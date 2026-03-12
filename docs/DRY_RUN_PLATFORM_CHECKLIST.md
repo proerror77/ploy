@@ -8,6 +8,9 @@
 - `PLOY_DEPLOYMENTS_FILE` 指向有效矩陣檔（建議 `data/state/deployments.json`）
 - `PLOY_RUN_SQLX_MIGRATIONS=false` 僅限本機實驗，不建議上線前保留
 - `.env` / workload env 已備齊且 `ploy-sidecar` 相關憑證不可用於 dry-run
+- EC2 staging 目標固定為 `tango-2-1`，正式 staging 釋出走
+  `.github/workflows/release-staging.yml`
+- staging workflow 只會重啟 dry-run/staging workloads，不應帶入 live services
 
 ## 1. 工具與快照檢查
 

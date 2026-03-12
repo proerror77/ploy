@@ -1,5 +1,9 @@
 # AWS EC2 Deployment Runbook
 
+`tango-2-1` is the EC2 staging host. Use `.github/workflows/release-staging.yml`
+for first-class staging deploys. That path ships CI-built artifacts only and
+does not revive the deprecated `deploy-tango21.yml` host-build flow.
+
 This runbook deploys always-on workloads on one EC2 host:
 - `ploy-sports-pm.service` (Sports PM / NBA comeback)
 - `ploy-crypto-collector.service` (Crypto event data collector: LOB + threshold + settlement)
@@ -7,7 +11,31 @@ This runbook deploys always-on workloads on one EC2 host:
 - `ploy-orderbook-history.service` (Polymarket L2 orderbook-history backfill collector)
 - `ploy-maintenance.timer` (DB + log retention)
 
+## Staging Target
+
+`tango-2-1` is the staging host for these dry-run workloads.
+
+- First-class workflow: `.github/workflows/release-staging.yml`
+- Deployment scope: `ploy-sports-pm`, `ploy-crypto-collector`, `ploy-crypto-dryrun`, `ploy-orderbook-history`, `ploy-maintenance.timer`
+- Artifact policy: deploy CI-built `ploy` + `sqlx` binaries only; do not build Rust source on-host
+- Migration policy: run tracked `sqlx migrate run` against `/opt/ploy/migrations`
+
 ## 1) Deploy to EC2
+
+Preferred staging path for `tango-2-1`:
+
+- trigger `.github/workflows/release-staging.yml`
+- GitHub Actions builds the x86_64 bundle, ships `ploy`, `sqlx`, tracked
+  migrations, and deployment assets
+- workflow scope is limited to staging workloads:
+  - `ploy-sports-pm.service`
+  - `ploy-crypto-collector.service`
+  - `ploy-crypto-dryrun.service`
+  - `ploy-orderbook-history.service`
+  - `ploy-maintenance.timer`
+
+Use the local script below only for manual host maintenance or break-glass work,
+not as the primary staging release path.
 
 Run from your local machine:
 

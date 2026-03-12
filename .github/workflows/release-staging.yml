@@ -1,0 +1,315 @@
+name: Release to Staging (tango-2-1)
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref to deploy to staging"
+        required: true
+        default: "main"
+
+concurrency:
+  group: release-staging-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  PLOY_RELEASE_FEATURES: claimer_daemon,api,pm_ctf,tokio/io-std
+  PLOY_RELEASE_TARGET: x86_64-unknown-linux-gnu
+  SQLX_CLI_VERSION: 0.8.6
+  DEPLOY_ROOT: ${{ vars.STAGING_PLOY_ROOT || '/opt/ploy' }}
+  STAGING_HOST_LABEL: tango-2-1
+  STAGING_SERVICES: >-
+    ploy-sports-pm.service
+    ploy-crypto-collector.service
+    ploy-crypto-dryrun.service
+    ploy-orderbook-history.service
+    ploy-maintenance.timer
+
+jobs:
+  build:
+    name: Build Linux x86_64 staging bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      bundle_tag: ${{ steps.bundle-meta.outputs.bundle_tag }}
+      source_sha: ${{ steps.source-sha.outputs.source_sha }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Capture source commit
+        id: source-sha
+        run: echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Compute staging bundle tag
+        id: bundle-meta
+        run: |
+          short_sha="$(git rev-parse --short HEAD)"
+          echo "bundle_tag=staging-${GITHUB_RUN_NUMBER}-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.PLOY_RELEASE_TARGET }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libpq-dev clang lld
+          sudo apt-get install -y sccache || cargo install sccache --locked
+          sudo apt-get install -y mold || true
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-staging
+
+      - name: Cache sccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: ${{ runner.os }}-sccache-release-staging-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sccache-release-staging-
+            ${{ runner.os }}-sccache-
+
+      - name: Build staging binary
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_CACHE_SIZE: 10G
+        run: |
+          cargo build --release --locked \
+            --target "${PLOY_RELEASE_TARGET}" \
+            --features "${PLOY_RELEASE_FEATURES}"
+          strip "target/${PLOY_RELEASE_TARGET}/release/ploy" || true
+
+      - name: Build SQLx CLI
+        env:
+          CARGO_TARGET_DIR: /tmp/sqlx-cli-target
+        run: |
+          cargo install sqlx-cli \
+            --locked \
+            --version "${SQLX_CLI_VERSION}" \
+            --root "${RUNNER_TEMP}/sqlx-cli" \
+            --target "${PLOY_RELEASE_TARGET}" \
+            --no-default-features \
+            --features rustls,postgres
+          strip "${RUNNER_TEMP}/sqlx-cli/bin/sqlx" || true
+
+      - name: Create staging bundle
+        run: |
+          bundle_root="dist/staging-bundle"
+          mkdir -p \
+            "${bundle_root}/bin" \
+            "${bundle_root}/data/state" \
+            "${bundle_root}/migrations" \
+            "${bundle_root}/scripts"
+          cp "target/${PLOY_RELEASE_TARGET}/release/ploy" "${bundle_root}/bin/ploy"
+          cp "${RUNNER_TEMP}/sqlx-cli/bin/sqlx" "${bundle_root}/bin/sqlx"
+          cp -R deployment "${bundle_root}/deployment"
+          cp -R migrations/. "${bundle_root}/migrations/"
+          cp scripts/install-service.sh "${bundle_root}/scripts/install-service.sh"
+          cp data/state/deployments.json.sample "${bundle_root}/data/state/deployments.json.sample"
+          sha256sum "${bundle_root}/bin/ploy" > dist/ploy.sha256
+          cat > dist/RELEASE.txt <<EOF
+          Bundle: ${{ steps.bundle-meta.outputs.bundle_tag }}
+          Commit: ${{ steps.source-sha.outputs.source_sha }}
+          Features: ${PLOY_RELEASE_FEATURES}
+          Target: ${PLOY_RELEASE_TARGET}
+          Host: ${STAGING_HOST_LABEL}
+          Services: ${STAGING_SERVICES}
+          Built at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          EOF
+          tar czf "dist/ploy-staging-${{ steps.bundle-meta.outputs.bundle_tag }}.tar.gz" -C "${bundle_root}" .
+
+      - name: Upload staging bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-staging-${{ steps.bundle-meta.outputs.bundle_tag }}
+          path: |
+            dist/ploy-staging-${{ steps.bundle-meta.outputs.bundle_tag }}.tar.gz
+            dist/ploy.sha256
+            dist/RELEASE.txt
+          retention-days: 14
+
+  deploy-staging:
+    name: Deploy to tango-2-1 staging
+    needs: build
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Download staging bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-staging-${{ needs.build.outputs.bundle_tag }}
+          path: dist
+
+      - name: Resolve staging host
+        id: resolve-host
+        env:
+          STATIC_HOST: ${{ vars.STAGING_EC2_HOST || secrets.AWS_EC2_HOST }}
+        run: |
+          set -euo pipefail
+          if [ -z "${STATIC_HOST:-}" ]; then
+            echo "Missing STAGING_EC2_HOST/AWS_EC2_HOST secret or variable."
+            exit 1
+          fi
+          echo "host=${STATIC_HOST}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload staging bundle to tango-2-1
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.resolve-host.outputs.host }}
+          username: ${{ vars.STAGING_EC2_USER || 'ubuntu' }}
+          key: ${{ secrets.STAGING_EC2_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
+          port: ${{ vars.STAGING_EC2_SSH_PORT || 22 }}
+          source: dist/ploy-staging-${{ needs.build.outputs.bundle_tag }}.tar.gz
+          target: /tmp/
+          strip_components: 1
+
+      - name: Install staging bundle, run tracked migrations, restart scoped services
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ steps.resolve-host.outputs.host }}
+          username: ${{ vars.STAGING_EC2_USER || 'ubuntu' }}
+          key: ${{ secrets.STAGING_EC2_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
+          port: ${{ vars.STAGING_EC2_SSH_PORT || 22 }}
+          envs: DEPLOY_ROOT,STAGING_SERVICES
+          script: |
+            bash <<'PLOY_STAGING'
+            set -euo pipefail
+
+            BUNDLE_TAG="${{ needs.build.outputs.bundle_tag }}"
+            DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/ploy}"
+            STAGING_SERVICES="${STAGING_SERVICES:-ploy-sports-pm.service ploy-crypto-collector.service ploy-crypto-dryrun.service ploy-orderbook-history.service ploy-maintenance.timer}"
+            BUNDLE="/tmp/ploy-staging-${BUNDLE_TAG}.tar.gz"
+            WORKDIR="/tmp/ploy-staging-${BUNDLE_TAG}"
+            RELEASE_DIR="${DEPLOY_ROOT}/releases/${BUNDLE_TAG}"
+
+            SUDO=""
+            if [ "$(id -u)" -ne 0 ]; then
+              SUDO="sudo"
+            fi
+
+            if command -v apt-get >/dev/null 2>&1; then
+              $SUDO apt-get update -qq
+              $SUDO apt-get install -y -qq libssl3 libpq5
+            fi
+
+            [ -f "${BUNDLE}" ]
+            rm -rf "${WORKDIR}"
+            mkdir -p "${WORKDIR}"
+            tar xzf "${BUNDLE}" -C "${WORKDIR}"
+
+            $SUDO mkdir -p \
+              "${RELEASE_DIR}/bin" \
+              "${DEPLOY_ROOT}/bin" \
+              "${DEPLOY_ROOT}/data/state" \
+              "${DEPLOY_ROOT}/deployment" \
+              "${DEPLOY_ROOT}/logs" \
+              "${DEPLOY_ROOT}/migrations" \
+              "${DEPLOY_ROOT}/releases" \
+              "${DEPLOY_ROOT}/scripts"
+
+            $SUDO install -m 755 "${WORKDIR}/bin/ploy" "${RELEASE_DIR}/bin/ploy"
+            $SUDO install -m 755 "${WORKDIR}/bin/ploy" "${DEPLOY_ROOT}/bin/ploy"
+            $SUDO install -m 755 "${WORKDIR}/bin/sqlx" "${DEPLOY_ROOT}/bin/sqlx"
+            if [ -f "${WORKDIR}/deployment/bin/ploy-orderbook-history-collector.sh" ]; then
+              $SUDO install -m 755 \
+                "${WORKDIR}/deployment/bin/ploy-orderbook-history-collector.sh" \
+                "${DEPLOY_ROOT}/bin/ploy-orderbook-history-collector.sh"
+            fi
+            $SUDO rm -rf "${DEPLOY_ROOT}/deployment"
+            $SUDO mkdir -p "${DEPLOY_ROOT}/deployment"
+            $SUDO cp -R "${WORKDIR}/deployment/." "${DEPLOY_ROOT}/deployment/"
+            $SUDO rm -rf "${DEPLOY_ROOT}/migrations"
+            $SUDO mkdir -p "${DEPLOY_ROOT}/migrations"
+            $SUDO cp -R "${WORKDIR}/migrations/." "${DEPLOY_ROOT}/migrations/"
+            $SUDO install -m 755 "${WORKDIR}/scripts/install-service.sh" "${DEPLOY_ROOT}/scripts/install-service.sh"
+            if [ -f "${WORKDIR}/data/state/deployments.json.sample" ]; then
+              $SUDO install -m 644 \
+                "${WORKDIR}/data/state/deployments.json.sample" \
+                "${DEPLOY_ROOT}/data/state/deployments.json.sample"
+            fi
+            echo "${BUNDLE_TAG}" | $SUDO tee "${DEPLOY_ROOT}/bin/.current_staging_release" >/dev/null
+
+            $SUDO bash "${DEPLOY_ROOT}/scripts/install-service.sh"
+
+            parse_env_value() {
+              local env_file="$1"
+              local key="$2"
+              [ -f "${env_file}" ] || return 1
+              sed -n "s/^${key}=//p" "${env_file}" | tail -n1 | sed -e 's/^\"//' -e 's/\"$//'
+            }
+
+            DATABASE_URL_VALUE=""
+            for env_file in \
+              "${DEPLOY_ROOT}/.env" \
+              "${DEPLOY_ROOT}/env/crypto-dryrun.env" \
+              "${DEPLOY_ROOT}/env/crypto-collector.env" \
+              "${DEPLOY_ROOT}/env/sports-pm.env"
+            do
+              DATABASE_URL_VALUE="$(parse_env_value "${env_file}" "DATABASE_URL" || true)"
+              if [ -n "${DATABASE_URL_VALUE}" ]; then
+                break
+              fi
+              DATABASE_URL_VALUE="$(parse_env_value "${env_file}" "PLOY_DATABASE__URL" || true)"
+              if [ -n "${DATABASE_URL_VALUE}" ]; then
+                break
+              fi
+            done
+
+            if [ -z "${DATABASE_URL_VALUE}" ]; then
+              echo "No DATABASE_URL or PLOY_DATABASE__URL found in staging env files."
+              exit 1
+            fi
+
+            "${DEPLOY_ROOT}/bin/sqlx" migrate run \
+              --source "${DEPLOY_ROOT}/migrations" \
+              --database-url "${DATABASE_URL_VALUE}"
+
+            $SUDO systemctl daemon-reload
+
+            restart_or_start_unit() {
+              local unit="$1"
+              if ! $SUDO systemctl list-unit-files --no-legend "${unit}" >/dev/null 2>&1; then
+                echo "Skip missing unit ${unit}"
+                return 0
+              fi
+              $SUDO systemctl enable "${unit}" >/dev/null 2>&1 || true
+              if [[ "${unit}" == *.timer ]]; then
+                $SUDO systemctl restart "${unit}" 2>/dev/null || $SUDO systemctl start "${unit}"
+                return 0
+              fi
+              if $SUDO systemctl is-active --quiet "${unit}"; then
+                $SUDO systemctl restart "${unit}"
+              else
+                $SUDO systemctl start "${unit}"
+              fi
+            }
+
+            for unit in ${STAGING_SERVICES}; do
+              restart_or_start_unit "${unit}"
+            done
+
+            rm -rf "${WORKDIR}" "${BUNDLE}"
+            PLOY_STAGING
+
+      - name: Deployment summary
+        run: |
+          echo "## Staging Deployment" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Host label: ${STAGING_HOST_LABEL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Environment: staging" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Bundle: ${{ needs.build.outputs.bundle_tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit: ${{ needs.build.outputs.source_sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Services: \`${STAGING_SERVICES}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Status: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"

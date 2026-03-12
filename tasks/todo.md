@@ -1270,6 +1270,39 @@ Keep shrinking the remaining live-path active core by extracting ownership from 
 
 - 2026-03-10: Preflight file ownership for Wave 10 assigned before dispatching the next parallel batch.
 
+# R-45 First-Class Staging Release Path (2026-03-12)
+
+## Goal
+Close `R-45` by making `tango-2-1` a first-class staging target with a dedicated artifact-based release workflow instead of the deprecated host-build path.
+
+## File ownership
+
+- `.github/workflows/release-staging.yml`
+  - owner: CI-built staging bundle, tracked SQLx migrations, and scoped dry-run service restart flow
+- `docs/AWS_EC2_DEPLOYMENT_RUNBOOK.md`
+  - owner: staging host/runbook guidance for `tango-2-1`
+- `docs/DRY_RUN_PLATFORM_CHECKLIST.md`
+  - owner: preflight checklist for the staging release path
+- `tests/staging_workflow.rs`
+  - owner: workflow guard that prevents regressions back to host builds or missing staging semantics
+
+## Tasks
+
+- [x] Add a first-class `release-staging.yml` workflow targeting `tango-2-1`.
+- [x] Ensure staging deploys use uploaded CI artifacts plus `sqlx migrate run`, not on-host Rust builds.
+- [x] Scope the workflow to dry-run/staging services only.
+- [x] Document the staging target and workflow in the runbooks/checklists.
+- [x] Add a workflow guard test plus YAML validation for the new path.
+
+## Progress notes
+
+- 2026-03-12: Added [release-staging.yml](/Users/proerror/Documents/ploy-order-intent-clean/.github/workflows/release-staging.yml) with a dedicated build job, artifact upload/download flow, tracked `sqlx migrate run`, and a scoped restart list for `ploy-sports-pm`, `ploy-crypto-collector`, `ploy-crypto-dryrun`, `ploy-orderbook-history`, and `ploy-maintenance.timer`.
+- 2026-03-12: Updated [AWS_EC2_DEPLOYMENT_RUNBOOK.md](/Users/proerror/Documents/ploy-order-intent-clean/docs/AWS_EC2_DEPLOYMENT_RUNBOOK.md) and [DRY_RUN_PLATFORM_CHECKLIST.md](/Users/proerror/Documents/ploy-order-intent-clean/docs/DRY_RUN_PLATFORM_CHECKLIST.md) so `tango-2-1` is explicitly treated as the staging host and the first-class workflow is documented as the preferred path.
+- 2026-03-12: Added [staging_workflow.rs](/Users/proerror/Documents/ploy-order-intent-clean/tests/staging_workflow.rs) to guard `environment: staging`, `tango-2-1`, artifact upload/download, tracked SQLx migrations, and the absence of host-side Rust builds in the deploy job.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-r45-green rtk cargo test release_staging_workflow_is_first_class_and_artifact_based --test staging_workflow -- --exact --nocapture`
+  - `ruby -e 'require "yaml"; YAML.load_file("/Users/proerror/Documents/ploy-order-intent-clean/.github/workflows/release-staging.yml"); puts "yaml ok"'`
+
 # Strategy And Adapter Wave 11 (2026-03-11)
 
 ## Goal
