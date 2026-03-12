@@ -5189,8 +5189,8 @@ Execute the highest-impact P2 runtime-performance fixes from the review in one b
 - [x] `R-28` collapsed ingress governance reads into a one-shot `GovernanceIntentSnapshot`.
 - [x] `R-29` collapsed `RiskGate::check_order` sequential lock churn into a single `RiskOrderSnapshot`.
 - [x] `R-32` removed the `reserve_buy` active-market `HashSet` rebuild from market accounting.
-- [x] Verified `R-30` is stale on this branch: `PositionAggregator` already maintains `positions_by_agent`.
-- [x] Verified `R-31` is stale on this branch: `ExecutionJournal::persist_execution()` already fans out independent writes via `join_execution_persistence_tasks()`.
+- [x] `R-30` is covered on this branch: `PositionAggregator` maintains and exercises `positions_by_agent`.
+- [x] `R-31` is covered on this branch: `ExecutionJournal::persist_execution()` fans out independent writes via `join_execution_persistence_tasks()`.
 
 ## Commits
 
@@ -5201,11 +5201,12 @@ Execute the highest-impact P2 runtime-performance fixes from the review in one b
 
 ## Validation
 
-- `CARGO_TARGET_DIR=/tmp/ploy-p2-final cargo test -q test_record_loss_resets_failure_streaks --lib -- --nocapture`
-- `CARGO_TARGET_DIR=/tmp/ploy-p2-final cargo test -q test_governance_runtime_state_snapshot_roundtrip --lib -- --nocapture`
-- `CARGO_TARGET_DIR=/tmp/ploy-p2-final cargo test -q test_sports_allocator_auto_split_deduplicates_current_pending_market --lib -- --nocapture`
-- `CARGO_TARGET_DIR=/tmp/ploy-p2-final cargo test -q test_governance_status_includes_domain_ingress_and_agents --lib -- --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-perf-seq cargo test coordinator::governance::tests::test_governance_intent_snapshot_reads_runtime_controls_in_one_view --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-perf-seq cargo test coordinator::capital::market::tests::test_sports_allocator_auto_split_deduplicates_current_pending_market --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-perf-seq cargo test coordinator::risk::tests::test_basic_check --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-perf-seq cargo test coordinator::journal::execution_writes::tests::join_execution_persistence_tasks_polls_independent_writes_concurrently --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-perf-seq cargo test coordinator::position::tests::test_agent_index_tracks_position_lifecycle --lib -- --exact --nocapture`
 
 ## Notes
 
-- Validation currently emits pre-existing warnings in unrelated modules (`sports_analyst`, `nba_comeback`, `liquidity_vacuum_backtest`), but the focused regressions above pass.
+- Validation currently emits pre-existing warnings in unrelated modules (`sports_analyst`, `nba_comeback`, `liquidity_vacuum_backtest`, and older coordinator tests), but the focused regressions above pass.
