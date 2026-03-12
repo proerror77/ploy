@@ -95,7 +95,7 @@ pub struct GrokDecisionRequest {
     pub research_summary: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SidecarInjuryUpdate {
     pub player_name: String,
     pub team_abbrev: String,
@@ -188,18 +188,23 @@ fn build_unified_decision_request(
     req: GrokDecisionRequest,
 ) -> UnifiedDecisionRequest {
     let fair_value_estimate = req.adjusted_win_prob.unwrap_or(req.market_price);
+    let game = build_live_game(&req);
+    let comeback = build_comeback_snapshot(&req);
+    let grok_intel = build_grok_intel(&req);
+    let market = build_market_snapshot(&req);
+    let risk_metrics = RiskMetrics::calculate(fair_value_estimate, req.market_price);
 
     UnifiedDecisionRequest {
         request_id,
         trigger: DecisionTrigger::EspnComeback,
-        game: build_live_game(&req),
+        game,
         trailing_team: req.trailing_team,
         trailing_abbrev: req.trailing_abbrev,
         deficit: req.deficit,
-        comeback: build_comeback_snapshot(&req),
-        grok_intel: build_grok_intel(&req),
-        market: build_market_snapshot(&req),
-        risk_metrics: RiskMetrics::calculate(fair_value_estimate, req.market_price),
+        comeback,
+        grok_intel,
+        market,
+        risk_metrics,
     }
 }
 

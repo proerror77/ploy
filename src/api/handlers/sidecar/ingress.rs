@@ -161,7 +161,7 @@ pub(super) fn ensure_deployment_accepts_live_ingress(
     ))
 }
 
-pub(super) fn ensure_agent_authorized(
+pub(super) async fn ensure_agent_authorized(
     state: &AppState,
     agent_id: &str,
 ) -> std::result::Result<(), (StatusCode, String)> {
