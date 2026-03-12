@@ -30,6 +30,18 @@ pub use self::types::{
     RiskCheckResult,
 };
 
+#[derive(Debug, Clone)]
+pub(super) struct RiskOrderSnapshot {
+    pub(super) platform_state: PlatformRiskState,
+    pub(super) params: AgentRiskParams,
+    pub(super) current_agent_exposure: Decimal,
+    pub(super) current_domain_exposure: Decimal,
+    pub(super) current_platform_exposure: Decimal,
+    pub(super) daily_total_pnl: Decimal,
+    pub(super) domain_pnl: Decimal,
+    pub(super) current_drawdown: Decimal,
+}
+
 /// 風控閘門
 ///
 /// 所有訂單在執行前都必須通過這個閘門的檢查。

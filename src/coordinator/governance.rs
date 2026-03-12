@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use crate::domain::Domain;
 use crate::error::Result;
 
+use super::OrderIntent;
 use super::command::{
     DomainIngressSnapshot, GovernancePolicyHistoryEntry, GovernancePolicySnapshot,
     GovernancePolicyUpdate,
@@ -60,9 +61,25 @@ pub(super) struct GovernanceRuntimeStateSnapshot {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct GovernanceIntentSnapshot {
+    pub(super) global_mode: IngressMode,
+    pub(super) domain_mode: IngressMode,
+    pub(super) agent_paused: bool,
+    pub(super) policy: GovernancePolicy,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct PersistedGovernanceState {
     pub(super) policy: GovernancePolicy,
     pub(super) runtime_state: GovernanceRuntimeStateSnapshot,
+}
+
+#[derive(Debug, Clone)]
+struct GovernanceState {
+    ingress_mode: IngressMode,
+    domain_ingress_modes: HashMap<Domain, IngressMode>,
+    policy: GovernancePolicy,
+    paused_agent_ids: HashSet<String>,
 }
 
 impl GovernancePolicy {
@@ -190,41 +207,43 @@ pub(super) fn governance_block_reason(
 }
 
 pub(super) struct GovernanceController {
-    ingress_mode: RwLock<IngressMode>,
-    domain_ingress_mode: RwLock<HashMap<Domain, IngressMode>>,
-    governance_policy: RwLock<GovernancePolicy>,
-    paused_agent_ids: RwLock<HashSet<String>>,
+    state: RwLock<GovernanceState>,
 }
 
 impl GovernanceController {
     pub(super) fn new(config: &CoordinatorConfig) -> Self {
         Self {
-            ingress_mode: RwLock::new(IngressMode::Running),
-            domain_ingress_mode: RwLock::new(HashMap::new()),
-            governance_policy: RwLock::new(GovernancePolicy::from_config(config)),
-            paused_agent_ids: RwLock::new(HashSet::new()),
+            state: RwLock::new(GovernanceState {
+                ingress_mode: IngressMode::Running,
+                domain_ingress_modes: HashMap::new(),
+                policy: GovernancePolicy::from_config(config),
+                paused_agent_ids: HashSet::new(),
+            }),
         }
     }
 
-    pub(super) async fn ingress_modes(&self, domain: Domain) -> (IngressMode, IngressMode) {
-        let global_mode = *self.ingress_mode.read().await;
-        let domain_mode = self
-            .domain_ingress_mode
-            .read()
-            .await
-            .get(&domain)
-            .copied()
-            .unwrap_or(IngressMode::Running);
-        (global_mode, domain_mode)
+    pub(super) async fn intent_snapshot(&self, intent: &OrderIntent) -> GovernanceIntentSnapshot {
+        let state = self.state.read().await;
+        GovernanceIntentSnapshot {
+            global_mode: state.ingress_mode,
+            domain_mode: state
+                .domain_ingress_modes
+                .get(&intent.domain)
+                .copied()
+                .unwrap_or(IngressMode::Running),
+            agent_paused: state.paused_agent_ids.contains(&intent.agent_id),
+            policy: state.policy.clone(),
+        }
     }
 
     pub(super) async fn ingress_mode_label(&self) -> String {
-        self.ingress_mode.read().await.as_str().to_string()
+        self.state.read().await.ingress_mode.as_str().to_string()
     }
 
     pub(super) async fn domain_ingress_snapshot_rows(&self) -> Vec<DomainIngressSnapshot> {
-        let modes = self.domain_ingress_mode.read().await;
-        let mut rows = modes
+        let state = self.state.read().await;
+        let mut rows = state
+            .domain_ingress_modes
             .iter()
             .map(|(domain, mode)| DomainIngressSnapshot {
                 domain: governance_domain_snapshot_label(*domain),
@@ -236,75 +255,70 @@ impl GovernanceController {
     }
 
     pub(super) async fn set_global_mode(&self, mode: IngressMode) {
-        *self.ingress_mode.write().await = mode;
-        self.domain_ingress_mode.write().await.clear();
+        let mut state = self.state.write().await;
+        state.ingress_mode = mode;
+        state.domain_ingress_modes.clear();
     }
 
     pub(super) async fn set_domain_mode(&self, domain: Domain, mode: IngressMode) {
-        let mut domain_modes = self.domain_ingress_mode.write().await;
+        let mut state = self.state.write().await;
         match mode {
             IngressMode::Running => {
-                domain_modes.remove(&domain);
+                state.domain_ingress_modes.remove(&domain);
             }
             _ => {
-                domain_modes.insert(domain, mode);
+                state.domain_ingress_modes.insert(domain, mode);
             }
         }
     }
 
     pub(super) async fn pause_agent(&self, agent_id: &str) {
-        self.paused_agent_ids
+        self.state
             .write()
             .await
+            .paused_agent_ids
             .insert(agent_id.to_string());
     }
 
     pub(super) async fn resume_agent(&self, agent_id: &str) {
-        self.paused_agent_ids.write().await.remove(agent_id);
-    }
-
-    pub(super) async fn is_agent_paused(&self, agent_id: &str) -> bool {
-        self.paused_agent_ids.read().await.contains(agent_id)
+        self.state.write().await.paused_agent_ids.remove(agent_id);
     }
 
     pub(super) async fn paused_agent_ids_sorted(&self) -> Vec<String> {
-        let mut paused = self
-            .paused_agent_ids
-            .read()
-            .await
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let state = self.state.read().await;
+        let mut paused = state.paused_agent_ids.iter().cloned().collect::<Vec<_>>();
         paused.sort();
         paused
     }
 
     pub(super) async fn policy_snapshot(&self) -> GovernancePolicySnapshot {
-        self.governance_policy.read().await.to_snapshot()
+        self.state.read().await.policy.to_snapshot()
     }
 
     pub(super) async fn current_policy(&self) -> GovernancePolicy {
-        self.governance_policy.read().await.clone()
+        self.state.read().await.policy.clone()
     }
 
     pub(super) async fn replace_policy(&self, next: GovernancePolicy) -> GovernancePolicySnapshot {
         let snapshot = next.to_snapshot();
-        *self.governance_policy.write().await = next;
+        self.state.write().await.policy = next;
         snapshot
     }
 
     pub(super) async fn runtime_state_snapshot(&self) -> GovernanceRuntimeStateSnapshot {
+        let state = self.state.read().await;
         GovernanceRuntimeStateSnapshot {
-            ingress_mode: *self.ingress_mode.read().await,
-            domain_ingress_modes: self.domain_ingress_mode.read().await.clone(),
-            paused_agent_ids: self.paused_agent_ids.read().await.clone(),
+            ingress_mode: state.ingress_mode,
+            domain_ingress_modes: state.domain_ingress_modes.clone(),
+            paused_agent_ids: state.paused_agent_ids.clone(),
         }
     }
 
     pub(super) async fn restore_runtime_state(&self, snapshot: &GovernanceRuntimeStateSnapshot) {
-        *self.ingress_mode.write().await = snapshot.ingress_mode;
-        *self.domain_ingress_mode.write().await = snapshot.domain_ingress_modes.clone();
-        *self.paused_agent_ids.write().await = snapshot.paused_agent_ids.clone();
+        let mut state = self.state.write().await;
+        state.ingress_mode = snapshot.ingress_mode;
+        state.domain_ingress_modes = snapshot.domain_ingress_modes.clone();
+        state.paused_agent_ids = snapshot.paused_agent_ids.clone();
     }
 }
 
@@ -819,6 +833,50 @@ mod tests {
 
         let restored_snapshot = restored.runtime_state_snapshot().await;
         assert_eq!(restored_snapshot, snapshot);
+    }
+
+    #[tokio::test]
+    async fn test_governance_intent_snapshot_reads_runtime_controls_in_one_view() {
+        let controller = GovernanceController::new(&CoordinatorConfig::default());
+        controller.set_global_mode(IngressMode::Paused).await;
+        controller
+            .set_domain_mode(Domain::Sports, IngressMode::Halted)
+            .await;
+        controller.pause_agent("sports_agent").await;
+
+        let policy = GovernancePolicy::try_from_update(GovernancePolicyUpdate {
+            block_new_intents: true,
+            blocked_domains: vec!["sports".to_string()],
+            max_intent_notional_usd: Some(dec!(10)),
+            max_total_notional_usd: Some(dec!(50)),
+            updated_by: "test".to_string(),
+            reason: Some("maintenance".to_string()),
+            metadata: HashMap::new(),
+        })
+        .expect("valid policy");
+        controller.replace_policy(policy.clone()).await;
+
+        let intent = OrderIntent::new(
+            "sports_agent",
+            Domain::Sports,
+            "nba-game-1",
+            "sports-token-yes",
+            crate::domain::Side::Up,
+            true,
+            10,
+            dec!(0.45),
+        );
+
+        let snapshot = controller.intent_snapshot(&intent).await;
+        assert_eq!(snapshot.global_mode, IngressMode::Paused);
+        assert_eq!(snapshot.domain_mode, IngressMode::Halted);
+        assert!(snapshot.agent_paused);
+        assert!(snapshot.policy.block_new_intents);
+        assert!(snapshot.policy.blocked_domains.contains(&Domain::Sports));
+        assert_eq!(
+            snapshot.policy.max_total_notional_usd,
+            policy.max_total_notional_usd
+        );
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ use crate::coordinator::admission::{
 use crate::coordinator::{QueueStats, QueueStatsSnapshot};
 use crate::domain::Domain;
 use crate::strategy::executor::OrderExecutor;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

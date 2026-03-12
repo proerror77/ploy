@@ -12,8 +12,16 @@ impl Coordinator {
         let agent_id = intent.agent_id.clone();
         let intent_id = intent.intent_id;
         let strategy_max_shares = intent.shares;
+        let governance_snapshot = if intent.is_buy {
+            Some(self.governance.intent_snapshot(&intent).await)
+        } else {
+            None
+        };
 
-        if let Some((reason, log_message)) = self.validate_runtime_order_intent(&intent).await {
+        if let Some((reason, log_message)) = self
+            .validate_runtime_order_intent(&intent, governance_snapshot.as_ref())
+            .await
+        {
             self.reject_order_intent(
                 &intent,
                 OrderStatus::Rejected,
@@ -26,7 +34,10 @@ impl Coordinator {
             return;
         }
 
-        if intent.is_buy && self.governance.is_agent_paused(&intent.agent_id).await {
+        if governance_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.agent_paused)
+        {
             let reason = format!("Agent {} is paused; blocking BUY intent", intent.agent_id);
             self.reject_order_intent(
                 &intent,
@@ -40,7 +51,10 @@ impl Coordinator {
             return;
         }
 
-        if let Some(reason) = self.check_governance_policy(&intent).await {
+        if let Some(reason) = self
+            .check_governance_policy(&intent, governance_snapshot.as_ref())
+            .await
+        {
             self.reject_order_intent(
                 &intent,
                 OrderStatus::Rejected,
@@ -222,10 +236,17 @@ impl Coordinator {
         .await;
     }
 
-    pub(super) async fn check_governance_policy(&self, intent: &OrderIntent) -> Option<String> {
-        let policy = self.governance.current_policy().await;
+    pub(super) async fn check_governance_policy(
+        &self,
+        intent: &OrderIntent,
+        governance_snapshot: Option<&crate::coordinator::governance::GovernanceIntentSnapshot>,
+    ) -> Option<String> {
+        let policy = match governance_snapshot {
+            Some(snapshot) => &snapshot.policy,
+            None => return None,
+        };
         let current_notional = self.current_account_notional().await;
-        governance_block_reason(&policy, intent, current_notional)
+        governance_block_reason(policy, intent, current_notional)
     }
 
     pub(super) async fn current_account_notional(&self) -> Decimal {

@@ -1,9 +1,11 @@
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
+use tokio::join;
 use tracing::{debug, warn};
 
 use super::{
     AdjustmentSuggestion, BlockReason, OrderIntent, OrderPriority, RiskCheckResult, RiskGate,
+    RiskOrderSnapshot,
 };
 
 impl RiskGate {
@@ -23,8 +25,12 @@ impl RiskGate {
             return RiskCheckResult::Passed;
         }
 
-        let platform_state = *self.state.read().await;
-        if !platform_state.can_trade() {
+        let snapshot = match self.load_order_snapshot(intent).await {
+            Ok(snapshot) => snapshot,
+            Err(result) => return result,
+        };
+
+        if !snapshot.platform_state.can_trade() {
             return RiskCheckResult::Blocked(BlockReason::CircuitBreakerTripped {
                 reason: "Platform trading halted".to_string(),
             });
@@ -37,12 +43,7 @@ impl RiskGate {
             );
         }
 
-        let params = match self.load_agent_params(intent).await {
-            Ok(params) => params,
-            Err(result) => return result,
-        };
-
-        if !params.is_market_allowed(&intent.market_slug) {
+        if !snapshot.params.is_market_allowed(&intent.market_slug) {
             return RiskCheckResult::Blocked(BlockReason::MarketNotAllowed {
                 market: intent.market_slug.clone(),
                 agent: intent.agent_id.clone(),
@@ -51,49 +52,46 @@ impl RiskGate {
 
         let order_value = intent.notional_value();
 
-        if let Some(result) = self.check_single_order_limit(intent, order_value, &params) {
+        if let Some(result) = self.check_single_order_limit(intent, order_value, &snapshot.params) {
             return result;
         }
 
-        let current_agent_exposure = self.current_agent_exposure(&intent.agent_id).await;
-        if current_agent_exposure + order_value > params.max_total_exposure {
+        if snapshot.current_agent_exposure + order_value > snapshot.params.max_total_exposure {
             return RiskCheckResult::Blocked(BlockReason::ExceedsTotalExposure {
-                limit: params.max_total_exposure,
-                current: current_agent_exposure,
+                limit: snapshot.params.max_total_exposure,
+                current: snapshot.current_agent_exposure,
                 requested: order_value,
             });
         }
 
-        if let Some(result) = self.check_domain_exposure_limit(intent, order_value).await {
+        if let Some(result) = self.check_domain_exposure_limit(intent, order_value, &snapshot) {
             return result;
         }
 
-        let current_platform_exposure = *self.total_exposure.read().await;
-        if current_platform_exposure + order_value > self.config.max_platform_exposure {
+        if snapshot.current_platform_exposure + order_value > self.config.max_platform_exposure {
             return RiskCheckResult::Blocked(BlockReason::ExceedsTotalExposure {
                 limit: self.config.max_platform_exposure,
-                current: current_platform_exposure,
+                current: snapshot.current_platform_exposure,
                 requested: order_value,
             });
         }
 
-        if !platform_state.can_open_new() {
+        if !snapshot.platform_state.can_open_new() {
             debug!(
                 "Elevated state: allowing buy order {} with extra scrutiny",
                 intent.intent_id
             );
         }
 
-        if let Some(result) = self.check_daily_loss_limits(intent).await {
+        if let Some(result) = self.check_daily_loss_limits(intent, &snapshot) {
             return result;
         }
 
         if let Some(limit) = self.config.max_drawdown_limit {
-            let current_drawdown = self.drawdown_stats.read().await.current_drawdown;
-            if limit > Decimal::ZERO && current_drawdown >= limit {
+            if limit > Decimal::ZERO && snapshot.current_drawdown >= limit {
                 return RiskCheckResult::Blocked(BlockReason::DrawdownExceeded {
                     limit,
-                    current: current_drawdown,
+                    current: snapshot.current_drawdown,
                 });
             }
         }
@@ -101,23 +99,58 @@ impl RiskGate {
         RiskCheckResult::Passed
     }
 
-    async fn load_agent_params(
+    async fn load_order_snapshot(
         &self,
         intent: &OrderIntent,
-    ) -> Result<crate::agent_runtime::AgentRiskParams, RiskCheckResult> {
-        let params_map = self.agent_params.read().await;
-        match params_map.get(&intent.agent_id) {
-            Some(params) => Ok(params.clone()),
-            None => {
-                warn!(
-                    "No risk params for agent {}, blocking order",
-                    intent.agent_id
-                );
-                Err(RiskCheckResult::Blocked(BlockReason::UnregisteredAgent {
-                    agent: intent.agent_id.clone(),
-                }))
-            }
-        }
+    ) -> Result<RiskOrderSnapshot, RiskCheckResult> {
+        let (
+            platform_state,
+            params_map,
+            stats_map,
+            domain_exposure_map,
+            platform_exposure,
+            daily_stats,
+            drawdown_stats,
+        ) = join!(
+            self.state.read(),
+            self.agent_params.read(),
+            self.agent_stats.read(),
+            self.domain_exposure.read(),
+            self.total_exposure.read(),
+            self.daily_stats.read(),
+            self.drawdown_stats.read(),
+        );
+
+        let Some(params) = params_map.get(&intent.agent_id).cloned() else {
+            warn!(
+                "No risk params for agent {}, blocking order",
+                intent.agent_id
+            );
+            return Err(RiskCheckResult::Blocked(BlockReason::UnregisteredAgent {
+                agent: intent.agent_id.clone(),
+            }));
+        };
+
+        Ok(RiskOrderSnapshot {
+            platform_state: *platform_state,
+            params,
+            current_agent_exposure: stats_map
+                .get(&intent.agent_id)
+                .map(|stats| stats.exposure)
+                .unwrap_or(Decimal::ZERO),
+            current_domain_exposure: domain_exposure_map
+                .get(&intent.domain)
+                .copied()
+                .unwrap_or(Decimal::ZERO),
+            current_platform_exposure: *platform_exposure,
+            daily_total_pnl: daily_stats.total_pnl,
+            domain_pnl: daily_stats
+                .domain_pnl
+                .get(&intent.domain)
+                .copied()
+                .unwrap_or(Decimal::ZERO),
+            current_drawdown: drawdown_stats.current_drawdown,
+        })
     }
 
     fn check_single_order_limit(
@@ -150,34 +183,20 @@ impl RiskGate {
         })
     }
 
-    async fn current_agent_exposure(&self, agent_id: &str) -> Decimal {
-        let stats_map = self.agent_stats.read().await;
-        stats_map
-            .get(agent_id)
-            .map(|stats| stats.exposure)
-            .unwrap_or(Decimal::ZERO)
-    }
-
-    async fn check_domain_exposure_limit(
+    fn check_domain_exposure_limit(
         &self,
         intent: &OrderIntent,
         order_value: Decimal,
+        snapshot: &RiskOrderSnapshot,
     ) -> Option<RiskCheckResult> {
         let domain_limit = self.config.domain_exposure_limit(intent.domain)?;
-        let current_domain_exposure = self
-            .domain_exposure
-            .read()
-            .await
-            .get(&intent.domain)
-            .copied()
-            .unwrap_or(Decimal::ZERO);
 
-        if current_domain_exposure + order_value > domain_limit {
+        if snapshot.current_domain_exposure + order_value > domain_limit {
             return Some(RiskCheckResult::Blocked(
                 BlockReason::DomainExposureExceeded {
                     domain: intent.domain,
                     limit: domain_limit,
-                    current: current_domain_exposure,
+                    current: snapshot.current_domain_exposure,
                     requested: order_value,
                 },
             ));
@@ -186,28 +205,27 @@ impl RiskGate {
         None
     }
 
-    async fn check_daily_loss_limits(&self, intent: &OrderIntent) -> Option<RiskCheckResult> {
-        let daily = self.daily_stats.read().await;
-        if daily.total_pnl < Decimal::ZERO && daily.total_pnl.abs() >= self.config.daily_loss_limit
+    fn check_daily_loss_limits(
+        &self,
+        intent: &OrderIntent,
+        snapshot: &RiskOrderSnapshot,
+    ) -> Option<RiskCheckResult> {
+        if snapshot.daily_total_pnl < Decimal::ZERO
+            && snapshot.daily_total_pnl.abs() >= self.config.daily_loss_limit
         {
             return Some(RiskCheckResult::Blocked(BlockReason::DailyLossExceeded {
                 limit: self.config.daily_loss_limit,
-                current: daily.total_pnl.abs(),
+                current: snapshot.daily_total_pnl.abs(),
             }));
         }
 
         let domain_loss_limit = self.config.domain_daily_loss_limit(intent.domain)?;
-        let domain_pnl = daily
-            .domain_pnl
-            .get(&intent.domain)
-            .copied()
-            .unwrap_or(Decimal::ZERO);
-        if domain_pnl < Decimal::ZERO && domain_pnl.abs() >= domain_loss_limit {
+        if snapshot.domain_pnl < Decimal::ZERO && snapshot.domain_pnl.abs() >= domain_loss_limit {
             return Some(RiskCheckResult::Blocked(
                 BlockReason::DomainDailyLossExceeded {
                     domain: intent.domain,
                     limit: domain_loss_limit,
-                    current: domain_pnl.abs(),
+                    current: snapshot.domain_pnl.abs(),
                 },
             ));
         }
