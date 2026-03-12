@@ -33,6 +33,23 @@ Add an opt-in `pm_5m_directional` backtest mode that automatically trims sparse 
   - `--pm5-auto-trim-window` trims the same request to `2026-03-07T04:20:00Z .. 2026-03-07T12:35:00Z` and replays successfully
   - `--save` persists `config_json.replay_window` and the terminal report prints `Requested` plus `Effective` window lines
 
+# PM5 Short-Window Walk-Forward (2026-03-12)
+
+## Goal
+Use the only currently trustworthy contiguous PM5 host window as a minimal train/holdout split, and check whether the promoted `vol_floor=0.0010` default actually stays superior out of sample.
+
+## Progress notes
+
+- 2026-03-12: Used the common-coverage window `2026-03-07T04:20:00Z .. 2026-03-07T12:35:00Z` and split it into:
+  - train: `2026-03-07T04:20:00Z .. 2026-03-07T08:20:00Z`
+  - holdout: `2026-03-07T08:20:00Z .. 2026-03-07T12:35:00Z`
+- 2026-03-12: Parameter comparison on host (`ploy-pm5-ac6a95f`) between `vol_floor=0.0010` and `0.0005`:
+  - train `vf0010`: `16` trades, `+4.17` net PnL, `Sharpe 7.70`, `PF 1.11`
+  - train `vf0005`: `18` trades, `-11.41` net PnL, `Sharpe -16.90`, `PF 0.79`
+  - holdout `vf0010`: `12` trades, `+15.39` net PnL, `Sharpe 30.29`, `PF 1.82`
+  - holdout `vf0005`: `12` trades, `+24.69` net PnL, `Sharpe 43.18`, `PF 2.55`
+- 2026-03-12: Conclusion: the parameter ranking flips between train and holdout on a very small sample (`16` + `12` trades). This is not enough evidence to claim `vol_floor=0.0010` is robustly superior; current PM5 host history remains too sparse for a statistically credible walk-forward.
+
 # PM5 Full 20-Level OBI Factors (2026-03-11)
 
 ## Goal
