@@ -17,7 +17,9 @@ EnvironmentFile=-/opt/ploy/env/crypto-dryrun.env
 ExecStart=/opt/ploy/bin/ploy-orderbook-history-collector.sh
 
 Restart=always
-RestartSec=10
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 NoNewPrivileges=true
 ProtectSystem=full
@@ -25,7 +27,9 @@ ProtectHome=true
 ReadWritePaths=/opt/ploy/logs
 PrivateTmp=true
 
+MemoryHigh=384M
 MemoryMax=512M
+OOMPolicy=kill
 CPUQuota=50%
 LimitNOFILE=65535
 
@@ -35,4 +39,3 @@ SyslogIdentifier=ploy-orderbook-history
 
 [Install]
 WantedBy=multi-user.target
-

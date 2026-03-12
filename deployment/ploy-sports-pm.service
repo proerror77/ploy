@@ -19,6 +19,8 @@ ExecStart=/opt/ploy/bin/ploy --config /opt/ploy/config/sports_pm.toml platform s
 
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 NoNewPrivileges=true
 ProtectSystem=full
@@ -26,7 +28,9 @@ ProtectHome=true
 ReadWritePaths=/opt/ploy/data /opt/ploy/logs /opt/ploy/config /opt/ploy/env
 PrivateTmp=true
 
+MemoryHigh=640M
 MemoryMax=768M
+OOMPolicy=kill
 CPUQuota=80%
 LimitNOFILE=65535
 

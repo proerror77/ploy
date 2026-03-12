@@ -5694,3 +5694,18 @@ Retire the last direct `ethers-core` / `ethers-signers` island by moving the cla
 ## Notes
 
 - The `cargo tree -i` checks now fail with `package ID specification ... did not match any packages`, which is the expected confirmation that the direct `ethers-*` packages are gone from the `claimer_daemon` graph.
+
+# Checked-in Systemd Guardrail Wave (2026-03-12)
+
+## Goal
+Close the remaining service-definition gap by making the checked-in systemd unit files enforce the same restart, memory-throttle, and OOM guardrails that the deploy workflows already require.
+
+## Outcomes
+
+- [x] Normalized the long-running checked-in unit files under [deployment/](/Users/proerror/Documents/ploy-order-intent-clean/deployment) plus [deployment/aws/ploy.service](/Users/proerror/Documents/ploy-order-intent-clean/deployment/aws/ploy.service) to use `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=300`, `StartLimitBurst=5`, explicit `MemoryHigh`, `MemoryMax`, and `OOMPolicy=kill`.
+- [x] Removed the legacy `StartLimitInterval=` spelling from the AWS unit and aligned its restart delay with the current host policy.
+- [x] Added a regression guard in [workflow_security.rs](/Users/proerror/Documents/ploy-order-intent-clean/tests/workflow_security.rs) so future checked-in unit files cannot drift away from these guardrails unnoticed.
+
+## Validation
+
+- `CARGO_TARGET_DIR=/tmp/ploy-systemd-units rtk cargo test checked_in_systemd_units_enforce_guardrails --test workflow_security -- --exact --nocapture`

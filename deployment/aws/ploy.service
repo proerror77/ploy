@@ -20,8 +20,8 @@ ExecStart=/opt/ploy/bin/ploy rl lead-lag-live \
 
 # Restart policy
 Restart=always
-RestartSec=10
-StartLimitInterval=300
+RestartSec=5
+StartLimitIntervalSec=300
 StartLimitBurst=5
 
 # Environment
@@ -50,7 +50,9 @@ MemoryDenyWriteExecute=true
 ReadWritePaths=/opt/ploy/data /opt/ploy/logs /opt/ploy/models
 
 # Resource limits
+MemoryHigh=384M
 MemoryMax=512M
+OOMPolicy=kill
 CPUQuota=80%
 
 # Logging

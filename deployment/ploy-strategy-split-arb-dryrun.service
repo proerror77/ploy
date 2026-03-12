@@ -17,6 +17,8 @@ ExecStart=/opt/ploy/bin/ploy strategy start split_arb --config /opt/ploy/config/
 
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 NoNewPrivileges=true
 ProtectSystem=full
@@ -24,7 +26,9 @@ ProtectHome=true
 ReadWritePaths=/opt/ploy/data /opt/ploy/logs /opt/ploy/config /opt/ploy/env /opt/ploy/run
 PrivateTmp=true
 
+MemoryHigh=192M
 MemoryMax=256M
+OOMPolicy=kill
 CPUQuota=80%
 LimitNOFILE=65535
 

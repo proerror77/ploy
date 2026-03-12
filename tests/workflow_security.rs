@@ -197,3 +197,53 @@ fn appleboy_workflows_pin_host_fingerprints() {
         offenders.join("\n")
     );
 }
+
+#[test]
+fn checked_in_systemd_units_enforce_guardrails() {
+    let units = [
+        "deployment/ploy.service",
+        "deployment/ploy@.service",
+        "deployment/ploy-crypto-collector.service",
+        "deployment/ploy-crypto-dryrun.service",
+        "deployment/ploy-crypto-live.service",
+        "deployment/ploy-orderbook-history.service",
+        "deployment/ploy-platform-live.service",
+        "deployment/ploy-sports-pm.service",
+        "deployment/ploy-strategy-momentum-dryrun.service",
+        "deployment/ploy-strategy-pattern-memory-dryrun.service",
+        "deployment/ploy-strategy-split-arb-dryrun.service",
+        "deployment/aws/ploy.service",
+    ];
+    let required = [
+        "Restart=always",
+        "RestartSec=5",
+        "StartLimitIntervalSec=300",
+        "StartLimitBurst=5",
+        "MemoryHigh=",
+        "MemoryMax=",
+        "OOMPolicy=kill",
+    ];
+    let mut offenders = Vec::new();
+
+    for unit in units {
+        let content = workflow_contents(unit);
+
+        if content.contains("StartLimitInterval=") {
+            offenders.push(format!(
+                "{unit}: still uses deprecated StartLimitInterval= instead of StartLimitIntervalSec="
+            ));
+        }
+
+        for needle in required {
+            if !content.contains(needle) {
+                offenders.push(format!("{unit}: missing guardrail `{needle}`"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "checked-in systemd unit guardrail check failed:\n{}",
+        offenders.join("\n")
+    );
+}

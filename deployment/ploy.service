@@ -11,6 +11,8 @@ WorkingDirectory=/opt/ploy
 ExecStart=/opt/ploy/bin/ploy --config /opt/ploy/config/default.toml platform start
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 # Environment
 Environment=RUST_LOG=info,ploy=info,sqlx=warn
@@ -25,7 +27,9 @@ ReadWritePaths=/opt/ploy/data /opt/ploy/logs /opt/ploy/config /opt/ploy/env
 PrivateTmp=true
 
 # Resource limits
+MemoryHigh=384M
 MemoryMax=512M
+OOMPolicy=kill
 CPUQuota=80%
 LimitNOFILE=65535
 
