@@ -1370,6 +1370,34 @@ Reduce `try_entry_for_window` complexity in `staggered_arb_live/entry.rs` by sep
   - `rtk cargo test test_try_entry_rejects_far_from_mid_fair_value_for_long_gamma_profile --lib -- --exact --nocapture`
   - `rtk cargo test test_balance_pause_blocks_until_expired_then_resumes_live_entry --lib -- --exact --nocapture`
 
+# R-40 MarketDiscovery Native Async Trait Cut (2026-03-12)
+
+## Goal
+Replace `async_trait` with native async trait methods for the `MarketDiscovery` branch only, which currently has no `dyn` consumers and can be migrated without changing the repo's object-safe strategy/runtime traits.
+
+## File ownership
+
+- `src/strategy/core/traits.rs`
+  - owner: `MarketDiscovery` trait definition
+- `src/strategy/crypto/discovery.rs`
+  - owner: `CryptoMarketDiscovery` native async trait impl
+- `src/strategy/sports/discovery.rs`
+  - owner: `SportsMarketDiscovery` native async trait impl
+
+## Tasks
+
+- [x] Remove `#[async_trait]` from `MarketDiscovery` and both concrete impls.
+- [x] Keep the migration scoped to the non-`dyn` discovery branch only.
+- [x] Re-run compile plus focused discovery regressions after the cut.
+
+## Progress notes
+
+- 2026-03-12: Verified `MarketDiscovery` has no `Box<dyn ...>` / `Arc<dyn ...>` / `&dyn ...` consumers, unlike `Strategy`, `ExchangeClient`, `RuntimeOrderStore`, and `EngineStore`, so this partial migration does not trip object-safety constraints.
+- 2026-03-12: Replaced `async_trait` with native async trait methods in [traits.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/strategy/core/traits.rs), [discovery.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/strategy/crypto/discovery.rs), and [discovery.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/strategy/sports/discovery.rs).
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-r40-check rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-r40-tests rtk cargo test test_available_strategies --lib -- --exact --nocapture`
+
 # R-47 Ingress Preflight Unification (2026-03-12)
 
 ## Goal
