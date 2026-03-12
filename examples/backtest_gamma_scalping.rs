@@ -5,10 +5,11 @@
 
 use chrono::{Duration, Utc};
 use ploy::strategy::backtest_feed::{HistoricalFeed, MarketUpdate, UpdateType};
+use ploy::strategy::backtest_recorder::NullRecorder;
 use ploy::strategy::staggered_arb_backtest::{
     StaggeredArbBacktestConfig, StaggeredArbBacktestEngine,
 };
-use ploy::strategy::backtest_recorder::NullRecorder;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 fn main() {
@@ -31,15 +32,22 @@ fn main() {
         shares_per_trade: 10,
         max_concurrent_positions: 3,
         direction_threshold: 0.03,
+        premium_sum_threshold: Decimal::ONE,
+        premium_sum_direction_slope: 1.25,
+        premium_sum_obi_slope: 0.25,
+        reverse_signal: false,
         max_initial_sum: dec!(1.20),
         max_leg1_price: dec!(0.80),
         merge_target_sum: dec!(0.95),
         min_profit_target: dec!(0.02),
         max_wait_secs: 180,
+        entry_after_start_max_secs: 30,
+        no_trade_last_secs: 30,
         max_wait_pct: 0.40,
         min_time_remaining_secs: 60,
         max_leg1_loss: dec!(0),
         force_complete_threshold: dec!(0.95),
+        protective_close_threshold: dec!(1.03),
         min_ask_price: dec!(0.05),
         min_entry_sum: dec!(0.70),
         allowed_window_durations: vec![300], // 5m only
@@ -49,11 +57,14 @@ fn main() {
         mu: 0.0,
         vol_lookback_secs: 300,
         vol_floor: 0.005,
+        min_entry_sigma: 0.005,
+        max_entry_sigma: 0.03,
         cooldown_secs: 5,
         // Greeks integration
         use_greeks: true,
         min_gamma: 0.0,
         max_theta_cost: 0.0,
+        max_fair_value_distance: 0.15,
         delta_weighted_sizing: false,
     };
 
@@ -63,7 +74,10 @@ fn main() {
     println!("  Max Leg1 Price: ${}", config.max_leg1_price);
     println!("  Merge Target Sum: ${}", config.merge_target_sum);
     println!("  Min Profit Target: ${}", config.min_profit_target);
-    println!("  Direction Threshold: {:.1}%", config.direction_threshold * 100.0);
+    println!(
+        "  Direction Threshold: {:.1}%",
+        config.direction_threshold * 100.0
+    );
     println!("  Greeks Enabled: {}\n", config.use_greeks);
 
     // Run backtest
@@ -115,7 +129,10 @@ fn main() {
                 println!("    Delta: {:.6}", delta);
                 println!("    Gamma: {:.6}", trade.entry_gamma.unwrap_or(0.0));
                 println!("    Theta: {:.6}/s", trade.entry_theta.unwrap_or(0.0));
-                println!("    Fair Value: {:.4}", trade.entry_fair_value.unwrap_or(0.0));
+                println!(
+                    "    Fair Value: {:.4}",
+                    trade.entry_fair_value.unwrap_or(0.0)
+                );
             }
             println!();
         }

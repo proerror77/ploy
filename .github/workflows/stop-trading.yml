@@ -25,7 +25,7 @@ jobs:
         echo "$PRIVATE_KEY" > private_key.pem
         chmod 600 private_key.pem
 
-        ssh -o StrictHostKeyChecking=no -i private_key.pem ec2-user@$HOST << 'ENDSSH'
+        ssh -o StrictHostKeyChecking=accept-new -i private_key.pem ec2-user@$HOST << 'ENDSSH'
           echo "=== Stopping ploy-trading container ==="
           docker stop ploy-trading
           echo "=== Container stopped ==="

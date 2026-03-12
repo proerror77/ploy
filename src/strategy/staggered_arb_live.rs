@@ -23,15 +23,57 @@ use tracing::{debug, info, warn};
 
 use super::momentum::Direction;
 use super::probability::estimate_probability;
-use super::staggered_arb_backtest::StaggeredArbBacktestConfig;
+use super::staggered_arb_backtest::{
+    polymarket_order_meets_minimum, PmEventQuoteState, StaggeredArbBacktestConfig,
+};
 use super::traits::{
     DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
-    StrategyEventType, StrategyStateInfo,
+    StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 use crate::adapters::SpotPrice;
-use crate::domain::order::OrderRequest;
-use crate::domain::{OrderStatus, Side};
+use crate::domain::{OrderType, Side, TimeInForce};
 use crate::error::Result;
+use crate::platform::Domain;
+use crate::strategy::crypto::{all_updown_series_ids, symbol_and_window_for_series};
+
+mod entry;
+mod leg2;
+mod lifecycle;
+mod order_updates;
+mod runtime_flow;
+
+use entry::{
+    has_opening_window_candidate as has_opening_window_candidate_impl, try_entry as try_entry_impl,
+    try_entry_for_window as try_entry_for_window_impl,
+};
+use lifecycle::{LiveOrderTrack, PaperPosition, PaperPositionState, PaperTrade};
+
+fn crypto_submit_intent(
+    client_order_id: String,
+    market_slug: String,
+    token_id: String,
+    side: Side,
+    shares: u64,
+    limit_price: Decimal,
+    priority: u8,
+) -> StrategyAction {
+    StrategyAction::SubmitIntent {
+        intent: StrategyOrderIntent {
+            client_order_id,
+            domain: Domain::Crypto,
+            market_slug,
+            token_id,
+            side,
+            is_buy: true,
+            shares,
+            limit_price,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::GTC,
+            priority,
+            metadata: HashMap::new(),
+        },
+    }
+}
 
 // ─────────────────────────────────────────────────────────────
 // Config
@@ -46,16 +88,7 @@ pub struct StaggeredArbLiveConfig {
 }
 
 fn default_staggered_series_ids() -> Vec<String> {
-    vec![
-        "10684".into(),
-        "10683".into(),
-        "10686".into(),
-        "10685".into(), // 5m
-        "10192".into(),
-        "10191".into(),
-        "10423".into(),
-        "10422".into(), // 15m
-    ]
+    all_updown_series_ids()
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -83,84 +116,6 @@ struct QuoteRoute {
     direction: Direction,
 }
 
-/// Paper position state machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PaperPositionState {
-    Leg1Filled,
-    Merged,
-    Settled,
-    ForcedComplete,
-}
-
-/// A paper position tracking the two-leg arb lifecycle.
-#[derive(Debug, Clone)]
-struct PaperPosition {
-    symbol: String,
-    event_id: String,
-    condition_id: Option<String>,
-    up_token: String,
-    down_token: String,
-    leg1_direction: Direction,
-    leg1_price: Decimal,
-    leg1_shares: u64,
-    leg1_fee: Decimal,
-    leg1_time: DateTime<Utc>,
-    wait_deadline: DateTime<Utc>,
-    leg2_price: Option<Decimal>,
-    leg2_shares: Option<u64>,
-    leg2_fee: Option<Decimal>,
-    leg2_time: Option<DateTime<Utc>>,
-    state: PaperPositionState,
-}
-
-/// A closed paper trade for summary reporting.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-struct PaperTrade {
-    symbol: String,
-    event_id: String,
-    direction: Direction,
-    leg1_price: Decimal,
-    leg2_price: Decimal,
-    total_cost: Decimal,
-    payout: Decimal,
-    pnl: Decimal,
-    exit_reason: String,
-    duration_secs: i64,
-    opened_at: DateTime<Utc>,
-    closed_at: DateTime<Utc>,
-}
-
-// ─────────────────────────────────────────────────────────────
-// Live order tracking
-// ─────────────────────────────────────────────────────────────
-
-/// Tracks an in-flight order for the live (non-paper) path.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-struct LiveOrderTrack {
-    event_id: String,
-    condition_id: Option<String>,
-    symbol: String,
-    up_token: String,
-    down_token: String,
-    direction: Direction,
-    token_id: String,
-    leg: u8, // 1 or 2
-    price: Decimal,
-    shares: u64,
-    /// For Leg2: index into self.positions
-    position_idx: Option<usize>,
-    /// How Leg2 was triggered: merge vs forced_*
-    close_reason: Option<String>,
-    /// When this order was submitted (for stale order detection)
-    submitted_at: DateTime<Utc>,
-    /// When we sent a cancel request (None = not yet requested)
-    cancel_requested_at: Option<DateTime<Utc>>,
-    /// Exchange-assigned order hash (set after submit response)
-    exchange_order_id: Option<String>,
-}
-
 // ─────────────────────────────────────────────────────────────
 // Adapter
 // ─────────────────────────────────────────────────────────────
@@ -174,10 +129,14 @@ pub struct StaggeredArbAdapter {
     spot_prices: HashMap<String, SpotPrice>,
     /// symbol -> latest Binance L2 OBI(top-5)
     binance_l2_obi_5: HashMap<String, Decimal>,
+    /// symbol -> previous Binance L2 OBI(top-5) for persistence / flip checks
+    binance_l2_obi_prev_5: HashMap<String, Decimal>,
     /// symbol -> timestamp for latest Binance L2 OBI update
     binance_l2_obi_ts: HashMap<String, DateTime<Utc>>,
     /// event_id → (up_ask, down_ask)
     pm_asks_by_event: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
+    /// event_id → quote freshness/persistence tracking for both sides
+    pm_quote_state_by_event: HashMap<String, PmEventQuoteState>,
     /// token_id → quote routing metadata
     token_to_quote_route: HashMap<String, QuoteRoute>,
 
@@ -202,6 +161,8 @@ pub struct StaggeredArbAdapter {
     // ── Live order tracking (used when dry_run = false) ──
     /// client_order_id → order tracking info
     live_orders: HashMap<String, LiveOrderTrack>,
+    /// Stale orders moved out of active cancellation loops but still eligible for late reconciliation.
+    archived_live_orders: HashMap<String, LiveOrderTrack>,
     /// Events with in-flight Leg1 orders (prevents duplicate entries)
     pending_leg1_events: HashSet<String>,
     /// Position indices with in-flight Leg2 orders (prevents duplicate Leg2)
@@ -220,8 +181,12 @@ pub struct StaggeredArbAdapter {
     balance_pause_until: Option<DateTime<Utc>>,
     /// Entry gate reject counters (why Leg1 was skipped)
     entry_reject_counts: HashMap<String, u64>,
+    /// Entry gate reject counters partitioned by symbol for diagnostics.
+    entry_reject_counts_by_symbol: HashMap<String, HashMap<String, u64>>,
     /// Leg2 skip counters (why close was skipped/deferred)
     leg2_skip_counts: HashMap<String, u64>,
+    /// Leg2 skip counters partitioned by symbol for diagnostics.
+    leg2_skip_counts_by_symbol: HashMap<String, HashMap<String, u64>>,
 }
 
 impl StaggeredArbAdapter {
@@ -233,8 +198,10 @@ impl StaggeredArbAdapter {
             dry_run,
             spot_prices: HashMap::new(),
             binance_l2_obi_5: HashMap::new(),
+            binance_l2_obi_prev_5: HashMap::new(),
             binance_l2_obi_ts: HashMap::new(),
             pm_asks_by_event: HashMap::new(),
+            pm_quote_state_by_event: HashMap::new(),
             token_to_quote_route: HashMap::new(),
             active_windows: HashMap::new(),
             series_ids: default_staggered_series_ids(),
@@ -246,6 +213,7 @@ impl StaggeredArbAdapter {
             event_trade_counts: HashMap::new(),
             last_summary: None,
             live_orders: HashMap::new(),
+            archived_live_orders: HashMap::new(),
             pending_leg1_events: HashSet::new(),
             pending_leg2_positions: HashSet::new(),
             fixed_amount_usd: None,
@@ -254,7 +222,9 @@ impl StaggeredArbAdapter {
             consecutive_balance_failures: 0,
             balance_pause_until: None,
             entry_reject_counts: HashMap::new(),
+            entry_reject_counts_by_symbol: HashMap::new(),
             leg2_skip_counts: HashMap::new(),
+            leg2_skip_counts_by_symbol: HashMap::new(),
         }
     }
 
@@ -265,8 +235,28 @@ impl StaggeredArbAdapter {
             .or_default() += 1;
     }
 
+    fn bump_entry_reject_for_symbol(&mut self, symbol: &str, reason: &str) {
+        self.bump_entry_reject(reason);
+        *self
+            .entry_reject_counts_by_symbol
+            .entry(symbol.to_string())
+            .or_default()
+            .entry(reason.to_string())
+            .or_default() += 1;
+    }
+
     fn bump_leg2_skip(&mut self, reason: &str) {
         *self.leg2_skip_counts.entry(reason.to_string()).or_default() += 1;
+    }
+
+    fn bump_leg2_skip_for_symbol(&mut self, symbol: &str, reason: &str) {
+        self.bump_leg2_skip(reason);
+        *self
+            .leg2_skip_counts_by_symbol
+            .entry(symbol.to_string())
+            .or_default()
+            .entry(reason.to_string())
+            .or_default() += 1;
     }
 
     /// Create from TOML configuration string.
@@ -277,174 +267,13 @@ impl StaggeredArbAdapter {
             toml::from_str(config_str).map_err(|e| anyhow::anyhow!("Invalid TOML: {}", e))?;
 
         let empty = Value::Table(Default::default());
-        let entry = config.get("entry").unwrap_or(&empty);
-        let timing = config.get("timing").unwrap_or(&empty);
         let risk = config.get("risk").unwrap_or(&empty);
-        let model = config.get("model").unwrap_or(&empty);
-        let filter = config.get("filter").unwrap_or(&empty);
+        let entry = config.get("entry").unwrap_or(&empty);
         let markets = config.get("markets").unwrap_or(&empty);
-
-        let symbols: Vec<String> = entry
-            .get("symbols")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_else(|| vec!["BTCUSDT".into(), "ETHUSDT".into()]);
-
-        let bc = StaggeredArbBacktestConfig {
-            symbols,
-            initial_capital: Decimal::try_from(
-                entry
-                    .get("initial_capital")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(10000.0),
-            )
-            .unwrap_or(dec!(10000)),
-            shares_per_trade: entry
-                .get("shares_per_trade")
-                .and_then(|v| v.as_integer().or_else(|| v.as_float().map(|f| f as i64)))
-                .unwrap_or(20) as u64,
-            max_concurrent_positions: entry
-                .get("max_concurrent")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(5) as usize,
-            direction_threshold: entry
-                .get("direction_threshold")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.04),
-            reverse_signal: entry
-                .get("reverse_signal")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            max_initial_sum: Decimal::try_from(
-                entry
-                    .get("max_initial_sum")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.92),
-            )
-            .unwrap_or(dec!(0.92)),
-            max_leg1_price: Decimal::try_from(
-                entry
-                    .get("max_leg1_price")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.65),
-            )
-            .unwrap_or(dec!(0.65)),
-            merge_target_sum: Decimal::try_from(
-                entry
-                    .get("merge_target_sum")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.95),
-            )
-            .unwrap_or(dec!(0.95)),
-            min_profit_target: Decimal::try_from(
-                entry
-                    .get("min_profit_target")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.02),
-            )
-            .unwrap_or(dec!(0.02)),
-            max_wait_secs: timing
-                .get("max_wait_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(120) as u64,
-            entry_after_start_max_secs: timing
-                .get("entry_after_start_max_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(0) as u64,
-            no_trade_last_secs: timing
-                .get("no_trade_last_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(30) as u64,
-            max_wait_pct: timing
-                .get("max_wait_pct")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.40),
-            min_time_remaining_secs: timing
-                .get("min_time_remaining")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(60) as u64,
-            max_leg1_loss: Decimal::try_from(
-                risk.get("max_leg1_loss")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.0),
-            )
-            .unwrap_or(Decimal::ZERO),
-            force_complete_threshold: Decimal::try_from(
-                risk.get("force_complete_threshold")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.00),
-            )
-            .unwrap_or(Decimal::ZERO),
-            min_ask_price: Decimal::try_from(
-                entry
-                    .get("min_ask_price")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.05),
-            )
-            .unwrap_or(dec!(0.05)),
-            min_entry_sum: Decimal::try_from(
-                entry
-                    .get("min_entry_sum")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.70),
-            )
-            .unwrap_or(dec!(0.70)),
-            allowed_window_durations: filter
-                .get("allowed_windows")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_integer().map(|i| i as u64))
-                        .collect()
-                })
-                .unwrap_or_else(|| vec![300, 900]),
-            window_duration_tolerance: filter
-                .get("window_tolerance")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(30) as u64,
-            min_leg2_delay_secs: timing
-                .get("min_leg2_delay_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(3) as u64,
-            max_trades_per_event: timing
-                .get("max_trades_per_event")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(3) as usize,
-            mu: model.get("mu").and_then(|v| v.as_float()).unwrap_or(0.0),
-            vol_lookback_secs: model
-                .get("vol_lookback_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(600) as u64,
-            vol_floor: model
-                .get("vol_floor")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.003),
-            cooldown_secs: timing
-                .get("cooldown_secs")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(5) as u64,
-            // Greeks integration — read from TOML [model] section
-            use_greeks: model
-                .get("use_greeks")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
-            min_gamma: model
-                .get("min_gamma")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.0),
-            max_theta_cost: model
-                .get("max_theta_cost")
-                .and_then(|v| v.as_float())
-                .unwrap_or(0.0),
-            delta_weighted_sizing: model
-                .get("delta_weighted_sizing")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        };
+        let bc = StaggeredArbBacktestConfig::from_toml_str_with_default_symbols(
+            config_str,
+            vec!["BTCUSDT".into(), "ETHUSDT".into()],
+        )?;
 
         let fee_rate = Decimal::try_from(
             entry
@@ -495,17 +324,7 @@ impl StaggeredArbAdapter {
     // ─── Series ID mapping (same as MomentumStrategyAdapter) ──
 
     fn series_to_symbol(series_id: &str) -> Option<(&'static str, u64)> {
-        match series_id {
-            "10684" => Some(("BTCUSDT", 300)),
-            "10683" => Some(("ETHUSDT", 300)),
-            "10686" => Some(("SOLUSDT", 300)),
-            "10685" => Some(("XRPUSDT", 300)),
-            "10192" => Some(("BTCUSDT", 900)),
-            "10191" => Some(("ETHUSDT", 900)),
-            "10423" => Some(("SOLUSDT", 900)),
-            "10422" => Some(("XRPUSDT", 900)),
-            _ => None,
-        }
+        symbol_and_window_for_series(series_id)
     }
 
     fn estimated_live_locked_capital(&self) -> Decimal {
@@ -738,177 +557,51 @@ impl StaggeredArbAdapter {
             .filter(|(_, pos)| {
                 pos.event_id == window.event_id && pos.state == PaperPositionState::Leg1Filled
             })
-            .map(|(idx, _)| idx)
-            .collect();
-        to_settle.sort_by(|a, b| b.cmp(a));
-
-        for idx in to_settle {
-            self.settle_single_leg_position(idx, up_won, settle_spot, ts, actions);
-        }
+            .unwrap_or(bc.vol_floor)
     }
 
-    fn settle_single_leg_position(
+    fn record_pm_quote(
         &mut self,
-        idx: usize,
-        up_won: bool,
-        settle_spot: Decimal,
+        event_id: &str,
+        direction: Direction,
+        ask: Option<Decimal>,
+        ask_size: Option<Decimal>,
         ts: DateTime<Utc>,
-        actions: &mut Vec<StrategyAction>,
     ) {
-        if idx >= self.positions.len() {
-            return;
+        let state = self
+            .pm_quote_state_by_event
+            .entry(event_id.to_string())
+            .or_default();
+        let side = match direction {
+            Direction::Up => Side::Up,
+            Direction::Down => Side::Down,
+        };
+        let side_state = state.side_mut(side);
+        if self.config.backtest_config.pm_quote_max_stale_secs > 0 {
+            if let Some(last_seen_at) = side_state.last_seen_at {
+                if (ts - last_seen_at).num_seconds()
+                    > self.config.backtest_config.pm_quote_max_stale_secs as i64
+                {
+                    side_state.clear();
+                }
+            }
         }
-
-        let (symbol, event_id, direction, leg1_price, leg1_shares, leg1_fee, leg1_time, won) = {
-            let pos = &self.positions[idx];
-            let won = matches!(pos.leg1_direction, Direction::Up) == up_won;
-            (
-                pos.symbol.clone(),
-                pos.event_id.clone(),
-                pos.leg1_direction.clone(),
-                pos.leg1_price,
-                pos.leg1_shares,
-                pos.leg1_fee,
-                pos.leg1_time,
-                won,
-            )
-        };
-
-        let payout = if won {
-            Decimal::from(leg1_shares)
-        } else {
-            Decimal::ZERO
-        };
-        let total_cost = Decimal::from(leg1_shares) * leg1_price + leg1_fee;
-        let pnl = payout - total_cost;
-        let duration_secs = (ts - leg1_time).num_seconds();
-
-        let pos = &mut self.positions[idx];
-        pos.state = PaperPositionState::Settled;
-        pos.leg2_time = Some(ts);
-
-        self.closed_trades.push(PaperTrade {
-            symbol: symbol.clone(),
-            event_id,
-            direction,
-            leg1_price,
-            leg2_price: Decimal::ZERO,
-            total_cost,
-            payout,
-            pnl,
-            exit_reason: "live_settlement".to_string(),
-            duration_secs,
-            opened_at: leg1_time,
-            closed_at: ts,
-        });
-
-        info!(
-            "[STAG-ARB] SETTLED {} spot={} payout=${:.4} pnl={}{:.4} wait={}s",
-            symbol,
-            settle_spot,
-            payout,
-            if pnl >= Decimal::ZERO { "+" } else { "" },
-            pnl,
-            duration_secs,
-        );
-        actions.push(StrategyAction::LogEvent {
-            event: StrategyEvent::new(
-                StrategyEventType::CycleCompleted,
-                format!(
-                    "[STAG-ARB] SETTLED {} payout=${:.4} pnl={}{:.4} wait={}s",
-                    symbol,
-                    payout,
-                    if pnl >= Decimal::ZERO { "+" } else { "" },
-                    pnl,
-                    duration_secs
-                ),
-            ),
-        });
+        state.update(side, ask, ask_size, ts);
+        self.pm_asks_by_event
+            .insert(event_id.to_string(), state.asks());
     }
 
-    fn record_leg1_fill(
-        &mut self,
-        track: &LiveOrderTrack,
-        filled_shares: u64,
-        fill_price: Decimal,
+    fn event_quote_state(
+        &self,
+        event_id: &str,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
         ts: DateTime<Utc>,
-        actions: &mut Vec<StrategyAction>,
-    ) {
-        if filled_shares == 0 {
-            return;
-        }
-
-        self.pending_leg1_events.remove(&track.event_id);
-        *self
-            .event_trade_counts
-            .entry(track.event_id.clone())
-            .or_default() += 1;
-
-        let bc = &self.config.backtest_config;
-        let window_end = self
-            .active_windows
-            .get(&track.symbol)
-            .and_then(|ws| ws.iter().find(|w| w.event_id == track.event_id))
-            .map(|w| w.end_time)
-            .unwrap_or(ts + chrono::Duration::seconds(300));
-
-        let window_duration = (window_end - ts).num_seconds() as f64;
-        let max_wait_by_pct = (window_duration * bc.max_wait_pct) as i64;
-        let max_wait = (bc.max_wait_secs as i64).min(max_wait_by_pct);
-        let wait_deadline = ts + chrono::Duration::seconds(max_wait);
-
-        let leg1_fee = fill_price * Decimal::from(filled_shares) * self.config.fee_rate;
-
-        self.positions.push(PaperPosition {
-            symbol: track.symbol.clone(),
-            event_id: track.event_id.clone(),
-            condition_id: track.condition_id.clone(),
-            up_token: track.up_token.clone(),
-            down_token: track.down_token.clone(),
-            leg1_direction: track.direction.clone(),
-            leg1_price: fill_price,
-            leg1_shares: filled_shares,
-            leg1_fee,
-            leg1_time: ts,
-            wait_deadline,
-            leg2_price: None,
-            leg2_shares: None,
-            leg2_fee: None,
-            leg2_time: None,
-            state: PaperPositionState::Leg1Filled,
-        });
-
-        if filled_shares < track.shares {
-            warn!(
-                "[STAG-ARB] LEG1 PARTIAL FILL {} {} @ {:.2}¢ ({}/{} shares)",
-                track.symbol,
-                track.direction,
-                fill_price * dec!(100),
-                filled_shares,
-                track.shares,
-            );
-        } else {
-            info!(
-                "[STAG-ARB] LEG1 FILLED {} {} @ {:.2}¢ ({} shares)",
-                track.symbol,
-                track.direction,
-                fill_price * dec!(100),
-                filled_shares,
-            );
-        }
-
-        actions.push(StrategyAction::LogEvent {
-            event: StrategyEvent::new(
-                StrategyEventType::OrderFilled,
-                format!(
-                    "[STAG-ARB] LEG1 FILLED {} {} @ {:.2}¢ shares={}",
-                    track.symbol,
-                    track.direction,
-                    fill_price * dec!(100),
-                    filled_shares
-                ),
-            ),
-        });
+    ) -> PmEventQuoteState {
+        self.pm_quote_state_by_event
+            .get(event_id)
+            .copied()
+            .unwrap_or_else(|| PmEventQuoteState::synthetic(up_ask, down_ask, ts))
     }
 
     /// Count currently active cycles (open Leg1 positions + pending Leg1 orders).
@@ -930,39 +623,14 @@ impl StaggeredArbAdapter {
             || self.pending_leg1_events.contains(event_id)
     }
 
+    fn has_opening_window_candidate(&self, symbol: &str, ts: DateTime<Utc>) -> bool {
+        has_opening_window_candidate_impl(self, symbol, ts)
+    }
+
     // ─── Entry logic (ported from backtest engine) ──────────
 
     fn try_entry(&mut self, symbol: &str, ts: DateTime<Utc>) -> Vec<StrategyAction> {
-        let mut actions = Vec::new();
-        let bc = &self.config.backtest_config;
-
-        let windows: Vec<LiveWindow> = match self.active_windows.get(symbol) {
-            Some(w) if !w.is_empty() => w.clone(),
-            _ => return actions,
-        };
-
-        let (st, vol_info) = match self.spot_prices.get(symbol) {
-            Some(s) => {
-                let vol = s.volatility(bc.vol_lookback_secs).and_then(|v| v.to_f64());
-                let n_ticks = s.history_len().min(5000) as f64;
-                (s.price, (vol, n_ticks))
-            }
-            None => return actions,
-        };
-
-        for window in &windows {
-            let (up_ask, down_ask) = self
-                .pm_asks_by_event
-                .get(&window.event_id)
-                .copied()
-                .unwrap_or((None, None));
-            if let Some(action) =
-                self.try_entry_for_window(symbol, ts, window, st, vol_info, up_ask, down_ask)
-            {
-                actions.push(action);
-            }
-        }
-        actions
+        try_entry_impl(self, symbol, ts)
     }
 
     fn try_entry_for_window(
@@ -1811,6 +1479,67 @@ impl StaggeredArbAdapter {
 
     // ─── Periodic summary ────────────────────────────────────
 
+    fn summarize_gate_counts(
+        counts: &HashMap<String, u64>,
+        include_reasons: Option<&[&str]>,
+        exclude_reasons: &[&str],
+        limit: usize,
+    ) -> String {
+        let mut ranked: Vec<_> = counts
+            .iter()
+            .filter(|(reason, count)| {
+                let reason = reason.as_str();
+                let include_match =
+                    include_reasons.map_or(true, |included| included.contains(&reason));
+                let exclude_match = exclude_reasons.contains(&reason);
+                **count > 0 && include_match && !exclude_match
+            })
+            .map(|(reason, count)| (reason.as_str(), *count))
+            .collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+        if ranked.is_empty() {
+            return "none".to_string();
+        }
+
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|(reason, count)| format!("{}:{}", reason, count))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn summarize_symbol_gate_counts(
+        counts_by_symbol: &HashMap<String, HashMap<String, u64>>,
+        symbols: &[String],
+        include_reasons: Option<&[&str]>,
+        exclude_reasons: &[&str],
+        per_symbol_limit: usize,
+    ) -> String {
+        let mut parts = Vec::new();
+        for symbol in symbols {
+            let Some(counts) = counts_by_symbol.get(symbol) else {
+                continue;
+            };
+            let summary = Self::summarize_gate_counts(
+                counts,
+                include_reasons,
+                exclude_reasons,
+                per_symbol_limit,
+            );
+            if !summary.is_empty() {
+                parts.push(format!("{}:[{}]", symbol, summary));
+            }
+        }
+
+        if parts.is_empty() {
+            "none".to_string()
+        } else {
+            parts.join(";")
+        }
+    }
+
     fn build_summary(&self) -> String {
         let total = self.closed_trades.len();
         let wins = self
@@ -1833,10 +1562,52 @@ impl StaggeredArbAdapter {
             .iter()
             .filter(|p| p.state == PaperPositionState::Leg1Filled)
             .count();
+        let entry_timing_reasons = [
+            "before_event_start",
+            "entry_window_expired",
+            "time_remaining_too_low",
+        ];
+        let entry_timing_gates = Self::summarize_gate_counts(
+            &self.entry_reject_counts,
+            Some(&entry_timing_reasons),
+            &["entry_accepted"],
+            3,
+        );
+        let entry_signal_gates = Self::summarize_gate_counts(
+            &self.entry_reject_counts,
+            None,
+            &[
+                "entry_accepted",
+                "before_event_start",
+                "entry_window_expired",
+                "time_remaining_too_low",
+            ],
+            3,
+        );
+        let entry_signal_by_symbol = Self::summarize_symbol_gate_counts(
+            &self.entry_reject_counts_by_symbol,
+            &self.config.backtest_config.symbols,
+            None,
+            &[
+                "entry_accepted",
+                "before_event_start",
+                "entry_window_expired",
+                "time_remaining_too_low",
+            ],
+            1,
+        );
+        let leg2_gates = Self::summarize_gate_counts(&self.leg2_skip_counts, None, &[], 3);
+        let leg2_by_symbol = Self::summarize_symbol_gate_counts(
+            &self.leg2_skip_counts_by_symbol,
+            &self.config.backtest_config.symbols,
+            None,
+            &[],
+            1,
+        );
 
         format!(
-            "[STAG-ARB] equity=${:.2} trades={} win_rate={:.0}% avg_pnl=${:.4} open={}",
-            self.equity, total, win_rate, avg_pnl, open,
+            "[STAG-ARB] equity=${:.2} trades={} win_rate={:.0}% avg_pnl=${:.4} open={} entry_timing_gates={} entry_signal_gates={} entry_signal_by_symbol={} leg2_gates={} leg2_by_symbol={}",
+            self.equity, total, win_rate, avg_pnl, open, entry_timing_gates, entry_signal_gates, entry_signal_by_symbol, leg2_gates, leg2_by_symbol,
         )
     }
 }
@@ -1868,166 +1639,7 @@ impl Strategy for StaggeredArbAdapter {
     }
 
     async fn on_market_update(&mut self, update: &MarketUpdate) -> Result<Vec<StrategyAction>> {
-        let mut actions = Vec::new();
-
-        match update {
-            MarketUpdate::BinancePrice {
-                symbol,
-                price,
-                timestamp,
-            } => {
-                self.spot_prices
-                    .entry(symbol.clone())
-                    .and_modify(|sp| sp.update(*price, None, *timestamp))
-                    .or_insert_with(|| SpotPrice::new(*price, None, *timestamp));
-
-                // Set open_price on windows that don't have one yet
-                if let Some(windows) = self.active_windows.get_mut(symbol) {
-                    for w in windows.iter_mut() {
-                        if w.open_price.is_none() {
-                            w.open_price = Some(*price);
-                        }
-                    }
-                }
-            }
-
-            MarketUpdate::BinanceL2 {
-                symbol,
-                obi_5,
-                timestamp,
-                ..
-            } => {
-                self.binance_l2_obi_5.insert(symbol.clone(), *obi_5);
-                self.binance_l2_obi_ts.insert(symbol.clone(), *timestamp);
-            }
-
-            MarketUpdate::PolymarketQuote {
-                token_id, quote, ..
-            } => {
-                if let Some(route) = self.token_to_quote_route.get(token_id) {
-                    let symbol = route.symbol.clone();
-                    let event_id = route.event_id.clone();
-                    let direction = route.direction.clone();
-                    let ask = quote.best_ask;
-
-                    let entry = self
-                        .pm_asks_by_event
-                        .entry(event_id)
-                        .or_insert((None, None));
-                    match direction {
-                        Direction::Up => entry.0 = ask,
-                        Direction::Down => entry.1 = ask,
-                    }
-
-                    // Check Leg2 opportunities first (existing positions)
-                    let leg2_actions = self.check_leg2_opportunities(&symbol, Utc::now());
-                    actions.extend(leg2_actions);
-
-                    // Then try new entries
-                    let entry_actions = self.try_entry(&symbol, Utc::now());
-                    actions.extend(entry_actions);
-                }
-            }
-            MarketUpdate::EventDiscovered {
-                event_id,
-                series_id,
-                up_token,
-                down_token,
-                end_time,
-                condition_id,
-                ..
-            } => {
-                let Some((symbol, window_secs)) = Self::series_to_symbol(series_id) else {
-                    return Ok(actions);
-                };
-
-                // Only track symbols we're configured for
-                if !self
-                    .config
-                    .backtest_config
-                    .symbols
-                    .iter()
-                    .any(|s| s == symbol)
-                {
-                    return Ok(actions);
-                }
-
-                // Window duration filter
-                let bc = &self.config.backtest_config;
-                if !bc.allowed_window_durations.is_empty() {
-                    let tol = bc.window_duration_tolerance as i64;
-                    let matches = bc
-                        .allowed_window_durations
-                        .iter()
-                        .any(|&d| (window_secs as i64 - d as i64).abs() <= tol);
-                    if !matches {
-                        return Ok(actions);
-                    }
-                }
-
-                self.token_to_quote_route.insert(
-                    up_token.clone(),
-                    QuoteRoute {
-                        event_id: event_id.clone(),
-                        symbol: symbol.to_string(),
-                        direction: Direction::Up,
-                    },
-                );
-                self.token_to_quote_route.insert(
-                    down_token.clone(),
-                    QuoteRoute {
-                        event_id: event_id.clone(),
-                        symbol: symbol.to_string(),
-                        direction: Direction::Down,
-                    },
-                );
-
-                // Add window
-                let windows = self.active_windows.entry(symbol.to_string()).or_default();
-                if !windows.iter().any(|w| w.event_id == *event_id) {
-                    let open_price = self.spot_prices.get(symbol).map(|s| s.price);
-                    windows.push(LiveWindow {
-                        event_id: event_id.clone(),
-                        symbol: symbol.to_string(),
-                        up_token: up_token.clone(),
-                        down_token: down_token.clone(),
-                        condition_id: condition_id.clone(),
-                        end_time: *end_time,
-                        open_price,
-                        window_secs,
-                    });
-                    debug!(
-                        "[STAG-ARB] Window added: {} {} {}s end={}",
-                        symbol,
-                        event_id,
-                        window_secs,
-                        end_time.format("%H:%M:%S"),
-                    );
-                }
-            }
-
-            MarketUpdate::EventExpired { event_id } => {
-                let expired_windows: Vec<LiveWindow> = self
-                    .active_windows
-                    .values()
-                    .flat_map(|windows| windows.iter())
-                    .filter(|w| w.event_id == *event_id)
-                    .cloned()
-                    .collect();
-                for window in &expired_windows {
-                    self.settle_expired_event(window, Utc::now(), &mut actions);
-                }
-                for windows in self.active_windows.values_mut() {
-                    windows.retain(|w| w.event_id != *event_id);
-                }
-                self.pm_asks_by_event.remove(event_id);
-                self.token_to_quote_route
-                    .retain(|_, route| route.event_id != *event_id);
-            }
-            _ => {}
-        }
-
-        Ok(actions)
+        Ok(self.handle_market_update(update))
     }
 
     async fn on_order_update(&mut self, update: &OrderUpdate) -> Result<Vec<StrategyAction>> {
@@ -2262,115 +1874,7 @@ impl Strategy for StaggeredArbAdapter {
     }
 
     async fn on_tick(&mut self, now: DateTime<Utc>) -> Result<Vec<StrategyAction>> {
-        let mut actions = Vec::new();
-
-        // 0. Cancel stale orders — two-phase approach to avoid race conditions.
-        //
-        // Phase 1: Order unfilled for >30s → send CancelOrder, mark cancel_requested_at.
-        //          Do NOT remove from live_orders yet — let on_order_update handle cleanup
-        //          when the exchange confirms Cancelled or Filled.
-        //
-        // Phase 2: Cancel was requested >60s ago but no callback arrived (lost message) →
-        //          hard cleanup as last resort.
-        const STALE_ORDER_SECS: i64 = 30;
-        const HARD_CLEANUP_SECS: i64 = 90;
-
-        // Phase 1: request cancel for stale orders
-        let cancel_ids: Vec<String> = self
-            .live_orders
-            .iter()
-            .filter(|(_, track)| {
-                track.cancel_requested_at.is_none()
-                    && (now - track.submitted_at).num_seconds() > STALE_ORDER_SECS
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for client_id in &cancel_ids {
-            if let Some(track) = self.live_orders.get_mut(client_id) {
-                // Use exchange order hash for cancel (CLOB requires it), fall back to client_id
-                let cancel_id = track
-                    .exchange_order_id
-                    .clone()
-                    .unwrap_or_else(|| client_id.clone());
-                info!(
-                    "[STAG-ARB] STALE ORDER CANCEL leg={} {} {} age={}s price={:.2}¢ exchange_id={}",
-                    track.leg,
-                    track.symbol,
-                    track.event_id,
-                    (now - track.submitted_at).num_seconds(),
-                    track.price * dec!(100),
-                    cancel_id,
-                );
-                track.cancel_requested_at = Some(now);
-                actions.push(StrategyAction::CancelOrder {
-                    order_id: cancel_id,
-                });
-            }
-        }
-
-        // Phase 2: hard cleanup — cancel was sent but no callback after 90s total
-        let orphan_ids: Vec<String> = self
-            .live_orders
-            .iter()
-            .filter(|(_, track)| {
-                track.cancel_requested_at.is_some()
-                    && (now - track.submitted_at).num_seconds() > HARD_CLEANUP_SECS
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for client_id in orphan_ids {
-            if let Some(track) = self.live_orders.remove(&client_id) {
-                warn!(
-                    "[STAG-ARB] ORPHAN ORDER HARD CLEANUP leg={} {} {} age={}s — no callback received",
-                    track.leg,
-                    track.symbol,
-                    track.event_id,
-                    (now - track.submitted_at).num_seconds(),
-                );
-                if track.leg == 1 {
-                    self.pending_leg1_events.remove(&track.event_id);
-                } else if let Some(idx) = track.position_idx {
-                    self.pending_leg2_positions.remove(&idx);
-                }
-            }
-        }
-
-        // 1. Clean expired windows
-        for windows in self.active_windows.values_mut() {
-            windows.retain(|w| w.end_time > now);
-        }
-
-        // 2. Re-run leg2 checks for all active symbols and any still-open positions.
-        let mut symbols: HashSet<String> = self.active_windows.keys().cloned().collect();
-        symbols.extend(
-            self.positions
-                .iter()
-                .filter(|p| p.state == PaperPositionState::Leg1Filled)
-                .map(|p| p.symbol.clone()),
-        );
-        for symbol in &symbols {
-            let leg2_actions = self.check_leg2_opportunities(symbol, now);
-            actions.extend(leg2_actions);
-        }
-
-        // 3. Periodic summary (every 60s)
-        let should_print = self
-            .last_summary
-            .map(|t| (now - t).num_seconds() >= 60)
-            .unwrap_or(true);
-        if should_print && !self.closed_trades.is_empty() {
-            let summary = self.build_summary();
-            info!("{}", summary);
-            actions.push(StrategyAction::LogEvent {
-                event: StrategyEvent::new(
-                    StrategyEventType::Custom("summary".to_string()),
-                    summary,
-                ),
-            });
-            self.last_summary = Some(now);
-        }
-
-        Ok(actions)
+        Ok(self.handle_tick(now))
     }
 
     fn state(&self) -> StrategyStateInfo {
@@ -2409,8 +1913,24 @@ impl Strategy for StaggeredArbAdapter {
         for (k, v) in self.entry_reject_counts.iter() {
             metrics.insert(format!("entry_gate_{}", k), v.to_string());
         }
+        for (symbol, counts) in self.entry_reject_counts_by_symbol.iter() {
+            for (reason, count) in counts {
+                metrics.insert(
+                    format!("entry_gate_{}_{}", symbol, reason),
+                    count.to_string(),
+                );
+            }
+        }
         for (k, v) in self.leg2_skip_counts.iter() {
             metrics.insert(format!("leg2_gate_{}", k), v.to_string());
+        }
+        for (symbol, counts) in self.leg2_skip_counts_by_symbol.iter() {
+            for (reason, count) in counts {
+                metrics.insert(
+                    format!("leg2_gate_{}_{}", symbol, reason),
+                    count.to_string(),
+                );
+            }
         }
 
         StrategyStateInfo {
@@ -2476,6 +1996,10 @@ impl Strategy for StaggeredArbAdapter {
         self.active_windows.clear();
         self.spot_prices.clear();
         self.pm_asks_by_event.clear();
+        self.pm_quote_state_by_event.clear();
+        self.binance_l2_obi_5.clear();
+        self.binance_l2_obi_prev_5.clear();
+        self.binance_l2_obi_ts.clear();
         self.token_to_quote_route.clear();
         self.last_summary = None;
         self.fixed_amount_overage_warned = false;

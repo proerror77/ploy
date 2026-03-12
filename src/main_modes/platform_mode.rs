@@ -27,24 +27,34 @@ fn build_platform_config_for_runtime(
         if !crypto {
             platform_cfg.enable_crypto = false;
             platform_cfg.enable_crypto_momentum = false;
+            platform_cfg.managed_crypto.enable_lob_ml = false;
             platform_cfg.enable_crypto_pattern_memory = false;
             platform_cfg.enable_crypto_split_arb = false;
+            #[cfg(feature = "rl")]
+            {
+                platform_cfg.managed_crypto.enable_rl_policy = false;
+            }
         }
         if !sports {
             platform_cfg.enable_sports = false;
         }
     }
 
-    // CLI platform-mode filters currently expose only crypto + sports runtime
-    // scope. Politics canonical runtime is still controlled outside this
-    // selector surface.
-    platform_cfg.enable_politics = false;
+    // Explicit domain flags still act as a filter until the CLI grows a politics selector.
+    if explicit_selection {
+        platform_cfg.enable_politics = false;
+    }
 
     if app_config.openclaw_runtime_lockdown() {
         platform_cfg.enable_crypto = false;
         platform_cfg.enable_crypto_momentum = false;
+        platform_cfg.managed_crypto.enable_lob_ml = false;
         platform_cfg.enable_crypto_pattern_memory = false;
         platform_cfg.enable_crypto_split_arb = false;
+        #[cfg(feature = "rl")]
+        {
+            platform_cfg.managed_crypto.enable_rl_policy = false;
+        }
         platform_cfg.enable_sports = false;
         platform_cfg.enable_politics = false;
         warn!("platform started in openclaw lockdown mode; built-in agents forced off");
@@ -77,8 +87,11 @@ pub async fn run_platform_mode(
     let platform_cfg = build_platform_config_for_runtime(&app_config, crypto, sports, dry_run);
 
     info!(
-        "Platform mode: crypto={} sports={} dry_run={}",
-        platform_cfg.enable_crypto, platform_cfg.enable_sports, platform_cfg.dry_run,
+        "Platform mode: crypto={} sports={} politics={} dry_run={}",
+        platform_cfg.enable_crypto,
+        platform_cfg.enable_sports,
+        platform_cfg.enable_politics,
+        platform_cfg.dry_run,
     );
 
     let control = PlatformStartControl { pause, resume };
@@ -245,7 +258,10 @@ mod tests {
 
         assert!(cfg.enable_crypto);
         assert!(cfg.enable_crypto_pattern_memory);
-        assert!(!cfg.enable_crypto_momentum);
+        assert!(
+            !cfg.managed_crypto.enable_lob_ml,
+            "pattern_memory deployment should not auto-route to crypto_lob_ml"
+        );
     }
 
     #[test]
@@ -283,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_scope_disables_politics_even_if_deployment_enables_it() {
+    fn runtime_scope_keeps_politics_when_no_explicit_selection() {
         let _guard = env_lock().lock().expect("failed to lock env");
         let mut env_override = EnvOverride::default();
         env_override.remove("PLOY_DEPLOYMENTS_JSON");
@@ -309,8 +325,40 @@ mod tests {
         let cfg = build_platform_config_for_runtime(&app, false, false, true);
 
         assert!(
+            cfg.enable_politics,
+            "platform runtime should preserve politics deployments when no explicit domain filter is set"
+        );
+    }
+
+    #[test]
+    fn explicit_selection_disables_politics_without_politics_flag() {
+        let _guard = env_lock().lock().expect("failed to lock env");
+        let mut env_override = EnvOverride::default();
+        env_override.remove("PLOY_DEPLOYMENTS_JSON");
+        env_override.set(
+            "PLOY_STRATEGY_DEPLOYMENTS_JSON",
+            r#"[
+              {
+                "id":"dep-politics",
+                "strategy":"event_edge",
+                "domain":"Politics",
+                "market_selector":{"mode":"dynamic","domain":"Politics","query":"Election"},
+                "timeframe":"15m",
+                "enabled":true,
+                "allocator_profile":"default",
+                "risk_profile":"default",
+                "priority":70,
+                "cooldown_secs":120
+              }
+            ]"#,
+        );
+
+        let app = AppConfig::default_config(true, "btc-price-series-15m");
+        let cfg = build_platform_config_for_runtime(&app, true, false, true);
+
+        assert!(
             !cfg.enable_politics,
-            "platform-mode selector surface should keep politics disabled until an explicit politics runtime flag exists"
+            "explicit crypto/sports selection should keep politics off until the CLI exposes a politics flag"
         );
     }
 }

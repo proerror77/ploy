@@ -46,6 +46,7 @@ pub use adapters::{MomentumStrategyAdapter, SplitArbStrategyAdapter};
 pub use feeds::{DataFeedBuilder, DataFeedManager};
 pub use manager::{StrategyFactory, StrategyInfo, StrategyManager, StrategyStatus};
 
+
 // =============================================================================
 // Subdomain modules
 // =============================================================================
@@ -80,6 +81,8 @@ pub mod integrity;
 pub mod liquidity_vacuum_backtest;
 pub mod momentum;
 pub mod momentum_backtest;
+pub mod momentum_runtime_config;
+pub mod multi_event;
 pub mod multi_outcome;
 pub mod nba_comeback;
 pub mod paper_runner;
@@ -201,16 +204,29 @@ pub use nba_comeback::nba_winprob::{
     GameFeatures, LiveWinProbModel, ModelMetadata, WinProbCoefficients, WinProbPrediction,
 };
 pub use paper_runner::{run_paper_trading, PaperTradingConfig, PaperTradingRunner, TrackedMarket};
+pub use pm_5m_directional::Pm5mDirectionalStrategy;
 pub use position_manager::{
     Position as PersistedPosition, PositionManager, PositionStatus as PersistedPositionStatus,
     PositionSummary,
 };
 pub use probability::{estimate_probability, full_estimate, Features, ProbabilityEstimate};
 pub use registry::{EventFilter, EventStatus, EventUpsertRequest, RegisteredEvent};
-pub use reverse_engineered::{
-    extract_profile_snapshot, infer_strategy_params, run_reverse_engineered_profile_paper,
-    ProfileSnapshot as ReverseProfileSnapshot, ReverseDryRunResult, ReverseEngineeredConfig,
-    ReverseTradeEvent, StrategyParams as ReverseStrategyParams, REVERSE_PROFILE_STRATEGY_NAME,
+pub use research_facade::{
+    binary_call_prob_forward, calculate_kline_volatility, extract_profile_snapshot,
+    infer_strategy_params, interpolate_iv_linear, load_klines_from_csv, load_pm_prices_from_csv,
+    load_report, net_edge, norm_cdf, parse_polymarket_question, run_deribit_probability_arb,
+    run_paper_trading, run_reverse_engineered_profile_paper, BacktestEngine, BacktestRecorder,
+    BacktestReport, BacktestResults, BacktestSignal, BacktestTrade, DeribitProbabilityArbConfig,
+    DirectionalBacktestConfig, DirectionalBacktestEngine, DirectionalClosedTrade, ExecutionResult,
+    ExecutionSimConfig, ExecutionSimulator, GarchProbabilityBacktestConfig,
+    GarchProbabilityBacktestEngine, GarchProbabilityClosedTrade, KlineRecord,
+    LiquidityVacuumBacktestConfig, LiquidityVacuumBacktestEngine, LiquidityVacuumClosedTrade,
+    MarketSnapshot, NullRecorder, PMPriceRecord, PaperSignal, PaperTrader, PaperTradingConfig,
+    PaperTradingRunner, PaperTradingStats, ParsedPolymarketQuestion, PendingTrade,
+    PgBacktestRecorder, ReverseDryRunResult, ReverseEngineeredConfig, ReverseProfileSnapshot,
+    ReverseStrategyParams, ReverseTradeEvent, SignalType, StaggeredArbBacktestConfig,
+    StaggeredArbBacktestEngine, StaggeredArbClosedTrade, Suggestion, SuggestionPriority,
+    SurfacePoint, TrackedMarket, VolSurfaceSnapshot, REVERSE_PROFILE_STRATEGY_NAME,
     REVERSE_PROFILE_STRATEGY_SLUG,
 };
 pub use risk_mgmt::risk::RiskManager;
@@ -220,8 +236,16 @@ pub use split_arb::{
     run_split_arb, ArbSide, ArbStats, HedgedPosition, PartialPosition, PositionStatus,
     SplitArbConfig, SplitArbEngine,
 };
-pub use staggered_arb_backtest::{
-    StaggeredArbBacktestConfig, StaggeredArbBacktestEngine, StaggeredArbClosedTrade,
+pub use sports_facade::{
+    EntryConfig, EntryDecision, EntryLogic, EntrySignal, ExitDecision, ExitLogic, ExitUrgency,
+    FilterConfig, FilterResult, GameFeatures, LiveWinProbModel, MarketContext, MarketFilters,
+    ModelMetadata, NbaCollectorConfig, NbaDataCollector, NbaExitConfig, NbaGameState,
+    NbaMarketSnapshot, NbaStateEvent, NbaStateMachine, NbaStrategyState, OrderbookData,
+    PartialSignal, PositionState, SportsLeague, SportsMarketDiscovery, TeamStats,
+    WinProbCoefficients, WinProbPrediction,
+};
+pub use trade_logger::{
+    BucketStats, SymbolStats, TradeContext, TradeLogger, TradeOutcome, TradeRecord, TradingStats,
 };
 pub use trading_costs::{
     OrderType, TradingCostBreakdown, TradingCostCalculator, TradingCostConfig,
@@ -267,6 +291,3 @@ pub use core::{
 
 // Crypto strategies
 pub use crypto::{run_crypto_split_arb, CryptoMarketDiscovery, CryptoSplitArbConfig};
-
-// Sports strategies
-pub use sports::{run_sports_split_arb, SportsLeague, SportsMarketDiscovery, SportsSplitArbConfig};

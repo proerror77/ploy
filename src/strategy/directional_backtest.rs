@@ -303,6 +303,9 @@ impl DirectionalBacktestEngine {
                 UpdateType::LobSnapshot { .. } => {
                     // LOB depth not used by directional backtest
                 }
+                UpdateType::BinanceL2 { .. } => {
+                    // Binance L2 features are ignored by the directional backtest.
+                }
             }
         }
 
@@ -465,9 +468,7 @@ impl DirectionalBacktestEngine {
                 .get(&window.event_slug)
                 .copied()
                 .unwrap_or((None, None));
-            self.try_entry_for_window(
-                symbol, ts, &window, spot_price, momentum, up_ask, down_ask,
-            );
+            self.try_entry_for_window(symbol, ts, &window, spot_price, momentum, up_ask, down_ask);
         }
     }
 

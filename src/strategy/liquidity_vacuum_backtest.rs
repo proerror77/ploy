@@ -415,10 +415,7 @@ pub struct LiquidityVacuumBacktestEngine {
 }
 
 impl LiquidityVacuumBacktestEngine {
-    pub fn new(
-        config: LiquidityVacuumBacktestConfig,
-        recorder: Box<dyn BacktestRecorder>,
-    ) -> Self {
+    pub fn new(config: LiquidityVacuumBacktestConfig, recorder: Box<dyn BacktestRecorder>) -> Self {
         let equity = config.initial_capital;
         Self {
             config,
@@ -485,7 +482,12 @@ impl LiquidityVacuumBacktestEngine {
                     outcome,
                 } => {
                     if let Some(up_won) = outcome {
-                        self.resolve_positions(&update.symbol, event_slug, *up_won, update.timestamp);
+                        self.resolve_positions(
+                            &update.symbol,
+                            event_slug,
+                            *up_won,
+                            update.timestamp,
+                        );
                         if let Some(events) = self.active_events.get_mut(&update.symbol) {
                             events.retain(|e| e.event_slug != *event_slug);
                         }
@@ -507,6 +509,9 @@ impl LiquidityVacuumBacktestEngine {
                     if let Some(state) = self.symbol_state.get_mut(&update.symbol) {
                         state.update_lob_depth(*ask_depth_shares);
                     }
+                    self.maybe_run_symbol_logic(&update.symbol, update.timestamp);
+                }
+                UpdateType::BinanceL2 { .. } => {
                     self.maybe_run_symbol_logic(&update.symbol, update.timestamp);
                 }
             }
@@ -661,7 +666,11 @@ impl LiquidityVacuumBacktestEngine {
         ts: DateTime<Utc>,
     ) -> Option<CommonSignalState> {
         let state = self.symbol_state.get_mut(symbol)?;
-        state.prune_old(ts, self.config.window_secs, self.config.volume_baseline_samples);
+        state.prune_old(
+            ts,
+            self.config.window_secs,
+            self.config.volume_baseline_samples,
+        );
         state.reset_daily_counter_if_needed(ts);
 
         let ema = state.ema.warm_value()?;
@@ -671,10 +680,8 @@ impl LiquidityVacuumBacktestEngine {
         }
         let signed_deviation = (state.spot.price - expected_price) / expected_price;
         let deviation_abs = signed_deviation.abs();
-        let deviation_zscore = state.record_deviation_sample(
-            signed_deviation,
-            self.config.zscore_lookback_samples,
-        );
+        let deviation_zscore =
+            state.record_deviation_sample(signed_deviation, self.config.zscore_lookback_samples);
 
         let price_move = state.spot.momentum(self.config.window_secs)?.abs();
 
@@ -709,12 +716,28 @@ impl LiquidityVacuumBacktestEngine {
         };
 
         if common.price_move <= self.config.price_move_threshold {
-            self.record_filtered(symbol, "", ts, None, Some(common.spot_price), None, "price_move_below_threshold");
+            self.record_filtered(
+                symbol,
+                "",
+                ts,
+                None,
+                Some(common.spot_price),
+                None,
+                "price_move_below_threshold",
+            );
             return;
         }
 
         if common.volume_ratio <= self.config.volume_multiplier_threshold {
-            self.record_filtered(symbol, "", ts, Some(common.volume_ratio), Some(common.spot_price), None, "volume_ratio_below_threshold");
+            self.record_filtered(
+                symbol,
+                "",
+                ts,
+                Some(common.volume_ratio),
+                Some(common.spot_price),
+                None,
+                "volume_ratio_below_threshold",
+            );
             return;
         }
 
@@ -898,9 +921,8 @@ impl LiquidityVacuumBacktestEngine {
             Direction::Down => Decimal::ONE - fair_up_prob,
         };
         let expected_edge = fair_price - entry_price;
-        let estimated_roundtrip_fee = self.fee_model.fee_shares(Decimal::ONE, entry_price)
-            * entry_price
-            * dec!(2);
+        let estimated_roundtrip_fee =
+            self.fee_model.fee_shares(Decimal::ONE, entry_price) * entry_price * dec!(2);
         let min_required_edge = estimated_roundtrip_fee + self.config.min_edge_buffer;
         if expected_edge <= min_required_edge {
             self.record_filtered(
@@ -962,7 +984,9 @@ impl LiquidityVacuumBacktestEngine {
 
         if let Some(state) = self.symbol_state.get_mut(symbol) {
             state.reset_daily_counter_if_needed(ts);
-            if self.config.max_daily_trades > 0 && state.daily_trade_count >= self.config.max_daily_trades {
+            if self.config.max_daily_trades > 0
+                && state.daily_trade_count >= self.config.max_daily_trades
+            {
                 self.record_filtered(
                     symbol,
                     &format!("{direction}"),
@@ -1036,7 +1060,11 @@ impl LiquidityVacuumBacktestEngine {
             symbol: symbol.to_string(),
             direction: format!("{direction}"),
             timestamp: ts,
-            p_hat: Some(((crowd_vote + Decimal::ONE) / dec!(2)).to_f64().unwrap_or(0.5)),
+            p_hat: Some(
+                ((crowd_vote + Decimal::ONE) / dec!(2))
+                    .to_f64()
+                    .unwrap_or(0.5),
+            ),
             ev_net: Some(deviation.to_f64().unwrap_or(0.0)),
             sigma: Some(crowd_vote.to_f64().unwrap_or(0.0)),
             market_price: Some(sim.fill_price),
@@ -1218,7 +1246,11 @@ impl LiquidityVacuumBacktestEngine {
             symbol: pos.symbol.clone(),
             direction: format!("{}", pos.direction),
             timestamp: ts,
-            p_hat: Some(((pos.entry_crowd_vote + Decimal::ONE) / dec!(2)).to_f64().unwrap_or(0.5)),
+            p_hat: Some(
+                ((pos.entry_crowd_vote + Decimal::ONE) / dec!(2))
+                    .to_f64()
+                    .unwrap_or(0.5),
+            ),
             ev_net: Some(pos.entry_deviation.to_f64().unwrap_or(0.0)),
             sigma: Some(pos.entry_crowd_vote.to_f64().unwrap_or(0.0)),
             market_price: Some(final_price),
@@ -1242,7 +1274,11 @@ impl LiquidityVacuumBacktestEngine {
             won,
             holding_secs,
             exit_reason: reason.to_string(),
-            entry_p_hat: Some(((pos.entry_crowd_vote + Decimal::ONE) / dec!(2)).to_f64().unwrap_or(0.5)),
+            entry_p_hat: Some(
+                ((pos.entry_crowd_vote + Decimal::ONE) / dec!(2))
+                    .to_f64()
+                    .unwrap_or(0.5),
+            ),
             entry_ev_net: Some(pos.entry_deviation.to_f64().unwrap_or(0.0)),
             entry_sigma: Some(pos.entry_crowd_vote.to_f64().unwrap_or(0.0)),
             s0: Some(pos.s0),

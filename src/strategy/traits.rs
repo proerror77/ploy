@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use crate::domain::{OrderRequest, OrderSide, OrderStatus, Quote, Side};
 use crate::error::Result;
+use crate::platform::Domain;
 
 // ============================================================================
 // Strategy Trait
@@ -133,8 +134,12 @@ pub enum MarketUpdate {
     /// Binance L2 orderbook snapshot features
     BinanceL2 {
         symbol: String,
+        obi_1: Decimal,
+        obi_2: Decimal,
+        obi_3: Decimal,
         obi_5: Decimal,
         obi_10: Decimal,
+        obi_20: Decimal,
         bid_volume_5: Decimal,
         ask_volume_5: Decimal,
         spread_bps: Decimal,
@@ -246,6 +251,9 @@ pub enum StrategyAction {
         priority: u8,
     },
 
+    /// Canonical strategy-side submit payload.
+    SubmitIntent { intent: StrategyOrderIntent },
+
     /// Cancel an existing order
     CancelOrder { order_id: String },
 
@@ -261,6 +269,22 @@ pub enum StrategyAction {
 
     /// Send an alert
     Alert { level: AlertLevel, message: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyOrderIntent {
+    pub client_order_id: String,
+    pub domain: Domain,
+    pub market_slug: String,
+    pub token_id: String,
+    pub side: Side,
+    pub is_buy: bool,
+    pub shares: u64,
+    pub limit_price: Decimal,
+    pub order_type: crate::domain::OrderType,
+    pub time_in_force: crate::domain::TimeInForce,
+    pub priority: u8,
+    pub metadata: HashMap<String, String>,
 }
 
 // ============================================================================

@@ -18,7 +18,6 @@ use crate::coordinator::CoordinatorCommand;
 use crate::platform::{AgentStatus, BinanceDataPlaneHandle, Domain};
 
 use super::allocator::DynamicAllocator;
-use super::config::OpenClawConfig;
 use super::conflict::ConflictDetector;
 use super::performance::PerformanceTracker;
 use super::regime::{RegimeDetector, RegimeSnapshot};
@@ -52,6 +51,7 @@ impl GovernanceAgent for OpenClawAgent {
     fn domain(&self) -> Domain {
         Domain::Custom(0)
     }
+
 
     async fn run(self, mut ctx: GovernanceContext) -> crate::error::Result<()> {
         info!(

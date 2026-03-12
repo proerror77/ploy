@@ -1,5 +1,6 @@
 pub mod account;
 pub mod adapters;
+pub mod agent_runtime;
 pub mod agents;
 pub mod ai_clients;
 #[cfg(feature = "analysis_tools")]
@@ -9,6 +10,7 @@ pub mod api;
 pub mod cli;
 pub mod collector;
 pub mod config;
+pub mod control_plane;
 pub mod coordination;
 pub mod coordinator;
 pub mod domain;
@@ -27,15 +29,22 @@ pub mod tui;
 #[cfg(feature = "rl")]
 pub mod rl;
 
+pub use agent_runtime::{AgentRiskParams, AgentStatus};
 pub use ai_clients::{AdvisoryAgent, AutonomousAgent, AutonomousConfig, ClaudeAgentClient};
 pub use collector::{
     BinanceDepthStream, LobCache, LobSnapshot, SyncCollector, SyncCollectorConfig,
 };
 pub use config::AppConfig;
+pub use control_plane::{
+    DeploymentExecutionMode, MarketSelector, RiskDecision, RiskDecisionStatus, StrategyDeployment,
+    StrategyEvaluationEvidence, StrategyEvaluationMetrics, StrategyEvaluationStage,
+    StrategyLifecycleStage, StrategyProductType, Timeframe, TradeIntent,
+};
 pub use coordination::{
     CircuitState, ComponentState, GracefulShutdown, LifecycleEvent, LifecycleManager,
     ShutdownSignal, TradingCircuitBreaker, TradingCircuitBreakerConfig,
 };
+pub use coordinator::RiskGate;
 pub use error::{PloyError, Result};
 pub use persistence::{
     CheckpointConfig, CheckpointService, Checkpointable, DLQHandler, DLQProcessor,
@@ -49,4 +58,7 @@ pub use platform::{
 pub use signing::Wallet;
 // RL exports (when feature enabled)
 #[cfg(feature = "rl")]
-pub use rl::{RLConfig, RLStrategy};
+pub use rl::{
+    ExecutionReport, ExecutionStatus, RLConfig, RLStrategy, RlOrderRuntime, RlOrderRuntimeConfig,
+    RlRuntimeStats,
+};

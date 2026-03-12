@@ -420,7 +420,7 @@ pub enum CryptoCommands {
 /// Sports market subcommands
 #[derive(Subcommand, Debug)]
 pub enum SportsCommands {
-    /// Split arbitrage on sports markets
+    /// Deprecated: standalone sports split-arb runtime
     SplitArb {
         /// Maximum entry price in cents
         #[arg(long, default_value = "45")]

@@ -226,6 +226,7 @@ pub(super) async fn run_strategy(
         up_token,
         down_token,
         symbol.to_string(),
+        series.to_string(),
     );
 
     info!("RL Strategy initialized");

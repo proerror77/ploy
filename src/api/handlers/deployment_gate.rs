@@ -3,7 +3,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use sqlx::Row;
 
 use crate::api::state::AppState;
-use crate::platform::StrategyDeployment;
+use crate::control_plane::StrategyDeployment;
 
 fn parse_boolish(value: &str) -> bool {
     matches!(

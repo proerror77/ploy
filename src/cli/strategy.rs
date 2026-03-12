@@ -22,6 +22,25 @@ use crate::config::ExecutionConfig;
 use crate::signing::Wallet;
 use crate::strategy::execution::executor::OrderExecutor;
 use crate::strategy::{StrategyFactory, StrategyManager};
+use analysis_commands::{
+    AccuracyArgs, BacktestArgs, BacktestDiffArgs, BacktestListArgs, DirectionalSignalBacktestArgs,
+    ExportCryptoLobDatasetArgs, LiveBacktestCompareArgs,
+};
+use backtest_ops::{run_backtest, run_backtest_diff, run_backtest_list, run_live_backtest_compare};
+use maintenance_ops::{
+    backfill_klines, backfill_pm_replay_tables, backfill_pm_token_settlements, run_integrity_check,
+    run_nba_comeback, seed_nba_stats,
+};
+use runtime_ops::{
+    list_strategies, reload_strategy, show_logs, show_status, start_strategy, stop_strategy,
+};
+use settlement_ops::{export_crypto_lob_dataset, report_accuracy_pm_settlement};
+
+mod analysis_commands;
+mod backtest_ops;
+mod maintenance_ops;
+mod runtime_ops;
+mod settlement_ops;
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoLobDatasetFormat {
@@ -55,203 +74,6 @@ impl Default for CryptoLobDatasetFormat {
     }
 }
 
-#[derive(Debug, Clone)]
-struct CryptoLobDatasetRow {
-    executed_at: chrono::DateTime<chrono::Utc>,
-    intent_id: uuid::Uuid,
-    account_id: String,
-    agent_id: String,
-    market_slug: String,
-    token_id: String,
-    market_side: String,
-    is_buy: bool,
-    limit_price: rust_decimal::Decimal,
-    p_up: Option<f64>,
-    obi5: f64,
-    obi10: f64,
-    spread_bps: f64,
-    bid_volume_5: f64,
-    ask_volume_5: f64,
-    momentum_1s: f64,
-    momentum_5s: f64,
-    pm_up_ask: Option<f64>,
-    pm_down_ask: Option<f64>,
-    settled_price: rust_decimal::Decimal,
-    y_up: i32,
-    model_type: String,
-    model_version: String,
-    config_hash: String,
-}
-
-fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('\"') || s.contains('\n') || s.contains('\r') {
-        format!("\"{}\"", s.replace('\"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
-
-fn write_crypto_lob_dataset_csv(
-    output: &std::path::Path,
-    rows: &[CryptoLobDatasetRow],
-) -> Result<()> {
-    let mut f = std::fs::File::create(output).context("Failed to create output file")?;
-    writeln!(
-        f,
-        "executed_at,intent_id,account_id,agent_id,market_slug,token_id,market_side,is_buy,limit_price,p_up,obi5,obi10,spread_bps,bid_volume_5,ask_volume_5,momentum_1s,momentum_5s,pm_up_ask,pm_down_ask,settled_price,y_up,model_type,model_version,config_hash"
-    )?;
-
-    for r in rows {
-        writeln!(
-            f,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            csv_escape(&r.executed_at.to_rfc3339()),
-            csv_escape(&r.intent_id.to_string()),
-            csv_escape(&r.account_id),
-            csv_escape(&r.agent_id),
-            csv_escape(&r.market_slug),
-            csv_escape(&r.token_id),
-            csv_escape(&r.market_side),
-            if r.is_buy { "1" } else { "0" },
-            r.limit_price,
-            r.p_up.map(|v| format!("{v:.6}")).unwrap_or_default(),
-            format!("{:.10}", r.obi5),
-            format!("{:.10}", r.obi10),
-            format!("{:.10}", r.spread_bps),
-            format!("{:.10}", r.bid_volume_5),
-            format!("{:.10}", r.ask_volume_5),
-            format!("{:.10}", r.momentum_1s),
-            format!("{:.10}", r.momentum_5s),
-            r.pm_up_ask.map(|v| format!("{v:.10}")).unwrap_or_default(),
-            r.pm_down_ask
-                .map(|v| format!("{v:.10}"))
-                .unwrap_or_default(),
-            r.settled_price,
-            r.y_up,
-            csv_escape(&r.model_type),
-            csv_escape(&r.model_version),
-            csv_escape(&r.config_hash),
-        )?;
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "analysis")]
-fn sanitize_duckdb_copy_path(path: &std::path::Path) -> std::result::Result<String, duckdb::Error> {
-    let s = path.display().to_string();
-    if s.contains('\'') || s.contains(';') || s.contains("--") {
-        return Err(duckdb::Error::InvalidParameterName(
-            "path contains SQL metacharacters".into(),
-        ));
-    }
-    Ok(s)
-}
-
-#[cfg(feature = "analysis")]
-fn write_crypto_lob_dataset_parquet(
-    output: &std::path::Path,
-    rows: &[CryptoLobDatasetRow],
-) -> Result<()> {
-    use duckdb::{params, Connection};
-    use rust_decimal::prelude::ToPrimitive;
-
-    let conn = Connection::open_in_memory().context("Failed to open DuckDB")?;
-    conn.execute_batch(
-        r#"
-        CREATE TABLE dataset (
-          executed_at VARCHAR,
-          intent_id VARCHAR,
-          account_id VARCHAR,
-          agent_id VARCHAR,
-          market_slug VARCHAR,
-          token_id VARCHAR,
-          market_side VARCHAR,
-          is_buy BOOLEAN,
-          limit_price DOUBLE,
-          p_up DOUBLE,
-          obi5 DOUBLE,
-          obi10 DOUBLE,
-          spread_bps DOUBLE,
-          bid_volume_5 DOUBLE,
-          ask_volume_5 DOUBLE,
-          momentum_1s DOUBLE,
-          momentum_5s DOUBLE,
-          pm_up_ask DOUBLE,
-          pm_down_ask DOUBLE,
-          settled_price DOUBLE,
-          y_up INTEGER,
-          model_type VARCHAR,
-          model_version VARCHAR,
-          config_hash VARCHAR
-        );
-        "#,
-    )
-    .context("Failed to create DuckDB dataset table")?;
-
-    let mut stmt = conn
-        .prepare(
-            r#"
-            INSERT INTO dataset VALUES (
-              ?,?,?,?,?,?,?,?,
-              ?,?,?,?,?,?,?,?,
-              ?,?,?,?,?,?,?,?
-            )
-            "#,
-        )
-        .context("Failed to prepare DuckDB insert statement")?;
-
-    for r in rows {
-        let limit_price = r
-            .limit_price
-            .to_f64()
-            .context("Failed to convert limit_price to f64")?;
-        let settled_price = r
-            .settled_price
-            .to_f64()
-            .context("Failed to convert settled_price to f64")?;
-
-        stmt.execute(params![
-            r.executed_at.to_rfc3339(),
-            r.intent_id.to_string(),
-            r.account_id.as_str(),
-            r.agent_id.as_str(),
-            r.market_slug.as_str(),
-            r.token_id.as_str(),
-            r.market_side.as_str(),
-            r.is_buy,
-            limit_price,
-            r.p_up,
-            r.obi5,
-            r.obi10,
-            r.spread_bps,
-            r.bid_volume_5,
-            r.ask_volume_5,
-            r.momentum_1s,
-            r.momentum_5s,
-            r.pm_up_ask,
-            r.pm_down_ask,
-            settled_price,
-            r.y_up,
-            r.model_type.as_str(),
-            r.model_version.as_str(),
-            r.config_hash.as_str(),
-        ])
-        .context("Failed to insert row into DuckDB")?;
-    }
-
-    if output.exists() {
-        std::fs::remove_file(output).context("Failed to remove existing output file")?;
-    }
-    let out = sanitize_duckdb_copy_path(output).context("Invalid output path for DuckDB COPY")?;
-    let copy_sql = format!("COPY dataset TO '{out}' (FORMAT PARQUET);");
-    conn.execute_batch(&copy_sql)
-        .context("Failed to COPY dataset to Parquet")?;
-
-    Ok(())
-}
-
-/// Strategy-related commands
 #[derive(Subcommand, Debug, Clone)]
 pub enum StrategyCommands {
     /// List all available strategies
@@ -322,7 +144,7 @@ pub enum StrategyCommands {
         database_url: Option<String>,
     },
 
-    /// Run the NBA Q3→Q4 comeback trading agent standalone
+    /// Deprecated: standalone NBA comeback runtime (use managed deployments)
     NbaComeback {
         /// Config file path
         #[arg(short, long)]
@@ -334,112 +156,16 @@ pub enum StrategyCommands {
     },
 
     /// Report prediction accuracy using Polymarket official settlement (token pays 1/0)
-    Accuracy {
-        /// Lookback window in hours (scopes which entry intents are scored)
-        #[arg(long, default_value = "12")]
-        lookback_hours: u64,
-
-        /// Filter by domain: crypto|sports|politics
-        #[arg(long)]
-        domain: Option<String>,
-
-        /// Filter by account_id (defaults to all)
-        #[arg(long)]
-        account_id: Option<String>,
-
-        /// Filter by agent_id (defaults to all)
-        #[arg(long)]
-        agent_id: Option<String>,
-
-        /// Only include live orders (exclude dry-run)
-        #[arg(long)]
-        live_only: bool,
-
-        /// Max number of intents to print (latest first)
-        #[arg(long, default_value = "200")]
-        limit: usize,
-
-        /// Skip refreshing settlement status via Gamma API (uses cached DB rows only)
-        #[arg(long)]
-        no_refresh: bool,
-
-        /// Database URL (uses DATABASE_URL env var if omitted)
-        #[arg(long)]
-        database_url: Option<String>,
-    },
+    Accuracy(AccuracyArgs),
 
     /// Backtest directional signals (signal_history) using Polymarket official settlement (token pays 1/0)
     ///
     /// Legacy alias for:
     /// `ploy strategy backtest directional --mode settlement ...`
-    DirectionalSignalBacktest {
-        /// Lookback window in hours (which directional signals are included)
-        #[arg(long, default_value = "168")]
-        lookback_hours: u64,
-
-        /// Filter by account_id (defaults to all)
-        #[arg(long)]
-        account_id: Option<String>,
-
-        /// Filter by agent_id (defaults to all)
-        #[arg(long)]
-        agent_id: Option<String>,
-
-        /// Only include live signals (exclude context->>'dry_run' = true)
-        #[arg(long)]
-        live_only: bool,
-
-        /// Max number of signals to backtest (latest first)
-        #[arg(long, default_value = "50000")]
-        limit: usize,
-
-        /// Skip refreshing settlement status via Gamma API (uses cached DB rows only)
-        #[arg(long)]
-        no_refresh: bool,
-
-        /// Database URL (uses DATABASE_URL env var if omitted)
-        #[arg(long)]
-        database_url: Option<String>,
-    },
+    DirectionalSignalBacktest(DirectionalSignalBacktestArgs),
 
     /// Export a labeled dataset for crypto LOB model training (uses Polymarket settlement y_up).
-    ExportCryptoLobDataset {
-        /// Lookback window in hours (which entry intents are exported)
-        #[arg(long, default_value = "168")]
-        lookback_hours: u64,
-
-        /// Filter by account_id (defaults to all)
-        #[arg(long)]
-        account_id: Option<String>,
-
-        /// Filter by agent_id (defaults to all)
-        #[arg(long)]
-        agent_id: Option<String>,
-
-        /// Only include live orders (exclude dry-run)
-        #[arg(long)]
-        live_only: bool,
-
-        /// Skip refreshing settlement status via Gamma API (uses cached DB rows only)
-        #[arg(long)]
-        no_refresh: bool,
-
-        /// Max number of intents to export (latest first)
-        #[arg(long, default_value = "50000")]
-        limit: usize,
-
-        /// Output format (default: parquet if built with --features analysis, else csv)
-        #[arg(long, value_enum, default_value_t = CryptoLobDatasetFormat::default())]
-        format: CryptoLobDatasetFormat,
-
-        /// Output path (default: ./data/crypto_lob_dataset.{csv|parquet})
-        #[arg(long)]
-        output: Option<PathBuf>,
-
-        /// Database URL (uses DATABASE_URL env var if omitted)
-        #[arg(long)]
-        database_url: Option<String>,
-    },
+    ExportCryptoLobDataset(ExportCryptoLobDatasetArgs),
 
     /// Run data integrity checks on the database
     IntegrityCheck {
@@ -586,42 +312,13 @@ pub enum StrategyCommands {
     },
 
     /// List historical backtest runs
-    BacktestList {
-        #[arg(long)]
-        database_url: Option<String>,
-        #[arg(long, default_value = "20")]
-        limit: usize,
-    },
+    BacktestList(BacktestListArgs),
 
     /// Compare two backtest runs side by side
-    BacktestDiff {
-        run1: String,
-        run2: String,
-        #[arg(long)]
-        database_url: Option<String>,
-    },
+    BacktestDiff(BacktestDiffArgs),
 
     /// Compare one backtest run against recent live order outcomes
-    LiveBacktestCompare {
-        /// Backtest run UUID
-        run_id: String,
-
-        /// Lookback window in hours for live order observations
-        #[arg(long, default_value = "72")]
-        lookback_hours: u64,
-
-        /// Filter by account_id (defaults to all)
-        #[arg(long)]
-        account_id: Option<String>,
-
-        /// Filter by strategy_id (defaults to all)
-        #[arg(long)]
-        strategy_id: Option<String>,
-
-        /// Database URL (uses DATABASE_URL env var if omitted)
-        #[arg(long)]
-        database_url: Option<String>,
-    },
+    LiveBacktestCompare(LiveBacktestCompareArgs),
 
     /// Backfill Binance klines into the database for historical backtesting
     BackfillKlines {
@@ -712,195 +409,16 @@ impl StrategyCommands {
                 database_url,
             } => seed_nba_stats(&season, database_url).await,
             Self::NbaComeback { config, dry_run } => run_nba_comeback(config, dry_run).await,
-            Self::Accuracy {
-                lookback_hours,
-                domain,
-                account_id,
-                agent_id,
-                live_only,
-                limit,
-                no_refresh,
-                database_url,
-            } => {
-                report_accuracy_pm_settlement(
-                    lookback_hours,
-                    domain,
-                    account_id,
-                    agent_id,
-                    live_only,
-                    limit,
-                    no_refresh,
-                    database_url,
-                )
-                .await
-            }
-            Self::DirectionalSignalBacktest {
-                lookback_hours,
-                account_id,
-                agent_id,
-                live_only,
-                limit,
-                no_refresh,
-                database_url,
-            } => {
-                run_backtest(
-                    "directional",
-                    StrategyBacktestMode::Settlement,
-                    None,
-                    None,
-                    "BTCUSDT,ETHUSDT,SOLUSDT",
-                    10000.0,
-                    false,
-                    false,
-                    lookback_hours,
-                    account_id,
-                    agent_id,
-                    live_only,
-                    limit,
-                    no_refresh,
-                    false,
-                    None,
-                    false,
-                    database_url,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .await
-            }
-            Self::ExportCryptoLobDataset {
-                lookback_hours,
-                account_id,
-                agent_id,
-                live_only,
-                no_refresh,
-                limit,
-                format,
-                output,
-                database_url,
-            } => {
-                export_crypto_lob_dataset(
-                    lookback_hours,
-                    account_id,
-                    agent_id,
-                    live_only,
-                    no_refresh,
-                    limit,
-                    format,
-                    output,
-                    database_url,
-                )
-                .await
-            }
+            Self::Accuracy(args) => args.run().await,
+            Self::DirectionalSignalBacktest(args) => args.run().await,
+            Self::ExportCryptoLobDataset(args) => args.run().await,
             Self::IntegrityCheck { json, database_url } => {
                 run_integrity_check(json, database_url).await
             }
-            Self::Backtest {
-                name,
-                mode,
-                from,
-                to,
-                symbols,
-                capital,
-                save,
-                json,
-                lookback_hours,
-                account_id,
-                agent_id,
-                live_only,
-                limit,
-                no_refresh,
-                skip_gamma,
-                verify_run,
-                diagnose_db,
-                database_url,
-                lv_profile,
-                lv_price_move_threshold,
-                lv_volume_multiplier_threshold,
-                lv_order_concentration_threshold,
-                lv_entry_deviation_threshold,
-                lv_entry_zscore_threshold,
-                lv_take_profit_zscore_threshold,
-                lv_stop_loss_zscore_threshold,
-                lv_take_profit_ema_band_pct,
-                lv_stop_loss_pct,
-                lv_min_edge_buffer,
-                lv_zscore_lookback_samples,
-                lv_max_holding_secs,
-                sa_entry_after_start_max_secs,
-            } => {
-                run_backtest(
-                    &name,
-                    mode,
-                    from,
-                    to,
-                    &symbols,
-                    capital,
-                    save,
-                    json,
-                    lookback_hours,
-                    account_id,
-                    agent_id,
-                    live_only,
-                    limit,
-                    no_refresh,
-                    skip_gamma,
-                    verify_run,
-                    diagnose_db,
-                    database_url,
-                    Some(lv_profile),
-                    lv_price_move_threshold,
-                    lv_volume_multiplier_threshold,
-                    lv_order_concentration_threshold,
-                    lv_entry_deviation_threshold,
-                    lv_entry_zscore_threshold,
-                    lv_take_profit_zscore_threshold,
-                    lv_stop_loss_zscore_threshold,
-                    lv_take_profit_ema_band_pct,
-                    lv_stop_loss_pct,
-                    lv_min_edge_buffer,
-                    lv_zscore_lookback_samples,
-                    lv_max_holding_secs,
-                    sa_entry_after_start_max_secs,
-                )
-                .await
-            }
-            Self::BacktestList {
-                database_url,
-                limit,
-            } => run_backtest_list(database_url, limit).await,
-            Self::BacktestDiff {
-                run1,
-                run2,
-                database_url,
-            } => run_backtest_diff(&run1, &run2, database_url).await,
-            Self::LiveBacktestCompare {
-                run_id,
-                lookback_hours,
-                account_id,
-                strategy_id,
-                database_url,
-            } => {
-                run_live_backtest_compare(
-                    &run_id,
-                    lookback_hours,
-                    account_id,
-                    strategy_id,
-                    database_url,
-                )
-                .await
-            }
+            Self::Backtest(args) => args.run().await,
+            Self::BacktestList(args) => args.run().await,
+            Self::BacktestDiff(args) => args.run().await,
+            Self::LiveBacktestCompare(args) => args.run().await,
             Self::BackfillKlines {
                 symbols,
                 from,
@@ -6239,3 +5757,4 @@ async fn backfill_pm_token_settlements(
 
     Ok(())
 }
+

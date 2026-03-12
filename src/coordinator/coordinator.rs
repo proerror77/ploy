@@ -8,18 +8,15 @@
 //!   - Periodically drain the queue and execute orders
 //!   - Periodically refresh GlobalState from aggregators
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use rust_decimal::prelude::ToPrimitive;
+use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
@@ -29,31 +26,29 @@ use crate::platform::{
 };
 use crate::strategy::execution::executor::OrderExecutor;
 
-use super::command::{
-    AllocatorLedgerSnapshot, CoordinatorCommand, CoordinatorControlCommand,
-    DeploymentLedgerSnapshot, DomainIngressSnapshot, GovernanceAgentSnapshot,
-    GovernancePolicyHistoryEntry, GovernancePolicySnapshot, GovernancePolicyUpdate,
-    GovernanceStatusSnapshot,
+use super::admission::{
+    buy_intent_missing_deployment_reason, sell_reduce_only_violation_reason, AdmissionController,
 };
-use super::config::{CoordinatorConfig, DuplicateGuardScope};
-use super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
+use super::capital::CapitalPolicy;
+use super::command::{CoordinatorCommand, CoordinatorControlCommand};
+use super::config::CoordinatorConfig;
+use super::governance::{governance_block_reason, GovernanceController, IngressMode};
+use super::journal::ExecutionJournal;
+use super::position::PositionAggregator;
+use super::queue::OrderQueue;
+use super::risk::{RiskCheckResult, RiskGate};
+use super::state::{AgentSnapshot, GlobalState};
+use crate::platform::{Domain, OrderIntent};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IngressMode {
-    Running,
-    Paused,
-    Halted,
-}
+mod control_surface;
+mod execution;
+mod ingress;
+mod order_updates;
+mod recovery;
+mod runtime_status;
 
-impl IngressMode {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Paused => "paused",
-            Self::Halted => "halted",
-        }
-    }
-}
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Clone)]
 struct AgentCommandChannel {
@@ -906,17 +901,12 @@ pub struct CoordinatorHandle {
     global_state: Arc<RwLock<GlobalState>>,
     risk_gate: Arc<RiskGate>,
     order_queue: Arc<RwLock<OrderQueue>>,
-    crypto_allocator: Arc<RwLock<CryptoCapitalAllocator>>,
-    sports_allocator: Arc<RwLock<MarketCapitalAllocator>>,
-    politics_allocator: Arc<RwLock<MarketCapitalAllocator>>,
-    economics_allocator: Arc<RwLock<MarketCapitalAllocator>>,
+    capital_policy: Arc<CapitalPolicy>,
     positions: Arc<PositionAggregator>,
-    ingress_mode: Arc<RwLock<IngressMode>>,
-    domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
-    deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
+    governance: Arc<GovernanceController>,
+    admission: Arc<AdmissionController>,
     allowed_domains: Arc<HashSet<Domain>>,
-    authorized_agents: Arc<std::sync::RwLock<HashSet<String>>>,
-    governance_policy: Arc<RwLock<GovernancePolicy>>,
+    authorized_agents: Arc<RwLock<HashSet<String>>>,
     governance_store_pool: Option<PgPool>,
 }
 
@@ -1326,25 +1316,20 @@ pub struct Coordinator {
     config: CoordinatorConfig,
     account_id: String,
     allowed_domains: Arc<HashSet<Domain>>,
-    authorized_agents: Arc<std::sync::RwLock<HashSet<String>>>,
-    deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
+    authorized_agents: Arc<RwLock<HashSet<String>>>,
+    admission: Arc<AdmissionController>,
     risk_gate: Arc<RiskGate>,
     order_queue: Arc<RwLock<OrderQueue>>,
-    duplicate_guard: Arc<RwLock<IntentDuplicateGuard>>,
-    crypto_allocator: Arc<RwLock<CryptoCapitalAllocator>>,
-    sports_allocator: Arc<RwLock<MarketCapitalAllocator>>,
-    politics_allocator: Arc<RwLock<MarketCapitalAllocator>>,
-    economics_allocator: Arc<RwLock<MarketCapitalAllocator>>,
+    capital_policy: Arc<CapitalPolicy>,
     positions: Arc<PositionAggregator>,
     executor: Arc<OrderExecutor>,
     global_state: Arc<RwLock<GlobalState>>,
-    execution_log_pool: Option<PgPool>,
+    journal: ExecutionJournal,
     governance_store_pool: Option<PgPool>,
-    ingress_mode: Arc<RwLock<IngressMode>>,
-    domain_ingress_mode: Arc<RwLock<HashMap<Domain, IngressMode>>>,
-    governance_policy: Arc<RwLock<GovernancePolicy>>,
+    governance: Arc<GovernanceController>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
-    paused_agent_ids: Arc<RwLock<HashSet<String>>>,
+    order_update_sinks:
+        Arc<RwLock<HashMap<String, mpsc::Sender<crate::strategy::OrderUpdate>>>>,
 
     // Channels
     order_tx: mpsc::Sender<OrderIntent>,
@@ -1358,1178 +1343,24 @@ pub struct Coordinator {
     agent_commands: HashMap<String, AgentCommandChannel>,
 }
 
-#[derive(Debug)]
-struct IntentDuplicateGuard {
-    enabled: bool,
-    window: ChronoDuration,
-    scope: DuplicateGuardScope,
-    recent_buys: HashMap<String, chrono::DateTime<Utc>>,
-}
-
-impl IntentDuplicateGuard {
-    fn new(window_ms: u64, enabled: bool, scope: DuplicateGuardScope) -> Self {
-        let clamped_ms = window_ms.min(i64::MAX as u64) as i64;
-        let window = ChronoDuration::milliseconds(clamped_ms.max(1));
-        Self {
-            enabled,
-            window,
-            scope,
-            recent_buys: HashMap::new(),
-        }
-    }
-
-    fn deployment_scope(intent: &OrderIntent) -> String {
-        intent_deployment_scope(intent)
-    }
-
-    fn buy_key(&self, intent: &OrderIntent) -> Option<String> {
-        // Only guard normal/high-priority ENTRY orders.
-        // Use condition_id-first identity so opposite-side re-entries
-        // on the same contract are blocked within the duplicate window.
-        // Scope is configurable:
-        // - Market: block across all strategies/deployments (safer, avoids double-entries).
-        // - Deployment: deployment-scoped behavior; allow different deployments to each enter.
-        if !intent.is_buy || intent.priority == OrderPriority::Critical {
-            return None;
-        }
-
-        let scope = match intent
-            .metadata
-            .get("duplicate_guard_scope")
-            .map(|v| v.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("deployment") | Some("dep") => DuplicateGuardScope::Deployment,
-            Some("market") | Some("global") => DuplicateGuardScope::Market,
-            _ => self.scope,
-        };
-
-        let market = intent_market_identity(intent);
-        let base = format!("{}|{}", intent.domain, market);
-
-        match scope {
-            DuplicateGuardScope::Market => Some(base),
-            DuplicateGuardScope::Deployment => {
-                Some(format!("{}|{}", base, Self::deployment_scope(intent)))
-            }
-        }
-    }
-
-    fn prune(&mut self, now: chrono::DateTime<Utc>) {
-        self.recent_buys
-            .retain(|_, ts| now.signed_duration_since(*ts) < self.window);
-    }
-
-    fn register_or_block(
-        &mut self,
-        intent: &OrderIntent,
-        now: chrono::DateTime<Utc>,
-    ) -> Option<String> {
-        if !self.enabled {
-            return None;
-        }
-
-        let key = self.buy_key(intent)?;
-        self.prune(now);
-
-        if let Some(last) = self.recent_buys.get(&key) {
-            let elapsed_ms = now.signed_duration_since(*last).num_milliseconds().max(0);
-            return Some(format!(
-                "Duplicate buy intent blocked (elapsed={}ms, guard_window={}ms, key={})",
-                elapsed_ms,
-                self.window.num_milliseconds(),
-                key
-            ));
-        }
-
-        self.recent_buys.insert(key, now);
-        None
-    }
-}
-
-const KNOWN_5M_SERIES_IDS: &[&str] = &["10684", "10683", "10686", "10685"];
-const KNOWN_15M_SERIES_IDS: &[&str] = &["10192", "10191", "10423", "10422"];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum CryptoHorizon {
-    M5,
-    M15,
-    Other,
-}
-
-impl CryptoHorizon {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::M5 => "5m",
-            Self::M15 => "15m",
-            Self::Other => "other",
-        }
-    }
-
-    fn from_hint(raw: &str) -> Option<Self> {
-        let normalized = raw.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            return None;
-        }
-        if normalized.contains("15m") || normalized == "15" {
-            return Some(Self::M15);
-        }
-        if normalized.contains("5m") || normalized == "5" {
-            return Some(Self::M5);
-        }
-        if KNOWN_15M_SERIES_IDS.iter().any(|id| *id == normalized) {
-            return Some(Self::M15);
-        }
-        if KNOWN_5M_SERIES_IDS.iter().any(|id| *id == normalized) {
-            return Some(Self::M5);
-        }
-        None
-    }
-}
-
-#[derive(Debug, Clone)]
-struct CryptoIntentDimensions {
-    coin: String,
-    horizon: CryptoHorizon,
-    deployment_scope: String,
-    position_key: String,
-}
-
-impl CryptoIntentDimensions {
-    fn from_intent(intent: &OrderIntent) -> Self {
-        let coin = Self::parse_coin(intent).unwrap_or_else(|| "OTHER".to_string());
-        let horizon = Self::parse_horizon(intent).unwrap_or(CryptoHorizon::Other);
-        let market_identity = intent_market_identity(intent);
-        let deployment_scope = intent_deployment_scope(intent);
-        let position_key = format!(
-            "{}|{}|{}|{}",
-            deployment_scope,
-            market_identity,
-            intent.token_id,
-            intent.side.as_str()
-        );
-        Self {
-            coin,
-            horizon,
-            deployment_scope,
-            position_key,
-        }
-    }
-
-    fn parse_coin(intent: &OrderIntent) -> Option<String> {
-        if let Some(coin) = intent
-            .metadata
-            .get("coin")
-            .and_then(|raw| Self::normalize_coin(raw))
-        {
-            return Some(coin);
-        }
-
-        if let Some(symbol) = intent.metadata.get("symbol") {
-            let cleaned = symbol
-                .trim()
-                .to_ascii_uppercase()
-                .replace("USDT", "")
-                .replace("USD", "");
-            if let Some(coin) = Self::normalize_coin(&cleaned) {
-                return Some(coin);
-            }
-        }
-
-        let slug = intent.market_slug.to_ascii_lowercase();
-        for (needle, coin) in [
-            ("bitcoin", "BTC"),
-            ("btc", "BTC"),
-            ("ethereum", "ETH"),
-            ("eth", "ETH"),
-            ("solana", "SOL"),
-            ("sol", "SOL"),
-            ("xrp", "XRP"),
-        ] {
-            if slug.contains(needle) {
-                return Some(coin.to_string());
-            }
-        }
-
-        None
-    }
-
-    fn parse_horizon(intent: &OrderIntent) -> Option<CryptoHorizon> {
-        if let Some(h) = intent
-            .metadata
-            .get("horizon")
-            .and_then(|raw| CryptoHorizon::from_hint(raw))
-        {
-            return Some(h);
-        }
-
-        if let Some(h) = intent
-            .metadata
-            .get("event_series_id")
-            .and_then(|raw| CryptoHorizon::from_hint(raw))
-        {
-            return Some(h);
-        }
-
-        if let Some(h) = intent
-            .metadata
-            .get("series_id")
-            .and_then(|raw| CryptoHorizon::from_hint(raw))
-        {
-            return Some(h);
-        }
-
-        CryptoHorizon::from_hint(&intent.market_slug)
-    }
-
-    fn normalize_coin(raw: &str) -> Option<String> {
-        let coin = raw.trim().to_ascii_uppercase();
-        if coin.is_empty() {
-            return None;
-        }
-        Some(match coin.as_str() {
-            "BITCOIN" | "BTC" => "BTC".to_string(),
-            "ETHEREUM" | "ETH" => "ETH".to_string(),
-            "SOLANA" | "SOL" => "SOL".to_string(),
-            "XRP" => "XRP".to_string(),
-            other => other.to_string(),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PositionExposure {
-    deployment_scope: String,
-    coin: String,
-    horizon: CryptoHorizon,
-    amount: Decimal,
-}
-
-#[derive(Debug, Default)]
-struct ExposureBook {
-    total: Decimal,
-    by_coin: HashMap<String, Decimal>,
-    by_horizon: HashMap<CryptoHorizon, Decimal>,
-    by_position: HashMap<String, PositionExposure>,
-}
-
-impl ExposureBook {
-    fn value_for_coin(&self, coin: &str) -> Decimal {
-        self.by_coin.get(coin).copied().unwrap_or(Decimal::ZERO)
-    }
-
-    fn value_for_horizon(&self, horizon: CryptoHorizon) -> Decimal {
-        self.by_horizon
-            .get(&horizon)
-            .copied()
-            .unwrap_or(Decimal::ZERO)
-    }
-
-    fn add(&mut self, dims: &CryptoIntentDimensions, amount: Decimal) {
-        if amount <= Decimal::ZERO {
-            return;
-        }
-        self.total += amount;
-        *self
-            .by_coin
-            .entry(dims.coin.clone())
-            .or_insert(Decimal::ZERO) += amount;
-        *self.by_horizon.entry(dims.horizon).or_insert(Decimal::ZERO) += amount;
-        self.by_position
-            .entry(dims.position_key.clone())
-            .and_modify(|pos| {
-                pos.amount += amount;
-                pos.deployment_scope = dims.deployment_scope.clone();
-                pos.coin = dims.coin.clone();
-                pos.horizon = dims.horizon;
-            })
-            .or_insert_with(|| PositionExposure {
-                deployment_scope: dims.deployment_scope.clone(),
-                coin: dims.coin.clone(),
-                horizon: dims.horizon,
-                amount,
-            });
-    }
-
-    fn subtract_from_position_key(&mut self, position_key: &str, amount: Decimal) -> Decimal {
-        if amount <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-
-        let mut removed = Decimal::ZERO;
-        let mut coin = None;
-        let mut horizon = None;
-        let mut delete_key = false;
-
-        if let Some(pos) = self.by_position.get_mut(position_key) {
-            removed = amount.min(pos.amount);
-            if removed > Decimal::ZERO {
-                pos.amount -= removed;
-                coin = Some(pos.coin.clone());
-                horizon = Some(pos.horizon);
-                delete_key = pos.amount <= Decimal::ZERO;
-            }
-        }
-
-        if delete_key {
-            self.by_position.remove(position_key);
-        }
-
-        if removed <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-
-        self.total = (self.total - removed).max(Decimal::ZERO);
-
-        if let Some(c) = coin {
-            if let Some(v) = self.by_coin.get_mut(&c) {
-                *v = (*v - removed).max(Decimal::ZERO);
-                if *v == Decimal::ZERO {
-                    self.by_coin.remove(&c);
-                }
-            }
-        }
-
-        if let Some(h) = horizon {
-            if let Some(v) = self.by_horizon.get_mut(&h) {
-                *v = (*v - removed).max(Decimal::ZERO);
-                if *v == Decimal::ZERO {
-                    self.by_horizon.remove(&h);
-                }
-            }
-        }
-
-        removed
-    }
-
-    fn subtract_matching_bucket(
-        &mut self,
-        deployment_scope: &str,
-        coin: &str,
-        horizon: CryptoHorizon,
-        amount: Decimal,
-    ) -> Decimal {
-        if amount <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-
-        let mut remaining = amount;
-        let keys: Vec<String> = self
-            .by_position
-            .iter()
-            .filter(|(_, p)| {
-                p.deployment_scope == deployment_scope && p.coin == coin && p.horizon == horizon
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
-
-        for key in keys {
-            if remaining <= Decimal::ZERO {
-                break;
-            }
-            let removed = self.subtract_from_position_key(&key, remaining);
-            remaining -= removed;
-        }
-
-        amount - remaining
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PendingCryptoIntent {
-    dims: CryptoIntentDimensions,
-    requested_notional: Decimal,
-}
-
-#[derive(Debug)]
-struct CryptoCapitalAllocator {
-    enabled: bool,
-    total_cap: Decimal,
-    coin_cap_pct: HashMap<String, Decimal>,
-    horizon_cap_pct: HashMap<CryptoHorizon, Decimal>,
-    open: ExposureBook,
-    pending: ExposureBook,
-    pending_by_intent: HashMap<Uuid, PendingCryptoIntent>,
-}
-
-impl CryptoCapitalAllocator {
-    fn new(config: &CoordinatorConfig) -> Self {
-        let configured_cap = config
-            .crypto_allocator_total_cap_usd
-            .or(config.risk.crypto_max_exposure)
-            .unwrap_or(config.risk.max_platform_exposure);
-        let total_cap = config
-            .risk
-            .crypto_max_exposure
-            .map(|risk_cap| configured_cap.min(risk_cap))
-            .unwrap_or(configured_cap)
-            .max(Decimal::ZERO);
-
-        let mut coin_cap_pct = HashMap::new();
-        coin_cap_pct.insert(
-            "BTC".to_string(),
-            Self::normalize_pct(config.crypto_coin_cap_btc_pct),
-        );
-        coin_cap_pct.insert(
-            "ETH".to_string(),
-            Self::normalize_pct(config.crypto_coin_cap_eth_pct),
-        );
-        coin_cap_pct.insert(
-            "SOL".to_string(),
-            Self::normalize_pct(config.crypto_coin_cap_sol_pct),
-        );
-        coin_cap_pct.insert(
-            "XRP".to_string(),
-            Self::normalize_pct(config.crypto_coin_cap_xrp_pct),
-        );
-        coin_cap_pct.insert(
-            "OTHER".to_string(),
-            Self::normalize_pct(config.crypto_coin_cap_other_pct),
-        );
-
-        let mut horizon_cap_pct = HashMap::new();
-        horizon_cap_pct.insert(
-            CryptoHorizon::M5,
-            Self::normalize_pct(config.crypto_horizon_cap_5m_pct),
-        );
-        horizon_cap_pct.insert(
-            CryptoHorizon::M15,
-            Self::normalize_pct(config.crypto_horizon_cap_15m_pct),
-        );
-        horizon_cap_pct.insert(
-            CryptoHorizon::Other,
-            Self::normalize_pct(config.crypto_horizon_cap_other_pct),
-        );
-
-        Self {
-            enabled: config.crypto_allocator_enabled,
-            total_cap,
-            coin_cap_pct,
-            horizon_cap_pct,
-            open: ExposureBook::default(),
-            pending: ExposureBook::default(),
-            pending_by_intent: HashMap::new(),
-        }
-    }
-
-    fn normalize_pct(value: Decimal) -> Decimal {
-        if value <= Decimal::ZERO {
-            Decimal::ZERO
-        } else if value >= Decimal::ONE {
-            Decimal::ONE
-        } else {
-            value
-        }
-    }
-
-    fn reset_runtime_state(&mut self) {
-        self.open = ExposureBook::default();
-        self.pending = ExposureBook::default();
-        self.pending_by_intent.clear();
-    }
-
-    fn reserve_buy(&mut self, intent: &OrderIntent) -> std::result::Result<(), String> {
-        if !self.enabled || intent.domain != Domain::Crypto || !intent.is_buy {
-            return Ok(());
-        }
-
-        if self.total_cap <= Decimal::ZERO {
-            return Err("Crypto allocator cap is 0; buy intent blocked".to_string());
-        }
-
-        let requested = intent.notional_value();
-        if requested <= Decimal::ZERO {
-            return Err("Crypto buy intent has non-positive notional".to_string());
-        }
-
-        let dims = CryptoIntentDimensions::from_intent(intent);
-
-        let projected_total = self.open.total + self.pending.total + requested;
-        if projected_total > self.total_cap {
-            return Err(format!(
-                "Crypto total cap exceeded: projected={} cap={}",
-                projected_total, self.total_cap
-            ));
-        }
-
-        let coin_cap = self.total_cap * self.coin_cap_for(&dims.coin);
-        let projected_coin = self.open.value_for_coin(&dims.coin)
-            + self.pending.value_for_coin(&dims.coin)
-            + requested;
-        if projected_coin > coin_cap {
-            return Err(format!(
-                "Crypto coin cap exceeded: coin={} projected={} cap={}",
-                dims.coin, projected_coin, coin_cap
-            ));
-        }
-
-        let horizon_cap = self.total_cap * self.horizon_cap_for(dims.horizon);
-        let projected_horizon = self.open.value_for_horizon(dims.horizon)
-            + self.pending.value_for_horizon(dims.horizon)
-            + requested;
-        if projected_horizon > horizon_cap {
-            return Err(format!(
-                "Crypto horizon cap exceeded: horizon={} projected={} cap={}",
-                dims.horizon.as_str(),
-                projected_horizon,
-                horizon_cap
-            ));
-        }
-
-        self.pending.add(&dims, requested);
-        self.pending_by_intent.insert(
-            intent.intent_id,
-            PendingCryptoIntent {
-                dims,
-                requested_notional: requested,
-            },
-        );
-
-        Ok(())
-    }
-
-    fn available_notional_for(&self, intent: &OrderIntent) -> Option<Decimal> {
-        if !self.enabled || intent.domain != Domain::Crypto || !intent.is_buy {
-            return None;
-        }
-
-        if self.total_cap <= Decimal::ZERO {
-            return Some(Decimal::ZERO);
-        }
-
-        let dims = CryptoIntentDimensions::from_intent(intent);
-        let remaining_total =
-            (self.total_cap - self.open.total - self.pending.total).max(Decimal::ZERO);
-
-        let coin_cap = self.total_cap * self.coin_cap_for(&dims.coin);
-        let projected_coin =
-            self.open.value_for_coin(&dims.coin) + self.pending.value_for_coin(&dims.coin);
-        let remaining_coin = (coin_cap - projected_coin).max(Decimal::ZERO);
-
-        let horizon_cap = self.total_cap * self.horizon_cap_for(dims.horizon);
-        let projected_horizon = self.open.value_for_horizon(dims.horizon)
-            + self.pending.value_for_horizon(dims.horizon);
-        let remaining_horizon = (horizon_cap - projected_horizon).max(Decimal::ZERO);
-
-        Some(remaining_total.min(remaining_coin).min(remaining_horizon))
-    }
-
-    fn release_buy_reservation(&mut self, intent_id: Uuid) {
-        let Some(reservation) = self.pending_by_intent.remove(&intent_id) else {
-            return;
-        };
-        self.pending.subtract_from_position_key(
-            &reservation.dims.position_key,
-            reservation.requested_notional,
-        );
-    }
-
-    fn settle_buy_execution(
-        &mut self,
-        intent: &OrderIntent,
-        filled_shares: u64,
-        fill_price: Decimal,
-    ) {
-        if !self.enabled || intent.domain != Domain::Crypto || !intent.is_buy {
-            return;
-        }
-
-        let reservation = self
-            .pending_by_intent
-            .remove(&intent.intent_id)
-            .unwrap_or_else(|| PendingCryptoIntent {
-                dims: CryptoIntentDimensions::from_intent(intent),
-                requested_notional: intent.notional_value(),
-            });
-
-        self.pending.subtract_from_position_key(
-            &reservation.dims.position_key,
-            reservation.requested_notional,
-        );
-
-        if filled_shares == 0 || fill_price <= Decimal::ZERO {
-            return;
-        }
-
-        let actual_notional = fill_price * Decimal::from(filled_shares);
-        self.open.add(&reservation.dims, actual_notional);
-    }
-
-    fn settle_sell_execution(
-        &mut self,
-        intent: &OrderIntent,
-        filled_shares: u64,
-        execution_price: Decimal,
-    ) {
-        if !self.enabled || intent.domain != Domain::Crypto || intent.is_buy || filled_shares == 0 {
-            return;
-        }
-
-        let dims = CryptoIntentDimensions::from_intent(intent);
-        let Some((reference_price, has_explicit_entry_price)) =
-            sell_release_reference_price(intent, execution_price)
-        else {
-            return;
-        };
-
-        if reference_price <= Decimal::ZERO {
-            return;
-        }
-
-        let requested_release = Decimal::from(filled_shares) * reference_price;
-        let removed_by_key = self
-            .open
-            .subtract_from_position_key(&dims.position_key, requested_release);
-        if has_explicit_entry_price && removed_by_key < requested_release {
-            let remaining = requested_release - removed_by_key;
-            self.open.subtract_matching_bucket(
-                &dims.deployment_scope,
-                &dims.coin,
-                dims.horizon,
-                remaining,
-            );
-        }
-    }
-
-    fn coin_cap_for(&self, coin: &str) -> Decimal {
-        self.coin_cap_pct
-            .get(coin)
-            .copied()
-            .or_else(|| self.coin_cap_pct.get("OTHER").copied())
-            .unwrap_or(Decimal::ZERO)
-    }
-
-    fn horizon_cap_for(&self, horizon: CryptoHorizon) -> Decimal {
-        self.horizon_cap_pct
-            .get(&horizon)
-            .copied()
-            .or_else(|| self.horizon_cap_pct.get(&CryptoHorizon::Other).copied())
-            .unwrap_or(Decimal::ZERO)
-    }
-
-    fn ledger_snapshot(&self) -> AllocatorLedgerSnapshot {
-        let open_notional_usd = self.open.total;
-        let pending_notional_usd = self.pending.total;
-        let used = open_notional_usd + pending_notional_usd;
-        let available_notional_usd = (self.total_cap - used).max(Decimal::ZERO);
-        AllocatorLedgerSnapshot {
-            domain: "crypto".to_string(),
-            enabled: self.enabled,
-            cap_notional_usd: self.total_cap,
-            open_notional_usd,
-            pending_notional_usd,
-            available_notional_usd,
-        }
-    }
-
-    fn deployment_ledger_snapshot(&self) -> Vec<DeploymentLedgerSnapshot> {
-        let mut by_deployment: HashMap<String, (Decimal, Decimal)> = HashMap::new();
-
-        for position in self.open.by_position.values() {
-            let entry = by_deployment
-                .entry(position.deployment_scope.clone())
-                .or_insert((Decimal::ZERO, Decimal::ZERO));
-            entry.0 += position.amount;
-        }
-
-        for position in self.pending.by_position.values() {
-            let entry = by_deployment
-                .entry(position.deployment_scope.clone())
-                .or_insert((Decimal::ZERO, Decimal::ZERO));
-            entry.1 += position.amount;
-        }
-
-        let mut rows = by_deployment
-            .into_iter()
-            .map(
-                |(deployment_id, (open_notional_usd, pending_notional_usd))| {
-                    DeploymentLedgerSnapshot {
-                        deployment_id,
-                        domain: "crypto".to_string(),
-                        open_notional_usd,
-                        pending_notional_usd,
-                        total_notional_usd: open_notional_usd + pending_notional_usd,
-                    }
-                },
-            )
-            .collect::<Vec<_>>();
-        rows.sort_by(|a, b| a.deployment_id.cmp(&b.deployment_id));
-        rows
-    }
-}
-
-#[derive(Debug, Clone)]
-struct MarketIntentDimensions {
-    market_key: String,
-    deployment_scope: String,
-    position_key: String,
-}
-
-impl MarketIntentDimensions {
-    fn from_intent(intent: &OrderIntent) -> Self {
-        let market_key = intent_market_identity(intent);
-        let deployment_scope = intent_deployment_scope(intent);
-        let position_key = format!(
-            "{}|{}|{}|{}",
-            deployment_scope,
-            market_key,
-            intent.token_id,
-            intent.side.as_str()
-        );
-        Self {
-            market_key,
-            deployment_scope,
-            position_key,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct MarketPositionExposure {
-    market_key: String,
-    deployment_scope: String,
-    amount: Decimal,
-}
-
-#[derive(Debug, Default)]
-struct MarketExposureBook {
-    total: Decimal,
-    by_market: HashMap<String, Decimal>,
-    by_position: HashMap<String, MarketPositionExposure>,
-}
-
-impl MarketExposureBook {
-    fn value_for_market(&self, market_key: &str) -> Decimal {
-        self.by_market
-            .get(market_key)
-            .copied()
-            .unwrap_or(Decimal::ZERO)
-    }
-
-    fn add(&mut self, dims: &MarketIntentDimensions, amount: Decimal) {
-        if amount <= Decimal::ZERO {
-            return;
-        }
-
-        self.total += amount;
-        *self
-            .by_market
-            .entry(dims.market_key.clone())
-            .or_insert(Decimal::ZERO) += amount;
-        self.by_position
-            .entry(dims.position_key.clone())
-            .and_modify(|pos| {
-                pos.amount += amount;
-                pos.market_key = dims.market_key.clone();
-                pos.deployment_scope = dims.deployment_scope.clone();
-            })
-            .or_insert_with(|| MarketPositionExposure {
-                market_key: dims.market_key.clone(),
-                deployment_scope: dims.deployment_scope.clone(),
-                amount,
-            });
-    }
-
-    fn subtract_from_position_key(&mut self, position_key: &str, amount: Decimal) -> Decimal {
-        if amount <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-
-        let mut removed = Decimal::ZERO;
-        let mut market_key = None;
-        let mut delete_key = false;
-
-        if let Some(pos) = self.by_position.get_mut(position_key) {
-            removed = amount.min(pos.amount);
-            if removed > Decimal::ZERO {
-                pos.amount -= removed;
-                market_key = Some(pos.market_key.clone());
-                delete_key = pos.amount <= Decimal::ZERO;
-            }
-        }
-
-        if delete_key {
-            self.by_position.remove(position_key);
-        }
-
-        if removed <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-
-        self.total = (self.total - removed).max(Decimal::ZERO);
-        if let Some(market) = market_key {
-            if let Some(v) = self.by_market.get_mut(&market) {
-                *v = (*v - removed).max(Decimal::ZERO);
-                if *v == Decimal::ZERO {
-                    self.by_market.remove(&market);
-                }
-            }
-        }
-
-        removed
-    }
-
-    fn subtract_matching_market(
-        &mut self,
-        deployment_scope: &str,
-        market_key: &str,
-        amount: Decimal,
-    ) -> Decimal {
-        if amount <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-
-        let mut remaining = amount;
-        let keys: Vec<String> = self
-            .by_position
-            .iter()
-            .filter(|(_, p)| p.deployment_scope == deployment_scope && p.market_key == market_key)
-            .map(|(k, _)| k.clone())
-            .collect();
-
-        for key in keys {
-            if remaining <= Decimal::ZERO {
-                break;
-            }
-            let removed = self.subtract_from_position_key(&key, remaining);
-            remaining -= removed;
-        }
-
-        amount - remaining
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PendingMarketIntent {
-    dims: MarketIntentDimensions,
-    requested_notional: Decimal,
-}
-
-#[derive(Debug)]
-struct MarketCapitalAllocator {
-    domain: Domain,
-    domain_label: &'static str,
-    enabled: bool,
-    total_cap: Decimal,
-    market_cap_pct: Decimal,
-    auto_split_by_active_markets: bool,
-    open: MarketExposureBook,
-    pending: MarketExposureBook,
-    pending_by_intent: HashMap<Uuid, PendingMarketIntent>,
-}
-
-impl MarketCapitalAllocator {
-    fn for_sports(config: &CoordinatorConfig) -> Self {
-        Self::new_for_domain(config, Domain::Sports)
-    }
-
-    fn for_politics(config: &CoordinatorConfig) -> Self {
-        Self::new_for_domain(config, Domain::Politics)
-    }
-
-    fn for_economics(config: &CoordinatorConfig) -> Self {
-        Self::new_for_domain(config, Domain::Economics)
-    }
-
-    fn new_for_domain(config: &CoordinatorConfig, domain: Domain) -> Self {
-        let (
-            domain_label,
-            enabled,
-            configured_cap,
-            risk_cap,
-            market_cap_pct,
-            auto_split_by_active_markets,
-        ) = match domain {
-            Domain::Sports => (
-                "sports",
-                config.sports_allocator_enabled,
-                config.sports_allocator_total_cap_usd,
-                config.risk.sports_max_exposure,
-                config.sports_market_cap_pct,
-                config.sports_auto_split_by_active_markets,
-            ),
-            Domain::Politics => (
-                "politics",
-                config.politics_allocator_enabled,
-                config.politics_allocator_total_cap_usd,
-                config.risk.politics_max_exposure,
-                config.politics_market_cap_pct,
-                config.politics_auto_split_by_active_markets,
-            ),
-            Domain::Economics => (
-                "economics",
-                config.economics_allocator_enabled,
-                config.economics_allocator_total_cap_usd,
-                config.risk.economics_max_exposure,
-                config.economics_market_cap_pct,
-                config.economics_auto_split_by_active_markets,
-            ),
-            Domain::Crypto | Domain::Custom(_) => {
-                panic!("market allocator does not support domain {:?}", domain)
-            }
-        };
-
-        let configured_cap = configured_cap
-            .or(risk_cap)
-            .unwrap_or(config.risk.max_platform_exposure);
-        let total_cap = risk_cap
-            .map(|cap| configured_cap.min(cap))
-            .unwrap_or(configured_cap)
-            .max(Decimal::ZERO);
-
-        Self {
-            domain,
-            domain_label,
-            enabled,
-            total_cap,
-            market_cap_pct: Self::normalize_pct(market_cap_pct),
-            auto_split_by_active_markets,
-            open: MarketExposureBook::default(),
-            pending: MarketExposureBook::default(),
-            pending_by_intent: HashMap::new(),
-        }
-    }
-
-    fn normalize_pct(value: Decimal) -> Decimal {
-        if value <= Decimal::ZERO {
-            Decimal::ZERO
-        } else if value >= Decimal::ONE {
-            Decimal::ONE
-        } else {
-            value
-        }
-    }
-
-    fn reset_runtime_state(&mut self) {
-        self.open = MarketExposureBook::default();
-        self.pending = MarketExposureBook::default();
-        self.pending_by_intent.clear();
-    }
-
-    fn reserve_buy(&mut self, intent: &OrderIntent) -> std::result::Result<(), String> {
-        if !self.enabled || intent.domain != self.domain || !intent.is_buy {
-            return Ok(());
-        }
-
-        if self.total_cap <= Decimal::ZERO {
-            return Err(format!(
-                "{} allocator cap is 0; buy intent blocked",
-                self.domain_label
-            ));
-        }
-
-        let requested = intent.notional_value();
-        if requested <= Decimal::ZERO {
-            return Err(format!(
-                "{} buy intent has non-positive notional",
-                self.domain_label
-            ));
-        }
-
-        let dims = MarketIntentDimensions::from_intent(intent);
-
-        let projected_total = self.open.total + self.pending.total + requested;
-        if projected_total > self.total_cap {
-            return Err(format!(
-                "{} total cap exceeded: projected={} cap={}",
-                self.domain_label, projected_total, self.total_cap
-            ));
-        }
-
-        let market_cap = self.market_cap_for(&dims.market_key);
-        let projected_market = self.open.value_for_market(&dims.market_key)
-            + self.pending.value_for_market(&dims.market_key)
-            + requested;
-        if projected_market > market_cap {
-            return Err(format!(
-                "{} market cap exceeded: market={} projected={} cap={}",
-                self.domain_label, dims.market_key, projected_market, market_cap
-            ));
-        }
-
-        self.pending.add(&dims, requested);
-        self.pending_by_intent.insert(
-            intent.intent_id,
-            PendingMarketIntent {
-                dims,
-                requested_notional: requested,
-            },
-        );
-
-        Ok(())
-    }
-
-    fn release_buy_reservation(&mut self, intent_id: Uuid) {
-        let Some(reservation) = self.pending_by_intent.remove(&intent_id) else {
-            return;
-        };
-        self.pending.subtract_from_position_key(
-            &reservation.dims.position_key,
-            reservation.requested_notional,
-        );
-    }
-
-    fn settle_buy_execution(
-        &mut self,
-        intent: &OrderIntent,
-        filled_shares: u64,
-        fill_price: Decimal,
-    ) {
-        if !self.enabled || intent.domain != self.domain || !intent.is_buy {
-            return;
-        }
-
-        let reservation = self
-            .pending_by_intent
-            .remove(&intent.intent_id)
-            .unwrap_or_else(|| PendingMarketIntent {
-                dims: MarketIntentDimensions::from_intent(intent),
-                requested_notional: intent.notional_value(),
-            });
-
-        self.pending.subtract_from_position_key(
-            &reservation.dims.position_key,
-            reservation.requested_notional,
-        );
-
-        if filled_shares == 0 || fill_price <= Decimal::ZERO {
-            return;
-        }
-
-        let actual_notional = fill_price * Decimal::from(filled_shares);
-        self.open.add(&reservation.dims, actual_notional);
-    }
-
-    fn settle_sell_execution(
-        &mut self,
-        intent: &OrderIntent,
-        filled_shares: u64,
-        execution_price: Decimal,
-    ) {
-        if !self.enabled || intent.domain != self.domain || intent.is_buy || filled_shares == 0 {
-            return;
-        }
-
-        let dims = MarketIntentDimensions::from_intent(intent);
-        let Some((reference_price, has_explicit_entry_price)) =
-            sell_release_reference_price(intent, execution_price)
-        else {
-            return;
-        };
-
-        if reference_price <= Decimal::ZERO {
-            return;
-        }
-
-        let requested_release = Decimal::from(filled_shares) * reference_price;
-        let removed_by_key = self
-            .open
-            .subtract_from_position_key(&dims.position_key, requested_release);
-        if has_explicit_entry_price && removed_by_key < requested_release {
-            let remaining = requested_release - removed_by_key;
-            self.open
-                .subtract_matching_market(&dims.deployment_scope, &dims.market_key, remaining);
-        }
-    }
-
-    fn market_cap_for(&self, market_key: &str) -> Decimal {
-        let fixed_cap = self.total_cap * self.market_cap_pct;
-        if !self.auto_split_by_active_markets {
-            return fixed_cap;
-        }
-
-        let mut active_markets: HashSet<String> = self
-            .open
-            .by_market
-            .iter()
-            .filter(|(_, v)| **v > Decimal::ZERO)
-            .map(|(k, _)| k.clone())
-            .collect();
-
-        for (k, v) in &self.pending.by_market {
-            if *v > Decimal::ZERO {
-                active_markets.insert(k.clone());
-            }
-        }
-
-        if !market_key.is_empty() {
-            active_markets.insert(market_key.to_string());
-        }
-
-        let market_count = active_markets.len().max(1) as u64;
-        let dynamic_cap = self.total_cap / Decimal::from(market_count);
-        dynamic_cap.min(fixed_cap)
-    }
-    fn ledger_snapshot(&self) -> AllocatorLedgerSnapshot {
-        let open_notional_usd = self.open.total;
-        let pending_notional_usd = self.pending.total;
-        let used = open_notional_usd + pending_notional_usd;
-        let available_notional_usd = (self.total_cap - used).max(Decimal::ZERO);
-        AllocatorLedgerSnapshot {
-            domain: self.domain_label.to_string(),
-            enabled: self.enabled,
-            cap_notional_usd: self.total_cap,
-            open_notional_usd,
-            pending_notional_usd,
-            available_notional_usd,
-        }
-    }
-
-    fn deployment_ledger_snapshot(&self) -> Vec<DeploymentLedgerSnapshot> {
-        let mut by_deployment: HashMap<String, (Decimal, Decimal)> = HashMap::new();
-
-        for position in self.open.by_position.values() {
-            let entry = by_deployment
-                .entry(position.deployment_scope.clone())
-                .or_insert((Decimal::ZERO, Decimal::ZERO));
-            entry.0 += position.amount;
-        }
-
-        for position in self.pending.by_position.values() {
-            let entry = by_deployment
-                .entry(position.deployment_scope.clone())
-                .or_insert((Decimal::ZERO, Decimal::ZERO));
-            entry.1 += position.amount;
-        }
-
-        let mut rows = by_deployment
-            .into_iter()
-            .map(
-                |(deployment_id, (open_notional_usd, pending_notional_usd))| {
-                    DeploymentLedgerSnapshot {
-                        deployment_id,
-                        domain: self.domain_label.to_string(),
-                        open_notional_usd,
-                        pending_notional_usd,
-                        total_notional_usd: open_notional_usd + pending_notional_usd,
-                    }
-                },
-            )
-            .collect::<Vec<_>>();
-        rows.sort_by(|a, b| a.deployment_id.cmp(&b.deployment_id));
-        rows
-    }
-
-    fn available_notional_for(&self, intent: &OrderIntent) -> Option<Decimal> {
-        if !self.enabled || intent.domain != Domain::Sports || !intent.is_buy {
-            return None;
-        }
-
-        if self.total_cap <= Decimal::ZERO {
-            return Some(Decimal::ZERO);
-        }
-
-        let dims = MarketIntentDimensions::from_intent(intent);
-        let remaining_total =
-            (self.total_cap - self.open.total - self.pending.total).max(Decimal::ZERO);
-
-        let market_cap = self.market_cap_for(&dims.market_key);
-        let projected_market = self.open.value_for_market(&dims.market_key)
-            + self.pending.value_for_market(&dims.market_key);
-        let remaining_market = (market_cap - projected_market).max(Decimal::ZERO);
-
-        Some(remaining_total.min(remaining_market))
-    }
+/// Extracted context for the intent-processing worker task.
+///
+/// Contains only the Arc-wrapped fields that `handle_order_intent` needs,
+/// allowing it to run in a dedicated tokio task without blocking the
+/// coordinator's main `select!` loop.
+pub(super) struct IntentWorkerCtx {
+    pub(super) account_id: String,
+    pub(super) allowed_domains: Arc<HashSet<Domain>>,
+    pub(super) admission: Arc<AdmissionController>,
+    pub(super) risk_gate: Arc<RiskGate>,
+    pub(super) order_queue: Arc<RwLock<OrderQueue>>,
+    pub(super) capital_policy: Arc<CapitalPolicy>,
+    pub(super) positions: Arc<PositionAggregator>,
+    pub(super) executor: Arc<OrderExecutor>,
+    pub(super) journal: ExecutionJournal,
+    pub(super) governance: Arc<GovernanceController>,
+    pub(super) order_update_sinks:
+        Arc<RwLock<HashMap<String, mpsc::Sender<crate::strategy::OrderUpdate>>>>,
 }
 
 impl Coordinator {
@@ -2544,56 +1375,40 @@ impl Coordinator {
         let (control_tx, control_rx) = mpsc::channel(32);
 
         let allowed_domains = Arc::new(allowed_domains);
-        let authorized_agents = Arc::new(std::sync::RwLock::new(HashSet::new()));
+        let authorized_agents = Arc::new(RwLock::new(HashSet::new()));
         let risk_gate = Arc::new(RiskGate::new(config.risk.clone()));
         let order_queue = Arc::new(RwLock::new(OrderQueue::new(1024)));
-        let duplicate_guard = Arc::new(RwLock::new(IntentDuplicateGuard::new(
-            config.duplicate_guard_window_ms,
-            config.duplicate_guard_enabled,
-            config.duplicate_guard_scope,
-        )));
-        let deployments = Arc::new(RwLock::new(Self::load_strategy_deployments()));
-        let crypto_allocator = Arc::new(RwLock::new(CryptoCapitalAllocator::new(&config)));
-        let sports_allocator = Arc::new(RwLock::new(MarketCapitalAllocator::for_sports(&config)));
-        let politics_allocator =
-            Arc::new(RwLock::new(MarketCapitalAllocator::for_politics(&config)));
-        let economics_allocator =
-            Arc::new(RwLock::new(MarketCapitalAllocator::for_economics(&config)));
+        let admission = Arc::new(AdmissionController::new(&config));
+        let capital_policy = Arc::new(CapitalPolicy::new(&config));
         let positions = Arc::new(PositionAggregator::new());
         let global_state = Arc::new(RwLock::new(GlobalState::new()));
-        let ingress_mode = Arc::new(RwLock::new(IngressMode::Running));
-        let governance_policy = Arc::new(RwLock::new(GovernancePolicy::from_config(&config)));
-        let domain_ingress_mode = Arc::new(RwLock::new(HashMap::new()));
+        let governance = Arc::new(GovernanceController::new(&config));
         let stale_heartbeat_warn_at = Arc::new(RwLock::new(HashMap::new()));
+        let order_update_sinks = Arc::new(RwLock::new(HashMap::new()));
         let account_id = if account_id.trim().is_empty() {
             "default".to_string()
         } else {
             account_id
         };
+        let journal = ExecutionJournal::new(account_id.clone());
 
         Self {
             config,
             account_id,
             allowed_domains,
             authorized_agents,
-            deployments,
+            admission,
             risk_gate,
             order_queue,
-            duplicate_guard,
-            crypto_allocator,
-            sports_allocator,
-            politics_allocator,
-            economics_allocator,
+            capital_policy,
             positions,
             executor,
             global_state,
-            execution_log_pool: None,
+            journal,
             governance_store_pool: None,
-            ingress_mode,
-            domain_ingress_mode,
-            governance_policy,
+            governance,
             stale_heartbeat_warn_at,
-            paused_agent_ids: Arc::new(RwLock::new(HashSet::new())),
+            order_update_sinks,
             order_tx,
             order_rx,
             state_tx,
@@ -2602,252 +1417,6 @@ impl Coordinator {
             control_rx,
             agent_commands: HashMap::new(),
         }
-    }
-
-    /// Enable DB logging for order execution outcomes (including dry-run).
-    pub fn set_execution_log_pool(&mut self, pool: PgPool) {
-        self.execution_log_pool = Some(pool);
-    }
-
-    /// Restore persisted risk runtime state (drawdown + daily pnl continuity).
-    pub async fn restore_risk_runtime_state(&self) -> Result<()> {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
-            return Ok(());
-        };
-
-        let row = sqlx::query(
-            r#"
-            SELECT
-                current_equity,
-                equity_peak,
-                current_drawdown,
-                max_drawdown_observed,
-                daily_pnl,
-                daily_date,
-                risk_state
-            FROM risk_runtime_state
-            WHERE account_id = $1
-            "#,
-        )
-        .bind(&self.account_id)
-        .fetch_optional(pool)
-        .await?;
-
-        let Some(row) = row else {
-            return Ok(());
-        };
-
-        let snapshot = crate::platform::DrawdownSnapshot {
-            current_equity: row.try_get("current_equity").unwrap_or(Decimal::ZERO),
-            equity_peak: row.try_get("equity_peak").unwrap_or(Decimal::ZERO),
-            current_drawdown: row.try_get("current_drawdown").unwrap_or(Decimal::ZERO),
-            max_drawdown_observed: row
-                .try_get("max_drawdown_observed")
-                .unwrap_or(Decimal::ZERO),
-        };
-        self.risk_gate.restore_drawdown_snapshot(snapshot).await;
-
-        let daily_date: Option<chrono::NaiveDate> = row.try_get("daily_date").ok();
-        let daily_pnl: Decimal = row.try_get("daily_pnl").unwrap_or(Decimal::ZERO);
-        if daily_date == Some(Utc::now().date_naive()) {
-            self.risk_gate.restore_daily_pnl_for_today(daily_pnl).await;
-        }
-
-        let risk_state_raw: String = row.try_get("risk_state").unwrap_or_default();
-        if risk_state_raw.eq_ignore_ascii_case("halted") {
-            self.risk_gate
-                .trigger_circuit_breaker("restored persisted halted risk state")
-                .await;
-        }
-
-        info!(
-            account_id = %self.account_id,
-            daily_pnl = %daily_pnl,
-            risk_state = %risk_state_raw,
-            "restored persisted risk runtime state"
-        );
-        Ok(())
-    }
-
-    /// Enable DB persistence for coordinator governance policy.
-    pub fn set_governance_store_pool(&mut self, pool: PgPool) {
-        self.governance_store_pool = Some(pool);
-    }
-
-    /// Restore runtime governance policy from DB (if a persisted row exists).
-    pub async fn load_persisted_governance_policy(&self) -> Result<()> {
-        let Some(pool) = self.governance_store_pool.as_ref() else {
-            return Ok(());
-        };
-
-        let Some(policy) = load_governance_policy(pool, &self.account_id).await? else {
-            return Ok(());
-        };
-
-        let snapshot = policy.to_snapshot();
-        let mut state = self.governance_policy.write().await;
-        *state = policy;
-        info!(
-            account_id = %self.account_id,
-            updated_by = %snapshot.updated_by,
-            updated_at = %snapshot.updated_at,
-            "restored governance policy from DB"
-        );
-        Ok(())
-    }
-
-    /// Rebuild runtime position/allocator state from persisted execution fills.
-    ///
-    /// This prevents cold-start underestimation of account exposure when a process restarts.
-    pub async fn restore_runtime_state_from_execution_log(&self) -> Result<()> {
-        let Some(pool) = self.execution_log_pool.as_ref() else {
-            return Ok(());
-        };
-
-        let today = Utc::now().date_naive();
-        let window_start = DateTime::<Utc>::from_naive_utc_and_offset(
-            today
-                .and_hms_opt(0, 0, 0)
-                .expect("00:00:00 is always a valid UTC time"),
-            Utc,
-        );
-        let window_end = window_start + ChronoDuration::days(1);
-        let dry_run = self.executor.is_dry_run();
-
-        let fills = load_execution_log_fills(pool, &self.account_id, dry_run).await?;
-        let outcomes_today =
-            load_execution_log_outcomes(pool, &self.account_id, dry_run, window_start, window_end)
-                .await?;
-
-        if fills.is_empty() && outcomes_today.is_empty() {
-            return Ok(());
-        }
-
-        self.positions.clear().await;
-        {
-            let mut allocator = self.crypto_allocator.write().await;
-            allocator.reset_runtime_state();
-        }
-        {
-            let mut allocator = self.sports_allocator.write().await;
-            allocator.reset_runtime_state();
-        }
-        {
-            let mut allocator = self.politics_allocator.write().await;
-            allocator.reset_runtime_state();
-        }
-        {
-            let mut allocator = self.economics_allocator.write().await;
-            allocator.reset_runtime_state();
-        }
-
-        let restored_fill_count = fills.len();
-        let mut restored_agents = HashSet::new();
-        let mut daily_total_pnl = Decimal::ZERO;
-        let mut daily_domain_pnl: HashMap<Domain, Decimal> = HashMap::new();
-        let mut daily_agent_pnl: HashMap<String, Decimal> = HashMap::new();
-
-        for fill in fills {
-            let mut intent = OrderIntent::new(
-                fill.agent_id.clone(),
-                fill.domain,
-                fill.market_slug.clone(),
-                fill.token_id.clone(),
-                fill.side,
-                fill.is_buy,
-                fill.filled_shares,
-                fill.fill_price,
-            );
-            intent.intent_id = fill.intent_id;
-            intent.created_at = fill.executed_at;
-            intent.metadata = fill.metadata;
-
-            self.settle_domain_success(&intent, fill.filled_shares, fill.fill_price)
-                .await;
-
-            if fill.is_buy {
-                let _ = self
-                    .positions
-                    .open_position(
-                        &fill.agent_id,
-                        fill.domain,
-                        &fill.market_slug,
-                        &fill.token_id,
-                        fill.side,
-                        fill.filled_shares,
-                        fill.fill_price,
-                    )
-                    .await;
-            } else {
-                let realized_pnl = self
-                    .apply_sell_fill_to_positions(&intent, fill.filled_shares, fill.fill_price)
-                    .await;
-                if fill.executed_at >= window_start && fill.executed_at < window_end {
-                    daily_total_pnl += realized_pnl;
-                    *daily_domain_pnl.entry(fill.domain).or_insert(Decimal::ZERO) += realized_pnl;
-                    *daily_agent_pnl
-                        .entry(fill.agent_id.clone())
-                        .or_insert(Decimal::ZERO) += realized_pnl;
-                }
-            }
-            restored_agents.insert(fill.agent_id);
-        }
-
-        let mut daily_order_count: u32 = 0;
-        let mut daily_success_count: u32 = 0;
-        let mut daily_failure_count: u32 = 0;
-        let mut global_consecutive_failures: u32 = 0;
-        let mut per_agent_consecutive_failures: HashMap<String, u32> = HashMap::new();
-        let mut last_risk_event_at: Option<DateTime<Utc>> = None;
-
-        for outcome in outcomes_today {
-            daily_order_count = daily_order_count.saturating_add(1);
-            last_risk_event_at = Some(outcome.executed_at);
-            if outcome.is_failure {
-                daily_failure_count = daily_failure_count.saturating_add(1);
-                global_consecutive_failures = global_consecutive_failures.saturating_add(1);
-                let entry = per_agent_consecutive_failures
-                    .entry(outcome.agent_id)
-                    .or_insert(0);
-                *entry = entry.saturating_add(1);
-            } else {
-                daily_success_count = daily_success_count.saturating_add(1);
-                global_consecutive_failures = 0;
-                per_agent_consecutive_failures.insert(outcome.agent_id, 0);
-            }
-        }
-
-        self.risk_gate
-            .restore_runtime_counters(
-                today,
-                daily_total_pnl,
-                daily_domain_pnl,
-                daily_order_count,
-                daily_success_count,
-                daily_failure_count,
-                global_consecutive_failures,
-                daily_agent_pnl,
-                per_agent_consecutive_failures,
-                last_risk_event_at,
-            )
-            .await;
-
-        for agent_id in &restored_agents {
-            self.refresh_risk_exposure_for_agent(agent_id).await;
-        }
-        self.refresh_global_state().await;
-
-        info!(
-            account_id = %self.account_id,
-            fill_count = restored_fill_count,
-            restored_agents = restored_agents.len(),
-            daily_order_count,
-            daily_success_count,
-            daily_failure_count,
-            global_consecutive_failures,
-            "restored coordinator runtime state from execution log"
-        );
-        Ok(())
     }
 
     /// Create a clonable handle for agents
@@ -2860,17 +1429,12 @@ impl Coordinator {
             global_state: self.global_state.clone(),
             risk_gate: self.risk_gate.clone(),
             order_queue: self.order_queue.clone(),
-            crypto_allocator: self.crypto_allocator.clone(),
-            sports_allocator: self.sports_allocator.clone(),
-            politics_allocator: self.politics_allocator.clone(),
-            economics_allocator: self.economics_allocator.clone(),
+            capital_policy: self.capital_policy.clone(),
             positions: self.positions.clone(),
-            ingress_mode: self.ingress_mode.clone(),
-            domain_ingress_mode: self.domain_ingress_mode.clone(),
-            deployments: self.deployments.clone(),
+            governance: self.governance.clone(),
+            admission: self.admission.clone(),
             allowed_domains: self.allowed_domains.clone(),
             authorized_agents: self.authorized_agents.clone(),
-            governance_policy: self.governance_policy.clone(),
             governance_store_pool: self.governance_store_pool.clone(),
         }
     }
@@ -2885,8 +1449,30 @@ impl Coordinator {
         self.positions.clone()
     }
 
+    /// Build an `IntentWorkerCtx` from the coordinator's shared fields.
+    fn intent_worker_ctx(&self) -> IntentWorkerCtx {
+        IntentWorkerCtx {
+            account_id: self.account_id.clone(),
+            allowed_domains: self.allowed_domains.clone(),
+            admission: self.admission.clone(),
+            risk_gate: self.risk_gate.clone(),
+            order_queue: self.order_queue.clone(),
+            capital_policy: self.capital_policy.clone(),
+            positions: self.positions.clone(),
+            executor: self.executor.clone(),
+            journal: self.journal.clone(),
+            governance: self.governance.clone(),
+            order_update_sinks: self.order_update_sinks.clone(),
+        }
+    }
+
+    /// Convenience delegation for tests and direct callers.
+    pub(super) async fn handle_order_intent(&self, intent: OrderIntent) {
+        self.intent_worker_ctx().handle_order_intent(intent).await;
+    }
+
     /// Register an agent and return its command receiver
-    pub fn register_agent(
+    pub async fn register_agent(
         &mut self,
         agent_id: String,
         domain: Domain,
@@ -2895,201 +1481,15 @@ impl Coordinator {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         self.agent_commands
             .insert(agent_id.clone(), AgentCommandChannel { domain, tx: cmd_tx });
-        if let Ok(mut authorized) = self.authorized_agents.write() {
-            authorized.insert(agent_id.clone());
-        }
+        self.authorized_agents.write().await.insert(agent_id.clone());
 
-        // Register with risk gate (fire-and-forget via spawn since we're not async here)
-        let risk_gate = self.risk_gate.clone();
-        let id = agent_id.clone();
-        tokio::spawn(async move {
-            risk_gate
-                .register_agent_with_domain(&id, domain, risk_params)
-                .await;
-        });
+        // Register with risk gate (now safe since register_agent is async)
+        self.risk_gate
+            .register_agent_with_domain(&agent_id, domain, risk_params)
+            .await;
 
         info!(agent_id, "agent registered with coordinator");
         cmd_rx
-    }
-
-    pub async fn authorize_external_agent(&self, agent_id: &str, params: AgentRiskParams) {
-        let id = agent_id.trim();
-        if id.is_empty() {
-            return;
-        }
-        if let Ok(mut authorized) = self.authorized_agents.write() {
-            authorized.insert(id.to_string());
-        }
-        self.risk_gate.register_agent(id, params).await;
-        info!(agent_id = %id, "external ingress agent authorized");
-    }
-
-    /// Send a command to a specific agent
-    pub async fn send_command(&self, agent_id: &str, cmd: CoordinatorCommand) -> Result<()> {
-        if let Some(tx) = self.agent_commands.get(agent_id) {
-            tx.tx.send(cmd).await.map_err(|_| {
-                crate::error::PloyError::Internal(format!(
-                    "agent {} command channel closed",
-                    agent_id
-                ))
-            })
-        } else {
-            Err(crate::error::PloyError::Internal(format!(
-                "agent {} not registered",
-                agent_id
-            )))
-        }
-    }
-
-    fn should_apply_domain_cmd(&self, entry: &AgentCommandChannel, target: Domain) -> bool {
-        entry.domain == target
-    }
-
-    fn is_domain_allowed(&self, domain: Domain) -> bool {
-        self.allowed_domains.contains(&domain)
-    }
-
-    async fn set_domain_mode(&self, domain: Domain, mode: IngressMode) {
-        let mut domain_modes = self.domain_ingress_mode.write().await;
-        match mode {
-            IngressMode::Running => {
-                domain_modes.remove(&domain);
-            }
-            _ => {
-                domain_modes.insert(domain, mode);
-            }
-        }
-    }
-
-    async fn cancel_queued_buy_intents(&self, domain: Option<Domain>, reason: &str) {
-        let dropped = {
-            let mut queue = self.order_queue.write().await;
-            queue.remove_buy_orders(domain)
-        };
-
-        if dropped.is_empty() {
-            return;
-        }
-
-        for intent in dropped {
-            self.persist_risk_decision(&intent, "BLOCKED", Some(reason.to_string()), None)
-                .await;
-            self.settle_domain_failure(&intent).await;
-        }
-    }
-
-    /// Pause all agents
-    pub async fn pause_all(&self) {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Paused;
-        }
-        self.domain_ingress_mode.write().await.clear();
-        for (id, entry) in &self.agent_commands {
-            if let Err(e) = entry.tx.send(CoordinatorCommand::Pause).await {
-                warn!(agent_id = %id, error = %e, "failed to send pause");
-            }
-        }
-    }
-
-    /// Resume all agents
-    pub async fn resume_all(&self) {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Running;
-        }
-        self.domain_ingress_mode.write().await.clear();
-        for (id, entry) in &self.agent_commands {
-            if let Err(e) = entry.tx.send(CoordinatorCommand::Resume).await {
-                warn!(agent_id = %id, error = %e, "failed to send resume");
-            }
-        }
-    }
-
-    /// Force-close all agents (best-effort)
-    pub async fn force_close_all(&self) {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Halted;
-        }
-        self.domain_ingress_mode.write().await.clear();
-        self.cancel_queued_buy_intents(None, "dropped by coordinator global halt")
-            .await;
-        info!("coordinator: sending force-close to all agents");
-        for (id, entry) in &self.agent_commands {
-            if let Err(e) = entry.tx.send(CoordinatorCommand::ForceClose).await {
-                warn!(agent_id = %id, error = %e, "failed to send force-close");
-            }
-        }
-    }
-
-    /// Shutdown all agents gracefully
-    pub async fn shutdown(&self) {
-        {
-            let mut mode = self.ingress_mode.write().await;
-            *mode = IngressMode::Halted;
-        }
-        self.domain_ingress_mode.write().await.clear();
-        self.cancel_queued_buy_intents(None, "dropped by coordinator shutdown")
-            .await;
-        info!("coordinator: sending shutdown to all agents");
-        for (id, entry) in &self.agent_commands {
-            if let Err(e) = entry.tx.send(CoordinatorCommand::Shutdown).await {
-                warn!(agent_id = %id, error = %e, "failed to send shutdown");
-            }
-        }
-    }
-
-    /// Pause one domain
-    pub async fn pause_domain(&self, domain: Domain) {
-        self.set_domain_mode(domain, IngressMode::Paused).await;
-        for (id, entry) in &self.agent_commands {
-            if self.should_apply_domain_cmd(entry, domain) {
-                if let Err(e) = entry.tx.send(CoordinatorCommand::Pause).await {
-                    warn!(agent_id = %id, error = %e, "failed to send domain pause");
-                }
-            }
-        }
-    }
-
-    /// Resume one domain
-    pub async fn resume_domain(&self, domain: Domain) {
-        self.set_domain_mode(domain, IngressMode::Running).await;
-        for (id, entry) in &self.agent_commands {
-            if self.should_apply_domain_cmd(entry, domain) {
-                if let Err(e) = entry.tx.send(CoordinatorCommand::Resume).await {
-                    warn!(agent_id = %id, error = %e, "failed to send domain resume");
-                }
-            }
-        }
-    }
-
-    /// Force-close all agents in one domain
-    pub async fn force_close_domain(&self, domain: Domain) {
-        self.set_domain_mode(domain, IngressMode::Halted).await;
-        self.cancel_queued_buy_intents(Some(domain), "dropped by coordinator domain halt")
-            .await;
-        for (id, entry) in &self.agent_commands {
-            if self.should_apply_domain_cmd(entry, domain) {
-                if let Err(e) = entry.tx.send(CoordinatorCommand::ForceClose).await {
-                    warn!(agent_id = %id, error = %e, "failed to send domain force-close");
-                }
-            }
-        }
-    }
-
-    /// Shutdown all agents in one domain
-    pub async fn shutdown_domain(&self, domain: Domain) {
-        self.set_domain_mode(domain, IngressMode::Halted).await;
-        self.cancel_queued_buy_intents(Some(domain), "dropped by coordinator domain shutdown")
-            .await;
-        for (id, entry) in &self.agent_commands {
-            if self.should_apply_domain_cmd(entry, domain) {
-                if let Err(e) = entry.tx.send(CoordinatorCommand::Shutdown).await {
-                    warn!(agent_id = %id, error = %e, "failed to send domain shutdown");
-                }
-            }
-        }
     }
 
     /// Main coordinator loop — blocks until shutdown
@@ -3109,40 +1509,50 @@ impl Coordinator {
         drain_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        // Spawn a dedicated worker for order intent processing so that
+        // handle_order_intent (which does risk checks, capital reservation,
+        // and queue enqueue) does not block the select! loop.  A bounded
+        // channel preserves sequential intent ordering — important for
+        // consistent capital reservation and duplicate-intent detection.
+        let (intent_worker_tx, mut intent_worker_rx) =
+            mpsc::channel::<OrderIntent>(64);
+
+        // Move the fields the worker needs into an Arc-friendly bundle.
+        // All accessed fields are already Arc-wrapped or Clone, so we
+        // just clone the references the worker will use.
+        let worker_self = IntentWorkerCtx {
+            account_id: self.account_id.clone(),
+            allowed_domains: self.allowed_domains.clone(),
+            admission: self.admission.clone(),
+            risk_gate: self.risk_gate.clone(),
+            order_queue: self.order_queue.clone(),
+            capital_policy: self.capital_policy.clone(),
+            positions: self.positions.clone(),
+            executor: self.executor.clone(),
+            journal: self.journal.clone(),
+            governance: self.governance.clone(),
+            order_update_sinks: self.order_update_sinks.clone(),
+        };
+
+        let intent_worker = tokio::spawn(async move {
+            while let Some(intent) = intent_worker_rx.recv().await {
+                worker_self.handle_order_intent(intent).await;
+            }
+            debug!("intent worker: channel closed, exiting");
+        });
+
         loop {
             tokio::select! {
                 // --- Control commands (pause/resume/force-close) ---
                 Some(cmd) = self.control_rx.recv() => {
-                    match cmd {
-                        CoordinatorControlCommand::PauseAll => self.pause_all().await,
-                        CoordinatorControlCommand::ResumeAll => self.resume_all().await,
-                        CoordinatorControlCommand::ForceCloseAll => self.force_close_all().await,
-                        CoordinatorControlCommand::ShutdownAll => self.shutdown().await,
-                        CoordinatorControlCommand::PauseDomain(domain) => self.pause_domain(domain).await,
-                        CoordinatorControlCommand::ResumeDomain(domain) => {
-                            self.resume_domain(domain).await
-                        }
-                        CoordinatorControlCommand::ForceCloseDomain(domain) => {
-                            self.force_close_domain(domain).await
-                        }
-                        CoordinatorControlCommand::ShutdownDomain(domain) => {
-                            self.shutdown_domain(domain).await
-                        }
-                        CoordinatorControlCommand::PauseAgent(id) => {
-                            // Track per-agent pause so handle_order_intent blocks BUY intents
-                            self.paused_agent_ids.write().await.insert(id.clone());
-                            self.send_command(&id, CoordinatorCommand::Pause).await.ok();
-                        }
-                        CoordinatorControlCommand::ResumeAgent(id) => {
-                            self.paused_agent_ids.write().await.remove(&id);
-                            self.send_command(&id, CoordinatorCommand::Resume).await.ok();
-                        }
-                    }
+                    self.handle_control_command(cmd).await;
                 }
 
                 // --- Incoming order intents ---
                 Some(intent) = self.order_rx.recv() => {
-                    self.handle_order_intent(intent).await;
+                    if let Err(e) = intent_worker_tx.send(intent).await {
+                        warn!("intent worker channel closed, dropping intent: {}", e);
+                    }
                 }
 
                 // --- Agent state updates (heartbeats) ---
@@ -3163,6 +1573,10 @@ impl Coordinator {
                 // --- Shutdown signal ---
                 _ = shutdown_rx.recv() => {
                     info!("coordinator: shutdown signal received");
+                    // Drop the sender so the intent worker drains remaining
+                    // intents and exits cleanly.
+                    drop(intent_worker_tx);
+                    let _ = intent_worker.await;
                     self.shutdown().await;
                     break;
                 }

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::api::{auth::ensure_admin_authorized, state::AppState};
-use crate::platform::{
+use crate::control_plane::{
     StrategyEvaluationEvidence, StrategyEvaluationMetrics, StrategyEvaluationStage,
     StrategyLifecycleStage, StrategyProductType,
 };

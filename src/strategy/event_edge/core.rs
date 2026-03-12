@@ -80,20 +80,32 @@ impl EventEdgeCore {
     // ── Guards ───────────────────────────────────────────────────────
 
     pub fn reset_daily_if_needed(&mut self) {
-        let today = Utc::now().date_naive();
+        self.reset_daily_if_needed_at(Utc::now());
+    }
+
+    pub fn reset_daily_if_needed_at(&mut self, now: DateTime<Utc>) {
+        let today = now.date_naive();
         if today != self.state.daily_spend_day {
             self.state.daily_spend_day = today;
             self.state.daily_spend_usd = Decimal::ZERO;
         }
     }
 
-    pub fn is_on_cooldown(&self, token_id: &str) -> bool {
-        let now = Utc::now();
+    pub fn is_on_cooldown_at(&self, token_id: &str, now: DateTime<Utc>) -> bool {
         if let Some(last) = self.state.last_trade_at.get(token_id) {
             (now - *last).num_seconds() < self.cfg.cooldown_secs as i64
         } else {
             false
         }
+    }
+
+    pub fn record_trade_at(&mut self, token_id: &str, spend: Decimal, now: DateTime<Utc>) {
+        self.state.last_trade_at.insert(token_id.to_string(), now);
+        self.state.daily_spend_usd += spend;
+    }
+
+    pub fn is_on_cooldown(&self, token_id: &str) -> bool {
+        self.is_on_cooldown_at(token_id, Utc::now())
     }
 
     pub fn can_spend(&self, amount: Decimal) -> bool {
@@ -105,10 +117,7 @@ impl EventEdgeCore {
     }
 
     pub fn record_trade(&mut self, token_id: &str, spend: Decimal) {
-        self.state
-            .last_trade_at
-            .insert(token_id.to_string(), Utc::now());
-        self.state.daily_spend_usd += spend;
+        self.record_trade_at(token_id, spend, Utc::now());
     }
 
     pub fn targets_empty(&self) -> bool {

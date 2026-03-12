@@ -1,9 +1,15 @@
+<<<<<<<< HEAD:src/rl/integration/live_runtime.rs
 //! RL live runtime helper for command-scoped execution.
 //!
 //! This retains the former RL crypto agent behavior without keeping the
 //! retired `DomainAgent` / `platform::agents` compatibility layer alive.
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
+========
+//! RL-powered crypto agent used by the legacy RL CLI runtime.
+
+use chrono::{DateTime, Utc};
+>>>>>>>> origin/hotfix/staggered-arb-release-20260306:src/rl/cli_agent.rs
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -11,14 +17,19 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use crate::agent_runtime::AgentRiskParams;
 use crate::domain::Side;
 use crate::error::Result;
 #[cfg(feature = "onnx")]
 use crate::ml::OnnxModel;
+<<<<<<<< HEAD:src/rl/integration/live_runtime.rs
 use crate::platform::{
     AgentRiskParams, AgentStatus, CryptoEvent, Domain, ExecutionReport, OrderIntent,
     OrderPriority, QuoteUpdateEvent,
 };
+========
+use crate::platform::OrderPriority;
+>>>>>>>> origin/hotfix/staggered-arb-release-20260306:src/rl/cli_agent.rs
 use crate::rl::config::RLConfig;
 #[cfg(feature = "onnx")]
 use crate::rl::core::{DefaultStateEncoder, TOTAL_FEATURES};
@@ -28,6 +39,10 @@ use crate::rl::core::{
 #[cfg(feature = "onnx")]
 use crate::rl::{CONTINUOUS_ACTION_DIM, NUM_DISCRETE_ACTIONS};
 use crate::rl::memory::ReplayBuffer;
+use crate::rl::{CryptoEvent, DomainEvent, ExecutionReport};
+use crate::{AgentStatus, Domain, OrderIntent};
+
+mod policy;
 
 fn default_policy_output() -> String {
     "continuous".to_string()
@@ -88,9 +103,18 @@ struct InternalPosition {
     unrealized_pnl: Decimal,
 }
 
+<<<<<<<< HEAD:src/rl/integration/live_runtime.rs
 /// Standalone RL live runtime used by CLI/research command paths.
 pub struct RLCryptoRuntime {
     config: RLCryptoRuntimeConfig,
+========
+/// RL-Powered Crypto Agent
+///
+/// Uses reinforcement learning to make trading decisions for crypto markets.
+/// The legacy RL CLI drives it directly instead of routing through a shared agent runtime.
+pub struct RLCryptoAgent {
+    config: RLCryptoAgentConfig,
+>>>>>>>> origin/hotfix/staggered-arb-release-20260306:src/rl/cli_agent.rs
     status: AgentStatus,
     #[cfg(feature = "onnx")]
     encoder: Arc<DefaultStateEncoder>,
@@ -183,14 +207,56 @@ impl RLCryptoRuntime {
         Self::new(RLCryptoRuntimeConfig::default())
     }
 
+<<<<<<<< HEAD:src/rl/integration/live_runtime.rs
     pub fn id(&self) -> &str {
         &self.config.id
+========
+    /// Update observation from crypto event
+    fn update_from_crypto_event(&mut self, event: &CryptoEvent) {
+        // Update spot price
+        self.current_obs.spot_price = Some(event.spot_price);
+
+        // Update price history
+        if self.current_obs.price_history.len() >= 15 {
+            self.current_obs.price_history.remove(0);
+        }
+        self.current_obs.price_history.push(event.spot_price);
+
+        // Update momentum features
+        if let Some(momentum) = event.momentum {
+            self.current_obs.momentum_1s = Some(Decimal::try_from(momentum[0]).unwrap_or_default());
+            self.current_obs.momentum_5s = Some(Decimal::try_from(momentum[1]).unwrap_or_default());
+            self.current_obs.momentum_15s =
+                Some(Decimal::try_from(momentum[2]).unwrap_or_default());
+            self.current_obs.momentum_60s =
+                Some(Decimal::try_from(momentum[3]).unwrap_or_default());
+        }
+
+        // Update quotes
+        if let Some(quotes) = &event.quotes {
+            self.current_obs.up_bid = Some(quotes.up_bid);
+            self.current_obs.up_ask = Some(quotes.up_ask);
+            self.current_obs.down_bid = Some(quotes.down_bid);
+            self.current_obs.down_ask = Some(quotes.down_ask);
+            self.current_obs.calculate_spreads();
+            self.current_obs.calculate_sum_of_asks();
+        }
+
+        // Update time features
+        let now = Utc::now();
+        self.current_obs
+            .update_time_features(now.hour(), now.weekday().num_days_from_monday());
+
+        // Update position features
+        self.update_position_features();
+>>>>>>>> origin/hotfix/staggered-arb-release-20260306:src/rl/cli_agent.rs
     }
 
     pub fn status(&self) -> AgentStatus {
         self.status
     }
 
+<<<<<<<< HEAD:src/rl/integration/live_runtime.rs
     pub fn position_count(&self) -> usize {
         usize::from(self.position.is_some())
     }
@@ -229,6 +295,18 @@ impl RLCryptoRuntime {
             return vec![];
         }
 
+========
+    /// Decay exploration rate
+    fn decay_exploration(&mut self) {
+        let decay = self.config.rl_config.training.exploration_decay;
+        let min = self.config.rl_config.training.exploration_min;
+        self.exploration_rate = (self.exploration_rate * decay).max(min);
+    }
+
+    /// Process crypto event and generate intents
+    fn process_crypto_event(&mut self, event: &CryptoEvent) -> Vec<OrderIntent> {
+        // Check if this is a coin we're monitoring
+>>>>>>>> origin/hotfix/staggered-arb-release-20260306:src/rl/cli_agent.rs
         let coin = event.symbol.replace("USDT", "");
         if !self.config.coins.iter().any(|c| c == &coin) {
             return vec![];
@@ -491,6 +569,7 @@ impl RLCryptoRuntime {
             }
         }
 
+<<<<<<<< HEAD:src/rl/integration/live_runtime.rs
         if rand::random::<f32>() < self.exploration_rate {
             action = ContinuousAction::new(
                 rand::random::<f32>() * 2.0 - 1.0,
@@ -778,12 +857,52 @@ impl RLCryptoRuntime {
                         }
                     }
                 }
+========
+use chrono::Datelike;
+use chrono::Timelike;
+
+impl RLCryptoAgent {
+    pub fn id(&self) -> &str {
+        &self.config.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.config.name
+    }
+
+    pub fn domain(&self) -> Domain {
+        Domain::Crypto
+    }
+
+    pub fn status(&self) -> AgentStatus {
+        self.status
+    }
+
+    pub fn risk_params(&self) -> &AgentRiskParams {
+        &self.config.risk_params
+    }
+
+    pub async fn on_event(&mut self, event: DomainEvent) -> Result<Vec<OrderIntent>> {
+        if !self.status.can_trade() {
+            return Ok(vec![]);
+        }
+
+        match event {
+            DomainEvent::Crypto(crypto_event) => Ok(self.process_crypto_event(&crypto_event)),
+            DomainEvent::Tick(now) => {
+                self.current_obs
+                    .update_time_features(now.hour(), now.weekday().num_days_from_monday());
+                self.update_position_prices();
+                self.update_position_features();
+                Ok(vec![])
+>>>>>>>> origin/hotfix/staggered-arb-release-20260306:src/rl/cli_agent.rs
             }
         }
 
         intents
     }
 
+<<<<<<<< HEAD:src/rl/integration/live_runtime.rs
     fn calculate_shares(&self, action: &ContinuousAction) -> u64 {
         let base = self.config.default_shares;
         let multiplier = action.position_size_pct();
@@ -794,13 +913,60 @@ impl RLCryptoRuntime {
         let decay = self.config.rl_config.training.exploration_decay;
         let min = self.config.rl_config.training.exploration_min;
         self.exploration_rate = (self.exploration_rate * decay).max(min);
+========
+    pub async fn on_execution(&mut self, report: ExecutionReport) {
+        self.handle_execution(&report);
+    }
+
+    pub async fn start(&mut self) -> Result<()> {
+        info!("[{}] Starting RL Crypto Agent...", self.config.id);
+        self.status = AgentStatus::Running;
+        Ok(())
+    }
+
+    pub async fn stop(&mut self) -> Result<()> {
+        info!("[{}] Stopping RL Crypto Agent...", self.config.id);
+        self.status = AgentStatus::Stopped;
+        Ok(())
+    }
+
+    pub fn pause(&mut self) {
+        info!("[{}] Pausing...", self.config.id);
+        self.status = AgentStatus::Paused;
+    }
+
+    pub fn resume(&mut self) {
+        info!("[{}] Resuming...", self.config.id);
+        self.consecutive_failures = 0;
+        self.status = AgentStatus::Running;
+    }
+
+    pub fn position_count(&self) -> usize {
+        if self.position.is_some() {
+            1
+        } else {
+            0
+        }
+    }
+
+    pub fn total_exposure(&self) -> Decimal {
+        self.total_exposure
+    }
+
+    pub fn daily_pnl(&self) -> Decimal {
+        self.daily_pnl
+>>>>>>>> origin/hotfix/staggered-arb-release-20260306:src/rl/cli_agent.rs
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+<<<<<<<< HEAD:src/rl/integration/live_runtime.rs
     use crate::platform::{CryptoEvent, ExecutionStatus, QuoteData};
+========
+    use crate::rl::{ExecutionStatus, QuoteData};
+>>>>>>>> origin/hotfix/staggered-arb-release-20260306:src/rl/cli_agent.rs
 
     fn make_crypto_event(
         symbol: &str,

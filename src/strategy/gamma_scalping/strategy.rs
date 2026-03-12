@@ -8,21 +8,20 @@ use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
-use tracing::{debug, info, warn};
-use uuid::Uuid;
+use tracing::{info, warn};
 
-use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
+use crate::domain::{OrderStatus, Quote, Side};
 use crate::error::Result;
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::traits::{
     DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
     StrategyEventType, StrategyStateInfo,
 };
-use crate::strategy::volatility_arb::calculate_implied_volatility;
 
 use super::config::GammaScalpingConfig;
-use super::greeks::{binary_greeks, realized_vol_from_closes};
-use super::rebalancer::{RebalanceAction, Rebalancer, Straddle};
+use super::rebalancer::{Rebalancer, Straddle};
+
+mod decision_flow;
 
 /// Metadata for a tracked event (discovered from Polymarket).
 #[derive(Debug, Clone)]
@@ -886,5 +885,64 @@ mod tests {
             .expect("event should be tracked");
         assert_eq!(event.up_token, "up-token");
         assert_eq!(event.down_token, "down-token");
+    }
+
+    #[test]
+    fn evaluate_entry_emits_submit_intents() {
+        use rust_decimal_macros::dec;
+        let mut config = GammaScalpingConfig::default();
+        config.dry_run = false;
+        config.vol_lookback_periods = 5;
+        let mut strategy = GammaScalpingStrategy::new(config);
+        strategy.spot_prices.insert("BTCUSDT".to_string(), 100.0);
+        strategy.kline_history.insert(
+            "BTCUSDT".to_string(),
+            VecDeque::from(vec![100.0, 110.0, 90.0, 120.0, 80.0, 130.0]),
+        );
+        strategy.quote_cache.insert(
+            "token-up".to_string(),
+            Quote {
+                side: Side::Up,
+                best_bid: Some(dec!(0.30)),
+                best_ask: Some(dec!(0.31)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+                timestamp: Utc::now(),
+            },
+        );
+        strategy.quote_cache.insert(
+            "token-down".to_string(),
+            Quote {
+                side: Side::Down,
+                best_bid: Some(dec!(0.28)),
+                best_ask: Some(dec!(0.29)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+                timestamp: Utc::now(),
+            },
+        );
+
+        let ctx = EventContext {
+            event_id: "event-1".to_string(),
+            series_id: "btc-series".to_string(),
+            symbol: "BTCUSDT".to_string(),
+            up_token: "token-up".to_string(),
+            down_token: "token-down".to_string(),
+            end_time: Utc::now() + chrono::Duration::seconds(600),
+            price_to_beat: Some(dec!(100)),
+        };
+
+        let actions = strategy
+            .evaluate_entry(&ctx, Utc::now())
+            .expect("entry actions");
+
+        assert!(matches!(
+            actions.first(),
+            Some(StrategyAction::SubmitIntent { .. })
+        ));
+        assert!(matches!(
+            actions.get(1),
+            Some(StrategyAction::SubmitIntent { .. })
+        ));
     }
 }

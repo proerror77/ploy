@@ -9,9 +9,8 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::coordinator::bootstrap::AllocatorConfig;
 use crate::coordinator::GlobalState;
-
-use super::config::AllocatorConfig;
 
 /// Rolling performance metrics for one agent
 #[derive(Debug, Clone, Serialize, Deserialize)]

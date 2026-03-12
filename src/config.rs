@@ -717,7 +717,7 @@ impl Default for ExecutionConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct KalshiConfig {
     /// Kalshi Trade API base URL.
     #[serde(default = "default_kalshi_base_url")]
@@ -728,6 +728,20 @@ pub struct KalshiConfig {
     /// Optional API secret (can also be sourced from env).
     #[serde(default)]
     pub api_secret: Option<String>,
+}
+
+fn redact_optional_secret(secret: &Option<String>) -> Option<&'static str> {
+    secret.as_ref().map(|_| "[REDACTED]")
+}
+
+impl fmt::Debug for KalshiConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KalshiConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &redact_optional_secret(&self.api_key))
+            .field("api_secret", &redact_optional_secret(&self.api_secret))
+            .finish()
+    }
 }
 
 impl Default for KalshiConfig {
@@ -780,13 +794,22 @@ fn default_max_positions_per_symbol() -> u32 {
     1 // Default: only 1 position per symbol
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct DatabaseConfig {
     /// PostgreSQL connection URL
     pub url: String,
     /// Maximum connections in pool
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+}
+
+impl fmt::Debug for DatabaseConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DatabaseConfig")
+            .field("url", &"[REDACTED]")
+            .field("max_connections", &self.max_connections)
+            .finish()
+    }
 }
 
 fn default_max_connections() -> u32 {
@@ -991,234 +1014,12 @@ impl AppConfig {
     }
 
     fn apply_env_overrides(&mut self) {
-        if let Some(v) = env_bool(&["PLOY_DRY_RUN__ENABLED", "PLOY__DRY_RUN__ENABLED"]) {
-            self.dry_run.enabled = v;
-        }
-
-        if let Some(v) = env_string(&["PLOY_ACCOUNT__ID", "PLOY__ACCOUNT__ID", "PLOY_ACCOUNT_ID"]) {
-            if !v.trim().is_empty() {
-                self.account.id = v;
-            }
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_ACCOUNT__WALLET_ADDRESS",
-            "PLOY__ACCOUNT__WALLET_ADDRESS",
-            "PLOY_ACCOUNT_WALLET_ADDRESS",
-        ]) {
-            if !v.trim().is_empty() {
-                self.account.wallet_address = Some(v);
-            }
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_ACCOUNT__LABEL",
-            "PLOY__ACCOUNT__LABEL",
-            "PLOY_ACCOUNT_LABEL",
-        ]) {
-            if !v.trim().is_empty() {
-                self.account.label = Some(v);
-            }
-        }
-
-        if let Some(v) = env_string(&["PLOY_MARKET__MARKET_SLUG", "PLOY__MARKET__MARKET_SLUG"]) {
-            self.market.market_slug = v;
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_EXECUTION__EXCHANGE",
-            "PLOY__EXECUTION__EXCHANGE",
-            "PLOY_EXECUTION_EXCHANGE",
-        ]) {
-            let normalized = v.trim().to_ascii_lowercase();
-            if matches!(normalized.as_str(), "polymarket" | "kalshi") {
-                self.execution.exchange = normalized;
-            }
-        }
-
-        if let Some(v) = env_string_raw(&[
-            "PLOY_KALSHI__BASE_URL",
-            "PLOY__KALSHI__BASE_URL",
-            "PLOY_KALSHI_BASE_URL",
-            "KALSHI_BASE_URL",
-        ]) {
-            if !v.trim().is_empty() {
-                self.kalshi.base_url = v;
-            }
-        }
-
-        if let Some(v) = env_string_raw(&[
-            "PLOY_KALSHI__API_KEY",
-            "PLOY__KALSHI__API_KEY",
-            "PLOY_KALSHI_API_KEY",
-            "KALSHI_API_KEY",
-            "KALSHI_ACCESS_KEY",
-        ]) {
-            if !v.trim().is_empty() {
-                self.kalshi.api_key = Some(v);
-            }
-        }
-
-        if let Some(v) = env_string_raw(&[
-            "PLOY_KALSHI__API_SECRET",
-            "PLOY__KALSHI__API_SECRET",
-            "PLOY_KALSHI_API_SECRET",
-            "KALSHI_API_SECRET",
-            "KALSHI_ACCESS_SECRET",
-        ]) {
-            if !v.trim().is_empty() {
-                self.kalshi.api_secret = Some(v);
-            }
-        }
-
-        if let Some(v) = env_u16(&["PLOY_API_PORT", "PLOY__API_PORT"]) {
-            self.api_port = Some(v);
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_DATABASE__URL",
-            "PLOY__DATABASE__URL",
-            "PLOY_DATABASE_URL",
-            "DATABASE_URL",
-        ]) {
-            self.database.url = v;
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_DATABASE__MAX_CONNECTIONS",
-            "PLOY__DATABASE__MAX_CONNECTIONS",
-            "PLOY_DATABASE_MAX_CONNECTIONS",
-        ])
-        .and_then(|raw| raw.parse::<u32>().ok())
-        {
-            self.database.max_connections = v;
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_AGENT_FRAMEWORK__MODE",
-            "PLOY__AGENT_FRAMEWORK__MODE",
-            "PLOY_AGENT_FRAMEWORK_MODE",
-        ]) {
-            let normalized = v.trim().to_ascii_lowercase();
-            if matches!(normalized.as_str(), "internal" | "openclaw") {
-                self.agent_framework.mode = normalized;
-            }
-        }
-
-        if let Some(v) = env_bool(&[
-            "PLOY_AGENT_FRAMEWORK__HARD_DISABLE_INTERNAL_AGENTS",
-            "PLOY__AGENT_FRAMEWORK__HARD_DISABLE_INTERNAL_AGENTS",
-            "PLOY_AGENT_FRAMEWORK_HARD_DISABLE_INTERNAL_AGENTS",
-            "PLOY_OPENCLAW_ONLY",
-        ]) {
-            self.agent_framework.hard_disable_internal_agents = v;
-        }
-
-        let ee_enabled = env_bool(&[
-            "PLOY_EVENT_EDGE_AGENT__ENABLED",
-            "PLOY__EVENT_EDGE_AGENT__ENABLED",
-        ]);
-        let ee_trade = env_bool(&[
-            "PLOY_EVENT_EDGE_AGENT__TRADE",
-            "PLOY__EVENT_EDGE_AGENT__TRADE",
-        ]);
-        let ee_event_ids = env_list(&[
-            "PLOY_EVENT_EDGE_AGENT__EVENT_IDS",
-            "PLOY__EVENT_EDGE_AGENT__EVENT_IDS",
-            "PLOY_EVENT_EDGE_AGENT_EVENT_IDS",
-        ]);
-        let ee_titles = env_list(&[
-            "PLOY_EVENT_EDGE_AGENT__TITLES",
-            "PLOY__EVENT_EDGE_AGENT__TITLES",
-            "PLOY_EVENT_EDGE_AGENT_TITLES",
-        ]);
-        if ee_enabled.is_some() || ee_trade.is_some() {
-            let ee = self
-                .event_edge_agent
-                .get_or_insert_with(EventEdgeAgentConfig::default);
-            if let Some(v) = ee_enabled {
-                ee.enabled = v;
-            }
-            if let Some(v) = ee_trade {
-                ee.trade = v;
-            }
-        }
-        if ee_event_ids.is_some() || ee_titles.is_some() {
-            let ee = self
-                .event_edge_agent
-                .get_or_insert_with(EventEdgeAgentConfig::default);
-            if let Some(v) = ee_event_ids {
-                ee.event_ids = v;
-            }
-            if let Some(v) = ee_titles {
-                ee.titles = v;
-            }
-        }
+        env_overrides::apply_env_overrides(self);
     }
 
     /// Whether built-in Rust agent loops must be disabled in this process.
     pub fn openclaw_runtime_lockdown(&self) -> bool {
         self.agent_framework.is_openclaw_mode() && self.agent_framework.hard_disable_internal_agents
-    }
-}
-
-fn env_string(keys: &[&str]) -> Option<String> {
-    env_string_raw(keys).map(|s| s.to_ascii_lowercase())
-}
-
-fn env_string_raw(keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Ok(v) = std::env::var(key) {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn env_u16(keys: &[&str]) -> Option<u16> {
-    env_string(keys).and_then(|v| v.parse::<u16>().ok())
-}
-
-fn env_bool(keys: &[&str]) -> Option<bool> {
-    env_string(keys).and_then(|v| parse_bool_like(&v))
-}
-
-fn env_list(keys: &[&str]) -> Option<Vec<String>> {
-    env_string(keys).map(|raw| parse_string_list(&raw))
-}
-
-fn parse_string_list(raw: &str) -> Vec<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-
-    if trimmed.starts_with('[') {
-        if let Ok(values) = serde_json::from_str::<Vec<String>>(trimmed) {
-            return values
-                .into_iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-    }
-
-    trimmed
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn parse_bool_like(v: &str) -> Option<bool> {
-    match v.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
     }
 }
 
@@ -1245,13 +1046,13 @@ mod tests {
 
     #[test]
     fn test_parse_string_list_csv() {
-        let parsed = parse_string_list("a,b, c ,,d");
+        let parsed = env_overrides::parse_string_list("a,b, c ,,d");
         assert_eq!(parsed, vec!["a", "b", "c", "d"]);
     }
 
     #[test]
     fn test_parse_string_list_json_array() {
-        let parsed = parse_string_list(r#"["id-1","id-2"]"#);
+        let parsed = env_overrides::parse_string_list(r#"["id-1","id-2"]"#);
         assert_eq!(parsed, vec!["id-1", "id-2"]);
     }
 
@@ -1273,5 +1074,34 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| e.contains("execution.exchange must be one of [polymarket, kalshi]")));
+    }
+
+    #[test]
+    fn test_database_config_debug_redacts_url() {
+        let cfg = DatabaseConfig {
+            url: "postgres://user:password@localhost:5432/ploy".to_string(),
+            max_connections: 7,
+        };
+
+        let rendered = format!("{:?}", cfg);
+
+        assert!(!rendered.contains("password"));
+        assert!(!rendered.contains("postgres://user:password@localhost:5432/ploy"));
+        assert!(rendered.contains("7"));
+    }
+
+    #[test]
+    fn test_kalshi_config_debug_redacts_credentials() {
+        let cfg = KalshiConfig {
+            base_url: "https://example.com".to_string(),
+            api_key: Some("kalshi-key".to_string()),
+            api_secret: Some("kalshi-secret".to_string()),
+        };
+
+        let rendered = format!("{:?}", cfg);
+
+        assert!(!rendered.contains("kalshi-key"));
+        assert!(!rendered.contains("kalshi-secret"));
+        assert!(rendered.contains("https://example.com"));
     }
 }

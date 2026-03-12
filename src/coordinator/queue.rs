@@ -1,0 +1,706 @@
+//! Order Queue - 優先級訂單隊列
+
+use chrono::Utc;
+use rust_decimal::Decimal;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use tracing::{debug, warn};
+
+use crate::domain::Side;
+use crate::platform::{Domain, OrderIntent, OrderPriority};
+
+/// 包裝 OrderIntent 以支持優先級排序
+#[derive(Debug)]
+struct PrioritizedIntent {
+    intent: OrderIntent,
+    sequence: u64, // 用於相同優先級時的 FIFO 排序
+}
+
+impl PartialEq for PrioritizedIntent {
+    fn eq(&self, other: &Self) -> bool {
+        self.intent.priority == other.intent.priority && self.sequence == other.sequence
+    }
+}
+
+impl Eq for PrioritizedIntent {}
+
+impl PartialOrd for PrioritizedIntent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PrioritizedIntent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // 優先級數字越小越優先 (Critical=0 > High=1 > Normal=2 > Low=3)
+        match other.intent.priority.cmp(&self.intent.priority) {
+            Ordering::Equal => {
+                // 相同優先級，先進先出 (sequence 越小越早)
+                other.sequence.cmp(&self.sequence)
+            }
+            ord => ord,
+        }
+    }
+}
+
+/// 訂單隊列 - 基於優先級的訂單排隊系統
+pub struct OrderQueue {
+    /// 優先級堆
+    heap: BinaryHeap<PrioritizedIntent>,
+    /// 序列號計數器
+    sequence_counter: u64,
+    /// 最大隊列長度
+    max_size: usize,
+    /// 統計：已入隊數量
+    enqueued_count: u64,
+    /// 統計：已出隊數量
+    dequeued_count: u64,
+    /// 統計：已過期數量
+    expired_count: u64,
+}
+
+impl OrderQueue {
+    /// 創建新隊列
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+            sequence_counter: 0,
+            max_size,
+            enqueued_count: 0,
+            dequeued_count: 0,
+            expired_count: 0,
+        }
+    }
+
+    /// 將訂單意圖加入隊列
+    ///
+    /// # Returns
+    /// - `Ok(())` 成功入隊
+    /// - `Err(reason)` 隊列已滿或訂單無效
+    pub fn enqueue(&mut self, intent: OrderIntent) -> Result<(), String> {
+        self.enqueue_with_eviction(intent).map(|_| ())
+    }
+
+    /// Enqueue and return evicted low-priority intent when queue is full.
+    pub fn enqueue_with_eviction(
+        &mut self,
+        intent: OrderIntent,
+    ) -> Result<Option<OrderIntent>, String> {
+        let mut evicted: Option<OrderIntent> = None;
+        // 檢查隊列是否已滿
+        if self.heap.len() >= self.max_size {
+            // 如果新訂單優先級更高，嘗試移除最低優先級的
+            if let Some(lowest_priority) = self.heap.iter().map(|item| item.intent.priority).max() {
+                if intent.priority < lowest_priority {
+                    // 新訂單優先級更高，移除最低的
+                    evicted = self.pop_lowest_priority().map(|v| v.intent);
+                    warn!(
+                        "Queue full, dropped lowest priority order to make room for {:?}",
+                        intent.priority
+                    );
+                } else {
+                    return Err("Queue is full and new order has lower priority".to_string());
+                }
+            }
+        }
+
+        // 檢查是否已過期
+        if intent.is_expired() {
+            return Err("Order intent has already expired".to_string());
+        }
+
+        let sequence = self.sequence_counter;
+        self.sequence_counter += 1;
+
+        debug!(
+            "Enqueuing order intent {} from agent {} with priority {:?}",
+            intent.intent_id, intent.agent_id, intent.priority
+        );
+
+        self.heap.push(PrioritizedIntent { intent, sequence });
+        self.enqueued_count += 1;
+
+        Ok(evicted)
+    }
+
+    /// Pop one lowest-priority item from queue.
+    /// When priorities tie, evict the newest item in that lowest bucket.
+    fn pop_lowest_priority(&mut self) -> Option<PrioritizedIntent> {
+        let mut items: Vec<PrioritizedIntent> = std::mem::take(&mut self.heap).into_vec();
+        if items.is_empty() {
+            return None;
+        }
+
+        let mut lowest_idx = 0usize;
+        for idx in 1..items.len() {
+            let current = &items[idx];
+            let lowest = &items[lowest_idx];
+            if current.intent.priority > lowest.intent.priority
+                || (current.intent.priority == lowest.intent.priority
+                    && current.sequence > lowest.sequence)
+            {
+                lowest_idx = idx;
+            }
+        }
+
+        let dropped = items.swap_remove(lowest_idx);
+        self.heap = BinaryHeap::from(items);
+        Some(dropped)
+    }
+
+    /// 取出下一個要執行的訂單
+    pub fn dequeue(&mut self) -> Option<OrderIntent> {
+        // 跳過已過期的訂單
+        while let Some(prioritized) = self.heap.pop() {
+            if prioritized.intent.is_expired() {
+                self.expired_count += 1;
+                debug!(
+                    "Skipping expired order intent {}",
+                    prioritized.intent.intent_id
+                );
+                continue;
+            }
+
+            self.dequeued_count += 1;
+            return Some(prioritized.intent);
+        }
+
+        None
+    }
+
+    /// 批量取出訂單 (最多 n 個)
+    pub fn dequeue_batch(&mut self, n: usize) -> Vec<OrderIntent> {
+        let mut batch = Vec::with_capacity(n);
+        for _ in 0..n {
+            if let Some(intent) = self.dequeue() {
+                batch.push(intent);
+            } else {
+                break;
+            }
+        }
+        batch
+    }
+
+    /// 查看隊列頭部 (不移除)
+    pub fn peek(&self) -> Option<&OrderIntent> {
+        self.heap.peek().map(|p| &p.intent)
+    }
+
+    /// 隊列長度
+    pub fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    /// 隊列是否為空
+    pub fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
+
+    /// 清理過期訂單
+    pub fn cleanup_expired(&mut self) -> usize {
+        self.cleanup_expired_intents().len()
+    }
+
+    /// 清理過期訂單並返回被移除的 intents（供上層釋放預留資金）
+    pub fn cleanup_expired_intents(&mut self) -> Vec<OrderIntent> {
+        let before = self.heap.len();
+        let now = Utc::now();
+        let mut expired = Vec::new();
+
+        // 需要重建堆，因為 BinaryHeap 不支持條件刪除
+        let items: Vec<_> = std::mem::take(&mut self.heap).into_vec();
+
+        for item in items {
+            if let Some(expires) = item.intent.expires_at {
+                if now > expires {
+                    self.expired_count += 1;
+                    expired.push(item.intent);
+                    continue;
+                }
+            }
+            self.heap.push(item);
+        }
+
+        let cleaned = before - self.heap.len();
+        if cleaned > 0 {
+            debug!("Cleaned {} expired orders from queue", cleaned);
+        }
+        expired
+    }
+
+    /// 移除指定 Agent 的所有訂單
+    pub fn remove_agent_orders(&mut self, agent_id: &str) -> usize {
+        let before = self.heap.len();
+
+        let items: Vec<_> = std::mem::take(&mut self.heap).into_vec();
+
+        for item in items {
+            if item.intent.agent_id != agent_id {
+                self.heap.push(item);
+            }
+        }
+
+        before - self.heap.len()
+    }
+
+    /// 移除 queue 中待執行 BUY 訂單（可選限定 domain），並返回被移除的 intents。
+    pub fn remove_buy_orders(&mut self, domain: Option<Domain>) -> Vec<OrderIntent> {
+        let items: Vec<_> = std::mem::take(&mut self.heap).into_vec();
+        let mut removed = Vec::new();
+
+        for item in items {
+            let should_remove = item.intent.is_buy
+                && domain
+                    .map(|target| item.intent.domain == target)
+                    .unwrap_or(true);
+            if should_remove {
+                removed.push(item.intent);
+            } else {
+                self.heap.push(item);
+            }
+        }
+
+        removed
+    }
+
+    /// 獲取隊列統計
+    pub fn stats(&self) -> QueueStats {
+        let mut priority_counts = [0usize; 4];
+        for item in self.heap.iter() {
+            let idx = item.intent.priority as usize;
+            if idx < 4 {
+                priority_counts[idx] += 1;
+            }
+        }
+
+        QueueStats {
+            current_size: self.heap.len(),
+            max_size: self.max_size,
+            enqueued_total: self.enqueued_count,
+            dequeued_total: self.dequeued_count,
+            expired_total: self.expired_count,
+            critical_count: priority_counts[0],
+            high_count: priority_counts[1],
+            normal_count: priority_counts[2],
+            low_count: priority_counts[3],
+        }
+    }
+
+    /// Sum buy-intent notionals in queue, excluding specific domains.
+    pub fn pending_buy_notional_excluding_domains(&self, excluded: &[Domain]) -> Decimal {
+        self.heap
+            .iter()
+            .filter_map(|item| {
+                let intent = &item.intent;
+                (intent.is_buy && !excluded.contains(&intent.domain))
+                    .then_some(intent.notional_value())
+            })
+            .sum()
+    }
+
+    /// Sum pending SELL shares in queue for one reduce-only bucket.
+    pub fn pending_sell_shares_for(
+        &self,
+        agent_id: &str,
+        domain: Domain,
+        token_id: &str,
+        side: Side,
+    ) -> u64 {
+        self.heap
+            .iter()
+            .filter_map(|item| {
+                let intent = &item.intent;
+                (!intent.is_buy
+                    && !intent.is_expired()
+                    && intent.agent_id == agent_id
+                    && intent.domain == domain
+                    && intent.side == side
+                    && intent.token_id.eq_ignore_ascii_case(token_id))
+                .then_some(intent.shares)
+            })
+            .fold(0u64, |acc, shares| acc.saturating_add(shares))
+    }
+}
+
+/// 隊列統計
+#[derive(Debug, Clone)]
+pub struct QueueStats {
+    pub current_size: usize,
+    pub max_size: usize,
+    pub enqueued_total: u64,
+    pub dequeued_total: u64,
+    pub expired_total: u64,
+    pub critical_count: usize,
+    pub high_count: usize,
+    pub normal_count: usize,
+    pub low_count: usize,
+}
+
+impl std::fmt::Display for QueueStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Queue[{}/{}, enq={}, deq={}, exp={}, C={}/H={}/N={}/L={}]",
+            self.current_size,
+            self.max_size,
+            self.enqueued_total,
+            self.dequeued_total,
+            self.expired_total,
+            self.critical_count,
+            self.high_count,
+            self.normal_count,
+            self.low_count
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::Side;
+    use rust_decimal::Decimal;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::{Barrier, Mutex};
+    use tokio::time::{Duration, timeout};
+
+    fn make_intent(agent: &str, priority: OrderPriority) -> OrderIntent {
+        OrderIntent::new(
+            agent,
+            Domain::Crypto,
+            "test-market",
+            "token-123",
+            Side::Up,
+            true,
+            100,
+            Decimal::from_str_exact("0.50").unwrap(),
+        )
+        .with_priority(priority)
+    }
+
+    #[test]
+    fn test_priority_ordering() {
+        let mut queue = OrderQueue::new(100);
+
+        // 入隊順序：Normal, Low, Critical, High
+        queue
+            .enqueue(make_intent("a1", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a2", OrderPriority::Low))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a3", OrderPriority::Critical))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a4", OrderPriority::High))
+            .unwrap();
+
+        // 出隊順序應該是：Critical, High, Normal, Low
+        assert_eq!(queue.dequeue().unwrap().agent_id, "a3");
+        assert_eq!(queue.dequeue().unwrap().agent_id, "a4");
+        assert_eq!(queue.dequeue().unwrap().agent_id, "a1");
+        assert_eq!(queue.dequeue().unwrap().agent_id, "a2");
+    }
+
+    #[test]
+    fn test_fifo_same_priority() {
+        let mut queue = OrderQueue::new(100);
+
+        queue
+            .enqueue(make_intent("first", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("second", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("third", OrderPriority::Normal))
+            .unwrap();
+
+        assert_eq!(queue.dequeue().unwrap().agent_id, "first");
+        assert_eq!(queue.dequeue().unwrap().agent_id, "second");
+        assert_eq!(queue.dequeue().unwrap().agent_id, "third");
+    }
+
+    #[test]
+    fn test_queue_full() {
+        let mut queue = OrderQueue::new(2);
+
+        queue
+            .enqueue(make_intent("a1", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a2", OrderPriority::Normal))
+            .unwrap();
+
+        // 滿了，低優先級無法入隊
+        let result = queue.enqueue(make_intent("a3", OrderPriority::Low));
+        assert!(result.is_err());
+
+        // 高優先級可以入隊 (踢掉最低的)
+        queue
+            .enqueue(make_intent("a4", OrderPriority::Critical))
+            .unwrap();
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
+    fn test_enqueue_with_eviction_returns_dropped_intent() {
+        let mut queue = OrderQueue::new(2);
+        queue
+            .enqueue(make_intent("a1", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a2", OrderPriority::Low))
+            .unwrap();
+
+        let dropped = queue
+            .enqueue_with_eviction(make_intent("a3", OrderPriority::Critical))
+            .unwrap()
+            .expect("expected an evicted intent");
+
+        assert_eq!(dropped.agent_id, "a2");
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
+    fn test_stats() {
+        let mut queue = OrderQueue::new(100);
+
+        queue
+            .enqueue(make_intent("a1", OrderPriority::Critical))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a2", OrderPriority::High))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a3", OrderPriority::Normal))
+            .unwrap();
+        queue
+            .enqueue(make_intent("a4", OrderPriority::Low))
+            .unwrap();
+
+        let stats = queue.stats();
+        assert_eq!(stats.current_size, 4);
+        assert_eq!(stats.critical_count, 1);
+        assert_eq!(stats.high_count, 1);
+        assert_eq!(stats.normal_count, 1);
+        assert_eq!(stats.low_count, 1);
+    }
+
+    #[test]
+    fn test_pending_buy_notional_excluding_domains() {
+        let mut queue = OrderQueue::new(100);
+
+        let crypto_buy = OrderIntent::new(
+            "a1",
+            Domain::Crypto,
+            "btc-up",
+            "token-btc",
+            Side::Up,
+            true,
+            10,
+            Decimal::from_str_exact("0.50").unwrap(),
+        ); // 5
+        let politics_buy = OrderIntent::new(
+            "a2",
+            Domain::Politics,
+            "election-yes",
+            "token-pol",
+            Side::Up,
+            true,
+            20,
+            Decimal::from_str_exact("0.50").unwrap(),
+        ); // 10
+        let mut politics_sell = OrderIntent::new(
+            "a3",
+            Domain::Politics,
+            "election-yes",
+            "token-pol",
+            Side::Up,
+            false,
+            30,
+            Decimal::from_str_exact("0.50").unwrap(),
+        ); // ignored
+        politics_sell.priority = OrderPriority::Low;
+
+        queue.enqueue(crypto_buy).unwrap();
+        queue.enqueue(politics_buy).unwrap();
+        queue.enqueue(politics_sell).unwrap();
+
+        let notional =
+            queue.pending_buy_notional_excluding_domains(&[Domain::Crypto, Domain::Sports]);
+        assert_eq!(notional, Decimal::from_str_exact("10.00").unwrap());
+    }
+
+    #[test]
+    fn test_remove_buy_orders_with_domain_filter() {
+        let mut queue = OrderQueue::new(100);
+        let crypto_buy = make_intent("a1", OrderPriority::Normal);
+        let sports_buy = OrderIntent::new(
+            "a2",
+            Domain::Sports,
+            "nba",
+            "token-s",
+            Side::Up,
+            true,
+            10,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        let mut crypto_sell = make_intent("a3", OrderPriority::Low);
+        crypto_sell.is_buy = false;
+
+        queue.enqueue(crypto_buy).unwrap();
+        queue.enqueue(sports_buy).unwrap();
+        queue.enqueue(crypto_sell).unwrap();
+
+        let removed = queue.remove_buy_orders(Some(Domain::Crypto));
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].domain, Domain::Crypto);
+        assert_eq!(queue.len(), 2);
+
+        let removed_all = queue.remove_buy_orders(None);
+        assert_eq!(removed_all.len(), 1);
+        assert_eq!(removed_all[0].domain, Domain::Sports);
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn test_pending_sell_shares_for_filters_bucket() {
+        let mut queue = OrderQueue::new(100);
+
+        let mut sell_a = OrderIntent::new(
+            "agent1",
+            Domain::Crypto,
+            "btc-up",
+            "TOKEN-UP",
+            Side::Up,
+            false,
+            40,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        sell_a.priority = OrderPriority::High;
+
+        let mut sell_b = OrderIntent::new(
+            "agent1",
+            Domain::Crypto,
+            "btc-up",
+            "token-up",
+            Side::Up,
+            false,
+            35,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        sell_b.priority = OrderPriority::Normal;
+
+        let mut other_side = OrderIntent::new(
+            "agent1",
+            Domain::Crypto,
+            "btc-up",
+            "token-up",
+            Side::Down,
+            false,
+            20,
+            Decimal::from_str_exact("0.50").unwrap(),
+        );
+        other_side.priority = OrderPriority::Low;
+
+        queue.enqueue(sell_a).unwrap();
+        queue.enqueue(sell_b).unwrap();
+        queue.enqueue(other_side).unwrap();
+
+        assert_eq!(
+            queue.pending_sell_shares_for("agent1", Domain::Crypto, "token-up", Side::Up),
+            75
+        );
+    }
+
+    #[test]
+    fn test_cleanup_expired_intents_returns_removed_items() {
+        let mut queue = OrderQueue::new(100);
+        let mut expired = make_intent("agent1", OrderPriority::Normal);
+        expired.is_buy = false;
+        expired.expires_at = Some(Utc::now() + chrono::Duration::milliseconds(10));
+
+        let active = make_intent("agent2", OrderPriority::High);
+
+        queue.enqueue(expired).unwrap();
+        queue.enqueue(active).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let removed = queue.cleanup_expired_intents();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].agent_id, "agent1");
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_enqueue_dequeue_pressure() {
+        let producer_count = 4usize;
+        let intents_per_producer = 25usize;
+        let total_intents = producer_count * intents_per_producer;
+        let queue = Arc::new(Mutex::new(OrderQueue::new(total_intents + 8)));
+        let start = Arc::new(Barrier::new(producer_count + 1));
+
+        let mut producers = Vec::with_capacity(producer_count);
+        for producer_idx in 0..producer_count {
+            let queue = queue.clone();
+            let start = start.clone();
+            producers.push(tokio::spawn(async move {
+                start.wait().await;
+                for intent_idx in 0..intents_per_producer {
+                    let agent_id = format!("p{}-{}", producer_idx, intent_idx);
+                    let priority = match intent_idx % 4 {
+                        0 => OrderPriority::Critical,
+                        1 => OrderPriority::High,
+                        2 => OrderPriority::Normal,
+                        _ => OrderPriority::Low,
+                    };
+                    queue
+                        .lock()
+                        .await
+                        .enqueue(make_intent(&agent_id, priority))
+                        .expect("enqueue under concurrent pressure");
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+
+        let consumer_queue = queue.clone();
+        let consumer_start = start.clone();
+        let consumer = tokio::spawn(async move {
+            consumer_start.wait().await;
+            let mut seen = HashSet::with_capacity(total_intents);
+
+            while seen.len() < total_intents {
+                let maybe_intent = { consumer_queue.lock().await.dequeue() };
+                if let Some(intent) = maybe_intent {
+                    assert!(
+                        seen.insert(intent.agent_id.clone()),
+                        "duplicate dequeue for {}",
+                        intent.agent_id
+                    );
+                } else {
+                    tokio::task::yield_now().await;
+                }
+            }
+
+            seen
+        });
+
+        for producer in producers {
+            producer.await.expect("producer task should finish");
+        }
+
+        let seen = timeout(Duration::from_secs(5), consumer)
+            .await
+            .expect("consumer should drain queue under concurrent pressure")
+            .expect("consumer task should finish");
+
+        assert_eq!(seen.len(), total_intents);
+        assert!(
+            queue.lock().await.is_empty(),
+            "queue should drain completely"
+        );
+    }
+}

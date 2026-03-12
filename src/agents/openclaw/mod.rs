@@ -6,12 +6,9 @@
 
 pub mod agent;
 pub mod allocator;
-pub mod config;
 pub mod conflict;
 pub mod performance;
 pub mod regime;
 pub mod straddle;
 
 pub use agent::OpenClawAgent;
-pub use config::OpenClawConfig;
-pub use regime::{MarketRegime, RegimeSnapshot};

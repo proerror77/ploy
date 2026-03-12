@@ -1,4 +1,4 @@
-//! Order Platform - 統一下單平台
+//! Order Platform - legacy execution surface
 //!
 //! 提供領域無關的訂單執行、風控和倉位管理。
 //! Canonical live strategies now flow through coordinator-managed runtime paths.
@@ -8,6 +8,7 @@
 mod contracts;
 pub mod data_plane;
 pub mod freshness;
+mod market_persistence;
 pub mod persistence_pipeline;
 pub mod persistence_schema;
 mod position;
@@ -28,6 +29,10 @@ pub use data_plane::{
     PlatformDataPlane, SourceHealth,
 };
 pub use freshness::{DataPlaneFreshness, DataSource};
+pub(crate) use market_persistence::{
+    ensure_clob_trade_alerts_table, spawn_pm_token_settlement_persistence,
+    spawn_polymarket_trade_persistence, spawn_polymarket_trade_persistence_from_collector_targets,
+};
 pub use persistence_pipeline::{
     BinanceLobTick, BinancePriceTick, ChainlinkPriceTick, ClobOrderbookSnapshot, ClobQuoteTick,
     PersistenceConfig, PersistenceEvent, PersistencePipeline, PersistencePipelineHandle,

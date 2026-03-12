@@ -60,12 +60,30 @@
   - Re-anchor analysis/search to the corrected term.
   - Avoid carrying forward assumptions from the wrong term.
 
+- Pattern: When the user asks for a large structural cleanup, repeated in-file helper extractions can still feel like local patching rather than plan-driven refactoring.
+- Rule: For architecture refactors on this repo, execute the approved plan in large slices that cross file boundaries. Prefer module extraction, ownership moves, and old-path retirement over more micro-refactors inside the same oversized file.
+- Execution guardrail:
+  - Re-anchor on the written implementation plan before each batch.
+  - Choose the highest-leverage structural slice, not the easiest local edit.
+  - End each batch with compile/tests plus an atomic commit.
+
 - Pattern: Multi-file fixes often happen in dirty worktrees.
 - Rule: In dirty worktree sessions, keep progressing after explicit user approval, and isolate commits by staging only request-related files/hunks.
 - Commit safety:
   - Capture preflight (`git status --short`, `git diff --name-only`) before staging.
   - Use partial staging for mixed files; do not revert unrelated edits.
   - Report remaining unstaged files after commit.
+
+## 2026-03-09
+
+- Pattern: Repeated confirmation prompts after a plan is already clear slow execution and create unnecessary user overhead.
+- Rule: Once the user has approved or confirmed the plan, keep iterating through planned steps automatically. Only stop to ask when the next action is destructive, irreversible, production-impacting, materially changes plan scope, or is blocked by ambiguity/permissions that cannot be resolved locally.
+- Execution loop:
+  - Write or confirm the plan.
+  - Execute the next step.
+  - Verify the result.
+  - Update progress.
+  - Continue automatically until completion or a real stop condition appears.
 
 ## 2026-03-06
 
@@ -85,6 +103,9 @@
   - Clear in-flight markers after a partial close so the residual can retry cleanly.
   - Log `filled/target` progress on retries so live acceptance can prove the fix.
 
+- Pattern: A partially-hedged cycle can expire or settle before the venue sends the final `LEG2` callback; if expiry logic ignores already-filled hedge shares, replay/live PnL can be overstated or a late callback can close the same cycle twice.
+- Rule: Expiry / settlement paths must account for actual cumulative `LEG2` shares, price, and fees. After expiry settlement, retire all order tracking for that event and ignore later callbacks for positions that are no longer in `Leg1Filled`.
+
 - Pattern: A release workflow can partially deploy the new binary and still fail availability because installed but inactive services are not explicitly started.
 - Rule: Remote deploy steps must treat installed `ploy` services as start/restart targets, wait for `active`, and only then declare rollout success.
 
@@ -99,3 +120,119 @@
   - Use `exec_command` for reads, validation, git, and shell-native tasks only.
   - Use `apply_patch` for every manual tracked-file edit.
   - Split read/validate steps from edit steps instead of combining them in one shell command.
+
+- Pattern: Aggregate entry reject counters can be dominated by structural timing reasons and hide the actual signal path, making live strategy diagnosis look like a pricing problem when the runtime is not even reaching signal evaluation.
+- Rule: For live/dry-run diagnostics, separate `entry_timing_gates` from `entry_signal_gates` and sample across a real event boundary before concluding that `sum`, `OBI`, or model thresholds are the blocker.
+
+- Pattern: Opening-window strategies can silently miss valid entries when evaluation is only triggered by quote callbacks and the venue does not emit a fresh quote inside the narrow entry window.
+- Rule: If a strategy has a short timing window, the live runtime must re-evaluate on periodic ticks using the latest cached market state, not only on event-driven quote deltas.
+
+- Pattern: Hard-cleaning a stale live order by simply deleting its tracking entry can reopen same-event entries or duplicate hedges while the venue still has a pending or recently-filled order.
+- Rule: For stale live orders, archive reconciliation metadata and keep same-event / same-position locks until a terminal callback or explicit event cleanup clears them.
+
+- Pattern: A directional `LEG1 -> LEG2` strategy needs two different price caps: one for generic forced cleanup and another for protective stop-loss merges. Reusing one threshold for both either disables stops or allows bad timeout fills.
+- Rule: Keep `force_complete_threshold` for timeout/time-safety/final-window cleanup, and use a separate `protective_close_threshold` for stop-loss / theta-driven capped-loss merges.
+
+- Pattern: When adding volatility regime filters, old entry tests can start failing for the wrong reason because their synthetic sigma is far outside the new allowed band.
+- Rule: Tests that are validating timing or quote scoping must explicitly widen `max_entry_sigma` or shrink synthetic vol so they only exercise the intended gate.
+
+- Pattern: Protective `LEG2` stop-loss logic can cap downside, but it does not create edge if `LEG1` is opened too far from ATM or too expensively.
+- Rule: For OBI-triggered long-gamma profiles, keep the entry band explicitly tight enough to preserve convexity. If replay flips from positive to negative after enabling capped-loss stops, tighten `max_leg1_price`, `max_initial_sum`, `max_trades_per_event`, and the fair-value band before touching exit logic again.
+
+- Pattern: Once the long-gamma entry band is reasonably tight, the next failure mode is still overpaying for entries just above parity without enough directional edge.
+- Rule: Treat `sum > 1.00` as premium inventory. Require stronger direction strength and stronger OBI confirmation as `sum` rises above parity, instead of only clipping with a hard `max_initial_sum`.
+
+- Pattern: Enforcing historical Binance L2 / OBI gates in replay without checking data coverage can make a healthy strategy look broken by collapsing a window to zero trades.
+- Rule: Before using a replay window as live evidence, measure `binance_lob_ticks` coverage for that window. If fresh L2 history is absent while live requires OBI, mark that window as non-parity / non-actionable instead of silently falling back to easier entry logic.
+
+- Pattern: Validating a replay parity gate on a window without overlapping PM replay and Binance L2 history gives a false negative and wastes time.
+- Rule: Use one window with current production replay behavior for regression checks, and a separate overlap window where PM replay plus `binance_lob_ticks` both exist to prove the new gate actually changes trade selection.
+
+- Pattern: Changing a strategy profile in the checked-in TOML is not enough if the live parser defaults and replay defaults still point at the old regime.
+- Rule: Whenever a strategy's intended defaults change, update all three layers together: checked-in TOML, `from_toml` parser fallbacks, and `BacktestConfig::default()`. Add a regression test for missing-field TOML parsing so old defaults cannot silently leak back in.
+
+- Pattern: Even if parser defaults are aligned, replay can still drift from live when the CLI constructs a config directly instead of loading the canonical strategy template.
+- Rule: For deployment decisions, the staggered-arb replay entrypoint must load `config/strategies/staggered_arb.toml` and only override explicit CLI-scoped inputs like symbols, capital, or one-off timing flags.
+
+- Pattern: A green local test run can still hide an undeclared dependency on dirty worktree files; CI then fails because the pushed branch does not contain the supporting feed/schema changes.
+- Rule: Before triggering a production release from a dirty worktree, inspect compile dependencies for every touched module and verify the release branch itself builds from committed files only. If a strategy change consumes a new feed enum/field, commit the feed change in the same release stack.
+
+- Pattern: When delayed-entry logic becomes part of the core profile, legacy tests can fail for timing reasons instead of the behavior they were supposed to cover.
+- Rule: Tests that are not explicitly about post-open observation delay must either set `entry_after_start_min_secs = 0` or choose timestamps safely past the minimum delay, so failures keep pointing at the intended gate.
+
+- Pattern: Removing hard entry caps and per-event trade limits can dramatically increase turnover; a profile can stay strongly positive on long / L2-rich windows while degrading to near-flat on a noisy short window.
+- Rule: For aggressive OBI long-gamma profiles, always validate at least one short production-like March window and one L2-overlap window before calling the change an improvement. Report turnover alongside PnL so overtrading is visible.
+
+- Pattern: Polymarket submit responses can already be terminal while still omitting associated trades, which makes the raw response price look like the real fill price when it is only the submitted limit.
+- Rule: When a live submit returns `Filled` / partial terminal state without trade details, query the order once before persisting `avg_fill_price`; otherwise signal history and local PnL will diverge from the venue UI.
+
+- Pattern: The coordinator-managed strategy runtime can look healthy because it writes `signal_history`, while silently skipping `orders` persistence if it does not reuse the CLI order-store path.
+- Rule: Any managed runtime that submits orders directly must normalize `client_order_id`, insert an `orders` row before execution, and update that row on both submit and poll transitions. Also treat zero-row DB updates as errors, not success.
+
+- Pattern: A Binance depth socket can remain connected while top-of-book persistence goes stale if the collector tries to reconstruct a book from unsynchronized diff updates.
+- Rule: For spot L2 features that only need top levels, prefer the combined partial-depth snapshot stream (or do full snapshot+sequence sync). Do not build a production book from raw diffs without explicit synchronization and liveness tracking.
+
+- Pattern: Once live orders and L2 persistence are working, the next performance drag can still come from overly loose protective merge caps rather than execution bugs.
+- Rule: Before changing the order state machine again, break recent live/backtest results down by exit reason. If `protective_stop_loss` dominates losses while ordinary merges are profitable, tighten `max_leg1_loss`, `force_complete_threshold`, `protective_close_threshold`, and the post-open entry window before adding more execution complexity.
+
+- Pattern: Managed-runtime staggered-arb can diverge sharply from replay when a partial `LEG2` leaves a residual below Polymarket's venue minimum, because live will fail every submit while replay may keep assuming the remainder is fillable.
+- Rule: Apply the same Polymarket minimum-order rule (`>= 5 shares` and `>= $1` notional at the attempted price) to every live and replay `LEG2` submit. Never resubmit impossible residual sizes.
+
+- Pattern: A "smart" final-window single-leg hold can make the profile look profitable in isolated cases, but it silently changes a hedge strategy into a directional settlement bet and breaks live/replay comparability.
+- Rule: For hedge-disciplined staggered-arb profiles, final-window logic should always attempt an explicit `LEG2` close when thresholds allow. Single-leg settlement should be a residual fallback, not an intentional preferred path.
+
+- Pattern: A single overlap window with full PM + Binance L2 coverage can still be an unusually favorable regime and materially overstate staggered-arb edge.
+- Rule: Do not tune staggered-arb off one strong window like `2026-02-24` alone. Require at least one recent live-like window plus adjacent independent overlap windows before treating a parameter change as robust.
+
+- Pattern: Fixed `force_complete_threshold` / `protective_close_threshold` values can overpay for early hedges even when the same cap is appropriate near expiry.
+- Rule: Treat close thresholds as final caps, not flat gates. In staggered-arb, derive stricter early-window protective/forced thresholds from time remaining, then let them widen toward the configured cap as expiry risk rises.
+
+- Pattern: Strengthening OBI logic can be correct in isolation yet leave primary validation windows unchanged when those windows were never bottlenecked by the old OBI gate.
+- Rule: After adding a new staggered-arb signal feature, compare the same recent live-like and adjacent overlap windows first. If trade count and PnL stay flat, stop loosening entry further and shift attention to exit timing or `LEG2` execution quality.
+
+- Pattern: When staggered-arb mixes `5m` and `15m` windows under one profile, a broader timeframe can silently dilute or reverse edge even if the aggregate logic looks sensible.
+- Rule: Before adding new timing complexity or loosening entry further, decompose replay by window duration. If one timeframe is consistently negative across the recent live-like and adjacent overlap windows, remove that timeframe from the canonical profile before tuning anything else.
+
+- Pattern: A new staggered-arb control path can be logically sound and fully tested, yet still underperform a simpler parameter-only change on the actual production-like validation windows.
+- Rule: After implementing new exit logic, always run a parameter sweep against the current best simple baseline before keeping the extra complexity. If a tighter close cap outperforms the new branch on the recent live-like window and independent overlap windows, disable the new branch by default and ship the simpler profile.
+
+- Pattern: Tightening staggered-arb close caps slightly can improve both recent live-like windows and independent overlap windows, while caps that are too tight or too loose both degrade results in different ways.
+- Rule: For current 5m-only staggered-arb, treat `1.06` as the new protective/forced close baseline. Re-validate `1.05`, `1.06`, and `1.07+` around any future profile change instead of assuming the old `1.08` cap is still appropriate.
+
+- Pattern: Live staggered-arb can diverge sharply from replay when a partially filled `LEG2` leaves a residual position smaller than venue minimum order size; replay assumes any positive remainder can be completed, while live keeps retrying an impossible order.
+- Rule: Before trusting live-vs-replay comparisons, inspect one concrete cycle across `orders`, `signal_history`, and venue constraints. For Polymarket-style execution, never resubmit residual `LEG2` orders below venue minimums (`5` shares and `$1` notional); clamp or settle them explicitly instead of retrying forever.
+
+- Pattern: Managed-runtime staggered-arb currently records fills in `orders` and `signal_history`, but not in the `fills` ledger table, so relying on `fills` alone falsely suggests no live executions occurred.
+- Rule: When reconciling live trading records, treat `orders.filled_shares` plus `signal_history` as the source of truth until managed-runtime fill events also persist into `fills`. Do not declare “no成交” from an empty `fills` query without checking `orders`.
+
+- Pattern: Internal staggered-arb `split_arb_cycle_completed` totals can materially diverge from the user-visible Polymarket wallet 1D PnL, because official portfolio PnL is wallet-level and includes inventory mark-to-market while `cycle_completed` is only a strategy-emitted subset.
+- Rule: For any live strategy performance review, reconcile three views in this order: (1) official Polymarket wallet 1D / profile PnL, (2) public wallet activity cashflow by market/event, (3) internal `signal_history` / `orders`. Never present `cycle_completed` totals alone as the user's真钱表现.
+
+- Pattern: Using shell `exec_command` to invoke `apply_patch` triggers avoidable tool warnings and makes edit provenance harder to audit.
+- Rule: In Codex sessions, always use the dedicated `apply_patch` tool for manual file edits. Do not run `apply_patch` through shell commands.
+
+- Pattern: PM quote persistence gates still overstate hedgeability if a side disappears long enough to go stale and then reappears; carrying forward the old `first_seen_at` makes a fresh quote look durable when it is not.
+- Rule: Whenever staggered-arb tracks quote persistence, reset persistence timing after stale quote gaps, not only when an explicit `ask=None` update arrives. Add a regression test for the stale-gap reappearance path in both live and replay code.
+
+- Pattern: Generic `Max retries exceeded: 3` hides the real managed-order failure mode and makes live wallet-loss debugging nearly impossible.
+- Rule: For managed execution retries, stop immediately on clearly non-retryable validation/auth/signing/liquidity errors, and when retries are exhausted surface the last underlying submit error verbatim in the returned error and observability path.
+
+- Pattern: Aggregate staggered-arb gate counters can make BTC look like “not configured” when it is actually being filtered by symbol-specific entry conditions.
+- Rule: Whenever diagnosing missing live trades for one symbol in a multi-symbol strategy, emit and inspect per-symbol gate counters in addition to aggregate summary counters. Do not infer symbol-level behavior from aggregate reject totals alone.
+
+- Pattern: Managed runtime orders can silently lose gateway/idempotency guarantees if the strategy-generated `client_order_id` is not propagated into the actual `OrderRequest`.
+- Rule: For coordinator-managed order submission, the strategy-generated action ID must be copied into both `client_order_id` and `idempotency_key` before execution or persistence. Add a regression test for that normalization path.
+
+## 2026-03-09
+
+- Pattern: During architectural cleanup, the user does not want a stream of tiny isolated refactors with frequent stop-and-report pauses; that makes structural progress look smaller than it is and slows down legacy retirement.
+- Rule: For active refactor sessions, batch work into larger ownership cuts, keep multiple agents busy on non-overlapping slices, and only stop at natural atomic checkpoints (validated commit boundaries), not after every small extraction.
+
+- Pattern: Parallel agent work can re-dirty the integration worktree with unrelated experiments, which blurs commit boundaries and slows structural refactors.
+- Rule: After every parallel batch, compare the worktree against the current ownership plan and evict unrelated agent edits before validation or staging. Do not let maintenance/perf side experiments bleed into the current atomic refactor slice.
+
+## 2026-03-12
+
+- Pattern: `release-aliyun.yml` can silently brick `tango-1-1` if its hardcoded Rust target does not match the host `uname -m`; the symptom is `Exec format error`, `ploy-platform.service` restart loops, and immediate gaps in PM collection tables.
+- Rule: Production deploy and rollback paths must validate both the artifact file type and the remote host architecture before swapping `/root/ploy/bin/ploy`. For `tango-1-1`, default the release target to `x86_64-unknown-linux-gnu` and reject any artifact whose `file` output does not match the host architecture.
+

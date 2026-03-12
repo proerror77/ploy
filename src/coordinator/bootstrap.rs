@@ -6,10 +6,10 @@
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
@@ -47,10 +47,60 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::mpsc;
-use tracing::instrument;
+
+use super::strategy_runtime::run_managed_strategy_runtime;
+
+mod bootstrap_config;
+mod coordinator_bootstrap;
+mod crypto_runtime_support;
+mod managed_crypto;
+mod openclaw_config;
+mod runtime_config;
+mod runtime_orchestration;
+mod runtime_spawns;
+mod schema;
+mod sports_runtime_support;
+mod startup_context;
+mod status;
+mod strategy_deployments;
+mod support;
+#[cfg(test)]
+mod tests;
+
+pub use self::bootstrap_config::PlatformBootstrapConfig;
+use self::coordinator_bootstrap::initialize_coordinator_runtime;
+use self::crypto_runtime_support::initialize_crypto_runtime_support;
+pub use self::openclaw_config::{AllocatorConfig, OpenClawConfig, RegimeConfig, StraddleConfig};
+use self::runtime_orchestration::run_platform_runtime;
+use self::runtime_spawns::{spawn_managed_strategy_runtime_task, spawn_openclaw_governance_agent};
+use self::schema::{
+    ensure_accounts_table, ensure_binance_lob_ticks_table, ensure_binance_price_ticks_table,
+    ensure_clob_quote_ticks_table, ensure_schema_repairs, upsert_account_from_config,
+};
+pub(crate) use self::schema::{
+    ensure_agent_order_executions_table, ensure_clob_orderbook_snapshots_table,
+    ensure_coordinator_governance_policies_table,
+    ensure_coordinator_governance_policy_history_table, ensure_pm_market_metadata_table,
+    ensure_pm_token_settlements_table, ensure_risk_runtime_state_table,
+    ensure_strategy_observability_tables,
+};
+use self::sports_runtime_support::prepare_sports_runtime_support;
+use self::startup_context::initialize_startup_context;
+pub use self::status::print_platform_status;
+#[cfg(all(test, feature = "rl"))]
+use self::strategy_deployments::build_crypto_rl_policy_runtime_config;
+#[cfg(test)]
+use self::strategy_deployments::{
+    build_crypto_lob_ml_runtime_config, build_event_edge_runtime_config,
+    build_momentum_runtime_config, build_nba_comeback_runtime_config,
+    build_split_arb_runtime_config,
+};
+use self::strategy_deployments::{
+    collect_managed_strategy_runtime_plans, collect_runtime_crypto_strategy_targets,
+    ManagedRuntimeBootstrapStep, ManagedRuntimeDataPlaneKind,
+};
+use self::support::{env_bool, env_i64, env_u64, env_usize, lob_levels_json};
 
 #[cfg(test)]
 use super::runtime_specs::{
@@ -4847,16 +4897,13 @@ pub async fn start_platform(
     app_config: &AppConfig,
     control: PlatformStartControl,
 ) -> Result<()> {
-    let exchange_kind = parse_exchange_kind(&app_config.execution.exchange)?;
-    let exchange_client = build_exchange_client(app_config, config.dry_run).await?;
-    let non_pm_builtin_agents_enabled = exchange_kind != ExchangeKind::Polymarket
-        && (config.enable_crypto || config.enable_sports || config.enable_politics);
-    if non_pm_builtin_agents_enabled {
-        return Err(crate::error::PloyError::Validation(format!(
-            "execution.exchange={} is not yet supported with built-in agents (crypto/sports/politics). Disable built-in agents or set execution.exchange=polymarket",
-            exchange_kind
-        )));
-    }
+    let startup = initialize_startup_context(&config, app_config).await?;
+    let exchange_client = startup.exchange_client;
+    let pm_client = startup.pm_client;
+    let account_id = startup.account_id;
+    let runtime_crypto_targets = startup.runtime_crypto_targets;
+    let allowed_domains = startup.allowed_domains;
+    let shared_pool = startup.shared_pool;
 
     // Polymarket client is required for:
     // - crypto event discovery (Gamma)

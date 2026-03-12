@@ -3,7 +3,7 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::platform::RiskConfig;
+use super::RiskConfig;
 
 /// Scope for duplicate-intent guard.
 ///

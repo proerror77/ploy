@@ -14,16 +14,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
-use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
+use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
+use crate::platform::Domain;
 
 use crate::strategy::detectors::{
     MomentumDetector, MomentumDetectorConfig, MomentumSignal, TrendDirection,
 };
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
-    StrategyEvent, StrategyEventType, StrategyStateInfo,
+    StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
+
+mod signal_flow;
 
 /// Momentum strategy configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

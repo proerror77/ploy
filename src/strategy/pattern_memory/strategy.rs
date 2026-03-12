@@ -4,12 +4,12 @@
 //! associative memory over recent kline return patterns.
 
 use super::engine::{PatternMemory, Posterior};
-use crate::domain::{OrderRequest, Quote, Side};
+use crate::domain::{OrderType, Side, TimeInForce};
 use crate::error::{PloyError, Result};
-use crate::strategy::multi_outcome::{ExpectedValue, POLYMARKET_FEE_RATE};
+use crate::platform::Domain;
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
-    StrategyEvent, StrategyEventType, StrategyStateInfo,
+    StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -17,6 +17,9 @@ use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
+
+#[path = "decision_runtime.rs"]
+mod decision_runtime;
 
 const PATTERN_LEN: usize = 20;
 const TF_5M: &str = "5m";
@@ -955,5 +958,98 @@ impl Strategy for PatternMemoryStrategy {
         self.traded_events.clear();
         self.cooldowns.clear();
         self.last_decision.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use rust_decimal_macros::dec;
+
+    fn pattern_memory_test_config() -> &'static str {
+        r#"
+[[markets]]
+symbol = "BTC"
+series_id = "series-btc"
+
+[pattern]
+min_matches = 0
+min_n_eff = 0.0
+min_confidence = 0.0
+
+[filter_15m]
+enabled = false
+
+[trade]
+shares = 42
+max_entry_price = 0.55
+min_net_ev = 0.0
+"#
+    }
+
+    #[tokio::test]
+    async fn maybe_trade_on_5m_close_emits_canonical_submit_intent() {
+        let now = Utc::now();
+        let mut strategy = PatternMemoryStrategy::from_toml(
+            "pattern-memory-test".to_string(),
+            pattern_memory_test_config(),
+            true,
+        )
+        .expect("strategy config should parse");
+
+        strategy
+            .mem_5m
+            .insert("BTC".to_string(), PatternMemory::<PATTERN_LEN>::new());
+        strategy.events.insert(
+            "BTC".to_string(),
+            HashMap::from([(
+                "event-1".to_string(),
+                EventState {
+                    event_id: "event-1".to_string(),
+                    series_id: "series-btc".to_string(),
+                    up_token: "token-up".to_string(),
+                    down_token: "token-down".to_string(),
+                    end_time: now + Duration::seconds(300),
+                    price_to_beat: None,
+                    title: Some("btc-up-down".to_string()),
+                },
+            )]),
+        );
+        strategy.quotes.insert(
+            "token-up".to_string(),
+            QuoteState {
+                side: Side::Up,
+                best_bid: Some(dec!(0.09)),
+                best_ask: Some(dec!(0.10)),
+                ts: now,
+            },
+        );
+
+        let actions = strategy
+            .maybe_trade_on_5m_close("BTC", dec!(100000), now)
+            .await
+            .expect("strategy should emit entry actions");
+
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], StrategyAction::LogEvent { .. }));
+
+        let intent = match &actions[1] {
+            StrategyAction::SubmitIntent { intent } => intent,
+            other => panic!("expected submit intent, got {other:?}"),
+        };
+
+        assert!(intent
+            .client_order_id
+            .starts_with("pattern-memory-test_BTC_event-1_up_"));
+        assert_eq!(intent.domain, Domain::Crypto);
+        assert_eq!(intent.market_slug, "event-1");
+        assert_eq!(intent.token_id, "token-up");
+        assert_eq!(intent.side, Side::Up);
+        assert!(intent.is_buy);
+        assert_eq!(intent.shares, 42);
+        assert_eq!(intent.limit_price, dec!(0.10));
+        assert_eq!(intent.priority, 7);
+        assert!(intent.metadata.is_empty());
     }
 }

@@ -53,9 +53,7 @@ impl MarketFeed for SharedFeed {
 }
 
 fn parse_arg(args: &[String], key: &str) -> Option<String> {
-    args.windows(2)
-        .find(|w| w[0] == key)
-        .map(|w| w[1].clone())
+    args.windows(2).find(|w| w[0] == key).map(|w| w[1].clone())
 }
 
 fn run_one(
@@ -95,10 +93,10 @@ async fn main() -> Result<()> {
 
     let from_raw = parse_arg(&args, "--from")
         .context("missing --from (ISO8601, e.g. 2026-03-01T00:00:00Z)")?;
-    let to_raw = parse_arg(&args, "--to")
-        .context("missing --to (ISO8601, e.g. 2026-03-04T00:00:00Z)")?;
-    let max_initial_sums_raw = parse_arg(&args, "--max-initial-sums")
-        .unwrap_or_else(|| "0.80,0.85,0.90".to_string());
+    let to_raw =
+        parse_arg(&args, "--to").context("missing --to (ISO8601, e.g. 2026-03-04T00:00:00Z)")?;
+    let max_initial_sums_raw =
+        parse_arg(&args, "--max-initial-sums").unwrap_or_else(|| "0.80,0.85,0.90".to_string());
     let symbols_raw =
         parse_arg(&args, "--symbols").unwrap_or_else(|| "BTCUSDT,ETHUSDT,SOLUSDT".to_string());
     let capital_raw = parse_arg(&args, "--capital").unwrap_or_else(|| "10000".to_string());
@@ -129,15 +127,11 @@ async fn main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string());
+    let db_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string());
     let store = PostgresStore::new(&db_url, 5).await?;
-    let mut feed = HistoricalFeed::from_database(
-        store.pool(),
-        &symbols,
-        Some(from_dt),
-        Some(to_dt),
-    )
-    .await?;
+    let mut feed =
+        HistoricalFeed::from_database(store.pool(), &symbols, Some(from_dt), Some(to_dt)).await?;
 
     let mut updates = Vec::with_capacity(feed.len());
     while let Some(u) = feed.next_update() {
@@ -157,7 +151,10 @@ async fn main() -> Result<()> {
 
     let mut summaries: Vec<Summary> = handles
         .into_iter()
-        .map(|h| h.join().map_err(|_| anyhow::anyhow!("worker thread panicked")))
+        .map(|h| {
+            h.join()
+                .map_err(|_| anyhow::anyhow!("worker thread panicked"))
+        })
         .collect::<Result<Vec<_>>>()?;
     summaries.sort_by(|a, b| a.max_initial_sum.cmp(&b.max_initial_sum));
 

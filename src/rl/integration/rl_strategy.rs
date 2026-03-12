@@ -2,6 +2,7 @@
 //!
 //! Implements the Strategy trait using an RL agent for decision making.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -9,16 +10,17 @@ use chrono::{DateTime, Datelike, Timelike, Utc};
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
-use uuid::Uuid;
 
-use crate::domain::{OrderRequest, OrderSide, OrderType, Side, TimeInForce};
+use crate::domain::{OrderType, Side, TimeInForce};
 use crate::error::Result;
+use crate::platform::Domain;
 use crate::rl::config::RLConfig;
 use crate::rl::core::{
     ContinuousAction, DefaultStateEncoder, DiscreteAction, PnLRewardFunction, RawObservation,
     RewardFunction, RewardTransition,
 };
 use crate::rl::memory::ReplayBuffer;
+use crate::strategy::traits::StrategyOrderIntent;
 use crate::strategy::{
     DataFeed, MarketUpdate, OrderPurpose, OrderUpdate, PositionInfo, Strategy, StrategyAction,
     StrategyStateInfo,
@@ -50,6 +52,8 @@ pub struct RLStrategy {
     token_ids: (String, String),
     /// Binance symbol to track
     symbol: String,
+    /// Polymarket market slug for canonical submit intents
+    market_slug: String,
     /// Online learning enabled
     online_learning: bool,
     /// Step counter
@@ -68,6 +72,7 @@ impl RLStrategy {
         up_token: String,
         down_token: String,
         symbol: String,
+        market_slug: String,
     ) -> Self {
         let state = StrategyStateInfo {
             strategy_id: id.clone(),
@@ -88,6 +93,7 @@ impl RLStrategy {
             state,
             token_ids: (up_token, down_token),
             symbol,
+            market_slug,
             online_learning: config.training.online_learning,
             step_count: 0,
             last_action: None,
@@ -262,15 +268,14 @@ impl RLStrategy {
                     };
 
                     if let Some(bid) = bid {
-                        let order = OrderRequest {
-                            client_order_id: Uuid::new_v4().to_string(),
-                            idempotency_key: None,
-                            token_id: pos.token_id.clone(),
-                            market_side: pos.side,
-                            order_side: OrderSide::Sell,
-                            shares: pos.shares,
-                            limit_price: bid,
-                            order_type: if action.is_aggressive() {
+                        actions.push(self.submit_intent(
+                            format!("rl_sell_{}", self.step_count),
+                            &pos.token_id,
+                            pos.side,
+                            false,
+                            pos.shares,
+                            bid,
+                            if action.is_aggressive() {
                                 OrderType::Market
                             } else {
                                 OrderType::Limit
@@ -304,29 +309,33 @@ impl RLStrategy {
         (base_size as f32 * size_multiplier).max(1.0) as u64
     }
 
-    /// Create an order request
-    fn create_order(
+    fn submit_intent(
         &self,
+        client_order_id: String,
         token_id: &str,
         market_side: Side,
+        is_buy: bool,
         shares: u64,
         price: Decimal,
-        action: &ContinuousAction,
-    ) -> OrderRequest {
-        OrderRequest {
-            client_order_id: Uuid::new_v4().to_string(),
-            idempotency_key: None,
-            token_id: token_id.to_string(),
-            market_side,
-            order_side: OrderSide::Buy,
-            shares,
-            limit_price: price,
-            order_type: if action.is_aggressive() {
-                OrderType::Market
-            } else {
-                OrderType::Limit
+        order_type: OrderType,
+        time_in_force: TimeInForce,
+        priority: u8,
+    ) -> StrategyAction {
+        StrategyAction::SubmitIntent {
+            intent: StrategyOrderIntent {
+                client_order_id,
+                domain: Domain::Crypto,
+                market_slug: self.market_slug.clone(),
+                token_id: token_id.to_string(),
+                side: market_side,
+                is_buy,
+                shares,
+                limit_price: price,
+                order_type,
+                time_in_force,
+                priority,
+                metadata: HashMap::from([("strategy".to_string(), "rl".to_string())]),
             },
-            time_in_force: TimeInForce::GTC,
         }
     }
 
@@ -598,6 +607,7 @@ mod tests {
             "up_token".to_string(),
             "down_token".to_string(),
             "BTCUSDT".to_string(),
+            "btc-up-down".to_string(),
         );
 
         assert_eq!(strategy.id(), "test_rl");
@@ -613,6 +623,7 @@ mod tests {
             "up_token".to_string(),
             "down_token".to_string(),
             "BTCUSDT".to_string(),
+            "btc-up-down".to_string(),
         );
 
         // Without sum of asks, should hold

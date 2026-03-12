@@ -1,3 +1,4 @@
+# DEPRECATED: Use release-aliyun.yml. Builds x86_64 (wrong arch for aarch64 target).
 name: Deploy to AWS
 
 on:

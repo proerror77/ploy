@@ -4,16 +4,15 @@ use ploy::cli::runtime::CryptoCommands;
 use ploy::config::ExecutionConfig;
 use ploy::error::Result;
 use ploy::strategy::execution::executor::OrderExecutor;
+use ploy::strategy::crypto::series_ids_for_symbol as crypto_series_ids_for_symbol;
 use tracing::info;
 
 pub(crate) fn map_crypto_coin_to_series_ids(coin_or_series: &str) -> Vec<String> {
-    match coin_or_series.trim().to_uppercase().as_str() {
-        // Prefer 5m; include 15m as fallback (e.g. ETH 5m can be absent).
-        "BTC" => vec!["10684".to_string(), "10192".to_string()], // btc-up-or-down-5m, btc-up-or-down-15m
-        "ETH" => vec!["10683".to_string(), "10191".to_string()], // eth-up-or-down-5m, eth-up-or-down-15m
-        "SOL" => vec!["10686".to_string(), "10423".to_string()], // sol-up-or-down-5m, sol-up-or-down-15m
-        "XRP" => vec!["10685".to_string(), "10422".to_string()], // xrp-up-or-down-5m, xrp-up-or-down-15m
-        _ => vec![coin_or_series.trim().to_string()],            // Allow raw series IDs
+    let mapped = crypto_series_ids_for_symbol(coin_or_series);
+    if mapped.is_empty() {
+        vec![coin_or_series.trim().to_string()]
+    } else {
+        mapped
     }
 }
 

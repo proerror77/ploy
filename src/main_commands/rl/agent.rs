@@ -94,6 +94,7 @@ pub(super) async fn run_agent(
     };
     use ploy::rl::{RLCryptoRuntime, RLCryptoRuntimeConfig, RLConfig};
     use ploy::signing::Wallet;
+    use ploy::AgentRiskParams;
     use rust_decimal::prelude::ToPrimitive;
     use rust_decimal::Decimal;
     use std::sync::Arc;
@@ -211,6 +212,8 @@ pub(super) async fn run_agent(
     let tick_duration = std::time::Duration::from_millis(tick_interval);
     let mut interval = tokio::time::interval(tick_duration);
     let mut step_count = 0u64;
+    let mut events_received = 0u64;
+    let mut intents_generated = 0u64;
     let mut quotes_received = false;
     let mut intents_generated = 0u64;
     let mut executions_success = 0u64;

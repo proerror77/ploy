@@ -6,7 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::api::{auth::ensure_admin_authorized, state::AppState};
-use crate::platform::StrategyDeployment;
+use crate::control_plane::StrategyDeployment;
 
 use super::deployment_gate::ensure_required_strategy_evidence;
 

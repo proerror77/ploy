@@ -57,7 +57,7 @@ pub enum AppEvent {
     AgentUpdate(Vec<crate::coordinator::AgentSnapshot>),
     /// Risk state update from coordinator
     RiskUpdate {
-        state: crate::platform::PlatformRiskState,
+        state: crate::coordinator::PlatformRiskState,
         daily_loss_used: rust_decimal::Decimal,
         daily_loss_limit: rust_decimal::Decimal,
         queue_depth: usize,

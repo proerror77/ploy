@@ -274,7 +274,8 @@ impl BacktestCollector {
                         Ok(klines) => {
                             if let Some(kline) = klines.last() {
                                 let write_ok = if config.persist_csv {
-                                    match Self::append_kline(&config.output_dir, symbol, kline).await
+                                    match Self::append_kline(&config.output_dir, symbol, kline)
+                                        .await
                                     {
                                         Ok(_) => true,
                                         Err(e) => {

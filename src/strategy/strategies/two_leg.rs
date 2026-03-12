@@ -13,13 +13,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
-use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
+use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
+use crate::platform::Domain;
 
 use crate::strategy::detectors::{DumpDetector, DumpDetectorConfig, DumpSignal};
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
-    StrategyEvent, StrategyEventType, StrategyStateInfo,
+    StrategyConfig, StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 
 /// Two-leg strategy configuration
@@ -237,13 +238,6 @@ impl TwoLegStrategy {
         // Create Leg1 order
         let client_order_id = format!("{}-leg1-{}", self.config.id, Utc::now().timestamp_millis());
 
-        let order = OrderRequest::buy_limit(
-            token_id.to_string(),
-            signal.side,
-            self.config.shares,
-            signal.trigger_price,
-        );
-
         // Track pending order
         self.pending_orders.insert(
             client_order_id.clone(),
@@ -263,10 +257,16 @@ impl TwoLegStrategy {
             signal.side, self.config.shares, signal.trigger_price
         );
 
-        actions.push(StrategyAction::SubmitOrder {
-            client_order_id,
-            order,
-            priority: 10,
+        actions.push(StrategyAction::SubmitIntent {
+            intent: self.submit_intent(
+                client_order_id,
+                token_id.to_string(),
+                signal.side,
+                true,
+                self.config.shares,
+                signal.trigger_price,
+                10,
+            ),
         });
 
         actions.push(StrategyAction::LogEvent {
@@ -317,7 +317,6 @@ impl TwoLegStrategy {
 
         let client_order_id = format!("{}-leg2-{}", self.config.id, Utc::now().timestamp_millis());
 
-        let order = OrderRequest::buy_limit(token_id.to_string(), side, ctx.leg1_shares, price);
 
         self.pending_orders.insert(
             client_order_id.clone(),
@@ -336,13 +335,51 @@ impl TwoLegStrategy {
             side, ctx.leg1_shares, price
         );
 
-        actions.push(StrategyAction::SubmitOrder {
-            client_order_id,
-            order,
-            priority: 10,
+        actions.push(StrategyAction::SubmitIntent {
+            intent: self.submit_intent(
+                client_order_id,
+                token_id.to_string(),
+                side,
+                true,
+                ctx.leg1_shares,
+                price,
+                10,
+            ),
         });
 
         actions
+    }
+
+    fn submit_intent(
+        &self,
+        client_order_id: String,
+        token_id: String,
+        side: Side,
+        is_buy: bool,
+        shares: u64,
+        limit_price: Decimal,
+        priority: u8,
+    ) -> StrategyOrderIntent {
+        let market_slug = self
+            .current_event
+            .as_ref()
+            .map(|event| event.event_id.clone())
+            .unwrap_or_else(|| token_id.clone());
+
+        StrategyOrderIntent {
+            client_order_id,
+            domain: Domain::Crypto,
+            market_slug,
+            token_id,
+            side,
+            is_buy,
+            shares,
+            limit_price,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::GTC,
+            priority,
+            metadata: HashMap::new(),
+        }
     }
 
     /// Force Leg2 or abort
@@ -485,6 +522,7 @@ impl Strategy for TwoLegStrategy {
                     self.state = TwoLegState::WatchWindow;
 
                     info!("Started monitoring event: {}", event_id);
+
                 }
             }
             MarketUpdate::EventExpired { event_id } => {
@@ -714,6 +752,7 @@ impl Strategy for TwoLegStrategy {
 mod tests {
     use super::*;
     use chrono::Duration;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn test_state_transitions() {
