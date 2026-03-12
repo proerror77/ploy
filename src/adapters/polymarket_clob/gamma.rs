@@ -8,7 +8,10 @@ use polymarket_client_sdk::gamma::types::request::{
 use polymarket_client_sdk::gamma::types::response::Event as SdkEvent;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use tokio::time::{timeout, Duration};
 use tracing::{debug, instrument};
+
+const GAMMA_REQUEST_TIMEOUT_SECS: u64 = 15;
 
 impl PolymarketClient {
     /// Get the raw Gamma market (SDK type) by CLOB token id.
@@ -30,8 +33,15 @@ impl PolymarketClient {
 
         let markets = self
             .gamma_client
-            .markets(&req)
+            .markets(&req);
+        let markets = timeout(Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS), markets)
             .await
+            .map_err(|_| {
+                PloyError::Internal(format!(
+                    "Gamma markets request timed out after {}s",
+                    GAMMA_REQUEST_TIMEOUT_SECS
+                ))
+            })?
             .map_err(|e| PloyError::Internal(format!("Failed to get market: {}", e)))?;
 
         markets.into_iter().next().ok_or_else(|| {
@@ -46,8 +56,15 @@ impl PolymarketClient {
 
         let results = self
             .gamma_client
-            .search(&req)
+            .search(&req);
+        let results = timeout(Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS), results)
             .await
+            .map_err(|_| {
+                PloyError::Internal(format!(
+                    "Gamma search timed out after {}s",
+                    GAMMA_REQUEST_TIMEOUT_SECS
+                ))
+            })?
             .map_err(|e| PloyError::Internal(format!("Failed to search markets: {}", e)))?;
 
         let mut summaries = Vec::new();
@@ -92,8 +109,15 @@ impl PolymarketClient {
 
         let series = self
             .gamma_client
-            .series_by_id(&req)
+            .series_by_id(&req);
+        let series = timeout(Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS), series)
             .await
+            .map_err(|_| {
+                PloyError::Internal(format!(
+                    "Gamma series fetch timed out after {}s",
+                    GAMMA_REQUEST_TIMEOUT_SECS
+                ))
+            })?
             .map_err(|e| PloyError::Internal(format!("Failed to get series: {}", e)))?;
 
         Ok(GammaSeriesResponse {
@@ -148,8 +172,15 @@ impl PolymarketClient {
 
         let event = self
             .gamma_client
-            .event_by_id(&req)
+            .event_by_id(&req);
+        let event = timeout(Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS), event)
             .await
+            .map_err(|_| {
+                PloyError::Internal(format!(
+                    "Gamma event fetch timed out after {}s",
+                    GAMMA_REQUEST_TIMEOUT_SECS
+                ))
+            })?
             .map_err(|e| PloyError::Internal(format!("Failed to get event: {}", e)))?;
 
         Ok(self.convert_sdk_event(&event))
@@ -185,8 +216,15 @@ impl PolymarketClient {
         let req = SeriesByIdRequest::builder().id(series_id).build();
         let series = self
             .gamma_client
-            .series_by_id(&req)
+            .series_by_id(&req);
+        let series = timeout(Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS), series)
             .await
+            .map_err(|_| {
+                PloyError::Internal(format!(
+                    "Gamma active-events fetch timed out after {}s for series {}",
+                    GAMMA_REQUEST_TIMEOUT_SECS, series_id
+                ))
+            })?
             .map_err(|e| PloyError::Internal(format!("Failed to fetch series: {}", e)))?;
 
         let active_events: Vec<GammaEventInfo> = series

@@ -162,6 +162,8 @@ pub(super) async fn initialize_crypto_market_discovery(
                     );
                 }
             }
+            let desired_count = desired.len();
+            let collector_target_count = collector_targets.len();
 
             if use_data_plane_collector {
                 if desired != last_desired {
@@ -214,6 +216,13 @@ pub(super) async fn initialize_crypto_market_discovery(
                     );
                 }
             }
+
+            info!(
+                agent = %agent_id_collector,
+                token_count = desired_count,
+                collector_targets = collector_target_count,
+                "pm token collector refresh cycle complete"
+            );
         }
     });
 
