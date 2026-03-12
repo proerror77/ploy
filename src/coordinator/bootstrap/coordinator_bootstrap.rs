@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent_runtime::AgentRiskParams;
+use crate::persistence::ensure_coordinator_ingress_state_table;
 
 pub(super) struct CoordinatorRuntimeBootstrap {
     pub(super) coordinator: Coordinator,
