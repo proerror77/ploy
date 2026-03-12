@@ -5537,3 +5537,20 @@ Take the smallest safe `R-40` slice by retiring `#[async_trait]` from the govern
 ## Notes
 
 - This slice intentionally avoids `pub trait async fn` syntax to sidestep the public-trait warning and avoids any trait-object redesign because `GovernanceAgent` has no dyn consumers on this branch.
+
+# Deploy Bootstrap Idempotence And Governance Reset Coverage Wave (2026-03-12)
+
+## Goal
+Close the remaining `deploy-prebuilt` bootstrap gap under `R-43` and add the missing regression for `R-52` so governance global-mode transitions cannot silently stop clearing per-domain overrides.
+
+## Outcomes
+
+- [x] Replaced `deploy-prebuilt.yml`'s swallow-errors PostgreSQL bootstrap with guarded `psql \\gexec` creation for the `ploy` role and database.
+- [x] Added a workflow guard test that fails if `deploy-prebuilt.yml` regresses to catch-all bootstrap handling instead of idempotent role/database setup.
+- [x] Added a governance regression test proving `set_global_mode()` clears all per-domain ingress overrides.
+
+## Validation
+
+- `CARGO_TARGET_DIR=/tmp/ploy-r43-bootstrap rtk cargo test deploy_prebuilt_bootstraps_postgres_idempotently --test workflow_migrations -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-r52 rtk cargo test test_set_global_mode_clears_domain_overrides --lib -- --exact --nocapture`
+- `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/deploy-prebuilt.yml"); puts "yaml ok"'`

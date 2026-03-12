@@ -168,9 +168,20 @@ jobs:
         sudo systemctl start postgresql
         sudo systemctl enable postgresql
 
-        sudo -u postgres psql << EOF || echo "Database may already exist"
-        CREATE DATABASE ploy;
-        CREATE USER ploy WITH PASSWORD 'ploy';
+        sudo -u postgres psql -v ON_ERROR_STOP=1 postgres << 'EOF'
+        SELECT 'CREATE USER ploy WITH PASSWORD ''ploy'''
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM pg_roles
+            WHERE rolname = 'ploy'
+        )\gexec
+        ALTER ROLE ploy WITH LOGIN PASSWORD 'ploy';
+        SELECT 'CREATE DATABASE ploy OWNER ploy'
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM pg_database
+            WHERE datname = 'ploy'
+        )\gexec
         GRANT ALL PRIVILEGES ON DATABASE ploy TO ploy;
         ALTER DATABASE ploy OWNER TO ploy;
         EOF

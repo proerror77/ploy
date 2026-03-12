@@ -65,3 +65,39 @@ fn ci_build_prepares_database_for_sqlx_compile_checks() {
         offenders.join("\n")
     );
 }
+
+#[test]
+fn deploy_prebuilt_bootstraps_postgres_idempotently() {
+    let content = workflow_contents(".github/workflows/deploy-prebuilt.yml");
+    let mut offenders = Vec::new();
+
+    if content.contains("Database may already exist") {
+        offenders.push(
+            "deploy-prebuilt.yml: still swallows bootstrap failures with a catch-all echo"
+                .to_string(),
+        );
+    }
+
+    if !content.contains("SELECT 'CREATE USER ploy WITH PASSWORD ''ploy'''")
+        || !content.contains("WHERE NOT EXISTS (")
+        || !content.contains("\\gexec")
+    {
+        offenders.push(
+            "deploy-prebuilt.yml: missing guarded role/database bootstrap with psql \\gexec"
+                .to_string(),
+        );
+    }
+
+    if !content.contains("ALTER ROLE ploy WITH LOGIN PASSWORD 'ploy';") {
+        offenders.push(
+            "deploy-prebuilt.yml: missing idempotent role password/login reconciliation"
+                .to_string(),
+        );
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "deploy-prebuilt bootstrap guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
