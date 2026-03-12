@@ -836,6 +836,96 @@ min_balance_usd = 9.0
 }
 
 #[test]
+fn test_balance_pause_blocks_until_expired_then_resumes_live_entry() {
+    let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), false);
+    let now = Utc::now();
+    let resume_at = now + chrono::Duration::seconds(45);
+    let resumed_ts = resume_at + chrono::Duration::seconds(1);
+    adapter.config.backtest_config.direction_threshold = 0.0;
+    adapter.config.backtest_config.use_greeks = false;
+    adapter.config.backtest_config.max_entry_sigma = 0.20;
+    adapter.config.backtest_config.entry_after_start_min_secs = 0;
+    adapter.config.backtest_config.entry_after_start_max_secs = 0;
+    adapter.config.backtest_config.entry_quote_persistence_secs = 0;
+    adapter.config.backtest_config.max_initial_sum = Decimal::ZERO;
+    adapter
+        .binance_l2_obi_5
+        .insert("BTCUSDT".into(), dec!(0.02));
+    adapter
+        .binance_l2_obi_prev_5
+        .insert("BTCUSDT".into(), dec!(0.02));
+    adapter
+        .binance_l2_obi_ts
+        .insert("BTCUSDT".into(), resumed_ts);
+
+    let window = LiveWindow {
+        event_id: "evt-balance-pause".into(),
+        symbol: "BTCUSDT".into(),
+        up_token: "up-token".into(),
+        down_token: "down-token".into(),
+        condition_id: None,
+        end_time: now + chrono::Duration::seconds(300),
+        open_price: Some(dec!(100)),
+        window_secs: 300,
+    };
+
+    seed_persistent_pm_quotes(
+        &mut adapter,
+        &window.event_id,
+        Some(dec!(0.55)),
+        Some(dec!(0.30)),
+        now - chrono::Duration::seconds(10),
+        resumed_ts,
+    );
+
+    adapter.balance_pause_until = Some(resume_at);
+    adapter.consecutive_balance_failures = 3;
+
+    let blocked = adapter.try_entry_for_window(
+        "BTCUSDT",
+        now,
+        &window,
+        dec!(101),
+        (Some(0.01), 100.0),
+        Some(dec!(0.55)),
+        Some(dec!(0.48)),
+    );
+    assert!(
+        blocked.is_none(),
+        "live entry should be blocked while the balance pause is still active"
+    );
+    assert_eq!(adapter.balance_pause_until, Some(resume_at));
+    assert_eq!(adapter.consecutive_balance_failures, 3);
+
+    seed_persistent_pm_quotes(
+        &mut adapter,
+        &window.event_id,
+        Some(dec!(0.55)),
+        Some(dec!(0.30)),
+        resumed_ts - chrono::Duration::seconds(10),
+        resumed_ts,
+    );
+
+    let resumed = adapter.try_entry_for_window(
+        "BTCUSDT",
+        resumed_ts,
+        &window,
+        dec!(101),
+        (Some(0.01), 100.0),
+        Some(dec!(0.55)),
+        Some(dec!(0.30)),
+    );
+    assert!(
+        matches!(resumed, Some(StrategyAction::SubmitIntent { .. })),
+        "live entry should resume with a normal submit intent once the pause expires; got {:?}, rejects={:?}",
+        resumed,
+        adapter.entry_reject_counts
+    );
+    assert_eq!(adapter.balance_pause_until, None);
+    assert_eq!(adapter.consecutive_balance_failures, 0);
+}
+
+#[test]
 fn test_force_threshold_not_triggered_without_timeout_or_risk() {
     let mut adapter = StaggeredArbAdapter::new("test".into(), default_config(), true);
     let now = Utc::now();

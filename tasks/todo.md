@@ -1333,6 +1333,43 @@ Close the staggered-arb documentation gaps by documenting each split live module
 - 2026-03-12: Added module docs to the split staggered-arb live owners so `entry`, `leg2`, `lifecycle`, `order_updates`, `reporting`, `runtime_flow`, and `state_support` each explain their responsibility at the file boundary.
 - 2026-03-12: Expanded [staggered_arb_state_machine.md](/Users/proerror/Documents/ploy-order-intent-clean/docs/strategies/staggered_arb_state_machine.md) with the live `LiveOrderTrack` lifecycle, foreground-vs-managed live submission paths, and the expiry/settlement branch that clears in-flight state across event expiry.
 
+# R-46 Staggered Arb Entry Gate Split (2026-03-12)
+
+## Goal
+Reduce `try_entry_for_window` complexity in `staggered_arb_live/entry.rs` by separating read-heavy gate evaluation from order-plan construction and final live/paper submission side effects.
+
+## File ownership
+
+- `src/strategy/staggered_arb_live/entry.rs`
+  - owner: gate-prep helpers, order-plan builder, and final entry submit path
+- `src/strategy/staggered_arb_live/tests.rs`
+  - owner: entry-path regressions, including balance-pause coverage
+
+## Tasks
+
+- [x] Split `try_entry_for_window` into smaller helpers without changing gate semantics.
+- [x] Keep the balance-pause mutation isolated from the read-heavy entry gate path.
+- [x] Keep live/paper submission side effects in a dedicated tail helper.
+- [x] Add focused regression coverage for the moved balance-pause path.
+- [x] Re-run compile plus focused staggered-arb entry regressions.
+
+## Progress notes
+
+- 2026-03-12: Added `PreparedEntryContext` and `EntryOrderPlan` in [entry.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/strategy/staggered_arb_live/entry.rs), then split `try_entry_for_window` into `prepare_entry_context`, `build_entry_order_plan`, and `submit_entry_order`.
+- 2026-03-12: Preserved live-path side effects in the final submit helper so cooldowns, pending-leg1 locks, paper positions, and submit intents are still applied from one place.
+- 2026-03-12: Added [test_balance_pause_blocks_until_expired_then_resumes_live_entry](/Users/proerror/Documents/ploy-order-intent-clean/src/strategy/staggered_arb_live/tests.rs) to cover the balance-pause block that was moved out of the main gate body.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-r46-check rtk cargo check --lib --message-format=short`
+  - `rtk cargo test test_live_leg1_submit_sets_client_order_and_idempotency_key --lib -- --exact --nocapture`
+  - `rtk cargo test test_try_entry_waits_for_post_open_delay_then_allows --lib -- --exact --nocapture`
+  - `rtk cargo test test_try_entry_requires_persistent_other_ask_before_leg1 --lib -- --exact --nocapture`
+  - `rtk cargo test test_min_balance_blocks_entry --lib -- --exact --nocapture`
+  - `rtk cargo test test_try_entry_requires_stronger_obi_for_premium_sum --lib -- --exact --nocapture`
+  - `rtk cargo test test_try_entry_uses_event_scoped_quotes --lib -- --exact --nocapture`
+  - `rtk cargo test test_try_entry_rejects_sigma_above_max_entry_sigma --lib -- --exact --nocapture`
+  - `rtk cargo test test_try_entry_rejects_far_from_mid_fair_value_for_long_gamma_profile --lib -- --exact --nocapture`
+  - `rtk cargo test test_balance_pause_blocks_until_expired_then_resumes_live_entry --lib -- --exact --nocapture`
+
 # Strategy And Adapter Wave 11 (2026-03-11)
 
 ## Goal

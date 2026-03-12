@@ -1,6 +1,31 @@
 //! Live Leg1 entry gating and opening-window evaluation for staggered arb.
 
 use super::*;
+use crate::strategy::gamma_scalping::greeks::BinaryGreeks;
+
+struct PreparedEntryContext {
+    elapsed_since_start: i64,
+    ua: Decimal,
+    da: Decimal,
+    current_sum: Decimal,
+    sigma: f64,
+    p_hat: f64,
+    greeks: Option<BinaryGreeks>,
+    predicted_up: bool,
+    obi: f64,
+    strong_obi_bonus_active: bool,
+    quote_state: PmEventQuoteState,
+}
+
+struct EntryOrderPlan {
+    leg1_dir: Direction,
+    leg1_ask: Decimal,
+    token_id: String,
+    side: Side,
+    shares: u64,
+    leg1_fee: Decimal,
+    total_cost: Decimal,
+}
 
 pub(super) fn has_opening_window_candidate(
     adapter: &StaggeredArbAdapter,
@@ -86,7 +111,24 @@ pub(super) fn try_entry_for_window(
     down_ask: Option<Decimal>,
 ) -> Option<StrategyAction> {
     let bc = adapter.config.backtest_config.clone();
+    let context = prepare_entry_context(
+        adapter, symbol, ts, window, st, vol_info, up_ask, down_ask, &bc,
+    )?;
+    let plan = build_entry_order_plan(adapter, symbol, ts, window, &bc, &context)?;
+    submit_entry_order(adapter, symbol, ts, window, &bc, context, plan)
+}
 
+fn prepare_entry_context(
+    adapter: &mut StaggeredArbAdapter,
+    symbol: &str,
+    ts: DateTime<Utc>,
+    window: &LiveWindow,
+    st: Decimal,
+    vol_info: (Option<f64>, f64),
+    up_ask: Option<Decimal>,
+    down_ask: Option<Decimal>,
+    bc: &StaggeredArbBacktestConfig,
+) -> Option<PreparedEntryContext> {
     if !adapter.dry_run {
         if let Some(pause_until) = adapter.balance_pause_until {
             if ts < pause_until {
@@ -144,7 +186,6 @@ pub(super) fn try_entry_for_window(
         adapter.bump_entry_reject_for_symbol(symbol, "pm_quotes_stale");
         return None;
     }
-
     if ua < bc.min_ask_price || da < bc.min_ask_price {
         adapter.bump_entry_reject_for_symbol(symbol, "ask_below_min");
         return None;
@@ -155,7 +196,6 @@ pub(super) fn try_entry_for_window(
         adapter.bump_entry_reject_for_symbol(symbol, "sum_below_min_entry_sum");
         return None;
     }
-
     if bc.max_initial_sum > Decimal::ZERO && current_sum >= bc.max_initial_sum {
         adapter.bump_entry_reject_for_symbol(symbol, "sum_above_max_initial_sum");
         return None;
@@ -171,7 +211,6 @@ pub(super) fn try_entry_for_window(
             _ => floor,
         }
     };
-
     if sigma < bc.min_entry_sigma {
         adapter.bump_entry_reject_for_symbol(symbol, "sigma_below_min_entry_sigma");
         return None;
@@ -189,7 +228,6 @@ pub(super) fn try_entry_for_window(
         }
     };
     let p_hat = estimate_probability(s0, st, sigma, time_remaining, bc.mu);
-
     let greeks = if bc.use_greeks {
         super::super::gamma_scalping::greeks::binary_greeks(
             st.to_f64().unwrap_or(0.0),
@@ -232,7 +270,6 @@ pub(super) fn try_entry_for_window(
     } else {
         p_hat > 0.5
     };
-
     if predicted_up && displacement <= 0.0 {
         adapter.bump_entry_reject_for_symbol(symbol, "direction_displacement_mismatch");
         return None;
@@ -274,6 +311,7 @@ pub(super) fn try_entry_for_window(
         adapter.bump_entry_reject_for_symbol(symbol, "obi_stale");
         return None;
     }
+
     let obi = match adapter.binance_l2_obi_5.get(symbol) {
         Some(v) => v.to_f64().unwrap_or(0.0),
         None => {
@@ -298,6 +336,7 @@ pub(super) fn try_entry_for_window(
         adapter.bump_entry_reject_for_symbol(symbol, reason);
         return None;
     }
+
     let obi_persistent = bc.obi_is_persistent(predicted_up, obi, prev_obi, required_obi_strength);
     let strong_obi_bonus_active = bc.strong_obi_entry_bonus_active(
         predicted_up,
@@ -326,29 +365,59 @@ pub(super) fn try_entry_for_window(
         return None;
     }
 
-    let allowed_entry_window_secs =
-        bc.entry_after_start_max_secs_now(window.window_secs, strong_obi_bonus_active);
-    if allowed_entry_window_secs > 0 && elapsed_since_start > allowed_entry_window_secs as i64 {
+    Some(PreparedEntryContext {
+        elapsed_since_start,
+        ua,
+        da,
+        current_sum,
+        sigma,
+        p_hat,
+        greeks,
+        predicted_up,
+        obi,
+        strong_obi_bonus_active,
+        quote_state,
+    })
+}
+
+fn build_entry_order_plan(
+    adapter: &mut StaggeredArbAdapter,
+    symbol: &str,
+    ts: DateTime<Utc>,
+    window: &LiveWindow,
+    bc: &StaggeredArbBacktestConfig,
+    context: &PreparedEntryContext,
+) -> Option<EntryOrderPlan> {
+    let allowed_entry_window_secs = bc.entry_after_start_max_secs_now(
+        window.window_secs,
+        context.strong_obi_bonus_active,
+    );
+    if allowed_entry_window_secs > 0
+        && context.elapsed_since_start > allowed_entry_window_secs as i64
+    {
         adapter.bump_entry_reject_for_symbol(symbol, "entry_window_expired");
         return None;
     }
 
-    let (leg1_dir, leg1_ask) = if predicted_up {
-        (Direction::Up, ua)
+    let (leg1_dir, leg1_ask, other_quote_first_seen_at) = if context.predicted_up {
+        (
+            Direction::Up,
+            context.ua,
+            context.quote_state.down.first_seen_at,
+        )
     } else {
-        (Direction::Down, da)
+        (
+            Direction::Down,
+            context.da,
+            context.quote_state.up.first_seen_at,
+        )
     };
-    let other_quote_state = if predicted_up {
-        quote_state.down
-    } else {
-        quote_state.up
-    };
-    if !bc.entry_quote_is_persistent(other_quote_state.first_seen_at, ts) {
+    if !bc.entry_quote_is_persistent(other_quote_first_seen_at, ts) {
         adapter.bump_entry_reject_for_symbol(symbol, "other_ask_not_persistent");
         return None;
     }
 
-    if leg1_ask > bc.max_leg1_price_now(strong_obi_bonus_active) {
+    if leg1_ask > bc.max_leg1_price_now(context.strong_obi_bonus_active) {
         adapter.bump_entry_reject_for_symbol(symbol, "leg1_price_above_cap");
         return None;
     }
@@ -397,7 +466,7 @@ pub(super) fn try_entry_for_window(
     } else {
         let base_shares = bc.shares_per_trade.max(5);
         if bc.delta_weighted_sizing {
-            if let Some(ref g) = greeks {
+            if let Some(ref g) = context.greeks {
                 let scale = (g.delta.abs() * 2.0).clamp(0.5, 2.0);
                 ((base_shares as f64 * scale).round() as u64).max(5)
             } else {
@@ -452,8 +521,28 @@ pub(super) fn try_entry_for_window(
         Direction::Down => Side::Down,
     };
 
+    Some(EntryOrderPlan {
+        leg1_dir,
+        leg1_ask,
+        token_id,
+        side,
+        shares,
+        leg1_fee,
+        total_cost,
+    })
+}
+
+fn submit_entry_order(
+    adapter: &mut StaggeredArbAdapter,
+    symbol: &str,
+    ts: DateTime<Utc>,
+    window: &LiveWindow,
+    bc: &StaggeredArbBacktestConfig,
+    context: PreparedEntryContext,
+    plan: EntryOrderPlan,
+) -> Option<StrategyAction> {
     if adapter.dry_run {
-        adapter.equity -= total_cost;
+        adapter.equity -= plan.total_cost;
 
         let window_duration = (window.end_time - ts).num_seconds() as f64;
         let max_wait_by_pct = (window_duration * bc.max_wait_pct) as i64;
@@ -466,12 +555,12 @@ pub(super) fn try_entry_for_window(
             condition_id: window.condition_id.clone(),
             up_token: window.up_token.clone(),
             down_token: window.down_token.clone(),
-            leg1_direction: leg1_dir.clone(),
-            leg1_price: leg1_ask,
-            leg1_shares: shares,
-            leg1_fee,
+            leg1_direction: plan.leg1_dir.clone(),
+            leg1_price: plan.leg1_ask,
+            leg1_shares: plan.shares,
+            leg1_fee: plan.leg1_fee,
             leg1_time: ts,
-            entry_obi: Some(obi),
+            entry_obi: Some(context.obi),
             protective_stop_armed_at: None,
             wait_deadline,
             leg2_price: None,
@@ -489,67 +578,62 @@ pub(super) fn try_entry_for_window(
 
         let msg = format!(
             "[STAG-ARB] ENTRY {} {} leg1=${:.4} sum=${:.4} p_hat={:.3} σ={:.5} (paper)",
-            symbol, leg1_dir, leg1_ask, current_sum, p_hat, sigma,
+            symbol, plan.leg1_dir, plan.leg1_ask, context.current_sum, context.p_hat, context.sigma,
         );
         info!("{}", msg);
         adapter.bump_entry_reject_for_symbol(symbol, "entry_accepted");
 
-        Some(StrategyAction::LogEvent {
+        return Some(StrategyAction::LogEvent {
             event: StrategyEvent::new(StrategyEventType::EntryTriggered, msg),
-        })
-    } else {
-        let client_order_id = format!(
-            "stag_leg1_{}_{}",
-            window.event_id,
-            Utc::now().timestamp_millis()
-        );
-
-        adapter.live_orders.insert(
-            client_order_id.clone(),
-            LiveOrderTrack {
-                event_id: window.event_id.clone(),
-                condition_id: window.condition_id.clone(),
-                symbol: symbol.to_string(),
-                up_token: window.up_token.clone(),
-                down_token: window.down_token.clone(),
-                direction: leg1_dir.clone(),
-                token_id: token_id.clone(),
-                leg: 1,
-                price: leg1_ask,
-                shares,
-                position_idx: None,
-                close_reason: None,
-                submitted_at: ts,
-                cancel_requested_at: None,
-                exchange_order_id: None,
-                acknowledged_filled_qty: 0,
-                entry_obi: Some(obi),
-            },
-        );
-        adapter.pending_leg1_events.insert(window.event_id.clone());
-        adapter.cooldowns.insert(symbol.to_string(), ts);
-
-        let msg = format!(
-            "[STAG-ARB] LEG1 SUBMIT {} {} @ {:.2}¢ ({} shares, ${:.2}) p_hat={:.3} σ={:.5}",
-            symbol,
-            leg1_dir,
-            leg1_ask * dec!(100),
-            shares,
-            leg1_ask.to_f64().unwrap_or(0.0) * shares as f64,
-            p_hat,
-            sigma,
-        );
-        info!("{}", msg);
-        adapter.bump_entry_reject_for_symbol(symbol, "entry_accepted");
-
-        Some(crypto_submit_intent(
-            client_order_id,
-            window.event_id.clone(),
-            token_id,
-            side,
-            shares,
-            leg1_ask,
-            10,
-        ))
+        });
     }
+
+    let client_order_id = format!("stag_leg1_{}_{}", window.event_id, Utc::now().timestamp_millis());
+    adapter.live_orders.insert(
+        client_order_id.clone(),
+        LiveOrderTrack {
+            event_id: window.event_id.clone(),
+            condition_id: window.condition_id.clone(),
+            symbol: symbol.to_string(),
+            up_token: window.up_token.clone(),
+            down_token: window.down_token.clone(),
+            direction: plan.leg1_dir.clone(),
+            token_id: plan.token_id.clone(),
+            leg: 1,
+            price: plan.leg1_ask,
+            shares: plan.shares,
+            position_idx: None,
+            close_reason: None,
+            submitted_at: ts,
+            cancel_requested_at: None,
+            exchange_order_id: None,
+            acknowledged_filled_qty: 0,
+            entry_obi: Some(context.obi),
+        },
+    );
+    adapter.pending_leg1_events.insert(window.event_id.clone());
+    adapter.cooldowns.insert(symbol.to_string(), ts);
+
+    let msg = format!(
+        "[STAG-ARB] LEG1 SUBMIT {} {} @ {:.2}¢ ({} shares, ${:.2}) p_hat={:.3} σ={:.5}",
+        symbol,
+        plan.leg1_dir,
+        plan.leg1_ask * dec!(100),
+        plan.shares,
+        plan.leg1_ask.to_f64().unwrap_or(0.0) * plan.shares as f64,
+        context.p_hat,
+        context.sigma,
+    );
+    info!("{}", msg);
+    adapter.bump_entry_reject_for_symbol(symbol, "entry_accepted");
+
+    Some(crypto_submit_intent(
+        client_order_id,
+        window.event_id.clone(),
+        plan.token_id,
+        plan.side,
+        plan.shares,
+        plan.leg1_ask,
+        10,
+    ))
 }
