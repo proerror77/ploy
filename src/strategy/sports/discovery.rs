@@ -5,7 +5,6 @@
 use crate::adapters::PolymarketClient;
 use crate::error::Result;
 use crate::strategy::core::{BinaryMarket, MarketDiscovery, MarketType};
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -182,7 +181,6 @@ impl SportsMarketDiscovery {
     }
 }
 
-#[async_trait]
 impl MarketDiscovery for SportsMarketDiscovery {
     fn market_type(&self) -> MarketType {
         MarketType::SportsMoneyline

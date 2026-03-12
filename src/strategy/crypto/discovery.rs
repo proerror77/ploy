@@ -5,7 +5,6 @@
 use crate::adapters::PolymarketClient;
 use crate::error::Result;
 use crate::strategy::core::{BinaryMarket, MarketDiscovery, MarketType};
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tracing::{debug, info};
 
@@ -117,7 +116,6 @@ impl CryptoMarketDiscovery {
     }
 }
 
-#[async_trait]
 impl MarketDiscovery for CryptoMarketDiscovery {
     fn market_type(&self) -> MarketType {
         MarketType::CryptoUpDown
