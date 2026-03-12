@@ -52,7 +52,10 @@ fn normalize_meta<'a>(metadata: &'a HashMap<String, String>, keys: &[&str]) -> O
         .filter(|v| !v.is_empty())
 }
 
-pub(super) async fn table_has_account_scope(pool: &sqlx::PgPool, table_name: &str) -> bool {
+pub(in crate::api::handlers::sidecar) async fn table_has_account_scope(
+    pool: &sqlx::PgPool,
+    table_name: &str,
+) -> bool {
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT 1
@@ -71,7 +74,7 @@ pub(super) async fn table_has_account_scope(pool: &sqlx::PgPool, table_name: &st
     .is_some()
 }
 
-pub(super) fn resolve_request_account_scope(
+pub(in crate::api::handlers::sidecar) fn resolve_request_account_scope(
     explicit: Option<&str>,
     metadata: Option<&HashMap<String, String>>,
 ) -> std::result::Result<Option<String>, (StatusCode, String)> {
@@ -93,7 +96,7 @@ pub(super) fn resolve_request_account_scope(
     Ok(explicit.or(metadata))
 }
 
-pub(super) fn validate_account_scope(
+pub(in crate::api::handlers::sidecar) fn validate_account_scope(
     state: &AppState,
     requested_account: Option<&str>,
 ) -> std::result::Result<(), (StatusCode, String)> {
@@ -116,7 +119,7 @@ pub(super) fn validate_account_scope(
     Ok(())
 }
 
-pub(super) fn ensure_domain_allowed(
+pub(in crate::api::handlers::sidecar) fn ensure_domain_allowed(
     state: &AppState,
     domain: Domain,
     reason: &str,
@@ -134,7 +137,7 @@ pub(super) fn ensure_domain_allowed(
     ))
 }
 
-pub(super) fn ensure_deployment_accepts_live_ingress(
+pub(in crate::api::handlers::sidecar) fn ensure_deployment_accepts_live_ingress(
     deployment: &StrategyDeployment,
 ) -> std::result::Result<(), (StatusCode, String)> {
     if allow_non_live_deployment_ingress() {
@@ -154,7 +157,7 @@ pub(super) fn ensure_deployment_accepts_live_ingress(
     ))
 }
 
-pub(super) async fn ensure_agent_authorized(
+pub(in crate::api::handlers::sidecar) async fn ensure_agent_authorized(
     state: &AppState,
     agent_id: &str,
 ) -> std::result::Result<(), (StatusCode, String)> {
@@ -173,7 +176,7 @@ pub(super) async fn ensure_agent_authorized(
     ))
 }
 
-pub(super) async fn resolve_intent_deployment(
+pub(in crate::api::handlers::sidecar) async fn resolve_intent_deployment(
     state: &AppState,
     deployment_id: &str,
 ) -> std::result::Result<Option<StrategyDeployment>, (StatusCode, String)> {
@@ -234,7 +237,7 @@ pub(super) async fn resolve_intent_deployment(
     Ok(Some(dep.clone()))
 }
 
-pub(super) fn validate_deployment_binding(
+pub(in crate::api::handlers::sidecar) fn validate_deployment_binding(
     deployment: &StrategyDeployment,
     domain: Domain,
     market_slug: &str,
@@ -328,7 +331,7 @@ pub(super) fn validate_deployment_binding(
     Ok(())
 }
 
-pub(super) fn apply_deployment_metadata(
+pub(in crate::api::handlers::sidecar) fn apply_deployment_metadata(
     metadata: &mut HashMap<String, String>,
     deployment: &StrategyDeployment,
 ) {
@@ -398,7 +401,9 @@ pub(super) fn apply_deployment_metadata(
     }
 }
 
-pub(super) fn deployment_default_priority(deployment: &StrategyDeployment) -> OrderPriority {
+pub(in crate::api::handlers::sidecar) fn deployment_default_priority(
+    deployment: &StrategyDeployment,
+) -> OrderPriority {
     match deployment.priority {
         p if p >= 90 => OrderPriority::Critical,
         p if p >= 70 => OrderPriority::High,

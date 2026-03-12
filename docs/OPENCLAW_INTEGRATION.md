@@ -80,6 +80,7 @@ JSON
 注意：
 - 控制面寫入 API（`/api/system/*`、`/api/config`、`/api/deployments*`）需要 admin token：
   設 `PLOY_API_ADMIN_TOKEN`，並在 header 帶 `x-ploy-admin-token`（或 `Authorization: Bearer ...`）。
+  若要讓 browser session cookie 在重啟/多實例下保持穩定，另外設 `PLOY_API_AUTH_COOKIE_SECRET`；否則系統會退回到 process-local 隨機 secret，舊 cookie 會在重啟後失效。
 - `pm.submit_limit` / `pm.cancel_order` / `events.upsert` / `events.update_status` 這類「寫入」操作預設會被拒絕，必須在交易機器環境設 `PLOY_RPC_WRITE_ENABLED=true` 才會放行。
 - 寫入操作現在要求 `params.idempotency_key`（建議用 UUID）。
 - `pm.submit_limit` / `gateway.submit_intent` 會改走 Coordinator ingestion API（預設 `http://127.0.0.1:8081/api/sidecar/intents`），所以交易機器必須有平台 API 正在運行；可用 `PLOY_RPC_COORDINATOR_INTENT_URL` 覆寫。

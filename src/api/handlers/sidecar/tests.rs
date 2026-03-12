@@ -4,7 +4,8 @@ use chrono::Utc;
 use std::{collections::HashMap, sync::Mutex};
 
 use crate::control_plane::{
-    MarketSelector, StrategyDeployment, StrategyLifecycleStage, StrategyProductType, Timeframe,
+    DeploymentExecutionMode, MarketSelector, StrategyDeployment, StrategyLifecycleStage,
+    StrategyProductType, Timeframe,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -33,6 +34,8 @@ fn sample_deployment(lifecycle_stage: StrategyLifecycleStage) -> StrategyDeploym
         risk_profile: "default".to_string(),
         priority: 80,
         cooldown_secs: 30,
+        account_ids: Vec::new(),
+        execution_mode: DeploymentExecutionMode::Any,
         lifecycle_stage,
         product_type: StrategyProductType::BinaryOption,
         last_evaluated_at: Some(Utc::now()),

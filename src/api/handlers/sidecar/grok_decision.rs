@@ -95,7 +95,7 @@ pub struct GrokDecisionRequest {
     pub research_summary: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SidecarInjuryUpdate {
     pub player_name: String,
     pub team_abbrev: String,
@@ -193,8 +193,8 @@ fn build_unified_decision_request(
         request_id,
         trigger: DecisionTrigger::EspnComeback,
         game: build_live_game(&req),
-        trailing_team: req.trailing_team,
-        trailing_abbrev: req.trailing_abbrev,
+        trailing_team: req.trailing_team.clone(),
+        trailing_abbrev: req.trailing_abbrev.clone(),
         deficit: req.deficit,
         comeback: build_comeback_snapshot(&req),
         grok_intel: build_grok_intel(&req),

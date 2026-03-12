@@ -1370,6 +1370,34 @@ Reduce `try_entry_for_window` complexity in `staggered_arb_live/entry.rs` by sep
   - `rtk cargo test test_try_entry_rejects_far_from_mid_fair_value_for_long_gamma_profile --lib -- --exact --nocapture`
   - `rtk cargo test test_balance_pause_blocks_until_expired_then_resumes_live_entry --lib -- --exact --nocapture`
 
+# R-51 Admin Auth Cookie Signing (2026-03-12)
+
+## Goal
+Replace the admin session cookie's unsalted SHA-256 value with a versioned HMAC-signed cookie while keeping legacy SHA-256/raw-cookie acceptance during the migration window.
+
+## File ownership
+
+- `src/api/auth.rs`
+  - owner: admin auth cookie signing/verification and auth regressions
+- `docs/OPENCLAW_INTEGRATION.md`
+  - owner: operator-facing auth cookie secret documentation
+
+## Tasks
+
+- [x] Emit `v2:` HMAC admin session cookies instead of bare SHA-256 fingerprints.
+- [x] Keep legacy SHA-256/raw cookie acceptance in `ensure_admin_authorized` during rollout.
+- [x] Add focused auth regressions for valid/invalid v2 cookies and legacy fallback.
+- [x] Re-run compile plus focused auth regressions after the cut.
+
+## Progress notes
+
+- 2026-03-12: Switched [auth.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/api/auth.rs) to sign admin session cookies as `v2:<hex(hmac_sha256(secret, token))>`, using `PLOY_API_AUTH_COOKIE_SECRET` when configured and a process-local random fallback otherwise.
+- 2026-03-12: `ensure_admin_authorized` now prefers the new `v2:` cookie path but still accepts legacy SHA-256 and raw-token cookies so browser sessions survive the migration window.
+- 2026-03-12: Documented `PLOY_API_AUTH_COOKIE_SECRET` in [OPENCLAW_INTEGRATION.md](/Users/proerror/Documents/ploy-order-intent-clean/docs/OPENCLAW_INTEGRATION.md).
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-r51-api cargo check --lib --features api`
+  - `CARGO_TARGET_DIR=/tmp/ploy-r51-api cargo test --lib --features api api::auth::tests -- --nocapture`
+
 # R-40 MarketDiscovery Native Async Trait Cut (2026-03-12)
 
 ## Goal
