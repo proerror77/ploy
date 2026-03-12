@@ -1,3 +1,43 @@
+# AGENTS Best-Practice Alignment (2026-03-13)
+
+## Goal
+Restructure the repo-level agent instructions so `AGENTS.md` matches OpenAI
+Codex best practices more closely while preserving the repo's workflow rules
+and keeping `CLAUDE.md` aligned.
+
+## Tasks
+
+- [x] Add repo layout plus concrete run/build/test/lint guidance to the
+  top-level agent instructions.
+- [x] Move detailed workflow policy out of the top-level files into a
+  referenced markdown document.
+- [x] Sync `AGENTS.md` and `CLAUDE.md` after the restructure.
+- [x] Review the final diff for clarity, scope, and alignment with the
+  official guidance.
+
+## Review
+
+- [x] Confirm the top-level agent files now cover repo layout, how to run the
+  project, validation commands, constraints, and done criteria.
+- [x] Confirm detailed workflow rules still exist, but now live in a referenced
+  file instead of crowding the main instructions.
+- [x] Confirm `AGENTS.md` and `CLAUDE.md` remain aligned after the rewrite.
+
+## Progress notes
+
+- 2026-03-13: Reworked the top-level agent instructions around the official
+  Codex `AGENTS.md` baseline: repo layout, run commands, build/test/lint
+  commands, conventions, constraints, and done criteria.
+- 2026-03-13: Moved long-form workflow, worktree, skills, and deployment policy
+  details into [agent-workflow.md](/Users/proerror/Documents/ploy/docs/agent-workflow.md)
+  so the main files stay concise.
+- 2026-03-13: Kept [AGENTS.md](/Users/proerror/Documents/ploy/AGENTS.md) and
+  [CLAUDE.md](/Users/proerror/Documents/ploy/CLAUDE.md) in sync after the
+  restructure.
+- 2026-03-13: Tightened the validation guidance to be change-type specific so
+  agents can choose the right checks faster for Rust, frontend, sidecar, and
+  docs-only edits.
+
 # Market Persistence Ownership Extraction (2026-03-09)
 
 ## Goal
