@@ -5210,3 +5210,33 @@ Execute the highest-impact P2 runtime-performance fixes from the review in one b
 ## Notes
 
 - Validation currently emits pre-existing warnings in unrelated modules (`sports_analyst`, `nba_comeback`, `liquidity_vacuum_backtest`, and older coordinator tests), but the focused regressions above pass.
+
+# Coordinator Test Reinforcement Wave (2026-03-12)
+
+## Goal
+Close the next testing gaps from the review by adding the missing queue/restore regressions and verifying whether staggered-arb partial-fill cancel coverage is already present on `session/order-intent-clean`.
+
+## Outcomes
+
+- [x] `R-34` added a concurrent `OrderQueue` pressure test with multi-producer + consumer coverage.
+- [x] `R-35` is already covered on this branch by existing staggered-arb partial-fill/cancel regressions.
+- [x] `R-36` added explicit restore-time corrupt-fill regressions for unknown domain, zero shares, and non-positive price.
+
+## Commits
+
+- `92887ba` `coordinator: add queue concurrency regression`
+- `76d3495` `coordinator: cover corrupt restore rows`
+
+## Validation
+
+- `CARGO_TARGET_DIR=/tmp/ploy-r34 cargo test coordinator::queue::tests::test_concurrent_enqueue_dequeue_pressure --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-r35 rtk cargo test strategy::staggered_arb_live::tests::test_leg1_cancelled_with_partial_fill_creates_position --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-r35 rtk cargo test strategy::staggered_arb_live::tests::test_leg1_partially_filled_updates_position_immediately_and_requests_cancel --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-r35 rtk cargo test strategy::staggered_arb_live::tests::test_leg2_partial_cancel_tracks_progress_and_only_resubmits_remaining --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-perf-seq cargo test coordinator::journal::restore::tests::test_decode_persisted_execution_fill_skips_unknown_domain --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-perf-seq cargo test coordinator::journal::restore::tests::test_decode_persisted_execution_fill_skips_zero_shares --lib -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-perf-seq cargo test coordinator::journal::restore::tests::test_decode_persisted_execution_fill_skips_non_positive_price --lib -- --exact --nocapture`
+
+## Notes
+
+- The staggered-arb coverage proof came from existing tests in `src/strategy/staggered_arb_live/tests.rs`, so `R-35` needed no new code.
