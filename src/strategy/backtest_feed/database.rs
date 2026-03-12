@@ -4,6 +4,7 @@ use alloy::primitives::U256;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tracing::info;
@@ -286,6 +287,7 @@ fn symbol_filter(symbols: &[String]) -> Option<Vec<String>> {
 struct TokenMappings {
     token_to_symbol: HashMap<String, String>,
     token_to_slug: HashMap<String, String>,
+    token_to_side: HashMap<String, Side>,
     slug_to_symbol: HashMap<String, String>,
 }
 
@@ -341,12 +343,14 @@ async fn build_token_mappings(
                     }
                     if let Some(t) = yes_token_id {
                         mappings.token_to_slug.insert(t.clone(), slug.clone());
+                        mappings.token_to_side.insert(t.clone(), Side::Up);
                         if !sym.is_empty() {
                             mappings.token_to_symbol.insert(t, sym.clone());
                         }
                     }
                     if let Some(t) = no_token_id {
                         mappings.token_to_slug.insert(t.clone(), slug.clone());
+                        mappings.token_to_side.insert(t.clone(), Side::Down);
                         if !sym.is_empty() {
                             mappings.token_to_symbol.insert(t, sym.clone());
                         }
@@ -386,6 +390,15 @@ async fn build_token_mappings(
                 .token_to_slug
                 .entry(token_id.clone())
                 .or_insert_with(|| slug.clone());
+            if let Some(side) = outcome
+                .as_deref()
+                .and_then(parse_token_outcome_side)
+            {
+                mappings
+                    .token_to_side
+                    .entry(token_id.clone())
+                    .or_insert(side);
+            }
             if let Some(sym) = mappings
                 .slug_to_symbol
                 .get(&slug)
@@ -409,12 +422,9 @@ async fn build_token_mappings(
 
     if pm_market_metadata_exists {
         let before = mappings.token_to_slug.len();
-        let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        let rows: Vec<(String, Option<String>, serde_json::Value)> = sqlx::query_as(
             r#"
-                SELECT DISTINCT
-                    market_slug,
-                    symbol,
-                    jsonb_array_elements_text((raw_market->>'clobTokenIds')::jsonb) AS token_id
+                SELECT market_slug, symbol, raw_market
                 FROM pm_market_metadata
                 WHERE raw_market IS NOT NULL
                   AND raw_market ? 'clobTokenIds'
@@ -430,31 +440,43 @@ async fn build_token_mappings(
         .await
         .unwrap_or_default();
 
-        for (slug, sym, token_id) in rows {
-            if slug.is_empty() || token_id.is_empty() {
+        for (slug, sym, raw_market) in rows {
+            if slug.is_empty() {
                 continue;
             }
-            let Some(token_id_norm) = normalize_clob_token_id(&token_id) else {
-                continue;
-            };
+            let token_ids = extract_clob_token_ids(Some(&raw_market));
+            let outcome_sides = extract_outcome_sides(Some(&raw_market));
 
-            mappings
-                .token_to_slug
-                .entry(token_id_norm.clone())
-                .or_insert_with(|| slug.clone());
+            for (index, token_id_norm) in token_ids.into_iter().enumerate() {
+                mappings
+                    .token_to_slug
+                    .entry(token_id_norm.clone())
+                    .or_insert_with(|| slug.clone());
 
-            let symbol = sym
-                .filter(|s| !s.is_empty())
-                .or_else(|| mappings.slug_to_symbol.get(&slug).cloned())
-                .or_else(|| infer_symbol_from_slug(&slug));
-
-            if let Some(symbol) = symbol {
-                if !symbol.is_empty() {
+                if let Some(side) = outcome_sides.get(index).copied().flatten() {
                     mappings
-                        .token_to_symbol
-                        .entry(token_id_norm)
-                        .or_insert(symbol.clone());
-                    mappings.slug_to_symbol.entry(slug).or_insert(symbol);
+                        .token_to_side
+                        .entry(token_id_norm.clone())
+                        .or_insert(side);
+                }
+
+                let symbol = sym
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| mappings.slug_to_symbol.get(&slug).cloned())
+                    .or_else(|| infer_symbol_from_slug(&slug));
+
+                if let Some(symbol) = symbol {
+                    if !symbol.is_empty() {
+                        mappings
+                            .token_to_symbol
+                            .entry(token_id_norm)
+                            .or_insert(symbol.clone());
+                        mappings
+                            .slug_to_symbol
+                            .entry(slug.clone())
+                            .or_insert(symbol);
+                    }
                 }
             }
         }
@@ -917,56 +939,10 @@ async fn load_lob_updates(
 
     let mut lob_count = 0u64;
     for (ts, token_id, asks_json) in &lob_rows {
-        let event_slug = match mappings.token_to_slug.get(token_id.as_str()) {
-            Some(s) => s.clone(),
-            None => continue,
-        };
-        let Some(symbol) = mappings.resolve_symbol(token_id, &event_slug) else {
-            continue;
-        };
-        if symbol.is_empty() {
-            continue;
+        if let Some(update) = build_lob_update(*ts, token_id, asks_json.as_ref(), mappings) {
+            updates.push(update);
+            lob_count += 1;
         }
-
-        let (total_depth, best_ask_price) = match asks_json {
-            Some(arr) if arr.is_array() => {
-                let levels = arr.as_array().unwrap();
-                let mut depth = 0.0f64;
-                let mut best = None;
-                for level in levels {
-                    if let (Some(size_str), Some(price_str)) = (
-                        level.get("size").and_then(|v| v.as_str()),
-                        level.get("price").and_then(|v| v.as_str()),
-                    ) {
-                        if let Ok(size) = size_str.parse::<f64>() {
-                            depth += size;
-                        }
-                        if best.is_none() {
-                            if let Ok(p) = price_str.parse::<Decimal>() {
-                                best = Some(p);
-                            }
-                        }
-                    }
-                }
-                (depth as u64, best)
-            }
-            _ => continue,
-        };
-
-        if total_depth == 0 {
-            continue;
-        }
-
-        updates.push(MarketUpdate {
-            timestamp: *ts,
-            symbol,
-            update_type: UpdateType::LobSnapshot {
-                side: "BOTH".to_string(),
-                ask_depth_shares: total_depth,
-                best_ask: best_ask_price,
-            },
-        });
-        lob_count += 1;
     }
     info!(
         "Loaded {} LOB snapshots ({} mapped to symbols)",
@@ -1017,6 +993,145 @@ fn normalize_clob_token_id(raw: &str) -> Option<String> {
     U256::from_str_radix(s, 16).ok().map(|u| u.to_string())
 }
 
+fn parse_token_outcome_side(raw: &str) -> Option<Side> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "up" | "yes" | "y" => Some(Side::Up),
+        "down" | "no" | "n" => Some(Side::Down),
+        _ => None,
+    }
+}
+
+fn extract_clob_token_ids(raw_market: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(raw_market) = raw_market else {
+        return Vec::new();
+    };
+    let Some(raw_ids) = raw_market.get("clobTokenIds") else {
+        return Vec::new();
+    };
+
+    let mut token_ids = Vec::new();
+    match raw_ids {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(token_id) = item.as_str().and_then(normalize_clob_token_id) {
+                    token_ids.push(token_id);
+                }
+            }
+        }
+        serde_json::Value::String(encoded) => {
+            if let Ok(items) = serde_json::from_str::<Vec<String>>(encoded) {
+                for item in items {
+                    if let Some(token_id) = normalize_clob_token_id(&item) {
+                        token_ids.push(token_id);
+                    }
+                }
+            } else if let Some(token_id) = normalize_clob_token_id(encoded) {
+                token_ids.push(token_id);
+            }
+        }
+        _ => {}
+    }
+
+    token_ids
+}
+
+fn extract_outcome_sides(raw_market: Option<&serde_json::Value>) -> Vec<Option<Side>> {
+    let Some(raw_market) = raw_market else {
+        return Vec::new();
+    };
+    let Some(raw_outcomes) = raw_market.get("outcomes") else {
+        return Vec::new();
+    };
+
+    match raw_outcomes {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| item.as_str().and_then(parse_token_outcome_side))
+            .collect(),
+        serde_json::Value::String(encoded) => serde_json::from_str::<Vec<String>>(encoded)
+            .map(|items| {
+                items.into_iter()
+                    .map(|item| parse_token_outcome_side(&item))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_lob_level(level: &serde_json::Value) -> Option<(Decimal, Decimal)> {
+    if let (Some(price_str), Some(size_str)) = (
+        level.get("price").and_then(|v| v.as_str()),
+        level.get("size").and_then(|v| v.as_str()),
+    ) {
+        return Some((
+            price_str.parse::<Decimal>().ok()?,
+            size_str.parse::<Decimal>().ok()?,
+        ));
+    }
+
+    let items = level.as_array()?;
+    if items.len() < 2 {
+        return None;
+    }
+
+    let price = items[0]
+        .as_str()
+        .and_then(|value| value.parse::<Decimal>().ok())
+        .or_else(|| Decimal::from_f64(items[0].as_f64()?))?;
+    let size = items[1]
+        .as_str()
+        .and_then(|value| value.parse::<Decimal>().ok())
+        .or_else(|| Decimal::from_f64(items[1].as_f64()?))?;
+    Some((price, size))
+}
+
+fn build_lob_update(
+    ts: DateTime<Utc>,
+    token_id: &str,
+    asks_json: Option<&serde_json::Value>,
+    mappings: &TokenMappings,
+) -> Option<MarketUpdate> {
+    let event_slug = mappings.token_to_slug.get(token_id)?.clone();
+    let symbol = mappings.resolve_symbol(token_id, &event_slug)?;
+    let side = mappings.token_to_side.get(token_id).copied()?;
+    if symbol.is_empty() {
+        return None;
+    }
+
+    let (total_depth, best_ask_price) = match asks_json {
+        Some(arr) if arr.is_array() => {
+            let levels = arr.as_array().unwrap();
+            let mut depth = Decimal::ZERO;
+            let mut best = None;
+            for level in levels {
+                if let Some((price, size)) = parse_lob_level(level) {
+                    depth += size;
+                    if best.is_none() {
+                        best = Some(price);
+                    }
+                }
+            }
+            (depth.floor().to_u64().unwrap_or(0), best)
+        }
+        _ => return None,
+    };
+
+    if total_depth == 0 {
+        return None;
+    }
+
+    Some(MarketUpdate {
+        timestamp: ts,
+        symbol,
+        update_type: UpdateType::LobSnapshot {
+            side: side.as_str().to_ascii_uppercase(),
+            ask_depth_shares: total_depth,
+            best_ask: best_ask_price,
+        },
+    })
+}
+
 fn spot_at_or_before(series: &[(DateTime<Utc>, Decimal)], ts: DateTime<Utc>) -> Option<Decimal> {
     if series.is_empty() {
         return None;
@@ -1065,6 +1180,8 @@ fn corrected_window_end(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
+    use serde_json::json;
 
     #[test]
     fn normalize_clob_token_id_accepts_hex_without_prefix() {
@@ -1089,5 +1206,51 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc)
         );
+    }
+
+    #[test]
+    fn parse_token_outcome_side_accepts_up_down_aliases() {
+        assert_eq!(parse_token_outcome_side("Up"), Some(Side::Up));
+        assert_eq!(parse_token_outcome_side("YES"), Some(Side::Up));
+        assert_eq!(parse_token_outcome_side("down"), Some(Side::Down));
+        assert_eq!(parse_token_outcome_side("no"), Some(Side::Down));
+    }
+
+    #[test]
+    fn build_lob_update_uses_token_side_mapping() {
+        let mut mappings = TokenMappings::default();
+        mappings
+            .token_to_slug
+            .insert("101".to_string(), "btc-updown-5m-test".to_string());
+        mappings
+            .token_to_symbol
+            .insert("101".to_string(), "BTCUSDT".to_string());
+        mappings.token_to_side.insert("101".to_string(), Side::Down);
+
+        let update = build_lob_update(
+            DateTime::parse_from_rfc3339("2025-01-01T00:00:05Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            "101",
+            Some(&json!([
+                {"price": "0.56", "size": "7"},
+                {"price": "0.57", "size": "5"}
+            ])),
+            &mappings,
+        )
+        .expect("lob update");
+
+        match update.update_type {
+            UpdateType::LobSnapshot {
+                side,
+                ask_depth_shares,
+                best_ask,
+            } => {
+                assert_eq!(side, "DOWN");
+                assert_eq!(ask_depth_shares, 12);
+                assert_eq!(best_ask, Some(dec!(0.56)));
+            }
+            other => panic!("unexpected update: {other:?}"),
+        }
     }
 }
