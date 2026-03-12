@@ -7,6 +7,9 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 /// Infrastructure-related commands
 #[derive(Subcommand, Debug)]
@@ -113,6 +116,91 @@ struct InfraConfig {
     user: String,
 }
 
+fn expand_home_path_with_home(raw: &str, home: Option<&Path>) -> PathBuf {
+    if raw == "~" {
+        return home
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(raw));
+    }
+
+    if let Some(suffix) = raw.strip_prefix("~/") {
+        if let Some(home) = home {
+            return home.join(suffix);
+        }
+    }
+
+    PathBuf::from(raw)
+}
+
+fn expand_home_path(raw: &str) -> PathBuf {
+    let home = std::env::var_os("HOME");
+    let home = home.as_deref().map(Path::new);
+    expand_home_path_with_home(raw, home)
+}
+
+fn known_hosts_path() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    let ssh_dir = PathBuf::from(home).join(".ssh");
+    fs::create_dir_all(&ssh_dir).context("failed to create ~/.ssh")?;
+    Ok(ssh_dir.join("known_hosts"))
+}
+
+fn ensure_known_host(host: &str) -> Result<()> {
+    let known_hosts = known_hosts_path()?;
+    let known_hosts_str = known_hosts
+        .to_str()
+        .context("known_hosts path is not valid UTF-8")?;
+
+    let _ = std::process::Command::new("ssh-keygen")
+        .args(["-R", host, "-f", known_hosts_str])
+        .status();
+
+    let scan = std::process::Command::new("ssh-keyscan")
+        .args(["-H", host])
+        .output()
+        .with_context(|| format!("failed to scan SSH host key for {}", host))?;
+
+    if !scan.status.success() || scan.stdout.is_empty() {
+        bail!("failed to collect SSH host key for {}", host);
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&known_hosts)
+        .with_context(|| format!("failed to open {}", known_hosts.display()))?;
+    file.write_all(&scan.stdout)
+        .with_context(|| format!("failed to update {}", known_hosts.display()))?;
+    Ok(())
+}
+
+fn ssh_identity_path(config: &InfraConfig) -> Result<String> {
+    let expanded = expand_home_path(&config.key_path);
+    expanded
+        .to_str()
+        .map(str::to_string)
+        .context("SSH key path is not valid UTF-8")
+}
+
+fn ssh_base_args_for_target(identity_path: String, user: &str, host: &str) -> Vec<String> {
+    vec![
+        "-i".to_string(),
+        identity_path,
+        "-o".to_string(),
+        "StrictHostKeyChecking=yes".to_string(),
+        format!("{}@{}", user, host),
+    ]
+}
+
+fn ssh_base_args(config: &InfraConfig, host: &str) -> Result<Vec<String>> {
+    ensure_known_host(host)?;
+    Ok(ssh_base_args_for_target(
+        ssh_identity_path(config)?,
+        &config.user,
+        host,
+    ))
+}
+
 async fn deploy(env: &str, skip_confirm: bool) -> Result<()> {
     let config = get_infra_config(env)?;
 
@@ -193,15 +281,11 @@ async fn deploy(env: &str, skip_confirm: bool) -> Result<()> {
              docker run -d --name ploy-trading --restart unless-stopped ploy-trading:latest"
         );
 
+        let mut ssh_args = ssh_base_args(&config, host)?;
+        ssh_args.push(ssh_cmd);
+
         let status = std::process::Command::new("ssh")
-            .args([
-                "-i",
-                &config.key_path,
-                "-o",
-                "StrictHostKeyChecking=no",
-                &format!("{}@{}", config.user, host),
-                &ssh_cmd,
-            ])
+            .args(&ssh_args)
             .status()
             .context("Failed to deploy to EC2")?;
 
@@ -240,15 +324,15 @@ async fn show_status(env: &str) -> Result<()> {
         println!("\n  Checking remote status...\n");
 
         // Check Docker containers
-        let output = std::process::Command::new("ssh")
-            .args([
-                "-i", &config.key_path,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=5",
-                &format!("{}@{}", config.user, host),
-                "docker ps --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || echo 'Docker not available'",
-            ])
-            .output();
+        let mut ssh_args = ssh_base_args(&config, host)?;
+        ssh_args.push("-o".to_string());
+        ssh_args.push("ConnectTimeout=5".to_string());
+        ssh_args.push(
+            "docker ps --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || echo 'Docker not available'"
+                .to_string(),
+        );
+
+        let output = std::process::Command::new("ssh").args(&ssh_args).output();
 
         match output {
             Ok(out) if out.status.success() => {
@@ -294,13 +378,7 @@ async fn ssh_connect(env: &str, command: Option<&str>) -> Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No host configured for {}", env))?;
 
-    let mut ssh_args = vec![
-        "-i".to_string(),
-        config.key_path.clone(),
-        "-o".to_string(),
-        "StrictHostKeyChecking=no".to_string(),
-        format!("{}@{}", config.user, host),
-    ];
+    let mut ssh_args = ssh_base_args(&config, host)?;
 
     if let Some(cmd) = command {
         ssh_args.push(cmd.to_string());
@@ -345,15 +423,11 @@ async fn show_logs(env: &str, tail: usize, follow: bool) -> Result<()> {
 
     println!("Fetching logs from {}...\n", config.name);
 
+    let mut ssh_args = ssh_base_args(&config, host)?;
+    ssh_args.push(docker_cmd);
+
     let status = std::process::Command::new("ssh")
-        .args([
-            "-i",
-            &config.key_path,
-            "-o",
-            "StrictHostKeyChecking=no",
-            &format!("{}@{}", config.user, host),
-            &docker_cmd,
-        ])
+        .args(&ssh_args)
         .status()
         .context("Failed to fetch logs")?;
 
@@ -394,15 +468,11 @@ async fn update_infra(env: &str, component: &str) -> Result<()> {
         ),
     };
 
+    let mut ssh_args = ssh_base_args(&config, host)?;
+    ssh_args.push(update_cmd.to_string());
+
     let status = std::process::Command::new("ssh")
-        .args([
-            "-i",
-            &config.key_path,
-            "-o",
-            "StrictHostKeyChecking=no",
-            &format!("{}@{}", config.user, host),
-            update_cmd,
-        ])
+        .args(&ssh_args)
         .status()
         .context("Failed to update infrastructure")?;
 
@@ -412,4 +482,57 @@ async fn update_infra(env: &str, component: &str) -> Result<()> {
 
     println!("  \x1b[32m✓ Update complete\x1b[0m\n");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config() -> InfraConfig {
+        InfraConfig {
+            name: "test".to_string(),
+            region: "ap-northeast-1".to_string(),
+            host: Some("example.com".to_string()),
+            key_path: "~/.ssh/test.pem".to_string(),
+            user: "ec2-user".to_string(),
+        }
+    }
+
+    #[test]
+    fn expand_home_path_rewrites_tilde_prefix() {
+        let expanded =
+            expand_home_path_with_home("~/.ssh/test.pem", Some(Path::new("/tmp/ploy-home")));
+        assert_eq!(expanded, Path::new("/tmp/ploy-home/.ssh/test.pem"));
+    }
+
+    #[test]
+    fn ssh_identity_path_uses_expanded_key_path() {
+        let config = InfraConfig {
+            key_path: "/tmp/ploy-home/.ssh/test.pem".to_string(),
+            ..sample_config()
+        };
+
+        let key_path = ssh_identity_path(&config).expect("expanded key path");
+        assert_eq!(key_path, "/tmp/ploy-home/.ssh/test.pem");
+    }
+
+    #[test]
+    fn ssh_base_args_for_target_enforces_host_key_verification() {
+        let args = ssh_base_args_for_target(
+            "/tmp/ploy-home/.ssh/test.pem".to_string(),
+            "ec2-user",
+            "example.com",
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "-i".to_string(),
+                "/tmp/ploy-home/.ssh/test.pem".to_string(),
+                "-o".to_string(),
+                "StrictHostKeyChecking=yes".to_string(),
+                "ec2-user@example.com".to_string(),
+            ]
+        );
+    }
 }
