@@ -7,9 +7,9 @@
 //! 4. Detects and resolves cross-agent position conflicts
 //! 5. Coordinates temporal straddle positions
 
-use async_trait::async_trait;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::future::Future;
 use tracing::{debug, info, warn};
 
 use crate::agent_runtime::AgentStatus;
@@ -41,7 +41,6 @@ impl OpenClawAgent {
     }
 }
 
-#[async_trait]
 impl GovernanceAgent for OpenClawAgent {
     fn id(&self) -> &str {
         &self.config.agent_id
@@ -51,72 +50,78 @@ impl GovernanceAgent for OpenClawAgent {
         "OpenClaw Meta-Agent"
     }
 
-    async fn run(self, mut ctx: GovernanceContext) -> crate::error::Result<()> {
-        info!(
-            agent_id = %self.config.agent_id,
-            regime_tick = self.config.regime_tick_secs,
-            perf_tick = self.config.perf_tick_secs,
-            alloc_tick = self.config.alloc_tick_secs,
-            "OpenClaw meta-agent starting"
-        );
+    fn run(
+        self,
+        mut ctx: GovernanceContext,
+    ) -> impl Future<Output = crate::error::Result<()>> + Send {
+        async move {
+            info!(
+                agent_id = %self.config.agent_id,
+                regime_tick = self.config.regime_tick_secs,
+                perf_tick = self.config.perf_tick_secs,
+                alloc_tick = self.config.alloc_tick_secs,
+                "OpenClaw meta-agent starting"
+            );
 
-        // Report initial state
-        ctx.report_state(
-            "OpenClaw Meta-Agent",
-            AgentStatus::Initializing,
-            0,
-            Decimal::ZERO,
-            Decimal::ZERO,
-            Decimal::ZERO,
-            None,
-        )
-        .await?;
+            // Report initial state
+            ctx.report_state(
+                "OpenClaw Meta-Agent",
+                AgentStatus::Initializing,
+                0,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                None,
+            )
+            .await?;
 
-        // Initialize sub-components
-        let mut regime_detector = RegimeDetector::new(
-            self.config.regime.clone(),
-            self.config.btc_symbol.clone(),
-            self.market_data.clone(),
-        );
-        let mut perf_tracker =
-            PerformanceTracker::new(self.config.allocator.clone(), self.config.perf_window_secs);
-        let mut allocator = DynamicAllocator::new(self.config.allocator.clone());
-        let mut straddle_mgr = StraddleManager::new(self.config.straddle.clone());
+            // Initialize sub-components
+            let mut regime_detector = RegimeDetector::new(
+                self.config.regime.clone(),
+                self.config.btc_symbol.clone(),
+                self.market_data.clone(),
+            );
+            let mut perf_tracker = PerformanceTracker::new(
+                self.config.allocator.clone(),
+                self.config.perf_window_secs,
+            );
+            let mut allocator = DynamicAllocator::new(self.config.allocator.clone());
+            let mut straddle_mgr = StraddleManager::new(self.config.straddle.clone());
 
-        let mut paused = false;
-        let mut last_regime_snapshot: Option<RegimeSnapshot> = None;
-        let mut paused_agents: Vec<String> = Vec::new();
+            let mut paused = false;
+            let mut last_regime_snapshot: Option<RegimeSnapshot> = None;
+            let mut paused_agents: Vec<String> = Vec::new();
 
-        // Timer intervals
-        let mut regime_tick = tokio::time::interval(tokio::time::Duration::from_secs(
-            self.config.regime_tick_secs,
-        ));
-        let mut perf_tick =
-            tokio::time::interval(tokio::time::Duration::from_secs(self.config.perf_tick_secs));
-        let mut alloc_tick = tokio::time::interval(tokio::time::Duration::from_secs(
-            self.config.alloc_tick_secs,
-        ));
-        let mut heartbeat_tick = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            // Timer intervals
+            let mut regime_tick = tokio::time::interval(tokio::time::Duration::from_secs(
+                self.config.regime_tick_secs,
+            ));
+            let mut perf_tick =
+                tokio::time::interval(tokio::time::Duration::from_secs(self.config.perf_tick_secs));
+            let mut alloc_tick = tokio::time::interval(tokio::time::Duration::from_secs(
+                self.config.alloc_tick_secs,
+            ));
+            let mut heartbeat_tick = tokio::time::interval(tokio::time::Duration::from_secs(5));
 
-        regime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        perf_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        alloc_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            regime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            perf_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            alloc_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        // Report running
-        ctx.report_state(
-            "OpenClaw Meta-Agent",
-            AgentStatus::Running,
-            0,
-            Decimal::ZERO,
-            Decimal::ZERO,
-            Decimal::ZERO,
-            None,
-        )
-        .await?;
+            // Report running
+            ctx.report_state(
+                "OpenClaw Meta-Agent",
+                AgentStatus::Running,
+                0,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                None,
+            )
+            .await?;
 
-        loop {
-            tokio::select! {
+            loop {
+                tokio::select! {
                 // --- Regime detection ---
                 _ = regime_tick.tick() => {
                     if paused { continue; }
@@ -314,23 +319,24 @@ impl GovernanceAgent for OpenClawAgent {
                         }
                     }
                 }
+                }
             }
+
+            // Final state report
+            let _ = ctx
+                .report_state(
+                    "OpenClaw Meta-Agent",
+                    AgentStatus::Stopped,
+                    0,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    Decimal::ZERO,
+                    None,
+                )
+                .await;
+
+            info!("OpenClaw meta-agent stopped");
+            Ok(())
         }
-
-        // Final state report
-        let _ = ctx
-            .report_state(
-                "OpenClaw Meta-Agent",
-                AgentStatus::Stopped,
-                0,
-                Decimal::ZERO,
-                Decimal::ZERO,
-                Decimal::ZERO,
-                None,
-            )
-            .await;
-
-        info!("OpenClaw meta-agent stopped");
-        Ok(())
     }
 }
