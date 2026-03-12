@@ -89,8 +89,7 @@ pub struct Coordinator {
     governance_store_pool: Option<PgPool>,
     governance: Arc<GovernanceController>,
     stale_heartbeat_warn_at: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
-    order_update_sinks:
-        Arc<RwLock<HashMap<String, mpsc::Sender<crate::strategy::OrderUpdate>>>>,
+    order_update_sinks: Arc<RwLock<HashMap<String, mpsc::Sender<crate::strategy::OrderUpdate>>>>,
 
     // Channels
     order_tx: mpsc::Sender<OrderIntent>,
@@ -242,7 +241,10 @@ impl Coordinator {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         self.agent_commands
             .insert(agent_id.clone(), AgentCommandChannel { domain, tx: cmd_tx });
-        self.authorized_agents.write().await.insert(agent_id.clone());
+        self.authorized_agents
+            .write()
+            .await
+            .insert(agent_id.clone());
 
         // Register with risk gate (now safe since register_agent is async)
         self.risk_gate
@@ -275,8 +277,7 @@ impl Coordinator {
         // and queue enqueue) does not block the select! loop.  A bounded
         // channel preserves sequential intent ordering — important for
         // consistent capital reservation and duplicate-intent detection.
-        let (intent_worker_tx, mut intent_worker_rx) =
-            mpsc::channel::<OrderIntent>(64);
+        let (intent_worker_tx, mut intent_worker_rx) = mpsc::channel::<OrderIntent>(64);
 
         // Move the fields the worker needs into an Arc-friendly bundle.
         // All accessed fields are already Arc-wrapped or Clone, so we

@@ -1,6 +1,6 @@
 use super::*;
-use chrono::Utc;
 use crate::platform::persistence_schema::ensure_clob_price_change_ticks_table;
+use chrono::Utc;
 
 pub(super) async fn initialize_crypto_market_data_runtime(
     shared_pool: Option<&PgPool>,
@@ -117,8 +117,11 @@ async fn initialize_crypto_persistence_pipeline(
         }
     };
 
-    let pipeline_handle =
-        if quote_table_ready || price_change_table_ready || price_table_ready || orderbook_table_ready {
+    let pipeline_handle = if quote_table_ready
+        || price_change_table_ready
+        || price_table_ready
+        || orderbook_table_ready
+    {
         let pipeline_config = crate::platform::PersistenceConfig {
             clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
             binance_price_min_interval_secs: BINANCE_PERSIST_MIN_INTERVAL_SECS,

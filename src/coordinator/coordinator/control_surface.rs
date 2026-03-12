@@ -219,10 +219,7 @@ impl CoordinatorHandle {
 
     /// Whether an agent_id is registered/authorized for order ingress.
     pub async fn is_agent_authorized(&self, agent_id: &str) -> bool {
-        self.authorized_agents
-            .read()
-            .await
-            .contains(agent_id)
+        self.authorized_agents.read().await.contains(agent_id)
     }
 }
 

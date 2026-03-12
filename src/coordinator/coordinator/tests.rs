@@ -176,7 +176,9 @@ async fn test_drain_and_execute_records_single_success_for_buy_fill() {
 #[tokio::test]
 async fn test_handle_order_intent_emits_rejected_update_for_missing_deployment() {
     let (_handle, mut coordinator) = make_test_handle();
-    let mut order_updates = coordinator.register_order_updates("crypto_lob_ml".to_string()).await;
+    let mut order_updates = coordinator
+        .register_order_updates("crypto_lob_ml".to_string())
+        .await;
 
     let intent = make_intent(true, OrderPriority::Normal);
     let client_order_id = intent.client_order_id.clone();
@@ -206,7 +208,9 @@ async fn test_drain_and_execute_emits_pending_and_fill_updates() {
         .risk_gate
         .register_agent_with_domain("crypto_lob_ml", Domain::Crypto, AgentRiskParams::default())
         .await;
-    let mut order_updates = coordinator.register_order_updates("crypto_lob_ml".to_string()).await;
+    let mut order_updates = coordinator
+        .register_order_updates("crypto_lob_ml".to_string())
+        .await;
 
     let intent =
         make_intent(true, OrderPriority::Normal).with_metadata("deployment_id", "deploy.test");
@@ -401,11 +405,7 @@ async fn test_staggered_arb_intent_passes_admission_risk_and_enqueues() {
     let (_handle, coordinator) = make_test_handle();
     coordinator
         .risk_gate
-        .register_agent_with_domain(
-            "staggered_arb",
-            Domain::Crypto,
-            AgentRiskParams::default(),
-        )
+        .register_agent_with_domain("staggered_arb", Domain::Crypto, AgentRiskParams::default())
         .await;
 
     let intent = make_staggered_arb_intent("staggered_arb", true, 20)
@@ -437,11 +437,7 @@ async fn test_staggered_arb_intent_rejected_without_deployment_id() {
     let (_handle, coordinator) = make_test_handle();
     coordinator
         .risk_gate
-        .register_agent_with_domain(
-            "staggered_arb",
-            Domain::Crypto,
-            AgentRiskParams::default(),
-        )
+        .register_agent_with_domain("staggered_arb", Domain::Crypto, AgentRiskParams::default())
         .await;
 
     let intent = make_staggered_arb_intent("staggered_arb", true, 20);
@@ -465,11 +461,7 @@ async fn test_force_close_domain_blocks_subsequent_buy_allows_sell() {
     let (handle, coordinator) = make_test_handle();
     coordinator
         .risk_gate
-        .register_agent_with_domain(
-            "staggered_arb",
-            Domain::Crypto,
-            AgentRiskParams::default(),
-        )
+        .register_agent_with_domain("staggered_arb", Domain::Crypto, AgentRiskParams::default())
         .await;
 
     // First, open a position so we have shares to sell
@@ -576,13 +568,11 @@ async fn test_coordinator_register_agent_wires_risk_gate() {
         .await;
 
     // Agent should be authorized
-    assert!(
-        coordinator
-            .authorized_agents
-            .read()
-            .await
-            .contains("momentum_agent")
-    );
+    assert!(coordinator
+        .authorized_agents
+        .read()
+        .await
+        .contains("momentum_agent"));
 }
 
 // PLACEHOLDER_R17
@@ -598,11 +588,7 @@ async fn test_cold_start_restore_rebuilds_positions_from_fills() {
     let (_handle, coordinator) = make_test_handle();
     coordinator
         .risk_gate
-        .register_agent_with_domain(
-            "staggered_arb",
-            Domain::Crypto,
-            AgentRiskParams::default(),
-        )
+        .register_agent_with_domain("staggered_arb", Domain::Crypto, AgentRiskParams::default())
         .await;
 
     // Execute a buy fill
@@ -624,8 +610,7 @@ async fn test_cold_start_restore_rebuilds_positions_from_fills() {
     assert_eq!(open_shares, 50, "should have 50 open shares from buy");
 
     // Verify risk counters
-    let (total_pnl, success_count, failure_count) =
-        coordinator.risk_gate.daily_stats().await;
+    let (total_pnl, success_count, failure_count) = coordinator.risk_gate.daily_stats().await;
     assert_eq!(total_pnl, Decimal::ZERO, "no sells yet, pnl should be zero");
     assert_eq!(success_count, 1, "one successful buy execution");
     assert_eq!(failure_count, 0);
@@ -689,11 +674,7 @@ async fn test_cold_start_restore_from_execution_log_requires_db() {
     coordinator.set_execution_log_pool(pool.clone());
     coordinator
         .risk_gate
-        .register_agent_with_domain(
-            "staggered_arb",
-            Domain::Crypto,
-            AgentRiskParams::default(),
-        )
+        .register_agent_with_domain("staggered_arb", Domain::Crypto, AgentRiskParams::default())
         .await;
 
     let intent = make_staggered_arb_intent("staggered_arb", true, 25)
@@ -711,11 +692,7 @@ async fn test_cold_start_restore_from_execution_log_requires_db() {
     restored.set_execution_log_pool(pool);
     restored
         .risk_gate
-        .register_agent_with_domain(
-            "staggered_arb",
-            Domain::Crypto,
-            AgentRiskParams::default(),
-        )
+        .register_agent_with_domain("staggered_arb", Domain::Crypto, AgentRiskParams::default())
         .await;
 
     restored

@@ -191,9 +191,9 @@ impl OrderData {
 
     /// Generate a random salt
     fn generate_salt() -> U256 {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let bytes: [u8; 32] = rng.gen();
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        let bytes: [u8; 32] = rng.random();
         U256::from_be_bytes(bytes)
     }
 

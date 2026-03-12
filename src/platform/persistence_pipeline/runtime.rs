@@ -218,7 +218,8 @@ impl PersistencePipeline {
 
         if !buffers.lobs.is_empty() {
             let ticks = std::mem::take(&mut buffers.lobs);
-            if let Err(e) = Self::write_binance_lobs(pool, &ticks, config.binance_lob_max_levels).await
+            if let Err(e) =
+                Self::write_binance_lobs(pool, &ticks, config.binance_lob_max_levels).await
             {
                 warn!(error = %e, count = ticks.len(), "binance lob batch persist failed");
             } else {

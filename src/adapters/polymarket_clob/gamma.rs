@@ -31,9 +31,7 @@ impl PolymarketClient {
             .limit(1)
             .build();
 
-        let markets = self
-            .gamma_client
-            .markets(&req);
+        let markets = self.gamma_client.markets(&req);
         let markets = timeout(Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS), markets)
             .await
             .map_err(|_| {
@@ -54,9 +52,7 @@ impl PolymarketClient {
     pub async fn search_markets(&self, query: &str) -> Result<Vec<MarketSummary>> {
         let req = SearchRequest::builder().q(query).build();
 
-        let results = self
-            .gamma_client
-            .search(&req);
+        let results = self.gamma_client.search(&req);
         let results = timeout(Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS), results)
             .await
             .map_err(|_| {
@@ -107,9 +103,7 @@ impl PolymarketClient {
     pub async fn get_series(&self, series_id: &str) -> Result<GammaSeriesResponse> {
         let req = SeriesByIdRequest::builder().id(series_id).build();
 
-        let series = self
-            .gamma_client
-            .series_by_id(&req);
+        let series = self.gamma_client.series_by_id(&req);
         let series = timeout(Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS), series)
             .await
             .map_err(|_| {
@@ -170,9 +164,7 @@ impl PolymarketClient {
     pub async fn get_event_details(&self, event_id: &str) -> Result<GammaEventInfo> {
         let req = EventByIdRequest::builder().id(event_id).build();
 
-        let event = self
-            .gamma_client
-            .event_by_id(&req);
+        let event = self.gamma_client.event_by_id(&req);
         let event = timeout(Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS), event)
             .await
             .map_err(|_| {
@@ -214,9 +206,7 @@ impl PolymarketClient {
     #[instrument(skip(self))]
     pub async fn get_all_active_events(&self, series_id: &str) -> Result<Vec<GammaEventInfo>> {
         let req = SeriesByIdRequest::builder().id(series_id).build();
-        let series = self
-            .gamma_client
-            .series_by_id(&req);
+        let series = self.gamma_client.series_by_id(&req);
         let series = timeout(Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS), series)
             .await
             .map_err(|_| {

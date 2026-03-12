@@ -3,10 +3,12 @@ use alloy::primitives::U256;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 
+use crate::strategy::backtest::BacktestTrade;
 use crate::strategy::backtest_feed::ReplayEventWindow;
 
 const STRICT_SPOT_TAIL_SECS: i64 = 15;
@@ -28,6 +30,14 @@ impl EventWindowQuality {
             Self::KeepStrict => "KEEP_STRICT",
             Self::KeepResearch => "KEEP_RESEARCH",
             Self::Drop => "DROP",
+        }
+    }
+
+    fn summary_key(self) -> &'static str {
+        match self {
+            Self::KeepStrict => "strict",
+            Self::KeepResearch => "research",
+            Self::Drop => "drop",
         }
     }
 
@@ -88,6 +98,91 @@ pub(super) struct PmEventReplaySelection {
     pub(super) effective_from: Option<DateTime<Utc>>,
     pub(super) effective_to: Option<DateTime<Utc>>,
     pub(super) windows: Vec<ReplayEventWindow>,
+    pub(super) window_audits: Vec<PmEventReplayWindowAudit>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(super) struct PmEventReplayWindowAudit {
+    pub(super) market_slug: String,
+    pub(super) symbol: String,
+    pub(super) horizon: String,
+    pub(super) start_time: Option<DateTime<Utc>>,
+    pub(super) end_time: Option<DateTime<Utc>>,
+    pub(super) corrected_end_time: Option<DateTime<Utc>>,
+    pub(super) quality: String,
+    pub(super) issues: Vec<String>,
+    pub(super) expected_token_count: usize,
+    pub(super) quote_rows: i64,
+    pub(super) quote_distinct_tokens: i64,
+    pub(super) quote_tail_gap_secs: Option<i64>,
+    pub(super) lob_rows: i64,
+    pub(super) lob_distinct_tokens: i64,
+    pub(super) lob_tail_gap_secs: Option<i64>,
+    pub(super) spot_rows: i64,
+    pub(super) spot_tail_gap_secs: Option<i64>,
+    pub(super) l2_rows: i64,
+    pub(super) l2_tail_gap_secs: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(super) struct PmEventReplaySummary {
+    pub(super) minimum_quality: String,
+    pub(super) total_windows: usize,
+    pub(super) kept_windows: usize,
+    pub(super) kept_strict_windows: usize,
+    pub(super) kept_research_windows: usize,
+    pub(super) dropped_windows: usize,
+    pub(super) effective_from: Option<DateTime<Utc>>,
+    pub(super) effective_to: Option<DateTime<Utc>>,
+    pub(super) replay_first_update: Option<DateTime<Utc>>,
+    pub(super) replay_last_update: Option<DateTime<Utc>>,
+    pub(super) updates_before: usize,
+    pub(super) updates_after: usize,
+    pub(super) dropped_updates: usize,
+    pub(super) quality_breakdown: Vec<PmEventReplayQualitySummary>,
+    pub(super) windows: Vec<PmEventReplayWindowSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(super) struct PmEventReplayQualitySummary {
+    pub(super) quality: String,
+    pub(super) window_count: usize,
+    pub(super) replayed_window_count: usize,
+    pub(super) trade_count: usize,
+    pub(super) winning_trades: usize,
+    pub(super) total_pnl: Decimal,
+    pub(super) win_rate: f64,
+    pub(super) avg_pnl_per_trade: Decimal,
+    pub(super) common_issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub(super) struct PmEventReplayWindowSummary {
+    pub(super) market_slug: String,
+    pub(super) symbol: String,
+    pub(super) horizon: String,
+    pub(super) quality: String,
+    pub(super) start_time: Option<DateTime<Utc>>,
+    pub(super) end_time: Option<DateTime<Utc>>,
+    pub(super) corrected_end_time: Option<DateTime<Utc>>,
+    pub(super) replayed: bool,
+    pub(super) replay_start_time: Option<DateTime<Utc>>,
+    pub(super) replay_end_time: Option<DateTime<Utc>>,
+    pub(super) issues: Vec<String>,
+    pub(super) trade_count: usize,
+    pub(super) winning_trades: usize,
+    pub(super) total_pnl: Decimal,
+    pub(super) first_entry_time: Option<DateTime<Utc>>,
+    pub(super) last_exit_time: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WindowTradeAggregate {
+    trade_count: usize,
+    winning_trades: usize,
+    total_pnl: Decimal,
+    first_entry_time: Option<DateTime<Utc>>,
+    last_exit_time: Option<DateTime<Utc>>,
 }
 
 pub(super) async fn print_backtest_db_diagnostics(
@@ -421,8 +516,12 @@ pub(super) async fn print_backtest_db_diagnostics(
     print_event_window_audit(pool, symbols, from, to).await?;
 
     println!("\nHint:");
-    println!("- PM 5m backtest needs: clob_quote_ticks + pm_market_metadata (or pm_token_settlements.raw_market) + spot (sync_records or binance_price_ticks/klines).");
-    println!("- Deribit IV (optional): populate deribit_iv_ticks (e.g. `ploy deribit-iv-backfill`) to enable IV-aware research/backtests.");
+    println!(
+        "- PM 5m backtest needs: clob_quote_ticks + pm_market_metadata (or pm_token_settlements.raw_market) + spot (sync_records or binance_price_ticks/klines)."
+    );
+    println!(
+        "- Deribit IV (optional): populate deribit_iv_ticks (e.g. `ploy deribit-iv-backfill`) to enable IV-aware research/backtests."
+    );
 
     Ok(())
 }
@@ -820,7 +919,10 @@ async fn print_event_window_audit(
         .collect();
 
     if !suspicious.is_empty() {
-        println!("sample suspicious windows (up to {}):", EVENT_AUDIT_PREVIEW_ROWS);
+        println!(
+            "sample suspicious windows (up to {}):",
+            EVENT_AUDIT_PREVIEW_ROWS
+        );
         for row in suspicious {
             println!(
                 "- [{}] {} {} {} .. {} | quote={}/{} lob={}/{} spot={} l2={} | issues={}",
@@ -852,7 +954,12 @@ pub(super) async fn build_pm_event_replay_selection(
     minimum_quality: PmReplayQuality,
 ) -> Result<PmEventReplaySelection> {
     let rows = load_event_window_audit_rows(pool, symbols, from, to).await?;
-    Ok(select_pm_event_replay_windows(&rows, minimum_quality, from, to))
+    Ok(select_pm_event_replay_windows(
+        &rows,
+        minimum_quality,
+        from,
+        to,
+    ))
 }
 
 async fn load_event_window_audit_rows(
@@ -943,11 +1050,17 @@ async fn load_event_window_audit_rows(
             .filter(|value| !value.is_empty())
             .or_else(|| infer_symbol_from_slug(&market_slug))
             .unwrap_or_default();
-        let start_time = row.try_get::<Option<DateTime<Utc>>, _>("start_time").ok().flatten();
-        let end_time = row.try_get::<Option<DateTime<Utc>>, _>("end_time").ok().flatten();
-        let corrected_end_time = start_time.zip(end_time).map(|(start_time, end_time)| {
-            corrected_window_end(&market_slug, start_time, end_time)
-        });
+        let start_time = row
+            .try_get::<Option<DateTime<Utc>>, _>("start_time")
+            .ok()
+            .flatten();
+        let end_time = row
+            .try_get::<Option<DateTime<Utc>>, _>("end_time")
+            .ok()
+            .flatten();
+        let corrected_end_time = start_time
+            .zip(end_time)
+            .map(|(start_time, end_time)| corrected_window_end(&market_slug, start_time, end_time));
         let horizon = row
             .try_get::<Option<String>, _>("horizon")
             .ok()
@@ -1060,28 +1173,30 @@ fn select_pm_event_replay_windows(
         rows.iter().filter(|row| row.horizon == "5m").collect();
 
     let mut windows = Vec::new();
+    let mut window_audits = Vec::with_capacity(filtered_rows.len());
     let mut kept_strict_windows = 0usize;
     let mut kept_research_windows = 0usize;
 
     for row in &filtered_rows {
+        let start_time = row.start_time;
+        let end_time = row.corrected_end_time.or(row.end_time);
+        let replay_window = match (start_time, end_time) {
+            (Some(start_time), Some(end_time)) if !row.symbol.is_empty() => {
+                let bounded_start = from.map(|from| start_time.max(from)).unwrap_or(start_time);
+                let bounded_end = to.map(|to| end_time.min(to)).unwrap_or(end_time);
+                (bounded_start <= bounded_end).then_some((bounded_start, bounded_end))
+            }
+            _ => None,
+        };
+
+        window_audits.push(build_window_audit_summary(row));
+
         if !row.quality.meets_minimum(minimum_quality) {
             continue;
         }
-        let Some(start_time) = row.start_time else {
+        let Some((bounded_start, bounded_end)) = replay_window else {
             continue;
         };
-        let Some(end_time) = row.corrected_end_time.or(row.end_time) else {
-            continue;
-        };
-        if row.symbol.is_empty() {
-            continue;
-        }
-
-        let bounded_start = from.map(|from| start_time.max(from)).unwrap_or(start_time);
-        let bounded_end = to.map(|to| end_time.min(to)).unwrap_or(end_time);
-        if bounded_start > bounded_end {
-            continue;
-        }
 
         match row.quality {
             EventWindowQuality::KeepStrict => {
@@ -1115,6 +1230,174 @@ fn select_pm_event_replay_windows(
         dropped_windows: total_windows.saturating_sub(kept_windows),
         effective_from,
         effective_to,
+        windows,
+        window_audits,
+    }
+}
+
+fn build_window_audit_summary(row: &EventWindowAuditRow) -> PmEventReplayWindowAudit {
+    let window_end = row.corrected_end_time.or(row.end_time);
+    PmEventReplayWindowAudit {
+        market_slug: row.market_slug.clone(),
+        symbol: row.symbol.clone(),
+        horizon: row.horizon.clone(),
+        start_time: row.start_time,
+        end_time: row.end_time,
+        corrected_end_time: row.corrected_end_time,
+        quality: row.quality.summary_key().to_string(),
+        issues: row
+            .issues
+            .iter()
+            .map(|issue| (*issue).to_string())
+            .collect(),
+        expected_token_count: row.expected_token_count,
+        quote_rows: row.quote.rows,
+        quote_distinct_tokens: row.quote.distinct_tokens,
+        quote_tail_gap_secs: row.quote.tail_gap_secs(window_end),
+        lob_rows: row.lob.rows,
+        lob_distinct_tokens: row.lob.distinct_tokens,
+        lob_tail_gap_secs: row.lob.tail_gap_secs(window_end),
+        spot_rows: row.spot.rows,
+        spot_tail_gap_secs: row.spot.tail_gap_secs(window_end),
+        l2_rows: row.l2.rows,
+        l2_tail_gap_secs: row.l2.tail_gap_secs(window_end),
+    }
+}
+
+pub(super) fn build_pm_event_replay_summary(
+    selection: &PmEventReplaySelection,
+    filter_stats: &crate::strategy::backtest_feed::ReplayEventWindowFilterStats,
+    trades: &[BacktestTrade],
+) -> PmEventReplaySummary {
+    let mut trade_by_market: HashMap<&str, WindowTradeAggregate> = HashMap::new();
+    for trade in trades {
+        let aggregate = trade_by_market.entry(trade.market_id.as_str()).or_default();
+        aggregate.trade_count += 1;
+        if trade.won {
+            aggregate.winning_trades += 1;
+        }
+        aggregate.total_pnl += trade.pnl;
+        aggregate.first_entry_time = Some(
+            aggregate
+                .first_entry_time
+                .map(|existing| existing.min(trade.entry_time))
+                .unwrap_or(trade.entry_time),
+        );
+        aggregate.last_exit_time = Some(
+            aggregate
+                .last_exit_time
+                .map(|existing| existing.max(trade.exit_time))
+                .unwrap_or(trade.exit_time),
+        );
+    }
+
+    let replayed_windows: HashMap<&str, &ReplayEventWindow> = selection
+        .windows
+        .iter()
+        .map(|window| (window.market_slug.as_str(), window))
+        .collect();
+
+    let mut quality_issue_counts: HashMap<&str, HashMap<String, usize>> = HashMap::new();
+    let mut quality_window_counts: HashMap<&str, usize> = HashMap::new();
+    let mut quality_replayed_counts: HashMap<&str, usize> = HashMap::new();
+    let mut quality_trade_counts: HashMap<&str, usize> = HashMap::new();
+    let mut quality_win_counts: HashMap<&str, usize> = HashMap::new();
+    let mut quality_total_pnl: HashMap<&str, Decimal> = HashMap::new();
+    let mut windows = Vec::with_capacity(selection.window_audits.len());
+
+    for window_audit in &selection.window_audits {
+        let replayed_window = replayed_windows
+            .get(window_audit.market_slug.as_str())
+            .copied();
+        let trade_stats = trade_by_market
+            .get(window_audit.market_slug.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let quality = window_audit.quality.as_str();
+
+        *quality_window_counts.entry(quality).or_insert(0) += 1;
+        if replayed_window.is_some() {
+            *quality_replayed_counts.entry(quality).or_insert(0) += 1;
+        }
+        *quality_trade_counts.entry(quality).or_insert(0) += trade_stats.trade_count;
+        *quality_win_counts.entry(quality).or_insert(0) += trade_stats.winning_trades;
+        *quality_total_pnl.entry(quality).or_insert(Decimal::ZERO) += trade_stats.total_pnl;
+        let issue_counts = quality_issue_counts.entry(quality).or_default();
+        for issue in &window_audit.issues {
+            *issue_counts.entry(issue.clone()).or_insert(0) += 1;
+        }
+
+        windows.push(PmEventReplayWindowSummary {
+            market_slug: window_audit.market_slug.clone(),
+            symbol: window_audit.symbol.clone(),
+            horizon: window_audit.horizon.clone(),
+            quality: window_audit.quality.clone(),
+            start_time: window_audit.start_time,
+            end_time: window_audit.end_time,
+            corrected_end_time: window_audit.corrected_end_time,
+            replayed: replayed_window.is_some(),
+            replay_start_time: replayed_window.map(|window| window.start_time),
+            replay_end_time: replayed_window.map(|window| window.end_time),
+            issues: window_audit.issues.clone(),
+            trade_count: trade_stats.trade_count,
+            winning_trades: trade_stats.winning_trades,
+            total_pnl: trade_stats.total_pnl,
+            first_entry_time: trade_stats.first_entry_time,
+            last_exit_time: trade_stats.last_exit_time,
+        });
+    }
+
+    let mut quality_breakdown = Vec::new();
+    for quality in ["strict", "research", "drop"] {
+        let trade_count = *quality_trade_counts.get(quality).unwrap_or(&0);
+        let winning_trades = *quality_win_counts.get(quality).unwrap_or(&0);
+        let total_pnl = *quality_total_pnl.get(quality).unwrap_or(&Decimal::ZERO);
+        let issue_counts = quality_issue_counts.remove(quality).unwrap_or_default();
+        let mut common_issues: Vec<(String, usize)> = issue_counts.into_iter().collect();
+        common_issues.sort_by(|(issue_a, count_a), (issue_b, count_b)| {
+            count_b.cmp(count_a).then_with(|| issue_a.cmp(issue_b))
+        });
+
+        quality_breakdown.push(PmEventReplayQualitySummary {
+            quality: quality.to_string(),
+            window_count: *quality_window_counts.get(quality).unwrap_or(&0),
+            replayed_window_count: *quality_replayed_counts.get(quality).unwrap_or(&0),
+            trade_count,
+            winning_trades,
+            total_pnl,
+            win_rate: if trade_count > 0 {
+                winning_trades as f64 / trade_count as f64
+            } else {
+                0.0
+            },
+            avg_pnl_per_trade: if trade_count > 0 {
+                total_pnl / Decimal::from(trade_count as u64)
+            } else {
+                Decimal::ZERO
+            },
+            common_issues: common_issues
+                .into_iter()
+                .map(|(issue, _)| issue)
+                .take(5)
+                .collect(),
+        });
+    }
+
+    PmEventReplaySummary {
+        minimum_quality: format!("{:?}", selection.minimum_quality).to_ascii_lowercase(),
+        total_windows: selection.total_windows,
+        kept_windows: selection.kept_windows,
+        kept_strict_windows: selection.kept_strict_windows,
+        kept_research_windows: selection.kept_research_windows,
+        dropped_windows: selection.dropped_windows,
+        effective_from: selection.effective_from,
+        effective_to: selection.effective_to,
+        replay_first_update: filter_stats.effective_from,
+        replay_last_update: filter_stats.effective_to,
+        updates_before: filter_stats.total_updates_before,
+        updates_after: filter_stats.total_updates_after,
+        dropped_updates: filter_stats.dropped_updates,
+        quality_breakdown,
         windows,
     }
 }
@@ -1168,15 +1451,13 @@ async fn fetch_token_coverage(
            AND ($2::timestamptz IS NULL OR {ts_column} >= $2) \
            AND ($3::timestamptz IS NULL OR {ts_column} <= $3)"
     );
-    let (rows, distinct_tokens, first_ts, last_ts) = sqlx::query_as::<
-        _,
-        (i64, i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
-    >(sql.as_str())
-    .bind(token_ids)
-    .bind(start_time)
-    .bind(end_time)
-    .fetch_one(pool)
-    .await?;
+    let (rows, distinct_tokens, first_ts, last_ts) =
+        sqlx::query_as::<_, (i64, i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(sql.as_str())
+            .bind(token_ids)
+            .bind(start_time)
+            .bind(end_time)
+            .fetch_one(pool)
+            .await?;
     Ok(SourceCoverage {
         rows,
         distinct_tokens,
@@ -1185,7 +1466,9 @@ async fn fetch_token_coverage(
     })
 }
 
-fn classify_event_window_audit(row: &EventWindowAuditRow) -> (EventWindowQuality, Vec<&'static str>) {
+fn classify_event_window_audit(
+    row: &EventWindowAuditRow,
+) -> (EventWindowQuality, Vec<&'static str>) {
     let mut issues = Vec::new();
 
     if row.start_time.is_none() || row.corrected_end_time.or(row.end_time).is_none() {
@@ -1215,16 +1498,32 @@ fn classify_event_window_audit(row: &EventWindowAuditRow) -> (EventWindowQuality
     if row.expected_token_count >= 2 && row.lob.distinct_tokens < 2 {
         issues.push("pm_lob_missing_side");
     }
-    if row.quote.tail_gap_secs(row.corrected_end_time.or(row.end_time)) > Some(STRICT_PM_QUOTE_TAIL_SECS) {
+    if row
+        .quote
+        .tail_gap_secs(row.corrected_end_time.or(row.end_time))
+        > Some(STRICT_PM_QUOTE_TAIL_SECS)
+    {
         issues.push("stale_pm_quote_tail");
     }
-    if row.lob.tail_gap_secs(row.corrected_end_time.or(row.end_time)) > Some(STRICT_PM_LOB_TAIL_SECS) {
+    if row
+        .lob
+        .tail_gap_secs(row.corrected_end_time.or(row.end_time))
+        > Some(STRICT_PM_LOB_TAIL_SECS)
+    {
         issues.push("stale_pm_lob_tail");
     }
-    if row.spot.tail_gap_secs(row.corrected_end_time.or(row.end_time)) > Some(STRICT_SPOT_TAIL_SECS) {
+    if row
+        .spot
+        .tail_gap_secs(row.corrected_end_time.or(row.end_time))
+        > Some(STRICT_SPOT_TAIL_SECS)
+    {
         issues.push("stale_spot_tail");
     }
-    if row.l2.tail_gap_secs(row.corrected_end_time.or(row.end_time)) > Some(STRICT_L2_TAIL_SECS) {
+    if row
+        .l2
+        .tail_gap_secs(row.corrected_end_time.or(row.end_time))
+        > Some(STRICT_L2_TAIL_SECS)
+    {
         issues.push("stale_binance_l2_tail");
     }
 
@@ -1240,13 +1539,21 @@ fn classify_event_window_audit(row: &EventWindowAuditRow) -> (EventWindowQuality
         && row.expected_token_count >= 2
         && row.quote.distinct_tokens >= 2
         && row.lob.distinct_tokens >= 2
-        && row.quote.tail_gap_secs(row.corrected_end_time.or(row.end_time))
+        && row
+            .quote
+            .tail_gap_secs(row.corrected_end_time.or(row.end_time))
             <= Some(STRICT_PM_QUOTE_TAIL_SECS)
-        && row.lob.tail_gap_secs(row.corrected_end_time.or(row.end_time))
+        && row
+            .lob
+            .tail_gap_secs(row.corrected_end_time.or(row.end_time))
             <= Some(STRICT_PM_LOB_TAIL_SECS)
-        && row.spot.tail_gap_secs(row.corrected_end_time.or(row.end_time))
+        && row
+            .spot
+            .tail_gap_secs(row.corrected_end_time.or(row.end_time))
             <= Some(STRICT_SPOT_TAIL_SECS)
-        && row.l2.tail_gap_secs(row.corrected_end_time.or(row.end_time))
+        && row
+            .l2
+            .tail_gap_secs(row.corrected_end_time.or(row.end_time))
             <= Some(STRICT_L2_TAIL_SECS);
 
     let quality = if strict_ready {
@@ -1304,7 +1611,9 @@ fn normalize_clob_token_id(raw: &str) -> Option<String> {
         .strip_prefix("0x")
         .or_else(|| trimmed.strip_prefix("0X"))
     {
-        return U256::from_str_radix(hex, 16).ok().map(|value| value.to_string());
+        return U256::from_str_radix(hex, 16)
+            .ok()
+            .map(|value| value.to_string());
     }
     if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
         return Some(trimmed.to_string());
@@ -1369,6 +1678,35 @@ fn corrected_window_end(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn trade_for(market_slug: &str, pnl: Decimal, won: bool) -> BacktestTrade {
+        let entry_time = DateTime::parse_from_rfc3339("2026-03-12T00:01:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let exit_time = DateTime::parse_from_rfc3339("2026-03-12T00:05:30Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        BacktestTrade {
+            entry_time,
+            exit_time,
+            symbol: "BTCUSDT".to_string(),
+            market_id: market_slug.to_string(),
+            direction: "UP".to_string(),
+            entry_price: dec!(0.60),
+            exit_price: if won { Decimal::ONE } else { Decimal::ZERO },
+            shares: 10,
+            pnl,
+            pnl_pct: if won { dec!(0.5) } else { dec!(-1) },
+            won,
+            fair_value: dec!(0.80),
+            price_edge: dec!(0.20),
+            vol_edge_pct: 0.0,
+            confidence: 0.80,
+            buffer_pct: dec!(0.20),
+            our_volatility: 0.0005,
+            implied_volatility: 0.0,
+        }
+    }
 
     fn strict_row() -> EventWindowAuditRow {
         let start_time = DateTime::parse_from_rfc3339("2026-03-12T00:00:00Z")
@@ -1519,17 +1857,178 @@ mod tests {
         row.issues = issues;
         assert_eq!(row.quality, EventWindowQuality::KeepStrict);
 
-        let selection = select_pm_event_replay_windows(
-            &[row],
-            PmReplayQuality::Research,
-            Some(from),
-            Some(to),
-        );
+        let selection =
+            select_pm_event_replay_windows(&[row], PmReplayQuality::Research, Some(from), Some(to));
 
         assert_eq!(selection.kept_windows, 0);
         assert!(selection.windows.is_empty());
         assert_eq!(selection.effective_from, None);
         assert_eq!(selection.effective_to, None);
+    }
+
+    #[test]
+    fn build_pm_event_replay_summary_breaks_down_quality_and_trade_results() {
+        let mut strict = strict_row();
+        strict.market_slug = "btc-updown-5m-strict".to_string();
+        let (quality, issues) = classify_event_window_audit(&strict);
+        strict.quality = quality;
+        strict.issues = issues;
+
+        let mut research = strict_row();
+        research.market_slug = "btc-updown-5m-research".to_string();
+        research.lob = SourceCoverage::default();
+        research.l2 = SourceCoverage::default();
+        let (quality, issues) = classify_event_window_audit(&research);
+        research.quality = quality;
+        research.issues = issues;
+
+        let mut dropped = strict_row();
+        dropped.market_slug = "btc-updown-5m-drop".to_string();
+        dropped.quote = SourceCoverage::default();
+        let (quality, issues) = classify_event_window_audit(&dropped);
+        dropped.quality = quality;
+        dropped.issues = issues;
+
+        let selection = select_pm_event_replay_windows(
+            &[strict.clone(), research.clone(), dropped.clone()],
+            PmReplayQuality::Research,
+            None,
+            None,
+        );
+        let filter_stats = crate::strategy::backtest_feed::ReplayEventWindowFilterStats {
+            total_updates_before: 100,
+            total_updates_after: 40,
+            dropped_updates: 60,
+            effective_from: strict.start_time,
+            effective_to: strict.corrected_end_time,
+        };
+        let summary = build_pm_event_replay_summary(
+            &selection,
+            &filter_stats,
+            &[
+                trade_for(&strict.market_slug, dec!(4.20), true),
+                trade_for(&research.market_slug, dec!(-2.10), false),
+            ],
+        );
+
+        assert_eq!(summary.windows.len(), 3);
+        assert_eq!(summary.quality_breakdown.len(), 3);
+
+        let strict_bucket = summary
+            .quality_breakdown
+            .iter()
+            .find(|bucket| bucket.quality == "strict")
+            .expect("strict bucket");
+        assert_eq!(strict_bucket.window_count, 1);
+        assert_eq!(strict_bucket.replayed_window_count, 1);
+        assert_eq!(strict_bucket.trade_count, 1);
+        assert_eq!(strict_bucket.winning_trades, 1);
+        assert_eq!(strict_bucket.total_pnl, dec!(4.20));
+
+        let research_bucket = summary
+            .quality_breakdown
+            .iter()
+            .find(|bucket| bucket.quality == "research")
+            .expect("research bucket");
+        assert_eq!(research_bucket.window_count, 1);
+        assert_eq!(research_bucket.replayed_window_count, 1);
+        assert_eq!(research_bucket.trade_count, 1);
+        assert_eq!(research_bucket.winning_trades, 0);
+        assert_eq!(research_bucket.total_pnl, dec!(-2.10));
+        assert!(
+            research_bucket
+                .common_issues
+                .contains(&"missing_pm_lob".to_string())
+        );
+        assert!(
+            research_bucket
+                .common_issues
+                .contains(&"missing_binance_l2".to_string())
+        );
+
+        let dropped_bucket = summary
+            .quality_breakdown
+            .iter()
+            .find(|bucket| bucket.quality == "drop")
+            .expect("drop bucket");
+        assert_eq!(dropped_bucket.window_count, 1);
+        assert_eq!(dropped_bucket.replayed_window_count, 0);
+        assert_eq!(dropped_bucket.trade_count, 0);
+        assert_eq!(dropped_bucket.total_pnl, Decimal::ZERO);
+
+        let dropped_window = summary
+            .windows
+            .iter()
+            .find(|window| window.market_slug == dropped.market_slug)
+            .expect("dropped window summary");
+        assert!(!dropped_window.replayed);
+        assert_eq!(dropped_window.trade_count, 0);
+        assert!(
+            dropped_window
+                .issues
+                .contains(&"missing_pm_quote".to_string())
+        );
+    }
+
+    #[test]
+    fn build_pm_event_replay_summary_keeps_research_windows_non_replayed_in_strict_mode() {
+        let mut strict = strict_row();
+        strict.market_slug = "btc-updown-5m-strict".to_string();
+        let (quality, issues) = classify_event_window_audit(&strict);
+        strict.quality = quality;
+        strict.issues = issues;
+
+        let mut research = strict_row();
+        research.market_slug = "btc-updown-5m-research".to_string();
+        research.lob = SourceCoverage::default();
+        research.l2 = SourceCoverage::default();
+        let (quality, issues) = classify_event_window_audit(&research);
+        research.quality = quality;
+        research.issues = issues;
+
+        let selection = select_pm_event_replay_windows(
+            &[strict.clone(), research.clone()],
+            PmReplayQuality::Strict,
+            None,
+            None,
+        );
+        let filter_stats = crate::strategy::backtest_feed::ReplayEventWindowFilterStats {
+            total_updates_before: 80,
+            total_updates_after: 20,
+            dropped_updates: 60,
+            effective_from: strict.start_time,
+            effective_to: strict.corrected_end_time,
+        };
+        let summary = build_pm_event_replay_summary(
+            &selection,
+            &filter_stats,
+            &[trade_for(&strict.market_slug, dec!(3.10), true)],
+        );
+
+        let strict_bucket = summary
+            .quality_breakdown
+            .iter()
+            .find(|bucket| bucket.quality == "strict")
+            .expect("strict bucket");
+        assert_eq!(strict_bucket.replayed_window_count, 1);
+        assert_eq!(strict_bucket.trade_count, 1);
+
+        let research_bucket = summary
+            .quality_breakdown
+            .iter()
+            .find(|bucket| bucket.quality == "research")
+            .expect("research bucket");
+        assert_eq!(research_bucket.window_count, 1);
+        assert_eq!(research_bucket.replayed_window_count, 0);
+        assert_eq!(research_bucket.trade_count, 0);
+
+        let research_window = summary
+            .windows
+            .iter()
+            .find(|window| window.market_slug == research.market_slug)
+            .expect("research window summary");
+        assert!(!research_window.replayed);
+        assert_eq!(research_window.trade_count, 0);
     }
 
     #[test]

@@ -303,7 +303,9 @@ impl GovernanceController {
         let paused_ids = self.paused_agent_ids.read().await.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = persist_ingress_state(&pool, &account_id, mode, &domain_modes, &paused_ids).await {
+            if let Err(e) =
+                persist_ingress_state(&pool, &account_id, mode, &domain_modes, &paused_ids).await
+            {
                 tracing::warn!(error = %e, "fire-and-forget ingress state persist failed");
             }
         });

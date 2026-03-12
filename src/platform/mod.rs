@@ -22,8 +22,8 @@ pub(crate) use market_persistence::{
 };
 pub use persistence_pipeline::{
     BinanceLobTick, BinancePriceTick, ChainlinkPriceTick, ClobOrderbookSnapshot,
-    ClobPriceChangeTick, ClobQuoteTick, PersistenceConfig, PersistenceEvent,
-    PersistencePipeline, PersistencePipelineHandle, PipelineStats,
+    ClobPriceChangeTick, ClobQuoteTick, PersistenceConfig, PersistenceEvent, PersistencePipeline,
+    PersistencePipelineHandle, PipelineStats,
 };
 pub use subscription_planner::{
     ConsumerId, PlanDelta, SubscriptionKey, SubscriptionPlan, SubscriptionPlanner,

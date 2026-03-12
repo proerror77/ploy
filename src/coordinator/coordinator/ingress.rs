@@ -52,9 +52,7 @@ impl IntentWorkerCtx {
             return;
         }
         let update = crate::strategy::OrderUpdate {
-            order_id: exchange_order_id
-                .unwrap_or(client_order_id)
-                .to_string(),
+            order_id: exchange_order_id.unwrap_or(client_order_id).to_string(),
             client_order_id: Some(client_order_id.to_string()),
             status,
             filled_qty,
@@ -393,4 +391,3 @@ impl IntentWorkerCtx {
         warn!(%agent_id, %intent_id, reason = %reason, "order blocked");
     }
 }
-

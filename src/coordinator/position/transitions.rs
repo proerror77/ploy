@@ -53,7 +53,11 @@ impl PositionAggregator {
         let (agent_id, shares, entry_price) = {
             let mut positions = self.positions.write().await;
             let position = positions.remove(position_id)?;
-            (position.agent_id.clone(), position.shares, position.entry_price)
+            (
+                position.agent_id.clone(),
+                position.shares,
+                position.entry_price,
+            )
         }; // positions lock dropped here
 
         let pnl = (exit_price - entry_price) * Decimal::from(shares);
