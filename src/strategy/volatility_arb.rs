@@ -31,8 +31,210 @@ use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::f64::consts::PI;
 use tracing::{debug, info};
+
+pub use pricing_math::{
+    calculate_fair_yes_price, calculate_implied_volatility, calculate_kelly_fraction, norm_cdf,
+};
+
+mod config_defaults {
+    pub(super) fn high_vol_threshold() -> f64 {
+        0.005
+    }
+
+    pub(super) fn high_vol_kelly_multiplier() -> f64 {
+        0.7
+    }
+}
+
+mod pricing_math {
+    use std::f64::consts::PI;
+
+    /// Standard normal CDF approximation (Abramowitz and Stegun)
+    pub fn norm_cdf(x: f64) -> f64 {
+        let a1 = 0.254829592;
+        let a2 = -0.284496736;
+        let a3 = 1.421413741;
+        let a4 = -1.453152027;
+        let a5 = 1.061405429;
+        let p = 0.3275911;
+
+        let sign = if x < 0.0 { -1.0 } else { 1.0 };
+        let z = x.abs() / 2.0_f64.sqrt();
+
+        let t = 1.0 / (1.0 + p * z);
+        let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp();
+
+        0.5 * (1.0 + sign * y)
+    }
+
+    /// Standard normal PDF
+    fn norm_pdf(x: f64) -> f64 {
+        (-x * x / 2.0).exp() / (2.0 * PI).sqrt()
+    }
+
+    /// Inverse normal CDF approximation (Beasley-Springer-Moro)
+    fn norm_inv(p: f64) -> f64 {
+        if p <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        if p >= 1.0 {
+            return f64::INFINITY;
+        }
+
+        let a = [
+            -3.969683028665376e+01,
+            2.209460984245205e+02,
+            -2.759285104469687e+02,
+            1.383577518672690e+02,
+            -3.066479806614716e+01,
+            2.506628277459239e+00,
+        ];
+        let b = [
+            -5.447609879822406e+01,
+            1.615858368580409e+02,
+            -1.556989798598866e+02,
+            6.680131188771972e+01,
+            -1.328068155288572e+01,
+        ];
+        let c = [
+            -7.784894002430293e-03,
+            -3.223964580411365e-01,
+            -2.400758277161838e+00,
+            -2.549732539343734e+00,
+            4.374664141464968e+00,
+            2.938163982698783e+00,
+        ];
+        let d = [
+            7.784695709041462e-03,
+            3.224671290700398e-01,
+            2.445134137142996e+00,
+            3.754408661907416e+00,
+        ];
+
+        let p_low = 0.02425;
+        let p_high = 1.0 - p_low;
+
+        if p < p_low {
+            let q = (-2.0 * p.ln()).sqrt();
+            (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
+                / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+        } else if p <= p_high {
+            let q = p - 0.5;
+            let r = q * q;
+            (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q
+                / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+        } else {
+            let q = (-2.0 * (1.0 - p).ln()).sqrt();
+            -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
+                / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+        }
+    }
+
+    /// Calculate fair YES price given buffer, volatility, and time
+    ///
+    /// Uses simplified binary option pricing:
+    /// P(YES) = N(d2) where d2 = buffer / (σ * √T)
+    ///
+    /// - buffer: (spot - threshold) / threshold as decimal (positive = above threshold)
+    /// - volatility: 15-minute volatility as decimal (e.g., 0.003 = 0.3%)
+    /// - time_remaining_fraction: fraction of 15-min window remaining (0.0 - 1.0)
+    pub fn calculate_fair_yes_price(
+        buffer: f64,
+        volatility: f64,
+        time_remaining_fraction: f64,
+    ) -> f64 {
+        if volatility <= 0.0 || time_remaining_fraction <= 0.0 {
+            return if buffer > 0.0 { 1.0 } else { 0.0 };
+        }
+
+        let adjusted_vol = volatility * time_remaining_fraction.sqrt();
+
+        if adjusted_vol < 1e-10 {
+            return if buffer > 0.0 { 1.0 } else { 0.0 };
+        }
+
+        let d2 = buffer / adjusted_vol;
+        let prob = norm_cdf(d2);
+
+        prob.max(0.001).min(0.999)
+    }
+
+    /// Calculate implied volatility from market price
+    ///
+    /// Given YES price, buffer, and time, solve for σ such that:
+    /// N(buffer / (σ * √T)) = YES_price
+    ///
+    /// Uses Newton-Raphson iteration
+    pub fn calculate_implied_volatility(
+        yes_price: f64,
+        buffer: f64,
+        time_remaining_fraction: f64,
+    ) -> Option<f64> {
+        if yes_price <= 0.0 || yes_price >= 1.0 || time_remaining_fraction <= 0.0 {
+            return None;
+        }
+
+        if buffer.abs() < 1e-10 {
+            return Some(0.003);
+        }
+
+        let d2_target = norm_inv(yes_price);
+
+        if d2_target.abs() < 1e-10 {
+            return Some(0.003);
+        }
+
+        let sqrt_t = time_remaining_fraction.sqrt();
+        let initial_vol = (buffer / (d2_target * sqrt_t)).abs();
+        let mut vol = initial_vol.max(0.0001).min(0.1);
+
+        for _ in 0..20 {
+            let adjusted_vol = vol * sqrt_t;
+            if adjusted_vol < 1e-10 {
+                break;
+            }
+
+            let d2 = buffer / adjusted_vol;
+            let price = norm_cdf(d2);
+            let error = price - yes_price;
+
+            if error.abs() < 1e-8 {
+                break;
+            }
+
+            let vega = -norm_pdf(d2) * d2 / vol;
+
+            if vega.abs() < 1e-10 {
+                break;
+            }
+
+            vol -= error / vega;
+            vol = vol.max(0.0001).min(0.1);
+        }
+
+        Some(vol)
+    }
+
+    /// Calculate Kelly fraction for position sizing
+    ///
+    /// f* = (p * b - q) / b
+    /// where p = win probability, q = 1 - p, b = odds
+    ///
+    /// For binary options: b = (1 - entry_price) / entry_price for YES
+    pub fn calculate_kelly_fraction(win_probability: f64, entry_price: f64) -> f64 {
+        if entry_price <= 0.0 || entry_price >= 1.0 {
+            return 0.0;
+        }
+
+        let p = win_probability;
+        let q = 1.0 - p;
+        let b = (1.0 - entry_price) / entry_price;
+
+        let kelly = (p * b - q) / b;
+        kelly.max(0.0)
+    }
+}
 
 // ============================================================================
 // Configuration
@@ -72,10 +274,10 @@ pub struct VolatilityArbConfig {
     /// Kelly fraction for position sizing (0.25 = quarter Kelly)
     pub kelly_fraction: f64,
     /// Combined volatility level above which we reduce Kelly sizing
-    #[serde(default = "default_high_vol_threshold")]
+    #[serde(default = "config_defaults::high_vol_threshold")]
     pub high_vol_threshold: f64,
     /// Multiplier applied to Kelly sizing in high volatility regimes
-    #[serde(default = "default_high_vol_kelly_multiplier")]
+    #[serde(default = "config_defaults::high_vol_kelly_multiplier")]
     pub high_vol_kelly_multiplier: f64,
     /// Maximum total exposure per symbol
     pub max_symbol_exposure_usd: Decimal,
@@ -112,8 +314,8 @@ impl Default for VolatilityArbConfig {
             // Risk management
             max_position_usd: dec!(50),
             kelly_fraction: 0.25, // Quarter Kelly
-            high_vol_threshold: default_high_vol_threshold(),
-            high_vol_kelly_multiplier: default_high_vol_kelly_multiplier(),
+            high_vol_threshold: config_defaults::high_vol_threshold(),
+            high_vol_kelly_multiplier: config_defaults::high_vol_kelly_multiplier(),
             max_symbol_exposure_usd: dec!(100),
             cooldown_secs: 300, // 5 minute cooldown
 
@@ -124,14 +326,6 @@ impl Default for VolatilityArbConfig {
             symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
         }
     }
-}
-
-fn default_high_vol_threshold() -> f64 {
-    0.005
-}
-
-fn default_high_vol_kelly_multiplier() -> f64 {
-    0.7
 }
 
 // ============================================================================
@@ -250,206 +444,6 @@ pub struct VolArbStats {
 // Mathematical Functions
 // ============================================================================
 
-/// Standard normal CDF approximation (Abramowitz and Stegun)
-fn norm_cdf(x: f64) -> f64 {
-    let a1 = 0.254829592;
-    let a2 = -0.284496736;
-    let a3 = 1.421413741;
-    let a4 = -1.453152027;
-    let a5 = 1.061405429;
-    let p = 0.3275911;
-
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let z = x.abs() / 2.0_f64.sqrt();
-
-    let t = 1.0 / (1.0 + p * z);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp();
-
-    0.5 * (1.0 + sign * y)
-}
-
-/// Standard normal PDF
-fn norm_pdf(x: f64) -> f64 {
-    (-x * x / 2.0).exp() / (2.0 * PI).sqrt()
-}
-
-/// Inverse normal CDF approximation (Beasley-Springer-Moro)
-fn norm_inv(p: f64) -> f64 {
-    if p <= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if p >= 1.0 {
-        return f64::INFINITY;
-    }
-
-    let a = [
-        -3.969683028665376e+01,
-        2.209460984245205e+02,
-        -2.759285104469687e+02,
-        1.383577518672690e+02,
-        -3.066479806614716e+01,
-        2.506628277459239e+00,
-    ];
-    let b = [
-        -5.447609879822406e+01,
-        1.615858368580409e+02,
-        -1.556989798598866e+02,
-        6.680131188771972e+01,
-        -1.328068155288572e+01,
-    ];
-    let c = [
-        -7.784894002430293e-03,
-        -3.223964580411365e-01,
-        -2.400758277161838e+00,
-        -2.549732539343734e+00,
-        4.374664141464968e+00,
-        2.938163982698783e+00,
-    ];
-    let d = [
-        7.784695709041462e-03,
-        3.224671290700398e-01,
-        2.445134137142996e+00,
-        3.754408661907416e+00,
-    ];
-
-    let p_low = 0.02425;
-    let p_high = 1.0 - p_low;
-
-    if p < p_low {
-        let q = (-2.0 * p.ln()).sqrt();
-        (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
-            / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
-    } else if p <= p_high {
-        let q = p - 0.5;
-        let r = q * q;
-        (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q
-            / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
-    } else {
-        let q = (-2.0 * (1.0 - p).ln()).sqrt();
-        -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
-            / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
-    }
-}
-
-/// Calculate fair YES price given buffer, volatility, and time
-///
-/// Uses simplified binary option pricing:
-/// P(YES) = N(d2) where d2 = buffer / (σ * √T)
-///
-/// - buffer: (spot - threshold) / threshold as decimal (positive = above threshold)
-/// - volatility: 15-minute volatility as decimal (e.g., 0.003 = 0.3%)
-/// - time_remaining_fraction: fraction of 15-min window remaining (0.0 - 1.0)
-pub fn calculate_fair_yes_price(buffer: f64, volatility: f64, time_remaining_fraction: f64) -> f64 {
-    if volatility <= 0.0 || time_remaining_fraction <= 0.0 {
-        // Edge case: no volatility or no time
-        return if buffer > 0.0 { 1.0 } else { 0.0 };
-    }
-
-    // Adjust volatility for remaining time
-    // σ_remaining = σ_15min * √(T_remaining / T_total)
-    let adjusted_vol = volatility * time_remaining_fraction.sqrt();
-
-    if adjusted_vol < 1e-10 {
-        return if buffer > 0.0 { 1.0 } else { 0.0 };
-    }
-
-    // d2 = buffer / adjusted_vol
-    let d2 = buffer / adjusted_vol;
-
-    // P(YES) = N(d2)
-    let prob = norm_cdf(d2);
-
-    // Clamp to valid range
-    prob.max(0.001).min(0.999)
-}
-
-/// Calculate implied volatility from market price
-///
-/// Given YES price, buffer, and time, solve for σ such that:
-/// N(buffer / (σ * √T)) = YES_price
-///
-/// Uses Newton-Raphson iteration
-pub fn calculate_implied_volatility(
-    yes_price: f64,
-    buffer: f64,
-    time_remaining_fraction: f64,
-) -> Option<f64> {
-    if yes_price <= 0.0 || yes_price >= 1.0 {
-        return None;
-    }
-    if time_remaining_fraction <= 0.0 {
-        return None;
-    }
-
-    // Handle extreme cases
-    if buffer.abs() < 1e-10 {
-        // At the money - implied vol can be anything
-        return Some(0.003); // Return reasonable default
-    }
-
-    // Initial guess based on inverting the formula
-    // d2 = norm_inv(yes_price)
-    // buffer / (σ * √T) = d2
-    // σ = buffer / (d2 * √T)
-    let d2_target = norm_inv(yes_price);
-
-    if d2_target.abs() < 1e-10 {
-        return Some(0.003); // Near ATM
-    }
-
-    let sqrt_t = time_remaining_fraction.sqrt();
-    let initial_vol = (buffer / (d2_target * sqrt_t)).abs();
-
-    // Newton-Raphson refinement
-    let mut vol = initial_vol.max(0.0001).min(0.1);
-
-    for _ in 0..20 {
-        let adjusted_vol = vol * sqrt_t;
-        if adjusted_vol < 1e-10 {
-            break;
-        }
-
-        let d2 = buffer / adjusted_vol;
-        let price = norm_cdf(d2);
-        let error = price - yes_price;
-
-        if error.abs() < 1e-8 {
-            break;
-        }
-
-        // Vega (derivative of price w.r.t. vol)
-        let vega = -norm_pdf(d2) * d2 / vol;
-
-        if vega.abs() < 1e-10 {
-            break;
-        }
-
-        vol -= error / vega;
-        vol = vol.max(0.0001).min(0.1);
-    }
-
-    Some(vol)
-}
-
-/// Calculate Kelly fraction for position sizing
-///
-/// f* = (p * b - q) / b
-/// where p = win probability, q = 1 - p, b = odds
-///
-/// For binary options: b = (1 - entry_price) / entry_price for YES
-pub fn calculate_kelly_fraction(win_probability: f64, entry_price: f64) -> f64 {
-    if entry_price <= 0.0 || entry_price >= 1.0 {
-        return 0.0;
-    }
-
-    let p = win_probability;
-    let q = 1.0 - p;
-    let b = (1.0 - entry_price) / entry_price; // Odds
-
-    let kelly = (p * b - q) / b;
-    kelly.max(0.0) // Never go negative (don't short)
-}
-
 // ============================================================================
 // Volatility Arbitrage Engine
 // ============================================================================
@@ -521,17 +515,9 @@ impl VolatilityArbEngine {
 
         // Confidence based on data availability
         let mut confidence = if self.kline_vol_cache.contains_key(symbol) {
-            if tick_volatility.is_some() {
-                0.9
-            } else {
-                0.7
-            }
+            if tick_volatility.is_some() { 0.9 } else { 0.7 }
         } else {
-            if tick_volatility.is_some() {
-                0.5
-            } else {
-                0.3
-            }
+            if tick_volatility.is_some() { 0.5 } else { 0.3 }
         };
 
         // Penalize confidence when kline/tick disagree (proxy for vol-of-vol / instability).

@@ -5950,3 +5950,63 @@ Remove one more internal `async_trait` seam by converting the DLQ handler contra
 - 2026-03-12: Validation passed:
   - `DATABASE_URL=<tango-1-1 via ssh tunnel> CARGO_TARGET_DIR=/tmp/ploy-dlq-wave rtk cargo test test_logging_handler_types --lib -- --exact --nocapture`
   - `DATABASE_URL=<tango-1-1 via ssh tunnel> CARGO_TARGET_DIR=/tmp/ploy-dlq-wave rtk cargo test test_backoff_calculation --lib -- --exact --nocapture`
+# Structural Wave 11 Sidecar Validation Block (2026-03-13)
+
+## Goal
+Keep the extracted sidecar live-submission ownership cut isolated until `api` feature validation can run against the `tango-1-1` schema source of truth.
+
+## Progress notes
+
+- 2026-03-13: The sidecar write-path extraction remains uncommitted in stash `wave11-sidecar-api-blocked`.
+- 2026-03-13: `api` feature validation was blocked because the reused `tango-1-1` tunnel endpoint (`127.0.0.1:55432`) traced back to a remote `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ploy`, but `ssh tango-1-1 "pg_isready -h localhost -p 5432 -d ploy -U postgres"` returned `localhost:5432 - no response`.
+- 2026-03-13: Resume this slice only after the `tango-1-1` PostgreSQL endpoint is reachable again, then re-run:
+  - `DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/ploy CARGO_TARGET_DIR=/tmp/ploy-wave13-api rtk cargo test --features api api::handlers::sidecar::write_side::live_submission::tests::build_sidecar_order_live_order_applies_deployment_and_request_metadata --lib -- --exact --nocapture`
+  - `DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/ploy CARGO_TARGET_DIR=/tmp/ploy-wave13-api rtk cargo test --features api api::handlers::sidecar::write_side::live_submission::tests::build_sidecar_intent_live_order_preserves_explicit_intent_id --lib -- --exact --nocapture`
+
+# Structural Wave 12 (2026-03-13)
+
+## Goal
+Keep shrinking active-core owners by cutting governance persistence and three remaining heavy strategy seams in parallel:
+- governance control-plane persistence/history loading
+- Deribit probability arb parsing/surface support
+- volatility arb math/config helper ownership
+- dump hedge tracker ownership
+
+## File ownership
+
+- `src/coordinator/governance.rs`
+  - owner: runtime control state, policy validation, and governance snapshots
+- `src/coordinator/governance/persistence.rs`
+  - owner: governance DB persistence, history loading, and runtime-state restoration payload decoding
+- `src/strategy/deribit_probability_arb.rs`
+  - owner: runner orchestration and top-level Deribit probability arb surface
+- `src/strategy/deribit_probability_arb_support.rs`
+  - owner: Deribit parsing, symbol normalization, probability math, and public-client helpers
+- `src/strategy/volatility_arb.rs`
+  - owner: engine state and strategy orchestration, with math/config helpers modularized in-file
+- `src/strategy/dump_hedge.rs`
+  - owner: config, pending-hedge state, and engine orchestration
+- `src/strategy/dump_hedge/tracker.rs`
+  - owner: enhanced snapshot tracking, dump detection, and signal-strength helpers
+
+## Tasks
+
+- [x] Extract governance persistence/history loading into a sibling module.
+- [x] Extract Deribit probability arb support helpers into a sibling module.
+- [x] Modularize volatility arb pure math/config helpers without changing behavior.
+- [x] Extract dump hedge tracker ownership into a sibling module.
+- [x] Re-run compile and focused regressions for the integrated wave.
+
+## Progress notes
+
+- 2026-03-13: Added [persistence.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/governance/persistence.rs) and reduced [governance.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/coordinator/governance.rs) so the root file no longer owns governance DB writes/history loading.
+- 2026-03-13: Added [deribit_probability_arb_support.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/deribit_probability_arb_support.rs) and reduced [deribit_probability_arb.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/deribit_probability_arb.rs) to runner/runtime orchestration plus focused tests.
+- 2026-03-13: Reduced [volatility_arb.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/volatility_arb.rs) by modularizing pure math/config helpers in-file while keeping the public strategy surface unchanged.
+- 2026-03-13: Added [tracker.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/dump_hedge/tracker.rs) and reduced [dump_hedge.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/dump_hedge.rs) to config/state/engine ownership.
+- 2026-03-13: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave13-next4 cargo check --lib --message-format=short`
+  - `cargo test --lib coordinator::governance::tests::test_governance_intent_snapshot_reads_runtime_controls_in_one_view -- --exact --nocapture`
+  - `cargo test --lib coordinator::governance::tests::test_set_global_mode_clears_domain_overrides -- --exact --nocapture`
+  - `cargo test --lib strategy::deribit_probability_arb::tests::interpolate_iv_linear_blends_variance_by_maturity -- --exact --nocapture`
+  - `cargo test --lib strategy::volatility_arb::tests::test_implied_volatility -- --exact --nocapture`
+  - `cargo test --lib strategy::dump_hedge::tests::test_signal_strength -- --exact --nocapture`
