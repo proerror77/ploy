@@ -5612,3 +5612,20 @@ Close the remaining high-priority workflow security findings by adding dependenc
 
 - `cargo audit` is now enforced in CI, but it carries a temporary `RUSTSEC-2023-0071` ignore because `sqlx 0.8.6` still drags an unused MySQL `rsa` chain into `Cargo.lock`.
 - The actionable high-severity audit failure was `quinn-proto 0.11.13`; the lockfile was updated to `0.11.14` so the CI audit command can pass with only the documented SQLx exception.
+
+# Appleboy Workflow Host Trust Wave (2026-03-12)
+
+## Goal
+Close the remaining workflow SSH trust gap by pinning host fingerprints on every `appleboy/ssh-action` and `appleboy/scp-action` path, rather than leaving release/deploy/rollback jobs on implicit TOFU host trust.
+
+## Outcomes
+
+- [x] Added explicit `fingerprint:` wiring to all production `appleboy` deploy/release/rollback steps in `.github/workflows/deploy.yml`, `.github/workflows/release.yml`, and `.github/workflows/rollback.yml`.
+- [x] Added explicit staging fingerprint wiring to `.github/workflows/release-staging.yml`.
+- [x] Added explicit Aliyun fingerprint wiring to `.github/workflows/release-aliyun.yml`.
+- [x] Added a workflow guard test in `tests/workflow_security.rs` that counts every remaining `appleboy` action and fails CI if any path loses its pinned fingerprint.
+
+## Validation
+
+- `CARGO_TARGET_DIR=/tmp/ploy-appleboy-fingerprint rtk cargo test appleboy_workflows_pin_host_fingerprints --test workflow_security -- --exact --nocapture`
+- `ruby -e 'require "yaml"; %w[deploy.yml release.yml release-staging.yml release-aliyun.yml rollback.yml].each { |f| YAML.load_file(File.join(".github/workflows", f)) }; puts "yaml ok"'`

@@ -267,6 +267,7 @@ jobs:
           host: ${{ steps.resolve-host.outputs.host }}
           username: ${{ secrets.ALIYUN_ECS_USER || 'root' }}
           key: ${{ secrets.ALIYUN_ECS_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
+          fingerprint: ${{ secrets.ALIYUN_ECS_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT }}
           port: ${{ secrets.ALIYUN_ECS_SSH_PORT || 22 }}
           source: dist/ploy-release-${{ needs.build.outputs.release_tag }}.tar.gz
           target: /tmp/
@@ -278,6 +279,7 @@ jobs:
           host: ${{ steps.resolve-host.outputs.host }}
           username: ${{ secrets.ALIYUN_ECS_USER || 'root' }}
           key: ${{ secrets.ALIYUN_ECS_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
+          fingerprint: ${{ secrets.ALIYUN_ECS_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT }}
           port: ${{ secrets.ALIYUN_ECS_SSH_PORT || 22 }}
           envs: DEPLOY_ROOT,PLOY_SYSTEMD_MEMORY_HIGH,PLOY_SYSTEMD_MEMORY_MAX,PLOY_SYSTEMD_RESTART_SEC
           script: |

@@ -135,3 +135,65 @@ fn release_workflows_enforce_systemd_guardrails() {
         offenders.join("\n")
     );
 }
+
+#[test]
+fn appleboy_workflows_pin_host_fingerprints() {
+    let workflows = [
+        (
+            ".github/workflows/deploy.yml",
+            5,
+            "EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT",
+        ),
+        (
+            ".github/workflows/release.yml",
+            2,
+            "EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT",
+        ),
+        (
+            ".github/workflows/release-staging.yml",
+            2,
+            "STAGING_EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT",
+        ),
+        (
+            ".github/workflows/release-aliyun.yml",
+            2,
+            "ALIYUN_ECS_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT",
+        ),
+        (
+            ".github/workflows/rollback.yml",
+            1,
+            "EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT",
+        ),
+    ];
+    let mut offenders = Vec::new();
+
+    for (workflow, expected_appleboy_steps, fingerprint_secret) in workflows {
+        let content = workflow_contents(workflow);
+        let appleboy_steps = content.matches("uses: appleboy/").count();
+        let fingerprint_count = content.matches("fingerprint:").count();
+
+        if appleboy_steps != expected_appleboy_steps {
+            offenders.push(format!(
+                "{workflow}: expected {expected_appleboy_steps} appleboy steps, found {appleboy_steps}"
+            ));
+        }
+
+        if fingerprint_count != expected_appleboy_steps {
+            offenders.push(format!(
+                "{workflow}: expected {expected_appleboy_steps} fingerprint pins, found {fingerprint_count}"
+            ));
+        }
+
+        if !content.contains(fingerprint_secret) {
+            offenders.push(format!(
+                "{workflow}: missing expected fingerprint secret wiring `{fingerprint_secret}`"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "workflow appleboy fingerprint check failed:\n{}",
+        offenders.join("\n")
+    );
+}

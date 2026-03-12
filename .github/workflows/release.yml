@@ -168,6 +168,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
+          fingerprint: ${{ secrets.EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT }}
           source: "./dist/ploy"
           target: "/tmp/"
           strip_components: 1
@@ -178,6 +179,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
+          fingerprint: ${{ secrets.EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT }}
           script_stop: true
           script: |
             set -e

@@ -171,6 +171,7 @@ jobs:
           host: ${{ steps.resolve-host.outputs.host }}
           username: ${{ vars.STAGING_EC2_USER || 'ubuntu' }}
           key: ${{ secrets.STAGING_EC2_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
+          fingerprint: ${{ secrets.STAGING_EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT }}
           port: ${{ vars.STAGING_EC2_SSH_PORT || 22 }}
           source: dist/ploy-staging-${{ needs.build.outputs.bundle_tag }}.tar.gz
           target: /tmp/
@@ -182,6 +183,7 @@ jobs:
           host: ${{ steps.resolve-host.outputs.host }}
           username: ${{ vars.STAGING_EC2_USER || 'ubuntu' }}
           key: ${{ secrets.STAGING_EC2_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
+          fingerprint: ${{ secrets.STAGING_EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT }}
           port: ${{ vars.STAGING_EC2_SSH_PORT || 22 }}
           envs: DEPLOY_ROOT,STAGING_SERVICES
           script: |
