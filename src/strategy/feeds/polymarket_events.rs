@@ -534,14 +534,17 @@ impl DataFeedManager {
                             .await;
                 }
 
-                if refresh_changed {
-                    if use_data_plane {
+                if use_data_plane {
+                    // Shared crypto collection keeps the broader raw token superset alive; the
+                    // strategy feed may add tokens and request a resubscribe, but must not prune
+                    // collector-owned subscriptions down to the strategy's narrower window set.
+                    if refresh_changed {
                         debug!(
                             "Polymarket refresh changed token set; requesting PlatformDataPlane resubscribe"
                         );
                         pm_ws.request_resubscribe();
-                        continue;
                     }
+                    continue;
                 }
 
                 let desired = desired_polymarket_token_sides(&series_events).await;
