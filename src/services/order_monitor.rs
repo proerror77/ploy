@@ -127,7 +127,7 @@ impl OrderMonitor {
 
     /// Start the monitoring loop
     pub async fn start(&self) {
-        if self.running.swap(true, Ordering::SeqCst) {
+        if self.running.swap(true, Ordering::AcqRel) {
             warn!("Order monitor already running");
             return;
         }
@@ -148,7 +148,7 @@ impl OrderMonitor {
             let mut interval =
                 tokio::time::interval(tokio::time::Duration::from_secs(config.check_interval_secs));
 
-            while running.load(Ordering::SeqCst) {
+            while running.load(Ordering::Acquire) {
                 interval.tick().await;
 
                 if let Err(e) = Self::run_check_cycle(
@@ -170,7 +170,7 @@ impl OrderMonitor {
 
     /// Stop the monitoring loop
     pub fn stop(&self) {
-        self.running.store(false, Ordering::SeqCst);
+        self.running.store(false, Ordering::Release);
         info!("Order monitor stop requested");
     }
 

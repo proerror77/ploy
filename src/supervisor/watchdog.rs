@@ -288,7 +288,7 @@ impl Watchdog {
         Fut: std::future::Future<Output = Result<(), String>> + Send,
     {
         self.running
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(true, std::sync::atomic::Ordering::Release);
         info!("Watchdog daemon started");
 
         let check_interval = Duration::from_secs(self.config.check_interval_secs);
@@ -303,7 +303,7 @@ impl Watchdog {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(check_interval);
 
-            while running.load(std::sync::atomic::Ordering::SeqCst) {
+            while running.load(std::sync::atomic::Ordering::Acquire) {
                 interval.tick().await;
 
                 let now = Utc::now();
@@ -426,7 +426,7 @@ impl Watchdog {
     /// Stop the watchdog daemon
     pub fn stop(&self) {
         self.running
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 

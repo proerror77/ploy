@@ -5709,3 +5709,36 @@ Close the remaining service-definition gap by making the checked-in systemd unit
 ## Validation
 
 - `CARGO_TARGET_DIR=/tmp/ploy-systemd-units rtk cargo test checked_in_systemd_units_enforce_guardrails --test workflow_security -- --exact --nocapture`
+# Runtime Flag Ordering Sweep (2026-03-12)
+
+## Goal
+Replace over-serialized `SeqCst` run-flag atomics with tighter acquire/release ordering in long-running background services so simple start/stop flags stop paying unnecessary global ordering cost.
+
+## File ownership
+
+- `src/services/order_monitor.rs`
+  - owner: order monitor run-flag lifecycle
+- `src/supervisor/watchdog.rs`
+  - owner: watchdog daemon run-flag lifecycle
+- `src/persistence/dlq_processor.rs`
+  - owner: DLQ processor daemon run-flag lifecycle
+- `src/persistence/checkpoint.rs`
+  - owner: checkpoint service run-flag lifecycle
+
+## Tasks
+
+- [x] Replace the `OrderMonitor` running flag with `AcqRel` / `Acquire` / `Release`.
+- [x] Replace the `Watchdog` running flag with `Acquire` / `Release`.
+- [x] Replace the `DLQProcessor` running flag with `Acquire` / `Release`.
+- [x] Replace the `CheckpointService` running flag with `Acquire` / `Release`.
+- [x] Re-run compile plus focused service regressions after the sweep.
+
+## Progress notes
+
+- 2026-03-12: Updated [order_monitor.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/services/order_monitor.rs), [watchdog.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/supervisor/watchdog.rs), [dlq_processor.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/persistence/dlq_processor.rs), and [checkpoint.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/persistence/checkpoint.rs) to use acquire/release ordering for simple daemon run flags instead of `SeqCst`.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-atomic-ordering rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/ploy-atomic-ordering rtk cargo test test_default_config --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-atomic-ordering rtk cargo test test_watchdog_register --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-atomic-ordering rtk cargo test test_backoff_calculation --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-atomic-ordering rtk cargo test test_mock_checkpoint --lib -- --exact --nocapture`

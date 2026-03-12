@@ -263,7 +263,7 @@ impl DLQProcessor {
     /// Start the DLQ processor daemon
     pub async fn start(&self) {
         self.running
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(true, std::sync::atomic::Ordering::Release);
         info!(
             "DLQ processor started (interval: {}s, batch: {})",
             self.config.process_interval_secs, self.config.batch_size
@@ -280,7 +280,7 @@ impl DLQProcessor {
         tokio::spawn(async move {
             let mut timer = tokio::time::interval(interval);
 
-            while running.load(std::sync::atomic::Ordering::SeqCst) {
+            while running.load(std::sync::atomic::Ordering::Acquire) {
                 timer.tick().await;
 
                 match tm.get_pending_dlq(batch_size).await {
@@ -348,7 +348,7 @@ impl DLQProcessor {
     /// Stop the DLQ processor daemon
     pub fn stop(&self) {
         self.running
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// Get current statistics

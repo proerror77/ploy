@@ -160,7 +160,7 @@ impl CheckpointService {
         Fut: std::future::Future<Output = Vec<Box<dyn Checkpointable>>> + Send,
     {
         self.running
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(true, std::sync::atomic::Ordering::Release);
         info!(
             "Checkpoint service started (interval: {}s)",
             self.config.interval_secs
@@ -173,7 +173,7 @@ impl CheckpointService {
         tokio::spawn(async move {
             let mut timer = tokio::time::interval(interval);
 
-            while running.load(std::sync::atomic::Ordering::SeqCst) {
+            while running.load(std::sync::atomic::Ordering::Acquire) {
                 timer.tick().await;
 
                 let components = get_components().await;
@@ -218,7 +218,7 @@ impl CheckpointService {
     /// Stop the periodic checkpoint task
     pub fn stop(&self) {
         self.running
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// Create checkpoints for all components (on-demand)
