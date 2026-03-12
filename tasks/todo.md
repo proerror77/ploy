@@ -5554,3 +5554,20 @@ Close the remaining `deploy-prebuilt` bootstrap gap under `R-43` and add the mis
 - `CARGO_TARGET_DIR=/tmp/ploy-r43-bootstrap rtk cargo test deploy_prebuilt_bootstraps_postgres_idempotently --test workflow_migrations -- --exact --nocapture`
 - `CARGO_TARGET_DIR=/tmp/ploy-r52 rtk cargo test test_set_global_mode_clears_domain_overrides --lib -- --exact --nocapture`
 - `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/deploy-prebuilt.yml"); puts "yaml ok"'`
+
+# Workflow Security Hardening Wave (2026-03-12)
+
+## Goal
+Close the remaining high-priority workflow security findings by adding dependency vulnerability scanning to CI and replacing the AWS helper workflows' TOFU SSH setup with pinned host trust.
+
+## Outcomes
+
+- [x] Added `cargo audit` installation and execution to `.github/workflows/test.yml`.
+- [x] Replaced the AWS helper workflows' `StrictHostKeyChecking=no`/TOFU SSH setup with pinned `AWS_EC2_KNOWN_HOSTS` trust plus explicit host-entry validation.
+- [x] Added workflow guard tests so CI fails if dependency audit or host key verification regresses.
+
+## Validation
+
+- `CARGO_TARGET_DIR=/tmp/ploy-r21-r24 rtk cargo test ci_runs_dependency_vulnerability_audit --test workflow_security -- --exact --nocapture`
+- `CARGO_TARGET_DIR=/tmp/ploy-r21-r24 rtk cargo test ssh_workflows_require_host_key_verification --test workflow_security -- --exact --nocapture`
+- `ruby -e 'require "yaml"; %w[test.yml deploy-aws-jp.yml get-logs.yml stop-trading.yml].each { |f| YAML.load_file(File.join(\".github/workflows\", f)) }; puts \"yaml ok\"'`

@@ -21,11 +21,22 @@ jobs:
       env:
         PRIVATE_KEY: ${{ secrets.AWS_EC2_PRIVATE_KEY }}
         HOST: ${{ secrets.AWS_EC2_HOST }}
+        KNOWN_HOSTS: ${{ secrets.AWS_EC2_KNOWN_HOSTS }}
       run: |
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        : "${KNOWN_HOSTS:?Missing AWS_EC2_KNOWN_HOSTS secret}"
+        printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+        chmod 600 ~/.ssh/known_hosts
+        ssh-keygen -F "$HOST" -f ~/.ssh/known_hosts >/dev/null || {
+          echo "AWS_EC2_KNOWN_HOSTS is missing an entry for $HOST"
+          exit 1
+        }
+
         echo "$PRIVATE_KEY" > private_key.pem
         chmod 600 private_key.pem
 
-        ssh -o StrictHostKeyChecking=no -i private_key.pem ec2-user@$HOST << 'ENDSSH'
+        ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -i private_key.pem ec2-user@$HOST << 'ENDSSH'
           echo "=== Container Status ==="
           docker ps -a --filter name=ploy-trading
 

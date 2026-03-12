@@ -100,6 +100,12 @@ jobs:
             --no-default-features \
             --features rustls,postgres
 
+      - name: Dependency vulnerability audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
+
       - name: Prepare database schema for compile-time SQLx checks
         env:
           DATABASE_URL: postgres://ploy:ploy@localhost:5432/ploy_test
