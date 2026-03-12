@@ -1,5 +1,10 @@
 use super::*;
 
+struct ObiConfirmation {
+    obi: f64,
+    strong_obi_bonus_active: bool,
+}
+
 pub(super) fn has_opening_window_candidate(
     adapter: &StaggeredArbAdapter,
     symbol: &str,
@@ -259,70 +264,18 @@ pub(super) fn try_entry_for_window(
         }
     }
 
-    const OI_CONFIRM_THRESHOLD: f64 = 0.005;
-    const OI_MAX_STALE_SECS: i64 = 60;
-    let obi_ts = match adapter.binance_l2_obi_ts.get(symbol) {
-        Some(v) => *v,
-        None => {
-            adapter.bump_entry_reject_for_symbol(symbol, "obi_missing");
-            return None;
-        }
-    };
-    if (ts - obi_ts).num_seconds().abs() > OI_MAX_STALE_SECS {
-        adapter.bump_entry_reject_for_symbol(symbol, "obi_stale");
-        return None;
-    }
-    let obi = match adapter.binance_l2_obi_5.get(symbol) {
-        Some(v) => v.to_f64().unwrap_or(0.0),
-        None => {
-            adapter.bump_entry_reject_for_symbol(symbol, "obi_missing");
-            return None;
-        }
-    };
-    let prev_obi = adapter
-        .binance_l2_obi_prev_5
-        .get(symbol)
-        .map(|value| value.to_f64().unwrap_or(0.0));
-    let fair_value_distance = greeks.as_ref().map(|g| (g.fair_value - 0.5).abs());
-    let premium_sum_excess = adapter.premium_sum_excess(current_sum);
-    let required_obi_strength =
-        bc.obi_confirm_threshold + premium_sum_excess * bc.premium_sum_obi_slope;
-    if !bc.obi_confirms_direction(predicted_up, obi, required_obi_strength) {
-        let reason = if required_obi_strength > OI_CONFIRM_THRESHOLD {
-            "obi_not_confirmed_for_premium_entry"
-        } else {
-            "obi_not_confirmed"
-        };
-        adapter.bump_entry_reject_for_symbol(symbol, reason);
-        return None;
-    }
-    let obi_persistent = bc.obi_is_persistent(predicted_up, obi, prev_obi, required_obi_strength);
-    let strong_obi_bonus_active = bc.strong_obi_entry_bonus_active(
-        predicted_up,
-        obi,
-        prev_obi,
+    let obi_confirmation = prepare_obi_confirmation(
+        adapter,
+        symbol,
+        ts,
         current_sum,
-        fair_value_distance,
-    );
-    if !obi_persistent && !strong_obi_bonus_active {
-        adapter.bump_entry_reject_for_symbol(symbol, "obi_not_persistent");
-        return None;
-    }
-
-    let direction_strength = (p_hat - 0.5).abs();
-    let required_direction_strength =
-        bc.direction_threshold_now(current_sum, strong_obi_bonus_active);
-    if direction_strength < required_direction_strength {
-        let reason = if strong_obi_bonus_active {
-            "direction_strength_below_strong_obi_adjusted_threshold"
-        } else if required_direction_strength > bc.direction_threshold {
-            "direction_strength_below_sum_adjusted_threshold"
-        } else {
-            "direction_strength_below_threshold"
-        };
-        adapter.bump_entry_reject_for_symbol(symbol, reason);
-        return None;
-    }
+        p_hat,
+        predicted_up,
+        greeks.as_ref(),
+        &bc,
+    )?;
+    let obi = obi_confirmation.obi;
+    let strong_obi_bonus_active = obi_confirmation.strong_obi_bonus_active;
 
     let allowed_entry_window_secs =
         bc.entry_after_start_max_secs_now(window.window_secs, strong_obi_bonus_active);
@@ -550,4 +503,88 @@ pub(super) fn try_entry_for_window(
             10,
         ))
     }
+}
+
+fn prepare_obi_confirmation(
+    adapter: &mut StaggeredArbAdapter,
+    symbol: &str,
+    ts: DateTime<Utc>,
+    current_sum: Decimal,
+    p_hat: f64,
+    predicted_up: bool,
+    greeks: Option<&super::super::gamma_scalping::greeks::BinaryGreeks>,
+    bc: &StaggeredArbBacktestConfig,
+) -> Option<ObiConfirmation> {
+    const OI_CONFIRM_THRESHOLD: f64 = 0.005;
+    const OI_MAX_STALE_SECS: i64 = 60;
+
+    let obi_ts = match adapter.binance_l2_obi_ts.get(symbol) {
+        Some(v) => *v,
+        None => {
+            adapter.bump_entry_reject_for_symbol(symbol, "obi_missing");
+            return None;
+        }
+    };
+    if (ts - obi_ts).num_seconds().abs() > OI_MAX_STALE_SECS {
+        adapter.bump_entry_reject_for_symbol(symbol, "obi_stale");
+        return None;
+    }
+
+    let obi = match adapter.binance_l2_obi_5.get(symbol) {
+        Some(v) => v.to_f64().unwrap_or(0.0),
+        None => {
+            adapter.bump_entry_reject_for_symbol(symbol, "obi_missing");
+            return None;
+        }
+    };
+    let prev_obi = adapter
+        .binance_l2_obi_prev_5
+        .get(symbol)
+        .map(|value| value.to_f64().unwrap_or(0.0));
+    let fair_value_distance = greeks.map(|g| (g.fair_value - 0.5).abs());
+    let premium_sum_excess = adapter.premium_sum_excess(current_sum);
+    let required_obi_strength =
+        bc.obi_confirm_threshold + premium_sum_excess * bc.premium_sum_obi_slope;
+    if !bc.obi_confirms_direction(predicted_up, obi, required_obi_strength) {
+        let reason = if required_obi_strength > OI_CONFIRM_THRESHOLD {
+            "obi_not_confirmed_for_premium_entry"
+        } else {
+            "obi_not_confirmed"
+        };
+        adapter.bump_entry_reject_for_symbol(symbol, reason);
+        return None;
+    }
+
+    let obi_persistent = bc.obi_is_persistent(predicted_up, obi, prev_obi, required_obi_strength);
+    let strong_obi_bonus_active = bc.strong_obi_entry_bonus_active(
+        predicted_up,
+        obi,
+        prev_obi,
+        current_sum,
+        fair_value_distance,
+    );
+    if !obi_persistent && !strong_obi_bonus_active {
+        adapter.bump_entry_reject_for_symbol(symbol, "obi_not_persistent");
+        return None;
+    }
+
+    let direction_strength = (p_hat - 0.5).abs();
+    let required_direction_strength =
+        bc.direction_threshold_now(current_sum, strong_obi_bonus_active);
+    if direction_strength < required_direction_strength {
+        let reason = if strong_obi_bonus_active {
+            "direction_strength_below_strong_obi_adjusted_threshold"
+        } else if required_direction_strength > bc.direction_threshold {
+            "direction_strength_below_sum_adjusted_threshold"
+        } else {
+            "direction_strength_below_threshold"
+        };
+        adapter.bump_entry_reject_for_symbol(symbol, reason);
+        return None;
+    }
+
+    Some(ObiConfirmation {
+        obi,
+        strong_obi_bonus_active,
+    })
 }
