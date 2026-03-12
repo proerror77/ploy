@@ -3,30 +3,43 @@
 This repository supports both Codex-style `AGENTS.md` and Claude-style `CLAUDE.md`.
 Keep `AGENTS.md` and the repo-root `CLAUDE.md` aligned (same intent, same rules).
 
+## CLI Output Compression
+
+Prefer `rtk` wrappers for commands that would otherwise emit large output or are
+explicitly supported by RTK.
+
+- Use `rtk read <file>` instead of raw `cat` / `head` / `tail`.
+- Use `rtk git status`, `rtk git diff`, `rtk git log`, and `rtk git push`.
+- Use `rtk cargo ...`, `rtk pytest`, `rtk test npm test`, and other RTK wrappers
+  when they apply.
+- If no RTK wrapper exists for the command you need, run the plain command.
+
 ## Tool Mapping
 
 When instructions mention Claude Code tools, map them like this in Codex:
 
-- Read: use shell reads (`cat`, `sed`) or `rg`
-- Write: create files via shell redirection or `apply_patch`
+- Read: use `rtk read`, `sed`, or `rg`
+- Write: create or edit files with `apply_patch`
 - Edit/MultiEdit: use `apply_patch`
 - Bash: use `functions.exec_command`
 - Grep: use `rg` (fallback: `grep`)
 - Glob: use `rg --files` or `find`
 - LS: use `ls` via `functions.exec_command`
-- WebFetch/WebSearch: use `curl` (and Context7 for library docs when relevant)
+- WebFetch: use `curl` for known URLs (and Context7 for library docs when relevant)
+- WebSearch: use Codex web search/browsing tools; if you already have a concrete URL, treat it as fetch instead of search
 - If `curl` cannot fetch meaningful page content (JS-rendered pages, anti-bot/Cloudflare, login walls), switch to the `agent-browser` skill workflow (`open` -> `snapshot -i` -> `get text body`) before trying mirrors.
 - Parallel: use `multi_tool_use.parallel` for parallel shell reads/searches
 
 ## Git / Atomic Commits
 
-Prefer **atomic commits**:
+Prefer **atomic commits** for landed repo changes:
 
-- Any code or docs modification must be committed atomically.
+- When a task is meant to leave committed repo changes, keep them atomic.
 - One commit should represent one logical change.
 - Keep refactors, formatting, and behavior changes in separate commits.
 - Each commit should build (and run relevant tests when available).
 - Avoid WIP commits on shared branches.
+- Pure review, research, and question-answer tasks do not require a commit by default.
 
 ### Atomic Commit Execution Standard
 
@@ -49,8 +62,8 @@ Prefer **atomic commits**:
 - Treat each session as isolated: one session = one worktree + one branch.
 - Create sessions from updated main (example: `git fetch origin && git worktree add ../ploy-s1 -b session/s1 origin/main`).
 - Define file ownership in `tasks/todo.md` before implementation; avoid cross-session overlap.
-- Before editing, run preflight checks: `git status --short`, `git branch --show-current`, `git diff --name-only`.
-- Stage explicit paths only, then verify with `git diff --cached` before commit.
+- Before editing, run preflight checks: `rtk git status --short`, `git branch --show-current`, `rtk git diff --name-only`.
+- Stage explicit paths only, then verify with `rtk git diff --cached` before commit.
 - Use one integration session to merge work: `git switch main && git pull --rebase`, then `git cherry-pick <sha...>`.
 - After merge, remove temporary worktrees to prevent stale branches and accidental edits.
 
@@ -75,14 +88,22 @@ When using a skill:
 
 ## Workflow Orchestration
 
-### 1. Plan Mode Default
+### 1. Planning Default
 
-- Enter plan mode for any non-trivial task (3+ steps or architectural decisions).
+- For any non-trivial task (3+ steps or architectural decisions), write and maintain a short plan.
+- Use explicit plan-mode tooling when the current runtime supports it; otherwise keep the plan in the task tracker or working notes.
 - If something goes sideways, stop and re-plan immediately instead of pushing through.
-- Use plan mode for verification steps, not only implementation.
+- Use planning for verification steps, not only implementation.
 - Write detailed specs upfront to reduce ambiguity.
 
-### 2. Subagent Strategy
+### 2. Execution Loop Default
+
+- Once a plan is explicit and approved, execute it continuously without waiting for step-by-step confirmation.
+- Default loop: plan -> execute -> verify -> update progress -> continue to the next planned item.
+- Do not stop just to ask whether to continue when the next step is already implied by the plan and current repo context.
+- Only stop for user confirmation when the next action is destructive, irreversible, production-impacting, materially changes the approved plan, requires unavailable credentials/permissions, or remains genuinely ambiguous after reasonable local discovery.
+
+### 3. Subagent Strategy
 
 - Prefer Agent team execution by default for non-trivial work.
 - Use subagents liberally to keep the main context window clean.
@@ -90,28 +111,28 @@ When using a skill:
 - For complex problems, use subagents to increase parallel compute.
 - Keep one task per subagent for focused execution.
 
-### 3. Self-Improvement Loop
+### 4. Self-Improvement Loop
 
-- After any correction from the user, update `tasks/lessons.md` with the pattern.
+- After a substantive correction from the user that reveals a reusable repo-specific failure pattern, update `tasks/lessons.md` with the pattern.
 - Write explicit rules that prevent repeating the same mistake.
 - Iteratively refine lessons until error rate drops.
 - Review relevant lessons at session start.
 
-### 4. Verification Before Done
+### 5. Verification Before Done
 
 - Never mark a task complete without proving it works.
 - Diff behavior between main and your changes when relevant.
 - Ask yourself: "Would a staff engineer approve this?"
 - Run tests, check logs, and demonstrate correctness.
 
-### 5. Demand Elegance (Balanced)
+### 6. Demand Elegance (Balanced)
 
 - For non-trivial changes, pause and ask if there is a more elegant way.
 - If a fix feels hacky, re-implement the elegant solution using current understanding.
 - Skip this for simple, obvious fixes to avoid over-engineering.
 - Challenge your own work before presenting it.
 
-### 6. Autonomous Bug Fixing
+### 7. Autonomous Bug Fixing
 
 - When given a bug report, fix it directly without requiring hand-holding.
 - Start from logs, errors, and failing tests, then resolve root causes.
@@ -120,18 +141,33 @@ When using a skill:
 
 ## Task Management
 
-1. **Plan First**: Write a plan in `tasks/todo.md` with checkable items.
-2. **Verify Plan**: Check in before starting implementation.
-3. **Track Progress**: Mark items complete as you go.
-4. **Explain Changes**: Provide a high-level summary at each step.
-5. **Document Results**: Add a review section to `tasks/todo.md`.
-6. **Capture Lessons**: Update `tasks/lessons.md` after corrections.
+1. **Plan First**: For multi-step implementation work, write a plan in `tasks/todo.md` with checkable items.
+2. **Verify Plan**: Check in before starting implementation when the task has multiple moving parts.
+3. **Execute Continuously**: Once the plan is clear, keep moving through planned steps without asking for confirmation at each checkpoint unless a listed stop condition is hit.
+4. **Track Progress**: Mark items complete as you go when using `tasks/todo.md`.
+5. **Explain Changes**: Provide a high-level summary at each step for substantial work.
+6. **Document Results**: Add a review section to `tasks/todo.md` for substantial tracked work.
+7. **Capture Lessons**: Update `tasks/lessons.md` after substantive user corrections that expose a reusable repo-specific rule.
 
 ## Issue Tracking
 
 - If a problem cannot be resolved in the current change, create or update an issue.
 - Include clear context, impact, reproduction steps, and proposed next action.
 - Link follow-up work to the issue so later corrections can be executed cleanly.
+
+## Trading Host Deployment Policy (Required)
+
+- For trading hosts (for example `tango-1-1`), do not build Rust source on-host.
+- Build in CI/GitHub Actions and deploy release artifacts only.
+- Preferred production path: `.github/workflows/release-aliyun.yml`.
+- Keep host Rust on latest stable via rustup, and ensure default `rustc`/`cargo` resolve to rustup-managed binaries.
+- Enforce systemd guardrails on live ploy services:
+  - `Restart=always`
+  - `RestartSec=5`
+  - `MemoryHigh=1280M`
+  - `MemoryMax=1536M`
+  - `OOMPolicy=kill`
+- After deploy, verify with `systemctl show <service> -p MemoryMax -p Restart -p OOMPolicy` and ensure no active `cargo`/`rustc` build process remains.
 
 ## Core Principles
 

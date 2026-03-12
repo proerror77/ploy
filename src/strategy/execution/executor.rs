@@ -2,7 +2,7 @@ use super::idempotency::{IdempotencyManager, IdempotencyRecord, IdempotencyResul
 use crate::adapters::{FeishuNotifier, PolymarketClient};
 use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus, Side};
-use crate::error::{OrderError, Result};
+use crate::error::Result;
 use crate::exchange::ExchangeClient;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, timeout, Instant};
 use tracing::{debug, error, info, warn};
+
+mod execution_flow;
 
 /// Order executor for managing order lifecycle
 pub struct OrderExecutor {
@@ -60,338 +62,6 @@ impl OrderExecutor {
     /// Check if in dry run mode
     pub fn is_dry_run(&self) -> bool {
         self.client.is_dry_run()
-    }
-
-    /// Execute an order with retry logic and idempotency protection
-    pub async fn execute(&self, request: &OrderRequest) -> Result<ExecutionResult> {
-        // Check for duplicate order if idempotency is enabled
-        if let Some(ref idempotency) = self.idempotency {
-            let idem_key = IdempotencyManager::generate_key(request);
-
-            match idempotency.check_or_create(&idem_key, request).await? {
-                IdempotencyResult::Duplicate {
-                    order_id,
-                    status,
-                    response_data,
-                    error_message,
-                } => {
-                    warn!(
-                        "Duplicate order detected (key: {}), status: {}",
-                        idem_key, status
-                    );
-
-                    let mut record = IdempotencyRecord {
-                        order_id,
-                        status,
-                        response_data,
-                        error_message,
-                    };
-
-                    match record.status.to_lowercase().as_str() {
-                        "completed" => {
-                            return Self::cached_result(record, request);
-                        }
-                        "failed" => {
-                            let msg = record
-                                .error_message
-                                .unwrap_or_else(|| "Previous attempt failed".to_string());
-                            return Err(crate::error::PloyError::Internal(format!(
-                                "Order submission failed: {}",
-                                msg
-                            )));
-                        }
-                        _ => {
-                            warn!(
-                                "Previous order attempt still pending, polling idempotency status..."
-                            );
-
-                            let poll_interval =
-                                Duration::from_millis(self.config.poll_interval_ms.max(100));
-                            let timeout_ms = self
-                                .config
-                                .confirm_fill_timeout_ms
-                                .max(poll_interval.as_millis() as u64);
-                            let start = Instant::now();
-
-                            loop {
-                                if start.elapsed() >= Duration::from_millis(timeout_ms) {
-                                    return Err(crate::error::PloyError::OrderSubmission(
-                                        "Order already pending; retry later".to_string(),
-                                    ));
-                                }
-
-                                sleep(poll_interval).await;
-                                record = idempotency.fetch_record(&idem_key).await?;
-
-                                match record.status.to_lowercase().as_str() {
-                                    "completed" => {
-                                        return Self::cached_result(record, request);
-                                    }
-                                    "failed" => {
-                                        let msg = record.error_message.unwrap_or_else(|| {
-                                            "Previous attempt failed".to_string()
-                                        });
-                                        return Err(crate::error::PloyError::Internal(format!(
-                                            "Order submission failed: {}",
-                                            msg
-                                        )));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-                IdempotencyResult::New => {
-                    // Continue with new order execution
-                    debug!("New order request (key: {})", idem_key);
-                }
-            }
-
-            // Execute the order
-            let result = self.execute_with_retry(request).await;
-
-            // Mark idempotency status
-            match &result {
-                Ok(exec_result) => {
-                    if let Err(e) = idempotency
-                        .mark_completed(&idem_key, &exec_result.order_id, exec_result)
-                        .await
-                    {
-                        warn!("Failed to mark idempotency as completed: {}", e);
-                    }
-                }
-                Err(e) => {
-                    if let Err(err) = idempotency.mark_failed(&idem_key, &e.to_string()).await {
-                        warn!("Failed to mark idempotency as failed: {}", err);
-                    }
-                }
-            }
-
-            result
-        } else {
-            // No idempotency protection, execute directly
-            self.execute_with_retry(request).await
-        }
-    }
-
-    fn cached_result(record: IdempotencyRecord, request: &OrderRequest) -> Result<ExecutionResult> {
-        if let Some(data) = record.response_data {
-            if let Ok(result) = serde_json::from_value::<ExecutionResult>(data) {
-                info!("Returning cached order result: {}", result.order_id);
-                return Ok(result);
-            }
-        }
-
-        if let Some(order_id) = record.order_id {
-            return Ok(ExecutionResult {
-                order_id,
-                status: OrderStatus::Submitted,
-                filled_shares: 0,
-                avg_fill_price: Some(request.limit_price),
-                elapsed_ms: 0,
-            });
-        }
-
-        Err(crate::error::PloyError::Internal(
-            "Idempotency record completed without order_id".to_string(),
-        ))
-    }
-
-    /// Execute order with retry logic (internal method)
-    async fn execute_with_retry(&self, request: &OrderRequest) -> Result<ExecutionResult> {
-        let mut attempts = 0;
-
-        loop {
-            attempts += 1;
-
-            match self.try_execute(request).await {
-                Ok(result) => {
-                    info!(
-                        "Order {} executed: {} shares @ {:?} ({}ms)",
-                        result.order_id,
-                        result.filled_shares,
-                        result.avg_fill_price,
-                        result.elapsed_ms
-                    );
-
-                    // Send Feishu notification
-                    if let Some(ref feishu) = self.feishu {
-                        let action = match request.order_side {
-                            crate::domain::OrderSide::Buy => "BUY",
-                            crate::domain::OrderSide::Sell => "SELL",
-                        };
-                        let side = match request.market_side {
-                            Side::Up => "UP",
-                            Side::Down => "DOWN",
-                        };
-                        let price = result
-                            .avg_fill_price
-                            .map(|p| p.to_f64().unwrap_or(0.0))
-                            .unwrap_or(request.limit_price.to_f64().unwrap_or(0.0));
-
-                        // Use request.shares since filled_shares may be 0 for submitted orders
-                        let shares = if result.filled_shares > 0 {
-                            result.filled_shares
-                        } else {
-                            request.shares
-                        };
-                        feishu
-                            .notify_trade(
-                                action,
-                                &request.token_id[..16.min(request.token_id.len())],
-                                side,
-                                price,
-                                shares as f64,
-                                Some(&result.order_id),
-                            )
-                            .await;
-                    }
-
-                    return Ok(result);
-                }
-                Err(e) => {
-                    if attempts >= self.config.max_retries {
-                        error!("Order execution failed after {} attempts: {}", attempts, e);
-                        return Err(OrderError::MaxRetriesExceeded { attempts }.into());
-                    }
-
-                    warn!("Order attempt {} failed: {}. Retrying...", attempts, e);
-
-                    // Exponential backoff
-                    let delay = Duration::from_millis(100 * (1 << attempts));
-                    sleep(delay).await;
-                }
-            }
-        }
-    }
-
-    /// Single execution attempt
-    async fn try_execute(&self, request: &OrderRequest) -> Result<ExecutionResult> {
-        let start = Instant::now();
-
-        // Submit order
-        let order_resp = self.client.submit_order_gateway(request).await?;
-        let order_id = order_resp.id.clone();
-
-        debug!("Order submitted: {}", order_id);
-
-        // If dry run, simulate immediate fill
-        if self.client.is_dry_run() {
-            return Ok(ExecutionResult {
-                order_id,
-                status: OrderStatus::Filled,
-                filled_shares: request.shares,
-                avg_fill_price: Some(request.limit_price),
-                elapsed_ms: start.elapsed().as_millis() as u64,
-            });
-        }
-
-        // Optional best-effort confirmation: never fail the execution after a successful submit,
-        // otherwise retry logic would resubmit and potentially create duplicates.
-        if self.config.confirm_fills {
-            let poll_interval = Duration::from_millis(self.config.poll_interval_ms.max(100));
-            let confirm_timeout = Duration::from_millis(self.config.confirm_fill_timeout_ms);
-
-            match timeout(
-                confirm_timeout,
-                self.wait_for_fill(&order_id, poll_interval),
-            )
-            .await
-            {
-                Ok(Ok(mut result)) => {
-                    result.elapsed_ms = start.elapsed().as_millis() as u64;
-                    return Ok(result);
-                }
-                Ok(Err(e)) => {
-                    warn!(
-                        order_id,
-                        error = %e,
-                        "Order submitted but confirmation polling failed; returning Submitted"
-                    );
-                }
-                Err(_) => {
-                    debug!(
-                        order_id,
-                        timeout_ms = self.config.confirm_fill_timeout_ms,
-                        "Order confirmation timed out; returning Submitted"
-                    );
-                }
-            }
-
-            // For non-resting orders, make a best-effort attempt to cancel and fetch final fill
-            // so callers don't treat a partially-filled order as 0-fill.
-            match request.time_in_force {
-                crate::domain::TimeInForce::IOC | crate::domain::TimeInForce::FOK => {
-                    let _ = self.client.cancel_order(&order_id).await;
-                    if let Ok(order) = self.client.get_order(&order_id).await {
-                        let status = self.client.infer_order_status(&order);
-                        let (filled_u64, price) = self.client.calculate_fill(&order);
-
-                        return Ok(ExecutionResult {
-                            order_id,
-                            status,
-                            filled_shares: filled_u64,
-                            avg_fill_price: price,
-                            elapsed_ms: start.elapsed().as_millis() as u64,
-                        });
-                    }
-                }
-                crate::domain::TimeInForce::GTC => {}
-            }
-        }
-
-        // Default: return immediately after submission (order is live on the book).
-        info!(
-            "Order {} submitted to market, status: {}",
-            order_id, order_resp.status
-        );
-
-        Ok(ExecutionResult {
-            order_id,
-            status: OrderStatus::Submitted, // Order is live on the book
-            filled_shares: 0,               // Will be determined at market resolution
-            avg_fill_price: Some(request.limit_price),
-            elapsed_ms: start.elapsed().as_millis() as u64,
-        })
-    }
-
-    /// Poll for order fill
-    async fn wait_for_fill(
-        &self,
-        order_id: &str,
-        poll_interval: Duration,
-    ) -> Result<ExecutionResult> {
-        loop {
-            let order = self.client.get_order(order_id).await?;
-            let status = self.client.infer_order_status(&order);
-            let (filled_u64, price) = self.client.calculate_fill(&order);
-
-            match status {
-                OrderStatus::Filled => {
-                    return Ok(ExecutionResult {
-                        order_id: order_id.to_string(),
-                        status,
-                        filled_shares: filled_u64,
-                        avg_fill_price: price,
-                        elapsed_ms: 0, // Will be updated by caller
-                    });
-                }
-                OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired => {
-                    return Ok(ExecutionResult {
-                        order_id: order_id.to_string(),
-                        status,
-                        filled_shares: filled_u64,
-                        avg_fill_price: price,
-                        elapsed_ms: 0,
-                    });
-                }
-                _ => {
-                    // Still pending, continue polling
-                    sleep(poll_interval).await;
-                }
-            }
-        }
     }
 
     /// Create and execute a buy order
@@ -527,7 +197,13 @@ impl ExecutionParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::OrderResponse;
+    use crate::config::ExecutionConfig;
+    use crate::exchange::{ExchangeClient, ExchangeKind};
+    use async_trait::async_trait;
     use rust_decimal_macros::dec;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_execution_params() {
@@ -535,5 +211,199 @@ mod tests {
 
         // 0.50 * 1.02 = 0.51
         assert_eq!(params.effective_max_price(), dec!(0.51));
+    }
+
+    #[derive(Default)]
+    struct MockExchangeClient {
+        submit_results: Mutex<VecDeque<Result<OrderResponse>>>,
+        get_order_responses: Mutex<VecDeque<OrderResponse>>,
+        get_order_calls: Mutex<Vec<String>>,
+        submit_calls: Mutex<u32>,
+    }
+
+    impl MockExchangeClient {
+        fn with_submit_response(self, response: OrderResponse) -> Self {
+            self.submit_results
+                .lock()
+                .expect("submit_results lock")
+                .push_back(Ok(response));
+            self
+        }
+
+        fn with_submit_error(self, error: crate::error::PloyError) -> Self {
+            self.submit_results
+                .lock()
+                .expect("submit_results lock")
+                .push_back(Err(error));
+            self
+        }
+
+        fn with_get_order_response(self, response: OrderResponse) -> Self {
+            self.get_order_responses
+                .lock()
+                .expect("get_order_responses lock")
+                .push_back(response);
+            self
+        }
+    }
+
+    #[async_trait]
+    impl ExchangeClient for MockExchangeClient {
+        fn kind(&self) -> ExchangeKind {
+            ExchangeKind::Polymarket
+        }
+
+        fn is_dry_run(&self) -> bool {
+            false
+        }
+
+        async fn submit_order_gateway(&self, _request: &OrderRequest) -> Result<OrderResponse> {
+            *self.submit_calls.lock().expect("submit_calls lock") += 1;
+            self.submit_results
+                .lock()
+                .expect("submit_results lock")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(crate::error::PloyError::Internal(
+                        "missing submit response".to_string(),
+                    ))
+                })
+        }
+
+        async fn get_order(&self, order_id: &str) -> Result<OrderResponse> {
+            self.get_order_calls
+                .lock()
+                .expect("get_order_calls lock")
+                .push(order_id.to_string());
+            self.get_order_responses
+                .lock()
+                .expect("get_order_responses lock")
+                .pop_front()
+                .ok_or_else(|| {
+                    crate::error::PloyError::Internal("missing get_order response".to_string())
+                })
+        }
+
+        async fn cancel_order(&self, _order_id: &str) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn get_best_prices(
+            &self,
+            _token_id: &str,
+        ) -> Result<(Option<Decimal>, Option<Decimal>)> {
+            Ok((None, None))
+        }
+
+        fn infer_order_status(&self, order: &OrderResponse) -> OrderStatus {
+            crate::adapters::PolymarketClient::infer_order_status(order)
+        }
+
+        fn calculate_fill(&self, order: &OrderResponse) -> (u64, Option<Decimal>) {
+            let (filled, price) = crate::adapters::PolymarketClient::calculate_fill(order);
+            (filled.to_u64().unwrap_or(0), Some(price))
+        }
+    }
+
+    fn make_order_response(
+        id: &str,
+        status: &str,
+        matched: &str,
+        original: &str,
+        price: &str,
+    ) -> OrderResponse {
+        OrderResponse {
+            id: id.to_string(),
+            status: status.to_string(),
+            owner: None,
+            market: None,
+            asset_id: None,
+            side: None,
+            original_size: Some(original.to_string()),
+            size_matched: Some(matched.to_string()),
+            price: Some(price.to_string()),
+            associate_trades: None,
+            created_at: None,
+            expiration: None,
+            order_type: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_reconciles_immediate_fill_with_order_query() {
+        let client = MockExchangeClient::default()
+            .with_submit_response(make_order_response(
+                "exchange-1",
+                "FILLED",
+                "20",
+                "20",
+                "0.40",
+            ))
+            .with_get_order_response(make_order_response(
+                "exchange-1",
+                "FILLED",
+                "20",
+                "20",
+                "0.34",
+            ));
+        let executor =
+            OrderExecutor::new_with_exchange(Arc::new(client), ExecutionConfig::default());
+        let request = OrderRequest::buy_limit("token-1".to_string(), Side::Up, 20, dec!(0.40));
+
+        let result = executor
+            .execute(&request)
+            .await
+            .expect("execution should succeed");
+
+        assert_eq!(result.status, OrderStatus::Filled);
+        assert_eq!(result.filled_shares, 20);
+        assert_eq!(result.avg_fill_price, Some(dec!(0.34)));
+    }
+
+    #[tokio::test]
+    async fn execute_stops_retrying_non_retryable_validation_errors() {
+        let client = Arc::new(MockExchangeClient::default().with_submit_error(
+            crate::error::PloyError::Validation("bad request".to_string()),
+        ));
+        let mut config = ExecutionConfig::default();
+        config.max_retries = 3;
+        let executor = OrderExecutor::new_with_exchange(client.clone(), config);
+        let request = OrderRequest::buy_limit("token-1".to_string(), Side::Up, 20, dec!(0.40));
+
+        let err = executor
+            .execute(&request)
+            .await
+            .expect_err("validation error should not be retried");
+
+        assert!(matches!(err, crate::error::PloyError::Validation(_)));
+        assert_eq!(*client.submit_calls.lock().expect("submit_calls lock"), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_reports_last_retryable_error_when_retries_exhausted() {
+        let client = Arc::new(
+            MockExchangeClient::default()
+                .with_submit_error(crate::error::PloyError::OrderSubmission(
+                    "temporary backend 503".to_string(),
+                ))
+                .with_submit_error(crate::error::PloyError::OrderSubmission(
+                    "temporary backend 503".to_string(),
+                )),
+        );
+        let mut config = ExecutionConfig::default();
+        config.max_retries = 2;
+        let executor = OrderExecutor::new_with_exchange(client.clone(), config);
+        let request = OrderRequest::buy_limit("token-1".to_string(), Side::Up, 20, dec!(0.40));
+
+        let err = executor
+            .execute(&request)
+            .await
+            .expect_err("retry exhaustion should surface the last error");
+
+        assert!(matches!(err, crate::error::PloyError::OrderSubmission(_)));
+        let message = err.to_string();
+        assert!(message.contains("Max retries exceeded after 2 attempts"));
+        assert!(message.contains("temporary backend 503"));
+        assert_eq!(*client.submit_calls.lock().expect("submit_calls lock"), 2);
     }
 }

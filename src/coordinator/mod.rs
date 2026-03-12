@@ -4,11 +4,20 @@
 //! Provides a single order submission chokepoint with risk checks,
 //! cross-agent position awareness, and dynamic pause/resume control.
 
+mod admission;
 pub mod bootstrap;
+mod capital;
 pub mod command;
 pub mod config;
 pub mod coordinator;
+mod governance;
+mod journal;
+mod position;
+mod queue;
+mod risk;
 pub mod state;
+pub(crate) mod runtime_specs;
+pub(crate) mod strategy_runtime;
 
 pub use bootstrap::{start_platform, PlatformBootstrapConfig, PlatformStartControl};
 pub use command::{
@@ -18,4 +27,10 @@ pub use command::{
 };
 pub use config::CoordinatorConfig;
 pub use coordinator::{Coordinator, CoordinatorHandle};
+pub use position::{AggregatedPosition, Position, PositionAggregator};
+pub use queue::{OrderQueue, QueueStats};
+pub use risk::{
+    BlockReason, CircuitBreakerEvent, DrawdownSnapshot, PlatformRiskState, RiskCheckResult,
+    RiskConfig, RiskGate,
+};
 pub use state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};

@@ -426,4 +426,16 @@ mod tests {
         let round = test_round(15);
         assert!(risk.must_force_leg2(&round));
     }
+
+    #[tokio::test]
+    async fn test_expired_round_treated_as_zero_remaining() {
+        let risk = RiskManager::new(test_config());
+        let round = test_round(-5);
+
+        // Expired round should not wrap to a huge positive value.
+        assert!(risk.must_force_leg2(&round));
+
+        let result = risk.check_leg1_entry(10, dec!(0.50), &round).await;
+        assert!(result.is_err());
+    }
 }

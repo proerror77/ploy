@@ -3,16 +3,35 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderValue};
 use sha2::Sha256;
+use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// API credentials for L2 authentication
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApiCredentials {
     pub api_key: String,
     pub secret: String,
     pub passphrase: String,
+}
+
+fn redacted_secret(value: &str) -> &'static str {
+    if value.is_empty() {
+        "<empty>"
+    } else {
+        "[REDACTED]"
+    }
+}
+
+impl fmt::Debug for ApiCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApiCredentials")
+            .field("api_key", &redacted_secret(&self.api_key))
+            .field("secret", &redacted_secret(&self.secret))
+            .field("passphrase", &redacted_secret(&self.passphrase))
+            .finish()
+    }
 }
 
 impl ApiCredentials {
@@ -104,11 +123,10 @@ impl HmacAuth {
 
         // Debug: Log what we're signing
         tracing::debug!(
-            "HMAC signing - timestamp: {}, method: {}, path: {}, message: '{}', address: {}",
+            "HMAC signing - timestamp: {}, method: {}, path: {}, address: {}",
             timestamp,
             method,
             path,
-            message,
             self.address
         );
 
@@ -177,5 +195,20 @@ mod tests {
         // Should produce a base64 encoded signature
         assert!(!sig.is_empty());
         assert!(BASE64.decode(&sig).is_ok());
+    }
+
+    #[test]
+    fn test_api_credentials_debug_redacts_secrets() {
+        let creds = ApiCredentials::new(
+            "test-key".to_string(),
+            "super-secret".to_string(),
+            "test-passphrase".to_string(),
+        );
+
+        let rendered = format!("{:?}", creds);
+
+        assert!(!rendered.contains("test-key"));
+        assert!(!rendered.contains("super-secret"));
+        assert!(!rendered.contains("test-passphrase"));
     }
 }

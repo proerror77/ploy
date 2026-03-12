@@ -1,28 +1,26 @@
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::postgres::PostgresStore;
 use crate::adapters::PolymarketClient;
-use crate::config::AppConfig;
-use crate::domain::{OrderSide, Side};
-use crate::error::{PloyError, Result};
-use crate::platform::{Domain, TradeIntent};
+use crate::error::Result;
 use crate::signing::Wallet;
 use crate::strategy::event_edge::{discover_best_event_id_by_title, scan_event_edge_once};
 use crate::strategy::event_models::arena_text::fetch_arena_text_snapshot;
 use crate::strategy::multi_outcome::fetch_multi_outcome_event;
-use chrono::Utc;
-use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::sync::OnceLock;
-use std::time::Duration;
-use uuid::Uuid;
+use std::path::PathBuf;
+
+mod intent_methods;
+mod pm_read_methods;
+mod write_support;
+
+use intent_methods::handle_coordinator_intent_method;
+use pm_read_methods::handle_pm_read_method;
+use write_support::{
+    finalize_write_response, hash_idempotency_params, idempotency_record_path, is_write_method,
+    load_app_config, load_idempotency_record, parse_idempotency_key, parse_str,
+    require_write_enabled, write_enabled, IdempotencyContext,
+};
 // (keep logs minimal; stdout is reserved for JSON-RPC responses)
 
 #[derive(Debug, Deserialize)]
@@ -34,21 +32,6 @@ struct JsonRpcRequest {
     method: String,
     #[serde(default)]
     params: Option<Value>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct RpcIdempotencyRecord {
-    method: String,
-    params_hash: String,
-    response: Value,
-    created_at: String,
-}
-
-#[derive(Debug, Clone)]
-struct IdempotencyContext {
-    key: String,
-    params_hash: String,
-    record_path: PathBuf,
 }
 
 fn jsonrpc_ok(id: Option<Value>, result: Value) -> Value {
@@ -74,77 +57,6 @@ fn jsonrpc_err(id: Option<Value>, code: i32, message: &str, data: Option<Value>)
     })
 }
 
-fn write_enabled() -> bool {
-    matches!(
-        std::env::var("PLOY_RPC_WRITE_ENABLED")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase()
-            .as_str(),
-        "1" | "true" | "yes"
-    )
-}
-
-fn require_write_enabled(id: Option<Value>) -> std::result::Result<(), Value> {
-    if write_enabled() {
-        return Ok(());
-    }
-    Err(jsonrpc_err(
-        id,
-        -32010,
-        "write operations disabled (set PLOY_RPC_WRITE_ENABLED=true)",
-        None,
-    ))
-}
-
-fn parse_str(v: &Value, key: &str) -> std::result::Result<String, PloyError> {
-    v.get(key)
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| PloyError::Validation(format!("missing/invalid string param: {key}")))
-}
-
-fn parse_u64(v: &Value, key: &str) -> std::result::Result<u64, PloyError> {
-    v.get(key)
-        .and_then(|x| x.as_u64())
-        .ok_or_else(|| PloyError::Validation(format!("missing/invalid integer param: {key}")))
-}
-
-fn parse_decimal(v: &Value, key: &str) -> std::result::Result<Decimal, PloyError> {
-    let Some(x) = v.get(key) else {
-        return Err(PloyError::Validation(format!(
-            "missing/invalid decimal param: {key}"
-        )));
-    };
-    match x {
-        Value::String(s) => Decimal::from_str(s)
-            .map_err(|_| PloyError::Validation(format!("missing/invalid decimal param: {key}"))),
-        Value::Number(n) => Decimal::from_str(&n.to_string())
-            .map_err(|_| PloyError::Validation(format!("missing/invalid decimal param: {key}"))),
-        _ => Err(PloyError::Validation(format!(
-            "missing/invalid decimal param: {key}"
-        ))),
-    }
-}
-
-fn parse_optional_decimal(v: &Value, key: &str) -> std::result::Result<Option<Decimal>, PloyError> {
-    if v.get(key).is_none() {
-        return Ok(None);
-    }
-    parse_decimal(v, key).map(Some)
-}
-
-fn parse_optional_str(v: &Value, key: &str) -> Option<String> {
-    v.get(key)
-        .and_then(|x| x.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-}
-
-fn load_app_config(config_path: &Path) -> std::result::Result<AppConfig, PloyError> {
-    AppConfig::load_from(config_path).map_err(PloyError::from)
-}
-
 async fn build_pm_client(rest_url: &str, dry_run: bool) -> Result<PolymarketClient> {
     if dry_run {
         return PolymarketClient::new(rest_url, true);
@@ -157,208 +69,6 @@ async fn build_pm_client(rest_url: &str, dry_run: bool) -> Result<PolymarketClie
     } else {
         PolymarketClient::new_authenticated(rest_url, wallet, false).await
     }
-}
-
-fn parse_domain(value: Option<&str>) -> std::result::Result<Domain, PloyError> {
-    match value
-        .unwrap_or("crypto")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "crypto" => Ok(Domain::Crypto),
-        "sports" => Ok(Domain::Sports),
-        "politics" => Ok(Domain::Politics),
-        "economics" => Ok(Domain::Economics),
-        other => Err(PloyError::Validation(format!(
-            "invalid domain '{}', expected crypto|sports|politics|economics",
-            other
-        ))),
-    }
-}
-
-fn coordinator_intent_ingress_url() -> String {
-    std::env::var("PLOY_RPC_COORDINATOR_INTENT_URL")
-        .or_else(|_| std::env::var("PLOY_COORDINATOR_INTENT_URL"))
-        .unwrap_or_else(|_| "http://127.0.0.1:8081/api/sidecar/intents".to_string())
-}
-
-fn coordinator_intent_ingress_token() -> Option<String> {
-    std::env::var("PLOY_RPC_SIDECAR_AUTH_TOKEN")
-        .or_else(|_| std::env::var("PLOY_SIDECAR_AUTH_TOKEN"))
-        .or_else(|_| std::env::var("PLOY_API_SIDECAR_AUTH_TOKEN"))
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
-async fn submit_intent_via_coordinator(payload: &Value) -> Result<Value> {
-    let url = coordinator_intent_ingress_url();
-    let client = coordinator_ingress_http_client()?;
-
-    let mut request = client.post(&url).json(payload);
-    if let Some(token) = coordinator_intent_ingress_token() {
-        request = request.header("x-ploy-sidecar-token", token);
-    }
-
-    let response = request.send().await.map_err(|e| {
-        PloyError::Internal(format!(
-            "failed to reach coordinator intent ingress {}: {}",
-            url, e
-        ))
-    })?;
-    let status = response.status();
-    let text = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "<empty>".to_string());
-
-    if !status.is_success() {
-        return Err(PloyError::Internal(format!(
-            "coordinator intent ingress rejected request (status={}): {}",
-            status, text
-        )));
-    }
-
-    serde_json::from_str(&text)
-        .or_else(|_| Ok(json!({ "raw": text })))
-        .map_err(|e: serde_json::Error| PloyError::Internal(format!("invalid ingress JSON: {}", e)))
-}
-
-fn coordinator_ingress_http_client() -> Result<&'static reqwest::Client> {
-    static CLIENT: OnceLock<std::result::Result<reqwest::Client, String>> = OnceLock::new();
-    let client = CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(8))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(16)
-            .tcp_nodelay(true)
-            .build()
-            .map_err(|e| format!("failed to build http client: {}", e))
-    });
-
-    client
-        .as_ref()
-        .map_err(|msg| PloyError::Internal(msg.clone()))
-}
-
-fn is_write_method(method: &str) -> bool {
-    matches!(
-        method,
-        "pm.submit_limit"
-            | "gateway.submit_intent"
-            | "pm.cancel_order"
-            | "events.upsert"
-            | "events.update_status"
-    )
-}
-
-fn rpc_state_dir() -> PathBuf {
-    std::env::var("PLOY_RPC_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("data/rpc"))
-}
-
-fn sanitize_idempotency_key(raw: &str) -> String {
-    raw.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn idempotency_record_path(method: &str, key: &str) -> PathBuf {
-    let mut path = rpc_state_dir();
-    path.push("idempotency");
-    path.push(method.replace('.', "_"));
-    path.push(format!("{}.json", sanitize_idempotency_key(key)));
-    path
-}
-
-fn hash_idempotency_params(params: &Value) -> std::result::Result<String, PloyError> {
-    let mut normalized = params.clone();
-    if let Some(obj) = normalized.as_object_mut() {
-        obj.remove("idempotency_key");
-    }
-    let bytes = serde_json::to_vec(&normalized)?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn load_idempotency_record(
-    path: &Path,
-) -> std::result::Result<Option<RpcIdempotencyRecord>, PloyError> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(path)?;
-    let record = serde_json::from_str::<RpcIdempotencyRecord>(&text)?;
-    Ok(Some(record))
-}
-
-fn save_idempotency_record(
-    path: &Path,
-    record: &RpcIdempotencyRecord,
-) -> std::result::Result<(), PloyError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, serde_json::to_vec_pretty(record)?)?;
-    Ok(())
-}
-
-fn append_write_audit_log(
-    method: &str,
-    idempotency_key: Option<&str>,
-    params: &Value,
-    response: &Value,
-) -> std::result::Result<(), PloyError> {
-    let mut path = rpc_state_dir();
-    path.push("audit");
-    fs::create_dir_all(&path)?;
-    path.push(format!("{}.jsonl", Utc::now().format("%Y-%m-%d")));
-
-    let mut params_for_log = params.clone();
-    if let Some(obj) = params_for_log.as_object_mut() {
-        for secret_key in ["private_key", "api_secret", "passphrase"] {
-            if obj.contains_key(secret_key) {
-                obj.insert(
-                    secret_key.to_string(),
-                    Value::String("***redacted***".to_string()),
-                );
-            }
-        }
-    }
-
-    let line = json!({
-        "ts": Utc::now().to_rfc3339(),
-        "method": method,
-        "idempotency_key": idempotency_key,
-        "params": params_for_log,
-        "response": response
-    });
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    writeln!(file, "{}", line)?;
-    Ok(())
-}
-
-fn parse_idempotency_key(params: &Value) -> std::result::Result<String, PloyError> {
-    let key = parse_str(params, "idempotency_key")?;
-    if key.trim().is_empty() {
-        return Err(PloyError::Validation(
-            "missing/invalid string param: idempotency_key".to_string(),
-        ));
-    }
-    Ok(key)
 }
 
 pub async fn run_rpc(config_path: &str) -> Result<()> {
@@ -501,750 +211,63 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
         None
     };
 
-    let resp = match req.method.as_str() {
-        "system.ping" => jsonrpc_ok(req.id, json!({"ok": true})),
+    let resp = if let Some(resp) = handle_pm_read_method(
+        req.id.clone(),
+        req.method.as_str(),
+        &params,
+        &rest_url,
+        dry_run,
+    )
+    .await
+    {
+        resp
+    } else if let Some(resp) =
+        handle_coordinator_intent_method(&req.id, req.method.as_str(), &params).await
+    {
+        resp
+    } else {
+        match req.method.as_str() {
+            "system.ping" => jsonrpc_ok(req.id, json!({"ok": true})),
 
-        "system.describe" => jsonrpc_ok(
-            req.id,
-            json!({
-                "ok": true,
-                "rest_url": rest_url,
-                "dry_run": dry_run,
-                "write_enabled": allow_write,
-                "methods": [
-                    "system.ping",
-                    "system.describe",
-                    "pm.resolve_event_id",
-                    "pm.get_balance",
-                    "pm.get_positions",
-                    "pm.get_open_orders",
-                    "pm.get_order",
-                    "pm.cancel_order",
-                    "pm.search_markets",
-                    "pm.get_event_details",
-                    "pm.get_market",
-                    "pm.get_order_book",
-                    "pm.get_trades",
-                    "pm.get_account_summary",
-                    "pm.submit_limit",
-                    "gateway.submit_intent",
-                    "event_edge.scan",
-                    "multi_outcome.analyze",
-                    "events.upsert",
-                    "events.list",
-                    "events.update_status"
-                ]
-            }),
-        ),
-
-        "pm.resolve_event_id" => {
-            let title = match parse_str(&params, "title") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            match discover_best_event_id_by_title(&title).await {
-                Ok(event_id) => jsonrpc_ok(req.id, json!({ "title": title, "event_id": event_id })),
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm.resolve_event_id failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "pm.get_balance" => match build_pm_client(&rest_url, dry_run).await {
-            Ok(c) => match c.get_balance().await {
-                Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm.get_balance failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            },
-            Err(e) => jsonrpc_err(
+            "system.describe" => jsonrpc_ok(
                 req.id,
-                -32001,
-                "pm client init failed",
-                Some(json!({"detail": e.to_string()})),
+                json!({
+                    "ok": true,
+                    "rest_url": rest_url,
+                    "dry_run": dry_run,
+                    "write_enabled": allow_write,
+                    "methods": [
+                        "system.ping",
+                        "system.describe",
+                        "pm.resolve_event_id",
+                        "pm.get_balance",
+                        "pm.get_positions",
+                        "pm.get_open_orders",
+                        "pm.get_order",
+                        "pm.cancel_order",
+                        "pm.search_markets",
+                        "pm.get_event_details",
+                        "pm.get_market",
+                        "pm.get_order_book",
+                        "pm.get_trades",
+                        "pm.get_account_summary",
+                        "pm.submit_limit",
+                        "gateway.submit_intent",
+                        "event_edge.scan",
+                        "multi_outcome.analyze",
+                        "events.upsert",
+                        "events.list",
+                        "events.update_status"
+                    ]
+                }),
             ),
-        },
 
-        "pm.get_positions" => match build_pm_client(&rest_url, dry_run).await {
-            Ok(c) => match c.get_positions().await {
-                Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm.get_positions failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            },
-            Err(e) => jsonrpc_err(
-                req.id,
-                -32001,
-                "pm client init failed",
-                Some(json!({"detail": e.to_string()})),
-            ),
-        },
-
-        "pm.get_open_orders" => match build_pm_client(&rest_url, dry_run).await {
-            Ok(c) => match c.get_open_orders().await {
-                Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm.get_open_orders failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            },
-            Err(e) => jsonrpc_err(
-                req.id,
-                -32001,
-                "pm client init failed",
-                Some(json!({"detail": e.to_string()})),
-            ),
-        },
-
-        "pm.get_order" => {
-            let order_id = match parse_str(&params, "order_id") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
+            "pm.cancel_order" => {
+                if let Err(v) = require_write_enabled(req.id.clone()) {
+                    println!("{}", v.to_string());
                     return Ok(());
                 }
-            };
-            match build_pm_client(&rest_url, dry_run).await {
-                Ok(c) => match c.get_order(&order_id).await {
-                    Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "pm.get_order failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm client init failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "pm.cancel_order" => {
-            if let Err(v) = require_write_enabled(req.id.clone()) {
-                println!("{}", v.to_string());
-                return Ok(());
-            }
-            let order_id = match parse_str(&params, "order_id") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            match build_pm_client(&rest_url, dry_run).await {
-                Ok(c) => match c.cancel_order(&order_id).await {
-                    Ok(ok) => jsonrpc_ok(req.id, json!({ "ok": ok })),
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "pm.cancel_order failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm client init failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "pm.search_markets" => {
-            let query = match parse_str(&params, "query") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            match build_pm_client(&rest_url, true).await {
-                Ok(c) => match c.search_markets(&query).await {
-                    Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "pm.search_markets failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm client init failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "pm.get_event_details" => {
-            let event_id = match parse_str(&params, "event_id") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            match build_pm_client(&rest_url, true).await {
-                Ok(c) => match c.get_event_details(&event_id).await {
-                    Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "pm.get_event_details failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm client init failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "pm.get_market" => {
-            let condition_id = match parse_str(&params, "condition_id") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            match build_pm_client(&rest_url, true).await {
-                Ok(c) => match c.get_market(&condition_id).await {
-                    Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "pm.get_market failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm client init failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "pm.get_order_book" => {
-            let token_id = match parse_str(&params, "token_id") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            match build_pm_client(&rest_url, true).await {
-                Ok(c) => match c.get_order_book(&token_id).await {
-                    Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "pm.get_order_book failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm client init failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "pm.get_trades" => {
-            let limit = params
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32);
-            match build_pm_client(&rest_url, true).await {
-                Ok(c) => match c.get_trades(limit).await {
-                    Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "pm.get_trades failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm client init failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "pm.get_account_summary" => match build_pm_client(&rest_url, dry_run).await {
-            Ok(c) => match c.get_account_summary().await {
-                Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm.get_account_summary failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            },
-            Err(e) => jsonrpc_err(
-                req.id,
-                -32001,
-                "pm client init failed",
-                Some(json!({"detail": e.to_string()})),
-            ),
-        },
-
-        "pm.submit_limit" => {
-            if let Err(v) = require_write_enabled(req.id.clone()) {
-                println!("{}", v.to_string());
-                return Ok(());
-            }
-            // params:
-            // - token_id: string
-            // - market_side: "UP" | "DOWN" (optional, default "UP" to match EventEdge YES token convention)
-            // - order_side: "BUY" | "SELL"
-            // - shares: integer
-            // - limit_price: number|string (0..1)
-            let token_id = match parse_str(&params, "token_id") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let order_side = match parse_str(&params, "order_side") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let shares = match parse_u64(&params, "shares") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let limit_price = match parse_decimal(&params, "limit_price") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let market_side = params
-                .get("market_side")
-                .and_then(|v| v.as_str())
-                .unwrap_or("UP");
-            let market_side = match market_side {
-                "UP" => Side::Up,
-                "DOWN" => Side::Down,
-                _ => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": "market_side must be UP|DOWN"}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let order_side = match order_side.as_str() {
-                "BUY" => OrderSide::Buy,
-                "SELL" => OrderSide::Sell,
-                _ => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": "order_side must be BUY|SELL"}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-
-            let idempotency_key = match parse_str(&params, "idempotency_key") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-
-            let domain = match parse_domain(params.get("domain").and_then(|v| v.as_str())) {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let agent_id = parse_optional_str(&params, "agent_id")
-                .unwrap_or_else(|| "openclaw_rpc".to_string());
-            let deployment_id = match parse_str(&params, "deployment_id") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let market_slug =
-                parse_optional_str(&params, "market_slug").unwrap_or_else(|| token_id.clone());
-
-            let mut metadata: HashMap<String, String> = HashMap::new();
-            metadata.insert("source".to_string(), "rpc.pm.submit_limit".to_string());
-            metadata.insert("deployment_id".to_string(), deployment_id.clone());
-            if let Some(v) = parse_optional_str(&params, "symbol") {
-                metadata.insert("symbol".to_string(), v);
-            }
-            if let Some(v) = parse_optional_str(&params, "horizon") {
-                metadata.insert("horizon".to_string(), v);
-            }
-            if let Some(v) = parse_optional_str(&params, "series_id") {
-                metadata.insert("series_id".to_string(), v.clone());
-                metadata.entry("event_series_id".to_string()).or_insert(v);
-            }
-
-            let confidence = match parse_optional_decimal(&params, "confidence") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let edge = match parse_optional_decimal(&params, "edge") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let reason = parse_optional_str(&params, "reason");
-
-            let trade_intent = TradeIntent {
-                intent_id: Uuid::new_v4(),
-                deployment_id: deployment_id.clone(),
-                agent_id: agent_id.clone(),
-                domain,
-                market_slug: market_slug.clone(),
-                token_id: token_id.clone(),
-                side: market_side,
-                is_buy: matches!(order_side, OrderSide::Buy),
-                size: shares,
-                price_limit: limit_price,
-                confidence,
-                edge,
-                event_time: None,
-                reason,
-                priority: None,
-                metadata,
-            };
-
-            let ingress_payload = json!({
-                "intent_id": trade_intent.intent_id,
-                "deployment_id": trade_intent.deployment_id,
-                "agent_id": trade_intent.agent_id,
-                "domain": trade_intent.domain.to_string(),
-                "market_slug": trade_intent.market_slug,
-                "token_id": trade_intent.token_id,
-                "side": match trade_intent.side { Side::Up => "UP", Side::Down => "DOWN" },
-                "order_side": match order_side { OrderSide::Buy => "BUY", OrderSide::Sell => "SELL" },
-                "size": trade_intent.size,
-                "price_limit": trade_intent.price_limit.to_f64().unwrap_or(0.0),
-                "idempotency_key": idempotency_key,
-                "reason": trade_intent.reason,
-                "confidence": trade_intent.confidence.and_then(|v| v.to_f64()),
-                "edge": trade_intent.edge.and_then(|v| v.to_f64()),
-                "metadata": trade_intent.metadata,
-            });
-
-            match submit_intent_via_coordinator(&ingress_payload).await {
-                Ok(submission) => jsonrpc_ok(
-                    req.id,
-                    json!({
-                        "submission": submission,
-                        "intent_id": trade_intent.intent_id,
-                        "deployment_id": trade_intent.deployment_id,
-                    }),
-                ),
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm.submit_limit failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "gateway.submit_intent" => {
-            if let Err(v) = require_write_enabled(req.id.clone()) {
-                println!("{}", v.to_string());
-                return Ok(());
-            }
-
-            let deployment_id = match parse_str(&params, "deployment_id") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let agent_id =
-                parse_optional_str(&params, "agent_id").unwrap_or_else(|| "openclaw_rpc".into());
-            let domain = match parse_domain(params.get("domain").and_then(|v| v.as_str())) {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let market_slug = match parse_str(&params, "market_slug") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let token_id = match parse_str(&params, "token_id") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let side = match parse_str(&params, "side")
-                .unwrap_or_else(|_| "UP".to_string())
-                .to_ascii_uppercase()
-                .as_str()
-            {
-                "UP" | "YES" => Side::Up,
-                "DOWN" | "NO" => Side::Down,
-                _ => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": "side must be UP|DOWN|YES|NO"}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let order_side = match parse_str(&params, "order_side")
-                .unwrap_or_else(|_| "BUY".to_string())
-                .to_ascii_uppercase()
-                .as_str()
-            {
-                "BUY" => OrderSide::Buy,
-                "SELL" => OrderSide::Sell,
-                _ => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": "order_side must be BUY|SELL"}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let size = match parse_u64(&params, "size") {
-                Ok(v) => v,
-                Err(_) => match parse_u64(&params, "shares") {
+                let order_id = match parse_str(&params, "order_id") {
                     Ok(v) => v,
                     Err(e) => {
                         println!(
@@ -1258,498 +281,376 @@ pub async fn run_rpc(config_path: &str) -> Result<()> {
                         );
                         return Ok(());
                     }
-                },
-            };
-            let price_limit = match parse_decimal(&params, "price_limit") {
-                Ok(v) => v,
-                Err(_) => match parse_decimal(&params, "limit_price") {
-                    Ok(v) => v,
-                    Err(e) => {
+                };
+                match build_pm_client(&rest_url, dry_run).await {
+                    Ok(c) => match c.cancel_order(&order_id).await {
+                        Ok(ok) => jsonrpc_ok(req.id, json!({ "ok": ok })),
+                        Err(e) => jsonrpc_err(
+                            req.id,
+                            -32001,
+                            "pm.cancel_order failed",
+                            Some(json!({"detail": e.to_string()})),
+                        ),
+                    },
+                    Err(e) => jsonrpc_err(
+                        req.id,
+                        -32001,
+                        "pm client init failed",
+                        Some(json!({"detail": e.to_string()})),
+                    ),
+                }
+            }
+
+            "event_edge.scan" => {
+                let event_id_opt = params
+                    .get("event_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let title_opt = params
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let event_id = match (event_id_opt, title_opt) {
+                    (Some(id), _) => id,
+                    (None, Some(t)) => match discover_best_event_id_by_title(&t).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            println!(
+                                "{}",
+                                jsonrpc_err(
+                                    req.id,
+                                    -32001,
+                                    "event discovery failed",
+                                    Some(json!({"detail": e.to_string()}))
+                                )
+                            );
+                            return Ok(());
+                        }
+                    },
+                    _ => {
                         println!(
                             "{}",
                             jsonrpc_err(
                                 req.id,
                                 -32602,
                                 "invalid params",
-                                Some(json!({"detail": e.to_string()}))
+                                Some(json!({"detail": "event_id or title required"}))
                             )
                         );
                         return Ok(());
                     }
-                },
-            };
-            let idempotency_key = match parse_str(&params, "idempotency_key") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
+                };
 
-            let confidence = match parse_optional_decimal(&params, "confidence") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let edge = match parse_optional_decimal(&params, "edge") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let reason = parse_optional_str(&params, "reason");
-
-            let mut metadata: HashMap<String, String> = HashMap::new();
-            if let Some(meta_obj) = params.get("metadata").and_then(|v| v.as_object()) {
-                for (k, v) in meta_obj {
-                    if let Some(s) = v.as_str() {
-                        metadata.insert(k.clone(), s.to_string());
-                    } else {
-                        metadata.insert(k.clone(), v.to_string());
-                    }
-                }
-            }
-            metadata
-                .entry("source".to_string())
-                .or_insert_with(|| "rpc.gateway.submit_intent".to_string());
-
-            let trade_intent = TradeIntent {
-                intent_id: Uuid::new_v4(),
-                deployment_id: deployment_id.clone(),
-                agent_id: agent_id.clone(),
-                domain,
-                market_slug,
-                token_id,
-                side,
-                is_buy: matches!(order_side, OrderSide::Buy),
-                size,
-                price_limit,
-                confidence,
-                edge,
-                event_time: None,
-                reason,
-                priority: None,
-                metadata,
-            };
-
-            let ingress_payload = json!({
-                "intent_id": trade_intent.intent_id,
-                "deployment_id": trade_intent.deployment_id,
-                "agent_id": trade_intent.agent_id,
-                "domain": trade_intent.domain.to_string(),
-                "market_slug": trade_intent.market_slug,
-                "token_id": trade_intent.token_id,
-                "side": match trade_intent.side { Side::Up => "UP", Side::Down => "DOWN" },
-                "order_side": if trade_intent.is_buy { "BUY" } else { "SELL" },
-                "size": trade_intent.size,
-                "price_limit": trade_intent.price_limit.to_f64().unwrap_or(0.0),
-                "idempotency_key": idempotency_key,
-                "reason": trade_intent.reason,
-                "confidence": trade_intent.confidence.and_then(|v| v.to_f64()),
-                "edge": trade_intent.edge.and_then(|v| v.to_f64()),
-                "metadata": trade_intent.metadata,
-            });
-
-            match submit_intent_via_coordinator(&ingress_payload).await {
-                Ok(submission) => jsonrpc_ok(
-                    req.id,
-                    json!({
-                        "submission": submission,
-                        "intent_id": trade_intent.intent_id,
-                        "deployment_id": trade_intent.deployment_id,
-                    }),
-                ),
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "gateway.submit_intent failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "event_edge.scan" => {
-            let event_id_opt = params
-                .get("event_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let title_opt = params
-                .get("title")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            let event_id = match (event_id_opt, title_opt) {
-                (Some(id), _) => id,
-                (None, Some(t)) => match discover_best_event_id_by_title(&t).await {
-                    Ok(id) => id,
+                let arena = match fetch_arena_text_snapshot().await {
+                    Ok(a) => a,
                     Err(e) => {
                         println!(
                             "{}",
                             jsonrpc_err(
                                 req.id,
                                 -32001,
-                                "event discovery failed",
+                                "arena fetch failed",
                                 Some(json!({"detail": e.to_string()}))
                             )
                         );
                         return Ok(());
                     }
-                },
-                _ => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": "event_id or title required"}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
+                };
 
-            let arena = match fetch_arena_text_snapshot().await {
-                Ok(a) => a,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
+                match build_pm_client(&rest_url, true).await {
+                    Ok(c) => match scan_event_edge_once(&c, &event_id, Some(arena)).await {
+                        Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
+                        Err(e) => jsonrpc_err(
                             req.id,
                             -32001,
-                            "arena fetch failed",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-
-            match build_pm_client(&rest_url, true).await {
-                Ok(c) => match scan_event_edge_once(&c, &event_id, Some(arena)).await {
-                    Ok(r) => jsonrpc_ok(req.id, serde_json::to_value(r)?),
+                            "event_edge.scan failed",
+                            Some(json!({"detail": e.to_string()})),
+                        ),
+                    },
                     Err(e) => jsonrpc_err(
                         req.id,
                         -32001,
-                        "event_edge.scan failed",
+                        "pm client init failed",
                         Some(json!({"detail": e.to_string()})),
                     ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm client init failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "multi_outcome.analyze" => {
-            let event_id = match parse_str(&params, "event_id") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
                 }
-            };
+            }
 
-            match build_pm_client(&rest_url, true).await {
-                Ok(c) => match fetch_multi_outcome_event(&c, &event_id).await {
-                    Ok(monitor) => {
-                        let arbs = monitor.find_all_arbitrage();
-                        let summary = monitor.summary();
-                        jsonrpc_ok(
-                            req.id,
-                            json!({
-                                "event_id": monitor.event_id,
-                                "event_title": monitor.event_title,
-                                "outcomes": summary,
-                                "arbs": arbs
-                            }),
-                        )
+            "multi_outcome.analyze" => {
+                let event_id = match parse_str(&params, "event_id") {
+                    Ok(v) => v,
+                    Err(e) => {
+                        println!(
+                            "{}",
+                            jsonrpc_err(
+                                req.id,
+                                -32602,
+                                "invalid params",
+                                Some(json!({"detail": e.to_string()}))
+                            )
+                        );
+                        return Ok(());
                     }
+                };
+
+                match build_pm_client(&rest_url, true).await {
+                    Ok(c) => match fetch_multi_outcome_event(&c, &event_id).await {
+                        Ok(monitor) => {
+                            let arbs = monitor.find_all_arbitrage();
+                            let summary = monitor.summary();
+                            jsonrpc_ok(
+                                req.id,
+                                json!({
+                                    "event_id": monitor.event_id,
+                                    "event_title": monitor.event_title,
+                                    "outcomes": summary,
+                                    "arbs": arbs
+                                }),
+                            )
+                        }
+                        Err(e) => jsonrpc_err(
+                            req.id,
+                            -32001,
+                            "multi_outcome.analyze failed",
+                            Some(json!({"detail": e.to_string()})),
+                        ),
+                    },
                     Err(e) => jsonrpc_err(
                         req.id,
                         -32001,
-                        "multi_outcome.analyze failed",
+                        "pm client init failed",
                         Some(json!({"detail": e.to_string()})),
                     ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "pm client init failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
+                }
             }
-        }
 
-        // ==================== Event Registry ====================
-        "events.upsert" => {
-            if let Err(v) = require_write_enabled(req.id.clone()) {
-                println!("{}", v.to_string());
-                return Ok(());
-            }
-            let title = match parse_str(&params, "title") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
+            // ==================== Event Registry ====================
+            "events.upsert" => {
+                if let Err(v) = require_write_enabled(req.id.clone()) {
+                    println!("{}", v.to_string());
                     return Ok(());
                 }
-            };
-            let source = params
-                .get("source")
-                .and_then(|v| v.as_str())
-                .unwrap_or("manual")
-                .to_string();
-
-            let req_body = crate::strategy::registry::EventUpsertRequest {
-                title,
-                source,
-                event_id: params
-                    .get("event_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                slug: params
-                    .get("slug")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                domain: params
-                    .get("domain")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("politics")
-                    .to_string(),
-                strategy_hint: params
-                    .get("strategy_hint")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                status: params
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                confidence: params.get("confidence").and_then(|v| v.as_f64()),
-                settlement_rule: params
-                    .get("settlement_rule")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                end_time: params
-                    .get("end_time")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                    .map(|dt| dt.with_timezone(&chrono::Utc)),
-                market_slug: params
-                    .get("market_slug")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                condition_id: params
-                    .get("condition_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                token_ids: params.get("token_ids").cloned(),
-                outcome_prices: params.get("outcome_prices").cloned(),
-                metadata: params.get("metadata").cloned(),
-            };
-
-            match PostgresStore::new(&config.database.url, config.database.max_connections).await {
-                Ok(store) => match store.upsert_event(&req_body).await {
-                    Ok(id) => jsonrpc_ok(req.id, json!({"id": id})),
-                    Err(e) => jsonrpc_err(
-                        req.id,
-                        -32001,
-                        "events.upsert failed",
-                        Some(json!({"detail": e.to_string()})),
-                    ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "db connect failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
-            }
-        }
-
-        "events.list" => {
-            let filter = crate::strategy::registry::EventFilter {
-                status: params
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                domain: params
-                    .get("domain")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                strategy_hint: params
-                    .get("strategy_hint")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                source: params
+                let title = match parse_str(&params, "title") {
+                    Ok(v) => v,
+                    Err(e) => {
+                        println!(
+                            "{}",
+                            jsonrpc_err(
+                                req.id,
+                                -32602,
+                                "invalid params",
+                                Some(json!({"detail": e.to_string()}))
+                            )
+                        );
+                        return Ok(());
+                    }
+                };
+                let source = params
                     .get("source")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                limit: params.get("limit").and_then(|v| v.as_i64()),
-            };
+                    .unwrap_or("manual")
+                    .to_string();
 
-            match PostgresStore::new(&config.database.url, config.database.max_connections).await {
-                Ok(store) => match store.list_events(&filter).await {
-                    Ok(events) => jsonrpc_ok(req.id, serde_json::to_value(events)?),
+                let req_body = crate::strategy::registry::EventUpsertRequest {
+                    title,
+                    source,
+                    event_id: params
+                        .get("event_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    slug: params
+                        .get("slug")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    domain: params
+                        .get("domain")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("politics")
+                        .to_string(),
+                    strategy_hint: params
+                        .get("strategy_hint")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    status: params
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    confidence: params.get("confidence").and_then(|v| v.as_f64()),
+                    settlement_rule: params
+                        .get("settlement_rule")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    end_time: params
+                        .get("end_time")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&chrono::Utc)),
+                    market_slug: params
+                        .get("market_slug")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    condition_id: params
+                        .get("condition_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    token_ids: params.get("token_ids").cloned(),
+                    outcome_prices: params.get("outcome_prices").cloned(),
+                    metadata: params.get("metadata").cloned(),
+                };
+
+                match PostgresStore::new(&config.database.url, config.database.max_connections)
+                    .await
+                {
+                    Ok(store) => match store.upsert_event(&req_body).await {
+                        Ok(id) => jsonrpc_ok(req.id, json!({"id": id})),
+                        Err(e) => jsonrpc_err(
+                            req.id,
+                            -32001,
+                            "events.upsert failed",
+                            Some(json!({"detail": e.to_string()})),
+                        ),
+                    },
                     Err(e) => jsonrpc_err(
                         req.id,
                         -32001,
-                        "events.list failed",
+                        "db connect failed",
                         Some(json!({"detail": e.to_string()})),
                     ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "db connect failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
+                }
             }
-        }
 
-        "events.update_status" => {
-            if let Err(v) = require_write_enabled(req.id.clone()) {
-                println!("{}", v.to_string());
-                return Ok(());
+            "events.list" => {
+                let filter = crate::strategy::registry::EventFilter {
+                    status: params
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    domain: params
+                        .get("domain")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    strategy_hint: params
+                        .get("strategy_hint")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    source: params
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    limit: params.get("limit").and_then(|v| v.as_i64()),
+                };
+
+                match PostgresStore::new(&config.database.url, config.database.max_connections)
+                    .await
+                {
+                    Ok(store) => match store.list_events(&filter).await {
+                        Ok(events) => jsonrpc_ok(req.id, serde_json::to_value(events)?),
+                        Err(e) => jsonrpc_err(
+                            req.id,
+                            -32001,
+                            "events.list failed",
+                            Some(json!({"detail": e.to_string()})),
+                        ),
+                    },
+                    Err(e) => jsonrpc_err(
+                        req.id,
+                        -32001,
+                        "db connect failed",
+                        Some(json!({"detail": e.to_string()})),
+                    ),
+                }
             }
-            let id = match params.get("id").and_then(|v| v.as_i64()) {
-                Some(v) => v as i32,
-                None => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": "missing/invalid integer param: id"}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let status_str = match parse_str(&params, "status") {
-                Ok(v) => v,
-                Err(e) => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": e.to_string()}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
-            let new_status = match crate::strategy::registry::EventStatus::from_str(&status_str) {
-                Some(s) => s,
-                None => {
-                    println!(
-                        "{}",
-                        jsonrpc_err(
-                            req.id,
-                            -32602,
-                            "invalid params",
-                            Some(json!({"detail": format!("unknown status: {status_str}")}))
-                        )
-                    );
-                    return Ok(());
-                }
-            };
 
-            match PostgresStore::new(&config.database.url, config.database.max_connections).await {
-                Ok(store) => match store.update_event_status(id, new_status).await {
-                    Ok(()) => {
-                        jsonrpc_ok(req.id, json!({"ok": true, "id": id, "status": status_str}))
+            "events.update_status" => {
+                if let Err(v) = require_write_enabled(req.id.clone()) {
+                    println!("{}", v.to_string());
+                    return Ok(());
+                }
+                let id = match params.get("id").and_then(|v| v.as_i64()) {
+                    Some(v) => v as i32,
+                    None => {
+                        println!(
+                            "{}",
+                            jsonrpc_err(
+                                req.id,
+                                -32602,
+                                "invalid params",
+                                Some(json!({"detail": "missing/invalid integer param: id"}))
+                            )
+                        );
+                        return Ok(());
                     }
+                };
+                let status_str = match parse_str(&params, "status") {
+                    Ok(v) => v,
+                    Err(e) => {
+                        println!(
+                            "{}",
+                            jsonrpc_err(
+                                req.id,
+                                -32602,
+                                "invalid params",
+                                Some(json!({"detail": e.to_string()}))
+                            )
+                        );
+                        return Ok(());
+                    }
+                };
+                let new_status = match crate::strategy::registry::EventStatus::from_str(&status_str)
+                {
+                    Some(s) => s,
+                    None => {
+                        println!(
+                            "{}",
+                            jsonrpc_err(
+                                req.id,
+                                -32602,
+                                "invalid params",
+                                Some(json!({"detail": format!("unknown status: {status_str}")}))
+                            )
+                        );
+                        return Ok(());
+                    }
+                };
+
+                match PostgresStore::new(&config.database.url, config.database.max_connections)
+                    .await
+                {
+                    Ok(store) => match store.update_event_status(id, new_status).await {
+                        Ok(()) => {
+                            jsonrpc_ok(req.id, json!({"ok": true, "id": id, "status": status_str}))
+                        }
+                        Err(e) => jsonrpc_err(
+                            req.id,
+                            -32001,
+                            "events.update_status failed",
+                            Some(json!({"detail": e.to_string()})),
+                        ),
+                    },
                     Err(e) => jsonrpc_err(
                         req.id,
                         -32001,
-                        "events.update_status failed",
+                        "db connect failed",
                         Some(json!({"detail": e.to_string()})),
                     ),
-                },
-                Err(e) => jsonrpc_err(
-                    req.id,
-                    -32001,
-                    "db connect failed",
-                    Some(json!({"detail": e.to_string()})),
-                ),
+                }
             }
-        }
 
-        _ => jsonrpc_err(
-            req.id,
-            -32601,
-            "method not found",
-            Some(json!({"method": req.method})),
-        ),
+            _ => jsonrpc_err(
+                req.id,
+                -32601,
+                "method not found",
+                Some(json!({"method": req.method})),
+            ),
+        }
     };
 
-    if let Some(ctx) = idempotency_ctx {
-        if resp.get("error").is_none() {
-            let record = RpcIdempotencyRecord {
-                method: method_name.clone(),
-                params_hash: ctx.params_hash,
-                response: resp.clone(),
-                created_at: Utc::now().to_rfc3339(),
-            };
-            if let Err(e) = save_idempotency_record(&ctx.record_path, &record) {
-                eprintln!("rpc idempotency persistence failed: {}", e);
-            }
-        }
-
-        if let Err(e) = append_write_audit_log(&method_name, Some(&ctx.key), &params, &resp) {
-            eprintln!("rpc write audit log failed: {}", e);
-        }
-    } else if is_write_method(&method_name) {
-        if let Err(e) = append_write_audit_log(&method_name, None, &params, &resp) {
+    if let Err(e) = finalize_write_response(&method_name, idempotency_ctx.as_ref(), &params, &resp)
+    {
+        if idempotency_ctx.is_some() && resp.get("error").is_none() {
+            eprintln!("rpc idempotency persistence failed: {}", e);
+        } else {
             eprintln!("rpc write audit log failed: {}", e);
         }
     }

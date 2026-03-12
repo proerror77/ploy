@@ -25,6 +25,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  DEPLOY_ROOT: ${{ vars.ALIYUN_PLOY_ROOT || '/root/ploy' }}
+
 jobs:
   rollback:
     name: Execute Rollback
@@ -39,45 +42,124 @@ jobs:
             exit 1
           fi
 
-      - name: Roll back service on EC2
+      - name: Roll back service on Aliyun ECS
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
+          host: ${{ secrets.ALIYUN_ECS_HOST }}
+          username: root
+          key: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
           script_stop: true
+          envs: DEPLOY_ROOT
           script: |
-            set -e
+            set -euo pipefail
             MODE="${{ github.event.inputs.mode }}"
             RELEASE_TAG="${{ github.event.inputs.release_tag }}"
+            DEPLOY_ROOT="${DEPLOY_ROOT:-/root/ploy}"
 
-            sudo systemctl stop ploy || true
+            SUDO=""
+            if [ "$(id -u)" -ne 0 ]; then
+              SUDO="sudo"
+            fi
+
+            unit_exists() {
+              local unit="$1"
+              local unit_name="${unit}.service"
+              $SUDO systemctl list-unit-files --type=service --no-legend "$unit_name" 2>/dev/null \
+                | awk '{print $1}' \
+                | grep -qx "$unit_name"
+            }
+
+            host_arch_info() {
+              case "$(uname -m)" in
+                x86_64|amd64)
+                  printf '%s\t%s\n' "x86_64-unknown-linux-gnu" 'x86-64|x86_64'
+                  ;;
+                aarch64|arm64)
+                  printf '%s\t%s\n' "aarch64-unknown-linux-gnu" 'ARM aarch64|ARM64|aarch64'
+                  ;;
+                *)
+                  echo "Unsupported host architecture: $(uname -m)" >&2
+                  exit 1
+                  ;;
+              esac
+            }
+
+            IFS=$'\t' read -r HOST_RUST_TARGET HOST_FILE_REGEX <<EOF
+            $(host_arch_info)
+            EOF
+
+            units=()
+            for candidate in ploy ploy-platform ploy-platform-live; do
+              if unit_exists "$candidate"; then
+                units+=("$candidate")
+              fi
+            done
+
+            for unit in "${units[@]}"; do
+              $SUDO systemctl stop "$unit" || true
+            done
 
             if [ "$MODE" = "specific-tag" ]; then
-              target="/opt/ploy/releases/${RELEASE_TAG}/ploy"
+              target="${DEPLOY_ROOT}/releases/${RELEASE_TAG}/ploy"
               if [ ! -f "$target" ]; then
                 echo "Release binary not found: $target"
                 exit 1
               fi
-              sudo cp "$target" /opt/ploy/bin/ploy
-              echo "$RELEASE_TAG" | sudo tee /opt/ploy/bin/.current_release > /dev/null
+              $SUDO cp "$target" "${DEPLOY_ROOT}/bin/ploy"
+              echo "$RELEASE_TAG" | $SUDO tee "${DEPLOY_ROOT}/bin/.current_release" > /dev/null
             else
-              latest_backup="$(ls -1t /opt/ploy/bin/ploy.bak.* 2>/dev/null | head -1 || true)"
+              latest_backup="$(ls -1t "${DEPLOY_ROOT}/bin/ploy.bak."* 2>/dev/null | head -1 || true)"
               if [ -n "$latest_backup" ]; then
-                sudo cp "$latest_backup" /opt/ploy/bin/ploy
-              elif [ -f /opt/ploy/bin/ploy.bak ]; then
-                sudo cp /opt/ploy/bin/ploy.bak /opt/ploy/bin/ploy
+                $SUDO cp "$latest_backup" "${DEPLOY_ROOT}/bin/ploy"
+              elif [ -f "${DEPLOY_ROOT}/bin/ploy.bak" ]; then
+                $SUDO cp "${DEPLOY_ROOT}/bin/ploy.bak" "${DEPLOY_ROOT}/bin/ploy"
               else
-                echo "No backup binary found in /opt/ploy/bin"
+                echo "No backup binary found in ${DEPLOY_ROOT}/bin"
                 exit 1
               fi
             fi
 
-            sudo chmod +x /opt/ploy/bin/ploy
-            sudo chown ploy:ploy /opt/ploy/bin/ploy
-            sudo systemctl start ploy
-            sleep 5
-            sudo systemctl is-active --quiet ploy
+            $SUDO chmod +x "${DEPLOY_ROOT}/bin/ploy"
+            file "${DEPLOY_ROOT}/bin/ploy" | tee /tmp/ploy-rollback.file.txt
+            grep -q "ELF 64-bit LSB" /tmp/ploy-rollback.file.txt
+            grep -Eq "${HOST_FILE_REGEX}" /tmp/ploy-rollback.file.txt
+            if [ "$MODE" = "specific-tag" ]; then
+              grep -q "Target: ${HOST_RUST_TARGET}" "${DEPLOY_ROOT}/releases/${RELEASE_TAG}/RELEASE.txt" || true
+            fi
+
+            if [ "${#units[@]}" -eq 0 ]; then
+              echo "No ploy service units found; restored binary only."
+              exit 0
+            fi
+
+            unit_diagnostics() {
+              local unit="$1"
+              echo "---- ${unit}.service status ----"
+              $SUDO systemctl status "$unit" --no-pager -l || true
+              echo "---- ${unit}.service journal ----"
+              $SUDO journalctl -u "$unit" -n 80 --no-pager -l || true
+            }
+
+            wait_for_unit_active() {
+              local unit="$1"
+              local i
+              for i in $(seq 1 20); do
+                if $SUDO systemctl is-active --quiet "$unit"; then
+                  return 0
+                fi
+                sleep 2
+              done
+              unit_diagnostics "$unit"
+              return 1
+            }
+
+            for unit in "${units[@]}"; do
+              $SUDO systemctl start "$unit"
+              if ! wait_for_unit_active "$unit"; then
+                echo "${unit}.service failed to become active after rollback."
+                exit 1
+              fi
+            done
 
       - name: Rollback summary
         run: |

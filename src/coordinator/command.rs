@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use tokio::sync::oneshot;
 
 use super::state::{AgentSnapshot, QueueStatsSnapshot};
-use crate::platform::{Domain, PlatformRiskState};
+use super::PlatformRiskState;
+use crate::platform::Domain;
 
 /// Commands sent from the coordinator to individual agents
 #[derive(Debug)]

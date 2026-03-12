@@ -8,6 +8,7 @@
 use crate::error::{PloyError, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -15,7 +16,7 @@ use tokio::time::Instant;
 use tracing::{debug, warn};
 
 /// Grok API client configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GrokConfig {
     /// API key for Grok
     pub api_key: String,
@@ -25,6 +26,22 @@ pub struct GrokConfig {
     pub timeout_secs: u64,
     /// Model to use
     pub model: String,
+}
+
+impl fmt::Debug for GrokConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let api_key = if self.api_key.is_empty() {
+            "<empty>"
+        } else {
+            "[REDACTED]"
+        };
+        f.debug_struct("GrokConfig")
+            .field("api_key", &api_key)
+            .field("base_url", &self.base_url)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("model", &self.model)
+            .finish()
+    }
 }
 
 impl Default for GrokConfig {
@@ -372,5 +389,20 @@ Regular text not a bullet
     fn test_sentiment_display() {
         assert_eq!(Sentiment::Bullish.to_string(), "bullish");
         assert_eq!(Sentiment::Bearish.to_string(), "bearish");
+    }
+
+    #[test]
+    fn test_grok_config_debug_redacts_api_key() {
+        let config = GrokConfig {
+            api_key: "super-secret-grok-key".to_string(),
+            base_url: "https://api.x.ai/v1".to_string(),
+            timeout_secs: 30,
+            model: "grok-test".to_string(),
+        };
+
+        let rendered = format!("{:?}", config);
+
+        assert!(!rendered.contains("super-secret-grok-key"));
+        assert!(rendered.contains("grok-test"));
     }
 }

@@ -6,43 +6,38 @@
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::broadcast;
-use tracing::{debug, error, info, trace, warn};
+use tokio::sync::{broadcast, mpsc};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, PostgresStore};
-use crate::agents::{
-    AgentContext, CryptoLobMlAgent, CryptoLobMlConfig, CryptoLobMlEntrySidePolicy,
-    CryptoLobMlExitMode, CryptoTradingAgent, CryptoTradingConfig, OpenClawAgent, OpenClawConfig,
-    PoliticsTradingAgent, PoliticsTradingConfig, SportsTradingAgent, SportsTradingConfig,
-    TradingAgent,
+use crate::agents::governance_context::GovernanceContext;
+use crate::agents::openclaw::OpenClawAgent;
+use crate::agents::governance_agent::GovernanceAgent;
+use crate::config::{
+    AppConfig, CryptoEntryMode, CryptoTradingConfig, PoliticsTradingConfig, SportsTradingConfig,
 };
-#[cfg(feature = "rl")]
-use crate::agents::{CryptoRlPolicyAgent, CryptoRlPolicyConfig};
-use crate::ai_clients::PolymarketSportsClient;
-use crate::config::AppConfig;
 use crate::coordinator::config::DuplicateGuardScope;
-use crate::coordinator::{
-    AgentHealthResponse, AgentSnapshot, Coordinator, CoordinatorCommand, CoordinatorConfig,
-    GlobalState,
-};
+use crate::coordinator::{Coordinator, CoordinatorConfig, CoordinatorHandle, GlobalState};
 use crate::domain::{OrderStatus, Side};
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
 use crate::platform::{
-    AgentRiskParams, AgentStatus, BinanceDataPlaneHandle, CryptoDataPlaneHandle, DataPlaneConfig,
-    Domain, MarketSelector, PlatformDataPlane, StrategyDeployment,
+    AgentRiskParams, BinanceDataPlaneHandle, DataPlaneConfig, Domain, MarketSelector,
+    PlatformDataPlane, StrategyDeployment,
+};
+use crate::plugins::{
+    ComposableCryptoSpec, DeploymentState as PluginDeploymentState, PluginDefinition,
+    PluginDeployment, PluginKind, PluginRegistry, PluginSpec, RegisteredStrategySpec,
 };
 use crate::signing::Wallet;
-use crate::strategy::event_edge::core::EventEdgeCore;
-use crate::strategy::execution::executor::OrderExecutor;
-use crate::strategy::execution::idempotency::IdempotencyManager;
+use crate::strategy::executor::OrderExecutor;
+use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::momentum::EventMatcher;
-use crate::strategy::{
-    DataFeed, DataFeedManager, StrategyAction, StrategyFactory, StrategyManager,
-};
+use crate::strategy::{DataFeed, StrategyAction, StrategyManager};
 use chrono::Utc;
 use futures_util::StreamExt;
 use polymarket_client_sdk::data::types::request::TradesRequest as DataTradesRequest;
@@ -53,1086 +48,78 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::mpsc;
-use tracing::instrument;
+
+use super::strategy_runtime::run_managed_strategy_runtime;
+
+mod bootstrap_config;
+mod coordinator_bootstrap;
+mod crypto_runtime_support;
+mod managed_crypto;
+mod openclaw_config;
+mod runtime_config;
+mod runtime_orchestration;
+mod runtime_spawns;
+mod schema;
+mod sports_runtime_support;
+mod startup_context;
+mod status;
+mod strategy_deployments;
+mod support;
+#[cfg(test)]
+mod tests;
+
+pub use self::bootstrap_config::PlatformBootstrapConfig;
+use self::coordinator_bootstrap::initialize_coordinator_runtime;
+use self::crypto_runtime_support::initialize_crypto_runtime_support;
+pub use self::openclaw_config::{AllocatorConfig, OpenClawConfig, RegimeConfig, StraddleConfig};
+use self::runtime_orchestration::run_platform_runtime;
+use self::runtime_spawns::{spawn_managed_strategy_runtime_task, spawn_openclaw_governance_agent};
+use self::schema::{
+    ensure_accounts_table, ensure_binance_lob_ticks_table, ensure_binance_price_ticks_table,
+    ensure_clob_quote_ticks_table, ensure_schema_repairs, upsert_account_from_config,
+};
+pub(crate) use self::schema::{
+    ensure_agent_order_executions_table, ensure_clob_orderbook_snapshots_table,
+    ensure_coordinator_governance_policies_table,
+    ensure_coordinator_governance_policy_history_table, ensure_pm_market_metadata_table,
+    ensure_pm_token_settlements_table, ensure_risk_runtime_state_table,
+    ensure_strategy_observability_tables,
+};
+use self::sports_runtime_support::prepare_sports_runtime_support;
+use self::startup_context::initialize_startup_context;
+pub use self::status::print_platform_status;
+#[cfg(all(test, feature = "rl"))]
+use self::strategy_deployments::build_crypto_rl_policy_runtime_config;
+#[cfg(test)]
+use self::strategy_deployments::{
+    build_crypto_lob_ml_runtime_config, build_event_edge_runtime_config,
+    build_momentum_runtime_config, build_nba_comeback_runtime_config,
+    build_split_arb_runtime_config,
+};
+use self::strategy_deployments::{
+    collect_managed_strategy_runtime_plans, collect_runtime_crypto_strategy_targets,
+    ManagedRuntimeBootstrapStep, ManagedRuntimeDataPlaneKind,
+};
+use self::support::{env_bool, env_i64, env_u64, env_usize, lob_levels_json};
+
+#[cfg(test)]
+use super::runtime_specs::{
+    build_event_edge_managed_runtime_spec, build_event_edge_runtime_config,
+    build_momentum_managed_runtime_spec, build_momentum_runtime_config,
+    build_nba_comeback_managed_runtime_spec, build_nba_comeback_runtime_config,
+    build_split_arb_managed_runtime_spec, build_split_arb_runtime_config,
+};
+use super::runtime_specs::ManagedStrategyBootstrapSpec;
+use super::strategy_runtime::{
+    run_managed_strategy_runtime as run_managed_strategy_runtime_module,
+    ManagedStrategyRuntimeConfig,
+};
 
 const CLOB_PERSIST_MIN_INTERVAL_SECS: i64 = 2;
 const BINANCE_PERSIST_MIN_INTERVAL_SECS: i64 = 1;
 const PM_COLLECTOR_REFRESH_SECS: u64 = 300;
 
-async fn ensure_clob_quote_ticks_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS clob_quote_ticks (
-            id BIGSERIAL PRIMARY KEY,
-            token_id TEXT NOT NULL,
-            side TEXT NOT NULL CHECK (side IN ('UP', 'DOWN')),
-            best_bid NUMERIC(10,6),
-            best_ask NUMERIC(10,6),
-            bid_size NUMERIC(18,8),
-            ask_size NUMERIC(18,8),
-            source TEXT NOT NULL DEFAULT 'polymarket_ws',
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    // Add domain column if it doesn't exist (backcompat with existing tables).
-    sqlx::query("ALTER TABLE clob_quote_ticks ADD COLUMN IF NOT EXISTS domain TEXT")
-        .execute(pool)
-        .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_quote_ticks_token_time ON clob_quote_ticks(token_id, received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_quote_ticks_time ON clob_quote_ticks(received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_quote_ticks_domain_time ON clob_quote_ticks(domain, received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-async fn ensure_binance_price_ticks_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS binance_price_ticks (
-            id BIGSERIAL PRIMARY KEY,
-            symbol TEXT NOT NULL,
-            price NUMERIC(20,10) NOT NULL,
-            quantity NUMERIC(20,10),
-            trade_time TIMESTAMPTZ NOT NULL,
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_binance_price_ticks_symbol_time ON binance_price_ticks(symbol, trade_time DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_binance_price_ticks_time ON binance_price_ticks(trade_time DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-async fn ensure_binance_lob_ticks_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS binance_lob_ticks (
-            id BIGSERIAL PRIMARY KEY,
-            symbol TEXT NOT NULL,
-            update_id BIGINT,
-            best_bid NUMERIC(20,10) NOT NULL,
-            best_ask NUMERIC(20,10) NOT NULL,
-            mid_price NUMERIC(20,10) NOT NULL,
-            spread_bps NUMERIC(12,6) NOT NULL,
-            obi_5 NUMERIC(12,8) NOT NULL,
-            obi_10 NUMERIC(12,8) NOT NULL,
-            bid_volume_5 NUMERIC(20,10) NOT NULL,
-            ask_volume_5 NUMERIC(20,10) NOT NULL,
-            bids JSONB,
-            asks JSONB,
-            event_time TIMESTAMPTZ NOT NULL,
-            source TEXT NOT NULL DEFAULT 'binance_depth_ws',
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_binance_lob_ticks_symbol_time ON binance_lob_ticks(symbol, event_time DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_binance_lob_ticks_time ON binance_lob_ticks(event_time DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub(crate) async fn ensure_clob_orderbook_snapshots_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS clob_orderbook_snapshots (
-            id BIGSERIAL PRIMARY KEY,
-            domain TEXT,
-            token_id TEXT NOT NULL,
-            market TEXT,
-            bids JSONB NOT NULL,
-            asks JSONB NOT NULL,
-            book_timestamp TIMESTAMPTZ,
-            hash TEXT,
-            source TEXT NOT NULL DEFAULT 'polymarket_ws',
-            context JSONB,
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_orderbook_snapshots_token_time ON clob_orderbook_snapshots(token_id, received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_orderbook_snapshots_time ON clob_orderbook_snapshots(received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clob_orderbook_snapshots_domain_time ON clob_orderbook_snapshots(domain, received_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-async fn ensure_accounts_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS accounts (
-            account_id TEXT PRIMARY KEY,
-            wallet_address TEXT,
-            label TEXT,
-            metadata JSONB,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO accounts (account_id, label)
-        VALUES ('default', 'Default')
-        ON CONFLICT (account_id) DO NOTHING
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    // updated_at trigger (best-effort; older DBs may lack update_updated_at_column())
-    let _ = sqlx::query(
-        r#"
-        DO $$
-        BEGIN
-            IF to_regclass('public.accounts') IS NULL THEN
-                RETURN;
-            END IF;
-
-            BEGIN
-                DROP TRIGGER IF EXISTS update_accounts_updated_at ON accounts;
-                CREATE TRIGGER update_accounts_updated_at
-                BEFORE UPDATE ON accounts
-                FOR EACH ROW
-                EXECUTE FUNCTION update_updated_at_column();
-            EXCEPTION WHEN undefined_function THEN
-                NULL;
-            END;
-        END $$;
-        "#,
-    )
-    .execute(pool)
-    .await;
-
-    Ok(())
-}
-
-async fn upsert_account_from_config(
-    pool: &PgPool,
-    account_id: &str,
-    cfg: &crate::config::AccountConfig,
-) -> Result<()> {
-    let metadata = serde_json::json!({
-        "source": "ploy",
-        "config_wallet_address": cfg.wallet_address.as_deref(),
-        "config_label": cfg.label.as_deref(),
-    });
-
-    sqlx::query(
-        r#"
-        INSERT INTO accounts (account_id, wallet_address, label, metadata)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (account_id) DO UPDATE SET
-            wallet_address = COALESCE(EXCLUDED.wallet_address, accounts.wallet_address),
-            label = COALESCE(EXCLUDED.label, accounts.label),
-            metadata = COALESCE(EXCLUDED.metadata, accounts.metadata),
-            updated_at = NOW()
-        "#,
-    )
-    .bind(account_id)
-    .bind(cfg.wallet_address.as_deref())
-    .bind(cfg.label.as_deref())
-    .bind(sqlx::types::Json(metadata))
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub(crate) async fn ensure_agent_order_executions_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS agent_order_executions (
-            id BIGSERIAL PRIMARY KEY,
-            account_id TEXT NOT NULL DEFAULT 'default',
-            agent_id TEXT NOT NULL,
-            intent_id UUID NOT NULL,
-            domain TEXT NOT NULL,
-            market_slug TEXT NOT NULL,
-            token_id TEXT NOT NULL,
-            market_side TEXT NOT NULL CHECK (market_side IN ('UP', 'DOWN')),
-            is_buy BOOLEAN NOT NULL,
-            shares BIGINT NOT NULL,
-            limit_price NUMERIC(10,6) NOT NULL,
-            order_id TEXT,
-            status TEXT NOT NULL,
-            filled_shares BIGINT NOT NULL DEFAULT 0,
-            avg_fill_price NUMERIC(10,6),
-            elapsed_ms BIGINT,
-            dry_run BOOLEAN NOT NULL DEFAULT FALSE,
-            error TEXT,
-            intent_created_at TIMESTAMPTZ,
-            metadata JSONB,
-            executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            UNIQUE(intent_id)
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "ALTER TABLE agent_order_executions ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default'",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_agent_order_executions_time ON agent_order_executions(executed_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_agent_order_executions_agent_time ON agent_order_executions(agent_id, executed_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_agent_order_executions_token_time ON agent_order_executions(token_id, executed_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_agent_order_executions_account_time ON agent_order_executions(account_id, executed_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub(crate) async fn ensure_coordinator_governance_policies_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS coordinator_governance_policies (
-            account_id TEXT PRIMARY KEY,
-            block_new_intents BOOLEAN NOT NULL DEFAULT FALSE,
-            blocked_domains JSONB NOT NULL DEFAULT '[]'::jsonb,
-            max_intent_notional_usd NUMERIC,
-            max_total_notional_usd NUMERIC,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_by TEXT NOT NULL,
-            reason TEXT
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_coordinator_governance_policies_updated_at ON coordinator_governance_policies(updated_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub(crate) async fn ensure_coordinator_governance_policy_history_table(
-    pool: &PgPool,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS coordinator_governance_policy_history (
-            id BIGSERIAL PRIMARY KEY,
-            account_id TEXT NOT NULL,
-            block_new_intents BOOLEAN NOT NULL DEFAULT FALSE,
-            blocked_domains JSONB NOT NULL DEFAULT '[]'::jsonb,
-            max_intent_notional_usd NUMERIC,
-            max_total_notional_usd NUMERIC,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_by TEXT NOT NULL,
-            reason TEXT
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_coord_gov_policy_hist_account_time ON coordinator_governance_policy_history(account_id, updated_at DESC, id DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub(crate) async fn ensure_pm_token_settlements_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS pm_token_settlements (
-            token_id TEXT PRIMARY KEY,
-            condition_id TEXT,
-            market_id TEXT,
-            market_slug TEXT,
-            outcome TEXT,
-            settled_price NUMERIC(10,6),
-            resolved BOOLEAN NOT NULL DEFAULT FALSE,
-            resolved_at TIMESTAMPTZ,
-            fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            raw_market JSONB
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_pm_token_settlements_condition ON pm_token_settlements(condition_id)",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_pm_token_settlements_market_slug ON pm_token_settlements(market_slug)",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_pm_token_settlements_resolved_at ON pm_token_settlements(resolved_at DESC) WHERE resolved_at IS NOT NULL",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_pm_token_settlements_fetched_at ON pm_token_settlements(fetched_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub(crate) async fn ensure_risk_runtime_state_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS risk_runtime_state (
-            account_id TEXT PRIMARY KEY,
-            risk_state TEXT NOT NULL DEFAULT 'Normal',
-            daily_date DATE,
-            daily_pnl NUMERIC(18,8) NOT NULL DEFAULT 0,
-            daily_loss_limit NUMERIC(18,8) NOT NULL DEFAULT 0,
-            current_equity NUMERIC(18,8) NOT NULL DEFAULT 0,
-            equity_peak NUMERIC(18,8) NOT NULL DEFAULT 0,
-            current_drawdown NUMERIC(18,8) NOT NULL DEFAULT 0,
-            max_drawdown_observed NUMERIC(18,8) NOT NULL DEFAULT 0,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_risk_runtime_state_updated_at ON risk_runtime_state(updated_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub(crate) async fn ensure_pm_market_metadata_table(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS pm_market_metadata (
-            market_slug TEXT PRIMARY KEY,
-            price_to_beat NUMERIC(20,8) NOT NULL,
-            start_time TIMESTAMPTZ,
-            end_time TIMESTAMPTZ,
-            horizon TEXT,
-            symbol TEXT,
-            raw_market JSONB,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_pm_market_metadata_symbol_horizon ON pm_market_metadata(symbol, horizon)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_pm_market_metadata_end_time ON pm_market_metadata(end_time DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_pm_market_metadata_updated_at ON pm_market_metadata(updated_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-pub(crate) async fn ensure_strategy_observability_tables(pool: &PgPool) -> Result<()> {
-    // Persist strategy signal calculations for audit/backtest attribution.
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS signal_history (
-            id BIGSERIAL PRIMARY KEY,
-            account_id TEXT NOT NULL DEFAULT 'default',
-            recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            intent_id UUID,
-            agent_id TEXT NOT NULL,
-            strategy_id TEXT NOT NULL,
-            domain TEXT NOT NULL,
-            signal_type TEXT NOT NULL,
-            market_slug TEXT,
-            token_id TEXT,
-            symbol TEXT,
-            side TEXT,
-            confidence NUMERIC(12,6),
-            momentum_value NUMERIC(20,10),
-            short_ma NUMERIC(20,10),
-            long_ma NUMERIC(20,10),
-            rolling_volatility NUMERIC(20,10),
-            fair_value NUMERIC(12,6),
-            market_price NUMERIC(12,6),
-            edge NUMERIC(20,10),
-            config_hash TEXT,
-            context JSONB
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query("ALTER TABLE signal_history ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default'")
-        .execute(pool)
-        .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_signal_history_time ON signal_history(recorded_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_signal_history_agent_time ON signal_history(agent_id, recorded_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_signal_history_strategy_time ON signal_history(strategy_id, recorded_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_signal_history_intent ON signal_history(intent_id)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_signal_history_account_time ON signal_history(account_id, recorded_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    // Persist every risk-gate decision (pass/adjust/block) with context.
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS risk_gate_decisions (
-            id BIGSERIAL PRIMARY KEY,
-            account_id TEXT NOT NULL DEFAULT 'default',
-            decided_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            intent_id UUID NOT NULL UNIQUE,
-            agent_id TEXT NOT NULL,
-            domain TEXT NOT NULL,
-            decision TEXT NOT NULL CHECK (decision IN ('PASSED','BLOCKED','ADJUSTED')),
-            block_reason TEXT,
-            suggestion_max_shares BIGINT,
-            suggestion_reason TEXT,
-            notional_value NUMERIC(20,10),
-            config_hash TEXT,
-            metadata JSONB
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query("ALTER TABLE risk_gate_decisions ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default'")
-        .execute(pool)
-        .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_risk_gate_decisions_time ON risk_gate_decisions(decided_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_risk_gate_decisions_agent_time ON risk_gate_decisions(agent_id, decided_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_risk_gate_decisions_account_time ON risk_gate_decisions(account_id, decided_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    // Persist position-exit reason attribution (take-profit / stop-loss / etc.).
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS exit_reasons (
-            id BIGSERIAL PRIMARY KEY,
-            account_id TEXT NOT NULL DEFAULT 'default',
-            recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            intent_id UUID NOT NULL UNIQUE,
-            agent_id TEXT NOT NULL,
-            domain TEXT NOT NULL,
-            market_slug TEXT NOT NULL,
-            token_id TEXT NOT NULL,
-            market_side TEXT,
-            reason_code TEXT NOT NULL,
-            reason_detail TEXT,
-            entry_price NUMERIC(12,6),
-            exit_price NUMERIC(12,6),
-            pnl_pct NUMERIC(20,10),
-            status TEXT NOT NULL,
-            config_hash TEXT,
-            metadata JSONB
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query("ALTER TABLE exit_reasons ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default'")
-        .execute(pool)
-        .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_exit_reasons_time ON exit_reasons(recorded_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_exit_reasons_reason_time ON exit_reasons(reason_code, recorded_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_exit_reasons_account_time ON exit_reasons(account_id, recorded_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    // Persist execution quality stats (slippage + latency breakdown).
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS execution_analysis (
-            id BIGSERIAL PRIMARY KEY,
-            account_id TEXT NOT NULL DEFAULT 'default',
-            recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            intent_id UUID NOT NULL UNIQUE,
-            agent_id TEXT NOT NULL,
-            domain TEXT NOT NULL,
-            market_slug TEXT NOT NULL,
-            token_id TEXT NOT NULL,
-            is_buy BOOLEAN NOT NULL,
-            expected_price NUMERIC(12,6) NOT NULL,
-            executed_price NUMERIC(12,6),
-            expected_slippage_bps NUMERIC(20,10),
-            actual_slippage_bps NUMERIC(20,10),
-            queue_delay_ms BIGINT,
-            execution_latency_ms BIGINT,
-            total_latency_ms BIGINT,
-            status TEXT NOT NULL,
-            dry_run BOOLEAN NOT NULL DEFAULT FALSE,
-            config_hash TEXT,
-            metadata JSONB
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query("ALTER TABLE execution_analysis ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default'")
-        .execute(pool)
-        .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_execution_analysis_time ON execution_analysis(recorded_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_execution_analysis_agent_time ON execution_analysis(agent_id, recorded_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_execution_analysis_account_time ON execution_analysis(account_id, recorded_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    // strategy_evaluations is migration-owned; only run lightweight startup repairs when present.
-    let strategy_evaluations_exists = sqlx::query(
-        "SELECT to_regclass('public.strategy_evaluations') IS NOT NULL AS table_exists",
-    )
-    .fetch_one(pool)
-    .await?
-    .try_get::<bool, _>("table_exists")
-    .unwrap_or(false);
-
-    if strategy_evaluations_exists {
-        sqlx::query(
-            "ALTER TABLE strategy_evaluations ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default'",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_account_time ON strategy_evaluations(account_id, evaluated_at DESC)",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_strategy_stage_time ON strategy_evaluations(account_id, strategy_id, stage, evaluated_at DESC)",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_status_time ON strategy_evaluations(account_id, status, evaluated_at DESC)",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_evaluations_evidence_hash ON strategy_evaluations(account_id, strategy_id, stage, evidence_hash) WHERE evidence_hash IS NOT NULL",
-        )
-        .execute(pool)
-        .await?;
-    } else {
-        warn!("strategy_evaluations table missing at startup; run migrations to enable deployment evidence gating");
-    }
-
-    Ok(())
-}
-
-async fn ensure_schema_repairs(pool: &PgPool) -> Result<()> {
-    // These repairs remain startup-applied to harden mixed-version upgrades.
-    // `platform start` also runs the sqlx migration runner before this step.
-    let result = sqlx::query(
-        r#"
-        DO $$
-        BEGIN
-            BEGIN
-                -- orders(cycle_id, leg, created_at)
-                IF to_regclass('public.orders') IS NOT NULL THEN
-                    EXECUTE 'DROP INDEX IF EXISTS idx_orders_cycle_leg';
-                    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_orders_cycle_leg ON orders(cycle_id, leg, created_at DESC) WHERE cycle_id IS NOT NULL';
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-
-            BEGIN
-                -- positions(status='OPEN', opened_at)
-                IF to_regclass('public.positions') IS NOT NULL THEN
-                    EXECUTE 'DROP INDEX IF EXISTS idx_positions_status_opened';
-                    IF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'positions'
-                          AND column_name = 'opened_at'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_positions_status_opened ON positions(status, opened_at DESC) WHERE status = ''OPEN''';
-                    END IF;
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-
-            BEGIN
-                -- positions multi-account scoping
-                IF to_regclass('public.positions') IS NOT NULL THEN
-                    EXECUTE 'ALTER TABLE positions ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT ''default''';
-                    EXECUTE 'ALTER TABLE positions DROP CONSTRAINT IF EXISTS positions_event_id_token_id_key';
-                    EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_account_event_token_unique ON positions(account_id, event_id, token_id)';
-
-                    IF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'positions'
-                          AND column_name = 'opened_at'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_positions_account_status_opened ON positions(account_id, status, opened_at DESC) WHERE status = ''OPEN''';
-                    END IF;
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-
-            BEGIN
-                -- position_reconciliation_log(timestamp)
-                IF to_regclass('public.position_reconciliation_log') IS NOT NULL THEN
-                    EXECUTE 'DROP INDEX IF EXISTS idx_reconciliation_log_created';
-                    IF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'position_reconciliation_log'
-                          AND column_name = 'timestamp'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_reconciliation_log_created ON position_reconciliation_log(timestamp DESC)';
-                    END IF;
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-
-            BEGIN
-                -- unresolved discrepancy severity index
-                IF to_regclass('public.position_discrepancies') IS NOT NULL THEN
-                    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_discrepancies_severity_unresolved ON position_discrepancies(severity, created_at DESC) WHERE resolved = FALSE';
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-
-            BEGIN
-                -- nonce_usage active index (prefer allocated_at, fallback used_at)
-                IF to_regclass('public.nonce_usage') IS NOT NULL THEN
-                    EXECUTE 'DROP INDEX IF EXISTS idx_nonce_usage_active';
-                    IF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'nonce_usage'
-                          AND column_name = 'wallet_address'
-                    ) AND EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'nonce_usage'
-                          AND column_name = 'released_at'
-                    ) AND EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'nonce_usage'
-                          AND column_name = 'allocated_at'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_nonce_usage_active ON nonce_usage(wallet_address, allocated_at DESC) WHERE released_at IS NULL';
-                    ELSIF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'nonce_usage'
-                          AND column_name = 'wallet_address'
-                    ) AND EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'nonce_usage'
-                          AND column_name = 'released_at'
-                    ) AND EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'nonce_usage'
-                          AND column_name = 'used_at'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_nonce_usage_active ON nonce_usage(wallet_address, used_at DESC) WHERE released_at IS NULL';
-                    END IF;
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-
-            BEGIN
-                -- fills(timestamp) indexes (fallback to filled_at for older schemas)
-                IF to_regclass('public.fills') IS NOT NULL THEN
-                    EXECUTE 'DROP INDEX IF EXISTS idx_fills_position_time';
-                    EXECUTE 'DROP INDEX IF EXISTS idx_fills_order_time';
-                    IF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'fills'
-                          AND column_name = 'timestamp'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_fills_position_time ON fills(position_id, timestamp DESC)';
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_fills_order_time ON fills(order_id, timestamp DESC)';
-                    ELSIF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'fills'
-                          AND column_name = 'filled_at'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_fills_position_time ON fills(position_id, filled_at DESC)';
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_fills_order_time ON fills(order_id, filled_at DESC)';
-                    END IF;
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-
-            BEGIN
-                -- balance snapshots latest (timestamp preferred, fallback created_at)
-                IF to_regclass('public.balance_snapshots') IS NOT NULL THEN
-                    EXECUTE 'DROP INDEX IF EXISTS idx_balance_snapshots_latest';
-                    IF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'balance_snapshots'
-                          AND column_name = 'timestamp'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_balance_snapshots_latest ON balance_snapshots(timestamp DESC)';
-                    ELSIF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'balance_snapshots'
-                          AND column_name = 'created_at'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_balance_snapshots_latest ON balance_snapshots(created_at DESC)';
-                    END IF;
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-
-            BEGIN
-                -- component heartbeats by component_name/component
-                IF to_regclass('public.component_heartbeats') IS NOT NULL THEN
-                    EXECUTE 'DROP INDEX IF EXISTS idx_heartbeats_component_time';
-                    IF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'component_heartbeats'
-                          AND column_name = 'component_name'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_heartbeats_component_time ON component_heartbeats(component_name, last_heartbeat DESC)';
-                    ELSIF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'component_heartbeats'
-                          AND column_name = 'component'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_heartbeats_component_time ON component_heartbeats(component, last_heartbeat DESC)';
-                    END IF;
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-
-            BEGIN
-                -- system events by component
-                IF to_regclass('public.system_events') IS NOT NULL THEN
-                    EXECUTE 'DROP INDEX IF EXISTS idx_system_events_component_time';
-                    IF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'system_events'
-                          AND column_name = 'component'
-                    ) THEN
-                        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_system_events_component_time ON system_events(component, created_at DESC)';
-                    END IF;
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-
-            BEGIN
-                -- Reconcile order_idempotency schema drift + multi-account scoping.
-                IF to_regclass('public.order_idempotency') IS NOT NULL THEN
-                    EXECUTE 'ALTER TABLE order_idempotency ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT ''default''';
-                    EXECUTE 'ALTER TABLE order_idempotency ADD COLUMN IF NOT EXISTS request_hash TEXT';
-                    EXECUTE 'ALTER TABLE order_idempotency ADD COLUMN IF NOT EXISTS response_data JSONB';
-                    EXECUTE 'ALTER TABLE order_idempotency ADD COLUMN IF NOT EXISTS error_message TEXT';
-                    EXECUTE 'ALTER TABLE order_idempotency ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()';
-
-                    -- Drop global uniqueness constraints so idempotency keys can repeat across accounts.
-                    EXECUTE 'ALTER TABLE order_idempotency DROP CONSTRAINT IF EXISTS order_idempotency_idempotency_key_key';
-
-                    -- If the primary key is idempotency_key, replace it with a composite PK.
-                    IF EXISTS (
-                        SELECT 1
-                        FROM pg_constraint c
-                        JOIN unnest(c.conkey) WITH ORDINALITY AS x(attnum, ordinality) ON true
-                        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = x.attnum
-                        WHERE c.conrelid = 'public.order_idempotency'::regclass
-                          AND c.contype = 'p'
-                        GROUP BY c.oid
-                        HAVING array_agg(a.attname::text ORDER BY x.ordinality) = ARRAY['idempotency_key']::text[]
-                    ) THEN
-                        EXECUTE 'ALTER TABLE order_idempotency DROP CONSTRAINT order_idempotency_pkey';
-                        EXECUTE 'ALTER TABLE order_idempotency ADD PRIMARY KEY (account_id, idempotency_key)';
-                    ELSE
-                        EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS idx_order_idempotency_account_key ON order_idempotency(account_id, idempotency_key)';
-                    END IF;
-
-                    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_order_idempotency_key ON order_idempotency(idempotency_key)';
-                    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_order_idempotency_hash ON order_idempotency(request_hash)';
-                    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_order_idempotency_status ON order_idempotency(status, created_at)';
-                    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_order_idempotency_expires ON order_idempotency(expires_at)';
-                    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_order_idempotency_account_expires ON order_idempotency(account_id, expires_at)';
-
-                    IF EXISTS (
-                        SELECT 1
-                        FROM pg_proc
-                        WHERE proname = 'update_updated_at_column'
-                          AND pg_function_is_visible(oid)
-                    ) THEN
-                        EXECUTE 'DROP TRIGGER IF EXISTS update_order_idempotency_updated_at ON order_idempotency';
-                        EXECUTE 'CREATE TRIGGER update_order_idempotency_updated_at BEFORE UPDATE ON order_idempotency FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()';
-                    END IF;
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-
-            BEGIN
-                -- Reconcile quote_freshness drift from partial/older migrations.
-                IF to_regclass('public.quote_freshness') IS NOT NULL THEN
-                    IF NOT EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'quote_freshness'
-                          AND column_name = 'is_stale'
-                    ) THEN
-                        EXECUTE 'ALTER TABLE quote_freshness ADD COLUMN is_stale BOOLEAN NOT NULL DEFAULT FALSE';
-                    END IF;
-
-                    IF EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'quote_freshness'
-                          AND column_name = 'is_stale'
-                          AND is_generated = 'NEVER'
-                    ) AND EXISTS (
-                        SELECT 1
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public'
-                          AND table_name = 'quote_freshness'
-                          AND column_name = 'received_at'
-                    ) THEN
-                        EXECUTE 'UPDATE quote_freshness SET is_stale = (EXTRACT(EPOCH FROM (NOW() - received_at)) > 30) WHERE is_stale IS DISTINCT FROM (EXTRACT(EPOCH FROM (NOW() - received_at)) > 30)';
-                    END IF;
-
-                    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_quote_freshness_stale ON quote_freshness(is_stale) WHERE is_stale = false';
-                END IF;
-            EXCEPTION WHEN insufficient_privilege THEN
-                NULL;
-            END;
-        END $$;
-        "#,
-    )
-    .execute(pool)
-    .await;
-
-    if let Err(e) = result {
-        // Older installs may have tables owned by postgres while services run as `ploy`.
-        // In that case, startup DDL can't be applied by the app user.
-        warn!(
-            error = %e,
-            "schema repair DDL skipped at startup (run migration 013 as postgres for full repair)"
-        );
-    }
-
-    Ok(())
-}
 
 async fn ensure_clob_trade_ticks_table(pool: &PgPool) -> Result<()> {
     sqlx::query(
@@ -1246,38 +233,6 @@ async fn ensure_clob_trade_alerts_table(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-fn lob_levels_json(
-    state: &crate::collector::OrderBookState,
-    is_bids: bool,
-    max_levels: usize,
-) -> Vec<(String, String)> {
-    let max_levels = max_levels.max(1);
-
-    if is_bids {
-        state
-            .bids
-            .iter()
-            .rev()
-            .take(max_levels)
-            .map(|(price_cents, qty)| {
-                let price =
-                    rust_decimal::Decimal::from(*price_cents) / rust_decimal::Decimal::from(100);
-                (price.to_string(), qty.to_string())
-            })
-            .collect()
-    } else {
-        state
-            .asks
-            .iter()
-            .take(max_levels)
-            .map(|(price_cents, qty)| {
-                let price =
-                    rust_decimal::Decimal::from(*price_cents) / rust_decimal::Decimal::from(100);
-                (price.to_string(), qty.to_string())
-            })
-            .collect()
-    }
-}
 
 type InsertedTradeTickRow = (
     String,                // token_id
@@ -1371,23 +326,7 @@ struct TradeBurstAlert {
     n_trades: usize,
 }
 
-fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(default)
-}
 
-fn env_bool(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            _ => default,
-        },
-        Err(_) => default,
-    }
-}
 
 #[instrument(skip(data_client, pool, last_seen_by_market))]
 async fn collect_trades_for_market(
@@ -2619,19 +1558,7 @@ fn is_market_resolved(prices: &[rust_decimal::Decimal]) -> bool {
     winners == 1 && losers == prices.len().saturating_sub(1)
 }
 
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(default)
-}
 
-fn env_i64(name: &str, default: i64) -> i64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(default)
-}
 
 fn env_decimal(name: &str, default: rust_decimal::Decimal) -> rust_decimal::Decimal {
     std::env::var(name)
@@ -2770,27 +1697,35 @@ fn normalize_strategy_key(strategy: &str) -> String {
     strategy.to_ascii_lowercase().replace(['-', '_', ' '], "")
 }
 
-fn strategy_is_momentum(strategy_key: &str) -> bool {
-    strategy_key.contains("momentum") || strategy_key.contains("mom")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CryptoStrategyKind {
+    Momentum,
+    PatternMemory,
+    SplitArb,
+    Unknown,
 }
 
-fn strategy_is_pattern_memory(strategy_key: &str) -> bool {
-    strategy_key.contains("pattern")
-        || strategy_key.contains("memory")
-        || strategy_key.contains("pattenmem")
-}
+fn classify_crypto_strategy(strategy: &str) -> CryptoStrategyKind {
+    let key = normalize_strategy_key(strategy);
 
-fn strategy_is_split_arb(strategy_key: &str) -> bool {
-    strategy_key.contains("splitarb")
-        || (strategy_key.contains("split") && strategy_key.contains("arb"))
-}
-
-fn strategy_is_lob_ml(strategy_key: &str) -> bool {
-    strategy_key.contains("lob")
-        || strategy_key.contains("ml")
-        || strategy_key.contains("dl")
-        || strategy_key.contains("deep")
-        || strategy_key.contains("learning")
+    if key.contains("momentum")
+        || key == "mom"
+        || key == "directional"
+        || key == "directionalmomentum"
+    {
+        return CryptoStrategyKind::Momentum;
+    }
+    if key.contains("pattern") || key.contains("memory") || key.contains("pattenmem") {
+        return CryptoStrategyKind::PatternMemory;
+    }
+    if key.contains("splitarb")
+        || (key.contains("split") && key.contains("arb"))
+        || key.contains("staggeredarb")
+        || key.contains("gammascalping")
+    {
+        return CryptoStrategyKind::SplitArb;
+    }
+    CryptoStrategyKind::Unknown
 }
 
 fn normalize_horizon(value: &str) -> Option<&'static str> {
@@ -2804,7 +1739,7 @@ fn normalize_horizon(value: &str) -> Option<&'static str> {
     None
 }
 
-fn crypto_series_id_for(coin: &str, horizon: &str) -> Option<&'static str> {
+pub(crate) fn crypto_series_id_for(coin: &str, horizon: &str) -> Option<&'static str> {
     let c = coin.to_ascii_uppercase();
     match (c.as_str(), horizon) {
         ("BTC", "5m") => Some("10684"),
@@ -2819,7 +1754,7 @@ fn crypto_series_id_for(coin: &str, horizon: &str) -> Option<&'static str> {
     }
 }
 
-fn coin_symbol_for(coin: &str) -> Option<String> {
+pub(crate) fn coin_symbol_for(coin: &str) -> Option<String> {
     let c = coin.to_ascii_uppercase();
     if c.is_empty() {
         return None;
@@ -2839,164 +1774,12 @@ fn symbol_for_crypto_series_id(series_id: &str) -> Option<&'static str> {
 
 #[derive(Debug, Default)]
 struct RuntimeCryptoStrategyTargets {
+    momentum_coins: HashSet<String>,
     pattern_memory_coins: HashSet<String>,
     split_arb_coins: HashSet<String>,
     split_arb_horizons: HashSet<String>,
 }
 
-fn collect_runtime_crypto_strategy_targets(
-    runtime_account_id: &str,
-    runtime_dry_run: bool,
-) -> RuntimeCryptoStrategyTargets {
-    let deployments = load_strategy_deployments();
-    let mut out = RuntimeCryptoStrategyTargets::default();
-
-    for dep in deployments
-        .iter()
-        .filter(|d| d.enabled)
-        .filter(|d| d.matches_account(runtime_account_id))
-        .filter(|d| d.matches_execution_mode(runtime_dry_run))
-    {
-        if !matches!(dep.domain, Domain::Crypto) {
-            continue;
-        }
-
-        let strategy_key = normalize_strategy_key(&dep.strategy);
-        if strategy_is_pattern_memory(&strategy_key) {
-            add_coins_from_selector(&dep.market_selector, &mut out.pattern_memory_coins);
-        }
-        if strategy_is_split_arb(&strategy_key) {
-            add_coins_from_selector(&dep.market_selector, &mut out.split_arb_coins);
-            if let Some(h) = normalize_horizon(dep.timeframe.as_str()) {
-                out.split_arb_horizons.insert(h.to_string());
-            }
-        }
-    }
-
-    out
-}
-
-fn build_pattern_memory_runtime_config(coins: &[String]) -> Result<String> {
-    let mut selected: Vec<String> = coins
-        .iter()
-        .filter_map(|c| {
-            c.strip_suffix("USDT")
-                .map(|s| s.to_string())
-                .or_else(|| Some(c.clone()))
-        })
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
-    selected.sort();
-    selected.dedup();
-
-    let mut markets_block = String::new();
-    for coin in selected {
-        if let (Some(symbol), Some(series_id)) =
-            (coin_symbol_for(&coin), crypto_series_id_for(&coin, "5m"))
-        {
-            markets_block.push_str("\n[[markets]]\n");
-            markets_block.push_str(&format!("symbol = \"{}\"\n", symbol));
-            markets_block.push_str(&format!("series_id = \"{}\"\n", series_id));
-        }
-    }
-
-    if markets_block.trim().is_empty() {
-        return Err(crate::error::PloyError::Validation(
-            "pattern_memory runtime has no recognized crypto coins/series ids".to_string(),
-        ));
-    }
-
-    Ok(format!(
-        r#"# Auto-generated by platform bootstrap
-[strategy]
-name = "pattern_memory"
-enabled = true
-{markets}
-[pattern]
-corr_threshold = 0.70
-alpha = 1.0
-beta = 1.0
-min_matches = 3
-min_n_eff = 2.0
-min_confidence = 0.60
-
-[filter_15m]
-enabled = true
-min_confidence = 0.55
-min_n_eff = 1.0
-
-[timing]
-target_remaining_secs = 300
-tolerance_secs = 45
-min_remaining_secs = 60
-
-[trade]
-shares = 100
-max_entry_price = 0.55
-min_net_ev = 0.0
-cooldown_secs = 30
-"#,
-        markets = markets_block
-    ))
-}
-
-fn build_split_arb_runtime_config(symbols: &[String], series_ids: &[String]) -> String {
-    let rendered_symbols = symbols
-        .iter()
-        .map(|s| format!("\"{}\"", s))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let rendered_series = series_ids
-        .iter()
-        .map(|s| format!("\"{}\"", s))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    format!(
-        r#"# Auto-generated by platform bootstrap — staggered arb (時間差套利)
-[strategy]
-name = "staggered_arb"
-enabled = true
-
-[entry]
-symbols = [{symbols}]
-max_concurrent = 5
-direction_threshold = 0.03
-max_initial_sum = 1.10
-min_profit_target = 0.005
-min_ask_price = 0.05
-min_entry_sum = 0.70
-
-[timing]
-max_wait_secs = 180
-max_wait_pct = 0.40
-min_time_remaining = 60
-cooldown_secs = 5
-min_leg2_delay_secs = 3
-max_trades_per_event = 2
-
-[risk]
-fixed_amount_usd = 1.0
-min_balance_usd = 5.0
-max_leg1_loss = 0.0
-force_complete_threshold = 1.00
-
-[model]
-mu = 0.0
-vol_lookback_secs = 300
-vol_floor = 0.005
-
-[filter]
-allowed_windows = [300, 900]
-window_tolerance = 30
-
-[markets]
-series_ids = [{series_ids}]
-"#,
-        symbols = rendered_symbols,
-        series_ids = rendered_series
-    )
-}
 
 fn apply_strategy_deployments(
     cfg: &mut PlatformBootstrapConfig,
@@ -3023,11 +1806,6 @@ fn apply_strategy_deployments(
     cfg.enable_crypto_momentum = false;
     cfg.enable_crypto_pattern_memory = false;
     cfg.enable_crypto_split_arb = false;
-    cfg.enable_crypto_lob_ml = false;
-    #[cfg(feature = "rl")]
-    {
-        cfg.enable_crypto_rl_policy = false;
-    }
     cfg.enable_sports = false;
     cfg.enable_politics = false;
     cfg.enable_economics = false;
@@ -3043,36 +1821,33 @@ fn apply_strategy_deployments(
 
         match dep.domain {
             Domain::Crypto => {
-                cfg.enable_crypto = true;
-                let strategy_key = normalize_strategy_key(&dep.strategy);
+                let mapped = match classify_crypto_strategy(&dep.strategy) {
+                    CryptoStrategyKind::Momentum => {
+                        cfg.enable_crypto_momentum = true;
+                        true
+                    }
+                    CryptoStrategyKind::PatternMemory => {
+                        cfg.enable_crypto_pattern_memory = true;
+                        true
+                    }
+                    CryptoStrategyKind::SplitArb => {
+                        cfg.enable_crypto_split_arb = true;
+                        true
+                    }
+                    CryptoStrategyKind::Unknown => {
+                        warn!(
+                            deployment_id = %dep.id,
+                            strategy = %dep.strategy,
+                            "unknown crypto strategy in deployment matrix; skipping built-in mapping"
+                        );
+                        false
+                    }
+                };
 
-                let mut matched = false;
-                if strategy_is_momentum(&strategy_key) {
-                    cfg.enable_crypto_momentum = true;
-                    matched = true;
+                if mapped {
+                    cfg.enable_crypto = true;
+                    add_coins_from_selector(&dep.market_selector, &mut coins);
                 }
-                if strategy_is_pattern_memory(&strategy_key) {
-                    cfg.enable_crypto_pattern_memory = true;
-                    matched = true;
-                }
-                if strategy_is_split_arb(&strategy_key) {
-                    cfg.enable_crypto_split_arb = true;
-                    matched = true;
-                }
-                if strategy_is_lob_ml(&strategy_key) {
-                    cfg.enable_crypto_lob_ml = true;
-                    matched = true;
-                }
-                #[cfg(feature = "rl")]
-                if strategy_key.contains("rl") || strategy_key.contains("policy") {
-                    cfg.enable_crypto_rl_policy = true;
-                    matched = true;
-                }
-                if !matched {
-                    cfg.enable_crypto_momentum = true;
-                }
-
-                add_coins_from_selector(&dep.market_selector, &mut coins);
             }
             Domain::Sports => cfg.enable_sports = true,
             Domain::Politics => cfg.enable_politics = true,
@@ -3083,34 +1858,10 @@ fn apply_strategy_deployments(
         }
     }
 
-    if cfg.enable_crypto
-        && !cfg.enable_crypto_momentum
-        && !cfg.enable_crypto_pattern_memory
-        && !cfg.enable_crypto_split_arb
-        && !cfg.enable_crypto_lob_ml
-        && {
-            #[cfg(feature = "rl")]
-            {
-                !cfg.enable_crypto_rl_policy
-            }
-            #[cfg(not(feature = "rl"))]
-            {
-                true
-            }
-        }
-    {
-        cfg.enable_crypto_momentum = true;
-    }
-
     if !coins.is_empty() {
         let mut sorted: Vec<String> = coins.into_iter().collect();
         sorted.sort();
-        cfg.crypto.coins = sorted.clone();
-        cfg.crypto_lob_ml.coins = sorted.clone();
-        #[cfg(feature = "rl")]
-        {
-            cfg.crypto_rl_policy.coins = sorted.clone();
-        }
+        cfg.crypto.coins = sorted;
     }
 
     let mut tf: Vec<String> = timeframe_summary
@@ -3126,11 +1877,6 @@ fn apply_strategy_deployments(
             "custom deployments detected without built-in runtime agent registration"
         );
     }
-    #[cfg(feature = "rl")]
-    let crypto_rl_policy_enabled = cfg.enable_crypto_rl_policy;
-    #[cfg(not(feature = "rl"))]
-    let crypto_rl_policy_enabled = false;
-
     info!(
         total = deployments.len(),
         scoped = runtime_scoped.len(),
@@ -3141,8 +1887,6 @@ fn apply_strategy_deployments(
         crypto_momentum = cfg.enable_crypto_momentum,
         crypto_pattern_memory = cfg.enable_crypto_pattern_memory,
         crypto_split_arb = cfg.enable_crypto_split_arb,
-        crypto_lob_ml = cfg.enable_crypto_lob_ml,
-        crypto_rl_policy = crypto_rl_policy_enabled,
         sports = cfg.enable_sports,
         politics = cfg.enable_politics,
         economics = cfg.enable_economics,
@@ -3152,939 +1896,6 @@ fn apply_strategy_deployments(
     );
 }
 
-/// Top-level config for the platform bootstrap
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlatformBootstrapConfig {
-    pub coordinator: CoordinatorConfig,
-    pub enable_crypto: bool,
-    #[serde(default)]
-    pub enable_crypto_momentum: bool,
-    #[serde(default)]
-    pub enable_crypto_pattern_memory: bool,
-    #[serde(default)]
-    pub enable_crypto_split_arb: bool,
-    #[serde(default)]
-    pub enable_crypto_lob_ml: bool,
-    #[serde(default)]
-    #[cfg(feature = "rl")]
-    pub enable_crypto_rl_policy: bool,
-    pub enable_sports: bool,
-    pub enable_politics: bool,
-    #[serde(default)]
-    pub enable_economics: bool,
-    /// Enable OpenClaw meta-agent (Layer 3 orchestrator)
-    #[serde(default)]
-    pub enable_openclaw: bool,
-    pub dry_run: bool,
-    pub crypto: CryptoTradingConfig,
-    pub crypto_lob_ml: CryptoLobMlConfig,
-    #[serde(default)]
-    #[cfg(feature = "rl")]
-    pub crypto_rl_policy: CryptoRlPolicyConfig,
-    pub sports: SportsTradingConfig,
-    pub politics: PoliticsTradingConfig,
-    /// OpenClaw meta-agent configuration
-    #[serde(default)]
-    pub openclaw: OpenClawConfig,
-}
-
-impl Default for PlatformBootstrapConfig {
-    fn default() -> Self {
-        Self {
-            coordinator: CoordinatorConfig::default(),
-            enable_crypto: true,
-            enable_crypto_momentum: true,
-            enable_crypto_pattern_memory: false,
-            enable_crypto_split_arb: false,
-            enable_crypto_lob_ml: false,
-            #[cfg(feature = "rl")]
-            enable_crypto_rl_policy: false,
-            enable_sports: false,
-            enable_politics: false,
-            enable_economics: false,
-            enable_openclaw: false,
-            dry_run: true,
-            crypto: CryptoTradingConfig::default(),
-            crypto_lob_ml: CryptoLobMlConfig::default(),
-            #[cfg(feature = "rl")]
-            crypto_rl_policy: CryptoRlPolicyConfig::default(),
-            sports: SportsTradingConfig::default(),
-            politics: PoliticsTradingConfig::default(),
-            openclaw: OpenClawConfig::default(),
-        }
-    }
-}
-
-impl PlatformBootstrapConfig {
-    /// Re-evaluate deployment matrix against the current runtime account + dry-run mode.
-    pub fn reapply_strategy_deployments_for_runtime(&mut self, app: &AppConfig) {
-        let strategy_deployments = load_strategy_deployments();
-        if strategy_deployments.is_empty() {
-            return;
-        }
-
-        let runtime_account_id = if app.account.id.trim().is_empty() {
-            "default".to_string()
-        } else {
-            app.account.id.clone()
-        };
-        apply_strategy_deployments(
-            self,
-            &strategy_deployments,
-            &runtime_account_id,
-            self.dry_run,
-        );
-    }
-
-    /// Build from AppConfig, enabling agents based on their config sections
-    pub fn from_app_config(app: &AppConfig) -> Self {
-        let mut cfg = Self::default();
-        cfg.dry_run = app.dry_run.enabled;
-        cfg.sports.account_id = app.account.id.clone();
-
-        // Coordinator risk from app config
-        cfg.coordinator.risk = crate::platform::RiskConfig {
-            max_platform_exposure: app.risk.max_single_exposure_usd,
-            max_consecutive_failures: app.risk.max_consecutive_failures,
-            daily_loss_limit: app.risk.daily_loss_limit_usd,
-            max_spread_bps: 500,
-            critical_bypass_exposure: false,
-            ..Default::default()
-        };
-        cfg.coordinator.risk.max_drawdown_limit = env_decimal_opt("PLOY_RISK__MAX_DRAWDOWN_USD")
-            .map(|v| v.max(rust_decimal::Decimal::ZERO));
-        cfg.coordinator.risk.circuit_breaker_auto_recover = env_bool(
-            "PLOY_RISK__CIRCUIT_BREAKER_AUTO_RECOVER",
-            cfg.coordinator.risk.circuit_breaker_auto_recover,
-        );
-        cfg.coordinator.risk.circuit_breaker_cooldown_secs = env_u64(
-            "PLOY_RISK__CIRCUIT_BREAKER_COOLDOWN_SECS",
-            cfg.coordinator.risk.circuit_breaker_cooldown_secs,
-        );
-
-        // Optional domain-level risk splits.
-        // Example:
-        // - PLOY_RISK__ACCOUNT_RESERVE_PCT=0.15
-        // - PLOY_RISK__ACCOUNT_DEPLOYABLE_PCT=0.85
-        // - PLOY_RISK__CRYPTO_ALLOCATION_PCT=0.5
-        // - PLOY_RISK__SPORTS_ALLOCATION_PCT=0.5
-        // - PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD=45
-        // - PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD=45
-        let normalize_pct = |v: rust_decimal::Decimal| {
-            if v >= rust_decimal::Decimal::ZERO && v <= rust_decimal::Decimal::ONE {
-                Some(v)
-            } else {
-                None
-            }
-        };
-
-        let crypto_alloc_pct =
-            env_decimal_opt("PLOY_RISK__CRYPTO_ALLOCATION_PCT").and_then(normalize_pct);
-        let sports_alloc_pct =
-            env_decimal_opt("PLOY_RISK__SPORTS_ALLOCATION_PCT").and_then(normalize_pct);
-        let politics_alloc_pct =
-            env_decimal_opt("PLOY_RISK__POLITICS_ALLOCATION_PCT").and_then(normalize_pct);
-        let economics_alloc_pct =
-            env_decimal_opt("PLOY_RISK__ECONOMICS_ALLOCATION_PCT").and_then(normalize_pct);
-
-        let account_reserve_pct = env_decimal_opt("PLOY_RISK__ACCOUNT_RESERVE_PCT")
-            .and_then(normalize_pct)
-            .unwrap_or(rust_decimal::Decimal::ZERO);
-        let account_deployable_pct = env_decimal_opt("PLOY_RISK__ACCOUNT_DEPLOYABLE_PCT")
-            .and_then(normalize_pct)
-            .unwrap_or_else(|| rust_decimal::Decimal::ONE - account_reserve_pct);
-        let alloc_base = (cfg.coordinator.risk.max_platform_exposure * account_deployable_pct)
-            .max(rust_decimal::Decimal::ZERO);
-
-        cfg.coordinator.risk.crypto_max_exposure =
-            env_decimal_opt("PLOY_RISK__CRYPTO_MAX_EXPOSURE_USD")
-                .or_else(|| crypto_alloc_pct.map(|p| alloc_base * p));
-        cfg.coordinator.risk.sports_max_exposure =
-            env_decimal_opt("PLOY_RISK__SPORTS_MAX_EXPOSURE_USD")
-                .or_else(|| sports_alloc_pct.map(|p| alloc_base * p));
-        cfg.coordinator.risk.politics_max_exposure =
-            env_decimal_opt("PLOY_RISK__POLITICS_MAX_EXPOSURE_USD")
-                .or_else(|| politics_alloc_pct.map(|p| alloc_base * p));
-        cfg.coordinator.risk.economics_max_exposure =
-            env_decimal_opt("PLOY_RISK__ECONOMICS_MAX_EXPOSURE_USD")
-                .or_else(|| economics_alloc_pct.map(|p| alloc_base * p));
-
-        cfg.coordinator.risk.crypto_daily_loss_limit =
-            env_decimal_opt("PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD");
-        cfg.coordinator.risk.sports_daily_loss_limit =
-            env_decimal_opt("PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD");
-        cfg.coordinator.risk.politics_daily_loss_limit =
-            env_decimal_opt("PLOY_RISK__POLITICS_DAILY_LOSS_LIMIT_USD");
-        cfg.coordinator.risk.economics_daily_loss_limit =
-            env_decimal_opt("PLOY_RISK__ECONOMICS_DAILY_LOSS_LIMIT_USD");
-
-        cfg.coordinator.duplicate_guard_enabled = env_bool(
-            "PLOY_COORDINATOR__DUPLICATE_GUARD_ENABLED",
-            cfg.coordinator.duplicate_guard_enabled,
-        );
-        cfg.coordinator.duplicate_guard_window_ms = env_u64(
-            "PLOY_COORDINATOR__DUPLICATE_GUARD_WINDOW_MS",
-            cfg.coordinator.duplicate_guard_window_ms,
-        )
-        .max(100);
-        if let Ok(raw) = std::env::var("PLOY_COORDINATOR__DUPLICATE_GUARD_SCOPE") {
-            let v = raw.trim().to_ascii_lowercase();
-            cfg.coordinator.duplicate_guard_scope = match v.as_str() {
-                "deployment" | "dep" => DuplicateGuardScope::Deployment,
-                "market" | "global" => DuplicateGuardScope::Market,
-                _ => cfg.coordinator.duplicate_guard_scope,
-            };
-        }
-        cfg.coordinator.heartbeat_stale_warn_cooldown_secs = env_u64(
-            "PLOY_COORDINATOR__HEARTBEAT_STALE_WARN_COOLDOWN_SECS",
-            cfg.coordinator.heartbeat_stale_warn_cooldown_secs,
-        )
-        .max(10);
-
-        cfg.coordinator.crypto_allocator_enabled = env_bool(
-            "PLOY_COORDINATOR__CRYPTO_ALLOCATOR_ENABLED",
-            cfg.coordinator.crypto_allocator_enabled,
-        );
-        cfg.coordinator.crypto_allocator_total_cap_usd =
-            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_ALLOCATOR_TOTAL_CAP_USD")
-                .or(cfg.coordinator.crypto_allocator_total_cap_usd);
-
-        if let Some(v) =
-            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_COIN_CAP_BTC_PCT").and_then(normalize_pct)
-        {
-            cfg.coordinator.crypto_coin_cap_btc_pct = v;
-        }
-        if let Some(v) =
-            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_COIN_CAP_ETH_PCT").and_then(normalize_pct)
-        {
-            cfg.coordinator.crypto_coin_cap_eth_pct = v;
-        }
-        if let Some(v) =
-            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_COIN_CAP_SOL_PCT").and_then(normalize_pct)
-        {
-            cfg.coordinator.crypto_coin_cap_sol_pct = v;
-        }
-        if let Some(v) =
-            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_COIN_CAP_XRP_PCT").and_then(normalize_pct)
-        {
-            cfg.coordinator.crypto_coin_cap_xrp_pct = v;
-        }
-        if let Some(v) =
-            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_COIN_CAP_OTHER_PCT").and_then(normalize_pct)
-        {
-            cfg.coordinator.crypto_coin_cap_other_pct = v;
-        }
-
-        if let Some(v) =
-            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_HORIZON_CAP_5M_PCT").and_then(normalize_pct)
-        {
-            cfg.coordinator.crypto_horizon_cap_5m_pct = v;
-        }
-        if let Some(v) =
-            env_decimal_opt("PLOY_COORDINATOR__CRYPTO_HORIZON_CAP_15M_PCT").and_then(normalize_pct)
-        {
-            cfg.coordinator.crypto_horizon_cap_15m_pct = v;
-        }
-        if let Some(v) = env_decimal_opt("PLOY_COORDINATOR__CRYPTO_HORIZON_CAP_OTHER_PCT")
-            .and_then(normalize_pct)
-        {
-            cfg.coordinator.crypto_horizon_cap_other_pct = v;
-        }
-
-        cfg.coordinator.sports_allocator_enabled = env_bool(
-            "PLOY_COORDINATOR__SPORTS_ALLOCATOR_ENABLED",
-            cfg.coordinator.sports_allocator_enabled,
-        );
-        cfg.coordinator.sports_allocator_total_cap_usd =
-            env_decimal_opt("PLOY_COORDINATOR__SPORTS_ALLOCATOR_TOTAL_CAP_USD")
-                .or(cfg.coordinator.sports_allocator_total_cap_usd);
-        if let Some(v) =
-            env_decimal_opt("PLOY_COORDINATOR__SPORTS_MARKET_CAP_PCT").and_then(normalize_pct)
-        {
-            cfg.coordinator.sports_market_cap_pct = v;
-        }
-        cfg.coordinator.sports_auto_split_by_active_markets = env_bool(
-            "PLOY_COORDINATOR__SPORTS_AUTO_SPLIT_BY_ACTIVE_MARKETS",
-            cfg.coordinator.sports_auto_split_by_active_markets,
-        );
-
-        cfg.coordinator.politics_allocator_enabled = env_bool(
-            "PLOY_COORDINATOR__POLITICS_ALLOCATOR_ENABLED",
-            cfg.coordinator.politics_allocator_enabled,
-        );
-        cfg.coordinator.politics_allocator_total_cap_usd =
-            env_decimal_opt("PLOY_COORDINATOR__POLITICS_ALLOCATOR_TOTAL_CAP_USD")
-                .or(cfg.coordinator.politics_allocator_total_cap_usd);
-        if let Some(v) =
-            env_decimal_opt("PLOY_COORDINATOR__POLITICS_MARKET_CAP_PCT").and_then(normalize_pct)
-        {
-            cfg.coordinator.politics_market_cap_pct = v;
-        }
-        cfg.coordinator.politics_auto_split_by_active_markets = env_bool(
-            "PLOY_COORDINATOR__POLITICS_AUTO_SPLIT_BY_ACTIVE_MARKETS",
-            cfg.coordinator.politics_auto_split_by_active_markets,
-        );
-
-        cfg.coordinator.economics_allocator_enabled = env_bool(
-            "PLOY_COORDINATOR__ECONOMICS_ALLOCATOR_ENABLED",
-            cfg.coordinator.economics_allocator_enabled,
-        );
-        cfg.coordinator.economics_allocator_total_cap_usd =
-            env_decimal_opt("PLOY_COORDINATOR__ECONOMICS_ALLOCATOR_TOTAL_CAP_USD")
-                .or(cfg.coordinator.economics_allocator_total_cap_usd);
-        if let Some(v) =
-            env_decimal_opt("PLOY_COORDINATOR__ECONOMICS_MARKET_CAP_PCT").and_then(normalize_pct)
-        {
-            cfg.coordinator.economics_market_cap_pct = v;
-        }
-        cfg.coordinator.economics_auto_split_by_active_markets = env_bool(
-            "PLOY_COORDINATOR__ECONOMICS_AUTO_SPLIT_BY_ACTIVE_MARKETS",
-            cfg.coordinator.economics_auto_split_by_active_markets,
-        );
-
-        cfg.coordinator.governance_block_new_intents =
-            std::env::var("PLOY_COORDINATOR__GOVERNANCE_BLOCK_NEW_INTENTS")
-                .or_else(|_| std::env::var("PLOY_GOVERNANCE__BLOCK_NEW_INTENTS"))
-                .ok()
-                .map(|raw| match raw.trim().to_ascii_lowercase().as_str() {
-                    "1" | "true" | "yes" | "on" => true,
-                    "0" | "false" | "no" | "off" => false,
-                    _ => cfg.coordinator.governance_block_new_intents,
-                })
-                .unwrap_or(cfg.coordinator.governance_block_new_intents);
-        cfg.coordinator.governance_max_intent_notional_usd =
-            env_decimal_opt("PLOY_COORDINATOR__GOVERNANCE_MAX_INTENT_NOTIONAL_USD")
-                .or_else(|| env_decimal_opt("PLOY_GOVERNANCE__MAX_INTENT_NOTIONAL_USD"))
-                .or(cfg.coordinator.governance_max_intent_notional_usd);
-        cfg.coordinator.governance_max_total_notional_usd =
-            env_decimal_opt("PLOY_COORDINATOR__GOVERNANCE_MAX_TOTAL_NOTIONAL_USD")
-                .or_else(|| env_decimal_opt("PLOY_GOVERNANCE__MAX_TOTAL_NOTIONAL_USD"))
-                .or(cfg.coordinator.governance_max_total_notional_usd);
-
-        if let Ok(raw) = std::env::var("PLOY_COORDINATOR__GOVERNANCE_BLOCKED_DOMAINS")
-            .or_else(|_| std::env::var("PLOY_GOVERNANCE__BLOCKED_DOMAINS"))
-        {
-            let domains = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(|v| v.to_ascii_lowercase())
-                .collect::<Vec<_>>();
-            if !domains.is_empty() {
-                cfg.coordinator.governance_blocked_domains = domains;
-            }
-        }
-        // Coordinator-level Kelly sizing (optional; applied when intents carry `signal_fair_value`).
-        cfg.coordinator.kelly_sizing_enabled = env_bool(
-            "PLOY_COORDINATOR__KELLY_SIZING_ENABLED",
-            cfg.coordinator.kelly_sizing_enabled,
-        );
-        if let Some(v) =
-            env_decimal_opt("PLOY_COORDINATOR__KELLY_FRACTION_MULTIPLIER").and_then(normalize_pct)
-        {
-            cfg.coordinator.kelly_fraction_multiplier = v;
-        }
-        if let Some(v) = env_decimal_opt("PLOY_COORDINATOR__KELLY_MIN_EDGE") {
-            cfg.coordinator.kelly_min_edge = v
-                .max(rust_decimal::Decimal::ZERO)
-                .min(rust_decimal::Decimal::ONE);
-        }
-        cfg.coordinator.kelly_min_shares = env_u64(
-            "PLOY_COORDINATOR__KELLY_MIN_SHARES",
-            cfg.coordinator.kelly_min_shares,
-        );
-
-        // Execution venue minimums (used to prevent deterministic 400s that would otherwise
-        // trip the circuit breaker and make the system look like it "stops after one loop").
-        cfg.coordinator.min_order_shares = env_u64(
-            "PLOY_COORDINATOR__MIN_ORDER_SHARES",
-            cfg.coordinator.min_order_shares,
-        );
-        if let Some(v) = env_decimal_opt("PLOY_COORDINATOR__MIN_ORDER_NOTIONAL_USD") {
-            cfg.coordinator.min_order_notional_usd = v.max(rust_decimal::Decimal::ZERO);
-        }
-        // Map legacy [strategy]/[risk] values into crypto-agent defaults so
-        // platform mode follows deployed config instead of hardcoded defaults.
-        cfg.crypto.default_shares = app.strategy.shares.max(1);
-        let effective_threshold = app.strategy.effective_sum_target();
-        if effective_threshold > rust_decimal::Decimal::ZERO {
-            cfg.crypto.sum_threshold = effective_threshold;
-        } else if app.strategy.sum_target > rust_decimal::Decimal::ZERO {
-            cfg.crypto.sum_threshold = app.strategy.sum_target;
-        }
-        cfg.crypto.exit_edge_floor = app.strategy.profit_buffer.max(rust_decimal::Decimal::ZERO);
-        cfg.crypto.risk_params.max_order_value = app.risk.max_single_exposure_usd;
-        let max_positions = if app.risk.max_positions > 0 {
-            app.risk.max_positions
-        } else {
-            3
-        };
-        cfg.crypto.risk_params.max_total_exposure =
-            app.risk.max_single_exposure_usd * rust_decimal::Decimal::from(max_positions);
-        cfg.crypto.risk_params.max_daily_loss = app.risk.daily_loss_limit_usd;
-        cfg.crypto.risk_params.max_unhedged_positions = app.risk.max_positions_per_symbol.max(1);
-
-        // Environment overrides for crypto agent tuning (service-level).
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENABLED") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.enable_crypto_momentum = true,
-                "0" | "false" | "no" | "off" => cfg.enable_crypto_momentum = false,
-                _ => {}
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__COINS") {
-            let coins: Vec<String> = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_ascii_uppercase())
-                .collect();
-            if !coins.is_empty() {
-                cfg.crypto.coins = coins;
-            }
-        }
-        cfg.crypto.sum_threshold =
-            env_decimal("PLOY_CRYPTO_AGENT__SUM_THRESHOLD", cfg.crypto.sum_threshold);
-        cfg.crypto.default_shares = env_u64(
-            "PLOY_CRYPTO_AGENT__DEFAULT_SHARES",
-            cfg.crypto.default_shares,
-        )
-        .max(1);
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__MIN_MOMENTUM_1S") {
-            if let Ok(v) = raw.parse::<f64>() {
-                if v.is_finite() && v >= 0.0 {
-                    cfg.crypto.min_momentum_1s = v;
-                }
-            }
-        }
-        cfg.crypto.min_window_move_pct = env_decimal(
-            "PLOY_CRYPTO_AGENT__MIN_WINDOW_MOVE_PCT",
-            cfg.crypto.min_window_move_pct,
-        );
-        cfg.crypto.min_edge = env_decimal("PLOY_CRYPTO_AGENT__MIN_EDGE", cfg.crypto.min_edge);
-        cfg.crypto.event_refresh_secs = env_u64(
-            "PLOY_CRYPTO_AGENT__EVENT_REFRESH_SECS",
-            cfg.crypto.event_refresh_secs,
-        )
-        .max(1);
-        cfg.crypto.min_time_remaining_secs = env_u64(
-            "PLOY_CRYPTO_AGENT__MIN_TIME_REMAINING_SECS",
-            cfg.crypto.min_time_remaining_secs,
-        );
-        cfg.crypto.max_time_remaining_secs = env_u64(
-            "PLOY_CRYPTO_AGENT__MAX_TIME_REMAINING_SECS",
-            cfg.crypto.max_time_remaining_secs,
-        );
-        if cfg.crypto.max_time_remaining_secs < cfg.crypto.min_time_remaining_secs {
-            cfg.crypto.max_time_remaining_secs = cfg.crypto.min_time_remaining_secs;
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__PREFER_CLOSE_TO_END") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.crypto.prefer_close_to_end = true,
-                "0" | "false" | "no" | "off" => cfg.crypto.prefer_close_to_end = false,
-                _ => {}
-            }
-        }
-        cfg.crypto.entry_cooldown_secs = env_u64(
-            "PLOY_CRYPTO_AGENT__ENTRY_COOLDOWN_SECS",
-            cfg.crypto.entry_cooldown_secs,
-        );
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__REQUIRE_MTF_AGREEMENT") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.crypto.require_mtf_agreement = true,
-                "0" | "false" | "no" | "off" => cfg.crypto.require_mtf_agreement = false,
-                _ => {}
-            }
-        }
-        cfg.crypto.exit_edge_floor = env_decimal(
-            "PLOY_CRYPTO_AGENT__EXIT_EDGE_FLOOR",
-            cfg.crypto.exit_edge_floor,
-        );
-        cfg.crypto.exit_price_band = env_decimal(
-            "PLOY_CRYPTO_AGENT__EXIT_PRICE_BAND",
-            cfg.crypto.exit_price_band,
-        );
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENABLE_PRICE_EXITS") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.crypto.enable_price_exits = true,
-                "0" | "false" | "no" | "off" => cfg.crypto.enable_price_exits = false,
-                _ => {}
-            }
-        }
-        cfg.crypto.min_hold_secs =
-            env_u64("PLOY_CRYPTO_AGENT__MIN_HOLD_SECS", cfg.crypto.min_hold_secs);
-        // Entry mode: arb_only | directional | vol_straddle
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_AGENT__ENTRY_MODE") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "arb_only" | "arb" => {
-                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::ArbOnly
-                }
-                "directional" | "dir" => {
-                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::Directional
-                }
-                "vol_straddle" | "straddle" => {
-                    cfg.crypto.entry_mode = crate::agents::crypto::CryptoEntryMode::VolStraddle
-                }
-                _ => {}
-            }
-        }
-        cfg.crypto.oracle_lag_buffer_secs = env_u64(
-            "PLOY_CRYPTO_AGENT__ORACLE_LAG_BUFFER_SECS",
-            cfg.crypto.oracle_lag_buffer_secs,
-        );
-        cfg.crypto.max_spread_pct = env_decimal(
-            "PLOY_CRYPTO_AGENT__MAX_SPREAD_PCT",
-            cfg.crypto.max_spread_pct,
-        );
-        cfg.crypto.straddle_threshold = env_decimal(
-            "PLOY_CRYPTO_AGENT__STRADDLE_THRESHOLD",
-            cfg.crypto.straddle_threshold,
-        );
-        cfg.crypto.straddle_min_vol = env_decimal(
-            "PLOY_CRYPTO_AGENT__STRADDLE_MIN_VOL",
-            cfg.crypto.straddle_min_vol,
-        );
-        cfg.crypto.min_signal_score = env_decimal(
-            "PLOY_CRYPTO_AGENT__MIN_SIGNAL_SCORE",
-            cfg.crypto.min_signal_score,
-        )
-        .max(rust_decimal::Decimal::ZERO)
-        .min(rust_decimal::Decimal::ONE);
-        cfg.crypto.heartbeat_interval_secs = env_u64(
-            "PLOY_CRYPTO_AGENT__HEARTBEAT_INTERVAL_SECS",
-            cfg.crypto.heartbeat_interval_secs,
-        )
-        .max(1);
-        cfg.crypto.risk_params.max_order_value = env_decimal(
-            "PLOY_CRYPTO_AGENT__MAX_ORDER_VALUE_USD",
-            cfg.crypto.risk_params.max_order_value,
-        );
-        cfg.crypto.risk_params.max_total_exposure = env_decimal(
-            "PLOY_CRYPTO_AGENT__MAX_TOTAL_EXPOSURE_USD",
-            cfg.crypto.risk_params.max_total_exposure,
-        );
-        cfg.crypto.risk_params.max_daily_loss = env_decimal(
-            "PLOY_CRYPTO_AGENT__MAX_DAILY_LOSS_USD",
-            cfg.crypto.risk_params.max_daily_loss,
-        );
-        cfg.crypto.risk_params.max_unhedged_positions = env_u64(
-            "PLOY_CRYPTO_AGENT__MAX_UNHEDGED_POSITIONS",
-            cfg.crypto.risk_params.max_unhedged_positions as u64,
-        )
-        .max(1) as u32;
-
-        // Optional LOB+ML crypto agent (disabled by default).
-        // Default to the same risk envelope as the momentum agent unless overridden.
-        cfg.crypto_lob_ml.default_shares = cfg.crypto.default_shares;
-        cfg.crypto_lob_ml.exit_edge_floor = cfg.crypto.exit_edge_floor;
-        cfg.crypto_lob_ml.exit_price_band = cfg.crypto.exit_price_band;
-        cfg.crypto_lob_ml.risk_params = cfg.crypto.risk_params.clone();
-
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__ENABLED") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.enable_crypto_lob_ml = true,
-                "0" | "false" | "no" | "off" => cfg.enable_crypto_lob_ml = false,
-                _ => {}
-            }
-        }
-
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__COINS") {
-            let coins: Vec<String> = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_ascii_uppercase())
-                .collect();
-            if !coins.is_empty() {
-                cfg.crypto_lob_ml.coins = coins;
-            }
-        }
-
-        cfg.crypto_lob_ml.default_shares = env_u64(
-            "PLOY_CRYPTO_LOB_ML__DEFAULT_SHARES",
-            cfg.crypto_lob_ml.default_shares,
-        )
-        .max(1);
-        cfg.crypto_lob_ml.exit_edge_floor = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__EXIT_EDGE_FLOOR",
-            cfg.crypto_lob_ml.exit_edge_floor,
-        );
-        cfg.crypto_lob_ml.exit_price_band = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__EXIT_PRICE_BAND",
-            cfg.crypto_lob_ml.exit_price_band,
-        );
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__EXIT_MODE") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "settle_only" | "settle" => {
-                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::SettleOnly
-                }
-                "ev_exit" | "ev" | "model_ev" => {
-                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::EvExit
-                }
-                "signal_flip" | "flip" => {
-                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::SignalFlip
-                }
-                "trailing_exit" | "trailing" | "price_exit" | "price" | "mtm" => {
-                    cfg.crypto_lob_ml.exit_mode = CryptoLobMlExitMode::TrailingExit
-                }
-                _ => {
-                    warn!(
-                        value = %raw,
-                        "invalid PLOY_CRYPTO_LOB_ML__EXIT_MODE; keeping configured/default value"
-                    );
-                }
-            }
-        }
-        if std::env::var_os("PLOY_CRYPTO_LOB_ML__ENABLE_PRICE_EXITS").is_some() {
-            warn!(
-                "PLOY_CRYPTO_LOB_ML__ENABLE_PRICE_EXITS is deprecated and ignored; use PLOY_CRYPTO_LOB_ML__EXIT_MODE"
-            );
-        }
-        cfg.crypto_lob_ml.min_hold_secs = env_u64(
-            "PLOY_CRYPTO_LOB_ML__MIN_HOLD_SECS",
-            cfg.crypto_lob_ml.min_hold_secs,
-        );
-        cfg.crypto_lob_ml.min_edge =
-            env_decimal("PLOY_CRYPTO_LOB_ML__MIN_EDGE", cfg.crypto_lob_ml.min_edge);
-        cfg.crypto_lob_ml.max_entry_price = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__MAX_ENTRY_PRICE",
-            cfg.crypto_lob_ml.max_entry_price,
-        );
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__ENTRY_SIDE_POLICY") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "best_ev" | "best" => {
-                    cfg.crypto_lob_ml.entry_side_policy = CryptoLobMlEntrySidePolicy::BestEv
-                }
-                "lagging_only" | "lagging" => {
-                    cfg.crypto_lob_ml.entry_side_policy = CryptoLobMlEntrySidePolicy::LaggingOnly
-                }
-                _ => {}
-            }
-        }
-        cfg.crypto_lob_ml.entry_late_window_secs_5m = env_u64(
-            "PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_5M",
-            cfg.crypto_lob_ml.entry_late_window_secs_5m,
-        )
-        .min(300);
-        if std::env::var_os("PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_5M").is_none()
-            && std::env::var_os("PLOY_CRYPTO_LOB_ML__ENTRY_EARLY_WINDOW_SECS_5M").is_some()
-        {
-            warn!(
-                "PLOY_CRYPTO_LOB_ML__ENTRY_EARLY_WINDOW_SECS_5M is deprecated; use PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_5M"
-            );
-            cfg.crypto_lob_ml.entry_late_window_secs_5m = env_u64(
-                "PLOY_CRYPTO_LOB_ML__ENTRY_EARLY_WINDOW_SECS_5M",
-                cfg.crypto_lob_ml.entry_late_window_secs_5m,
-            )
-            .min(300);
-        }
-        cfg.crypto_lob_ml.entry_late_window_secs_15m = env_u64(
-            "PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_15M",
-            cfg.crypto_lob_ml.entry_late_window_secs_15m,
-        )
-        .min(900);
-        cfg.crypto_lob_ml.taker_fee_rate = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__TAKER_FEE_RATE",
-            cfg.crypto_lob_ml.taker_fee_rate,
-        )
-        .max(rust_decimal::Decimal::ZERO)
-        .min(rust_decimal::Decimal::new(25, 2));
-        cfg.crypto_lob_ml.entry_slippage_bps = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__ENTRY_SLIPPAGE_BPS",
-            cfg.crypto_lob_ml.entry_slippage_bps,
-        )
-        .max(rust_decimal::Decimal::ZERO)
-        .min(rust_decimal::Decimal::new(2500, 0));
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__USE_PRICE_TO_BEAT") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.use_price_to_beat = true,
-                "0" | "false" | "no" | "off" => cfg.crypto_lob_ml.use_price_to_beat = false,
-                _ => {}
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__REQUIRE_PRICE_TO_BEAT") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.require_price_to_beat = true,
-                "0" | "false" | "no" | "off" => cfg.crypto_lob_ml.require_price_to_beat = false,
-                _ => {}
-            }
-        }
-        cfg.crypto_lob_ml.model_blend_weight = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__MODEL_BLEND_WEIGHT",
-            cfg.crypto_lob_ml.model_blend_weight,
-        )
-        .max(rust_decimal::Decimal::new(1, 2))
-        .min(rust_decimal::Decimal::new(99, 2));
-        cfg.crypto_lob_ml.min_direction_strength = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__MIN_DIRECTION_STRENGTH",
-            cfg.crypto_lob_ml.min_direction_strength,
-        )
-        .max(rust_decimal::Decimal::ZERO)
-        .min(rust_decimal::Decimal::new(49, 2));
-        cfg.crypto_lob_ml.event_refresh_secs = env_u64(
-            "PLOY_CRYPTO_LOB_ML__EVENT_REFRESH_SECS",
-            cfg.crypto_lob_ml.event_refresh_secs,
-        )
-        .max(1);
-        cfg.crypto_lob_ml.min_time_remaining_secs = env_u64(
-            "PLOY_CRYPTO_LOB_ML__MIN_TIME_REMAINING_SECS",
-            cfg.crypto_lob_ml.min_time_remaining_secs,
-        );
-        cfg.crypto_lob_ml.max_time_remaining_secs = env_u64(
-            "PLOY_CRYPTO_LOB_ML__MAX_TIME_REMAINING_SECS",
-            cfg.crypto_lob_ml.max_time_remaining_secs,
-        );
-        cfg.crypto_lob_ml.max_time_remaining_secs_5m = env_u64(
-            "PLOY_CRYPTO_LOB_ML__MAX_TIME_REMAINING_SECS_5M",
-            cfg.crypto_lob_ml.max_time_remaining_secs_5m,
-        )
-        .max(1);
-        cfg.crypto_lob_ml.max_time_remaining_secs_15m = env_u64(
-            "PLOY_CRYPTO_LOB_ML__MAX_TIME_REMAINING_SECS_15M",
-            cfg.crypto_lob_ml.max_time_remaining_secs_15m,
-        )
-        .max(1);
-        if cfg.crypto_lob_ml.max_time_remaining_secs < cfg.crypto_lob_ml.min_time_remaining_secs {
-            cfg.crypto_lob_ml.max_time_remaining_secs = cfg.crypto_lob_ml.min_time_remaining_secs;
-        }
-        if cfg.crypto_lob_ml.max_time_remaining_secs_5m < cfg.crypto_lob_ml.min_time_remaining_secs
-        {
-            cfg.crypto_lob_ml.max_time_remaining_secs_5m =
-                cfg.crypto_lob_ml.min_time_remaining_secs;
-        }
-        if cfg.crypto_lob_ml.max_time_remaining_secs_15m < cfg.crypto_lob_ml.min_time_remaining_secs
-        {
-            cfg.crypto_lob_ml.max_time_remaining_secs_15m =
-                cfg.crypto_lob_ml.min_time_remaining_secs;
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__PREFER_CLOSE_TO_END") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.prefer_close_to_end = true,
-                "0" | "false" | "no" | "off" => cfg.crypto_lob_ml.prefer_close_to_end = false,
-                _ => {}
-            }
-        }
-        cfg.crypto_lob_ml.cooldown_secs = env_u64(
-            "PLOY_CRYPTO_LOB_ML__COOLDOWN_SECS",
-            cfg.crypto_lob_ml.cooldown_secs,
-        );
-        cfg.crypto_lob_ml.max_lob_snapshot_age_secs = env_u64(
-            "PLOY_CRYPTO_LOB_ML__MAX_LOB_SNAPSHOT_AGE_SECS",
-            cfg.crypto_lob_ml.max_lob_snapshot_age_secs,
-        )
-        .max(1);
-        cfg.crypto_lob_ml.heartbeat_interval_secs = env_u64(
-            "PLOY_CRYPTO_LOB_ML__HEARTBEAT_INTERVAL_SECS",
-            cfg.crypto_lob_ml.heartbeat_interval_secs,
-        )
-        .max(1);
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_TYPE") {
-            let v = raw.trim().to_ascii_lowercase();
-            if !v.is_empty() {
-                cfg.crypto_lob_ml.model_type = v;
-            }
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_PATH") {
-            let v = raw.trim();
-            cfg.crypto_lob_ml.model_path = if v.is_empty() {
-                None
-            } else {
-                Some(v.to_string())
-            };
-        }
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__MODEL_VERSION") {
-            let v = raw.trim();
-            cfg.crypto_lob_ml.model_version = if v.is_empty() {
-                None
-            } else {
-                Some(v.to_string())
-            };
-        }
-        // window_fallback_weight env var kept for backward compat but is unused
-        // in the 2-layer blend model. Ignore silently.
-        cfg.crypto_lob_ml.ev_exit_buffer = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__EV_EXIT_BUFFER",
-            cfg.crypto_lob_ml.ev_exit_buffer,
-        )
-        .max(rust_decimal::Decimal::ZERO)
-        .min(rust_decimal::Decimal::new(50, 2));
-        cfg.crypto_lob_ml.ev_exit_vol_scale = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__EV_EXIT_VOL_SCALE",
-            cfg.crypto_lob_ml.ev_exit_vol_scale,
-        )
-        .max(rust_decimal::Decimal::ZERO)
-        .min(rust_decimal::Decimal::new(50, 2));
-        cfg.crypto_lob_ml.oracle_lag_buffer_secs = env_u64(
-            "PLOY_CRYPTO_LOB_ML__ORACLE_LAG_BUFFER_SECS",
-            cfg.crypto_lob_ml.oracle_lag_buffer_secs,
-        );
-        cfg.crypto_lob_ml.max_spread_pct = env_decimal(
-            "PLOY_CRYPTO_LOB_ML__MAX_SPREAD_PCT",
-            cfg.crypto_lob_ml.max_spread_pct,
-        );
-        if let Ok(raw) = std::env::var("PLOY_CRYPTO_LOB_ML__FORCE_SETTLE_ONLY_5M") {
-            match raw.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => cfg.crypto_lob_ml.force_settle_only_5m = true,
-                "0" | "false" | "no" | "off" => cfg.crypto_lob_ml.force_settle_only_5m = false,
-                _ => {}
-            }
-        }
-
-        #[cfg(feature = "rl")]
-        {
-            // Optional RL policy crypto agent (disabled by default).
-            // Default to the same risk envelope as the momentum agent unless overridden.
-            cfg.crypto_rl_policy.default_shares = cfg.crypto.default_shares;
-            cfg.crypto_rl_policy.risk_params = cfg.crypto.risk_params.clone();
-            cfg.crypto_rl_policy.heartbeat_interval_secs = cfg.crypto.heartbeat_interval_secs;
-
-            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__ENABLED") {
-                match raw.trim().to_ascii_lowercase().as_str() {
-                    "1" | "true" | "yes" | "on" => cfg.enable_crypto_rl_policy = true,
-                    "0" | "false" | "no" | "off" => cfg.enable_crypto_rl_policy = false,
-                    _ => {}
-                }
-            }
-
-            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__COINS") {
-                let coins: Vec<String> = raw
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_ascii_uppercase())
-                    .collect();
-                if !coins.is_empty() {
-                    cfg.crypto_rl_policy.coins = coins;
-                }
-            }
-
-            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__MODEL_PATH") {
-                let v = raw.trim();
-                if !v.is_empty() {
-                    cfg.crypto_rl_policy.policy_model_path = Some(v.to_string());
-                }
-            }
-            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__POLICY_OUTPUT") {
-                let v = raw.trim().to_ascii_lowercase();
-                if !v.is_empty() {
-                    cfg.crypto_rl_policy.policy_output = v;
-                }
-            }
-            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__MODEL_VERSION") {
-                let v = raw.trim();
-                if !v.is_empty() {
-                    cfg.crypto_rl_policy.policy_model_version = Some(v.to_string());
-                }
-            }
-
-            cfg.crypto_rl_policy.default_shares = env_u64(
-                "PLOY_CRYPTO_RL_POLICY__DEFAULT_SHARES",
-                cfg.crypto_rl_policy.default_shares,
-            )
-            .max(1);
-            cfg.crypto_rl_policy.max_entry_price = env_decimal(
-                "PLOY_CRYPTO_RL_POLICY__MAX_ENTRY_PRICE",
-                cfg.crypto_rl_policy.max_entry_price,
-            );
-            cfg.crypto_rl_policy.cooldown_secs = env_u64(
-                "PLOY_CRYPTO_RL_POLICY__COOLDOWN_SECS",
-                cfg.crypto_rl_policy.cooldown_secs,
-            );
-            cfg.crypto_rl_policy.max_lob_snapshot_age_secs = env_u64(
-                "PLOY_CRYPTO_RL_POLICY__MAX_LOB_SNAPSHOT_AGE_SECS",
-                cfg.crypto_rl_policy.max_lob_snapshot_age_secs,
-            )
-            .max(1);
-            cfg.crypto_rl_policy.decision_interval_ms = env_u64(
-                "PLOY_CRYPTO_RL_POLICY__DECISION_INTERVAL_MS",
-                cfg.crypto_rl_policy.decision_interval_ms,
-            )
-            .max(50);
-            cfg.crypto_rl_policy.observation_version = env_u64(
-                "PLOY_CRYPTO_RL_POLICY__OBS_VERSION",
-                cfg.crypto_rl_policy.observation_version as u64,
-            ) as u32;
-            cfg.crypto_rl_policy.event_refresh_secs = env_u64(
-                "PLOY_CRYPTO_RL_POLICY__EVENT_REFRESH_SECS",
-                cfg.crypto_rl_policy.event_refresh_secs,
-            )
-            .max(1);
-            cfg.crypto_rl_policy.min_time_remaining_secs = env_u64(
-                "PLOY_CRYPTO_RL_POLICY__MIN_TIME_REMAINING_SECS",
-                cfg.crypto_rl_policy.min_time_remaining_secs,
-            );
-            cfg.crypto_rl_policy.max_time_remaining_secs = env_u64(
-                "PLOY_CRYPTO_RL_POLICY__MAX_TIME_REMAINING_SECS",
-                cfg.crypto_rl_policy.max_time_remaining_secs,
-            );
-            if cfg.crypto_rl_policy.max_time_remaining_secs
-                < cfg.crypto_rl_policy.min_time_remaining_secs
-            {
-                cfg.crypto_rl_policy.max_time_remaining_secs =
-                    cfg.crypto_rl_policy.min_time_remaining_secs;
-            }
-            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__PREFER_CLOSE_TO_END") {
-                match raw.trim().to_ascii_lowercase().as_str() {
-                    "1" | "true" | "yes" | "on" => cfg.crypto_rl_policy.prefer_close_to_end = true,
-                    "0" | "false" | "no" | "off" => {
-                        cfg.crypto_rl_policy.prefer_close_to_end = false
-                    }
-                    _ => {}
-                }
-            }
-            if let Ok(raw) = std::env::var("PLOY_CRYPTO_RL_POLICY__EXPLORATION_RATE") {
-                if let Ok(v) = raw.trim().parse::<f32>() {
-                    if v.is_finite() {
-                        cfg.crypto_rl_policy.exploration_rate = v.clamp(0.0, 1.0);
-                    }
-                }
-            }
-            cfg.crypto_rl_policy.heartbeat_interval_secs = env_u64(
-                "PLOY_CRYPTO_RL_POLICY__HEARTBEAT_INTERVAL_SECS",
-                cfg.crypto_rl_policy.heartbeat_interval_secs,
-            )
-            .max(1);
-        }
-
-        // Enable sports if NBA comeback config is present and enabled
-        if let Some(ref nba) = app.nba_comeback {
-            if nba.enabled {
-                cfg.enable_sports = true;
-                // Keep the agent poll cadence aligned with the NBA comeback config.
-                cfg.sports.poll_interval_secs = nba.espn_poll_interval_secs;
-            }
-        }
-
-        // Enable politics if event edge config is present and enabled
-        if let Some(ref ee) = app.event_edge_agent {
-            if ee.enabled {
-                cfg.enable_politics = true;
-            }
-        }
-
-        cfg.reapply_strategy_deployments_for_runtime(app);
-
-        // OpenClaw-first runtime lockdown:
-        // keep coordinator available, but disable built-in agent loops.
-        if app.openclaw_runtime_lockdown() {
-            cfg.enable_crypto = false;
-            cfg.enable_crypto_momentum = false;
-            cfg.enable_crypto_pattern_memory = false;
-            cfg.enable_crypto_split_arb = false;
-            cfg.enable_crypto_lob_ml = false;
-            #[cfg(feature = "rl")]
-            {
-                cfg.enable_crypto_rl_policy = false;
-            }
-            cfg.enable_sports = false;
-            cfg.enable_politics = false;
-            cfg.enable_economics = false;
-            info!("agent framework lockdown active (mode=openclaw): built-in agents are disabled");
-        }
-
-        cfg
-    }
-}
 
 /// Optional control commands to apply immediately after platform startup.
 #[derive(Debug, Clone, Default)]
@@ -4093,7 +1904,7 @@ pub struct PlatformStartControl {
     pub resume: Option<String>,
 }
 
-fn split_arb_status_key(status: OrderStatus) -> &'static str {
+pub(crate) fn split_arb_status_key(status: OrderStatus) -> &'static str {
     match status {
         OrderStatus::Pending => "pending",
         OrderStatus::Submitted => "submitted",
@@ -4106,7 +1917,7 @@ fn split_arb_status_key(status: OrderStatus) -> &'static str {
     }
 }
 
-fn split_arb_leg_and_mode(client_order_id: &str) -> (&'static str, &'static str) {
+pub(crate) fn split_arb_leg_and_mode(client_order_id: &str) -> (&'static str, &'static str) {
     if client_order_id.starts_with("stag_leg1_") {
         ("leg1", "entry")
     } else if client_order_id.starts_with("stag_leg2_merge_") {
@@ -4120,7 +1931,7 @@ fn split_arb_leg_and_mode(client_order_id: &str) -> (&'static str, &'static str)
     }
 }
 
-fn split_arb_event_signal_type(event: &crate::strategy::StrategyEvent) -> String {
+pub(crate) fn split_arb_event_signal_type(event: &crate::strategy::StrategyEvent) -> String {
     match &event.event_type {
         crate::strategy::StrategyEventType::SignalDetected => {
             "split_arb_signal_detected".to_string()
@@ -4153,7 +1964,7 @@ fn split_arb_event_signal_type(event: &crate::strategy::StrategyEvent) -> String
     }
 }
 
-async fn persist_split_arb_signal_history(
+pub(crate) async fn persist_split_arb_signal_history(
     pool: &PgPool,
     account_id: &str,
     strategy_id: &str,
@@ -4200,6 +2011,55 @@ async fn persist_split_arb_signal_history(
     }
 }
 
+pub(crate) async fn persist_live_order_signal_history(
+    pool: &PgPool,
+    account_id: &str,
+    strategy_label: &str,
+    strategy_id: &str,
+    signal_type: &str,
+    token_id: Option<&str>,
+    side: Option<&str>,
+    order_price: Option<Decimal>,
+    fill_price: Option<Decimal>,
+    context: serde_json::Value,
+) {
+    let agent_id = format!("{}_runtime", strategy_label);
+    let result = sqlx::query(
+        r#"
+        INSERT INTO signal_history (
+            account_id, intent_id, agent_id, strategy_id, domain, signal_type,
+            market_slug, token_id, symbol, side, confidence, fair_value, market_price, edge, config_hash, context
+        )
+        VALUES (
+            $1, NULL, $2, $3, 'strategy_runtime', $4,
+            NULL, $5, NULL, $6, NULL, $7, $8, NULL, NULL, $9
+        )
+        "#,
+    )
+    .bind(account_id)
+    .bind(agent_id)
+    .bind(strategy_id)
+    .bind(signal_type)
+    .bind(token_id)
+    .bind(side)
+    .bind(order_price)
+    .bind(fill_price)
+    .bind(sqlx::types::Json(context))
+    .execute(pool)
+    .await;
+
+    if let Err(e) = result {
+        warn!(
+            strategy = strategy_label,
+            strategy_id = strategy_id,
+            signal_type = signal_type,
+            error = %e,
+            "failed to persist live order signal_history observation"
+        );
+    }
+}
+
+#[allow(dead_code)]
 async fn handle_strategy_actions_runtime(
     strategy_label: &str,
     manager: Arc<StrategyManager>,
@@ -4218,6 +2078,7 @@ async fn handle_strategy_actions_runtime(
                 client_order_id,
                 order,
                 priority: _,
+                ..
             } => {
                 if paused.load(Ordering::Relaxed) {
                     warn!(
@@ -4235,6 +2096,31 @@ async fn handle_strategy_actions_runtime(
                         error: Some("strategy paused by coordinator".to_string()),
                     };
                     manager.send_order_update(update.clone());
+                    if let Some(pool) = observability_pool.as_ref() {
+                        let context = json!({
+                            "source": "managed_runtime",
+                            "phase": "submit_paused",
+                            "order_id": update.order_id,
+                            "client_order_id": client_order_id.clone(),
+                            "status": format!("{:?}", update.status),
+                            "filled_qty": update.filled_qty,
+                            "avg_fill_price": update.avg_fill_price.map(|p| p.to_string()),
+                            "error": update.error,
+                        });
+                        persist_live_order_signal_history(
+                            pool,
+                            &observability_account_id,
+                            strategy_label,
+                            &strategy_id,
+                            "live_order_rejected",
+                            Some(order.token_id.as_str()),
+                            Some(order.market_side.as_str()),
+                            Some(order.limit_price),
+                            update.avg_fill_price,
+                            context,
+                        )
+                        .await;
+                    }
                     if split_arb_managed {
                         if let Some(pool) = observability_pool.as_ref() {
                             let (leg, mode) = split_arb_leg_and_mode(&client_order_id);
@@ -4284,6 +2170,30 @@ async fn handle_strategy_actions_runtime(
                             error: None,
                         };
                         manager.send_order_update(update.clone());
+                        if let Some(pool) = observability_pool.as_ref() {
+                            let context = json!({
+                                "source": "managed_runtime",
+                                "phase": "submit_result",
+                                "order_id": update.order_id,
+                                "client_order_id": client_order_id.clone(),
+                                "status": format!("{:?}", update.status),
+                                "filled_qty": update.filled_qty,
+                                "avg_fill_price": update.avg_fill_price.map(|p| p.to_string()),
+                            });
+                            persist_live_order_signal_history(
+                                pool,
+                                &observability_account_id,
+                                strategy_label,
+                                &strategy_id,
+                                "live_order_submit_result",
+                                Some(order.token_id.as_str()),
+                                Some(order.market_side.as_str()),
+                                Some(order.limit_price),
+                                update.avg_fill_price,
+                                context,
+                            )
+                            .await;
+                        }
 
                         if split_arb_managed {
                             if let Some(pool) = observability_pool.as_ref() {
@@ -4398,6 +2308,31 @@ async fn handle_strategy_actions_runtime(
                                     manager_for_poll.send_order_update(update.clone());
 
                                     if let Some(pool) = observability_pool_for_poll.as_ref() {
+                                        let context = json!({
+                                            "source": "managed_runtime",
+                                            "phase": "poll",
+                                            "order_id": update.order_id,
+                                            "client_order_id": client_order_id_for_poll.clone(),
+                                            "status": format!("{:?}", update.status),
+                                            "filled_qty": update.filled_qty,
+                                            "avg_fill_price": update.avg_fill_price.map(|p| p.to_string()),
+                                        });
+                                        persist_live_order_signal_history(
+                                            pool,
+                                            &observability_account_for_poll,
+                                            strategy_label_owned.as_str(),
+                                            &strategy_id_for_poll,
+                                            "live_order_poll_update",
+                                            Some(order_for_poll.token_id.as_str()),
+                                            Some(order_for_poll.market_side.as_str()),
+                                            Some(order_for_poll.limit_price),
+                                            update.avg_fill_price,
+                                            context,
+                                        )
+                                        .await;
+                                    }
+
+                                    if let Some(pool) = observability_pool_for_poll.as_ref() {
                                         let (leg, mode) = split_arb_leg_and_mode(
                                             client_order_id_for_poll.as_str(),
                                         );
@@ -4458,6 +2393,31 @@ async fn handle_strategy_actions_runtime(
                             error: Some(e.to_string()),
                         };
                         manager.send_order_update(update.clone());
+                        if let Some(pool) = observability_pool.as_ref() {
+                            let context = json!({
+                                "source": "managed_runtime",
+                                "phase": "submit_error",
+                                "order_id": update.order_id,
+                                "client_order_id": client_order_id.clone(),
+                                "status": format!("{:?}", update.status),
+                                "filled_qty": update.filled_qty,
+                                "avg_fill_price": update.avg_fill_price.map(|p| p.to_string()),
+                                "error": update.error,
+                            });
+                            persist_live_order_signal_history(
+                                pool,
+                                &observability_account_id,
+                                strategy_label,
+                                &strategy_id,
+                                "live_order_submit_error",
+                                Some(order.token_id.as_str()),
+                                Some(order.market_side.as_str()),
+                                Some(order.limit_price),
+                                update.avg_fill_price,
+                                context,
+                            )
+                            .await;
+                        }
                         if split_arb_managed {
                             if let Some(pool) = observability_pool.as_ref() {
                                 let (leg, mode) = split_arb_leg_and_mode(&client_order_id);
@@ -4493,22 +2453,43 @@ async fn handle_strategy_actions_runtime(
             }
             StrategyAction::CancelOrder { order_id } => match executor.cancel(&order_id).await {
                 Ok(cancelled) => {
+                    let (status, filled_qty, avg_fill_price, error) = if cancelled {
+                        match executor.query_order_status(&order_id).await {
+                            Ok(polled) => {
+                                let status = if polled.status.is_terminal() {
+                                    polled.status
+                                } else {
+                                    OrderStatus::Cancelled
+                                };
+                                (status, polled.filled_shares, polled.avg_fill_price, None)
+                            }
+                            Err(e) => {
+                                debug!(
+                                    strategy = strategy_label,
+                                    strategy_id = %strategy_id,
+                                    order_id = %order_id,
+                                    error = %e,
+                                    "cancel succeeded but post-cancel status query failed"
+                                );
+                                (OrderStatus::Cancelled, 0, None, None)
+                            }
+                        }
+                    } else {
+                        (
+                            OrderStatus::Rejected,
+                            0,
+                            None,
+                            Some("order not found or already closed".to_string()),
+                        )
+                    };
                     manager.send_order_update(crate::strategy::OrderUpdate {
                         order_id: order_id.clone(),
                         client_order_id: None,
-                        status: if cancelled {
-                            OrderStatus::Cancelled
-                        } else {
-                            OrderStatus::Rejected
-                        },
-                        filled_qty: 0,
-                        avg_fill_price: None,
+                        status,
+                        filled_qty,
+                        avg_fill_price,
                         timestamp: Utc::now(),
-                        error: if cancelled {
-                            None
-                        } else {
-                            Some("order not found or already closed".to_string())
-                        },
+                        error,
                     });
                 }
                 Err(e) => {
@@ -4588,287 +2569,711 @@ async fn handle_strategy_actions_runtime(
                     }
                 }
             }
-            StrategyAction::UpdateRisk { level, reason } => {
-                info!(
-                    strategy = strategy_label,
-                    strategy_id = %strategy_id,
-                    risk_level = ?level,
-                    reason = reason,
-                    "strategy risk update"
+        }
+    }
+}
+
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_managed_strategy_runtime_spec(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    shutdown_tx: &broadcast::Sender<()>,
+    runtime_spec: ManagedStrategyBootstrapSpec,
+    risk_params: AgentRiskParams,
+    dry_run: bool,
+    pm_client: Option<PolymarketClient>,
+    pm_ws_url: &str,
+    data_plane: Option<Arc<PlatformDataPlane>>,
+    observability_pool: Option<PgPool>,
+    observability_account_id: &str,
+) -> Result<()> {
+    let pm_client = pm_client.ok_or_else(|| {
+        crate::error::PloyError::Validation(format!(
+            "managed strategy runtime '{}' requires a Polymarket client, but none was initialized",
+            runtime_spec.strategy_label
+        ))
+    })?;
+
+    spawn_managed_strategy_runtime_task(
+        agent_handles,
+        coordinator,
+        shutdown_tx,
+        runtime_spec.strategy_label,
+        runtime_spec.agent_id,
+        runtime_spec.domain,
+        risk_params,
+        runtime_spec.strategy_config_toml,
+        dry_run,
+        pm_client,
+        pm_ws_url.to_string(),
+        data_plane,
+        observability_pool,
+        observability_account_id.to_string(),
+    );
+
+    Ok(())
+}
+
+fn spawn_governance_agent_task<A: GovernanceAgent>(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    agent: A,
+    risk_params: AgentRiskParams,
+    error_label: &'static str,
+) {
+    let agent_id = agent.id().to_string();
+    let domain = agent.domain();
+    let cmd_rx = coordinator.register_agent(agent_id.clone(), domain.clone(), risk_params);
+    let ctx = GovernanceContext::new(agent_id, domain, handle.clone(), cmd_rx);
+
+    let jh = tokio::spawn(async move {
+        if let Err(e) = agent.run(ctx).await {
+            error!(agent = error_label, error = %e, "governance agent exited with error");
+        }
+    });
+    agent_handles.push(jh);
+}
+
+async fn load_sports_collector_targets(pool: &PgPool) -> HashMap<String, Side> {
+    let mut desired: HashMap<String, Side> = HashMap::new();
+    if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
+        r#"
+        SELECT token_id, metadata->>'side'
+        FROM collector_token_targets
+        WHERE domain = 'SPORTS_NBA'
+          AND target_date BETWEEN (CURRENT_DATE - 1) AND (CURRENT_DATE + 1)
+          AND (expires_at IS NULL OR expires_at > NOW())
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        for (token_id, side_str) in rows {
+            let side = match side_str.as_deref() {
+                Some("DOWN") | Some("NO") => Side::Down,
+                _ => Side::Up,
+            };
+            desired.insert(token_id, side);
+        }
+    }
+
+    desired
+}
+
+async fn start_sports_market_data_support(
+    shared_pool: Option<PgPool>,
+    app_config: &AppConfig,
+    freshness: Arc<crate::platform::DataPlaneFreshness>,
+    sports_cfg: &SportsTradingConfig,
+) -> Result<PgPool> {
+    let pool = match shared_pool {
+        Some(pool) => pool,
+        None => {
+            PgPoolOptions::new()
+                .max_connections(app_config.database.max_connections)
+                .connect(&app_config.database.url)
+                .await?
+        }
+    };
+    spawn_polymarket_trade_persistence_from_collector_targets(
+        pool.clone(),
+        sports_cfg.agent_id.clone(),
+        Domain::Sports,
+    );
+
+    let sports_data_plane_config = DataPlaneConfig {
+        polymarket_ws_url: app_config.market.ws_url.clone(),
+        ..DataPlaneConfig::default()
+    };
+    let sports_data_plane = Arc::new(PlatformDataPlane::new(
+        sports_data_plane_config,
+        Arc::clone(&freshness),
+    ));
+    sports_data_plane.start(Vec::new()).await?;
+    let sports_pm_ws = sports_data_plane.polymarket_ws().ok_or_else(|| {
+        crate::error::PloyError::Validation(
+            "sports data plane misconfigured: missing Polymarket WS adapter".to_string(),
+        )
+    })?;
+
+    let sports_desired = load_sports_collector_targets(&pool).await;
+    let initial_count = sports_desired.len();
+    if initial_count > 0 {
+        sports_pm_ws.reconcile_token_sides(&sports_desired).await;
+        info!(
+            agent = sports_cfg.agent_id,
+            token_count = initial_count,
+            "seeded sports PM WS tokens for L2 data collection"
+        );
+    }
+
+    let refresh_ws = sports_pm_ws.clone();
+    let refresh_pool = pool.clone();
+    let refresh_agent = sports_cfg.agent_id.clone();
+    tokio::spawn(async move {
+        let secs = env_u64("PM_SPORTS_COLLECTOR_REFRESH_SECS", 300).max(30);
+        let mut tick = tokio::time::interval(Duration::from_secs(secs));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let desired = load_sports_collector_targets(&refresh_pool).await;
+            let (_a, _r, _u, total) = refresh_ws.reconcile_token_sides(&desired).await;
+            trace!(
+                agent = refresh_agent,
+                total,
+                "refreshed sports PM WS token subscriptions"
+            );
+        }
+    });
+
+    let sports_quote_table_ready = match ensure_clob_quote_ticks_table(&pool).await {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(
+                agent = sports_cfg.agent_id,
+                error = %e,
+                "failed to ensure clob_quote_ticks table; sports quote persistence bridge disabled"
+            );
+            false
+        }
+    };
+    let sports_orderbook_table_ready = match ensure_clob_orderbook_snapshots_table(&pool).await {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(
+                agent = sports_cfg.agent_id,
+                error = %e,
+                "failed to ensure clob_orderbook_snapshots table; sports orderbook persistence bridge disabled"
+            );
+            false
+        }
+    };
+    if sports_quote_table_ready || sports_orderbook_table_ready {
+        let sports_orderbook_levels = env_usize("PM_ORDERBOOK_LEVELS", 20).clamp(1, 200);
+        let sports_orderbook_snapshot_ms = match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
+            Ok(raw) => raw.parse::<u64>().unwrap_or(0),
+            Err(_) => {
+                (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", 60).max(0) as u64).saturating_mul(1000)
+            }
+        };
+        let sports_orderbook_require_hash_change =
+            env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
+        let sports_pipeline_config = crate::platform::PersistenceConfig {
+            clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
+            clob_orderbook_snapshot_interval_ms: sports_orderbook_snapshot_ms as i64,
+            clob_orderbook_max_levels: sports_orderbook_levels,
+            clob_orderbook_require_hash_change: sports_orderbook_require_hash_change,
+            ..Default::default()
+        };
+        let sports_pipeline = crate::platform::PersistencePipeline::spawn_with_freshness(
+            pool.clone(),
+            sports_pipeline_config,
+            Some(Arc::clone(&freshness)),
+        );
+
+        if sports_quote_table_ready {
+            if let Some(quote_rx) = sports_data_plane.subscribe_quotes() {
+                sports_pipeline.spawn_bridge(
+                    quote_rx,
+                    format!("{}.sports_quote", sports_cfg.agent_id),
+                    |update| {
+                        Some(crate::platform::PersistenceEvent::ClobQuote(
+                            crate::platform::ClobQuoteTick {
+                                token_id: update.token_id.clone(),
+                                side: update.side.as_str().to_string(),
+                                best_bid: update.quote.best_bid,
+                                best_ask: update.quote.best_ask,
+                                bid_size: update.quote.bid_size,
+                                ask_size: update.quote.ask_size,
+                                domain: Domain::Sports,
+                                received_at: Utc::now(),
+                            },
+                        ))
+                    },
+                );
+            } else {
+                warn!("sports quote bridge unavailable: no quote receiver");
+            }
+        }
+
+        if sports_orderbook_table_ready {
+            if let Some(book_rx) = sports_data_plane.subscribe_books() {
+                sports_pipeline.spawn_bridge(
+                    book_rx,
+                    format!("{}.sports_orderbook", sports_cfg.agent_id),
+                    |book_msg| {
+                        use sha2::{Digest, Sha256};
+                        let bids_json = serde_json::to_value(&book_msg.bids).unwrap_or_default();
+                        let asks_json = serde_json::to_value(&book_msg.asks).unwrap_or_default();
+                        let mut hasher = Sha256::new();
+                        hasher.update(bids_json.to_string().as_bytes());
+                        hasher.update(asks_json.to_string().as_bytes());
+                        let hash = format!("{:x}", hasher.finalize());
+                        Some(crate::platform::PersistenceEvent::ClobOrderbook(
+                            crate::platform::ClobOrderbookSnapshot {
+                                domain: Domain::Sports,
+                                token_id: book_msg.asset_id.clone(),
+                                market: Some(book_msg.market.clone()),
+                                bids: bids_json,
+                                asks: asks_json,
+                                book_timestamp: book_msg
+                                    .timestamp
+                                    .as_deref()
+                                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                    .map(|dt| dt.with_timezone(&Utc)),
+                                hash,
+                                source: "polymarket_ws".into(),
+                                context: None,
+                            },
+                        ))
+                    },
+                );
+            } else {
+                warn!("sports orderbook bridge unavailable: no book receiver");
+            }
+        }
+    } else {
+        warn!(
+            agent = sports_cfg.agent_id,
+            "sports persistence tables unavailable; WS persistence bridges disabled"
+        );
+    }
+
+    info!(
+        agent = sports_cfg.agent_id,
+        "sports PM WS L2 data collection started"
+    );
+
+    Ok(pool)
+}
+
+fn spawn_openclaw_agent(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    handle: &CoordinatorHandle,
+    openclaw_cfg: OpenClawConfig,
+    freshness: Arc<crate::platform::DataPlaneFreshness>,
+) {
+    let oc_symbols = vec![openclaw_cfg.btc_symbol.clone()];
+    let oc_binance_ws = Arc::new(BinanceWebSocket::new(oc_symbols));
+    oc_binance_ws.set_freshness(Arc::clone(&freshness));
+
+    let oc_ws = oc_binance_ws.clone();
+    tokio::spawn(async move {
+        if let Err(e) = oc_ws.run().await {
+            tracing::error!(error = %e, "openclaw binance ws exited");
+        }
+    });
+
+    let oc_risk_params = AgentRiskParams::governance_only();
+    let oc_agent_id = openclaw_cfg.agent_id.clone();
+    let oc_regime_tick_secs = openclaw_cfg.regime_tick_secs;
+    let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws);
+    let agent = OpenClawAgent::new(openclaw_cfg, oc_market_data);
+    spawn_governance_agent_task(
+        agent_handles,
+        coordinator,
+        handle,
+        agent,
+        oc_risk_params,
+        "openclaw",
+    );
+    info!(
+        agent_id = %oc_agent_id,
+        regime_tick = oc_regime_tick_secs,
+        "openclaw meta-agent spawned"
+    );
+}
+
+fn builtin_runtime_plugin_definition(plugin_id: &str) -> Result<PluginDefinition> {
+    let registry = PluginRegistry::builtin_runtime_registry()?;
+    registry
+        .plugin(plugin_id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("missing {plugin_id} plugin definition").into())
+}
+
+fn builtin_runtime_plugin_deployment(
+    plugin_id: &str,
+    deployment_id: impl Into<String>,
+    account_id: &str,
+) -> PluginDeployment {
+    PluginDeployment {
+        deployment_id: deployment_id.into(),
+        plugin_id: plugin_id.to_string(),
+        account_id: account_id.to_string(),
+        state: PluginDeploymentState::Enabled,
+    }
+}
+
+fn project_pattern_memory_plugin_runtime_spec(
+    coins: &[String],
+    account_id: &str,
+) -> Result<ManagedStrategyBootstrapSpec> {
+    let definition = builtin_runtime_plugin_definition("crypto.pattern_memory.v1")?;
+    crate::plugins::projector::project_pattern_memory_runtime_spec(
+        &definition,
+        &PluginSpec::ComposableCrypto(ComposableCryptoSpec {
+            signal_blocks: vec!["pattern_memory".to_string()],
+        }),
+        &builtin_runtime_plugin_deployment(
+            "crypto.pattern_memory.v1",
+            "managed-runtime.pattern_memory",
+            account_id,
+        ),
+        coins,
+    )
+}
+
+fn project_split_arb_plugin_runtime_spec(
+    symbols: &[String],
+    series_ids: &[String],
+    account_id: &str,
+) -> Result<ManagedStrategyBootstrapSpec> {
+    let definition = builtin_runtime_plugin_definition("crypto.split_arb.v1")?;
+    crate::plugins::projector::project_split_arb_runtime_spec(
+        &definition,
+        &PluginSpec::ComposableCrypto(ComposableCryptoSpec {
+            signal_blocks: vec!["split_arb".to_string()],
+        }),
+        &builtin_runtime_plugin_deployment(
+            "crypto.split_arb.v1",
+            "managed-runtime.split_arb",
+            account_id,
+        ),
+        symbols,
+        series_ids,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_canonical_crypto_strategy_runtimes(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    shutdown_tx: &broadcast::Sender<()>,
+    pm_client: Option<PolymarketClient>,
+    pm_ws_url: &str,
+    data_plane: Option<Arc<PlatformDataPlane>>,
+    shared_pool: Option<PgPool>,
+    account_id: &str,
+    dry_run: bool,
+    crypto_cfg: &CryptoTradingConfig,
+    runtime_crypto_targets: &RuntimeCryptoStrategyTargets,
+    momentum_enabled: bool,
+    momentum_symbols: &[String],
+    pattern_memory_enabled: bool,
+    split_arb_enabled: bool,
+) {
+    if momentum_enabled {
+        if momentum_symbols.is_empty() {
+            warn!(
+                agent = crypto_cfg.agent_id,
+                "crypto momentum enabled but no recognized symbols were resolved"
+            );
+        } else {
+            let strategy_agent_id = crypto_cfg.agent_id.clone();
+            let runtime_spec = crate::plugins::projector::project_momentum_runtime_spec(
+                &PluginDefinition {
+                    plugin_id: "crypto.momentum.v1".to_string(),
+                    kind: PluginKind::ComposableCrypto,
+                    version: "v1".to_string(),
+                    domain: Domain::Crypto,
+                },
+                &PluginSpec::ComposableCrypto(ComposableCryptoSpec {
+                    signal_blocks: vec!["momentum".to_string()],
+                }),
+                &PluginDeployment {
+                    deployment_id: format!("deploy.crypto.momentum.{}", strategy_agent_id),
+                    plugin_id: "crypto.momentum.v1".to_string(),
+                    account_id: account_id.to_string(),
+                    state: PluginDeploymentState::Enabled,
+                },
+                momentum_symbols,
+                crypto_cfg,
+            );
+            if let Err(e) = runtime_spec.and_then(|runtime_spec| {
+                spawn_managed_strategy_runtime_spec(
+                    agent_handles,
+                    coordinator,
+                    shutdown_tx,
+                    runtime_spec,
+                    crypto_cfg.risk_params.clone(),
+                    dry_run,
+                    pm_client.clone(),
+                    pm_ws_url,
+                    data_plane.clone(),
+                    shared_pool.clone(),
+                    account_id,
+                )
+            }) {
+                warn!(
+                    agent = crypto_cfg.agent_id,
+                    error = %e,
+                    "crypto momentum enabled but canonical runtime could not be spawned; skipping"
+                );
+            } else {
+                info!(agent = %strategy_agent_id, "crypto momentum strategy runtime spawned");
+            }
+        }
+    } else {
+        info!(
+            agent = crypto_cfg.agent_id,
+            "crypto momentum strategy runtime disabled"
+        );
+    }
+
+    if pattern_memory_enabled {
+        if let Some(ref pool) = shared_pool {
+            if let Err(e) = crate::strategy::pattern_memory::persistence::ensure_table(pool).await {
+                warn!(error = %e, "failed to create pattern_memory_samples table");
+            }
+        }
+
+        let mut coins: Vec<String> = if runtime_crypto_targets.pattern_memory_coins.is_empty() {
+            crypto_cfg.coins.clone()
+        } else {
+            runtime_crypto_targets
+                .pattern_memory_coins
+                .iter()
+                .cloned()
+                .collect()
+        };
+        coins.sort();
+        coins.dedup();
+
+        match project_pattern_memory_plugin_runtime_spec(&coins, account_id) {
+            Ok(runtime_spec) => {
+                if let Err(e) = spawn_managed_strategy_runtime_spec(
+                    agent_handles,
+                    coordinator,
+                    shutdown_tx,
+                    runtime_spec,
+                    crypto_cfg.risk_params.clone(),
+                    dry_run,
+                    pm_client.clone(),
+                    pm_ws_url,
+                    data_plane.clone(),
+                    shared_pool.clone(),
+                    account_id,
+                ) {
+                    warn!(
+                        agent = "pattern_memory",
+                        error = %e,
+                        "pattern_memory enabled but canonical runtime could not be spawned"
+                    );
+                } else {
+                    info!("pattern_memory strategy runtime spawned");
+                }
+            }
+            Err(e) => {
+                warn!(
+                    agent = "pattern_memory",
+                    error = %e,
+                    "pattern_memory enabled but no valid runtime spec could be built"
                 );
             }
-            StrategyAction::SubscribeFeed { feed } => {
-                warn!(
-                    strategy = strategy_label,
-                    strategy_id = %strategy_id,
-                    feed = ?feed,
-                    "dynamic subscribe-feed action is not implemented in platform mode"
-                );
+        }
+    }
+
+    if split_arb_enabled {
+        let mut coins: Vec<String> = if runtime_crypto_targets.split_arb_coins.is_empty() {
+            crypto_cfg.coins.clone()
+        } else {
+            runtime_crypto_targets
+                .split_arb_coins
+                .iter()
+                .cloned()
+                .collect()
+        };
+        coins.sort();
+        coins.dedup();
+
+        let mut horizons: Vec<String> = if runtime_crypto_targets.split_arb_horizons.is_empty() {
+            vec!["5m".to_string(), "15m".to_string()]
+        } else {
+            runtime_crypto_targets
+                .split_arb_horizons
+                .iter()
+                .cloned()
+                .collect()
+        };
+        horizons.sort();
+        horizons.dedup();
+
+        let mut series_set: HashSet<String> = HashSet::new();
+        for coin in &coins {
+            let normalized = coin.trim_end_matches("USDT");
+            for horizon in &horizons {
+                if let Some(series_id) = crypto_series_id_for(normalized, horizon) {
+                    series_set.insert(series_id.to_string());
+                }
             }
-            StrategyAction::UnsubscribeFeed { feed } => {
-                warn!(
-                    strategy = strategy_label,
-                    strategy_id = %strategy_id,
-                    feed = ?feed,
-                    "dynamic unsubscribe-feed action is not implemented in platform mode"
-                );
+        }
+        let mut series_ids: Vec<String> = series_set.into_iter().collect();
+        series_ids.sort();
+
+        let mut symbols: Vec<String> = coins
+            .iter()
+            .filter_map(|coin| {
+                let normalized = coin.trim_end_matches("USDT");
+                coin_symbol_for(normalized)
+            })
+            .collect();
+        symbols.sort();
+        symbols.dedup();
+        if symbols.is_empty() {
+            symbols = series_ids
+                .iter()
+                .filter_map(|series_id| symbol_for_crypto_series_id(series_id).map(str::to_string))
+                .collect();
+            symbols.sort();
+            symbols.dedup();
+        }
+
+        if series_ids.is_empty() {
+            warn!(
+                agent = "split_arb",
+                "split_arb enabled but no recognized coin/horizon series ids were resolved"
+            );
+        } else {
+            match project_split_arb_plugin_runtime_spec(&symbols, &series_ids, account_id) {
+                Ok(runtime_spec) => {
+                    if let Err(e) = spawn_managed_strategy_runtime_spec(
+                        agent_handles,
+                        coordinator,
+                        shutdown_tx,
+                        runtime_spec,
+                        crypto_cfg.risk_params.clone(),
+                        dry_run,
+                        pm_client,
+                        pm_ws_url,
+                        data_plane,
+                        shared_pool,
+                        account_id,
+                    ) {
+                        warn!(
+                            agent = "split_arb",
+                            error = %e,
+                            "split_arb enabled but canonical runtime could not be spawned"
+                        );
+                    } else {
+                        info!("split_arb strategy runtime spawned");
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        agent = "split_arb",
+                        error = %e,
+                        "split_arb enabled but no valid plugin runtime spec could be built"
+                    );
+                }
             }
         }
     }
 }
 
-async fn run_managed_strategy_runtime(
-    strategy_label: &str,
-    agent_id: &str,
-    strategy_config_toml: String,
+#[allow(clippy::too_many_arguments)]
+async fn start_sports_strategy_runtime(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    shutdown_tx: &broadcast::Sender<()>,
+    app_config: &AppConfig,
+    shared_pool: Option<PgPool>,
+    freshness: Arc<crate::platform::DataPlaneFreshness>,
+    pm_client: Option<PolymarketClient>,
+    account_id: &str,
     dry_run: bool,
-    pm_client: PolymarketClient,
-    pm_ws_url: String,
-    data_plane: Option<Arc<PlatformDataPlane>>,
-    observability_pool: Option<PgPool>,
-    observability_account_id: String,
-    mut cmd_rx: mpsc::Receiver<CoordinatorCommand>,
-    mut shutdown_rx: broadcast::Receiver<()>,
+    sports_cfg: SportsTradingConfig,
+    nba_cfg: &crate::config::NbaComebackConfig,
 ) -> Result<()> {
-    let strategy = StrategyFactory::from_toml(&strategy_config_toml, dry_run)?;
-    let strategy_id = strategy.id().to_string();
-    let required_feeds = strategy.required_feeds();
-    let started_at = Utc::now();
-    let paused = Arc::new(AtomicBool::new(false));
-    let orders_submitted = Arc::new(AtomicU64::new(0));
-    let orders_filled = Arc::new(AtomicU64::new(0));
-    let mut status = AgentStatus::Running;
+    let registry = PluginRegistry::builtin_runtime_registry()?;
+    let definition = registry
+        .plugin("sports.nba_comeback.v1")
+        .ok_or_else(|| anyhow::anyhow!("missing sports.nba_comeback.v1 plugin definition"))?;
+    let managed_runtime_spec = crate::plugins::projector::project_nba_comeback_runtime_spec(
+        definition,
+        &PluginSpec::RegisteredStrategy(RegisteredStrategySpec::nba_comeback()),
+        &PluginDeployment {
+            deployment_id: format!("deploy.sports.nba_comeback.{}", sports_cfg.agent_id),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: account_id.to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        },
+        &app_config.database.url,
+        &sports_cfg,
+        nba_cfg,
+    )?;
 
-    let manager = Arc::new(StrategyManager::new(1000));
-    let action_rx = manager.take_action_receiver().await.ok_or_else(|| {
-        crate::error::PloyError::Internal(format!(
-            "strategy {} failed to take action receiver",
-            strategy_label
-        ))
-    })?;
+    let pool = start_sports_market_data_support(shared_pool, app_config, freshness, &sports_cfg)
+        .await?;
 
-    if strategy_label == "split_arb" {
-        if let Some(pool) = observability_pool.as_ref() {
-            if let Err(e) = ensure_strategy_observability_tables(pool).await {
-                warn!(
-                    strategy = strategy_label,
-                    error = %e,
-                    "failed to ensure strategy observability tables for managed runtime"
-                );
-            }
-        }
-    }
-
-    let mut binance_spot_symbols: Vec<String> = Vec::new();
-    let mut binance_kline_symbols: Vec<String> = Vec::new();
-    let mut binance_kline_intervals: Vec<String> = Vec::new();
-    let mut binance_kline_closed_only = true;
-
-    for feed in &required_feeds {
-        match feed {
-            DataFeed::BinanceSpot { symbols } => {
-                binance_spot_symbols.extend(symbols.clone());
-            }
-            DataFeed::BinanceKlines {
-                symbols,
-                intervals,
-                closed_only,
-            } => {
-                binance_kline_symbols.extend(symbols.clone());
-                binance_kline_intervals.extend(intervals.clone());
-                if !*closed_only {
-                    binance_kline_closed_only = false;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    binance_spot_symbols.sort();
-    binance_spot_symbols.dedup();
-    binance_kline_symbols.sort();
-    binance_kline_symbols.dedup();
-    binance_kline_intervals.sort();
-    binance_kline_intervals.dedup();
-
-    let feed_manager = if let Some(dp) = data_plane {
-        DataFeedManager::from_data_plane(dp, manager.clone()).with_pm_client(pm_client.clone())
-    } else {
-        let mut feed_manager = DataFeedManager::new(manager.clone());
-        if !binance_spot_symbols.is_empty() {
-            feed_manager = feed_manager.with_binance(binance_spot_symbols.clone());
-        }
-
-        if !binance_kline_symbols.is_empty() && !binance_kline_intervals.is_empty() {
-            let backfill_limit = std::env::var("PLOY_BINANCE_KLINE_BACKFILL_LIMIT")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(300);
-            feed_manager = feed_manager.with_binance_klines(
-                binance_kline_symbols.clone(),
-                binance_kline_intervals.clone(),
-                binance_kline_closed_only,
-                backfill_limit,
-            );
-        }
-
-        let has_polymarket_feed = required_feeds.iter().any(|f| {
-            matches!(
-                f,
-                DataFeed::PolymarketEvents { .. } | DataFeed::PolymarketQuotes { .. }
-            )
-        });
-        if has_polymarket_feed {
-            let pm_ws = PolymarketWebSocket::new(&pm_ws_url);
-            feed_manager = feed_manager.with_polymarket(pm_ws, pm_client.clone());
-        }
-
-        feed_manager
-    };
-
-    manager.start_strategy(strategy, None).await?;
-    feed_manager.start().await?;
-    let subscribed_tokens = feed_manager.start_for_feeds(required_feeds).await?;
-
-    let executor = Arc::new(OrderExecutor::new(
-        pm_client.clone(),
-        crate::config::ExecutionConfig::default(),
-    ));
-    let manager_for_actions = manager.clone();
-    let paused_for_actions = paused.clone();
-    let orders_submitted_for_actions = orders_submitted.clone();
-    let orders_filled_for_actions = orders_filled.clone();
-    let strategy_label_owned = strategy_label.to_string();
-    let observability_pool_for_actions = observability_pool.clone();
-    let observability_account_for_actions = observability_account_id.clone();
-    let action_task = tokio::spawn(async move {
-        handle_strategy_actions_runtime(
-            &strategy_label_owned,
-            manager_for_actions,
-            action_rx,
-            executor,
-            paused_for_actions,
-            orders_submitted_for_actions,
-            orders_filled_for_actions,
-            observability_pool_for_actions,
-            observability_account_for_actions,
-        )
-        .await;
-    });
-
+    spawn_managed_strategy_runtime_spec(
+        agent_handles,
+        coordinator,
+        shutdown_tx,
+        managed_runtime_spec,
+        sports_cfg.risk_params.clone(),
+        dry_run,
+        pm_client,
+        &app_config.market.ws_url,
+        None,
+        Some(pool.clone()),
+        account_id,
+    )?;
     info!(
-        strategy = strategy_label,
-        agent_id = agent_id,
-        strategy_id = %strategy_id,
-        subscribed_tokens = subscribed_tokens.len(),
-        dry_run = dry_run,
-        "managed strategy runtime started"
+        agent = %sports_cfg.agent_id,
+        "sports nba_comeback strategy runtime spawned"
     );
 
-    loop {
-        tokio::select! {
-            _ = shutdown_rx.recv() => {
-                info!(
-                    strategy = strategy_label,
-                    agent_id = agent_id,
-                    strategy_id = %strategy_id,
-                    "managed strategy runtime shutdown requested"
-                );
-                break;
-            }
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(CoordinatorCommand::Pause) => {
-                        paused.store(true, Ordering::Relaxed);
-                        status = AgentStatus::Paused;
-                        info!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime paused"
-                        );
-                    }
-                    Some(CoordinatorCommand::Resume) => {
-                        paused.store(false, Ordering::Relaxed);
-                        status = AgentStatus::Running;
-                        info!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime resumed"
-                        );
-                    }
-                    Some(CoordinatorCommand::ForceClose) => {
-                        warn!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime force-close requested"
-                        );
-                        break;
-                    }
-                    Some(CoordinatorCommand::Shutdown) => {
-                        info!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime shutdown command received"
-                        );
-                        break;
-                    }
-                    Some(CoordinatorCommand::HealthCheck(tx)) => {
-                        let position_count = manager
-                            .get_strategy_status(&strategy_id)
-                            .await
-                            .map(|s| s.position_count)
-                            .unwrap_or(0);
-                        let snapshot = AgentSnapshot {
-                            agent_id: agent_id.to_string(),
-                            name: strategy_label.to_string(),
-                            domain: Domain::Crypto,
-                            status,
-                            position_count,
-                            exposure: rust_decimal::Decimal::ZERO,
-                            daily_pnl: rust_decimal::Decimal::ZERO,
-                            unrealized_pnl: rust_decimal::Decimal::ZERO,
-                            metrics: HashMap::new(),
-                            last_heartbeat: Utc::now(),
-                            error_message: None,
-                        };
-                        let uptime_secs = (Utc::now() - started_at).num_seconds().max(0) as u64;
-                        let _ = tx.send(AgentHealthResponse {
-                            snapshot,
-                            is_healthy: matches!(status, AgentStatus::Running | AgentStatus::Paused),
-                            uptime_secs,
-                            orders_submitted: orders_submitted.load(Ordering::Relaxed),
-                            orders_filled: orders_filled.load(Ordering::Relaxed),
-                        });
-                    }
-                    None => {
-                        warn!(
-                            strategy = strategy_label,
-                            agent_id = agent_id,
-                            strategy_id = %strategy_id,
-                            "managed strategy runtime command channel closed"
-                        );
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    Ok(())
+}
 
-    if let Err(e) = manager.stop_all(true).await {
-        warn!(
-            strategy = strategy_label,
-            agent_id = agent_id,
-            strategy_id = %strategy_id,
-            error = %e,
-            "managed strategy runtime stop_all failed"
-        );
-    }
-    action_task.abort();
-
+fn spawn_politics_strategy_runtime(
+    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    coordinator: &mut Coordinator,
+    shutdown_tx: &broadcast::Sender<()>,
+    pm_client: Option<PolymarketClient>,
+    app_config: &AppConfig,
+    shared_pool: Option<PgPool>,
+    account_id: &str,
+    dry_run: bool,
+    politics_cfg: PoliticsTradingConfig,
+    ee_cfg: &crate::config::EventEdgeAgentConfig,
+) -> Result<()> {
+    let strategy_agent_id = politics_cfg.agent_id.clone();
+    let registry = PluginRegistry::builtin_runtime_registry()?;
+    let definition = registry
+        .plugin("politics.event_edge.v1")
+        .ok_or_else(|| anyhow::anyhow!("missing politics.event_edge.v1 plugin definition"))?;
+    let runtime_spec = crate::plugins::projector::project_event_edge_runtime_spec(
+        definition,
+        &PluginSpec::RegisteredStrategy(RegisteredStrategySpec::event_edge()),
+        &PluginDeployment {
+            deployment_id: format!("deploy.politics.event_edge.{}", politics_cfg.agent_id),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: account_id.to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        },
+        &app_config.market.rest_url,
+        &politics_cfg,
+        ee_cfg,
+    )?;
+    spawn_managed_strategy_runtime_spec(
+        agent_handles,
+        coordinator,
+        shutdown_tx,
+        runtime_spec,
+        politics_cfg.risk_params.clone(),
+        dry_run,
+        pm_client,
+        &app_config.market.ws_url,
+        None,
+        shared_pool,
+        account_id,
+    )?;
+    info!(agent = %strategy_agent_id, "politics event_edge strategy runtime spawned");
     Ok(())
 }
 
@@ -4881,16 +3286,13 @@ pub async fn start_platform(
     app_config: &AppConfig,
     control: PlatformStartControl,
 ) -> Result<()> {
-    let exchange_kind = parse_exchange_kind(&app_config.execution.exchange)?;
-    let exchange_client = build_exchange_client(app_config, config.dry_run).await?;
-    let non_pm_builtin_agents_enabled = exchange_kind != ExchangeKind::Polymarket
-        && (config.enable_crypto || config.enable_sports || config.enable_politics);
-    if non_pm_builtin_agents_enabled {
-        return Err(crate::error::PloyError::Validation(format!(
-            "execution.exchange={} is not yet supported with built-in agents (crypto/sports/politics). Disable built-in agents or set execution.exchange=polymarket",
-            exchange_kind
-        )));
-    }
+    let startup = initialize_startup_context(&config, app_config).await?;
+    let exchange_client = startup.exchange_client;
+    let pm_client = startup.pm_client;
+    let account_id = startup.account_id;
+    let runtime_crypto_targets = startup.runtime_crypto_targets;
+    let allowed_domains = startup.allowed_domains;
+    let shared_pool = startup.shared_pool;
 
     // Polymarket client is required for:
     // - crypto event discovery (Gamma)
@@ -4931,10 +3333,6 @@ pub async fn start_platform(
     };
     let runtime_crypto_targets =
         collect_runtime_crypto_strategy_targets(&account_id, config.dry_run);
-    #[cfg(feature = "rl")]
-    let crypto_rl_policy_enabled = config.enable_crypto_rl_policy;
-    #[cfg(not(feature = "rl"))]
-    let crypto_rl_policy_enabled = false;
 
     info!(
         account_id = %account_id,
@@ -4942,13 +3340,11 @@ pub async fn start_platform(
         crypto_momentum = config.enable_crypto_momentum,
         crypto_pattern_memory = config.enable_crypto_pattern_memory,
         crypto_split_arb = config.enable_crypto_split_arb,
-        crypto_lob_ml = config.enable_crypto_lob_ml,
-        crypto_rl_policy = crypto_rl_policy_enabled,
         sports = config.enable_sports,
         politics = config.enable_politics,
         economics = config.enable_economics,
         openclaw = config.enable_openclaw || config.openclaw.enabled,
-        exchange = %exchange_kind,
+        exchange = %exchange_client.kind(),
         dry_run = config.dry_run,
         "starting multi-agent platform"
     );
@@ -5330,25 +3726,6 @@ pub async fn start_platform(
         let momentum_enabled = config.enable_crypto_momentum;
         let pattern_memory_enabled = config.enable_crypto_pattern_memory;
         let split_arb_enabled = config.enable_crypto_split_arb;
-        let lob_cfg = config.crypto_lob_ml.clone();
-        let lob_agent_enabled = config.enable_crypto_lob_ml;
-        #[cfg(feature = "rl")]
-        let rl_cfg = config.crypto_rl_policy.clone();
-        #[cfg(feature = "rl")]
-        let rl_agent_enabled = config.enable_crypto_rl_policy;
-        #[cfg(not(feature = "rl"))]
-        let rl_agent_enabled = false;
-
-        let cmd_rx_opt = if momentum_enabled {
-            let risk_params = crypto_cfg.risk_params.clone();
-            Some(coordinator.register_agent(
-                crypto_cfg.agent_id.clone(),
-                Domain::Crypto,
-                risk_params,
-            ))
-        } else {
-            None
-        };
 
         // Discover active crypto events and token IDs (Gamma API) via EventMatcher
         let pm_client_ref = pm_client.as_ref().ok_or_else(|| {
@@ -5366,45 +3743,30 @@ pub async fn start_platform(
         let mut all_coins: Vec<String> = Vec::new();
         let mut planner_requirements: Vec<(crate::platform::ConsumerId, Domain, Vec<DataFeed>)> =
             Vec::new();
-        if momentum_enabled {
-            let symbols: Vec<String> = crypto_cfg
-                .coins
+        let mut momentum_coins: Vec<String> = if runtime_crypto_targets.momentum_coins.is_empty() {
+            crypto_cfg.coins.clone()
+        } else {
+            runtime_crypto_targets
+                .momentum_coins
                 .iter()
-                .map(|c| format!("{}USDT", c))
-                .collect();
+                .cloned()
+                .collect()
+        };
+        momentum_coins.sort();
+        momentum_coins.dedup();
+        let momentum_symbols: Vec<String> = momentum_coins
+            .iter()
+            .filter_map(|coin| coin_symbol_for(coin.trim_end_matches("USDT")))
+            .collect();
+        if momentum_enabled {
             planner_requirements.push((
                 crate::platform::ConsumerId::from(format!("momentum-{}", crypto_cfg.agent_id)),
                 Domain::Crypto,
-                vec![DataFeed::BinanceSpot { symbols }],
+                vec![DataFeed::BinanceSpot {
+                    symbols: momentum_symbols.clone(),
+                }],
             ));
-            for coin in &crypto_cfg.coins {
-                if !all_coins.contains(coin) {
-                    all_coins.push(coin.clone());
-                }
-            }
-        }
-        if lob_agent_enabled {
-            let symbols: Vec<String> = lob_cfg.coins.iter().map(|c| format!("{}USDT", c)).collect();
-            planner_requirements.push((
-                crate::platform::ConsumerId::from("lob-ml"),
-                Domain::Crypto,
-                vec![DataFeed::BinanceSpot { symbols }],
-            ));
-            for coin in &lob_cfg.coins {
-                if !all_coins.contains(coin) {
-                    all_coins.push(coin.clone());
-                }
-            }
-        }
-        #[cfg(feature = "rl")]
-        if rl_agent_enabled {
-            let symbols: Vec<String> = rl_cfg.coins.iter().map(|c| format!("{}USDT", c)).collect();
-            planner_requirements.push((
-                crate::platform::ConsumerId::from("rl-policy"),
-                Domain::Crypto,
-                vec![DataFeed::BinanceSpot { symbols }],
-            ));
-            for coin in &rl_cfg.coins {
+            for coin in &momentum_coins {
                 if !all_coins.contains(coin) {
                     all_coins.push(coin.clone());
                 }
@@ -5502,8 +3864,6 @@ pub async fn start_platform(
             info!("data plane freshness tracker attached to WS adapters");
             (binance_ws, pm_ws)
         };
-        let crypto_market_data = CryptoDataPlaneHandle::new(binance_ws.clone(), pm_ws.clone());
-
         // Seed PM token → side mapping for data collection, so QuoteUpdates carry the correct
         // UP/DOWN side and can be persisted to Postgres.
         //
@@ -5918,8 +4278,8 @@ pub async fn start_platform(
             );
         }
 
-        // Optional Binance LOB depth stream (for ML/RL feature generation).
-        let mut enable_binance_lob = lob_agent_enabled || rl_agent_enabled;
+        // Optional Binance LOB depth stream for collector/persistence support.
+        let mut enable_binance_lob = false;
         if let Ok(raw) = std::env::var("PLOY_BINANCE_LOB__ENABLED") {
             match raw.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => enable_binance_lob = true,
@@ -5928,7 +4288,6 @@ pub async fn start_platform(
             }
         }
 
-        let mut lob_cache_opt: Option<crate::collector::LobCache> = None;
         if enable_binance_lob {
             let depth_symbols: Vec<String> = match std::env::var("PLOY_BINANCE_LOB__SYMBOLS") {
                 Ok(raw) => raw
@@ -5941,8 +4300,6 @@ pub async fn start_platform(
             };
 
             let depth_stream = Arc::new(crate::collector::BinanceDepthStream::new(depth_symbols));
-            let lob_cache = depth_stream.cache().clone();
-            lob_cache_opt = Some(lob_cache.clone());
 
             if let Some(pool) = shared_pool.as_ref() {
                 match ensure_binance_lob_ticks_table(pool).await {
@@ -6031,666 +4388,59 @@ pub async fn start_platform(
             });
         }
 
-        if momentum_enabled {
-            if let Some(cmd_rx) = cmd_rx_opt {
-                let agent = CryptoTradingAgent::new(
-                    crypto_cfg.clone(),
-                    crypto_market_data.clone(),
-                    event_matcher.clone(),
-                );
-                let ctx = AgentContext::new(
-                    crypto_cfg.agent_id.clone(),
-                    Domain::Crypto,
-                    handle.clone(),
-                    cmd_rx,
-                );
-
-                let jh = tokio::spawn(async move {
-                    if let Err(e) = agent.run(ctx).await {
-                        error!(agent = "crypto", error = %e, "agent exited with error");
-                    }
-                });
-                agent_handles.push(jh);
-                info!("crypto momentum agent spawned");
-            } else {
-                warn!(
-                    agent = crypto_cfg.agent_id,
-                    "crypto momentum agent enabled but coordinator cmd_rx is missing"
-                );
-            }
-        } else {
-            info!(
-                agent = crypto_cfg.agent_id,
-                "crypto momentum agent disabled"
-            );
-        }
-
-        if pattern_memory_enabled {
-            // Ensure persistence table exists
-            if let Some(ref pool) = shared_pool {
-                if let Err(e) =
-                    crate::strategy::pattern_memory::persistence::ensure_table(pool).await
-                {
-                    warn!(error = %e, "failed to create pattern_memory_samples table");
-                }
-            }
-
-            let mut coins: Vec<String> = if runtime_crypto_targets.pattern_memory_coins.is_empty() {
-                crypto_cfg.coins.clone()
-            } else {
-                runtime_crypto_targets
-                    .pattern_memory_coins
-                    .iter()
-                    .cloned()
-                    .collect()
-            };
-            coins.sort();
-            coins.dedup();
-
-            match build_pattern_memory_runtime_config(&coins) {
-                Ok(toml_cfg) => {
-                    if let Some(strategy_pm_client) = pm_client.clone() {
-                        let strategy_agent_id = "pattern_memory".to_string();
-                        let strategy_cmd_rx = coordinator.register_agent(
-                            strategy_agent_id.clone(),
-                            Domain::Crypto,
-                            crypto_cfg.risk_params.clone(),
-                        );
-                        let strategy_ws_url = app_config.market.ws_url.clone();
-                        let strategy_data_plane = data_plane.clone();
-                        let strategy_shutdown_rx = shutdown_tx.subscribe();
-                        let strategy_dry_run = config.dry_run;
-                        let strategy_observability_pool = shared_pool.clone();
-                        let strategy_account_id = account_id.clone();
-                        let jh = tokio::spawn(async move {
-                            if let Err(e) = run_managed_strategy_runtime(
-                                "pattern_memory",
-                                &strategy_agent_id,
-                                toml_cfg,
-                                strategy_dry_run,
-                                strategy_pm_client,
-                                strategy_ws_url,
-                                strategy_data_plane,
-                                strategy_observability_pool,
-                                strategy_account_id,
-                                strategy_cmd_rx,
-                                strategy_shutdown_rx,
-                            )
-                            .await
-                            {
-                                error!(agent = "pattern_memory", error = %e, "managed strategy runtime exited with error");
-                            }
-                        });
-                        agent_handles.push(jh);
-                        info!("pattern_memory strategy runtime spawned");
-                    } else {
-                        warn!(
-                            agent = "pattern_memory",
-                            "pattern_memory enabled but pm client not configured; skipping"
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        agent = "pattern_memory",
-                        error = %e,
-                        "pattern_memory enabled but no valid runtime config could be built"
-                    );
-                }
-            }
-        }
-
-        if split_arb_enabled {
-            let mut coins: Vec<String> = if runtime_crypto_targets.split_arb_coins.is_empty() {
-                crypto_cfg.coins.clone()
-            } else {
-                runtime_crypto_targets
-                    .split_arb_coins
-                    .iter()
-                    .cloned()
-                    .collect()
-            };
-            coins.sort();
-            coins.dedup();
-
-            let mut horizons: Vec<String> = if runtime_crypto_targets.split_arb_horizons.is_empty()
-            {
-                vec!["5m".to_string(), "15m".to_string()]
-            } else {
-                runtime_crypto_targets
-                    .split_arb_horizons
-                    .iter()
-                    .cloned()
-                    .collect()
-            };
-            horizons.sort();
-            horizons.dedup();
-
-            let mut series_set: HashSet<String> = HashSet::new();
-            for coin in &coins {
-                let normalized = coin.trim_end_matches("USDT");
-                for horizon in &horizons {
-                    if let Some(series_id) = crypto_series_id_for(normalized, horizon) {
-                        series_set.insert(series_id.to_string());
-                    }
-                }
-            }
-            let mut series_ids: Vec<String> = series_set.into_iter().collect();
-            series_ids.sort();
-
-            let mut symbols: Vec<String> = coins
-                .iter()
-                .filter_map(|coin| {
-                    let normalized = coin.trim_end_matches("USDT");
-                    coin_symbol_for(normalized)
-                })
-                .collect();
-            symbols.sort();
-            symbols.dedup();
-            if symbols.is_empty() {
-                symbols = series_ids
-                    .iter()
-                    .filter_map(|series_id| {
-                        symbol_for_crypto_series_id(series_id).map(str::to_string)
-                    })
-                    .collect();
-                symbols.sort();
-                symbols.dedup();
-            }
-
-            if series_ids.is_empty() {
-                warn!(
-                    agent = "split_arb",
-                    "split_arb enabled but no recognized coin/horizon series ids were resolved"
-                );
-            } else {
-                let toml_cfg = build_split_arb_runtime_config(&symbols, &series_ids);
-                let strategy_agent_id = "split_arb".to_string();
-                if let Some(strategy_pm_client) = pm_client.clone() {
-                    let strategy_cmd_rx = coordinator.register_agent(
-                        strategy_agent_id.clone(),
-                        Domain::Crypto,
-                        crypto_cfg.risk_params.clone(),
-                    );
-                    let strategy_ws_url = app_config.market.ws_url.clone();
-                    let strategy_data_plane = data_plane.clone();
-                    let strategy_shutdown_rx = shutdown_tx.subscribe();
-                    let strategy_dry_run = config.dry_run;
-                    let strategy_observability_pool = shared_pool.clone();
-                    let strategy_account_id = account_id.clone();
-                    let jh = tokio::spawn(async move {
-                        if let Err(e) = run_managed_strategy_runtime(
-                            "split_arb",
-                            &strategy_agent_id,
-                            toml_cfg,
-                            strategy_dry_run,
-                            strategy_pm_client,
-                            strategy_ws_url,
-                            strategy_data_plane,
-                            strategy_observability_pool,
-                            strategy_account_id,
-                            strategy_cmd_rx,
-                            strategy_shutdown_rx,
-                        )
-                        .await
-                        {
-                            error!(agent = "split_arb", error = %e, "managed strategy runtime exited with error");
-                        }
-                    });
-                    agent_handles.push(jh);
-                    info!("split_arb strategy runtime spawned");
-                } else {
-                    warn!(
-                        agent = "split_arb",
-                        "split_arb enabled but pm client not configured; skipping"
-                    );
-                }
-            }
-        }
-
-        if lob_agent_enabled {
-            let model_type = lob_cfg.model_type.trim().to_ascii_lowercase();
-            let model_is_tcn = matches!(
-                model_type.as_str(),
-                "onnx_tcn" | "tcn" | "tcn_onnx" | "tcn-onnx"
-            );
-
-            if model_is_tcn && !cfg!(feature = "onnx") {
-                warn!(
-                    agent = lob_cfg.agent_id,
-                    model_type = %model_type,
-                    "crypto lob-ml agent model_type=onnx_tcn requires --features onnx; skipping agent spawn"
-                );
-            } else if model_is_tcn && shared_pool.is_none() {
-                warn!(
-                    agent = lob_cfg.agent_id,
-                    model_type = %model_type,
-                    "crypto lob-ml agent model_type=onnx_tcn requires DB for feature parity with training; skipping agent spawn"
-                );
-            } else if !model_is_tcn && lob_cache_opt.is_none() {
-                warn!(
-                    agent = lob_cfg.agent_id,
-                    model_type = %model_type,
-                    "crypto lob-ml agent requires binance depth stream but it is disabled; skipping agent spawn"
-                );
-            } else {
-                if let Some(lob_cache) = lob_cache_opt.clone() {
-                    let risk_params = lob_cfg.risk_params.clone();
-                    let agent = CryptoLobMlAgent::new(
-                        lob_cfg.clone(),
-                        crypto_market_data.clone(),
-                        event_matcher.clone(),
-                        lob_cache,
-                    )?;
-                    let cmd_rx = coordinator.register_agent(
-                        lob_cfg.agent_id.clone(),
-                        Domain::Crypto,
-                        risk_params,
-                    );
-                    let ctx = AgentContext::new(
-                        lob_cfg.agent_id.clone(),
-                        Domain::Crypto,
-                        handle.clone(),
-                        cmd_rx,
-                    );
-
-                    let jh = tokio::spawn(async move {
-                        if let Err(e) = agent.run(ctx).await {
-                            error!(agent = "crypto_lob_ml", error = %e, "agent exited with error");
-                        }
-                    });
-                    agent_handles.push(jh);
-                    info!("crypto lob-ml agent spawned");
-                } else {
-                    warn!(
-                        agent = lob_cfg.agent_id,
-                        model_type = %model_type,
-                        "crypto lob-ml agent requires binance depth stream but it is disabled; skipping agent spawn"
-                    );
-                }
-            }
-        }
-
-        #[cfg(feature = "rl")]
-        if rl_agent_enabled {
-            if let Some(lob_cache) = lob_cache_opt.clone() {
-                let risk_params = rl_cfg.risk_params.clone();
-                let cmd_rx = coordinator.register_agent(
-                    rl_cfg.agent_id.clone(),
-                    Domain::Crypto,
-                    risk_params,
-                );
-
-                let agent = CryptoRlPolicyAgent::new(
-                    rl_cfg.clone(),
-                    crypto_market_data.clone(),
-                    event_matcher.clone(),
-                    lob_cache,
-                );
-                let ctx = AgentContext::new(
-                    rl_cfg.agent_id.clone(),
-                    Domain::Crypto,
-                    handle.clone(),
-                    cmd_rx,
-                );
-
-                let jh = tokio::spawn(async move {
-                    if let Err(e) = agent.run(ctx).await {
-                        error!(agent = "crypto_rl_policy", error = %e, "agent exited with error");
-                    }
-                });
-                agent_handles.push(jh);
-                info!("crypto RL policy agent spawned");
-            } else {
-                warn!(
-                    agent = rl_cfg.agent_id,
-                    "RL policy agent enabled but binance depth stream is disabled; skipping agent spawn"
-                );
-            }
-        }
+        spawn_canonical_crypto_strategy_runtimes(
+            &mut agent_handles,
+            &mut coordinator,
+            &shutdown_tx,
+            pm_client.clone(),
+            &app_config.market.ws_url,
+            data_plane.clone(),
+            shared_pool.clone(),
+            &account_id,
+            config.dry_run,
+            &crypto_cfg,
+            &runtime_crypto_targets,
+            momentum_enabled,
+            &momentum_symbols,
+            pattern_memory_enabled,
+            split_arb_enabled,
+        )
+        .await;
     }
 
     if config.enable_sports {
         if let Some(ref nba_cfg) = app_config.nba_comeback {
-            let sports_cfg = config.sports.clone();
-            let risk_params = sports_cfg.risk_params.clone();
-            let cmd_rx = coordinator.register_agent(
-                sports_cfg.agent_id.clone(),
-                Domain::Sports,
-                risk_params,
-            );
-
-            let pool = match shared_pool.as_ref() {
-                Some(pool) => pool.clone(),
-                None => {
-                    PgPoolOptions::new()
-                        .max_connections(app_config.database.max_connections)
-                        .connect(&app_config.database.url)
-                        .await?
-                }
-            };
-            spawn_polymarket_trade_persistence_from_collector_targets(
-                pool.clone(),
-                sports_cfg.agent_id.clone(),
-                Domain::Sports,
-            );
-
-            // Sports L2 data collection: create a dedicated sports data plane so
-            // PM WS lifecycle stays domain-isolated from crypto.
-            {
-                let sports_data_plane_config = DataPlaneConfig {
-                    polymarket_ws_url: app_config.market.ws_url.clone(),
-                    ..DataPlaneConfig::default()
-                };
-                let sports_data_plane = Arc::new(PlatformDataPlane::new(
-                    sports_data_plane_config,
-                    Arc::clone(&freshness),
-                ));
-                sports_data_plane.start(Vec::new()).await?;
-                let sports_pm_ws = sports_data_plane.polymarket_ws().ok_or_else(|| {
-                    crate::error::PloyError::Validation(
-                        "sports data plane misconfigured: missing Polymarket WS adapter"
-                            .to_string(),
-                    )
-                })?;
-
-                // Seed initial NBA tokens from collector_token_targets
-                let mut sports_desired: HashMap<String, Side> = HashMap::new();
-                if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
-                    r#"
-                    SELECT token_id, metadata->>'side'
-                    FROM collector_token_targets
-                    WHERE domain = 'SPORTS_NBA'
-                      AND target_date BETWEEN (CURRENT_DATE - 1) AND (CURRENT_DATE + 1)
-                      AND (expires_at IS NULL OR expires_at > NOW())
-                    "#,
-                )
-                .fetch_all(&pool)
-                .await
-                {
-                    for (token_id, side_str) in rows {
-                        let side = match side_str.as_deref() {
-                            Some("DOWN") | Some("NO") => Side::Down,
-                            _ => Side::Up,
-                        };
-                        sports_desired.insert(token_id, side);
-                    }
-                }
-
-                let initial_count = sports_desired.len();
-                if initial_count > 0 {
-                    sports_pm_ws.reconcile_token_sides(&sports_desired).await;
-                    info!(
-                        agent = sports_cfg.agent_id,
-                        token_count = initial_count,
-                        "seeded sports PM WS tokens for L2 data collection"
-                    );
-                }
-
-                // Spawn periodic token refresh for sports WS
-                let refresh_ws = sports_pm_ws.clone();
-                let refresh_pool = pool.clone();
-                let refresh_agent = sports_cfg.agent_id.clone();
-                tokio::spawn(async move {
-                    let secs = env_u64("PM_SPORTS_COLLECTOR_REFRESH_SECS", 300).max(30);
-                    let mut tick = tokio::time::interval(Duration::from_secs(secs));
-                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    loop {
-                        tick.tick().await;
-                        let mut desired: HashMap<String, Side> = HashMap::new();
-                        if let Ok(rows) = sqlx::query_as::<_, (String, Option<String>)>(
-                            r#"
-                            SELECT token_id, metadata->>'side'
-                            FROM collector_token_targets
-                            WHERE domain = 'SPORTS_NBA'
-                              AND target_date BETWEEN (CURRENT_DATE - 1) AND (CURRENT_DATE + 1)
-                              AND (expires_at IS NULL OR expires_at > NOW())
-                            "#,
-                        )
-                        .fetch_all(&refresh_pool)
-                        .await
-                        {
-                            for (token_id, side_str) in rows {
-                                let side = match side_str.as_deref() {
-                                    Some("DOWN") | Some("NO") => Side::Down,
-                                    _ => Side::Up,
-                                };
-                                desired.insert(token_id, side);
-                            }
-                        }
-                        let (_a, _r, _u, total) = refresh_ws.reconcile_token_sides(&desired).await;
-                        trace!(
-                            agent = refresh_agent,
-                            total,
-                            "refreshed sports PM WS token subscriptions"
-                        );
-                    }
-                });
-
-                // Persistence: quotes + orderbook snapshots via unified pipeline.
-                let sports_quote_table_ready = match ensure_clob_quote_ticks_table(&pool).await {
-                    Ok(()) => true,
-                    Err(e) => {
-                        warn!(
-                            agent = sports_cfg.agent_id,
-                            error = %e,
-                            "failed to ensure clob_quote_ticks table; sports quote persistence bridge disabled"
-                        );
-                        false
-                    }
-                };
-                let sports_orderbook_table_ready = match ensure_clob_orderbook_snapshots_table(
-                    &pool,
-                )
-                .await
-                {
-                    Ok(()) => true,
-                    Err(e) => {
-                        warn!(
-                            agent = sports_cfg.agent_id,
-                            error = %e,
-                            "failed to ensure clob_orderbook_snapshots table; sports orderbook persistence bridge disabled"
-                        );
-                        false
-                    }
-                };
-                if sports_quote_table_ready || sports_orderbook_table_ready {
-                    let sports_orderbook_levels =
-                        env_usize("PM_ORDERBOOK_LEVELS", 20).clamp(1, 200);
-                    let sports_orderbook_snapshot_ms =
-                        match std::env::var("PM_ORDERBOOK_SNAPSHOT_MS") {
-                            Ok(raw) => raw.parse::<u64>().unwrap_or(0),
-                            Err(_) => (env_i64("PM_ORDERBOOK_SNAPSHOT_SECS", 60).max(0) as u64)
-                                .saturating_mul(1000),
-                        };
-                    let sports_orderbook_require_hash_change =
-                        env_bool("PM_ORDERBOOK_REQUIRE_HASH_CHANGE", true);
-                    let sports_pipeline_config = crate::platform::PersistenceConfig {
-                        clob_quote_min_interval_secs: CLOB_PERSIST_MIN_INTERVAL_SECS,
-                        clob_orderbook_snapshot_interval_ms: sports_orderbook_snapshot_ms as i64,
-                        clob_orderbook_max_levels: sports_orderbook_levels,
-                        clob_orderbook_require_hash_change: sports_orderbook_require_hash_change,
-                        ..Default::default()
-                    };
-                    let sports_pipeline =
-                        crate::platform::PersistencePipeline::spawn_with_freshness(
-                            pool.clone(),
-                            sports_pipeline_config,
-                            Some(Arc::clone(&freshness)),
-                        );
-
-                    if sports_quote_table_ready {
-                        if let Some(quote_rx) = sports_data_plane.subscribe_quotes() {
-                            sports_pipeline.spawn_bridge(
-                                quote_rx,
-                                format!("{}.sports_quote", sports_cfg.agent_id),
-                                |update| {
-                                    Some(crate::platform::PersistenceEvent::ClobQuote(
-                                        crate::platform::ClobQuoteTick {
-                                            token_id: update.token_id.clone(),
-                                            side: update.side.as_str().to_string(),
-                                            best_bid: update.quote.best_bid,
-                                            best_ask: update.quote.best_ask,
-                                            bid_size: update.quote.bid_size,
-                                            ask_size: update.quote.ask_size,
-                                            domain: Domain::Sports,
-                                            received_at: Utc::now(),
-                                        },
-                                    ))
-                                },
-                            );
-                        } else {
-                            warn!("sports quote bridge unavailable: no quote receiver");
-                        }
-                    }
-
-                    if sports_orderbook_table_ready {
-                        if let Some(book_rx) = sports_data_plane.subscribe_books() {
-                            sports_pipeline.spawn_bridge(
-                                book_rx,
-                                format!("{}.sports_orderbook", sports_cfg.agent_id),
-                                |book_msg| {
-                                    use sha2::{Digest, Sha256};
-                                    let bids_json =
-                                        serde_json::to_value(&book_msg.bids).unwrap_or_default();
-                                    let asks_json =
-                                        serde_json::to_value(&book_msg.asks).unwrap_or_default();
-                                    let mut hasher = Sha256::new();
-                                    hasher.update(bids_json.to_string().as_bytes());
-                                    hasher.update(asks_json.to_string().as_bytes());
-                                    let hash = format!("{:x}", hasher.finalize());
-                                    Some(crate::platform::PersistenceEvent::ClobOrderbook(
-                                        crate::platform::ClobOrderbookSnapshot {
-                                            domain: Domain::Sports,
-                                            token_id: book_msg.asset_id.clone(),
-                                            market: Some(book_msg.market.clone()),
-                                            bids: bids_json,
-                                            asks: asks_json,
-                                            book_timestamp: book_msg
-                                                .timestamp
-                                                .as_deref()
-                                                .and_then(|s| {
-                                                    chrono::DateTime::parse_from_rfc3339(s).ok()
-                                                })
-                                                .map(|dt| dt.with_timezone(&Utc)),
-                                            hash,
-                                            source: "polymarket_ws".into(),
-                                            context: None,
-                                        },
-                                    ))
-                                },
-                            );
-                        } else {
-                            warn!("sports orderbook bridge unavailable: no book receiver");
-                        }
-                    }
-                } else {
-                    warn!(
-                        agent = sports_cfg.agent_id,
-                        "sports persistence tables unavailable; WS persistence bridges disabled"
-                    );
-                }
-
-                info!(
-                    agent = sports_cfg.agent_id,
-                    "sports PM WS L2 data collection started"
-                );
-            }
-
-            let espn = crate::strategy::nba_comeback::espn::EspnClient::new();
-            let stats = crate::strategy::nba_comeback::ComebackStatsProvider::new(
-                pool.clone(),
-                nba_cfg.season.clone(),
-            );
-            let core =
-                crate::strategy::nba_comeback::NbaComebackCore::new(espn, stats, nba_cfg.clone());
-            let mut agent =
-                SportsTradingAgent::new(sports_cfg.clone(), core).with_observation_pool(pool);
-            match PolymarketSportsClient::new() {
-                Ok(pm_sports) => {
-                    agent = agent.with_pm_sports(pm_sports);
-                }
-                Err(e) => {
-                    warn!(
-                        agent = sports_cfg.agent_id,
-                        error = %e,
-                        "failed to initialize PolymarketSportsClient; continuing without PM market observations"
-                    );
-                }
-            }
-            if nba_cfg.grok_enabled {
-                match crate::ai_clients::grok::GrokClient::from_env() {
-                    Ok(grok) if grok.is_configured() => {
-                        info!(
-                            agent = sports_cfg.agent_id,
-                            "grok live search enabled for sports agent"
-                        );
-                        agent = agent.with_grok(grok);
-                    }
-                    Ok(_) => {
-                        warn!(
-                            agent = sports_cfg.agent_id,
-                            "grok_enabled=true but GROK_API_KEY not set; continuing without Grok"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            agent = sports_cfg.agent_id,
-                            error = %e,
-                            "failed to initialize GrokClient; continuing without Grok"
-                        );
-                    }
-                }
-            }
-            let ctx = AgentContext::new(
-                sports_cfg.agent_id.clone(),
-                Domain::Sports,
-                handle.clone(),
-                cmd_rx,
-            );
-
-            let jh = tokio::spawn(async move {
-                if let Err(e) = agent.run(ctx).await {
-                    error!(agent = "sports", error = %e, "agent exited with error");
-                }
-            });
-            agent_handles.push(jh);
-            info!("sports agent spawned");
+            start_sports_strategy_runtime(
+                &mut agent_handles,
+                &mut coordinator,
+                &shutdown_tx,
+                app_config,
+                shared_pool.clone(),
+                Arc::clone(&freshness),
+                pm_client.clone(),
+                &account_id,
+                config.dry_run,
+                config.sports.clone(),
+                nba_cfg,
+            )
+            .await?;
         }
     }
 
     if config.enable_politics {
         if let Some(ref ee_cfg) = app_config.event_edge_agent {
-            let politics_cfg = config.politics.clone();
-            let risk_params = politics_cfg.risk_params.clone();
-            let cmd_rx = coordinator.register_agent(
-                politics_cfg.agent_id.clone(),
-                Domain::Politics,
-                risk_params,
-            );
-
-            let pm_client_ref = pm_client.as_ref().ok_or_else(|| {
-                crate::error::PloyError::Validation(
-                    "politics domain requires a Polymarket client, but none was initialized"
-                        .to_string(),
-                )
-            })?;
-            let core = EventEdgeCore::new(pm_client_ref.clone(), ee_cfg.clone());
-            let agent = PoliticsTradingAgent::new(politics_cfg.clone(), core);
-            let ctx = AgentContext::new(
-                politics_cfg.agent_id.clone(),
-                Domain::Politics,
-                handle.clone(),
-                cmd_rx,
-            );
-
-            let jh = tokio::spawn(async move {
-                if let Err(e) = agent.run(ctx).await {
-                    error!(agent = "politics", error = %e, "agent exited with error");
-                }
-            });
-            agent_handles.push(jh);
-            info!("politics agent spawned");
+            spawn_politics_strategy_runtime(
+                &mut agent_handles,
+                &mut coordinator,
+                &shutdown_tx,
+                pm_client.clone(),
+                app_config,
+                shared_pool.clone(),
+                &account_id,
+                config.dry_run,
+                config.politics.clone(),
+                ee_cfg,
+            )?;
         }
     }
 
@@ -6700,80 +4450,25 @@ pub async fn start_platform(
         config.enable_openclaw || config.openclaw.enabled,
     );
     if openclaw_enabled {
-        // OpenClaw needs a BinanceWebSocket for regime detection.
-        // If crypto is enabled, a binance_ws was already created above and lives in a local scope.
-        // We create a dedicated one for OpenClaw using the configured BTC symbol.
-        let oc_symbols = vec![config.openclaw.btc_symbol.clone()];
-        let oc_binance_ws = Arc::new(BinanceWebSocket::new(oc_symbols));
-        oc_binance_ws.set_freshness(Arc::clone(&freshness));
-
-        // Spawn Binance WS feed for OpenClaw
-        let oc_ws = oc_binance_ws.clone();
-        tokio::spawn(async move {
-            if let Err(e) = oc_ws.run().await {
-                tracing::error!(error = %e, "openclaw binance ws exited");
-            }
-        });
-
-        let oc_risk_params = AgentRiskParams {
-            max_order_value: Decimal::ZERO,
-            max_total_exposure: Decimal::ZERO,
-            max_unhedged_positions: 0,
-            max_daily_loss: Decimal::ZERO,
-            allow_overnight: false,
-            allowed_markets: vec![],
-        };
-        let oc_agent_id = config.openclaw.agent_id.clone();
-        let cmd_rx =
-            coordinator.register_agent(oc_agent_id.clone(), Domain::Custom(0), oc_risk_params);
-
-        let oc_market_data = BinanceDataPlaneHandle::new(oc_binance_ws.clone());
-        let agent = OpenClawAgent::new(config.openclaw.clone(), oc_market_data);
-        let ctx = AgentContext::new(
-            oc_agent_id.clone(),
-            Domain::Custom(0),
-            handle.clone(),
-            cmd_rx,
-        );
-
-        let jh = tokio::spawn(async move {
-            if let Err(e) = agent.run(ctx).await {
-                tracing::error!(agent = "openclaw", error = %e, "openclaw meta-agent exited with error");
-            }
-        });
-        agent_handles.push(jh);
-        info!(
-            agent_id = %oc_agent_id,
-            regime_tick = config.openclaw.regime_tick_secs,
-            "openclaw meta-agent spawned"
+        spawn_openclaw_agent(
+            &mut agent_handles,
+            &mut coordinator,
+            &handle,
+            config.openclaw.clone(),
+            Arc::clone(&freshness),
         );
     }
 
     // ── Auto-claimer background task ──
-    // Automatically claims resolved positions every 5 minutes.
+    // Ensure single account-level daemon (deduped) and avoid spawning a second
+    // direct AutoClaimer loop in platform bootstrap.
     #[cfg(feature = "claimer_daemon")]
-    if let Some(ref claimer_pm_client) = pm_client {
-        let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
-            .or_else(|_| std::env::var("PRIVATE_KEY"))
-            .ok();
-
-        let claimer_config = crate::strategy::impls::ClaimerConfig {
-            check_interval_secs: 60, // every 60s — fast recycle for balance recovery
-            min_claim_size: rust_decimal::Decimal::ONE,
-            auto_claim: private_key.is_some(),
-            private_key,
-        };
-
-        let claimer =
-            crate::strategy::impls::AutoClaimer::new(claimer_pm_client.clone(), claimer_config);
-
-        let jh = tokio::spawn(async move {
-            if let Err(e) = claimer.start().await {
-                tracing::error!(error = %e, "auto-claimer exited with error");
-            }
-        });
-        agent_handles.push(jh);
-        info!("auto-claimer background task spawned (interval=60s)");
+    if !config.dry_run && pm_client.is_some() {
+        if let Err(e) = crate::account::ensure_account_claimer_daemon().await {
+            warn!(error = %e, "failed to ensure account-level auto-claimer daemon");
+        } else {
+            info!("auto-claimer background task ensured (account-level)");
+        }
     }
 
     #[cfg(not(feature = "claimer_daemon"))]
@@ -6832,41 +4527,6 @@ pub async fn start_platform(
     Ok(())
 }
 
-/// Print the current global state (for `ploy platform status`)
-pub fn print_platform_status(state: &GlobalState) {
-    println!("=== Platform Status ===");
-    println!(
-        "Started: {} | Last refresh: {}",
-        state.started_at.format("%H:%M:%S"),
-        state.last_refresh.format("%H:%M:%S")
-    );
-    println!("Risk state: {:?}", state.risk_state);
-    println!(
-        "Portfolio: exposure={} unrealized_pnl={} realized_pnl={}",
-        state.total_exposure(),
-        state.total_unrealized_pnl(),
-        state.total_realized_pnl
-    );
-    println!(
-        "Queue: size={} enqueued={} dequeued={}",
-        state.queue_stats.current_size,
-        state.queue_stats.enqueued_total,
-        state.queue_stats.dequeued_total
-    );
-    println!("\n--- Agents ({}) ---", state.agents.len());
-    for (id, agent) in &state.agents {
-        println!(
-            "  {} [{}] {:?} | pos={} exp={} pnl={} | hb={}",
-            id,
-            agent.name,
-            agent.status,
-            agent.position_count,
-            agent.exposure,
-            agent.daily_pnl,
-            agent.last_heartbeat.format("%H:%M:%S")
-        );
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -6899,6 +4559,34 @@ mod tests {
             },
             timeframe: Timeframe::M15,
             enabled,
+            state: crate::platform::DeploymentState::Enabled,
+            allocator_profile: "default".to_string(),
+            risk_profile: "default".to_string(),
+            priority: 0,
+            cooldown_secs: 60,
+            account_ids: Vec::new(),
+            execution_mode: DeploymentExecutionMode::Any,
+            lifecycle_stage: StrategyLifecycleStage::Live,
+            product_type: StrategyProductType::BinaryOption,
+            last_evaluated_at: None,
+            last_evaluation_score: None,
+        }
+    }
+
+    fn crypto_deployment(strategy: &str, enabled: bool) -> StrategyDeployment {
+        StrategyDeployment {
+            id: format!("deploy.crypto.{strategy}.5m"),
+            strategy: strategy.to_string(),
+            strategy_version: "v1".to_string(),
+            domain: Domain::Crypto,
+            market_selector: MarketSelector::Static {
+                symbol: Some("BTCUSDT".to_string()),
+                series_id: None,
+                market_slug: None,
+            },
+            timeframe: Timeframe::M5,
+            enabled,
+            state: crate::platform::DeploymentState::Enabled,
             allocator_profile: "default".to_string(),
             risk_profile: "default".to_string(),
             priority: 0,
@@ -6936,13 +4624,678 @@ mod tests {
     }
 
     #[test]
+    fn apply_strategy_deployments_does_not_route_unknown_crypto_strategy_to_momentum() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![crypto_deployment("totally_new_crypto_strategy", true)];
+
+        apply_strategy_deployments(&mut cfg, &deployments, "default", false);
+
+        assert!(
+            !cfg.enable_crypto,
+            "unknown crypto strategy should not auto-enable crypto domain"
+        );
+        assert!(
+            !cfg.enable_crypto_momentum,
+            "unknown crypto strategy must not auto-route to momentum"
+        );
+        assert!(!cfg.enable_crypto_pattern_memory);
+        assert!(!cfg.enable_crypto_split_arb);
+    }
+
+    #[test]
+    fn apply_strategy_deployments_does_not_route_retired_lob_ml_runtime() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![crypto_deployment("crypto_lob_ml", true)];
+
+        apply_strategy_deployments(&mut cfg, &deployments, "default", false);
+
+        assert!(
+            !cfg.enable_crypto,
+            "retired lob_ml runtime should no longer auto-enable crypto domain"
+        );
+        assert!(!cfg.enable_crypto_momentum);
+        assert!(!cfg.enable_crypto_pattern_memory);
+        assert!(!cfg.enable_crypto_split_arb);
+    }
+
+    #[cfg(feature = "rl")]
+    #[test]
+    fn apply_strategy_deployments_does_not_route_retired_rl_policy_runtime() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![crypto_deployment("crypto_rl_policy", true)];
+
+        apply_strategy_deployments(&mut cfg, &deployments, "default", false);
+
+        assert!(
+            !cfg.enable_crypto,
+            "retired rl_policy runtime should no longer auto-enable crypto domain"
+        );
+        assert!(!cfg.enable_crypto_momentum);
+        assert!(!cfg.enable_crypto_pattern_memory);
+        assert!(!cfg.enable_crypto_split_arb);
+    }
+
+    #[test]
+    fn apply_strategy_deployments_maps_gamma_scalping_alias_to_split_arb() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![crypto_deployment("gamma_scalping", true)];
+
+        apply_strategy_deployments(&mut cfg, &deployments, "default", false);
+
+        assert!(cfg.enable_crypto);
+        assert!(cfg.enable_crypto_split_arb);
+        assert!(!cfg.enable_crypto_momentum);
+    }
+
+    #[test]
+    fn apply_strategy_deployments_enables_crypto_momentum_domain() {
+        let mut cfg = PlatformBootstrapConfig::default();
+        let deployments = vec![crypto_deployment("momentum", true)];
+
+        apply_strategy_deployments(&mut cfg, &deployments, "default", false);
+
+        assert!(cfg.enable_crypto);
+        assert!(cfg.enable_crypto_momentum);
+        assert!(!cfg.enable_crypto_split_arb);
+    }
+
+    #[test]
+    fn build_momentum_runtime_config_overrides_template_symbols() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let rendered = build_momentum_runtime_config(&symbols, &CryptoTradingConfig::default());
+
+        assert!(rendered.contains("symbols = [\"BTCUSDT\", \"ETHUSDT\"]"));
+        assert!(
+            !rendered.contains("symbols = [\"BTCUSDT\", \"ETHUSDT\", \"SOLUSDT\", \"XRPUSDT\"]"),
+            "managed momentum runtime should replace template symbols with deployment-scoped symbols"
+        );
+        assert!(rendered.contains("name = \"momentum\""));
+    }
+
+    #[test]
+    fn build_momentum_runtime_config_projects_legacy_crypto_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let rendered = build_momentum_runtime_config(&symbols, &CryptoTradingConfig::default());
+
+        assert!(rendered.contains("min_move = 0.1"));
+        assert!(rendered.contains("min_edge = 2.0"));
+        assert!(rendered.contains("min_time_remaining = 60"));
+        assert!(rendered.contains("max_time_remaining = 300"));
+        assert!(rendered.contains("cooldown_secs = 0"));
+        assert!(rendered.contains("shares = 100"));
+        assert!(rendered.contains("max_positions = 2"));
+        assert!(rendered.contains("max_window_exposure = 100.0"));
+        assert!(rendered.contains("exit_edge_floor_pct = 2.0"));
+        assert!(rendered.contains("exit_price_band_pct = 5.0"));
+        assert!(rendered.contains("require_mtf_agreement = true"));
+        assert!(rendered.contains("directional_mode = true"));
+        assert!(rendered.contains("directional_entry_threshold = 2.0"));
+        assert!(
+            !rendered.contains("min_time_remaining = 300.0"),
+            "legacy crypto timing should override template defaults"
+        );
+    }
+
+    #[test]
+    fn build_momentum_managed_runtime_spec_projects_canonical_launch() {
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let crypto_cfg = CryptoTradingConfig::default();
+
+        let spec = build_momentum_managed_runtime_spec(&symbols, &crypto_cfg);
+
+        assert_eq!(spec.strategy_label, "composable_crypto");
+        assert_eq!(spec.agent_id, crypto_cfg.agent_id);
+        assert_eq!(spec.domain, Domain::Crypto);
+        assert!(spec
+            .strategy_config_toml
+            .contains("name = \"composable_crypto\""));
+        assert!(spec.strategy_config_toml.contains("[composable_crypto]"));
+    }
+
+    #[test]
+    fn project_momentum_plugin_runtime_spec_projects_canonical_launch() {
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let crypto_cfg = CryptoTradingConfig::default();
+        let definition = crate::plugins::PluginDefinition {
+            plugin_id: "crypto.momentum.v1".to_string(),
+            kind: crate::plugins::PluginKind::ComposableCrypto,
+            version: "v1".to_string(),
+            domain: Domain::Crypto,
+        };
+        let spec =
+            crate::plugins::PluginSpec::ComposableCrypto(crate::plugins::ComposableCryptoSpec {
+                signal_blocks: vec!["momentum".to_string()],
+            });
+        let deployment = crate::plugins::PluginDeployment {
+            deployment_id: "deploy.crypto.momentum.default".to_string(),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: "default".to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        };
+
+        let projected = crate::plugins::projector::project_momentum_runtime_spec(
+            &definition,
+            &spec,
+            &deployment,
+            &symbols,
+            &crypto_cfg,
+        )
+        .expect("project momentum runtime spec");
+
+        assert_eq!(projected.strategy_label, "composable_crypto");
+        assert_eq!(projected.agent_id, crypto_cfg.agent_id);
+        assert_eq!(projected.domain, Domain::Crypto);
+        assert!(projected
+            .strategy_config_toml
+            .contains("name = \"composable_crypto\""));
+        assert!(projected
+            .strategy_config_toml
+            .contains("[composable_crypto]"));
+    }
+
+    #[test]
+    fn build_momentum_managed_runtime_spec_matches_plugin_projection() {
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let crypto_cfg = CryptoTradingConfig::default();
+        let definition = crate::plugins::PluginDefinition {
+            plugin_id: "crypto.momentum.v1".to_string(),
+            kind: crate::plugins::PluginKind::ComposableCrypto,
+            version: "v1".to_string(),
+            domain: Domain::Crypto,
+        };
+        let spec =
+            crate::plugins::PluginSpec::ComposableCrypto(crate::plugins::ComposableCryptoSpec {
+                signal_blocks: vec!["momentum".to_string()],
+            });
+        let deployment = crate::plugins::PluginDeployment {
+            deployment_id: "deploy.crypto.momentum.default".to_string(),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: "default".to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        };
+
+        let managed = build_momentum_managed_runtime_spec(&symbols, &crypto_cfg);
+        let projected = crate::plugins::projector::project_momentum_runtime_spec(
+            &definition,
+            &spec,
+            &deployment,
+            &symbols,
+            &crypto_cfg,
+        )
+        .expect("project momentum runtime spec");
+
+        assert_eq!(managed.strategy_label, projected.strategy_label);
+        assert_eq!(managed.agent_id, projected.agent_id);
+        assert_eq!(managed.domain, projected.domain);
+        assert_eq!(managed.strategy_config_toml, projected.strategy_config_toml);
+    }
+
+    #[test]
+    fn project_momentum_plugin_runtime_spec_projects_composable_crypto_launch() {
+        let symbols = vec!["BTCUSDT".to_string()];
+        let crypto_cfg = CryptoTradingConfig::default();
+        let definition = crate::plugins::PluginDefinition {
+            plugin_id: "crypto.momentum.v1".to_string(),
+            kind: crate::plugins::PluginKind::ComposableCrypto,
+            version: "v1".to_string(),
+            domain: Domain::Crypto,
+        };
+        let spec =
+            crate::plugins::PluginSpec::ComposableCrypto(crate::plugins::ComposableCryptoSpec {
+                signal_blocks: vec!["momentum".to_string()],
+            });
+        let deployment = crate::plugins::PluginDeployment {
+            deployment_id: "deploy.crypto.momentum.default".to_string(),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: "default".to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        };
+
+        let projected = crate::plugins::projector::project_momentum_runtime_spec(
+            &definition,
+            &spec,
+            &deployment,
+            &symbols,
+            &crypto_cfg,
+        )
+        .expect("project momentum runtime spec");
+
+        assert_eq!(projected.strategy_label, "composable_crypto");
+        assert!(projected
+            .strategy_config_toml
+            .contains("name = \"composable_crypto\""));
+        assert!(projected
+            .strategy_config_toml
+            .contains("[composable_crypto]"));
+        assert!(projected
+            .strategy_config_toml
+            .contains("signal_blocks = [\"momentum\"]"));
+    }
+
+    #[test]
+    fn project_event_edge_plugin_runtime_spec_stamps_plugin_identity() {
+        let registry = crate::plugins::PluginRegistry::builtin_runtime_registry()
+            .expect("builtin plugin registry");
+        let definition = registry
+            .plugin("politics.event_edge.v1")
+            .expect("event edge plugin definition");
+        let spec = crate::plugins::PluginSpec::RegisteredStrategy(
+            crate::plugins::RegisteredStrategySpec::event_edge(),
+        );
+        let deployment = crate::plugins::PluginDeployment {
+            deployment_id: "deploy.politics.event_edge.default".to_string(),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: "default".to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        };
+        let politics_cfg = PoliticsTradingConfig::default();
+        let cfg = crate::config::EventEdgeAgentConfig {
+            enabled: true,
+            event_ids: vec!["evt-1".to_string()],
+            titles: vec!["Best AI model".to_string()],
+            interval_secs: 180,
+            min_edge: Decimal::new(8, 2),
+            max_entry: Decimal::new(70, 2),
+            shares: 25,
+            trade: true,
+            cooldown_secs: 120,
+            max_daily_spend_usd: Decimal::from(55),
+        };
+
+        let projected = crate::plugins::projector::project_event_edge_runtime_spec(
+            definition,
+            &spec,
+            &deployment,
+            "https://clob.polymarket.com",
+            &politics_cfg,
+            &cfg,
+        )
+        .expect("project event_edge runtime spec");
+
+        assert!(projected
+            .strategy_config_toml
+            .contains("plugin_id = \"politics.event_edge.v1\""));
+    }
+
+    #[test]
+    fn project_nba_comeback_plugin_runtime_spec_stamps_plugin_identity() {
+        let registry = crate::plugins::PluginRegistry::builtin_runtime_registry()
+            .expect("builtin plugin registry");
+        let definition = registry
+            .plugin("sports.nba_comeback.v1")
+            .expect("nba plugin definition");
+        let spec = crate::plugins::PluginSpec::RegisteredStrategy(
+            crate::plugins::RegisteredStrategySpec::nba_comeback(),
+        );
+        let deployment = crate::plugins::PluginDeployment {
+            deployment_id: "deploy.sports.nba_comeback.default".to_string(),
+            plugin_id: definition.plugin_id.clone(),
+            account_id: "default".to_string(),
+            state: crate::plugins::DeploymentState::Enabled,
+        };
+        let sports_cfg = SportsTradingConfig::default();
+        let cfg = sample_nba_comeback_config(false);
+
+        let projected = crate::plugins::projector::project_nba_comeback_runtime_spec(
+            definition,
+            &spec,
+            &deployment,
+            "postgres://db.example.com/ploy",
+            &sports_cfg,
+            &cfg,
+        )
+        .expect("project nba runtime spec");
+
+        assert!(projected
+            .strategy_config_toml
+            .contains("plugin_id = \"sports.nba_comeback.v1\""));
+    }
+
+    #[test]
+    fn project_pattern_memory_plugin_runtime_spec_projects_canonical_launch() {
+        let coins = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+
+        let projected = project_pattern_memory_plugin_runtime_spec(&coins, "default")
+            .expect("project pattern_memory runtime spec");
+
+        assert_eq!(projected.strategy_label, "pattern_memory");
+        assert_eq!(projected.agent_id, "pattern_memory");
+        assert_eq!(projected.domain, Domain::Crypto);
+        assert!(projected
+            .strategy_config_toml
+            .contains("name = \"pattern_memory\""));
+    }
+
+    #[test]
+    fn project_split_arb_plugin_runtime_spec_projects_canonical_launch() {
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let series_ids = vec!["10192".to_string(), "10684".to_string()];
+
+        let projected =
+            project_split_arb_plugin_runtime_spec(&symbols, &series_ids, "default")
+                .expect("project split_arb runtime spec");
+
+        assert_eq!(projected.strategy_label, "split_arb");
+        assert_eq!(projected.agent_id, "split_arb");
+        assert_eq!(projected.domain, Domain::Crypto);
+        assert!(projected
+            .strategy_config_toml
+            .contains("symbols = [\"BTCUSDT\", \"ETHUSDT\"]"));
+    }
+
+    #[test]
+    fn build_event_edge_runtime_config_projects_targets_and_limits() {
+        let cfg = crate::config::EventEdgeAgentConfig {
+            enabled: true,
+            event_ids: vec!["evt-1".to_string()],
+            titles: vec!["Best AI model".to_string()],
+            interval_secs: 180,
+            min_edge: Decimal::new(8, 2),
+            max_entry: Decimal::new(70, 2),
+            shares: 25,
+            trade: true,
+            cooldown_secs: 120,
+            max_daily_spend_usd: Decimal::from(55),
+        };
+
+        let rendered = build_event_edge_runtime_config("https://clob.polymarket.com", &cfg);
+
+        assert!(rendered.contains("name = \"event_edge\""));
+        assert!(rendered.contains("event_ids = [\"evt-1\"]"));
+        assert!(rendered.contains("titles = [\"Best AI model\"]"));
+        assert!(rendered.contains("poll_interval_secs = 180"));
+        assert!(rendered.contains("cooldown_secs = 120"));
+        assert!(rendered.contains("max_daily_spend_usd = 55.0"));
+        assert!(rendered.contains("rest_url = \"https://clob.polymarket.com\""));
+    }
+
+    #[test]
+    fn build_event_edge_managed_runtime_spec_projects_canonical_launch() {
+        let politics_cfg = PoliticsTradingConfig::default();
+        let cfg = crate::config::EventEdgeAgentConfig {
+            enabled: true,
+            event_ids: vec!["evt-1".to_string()],
+            titles: vec!["Best AI model".to_string()],
+            interval_secs: 180,
+            min_edge: Decimal::new(8, 2),
+            max_entry: Decimal::new(70, 2),
+            shares: 25,
+            trade: true,
+            cooldown_secs: 120,
+            max_daily_spend_usd: Decimal::from(55),
+        };
+
+        let spec = build_event_edge_managed_runtime_spec(
+            "https://clob.polymarket.com",
+            &politics_cfg,
+            &cfg,
+        );
+
+        assert_eq!(spec.strategy_label, "event_edge");
+        assert_eq!(spec.agent_id, politics_cfg.agent_id);
+        assert_eq!(spec.domain, Domain::Politics);
+        assert!(spec.strategy_config_toml.contains("name = \"event_edge\""));
+        assert!(spec
+            .strategy_config_toml
+            .contains("rest_url = \"https://clob.polymarket.com\""));
+    }
+
+    #[test]
+    fn build_nba_comeback_runtime_config_projects_strategy_fields() {
+        let cfg = crate::config::NbaComebackConfig {
+            enabled: true,
+            min_edge: Decimal::new(7, 2),
+            max_entry_price: Decimal::new(68, 2),
+            shares: 25,
+            cooldown_secs: 180,
+            max_daily_spend_usd: Decimal::from(55),
+            min_deficit: 4,
+            max_deficit: 12,
+            target_quarter: 3,
+            espn_poll_interval_secs: 45,
+            min_comeback_rate: 0.22,
+            season: "2026-27".to_string(),
+            grok_enabled: true,
+            grok_interval_secs: 600,
+            grok_min_edge: Decimal::new(9, 2),
+            grok_min_confidence: 0.72,
+            grok_decision_cooldown_secs: 90,
+            grok_fallback_enabled: false,
+            min_reward_risk_ratio: 5.0,
+            min_expected_value: 0.08,
+            kelly_fraction_cap: 0.20,
+            performance_daily_loss_limit_usd: Decimal::from(25),
+            performance_min_settled_trades: 12,
+            performance_min_win_rate: 0.48,
+            performance_low_winrate_multiplier: 0.55,
+            performance_loss_streak_threshold: 4,
+            performance_loss_streak_multiplier: 0.40,
+            scaling_enabled: true,
+            scaling_max_adds: 2,
+            scaling_min_price_drop_pct: 7.5,
+            scaling_max_game_exposure_usd: Decimal::from(42),
+            scaling_min_comeback_retention: 0.75,
+            scaling_min_time_remaining_mins: 9.5,
+            early_exit_enabled: true,
+            early_exit_take_profit_pct: 18.0,
+            early_exit_stop_loss_pct: 16.0,
+        };
+
+        let rendered = build_nba_comeback_runtime_config("postgres://db.example.com/ploy", &cfg);
+
+        assert!(rendered.contains("name = \"nba_comeback\""));
+        assert!(rendered.contains("poll_interval_secs = 45"));
+        assert!(rendered.contains("min_edge = 0.07"));
+        assert!(rendered.contains("max_entry_price = 0.68"));
+        assert!(rendered.contains("cooldown_secs = 180"));
+        assert!(rendered.contains("max_daily_spend_usd = 55.0"));
+        assert!(rendered.contains("min_deficit = 4"));
+        assert!(rendered.contains("max_deficit = 12"));
+        assert!(rendered.contains("season = \"2026-27\""));
+        assert!(rendered.contains("url = \"postgres://db.example.com/ploy\""));
+        assert!(rendered.contains("enabled = true"));
+        assert!(rendered.contains("interval_secs = 600"));
+        assert!(rendered.contains("decision_cooldown_secs = 90"));
+        assert!(rendered.contains("max_adds = 2"));
+        assert!(rendered.contains("take_profit_pct = 18.0"));
+        assert!(rendered.contains("stop_loss_pct = 16.0"));
+    }
+
+    fn sample_nba_comeback_config(grok_enabled: bool) -> crate::config::NbaComebackConfig {
+        crate::config::NbaComebackConfig {
+            enabled: true,
+            min_edge: Decimal::new(7, 2),
+            max_entry_price: Decimal::new(68, 2),
+            shares: 25,
+            cooldown_secs: 180,
+            max_daily_spend_usd: Decimal::from(55),
+            min_deficit: 4,
+            max_deficit: 12,
+            target_quarter: 3,
+            espn_poll_interval_secs: 45,
+            min_comeback_rate: 0.22,
+            season: "2026-27".to_string(),
+            grok_enabled,
+            grok_interval_secs: 600,
+            grok_min_edge: Decimal::new(9, 2),
+            grok_min_confidence: 0.72,
+            grok_decision_cooldown_secs: 90,
+            grok_fallback_enabled: false,
+            min_reward_risk_ratio: 5.0,
+            min_expected_value: 0.08,
+            kelly_fraction_cap: 0.20,
+            performance_daily_loss_limit_usd: Decimal::from(25),
+            performance_min_settled_trades: 12,
+            performance_min_win_rate: 0.48,
+            performance_low_winrate_multiplier: 0.55,
+            performance_loss_streak_threshold: 4,
+            performance_loss_streak_multiplier: 0.40,
+            scaling_enabled: true,
+            scaling_max_adds: 2,
+            scaling_min_price_drop_pct: 7.5,
+            scaling_max_game_exposure_usd: Decimal::from(42),
+            scaling_min_comeback_retention: 0.75,
+            scaling_min_time_remaining_mins: 9.5,
+            early_exit_enabled: true,
+            early_exit_take_profit_pct: 18.0,
+            early_exit_stop_loss_pct: 16.0,
+        }
+    }
+
+    #[test]
+    fn build_nba_comeback_managed_runtime_spec_projects_canonical_launch() {
+        let sports_cfg = SportsTradingConfig::default();
+        let nba_cfg = sample_nba_comeback_config(false);
+
+        let spec = build_nba_comeback_managed_runtime_spec(
+            "postgres://db.example.com/ploy",
+            &sports_cfg,
+            &nba_cfg,
+        );
+
+        assert_eq!(spec.strategy_label, "nba_comeback");
+        assert_eq!(spec.agent_id, sports_cfg.agent_id);
+        assert_eq!(spec.domain, Domain::Sports);
+        assert!(spec
+            .strategy_config_toml
+            .contains("name = \"nba_comeback\""));
+        assert!(spec
+            .strategy_config_toml
+            .contains("poll_interval_secs = 45"));
+        assert!(spec
+            .strategy_config_toml
+            .contains("url = \"postgres://db.example.com/ploy\""));
+    }
+
+    #[test]
+    fn build_nba_comeback_managed_runtime_spec_projects_grok_enabled_configs() {
+        let sports_cfg = SportsTradingConfig::default();
+        let nba_cfg = sample_nba_comeback_config(true);
+
+        let spec = build_nba_comeback_managed_runtime_spec(
+            "postgres://db.example.com/ploy",
+            &sports_cfg,
+            &nba_cfg,
+        );
+
+        assert_eq!(spec.strategy_label, "nba_comeback");
+        assert!(spec.strategy_config_toml.contains("[grok]"));
+        assert!(spec.strategy_config_toml.contains("enabled = true"));
+    }
+
+    #[test]
+    fn neutral_config_types_can_drive_runtime_projection() {
+        let symbols = vec!["BTCUSDT".to_string()];
+        let crypto_cfg = crate::config::CryptoTradingConfig::default();
+        let politics_cfg = crate::config::PoliticsTradingConfig::default();
+        let sports_cfg = crate::config::SportsTradingConfig::default();
+
+        let momentum = build_momentum_runtime_config(&symbols, &crypto_cfg);
+        assert!(momentum.contains("[strategy]"));
+
+        let nba_cfg = sample_nba_comeback_config(false);
+        let event_edge = build_event_edge_managed_runtime_spec(
+            "https://clob.polymarket.com",
+            &politics_cfg,
+            &crate::config::EventEdgeAgentConfig::default(),
+        );
+        assert_eq!(event_edge.strategy_label, "event_edge");
+
+        let nba = build_nba_comeback_managed_runtime_spec(
+            "postgres://db.example.com/ploy",
+            &sports_cfg,
+            &nba_cfg,
+        );
+        assert_eq!(nba.strategy_label, "nba_comeback");
+    }
+
+    #[test]
     fn build_split_arb_runtime_config_renders_symbols_and_series_ids() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
         let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
         let series_ids = vec!["10192".to_string(), "10684".to_string()];
         let rendered = build_split_arb_runtime_config(&symbols, &series_ids);
 
         assert!(rendered.contains("symbols = [\"BTCUSDT\", \"ETHUSDT\"]"));
         assert!(rendered.contains("series_ids = [\"10192\", \"10684\"]"));
+        assert!(rendered.contains("shares_per_trade = 20"));
+        assert!(
+            !rendered.contains("fixed_amount_usd"),
+            "managed staggered_arb runtime should honor share sizing defaults"
+        );
+    }
+
+    #[test]
+    fn build_split_arb_runtime_config_overrides_template_symbols_and_series_ids() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let series_ids = vec!["10192".to_string(), "10684".to_string()];
+        let rendered = build_split_arb_runtime_config(&symbols, &series_ids);
+
+        assert!(rendered.contains("symbols = [\"BTCUSDT\", \"ETHUSDT\"]"));
+        assert!(
+            !rendered.contains("symbols = [\"BTCUSDT\", \"ETHUSDT\", \"SOLUSDT\"]"),
+            "managed runtime should replace template symbols with deployment-scoped symbols"
+        );
+        assert!(rendered.contains("series_ids = [\"10192\", \"10684\"]"));
+    }
+
+    #[test]
+    fn build_split_arb_runtime_config_overrides_external_symbols_and_series_ids() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let env_key = "PLOY_STAGGERED_ARB_CONFIG";
+        let prev = std::env::var(env_key).ok();
+        let temp_path = std::env::temp_dir().join(format!(
+            "ploy-stag-arb-{}.toml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(
+            &temp_path,
+            r#"[strategy]
+name = "staggered_arb"
+
+[entry]
+symbols = ["SOLUSDT"]
+"#,
+        )
+        .expect("write temp staggered arb config");
+        std::env::set_var(env_key, &temp_path);
+
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let series_ids = vec!["10192".to_string(), "10684".to_string()];
+        let rendered = build_split_arb_runtime_config(&symbols, &series_ids);
+
+        match prev {
+            Some(v) => std::env::set_var(env_key, v),
+            None => std::env::remove_var(env_key),
+        }
+        let _ = std::fs::remove_file(&temp_path);
+
+        assert!(rendered.contains("[entry]\nsymbols = [\"BTCUSDT\", \"ETHUSDT\"]"));
+        assert!(rendered.contains("[markets]\nseries_ids = [\"10192\", \"10684\"]"));
+    }
+
+    #[test]
+    fn build_split_arb_managed_runtime_spec_projects_canonical_launch() {
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let series_ids = vec!["10192".to_string(), "10684".to_string()];
+
+        let spec = build_split_arb_managed_runtime_spec(&symbols, &series_ids);
+
+        assert_eq!(spec.strategy_label, "split_arb");
+        assert_eq!(spec.agent_id, "split_arb");
+        assert_eq!(spec.domain, Domain::Crypto);
+        assert!(spec.strategy_config_toml.contains("enabled = true"));
+        assert!(spec
+            .strategy_config_toml
+            .contains("symbols = [\"BTCUSDT\", \"ETHUSDT\"]"));
     }
 
     #[tokio::test]
@@ -7006,166 +5359,6 @@ mod tests {
     }
 
     #[test]
-    fn from_app_config_reads_crypto_lob_ml_model_env_vars() {
-        let _guard = ENV_LOCK.lock().unwrap();
-
-        let model_type_key = "PLOY_CRYPTO_LOB_ML__MODEL_TYPE";
-        let model_path_key = "PLOY_CRYPTO_LOB_ML__MODEL_PATH";
-        let model_version_key = "PLOY_CRYPTO_LOB_ML__MODEL_VERSION";
-        let blend_weight_key = "PLOY_CRYPTO_LOB_ML__MODEL_BLEND_WEIGHT";
-        let min_direction_strength_key = "PLOY_CRYPTO_LOB_ML__MIN_DIRECTION_STRENGTH";
-        let ev_exit_buffer_key = "PLOY_CRYPTO_LOB_ML__EV_EXIT_BUFFER";
-        let ev_exit_vol_scale_key = "PLOY_CRYPTO_LOB_ML__EV_EXIT_VOL_SCALE";
-        let taker_fee_key = "PLOY_CRYPTO_LOB_ML__TAKER_FEE_RATE";
-        let slippage_key = "PLOY_CRYPTO_LOB_ML__ENTRY_SLIPPAGE_BPS";
-        let use_threshold_key = "PLOY_CRYPTO_LOB_ML__USE_PRICE_TO_BEAT";
-        let require_threshold_key = "PLOY_CRYPTO_LOB_ML__REQUIRE_PRICE_TO_BEAT";
-        let exit_mode_key = "PLOY_CRYPTO_LOB_ML__EXIT_MODE";
-        let entry_side_policy_key = "PLOY_CRYPTO_LOB_ML__ENTRY_SIDE_POLICY";
-        let entry_late_window_5m_key = "PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_5M";
-        let entry_late_window_15m_key = "PLOY_CRYPTO_LOB_ML__ENTRY_LATE_WINDOW_SECS_15M";
-
-        let prev_model_type = std::env::var(model_type_key).ok();
-        let prev_model_path = std::env::var(model_path_key).ok();
-        let prev_model_version = std::env::var(model_version_key).ok();
-        let prev_blend_weight = std::env::var(blend_weight_key).ok();
-        let prev_min_direction_strength = std::env::var(min_direction_strength_key).ok();
-        let prev_ev_exit_buffer = std::env::var(ev_exit_buffer_key).ok();
-        let prev_ev_exit_vol_scale = std::env::var(ev_exit_vol_scale_key).ok();
-        let prev_taker_fee = std::env::var(taker_fee_key).ok();
-        let prev_slippage = std::env::var(slippage_key).ok();
-        let prev_use_threshold = std::env::var(use_threshold_key).ok();
-        let prev_require_threshold = std::env::var(require_threshold_key).ok();
-        let prev_exit_mode = std::env::var(exit_mode_key).ok();
-        let prev_entry_side_policy = std::env::var(entry_side_policy_key).ok();
-        let prev_entry_late_window_5m = std::env::var(entry_late_window_5m_key).ok();
-        let prev_entry_late_window_15m = std::env::var(entry_late_window_15m_key).ok();
-
-        set_env(model_type_key, Some("onnx"));
-        set_env(model_path_key, Some("/tmp/models/lob_tcn_v2.onnx"));
-        set_env(model_version_key, Some("lob_tcn_v2"));
-        set_env(blend_weight_key, Some("0.75"));
-        set_env(min_direction_strength_key, Some("0.06"));
-        set_env(ev_exit_buffer_key, Some("0.01"));
-        set_env(ev_exit_vol_scale_key, Some("0.03"));
-        set_env(taker_fee_key, Some("0.03"));
-        set_env(slippage_key, Some("12"));
-        set_env(use_threshold_key, Some("true"));
-        set_env(require_threshold_key, Some("false"));
-        set_env(exit_mode_key, Some("ev_exit"));
-        set_env(entry_side_policy_key, Some("lagging_only"));
-        set_env(entry_late_window_5m_key, Some("170"));
-        set_env(entry_late_window_15m_key, Some("180"));
-
-        let app = AppConfig::default_config(true, "btc-up-or-down-test");
-        let cfg = PlatformBootstrapConfig::from_app_config(&app);
-
-        assert_eq!(cfg.crypto_lob_ml.model_type, "onnx");
-        assert_eq!(
-            cfg.crypto_lob_ml.model_path.as_deref(),
-            Some("/tmp/models/lob_tcn_v2.onnx")
-        );
-        assert_eq!(
-            cfg.crypto_lob_ml.model_version.as_deref(),
-            Some("lob_tcn_v2")
-        );
-        assert_eq!(
-            cfg.crypto_lob_ml.model_blend_weight,
-            rust_decimal::Decimal::new(75, 2)
-        );
-        assert_eq!(
-            cfg.crypto_lob_ml.min_direction_strength,
-            rust_decimal::Decimal::new(6, 2)
-        );
-        assert_eq!(
-            cfg.crypto_lob_ml.ev_exit_buffer,
-            rust_decimal::Decimal::new(1, 2)
-        );
-        assert_eq!(
-            cfg.crypto_lob_ml.ev_exit_vol_scale,
-            rust_decimal::Decimal::new(3, 2)
-        );
-        assert_eq!(
-            cfg.crypto_lob_ml.taker_fee_rate,
-            rust_decimal::Decimal::new(3, 2)
-        );
-        assert_eq!(
-            cfg.crypto_lob_ml.entry_slippage_bps,
-            rust_decimal::Decimal::new(12, 0)
-        );
-        assert!(cfg.crypto_lob_ml.use_price_to_beat);
-        assert!(!cfg.crypto_lob_ml.require_price_to_beat);
-        assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
-        assert_eq!(
-            cfg.crypto_lob_ml.entry_side_policy,
-            CryptoLobMlEntrySidePolicy::LaggingOnly
-        );
-        assert_eq!(cfg.crypto_lob_ml.entry_late_window_secs_5m, 170);
-        assert_eq!(cfg.crypto_lob_ml.entry_late_window_secs_15m, 180);
-
-        match prev_model_type.as_deref() {
-            Some(v) => set_env(model_type_key, Some(v)),
-            None => set_env(model_type_key, None),
-        }
-        match prev_model_path.as_deref() {
-            Some(v) => set_env(model_path_key, Some(v)),
-            None => set_env(model_path_key, None),
-        }
-        match prev_model_version.as_deref() {
-            Some(v) => set_env(model_version_key, Some(v)),
-            None => set_env(model_version_key, None),
-        }
-        match prev_blend_weight.as_deref() {
-            Some(v) => set_env(blend_weight_key, Some(v)),
-            None => set_env(blend_weight_key, None),
-        }
-        match prev_min_direction_strength.as_deref() {
-            Some(v) => set_env(min_direction_strength_key, Some(v)),
-            None => set_env(min_direction_strength_key, None),
-        }
-        match prev_ev_exit_buffer.as_deref() {
-            Some(v) => set_env(ev_exit_buffer_key, Some(v)),
-            None => set_env(ev_exit_buffer_key, None),
-        }
-        match prev_ev_exit_vol_scale.as_deref() {
-            Some(v) => set_env(ev_exit_vol_scale_key, Some(v)),
-            None => set_env(ev_exit_vol_scale_key, None),
-        }
-        match prev_taker_fee.as_deref() {
-            Some(v) => set_env(taker_fee_key, Some(v)),
-            None => set_env(taker_fee_key, None),
-        }
-        match prev_slippage.as_deref() {
-            Some(v) => set_env(slippage_key, Some(v)),
-            None => set_env(slippage_key, None),
-        }
-        match prev_use_threshold.as_deref() {
-            Some(v) => set_env(use_threshold_key, Some(v)),
-            None => set_env(use_threshold_key, None),
-        }
-        match prev_require_threshold.as_deref() {
-            Some(v) => set_env(require_threshold_key, Some(v)),
-            None => set_env(require_threshold_key, None),
-        }
-        match prev_exit_mode.as_deref() {
-            Some(v) => set_env(exit_mode_key, Some(v)),
-            None => set_env(exit_mode_key, None),
-        }
-        match prev_entry_side_policy.as_deref() {
-            Some(v) => set_env(entry_side_policy_key, Some(v)),
-            None => set_env(entry_side_policy_key, None),
-        }
-        match prev_entry_late_window_5m.as_deref() {
-            Some(v) => set_env(entry_late_window_5m_key, Some(v)),
-            None => set_env(entry_late_window_5m_key, None),
-        }
-        match prev_entry_late_window_15m.as_deref() {
-            Some(v) => set_env(entry_late_window_15m_key, Some(v)),
-            None => set_env(entry_late_window_15m_key, None),
-        }
-    }
-
-    #[test]
     fn from_app_config_reads_crypto_agent_signal_gate_env_vars() {
         let _guard = ENV_LOCK.lock().unwrap();
 
@@ -7208,31 +5401,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn from_app_config_ignores_legacy_enable_price_exits_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-
-        let exit_mode_key = "PLOY_CRYPTO_LOB_ML__EXIT_MODE";
-        let legacy_price_exits_key = "PLOY_CRYPTO_LOB_ML__ENABLE_PRICE_EXITS";
-
-        let prev_exit_mode = std::env::var(exit_mode_key).ok();
-        let prev_legacy_price_exits = std::env::var(legacy_price_exits_key).ok();
-
-        set_env(exit_mode_key, None);
-        set_env(legacy_price_exits_key, Some("true"));
-
-        let app = AppConfig::default_config(true, "btc-up-or-down-test");
-        let cfg = PlatformBootstrapConfig::from_app_config(&app);
-
-        assert_eq!(cfg.crypto_lob_ml.exit_mode, CryptoLobMlExitMode::EvExit);
-
-        match prev_exit_mode.as_deref() {
-            Some(v) => set_env(exit_mode_key, Some(v)),
-            None => set_env(exit_mode_key, None),
-        }
-        match prev_legacy_price_exits.as_deref() {
-            Some(v) => set_env(legacy_price_exits_key, Some(v)),
-            None => set_env(legacy_price_exits_key, None),
-        }
-    }
 }

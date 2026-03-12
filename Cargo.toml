@@ -65,9 +65,6 @@ polymarket-client-sdk = { version = "0.4", features = ["gamma", "data", "clob"] 
 builder-relayer-client-rust = { version = "=0.2.2", optional = true }
 builder_signing_sdk_rs = { version = "0.1.0", optional = true }
 
-# Agent framework (Claude Code CLI) with MCP tools
-claude-agent-sdk-rs = { version = "0.6.3", optional = true }
-
 # Alloy for signing (used by polymarket-client-sdk)
 alloy = { version = "1", default-features = false, features = ["signer-local", "provider-http", "contract", "sol-types", "rpc-types", "reqwest"] }
 
@@ -137,9 +134,7 @@ rl = ["burn", "burn-ndarray", "bincode"]
 analysis = ["analysis_parquet"]
 analysis_parquet = ["duckdb"]
 onnx = ["tract-onnx"]
-tcn_db = [] # Legacy db-backed TCN path (currently unused)
 builder_relayer_sdk = ["dep:builder-relayer-client-rust", "dep:builder_signing_sdk_rs"]
-event_edge_claude_sdk = ["dep:claude-agent-sdk-rs"]
 pm_bridge = ["polymarket-client-sdk/bridge"]
 pm_ctf = ["polymarket-client-sdk/ctf"]
 

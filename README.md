@@ -6,7 +6,7 @@ A high-performance Polymarket trading bot focused on crypto and sports predictio
 
 - **Two runtime domains** -- Crypto (BTC/ETH/SOL UP/DOWN), Sports (NBA/NFL live odds)
 - **Multiple strategies** -- Momentum, Split-Arb, Event-Edge mispricing scanner, NBA Q3-Q4 comeback, market making
-- **Multi-agent platform** -- Coordinator with central order queue, per-domain agents, risk gate, and position aggregation
+- **Coordinator-managed runtime** -- Canonical strategy runtime with central order queue, governance gate, risk gate, and position aggregation
 - **Event registry** -- Automated DISCOVER -> RESEARCH -> MONITOR -> TRADE pipeline for new markets
 - **TUI dashboard** -- Ratatui-based terminal UI with live positions, quotes, Binance price feed, and trade log
 - **Claude AI agent** -- Advisory, autonomous, and chat modes for market analysis and trade execution
@@ -14,23 +14,33 @@ A high-performance Polymarket trading bot focused on crypto and sports predictio
 - **Persistence** -- PostgreSQL event store, checkpoints, dead-letter queue, and crash recovery
 - **Risk management** -- Position limits, circuit breaker, daily loss limit, slippage protection, emergency stop
 
-## Architecture (Agent-Based)
+## Architecture (Layered Live Runtime)
 
-Production runtime uses a 3-plane model:
+Production runtime now uses a 4-plane model:
 
-- **Strategy Plane (Poly Agents)**: direction/timing/pricing decisions and intent generation.
-- **Execution Plane (Ploy Coordinator)**: single live ingestion path (`OrderIntent -> Governance/Risk Gate -> Queue -> Executor`), plus audit trail.
-- **Control Plane (OpenClaw / AI Scheduler)**: global capital policy, deployment enable/disable, pause/halt/force-close.
+- **Strategy Plane**: canonical `Strategy` implementations decide direction, timing, sizing, and state transitions.
+- **Capital Governance Plane**: OpenClaw-style governance agents manage budget, pause/resume, throttle, and deployment-scoped policy.
+- **Execution Plane**: the coordinator is the only live order ingress (`StrategyIntent -> Governance/Risk Gate -> Queue -> Executor`), plus audit trail and recovery.
+- **Control Plane**: deployment/config projection, lifecycle control, health, observability, and rollout/shutdown wiring.
 
-Key rule: OpenClaw does not sit in the synchronous per-order decision path for HFT. It governs boundaries; agents decide entries/exits inside those boundaries.
+Key rule: OpenClaw does not sit in the synchronous per-order decision path for HFT. It governs boundaries; strategies decide entries/exits inside those boundaries.
+
+Live strategies now start only through the canonical managed `Strategy` runtime.
+
+Collector / backfill command routing is documented in [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md).
+
+New live strategies should implement the canonical `Strategy` contract.
+`TradingAgent` / `DomainAgent` are retired and only remain in historical design docs.
 For machine-readable control-plane discovery, query `GET /api/capabilities`.
+For plugin/runtime lifecycle visibility, query `GET /api/system/capabilities`; it now reports deployment state counts (`enabled|draining|disabled|archived`) plus builtin plugin summaries.
+For account-scoped lifecycle visibility, query `GET /api/system/accounts`; it now reports per-account deployment state counts and the runtime budget snapshot.
 For deployment/runtime control projection, query `GET /api/strategies/control` (admin token).
 For targeted deployment control patch, use `PUT /api/strategies/control/:id`.
 `strategies/control` now includes `strategy_version`, `lifecycle_stage` (`backtest|paper|shadow|live`), `product_type` (`binary_option` default), and evaluation snapshots.
 Live sidecar ingress enforces `lifecycle_stage=live` by default (temporary migration override: `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true`).
 Traceable strategy evidence ledger is available via `GET/POST /api/strategy-evaluations` and `GET /api/strategy-evaluations/:deployment_id/latest`.
 
-Canonical agent namespace is now `crate::agent_system::{ai,runtime,legacy_platform}` (legacy paths kept for compatibility).
+Governance agents live under `crate::agents`; canonical live strategy runtime ownership lives under `crate::strategy`, `crate::coordinator`, and `crate::plugins`.
 
 ## Prerequisites
 
@@ -106,9 +116,8 @@ The default configuration lives in `config/default.toml`. Override the path with
 | `[database]` | `url`, `max_connections` |
 | `[dry_run]` | `enabled` (defaults to `true`) |
 | `[logging]` | `level`, `json` |
-| `[event_edge_agent]` | `enabled`, `framework`, `trade`, `interval_secs`, `min_edge`, `max_entry`, `shares`, `cooldown_secs`, `max_daily_spend_usd`, `titles` |
+| `[event_edge_agent]` | `enabled`, `trade`, `interval_secs`, `min_edge`, `max_entry`, `shares`, `cooldown_secs`, `max_daily_spend_usd`, `titles` |
 | `[nba_comeback]` | `enabled`, `min_edge`, `max_entry_price`, `shares`, `min_deficit`, `max_deficit`, `target_quarter`, `espn_poll_interval_secs` |
-| `[event_registry]` | `enabled`, `scan_interval_secs`, `sports_keywords`, `general_keywords` |
 
 See the inline comments in `config/default.toml` for a full explanation of every field.
 
@@ -116,10 +125,10 @@ See the inline comments in `config/default.toml` for a full explanation of every
 
 ### Live Trading (Recommended)
 
-Ploy is migrating to a **Coordinator-only** live execution plane. For live orders, use the multi-agent platform entry point:
+Ploy uses a **Coordinator-only** live execution plane. For live orders, use the platform entry point:
 
 ```bash
-ploy platform start --crypto --sports              # Coordinator + Agents (live)
+ploy platform start --crypto --sports              # Coordinator + canonical live strategies
 ploy platform start --crypto --dry-run             # Safe dry-run
 ```
 
@@ -155,6 +164,18 @@ ploy claim --check-only                        # Check claimable resolved positi
 ploy history --limit 50                        # View recent trading history
 ploy ev --price 95 --probability 97            # Calculate expected value for near-settlement bets
 ```
+
+### Collector And Backfill
+
+Use the right command for the right data job:
+
+- `ploy collect` for continuous live/raw synchronized capture
+- `ploy collect --check-only` for a lightweight freshness / duplicate report
+- `ploy orderbook-history` for historical PM L2 snapshots by token ID
+- `ploy deribit-iv-backfill` for historical Deribit IV bars
+- `ploy strategy backfill-*` for offline replay / settlement / kline prep
+
+See [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md) for examples and workflow guidance.
 
 ### Strategies
 
@@ -318,14 +339,13 @@ Strategies run independently and can be managed as daemons (start/stop/status). 
 src/
   adapters/      Polymarket CLOB, WebSocket, Binance WS
   agents/        Domain trading agents (crypto, sports)
-  agent/         Claude AI agent integration
+  ai_clients/    Claude/Grok client integrations
   coordinator/   Multi-agent coordinator + order queue
   domain/        Core types (Market, Order, Quote)
   persistence/   Event store, checkpoints, DLQ
-  services/      Discovery, metrics, health
   signing/       Wallet, order signing, nonce manager
   strategy/      Trading strategies + risk + registry
-  supervisor/    Watchdog, emergency stop, shutdown
+  coordination/  Circuit breaker, emergency stop, shutdown
   tui/           Terminal dashboard (ratatui)
 config/          TOML configuration files
 migrations/      PostgreSQL schema migrations

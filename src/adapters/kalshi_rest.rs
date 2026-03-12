@@ -14,11 +14,13 @@ use rust_decimal::{Decimal, RoundingStrategy};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::debug;
+
+mod market_data;
 
 use super::{
-    polymarket_clob::{OrderBookLevel, OrderBookResponse, TokenInfo},
-    BalanceResponse, MarketResponse, MarketSummary, OrderResponse, PositionResponse, TradeResponse,
+    polymarket_clob::OrderBookResponse, BalanceResponse, MarketResponse, MarketSummary,
+    OrderResponse, PositionResponse, TradeResponse,
 };
 use crate::domain::{OrderRequest, OrderSide, OrderStatus};
 use crate::error::{PloyError, Result};
@@ -314,141 +316,6 @@ impl KalshiClient {
         ))
     }
 
-    fn extract_book_levels(value: &Value) -> Vec<OrderBookLevel> {
-        let mut out = Vec::new();
-
-        let Some(entries) = value.as_array() else {
-            return out;
-        };
-
-        for entry in entries {
-            match entry {
-                Value::Array(pair) if pair.len() >= 2 => {
-                    let Some(price) =
-                        Self::parse_decimalish(&pair[0]).map(Self::from_cents_if_needed)
-                    else {
-                        continue;
-                    };
-                    let Some(size) = Self::parse_decimalish(&pair[1]) else {
-                        continue;
-                    };
-                    out.push(OrderBookLevel {
-                        price: Self::format_price(price),
-                        size: size.normalize().to_string(),
-                    });
-                }
-                Value::Object(_) => {
-                    let price = Self::pick_obj(entry, &["price", "yes_price", "no_price"])
-                        .and_then(Self::parse_decimalish)
-                        .map(Self::from_cents_if_needed);
-                    let size = Self::pick_obj(entry, &["size", "count", "quantity"])
-                        .and_then(Self::parse_decimalish);
-
-                    if let (Some(price), Some(size)) = (price, size) {
-                        out.push(OrderBookLevel {
-                            price: Self::format_price(price),
-                            size: size.normalize().to_string(),
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        out
-    }
-
-    fn map_market_summary(value: &Value) -> MarketSummary {
-        let ticker = Self::pick_str(value, &["ticker", "market_ticker", "id"])
-            .unwrap_or_default()
-            .to_string();
-        let question =
-            Self::pick_str(value, &["title", "question", "market_title"]).map(ToString::to_string);
-        let slug =
-            Self::pick_str(value, &["slug", "ticker", "market_ticker"]).map(ToString::to_string);
-
-        let yes_ask = Self::pick_obj(value, &["yes_ask", "ask_yes", "yesAsk"])
-            .and_then(Self::parse_decimalish)
-            .map(Self::from_cents_if_needed)
-            .map(Self::format_price);
-        let no_ask = Self::pick_obj(value, &["no_ask", "ask_no", "noAsk"])
-            .and_then(Self::parse_decimalish)
-            .map(Self::from_cents_if_needed)
-            .map(Self::format_price);
-
-        let token_ids = vec![format!("{}:yes", ticker), format!("{}:no", ticker)];
-        let outcome_prices = vec![yes_ask.unwrap_or_default(), no_ask.unwrap_or_default()];
-
-        MarketSummary {
-            condition_id: ticker,
-            question,
-            slug,
-            active: !Self::pick_bool(value, &["closed", "is_closed"]).unwrap_or(false),
-            clob_token_ids: Some(
-                serde_json::to_string(&token_ids).unwrap_or_else(|_| "[]".to_string()),
-            ),
-            outcome_prices: Some(
-                serde_json::to_string(&outcome_prices).unwrap_or_else(|_| "[]".to_string()),
-            ),
-        }
-    }
-
-    fn map_market_response(value: &Value) -> MarketResponse {
-        let summary = Self::map_market_summary(value);
-        let token_ids: Vec<String> = summary
-            .clob_token_ids
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-            .unwrap_or_else(|| {
-                vec![
-                    format!("{}:yes", summary.condition_id),
-                    format!("{}:no", summary.condition_id),
-                ]
-            });
-        let prices: Vec<String> = summary
-            .outcome_prices
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-            .unwrap_or_else(|| vec![String::new(), String::new()]);
-
-        let mut yes_extra = HashMap::new();
-        yes_extra.insert("exchange".to_string(), Value::String("kalshi".to_string()));
-        let no_extra = yes_extra.clone();
-
-        let yes_token = TokenInfo {
-            token_id: token_ids
-                .first()
-                .cloned()
-                .unwrap_or_else(|| format!("{}:yes", summary.condition_id)),
-            outcome: "YES".to_string(),
-            price: prices.first().cloned().filter(|v| !v.is_empty()),
-            extra: yes_extra,
-        };
-        let no_token = TokenInfo {
-            token_id: token_ids
-                .get(1)
-                .cloned()
-                .unwrap_or_else(|| format!("{}:no", summary.condition_id)),
-            outcome: "NO".to_string(),
-            price: prices.get(1).cloned().filter(|v| !v.is_empty()),
-            extra: no_extra,
-        };
-
-        MarketResponse {
-            condition_id: summary.condition_id,
-            question_id: summary.slug,
-            tokens: vec![yes_token, no_token],
-            minimum_order_size: None,
-            minimum_tick_size: None,
-            active: summary.active,
-            closed: !summary.active,
-            end_date_iso: Self::pick_str(value, &["close_time", "expiration_time", "end_time"])
-                .map(ToString::to_string),
-            neg_risk: Some(false),
-            extra: HashMap::new(),
-        }
-    }
-
     fn map_order_response(order: &Value, fallback_id: Option<&str>) -> OrderResponse {
         let id = Self::pick_str(order, &["order_id", "id", "client_order_id"])
             .map(ToString::to_string)
@@ -494,102 +361,6 @@ impl KalshiClient {
                 .map(ToString::to_string),
             order_type: Self::pick_str(order, &["type", "order_type"]).map(ToString::to_string),
         }
-    }
-
-    async fn fetch_orderbook(&self, ticker: &str) -> Result<OrderBookResponse> {
-        let path = format!("/markets/{}/orderbook", ticker);
-        let value = match self
-            .request_json(Method::GET, &path, None, None, false)
-            .await
-        {
-            Ok(value) => value,
-            Err(_) => {
-                self.request_json(
-                    Method::GET,
-                    &format!("/markets/{}", ticker),
-                    None,
-                    None,
-                    false,
-                )
-                .await?
-            }
-        };
-
-        let root = Self::pick_obj(&value, &["orderbook", "book"]).unwrap_or(&value);
-        let asks = Self::pick_obj(root, &["asks", "sell"]).map(Self::extract_book_levels);
-        let bids = Self::pick_obj(root, &["bids", "buy"]).map(Self::extract_book_levels);
-
-        // Kalshi binary books often expose YES/NO ladders separately.
-        let yes = Self::pick_obj(root, &["yes", "yes_orders"]).map(Self::extract_book_levels);
-        let no = Self::pick_obj(root, &["no", "no_orders"]).map(Self::extract_book_levels);
-
-        let mut resolved_bids = bids.unwrap_or_default();
-        let mut resolved_asks = asks.unwrap_or_default();
-        if resolved_bids.is_empty() {
-            resolved_bids = yes.unwrap_or_default();
-        }
-        if resolved_asks.is_empty() {
-            resolved_asks = no.unwrap_or_default();
-        }
-
-        Ok(OrderBookResponse {
-            market: Some(ticker.to_string()),
-            asset_id: format!("{}:yes", ticker),
-            bids: resolved_bids,
-            asks: resolved_asks,
-            timestamp: Some(Utc::now().to_rfc3339()),
-            hash: None,
-        })
-    }
-
-    pub async fn get_order_book(&self, token_id: &str) -> Result<OrderBookResponse> {
-        let (ticker, _) = OutcomeSide::from_token_id(token_id);
-        self.fetch_orderbook(&ticker).await
-    }
-
-    pub async fn get_market(&self, ticker: &str) -> Result<MarketResponse> {
-        let path = format!("/markets/{}", ticker);
-        let value = self
-            .request_json(Method::GET, &path, None, None, false)
-            .await?;
-        let market = Self::pick_obj(&value, &["market", "data"]).unwrap_or(&value);
-        Ok(Self::map_market_response(market))
-    }
-
-    pub async fn search_markets(&self, query: &str) -> Result<Vec<MarketSummary>> {
-        let params = vec![("status", "open".to_string()), ("limit", "200".to_string())];
-        let value = self
-            .request_json(Method::GET, "/markets", Some(&params), None, false)
-            .await?;
-
-        let mut out = Vec::new();
-        if let Some(markets) = Self::pick_array(&value, &["markets", "data", "results"]) {
-            for market in markets {
-                let mapped = Self::map_market_summary(market);
-                if query.trim().is_empty()
-                    || mapped
-                        .question
-                        .as_deref()
-                        .unwrap_or_default()
-                        .to_ascii_lowercase()
-                        .contains(&query.to_ascii_lowercase())
-                    || mapped
-                        .slug
-                        .as_deref()
-                        .unwrap_or_default()
-                        .to_ascii_lowercase()
-                        .contains(&query.to_ascii_lowercase())
-                    || mapped
-                        .condition_id
-                        .to_ascii_lowercase()
-                        .contains(&query.to_ascii_lowercase())
-                {
-                    out.push(mapped);
-                }
-            }
-        }
-
-        Ok(out)
     }
 
     pub async fn submit_order(&self, request: &OrderRequest) -> Result<OrderResponse> {
@@ -800,36 +571,6 @@ impl KalshiClient {
         }
 
         Ok(out)
-    }
-
-    pub async fn get_best_prices(
-        &self,
-        token_id: &str,
-    ) -> Result<(Option<Decimal>, Option<Decimal>)> {
-        let (ticker, side) = OutcomeSide::from_token_id(token_id);
-        let book = self.fetch_orderbook(&ticker).await?;
-
-        if book.bids.is_empty() && book.asks.is_empty() {
-            warn!(token_id, "Kalshi order book has no bids/asks");
-            return Ok((None, None));
-        }
-
-        let mut bid = book
-            .bids
-            .first()
-            .and_then(|l| Decimal::from_str_exact(l.price.trim()).ok());
-        let mut ask = book
-            .asks
-            .first()
-            .and_then(|l| Decimal::from_str_exact(l.price.trim()).ok());
-
-        // If token requests NO side, invert from YES price when possible.
-        if side == OutcomeSide::No {
-            bid = bid.map(|v| (Decimal::ONE - v).max(Decimal::ZERO));
-            ask = ask.map(|v| (Decimal::ONE - v).max(Decimal::ZERO));
-        }
-
-        Ok((bid, ask))
     }
 }
 

@@ -17,12 +17,16 @@
 //! ```
 
 pub mod algorithms;
+pub mod cli_agent;
 pub mod config;
 pub mod core;
 pub mod environment;
+pub mod execution_types;
 pub mod integration;
 pub mod memory;
 pub mod networks;
+pub mod order_platform;
+pub mod runtime_types;
 pub mod training;
 
 // Config exports
@@ -39,7 +43,10 @@ pub use core::{
 pub use memory::ReplayBuffer;
 
 // Integration exports
-pub use integration::RLStrategy;
+pub use integration::{RLCryptoRuntime, RLCryptoRuntimeConfig, RLStrategy};
+pub use execution_types::{ExecutionReport, ExecutionStatus};
+pub use order_platform::{RlOrderRuntime, RlOrderRuntimeConfig, RlRuntimeStats};
+pub use runtime_types::{CryptoEvent, DomainEvent, QuoteData};
 
 // Environment exports
 pub use environment::{

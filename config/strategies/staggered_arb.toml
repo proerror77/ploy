@@ -1,41 +1,64 @@
 # Staggered Arbitrage Strategy — 時間差套利
-# Live trading configuration with $15/trade target
+# Live trading config — opening-window OBI long-gamma leg1 + opportunistic/protective LEG2
 
 [strategy]
 name = "staggered_arb"
 
 [entry]
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-# shares_per_trade is now ignored when fixed_amount_usd is set in [risk]
-max_concurrent = 5
-direction_threshold = 0.03
-max_initial_sum = 1.10
-min_profit_target = 0.005
+shares_per_trade = 20
+max_concurrent = 0
+direction_threshold = 0.05
+premium_sum_threshold = 1.00
+premium_sum_direction_slope = 1.25
+premium_sum_obi_slope = 0.25
+obi_confirm_threshold = 0.005
+strong_obi_threshold = 0.015
+strong_obi_direction_relaxation = 0.015
+strong_obi_price_bonus = 0.02
+max_initial_sum = 0.0
+max_leg1_price = 0.56
+merge_target_sum = 0.95
+min_profit_target = 0.02
 min_ask_price = 0.05
-min_entry_sum = 0.70
+min_entry_sum = 0.30
 
 [timing]
-max_wait_secs = 180
-max_wait_pct = 0.40
-min_time_remaining = 60
+max_wait_secs = 120
+max_wait_pct = 0.30
+min_time_remaining = 45
 cooldown_secs = 5
 min_leg2_delay_secs = 3
-max_trades_per_event = 2
+max_trades_per_event = 0
+entry_after_start_min_secs = 30  # observe the first 30s before opening new leg1s
+entry_after_start_max_secs = 240 # keep the early post-open window slightly wider; replay shows this lifts trade count without hurting quality
+pm_quote_max_stale_secs = 10     # live/replay should ignore Polymarket asks that have gone quiet for too long
+entry_quote_persistence_secs = 8 # only open LEG1 when the opposite-side ask has stayed visible long enough to look hedgeable
+strong_obi_window_bonus_secs = 60 # allow a little longer on 15m windows when OBI is both strong and persistent
+no_trade_last_secs = 30          # block new leg1s in the final 30s
 
 [risk]
 # === FUND MANAGEMENT ===
-fixed_amount_usd = 1.0          # Target per-leg notional (min 5 shares may raise actual notional)
+# fixed_amount_usd disabled: use fixed shares_per_trade sizing
 min_balance_usd = 5.0           # Keep $5 reserve
 
 # === STAGGERED ARB SPECIFIC ===
-max_leg1_loss = 0.0             # Never accept leg1 loss
-force_complete_threshold = 1.00 # Apply forced-close only on timeout/time-safety/risk and sum >= threshold
+max_leg1_loss = 0.03            # Trigger protective merge earlier; recent live data showed 5c waits were too loose
+protective_recovery_window_secs = 0 # Recovery-window sweep did not improve recent replay; disable by default
+force_complete_threshold = 1.06 # Slightly tighter forced-close cap improved recent and independent replay windows
+protective_close_threshold = 1.06 # Slightly tighter protective-close cap reduced punitive stop merges without killing trade count
+obi_decay_exit_ratio = 0.35     # If OBI falls below 35% of entry strength, the directional edge is considered decayed
+obi_flip_exit_threshold = 0.008 # Treat opposite-side OBI beyond this magnitude as a real flip against the position
 
 [model]
 mu = 0.0
-vol_lookback_secs = 300
-vol_floor = 0.005
+vol_lookback_secs = 600
+vol_floor = 0.003
+min_entry_sigma = 0.003
+max_entry_sigma = 0.0
+use_greeks = true
+max_fair_value_distance = 0.15
 
 [filter]
-allowed_windows = [300, 900]
+allowed_windows = [300] # 15m windows have been the consistent drag in replay; keep live on 5m only for now
 window_tolerance = 30

@@ -13,13 +13,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
-use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
+use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
+use crate::platform::Domain;
 
 use crate::strategy::detectors::{DumpDetector, DumpDetectorConfig, DumpSignal};
 use crate::strategy::traits::{
-    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, RiskLevel, Strategy,
-    StrategyAction, StrategyConfig, StrategyEvent, StrategyEventType, StrategyStateInfo,
+    AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
+    StrategyConfig, StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 
 /// Two-leg strategy configuration
@@ -43,6 +44,22 @@ pub struct TwoLegConfig {
     pub min_time_remaining_secs: u64,
     /// Dump detector configuration
     pub dump_config: DumpDetectorConfig,
+    /// Polymarket series to monitor for event discovery.
+    #[serde(default = "default_two_leg_series_ids")]
+    pub series_ids: Vec<String>,
+}
+
+fn default_two_leg_series_ids() -> Vec<String> {
+    vec![
+        "10684".to_string(), // BTC 5m
+        "10683".to_string(), // ETH 5m
+        "10686".to_string(), // SOL 5m
+        "10685".to_string(), // XRP 5m
+        "10192".to_string(), // BTC 15m
+        "10191".to_string(), // ETH 15m
+        "10423".to_string(), // SOL 15m
+        "10422".to_string(), // XRP 15m
+    ]
 }
 
 impl Default for TwoLegConfig {
@@ -57,6 +74,7 @@ impl Default for TwoLegConfig {
             window_min: 2,
             min_time_remaining_secs: 30,
             dump_config: DumpDetectorConfig::default(),
+            series_ids: default_two_leg_series_ids(),
         }
     }
 }
@@ -187,9 +205,7 @@ impl TwoLegStrategy {
     fn is_in_cycle(&self) -> bool {
         matches!(
             self.state,
-            TwoLegState::Leg1Pending
-                | TwoLegState::Leg1Filled
-                | TwoLegState::Leg2Pending
+            TwoLegState::Leg1Pending | TwoLegState::Leg1Filled | TwoLegState::Leg2Pending
         )
     }
 
@@ -222,13 +238,6 @@ impl TwoLegStrategy {
         // Create Leg1 order
         let client_order_id = format!("{}-leg1-{}", self.config.id, Utc::now().timestamp_millis());
 
-        let order = OrderRequest::buy_limit(
-            token_id.to_string(),
-            signal.side,
-            self.config.shares,
-            signal.trigger_price,
-        );
-
         // Track pending order
         self.pending_orders.insert(
             client_order_id.clone(),
@@ -248,17 +257,26 @@ impl TwoLegStrategy {
             signal.side, self.config.shares, signal.trigger_price
         );
 
-        actions.push(StrategyAction::SubmitOrder {
-            client_order_id,
-            order,
-            priority: 10,
+        actions.push(StrategyAction::SubmitIntent {
+            intent: self.submit_intent(
+                client_order_id,
+                token_id.to_string(),
+                signal.side,
+                true,
+                self.config.shares,
+                signal.trigger_price,
+                10,
+            ),
         });
 
         actions.push(StrategyAction::LogEvent {
             event: StrategyEvent::new(StrategyEventType::EntryTriggered, "Leg1 entry triggered")
                 .with_data("side", signal.side.to_string())
                 .with_data("price", signal.trigger_price.to_string())
-                .with_data("drop_pct", (signal.drop_pct * Decimal::from(100)).to_string()),
+                .with_data(
+                    "drop_pct",
+                    (signal.drop_pct * Decimal::from(100)).to_string(),
+                ),
         });
 
         actions
@@ -299,12 +317,6 @@ impl TwoLegStrategy {
 
         let client_order_id = format!("{}-leg2-{}", self.config.id, Utc::now().timestamp_millis());
 
-        let order = OrderRequest::buy_limit(
-            token_id.to_string(),
-            side,
-            ctx.leg1_shares,
-            price,
-        );
 
         self.pending_orders.insert(
             client_order_id.clone(),
@@ -318,15 +330,56 @@ impl TwoLegStrategy {
 
         self.state = TwoLegState::Leg2Pending;
 
-        info!("Entering Leg2: {} {} shares @ {}", side, ctx.leg1_shares, price);
+        info!(
+            "Entering Leg2: {} {} shares @ {}",
+            side, ctx.leg1_shares, price
+        );
 
-        actions.push(StrategyAction::SubmitOrder {
-            client_order_id,
-            order,
-            priority: 10,
+        actions.push(StrategyAction::SubmitIntent {
+            intent: self.submit_intent(
+                client_order_id,
+                token_id.to_string(),
+                side,
+                true,
+                ctx.leg1_shares,
+                price,
+                10,
+            ),
         });
 
         actions
+    }
+
+    fn submit_intent(
+        &self,
+        client_order_id: String,
+        token_id: String,
+        side: Side,
+        is_buy: bool,
+        shares: u64,
+        limit_price: Decimal,
+        priority: u8,
+    ) -> StrategyOrderIntent {
+        let market_slug = self
+            .current_event
+            .as_ref()
+            .map(|event| event.event_id.clone())
+            .unwrap_or_else(|| token_id.clone());
+
+        StrategyOrderIntent {
+            client_order_id,
+            domain: Domain::Crypto,
+            market_slug,
+            token_id,
+            side,
+            is_buy,
+            shares,
+            limit_price,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::GTC,
+            priority,
+            metadata: HashMap::new(),
+        }
     }
 
     /// Force Leg2 or abort
@@ -400,6 +453,9 @@ impl Strategy for TwoLegStrategy {
 
     fn required_feeds(&self) -> Vec<DataFeed> {
         vec![
+            DataFeed::PolymarketEvents {
+                series_ids: self.config.series_ids.clone(),
+            },
             DataFeed::Tick { interval_ms: 1000 },
         ]
     }
@@ -467,12 +523,6 @@ impl Strategy for TwoLegStrategy {
 
                     info!("Started monitoring event: {}", event_id);
 
-                    // Subscribe to token feeds
-                    actions.push(StrategyAction::SubscribeFeed {
-                        feed: DataFeed::PolymarketQuotes {
-                            tokens: vec![up_token.clone(), down_token.clone()],
-                        },
-                    });
                 }
             }
             MarketUpdate::EventExpired { event_id } => {
@@ -484,9 +534,9 @@ impl Strategy for TwoLegStrategy {
                 {
                     if self.is_in_cycle() {
                         self.abort_cycle("Event expired");
-                        actions.push(StrategyAction::UpdateRisk {
-                            level: RiskLevel::Elevated,
-                            reason: "Cycle aborted due to event expiration".to_string(),
+                        actions.push(StrategyAction::Alert {
+                            level: AlertLevel::Warning,
+                            message: "Cycle aborted due to event expiration".to_string(),
                         });
                     }
                     self.transition_to_idle();
@@ -593,10 +643,6 @@ impl Strategy for TwoLegStrategy {
                         level: AlertLevel::Critical,
                         message: format!("Leg2 order failed: {:?} - OPEN EXPOSURE", update.status),
                     });
-                    actions.push(StrategyAction::UpdateRisk {
-                        level: RiskLevel::Critical,
-                        reason: "Leg2 failed with open position".to_string(),
-                    });
                     self.state = TwoLegState::Abort;
                 }
 
@@ -642,9 +688,7 @@ impl Strategy for TwoLegStrategy {
         let exposure = self
             .positions
             .iter()
-            .map(|p| {
-                p.current_price.unwrap_or(p.entry_price) * Decimal::from(p.shares)
-            })
+            .map(|p| p.current_price.unwrap_or(p.entry_price) * Decimal::from(p.shares))
             .sum();
 
         let unrealized_pnl = self.positions.iter().map(|p| p.unrealized_pnl).sum();
@@ -707,6 +751,8 @@ impl Strategy for TwoLegStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn test_state_transitions() {
@@ -715,5 +761,108 @@ mod tests {
 
         assert_eq!(strategy.state, TwoLegState::Idle);
         assert!(!strategy.is_active());
+    }
+
+    #[test]
+    fn required_feeds_include_static_polymarket_event_feed() {
+        let strategy = TwoLegStrategy::new(TwoLegConfig::default());
+        let feeds = strategy.required_feeds();
+
+        assert!(feeds.iter().any(|feed| matches!(
+            feed,
+            DataFeed::PolymarketEvents { series_ids } if !series_ids.is_empty()
+        )));
+    }
+
+    #[tokio::test]
+    async fn event_discovery_starts_watch_window_without_feed_action() {
+        let mut strategy = TwoLegStrategy::new(TwoLegConfig::default());
+        let actions = strategy
+            .on_market_update(&MarketUpdate::EventDiscovered {
+                event_id: "evt-1".to_string(),
+                series_id: "ignored".to_string(),
+                up_token: "up-token".to_string(),
+                down_token: "down-token".to_string(),
+                end_time: Utc::now() + Duration::minutes(5),
+                price_to_beat: None,
+                title: None,
+                condition_id: None,
+            })
+            .await
+            .expect("event discovery should succeed");
+
+        assert!(actions.is_empty(), "feed lifecycle is runtime-owned");
+        assert_eq!(strategy.state, TwoLegState::WatchWindow);
+        let event = strategy.current_event.expect("event should be tracked");
+        assert_eq!(event.up_token_id, "up-token");
+        assert_eq!(event.down_token_id, "down-token");
+    }
+
+    #[tokio::test]
+    async fn event_expiry_emits_warning_alert_instead_of_risk_mutation() {
+        let mut strategy = TwoLegStrategy::new(TwoLegConfig::default());
+        strategy.current_event = Some(EventContext {
+            event_id: "evt-1".to_string(),
+            up_token_id: "up-token".to_string(),
+            down_token_id: "down-token".to_string(),
+            end_time: Utc::now() + Duration::minutes(5),
+            start_time: Utc::now(),
+        });
+        strategy.state = TwoLegState::Leg1Filled;
+
+        let actions = strategy
+            .on_market_update(&MarketUpdate::EventExpired {
+                event_id: "evt-1".to_string(),
+            })
+            .await
+            .expect("event expiry should succeed");
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            StrategyAction::Alert { level, message } => {
+                assert_eq!(*level, AlertLevel::Warning);
+                assert!(message.contains("event expiration"));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+        assert_eq!(strategy.state, TwoLegState::Idle);
+    }
+
+    #[tokio::test]
+    async fn leg2_failure_keeps_only_critical_alert_path() {
+        let mut strategy = TwoLegStrategy::new(TwoLegConfig::default());
+        strategy.state = TwoLegState::Leg2Pending;
+        strategy.pending_orders.insert(
+            "client-1".to_string(),
+            PendingOrder {
+                client_order_id: "client-1".to_string(),
+                order_id: Some("order-1".to_string()),
+                side: Side::Down,
+                is_leg1: false,
+            },
+        );
+
+        let actions = strategy
+            .on_order_update(&OrderUpdate {
+                order_id: "order-1".to_string(),
+                client_order_id: Some("client-1".to_string()),
+                status: OrderStatus::Rejected,
+                filled_qty: 0,
+                avg_fill_price: None,
+                timestamp: Utc::now(),
+                error: Some("rejected".to_string()),
+            })
+            .await
+            .expect("order update should succeed");
+
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            StrategyAction::Alert { level, message } => {
+                assert_eq!(*level, AlertLevel::Critical);
+                assert!(message.contains("OPEN EXPOSURE"));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+        assert_eq!(strategy.state, TwoLegState::Abort);
     }
 }

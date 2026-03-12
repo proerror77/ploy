@@ -303,7 +303,7 @@ Several collections are properly bounded:
 
 ### 4.2 Unbounded Growth Risks
 
-**File**: `src/supervisor/watchdog.rs:103`
+**Historical file**: `src/supervisor/watchdog.rs:103` (retired in March 2026 cleanup)
 
 ```rust
 struct TrackedComponent {
@@ -359,7 +359,6 @@ The codebase uses **336 lock instances** across 50 files. Key patterns:
 | `FundManager` (5 locks) | `RwLock` x5 | Medium | On entry |
 | `CircuitBreaker` state | `RwLock` | Low | On trade |
 | `LifecycleManager` | `RwLock` | Low | No |
-| `Watchdog` components | `RwLock` | Low | No |
 
 ### 5.2 FundManager: Five Separate Locks
 
@@ -465,27 +464,26 @@ Each phase has individual timeouts plus a global 120s timeout. The `wait_for_com
 
 ## 7. Monitoring & Observability
 
-### 7.1 Health Server
+### 7.1 Historical Health Server
 
-**File**: `src/services/health.rs:1-200`
+**Historical file**: `src/services/health.rs:1-200` (retired in March 2026 cleanup)
 
-**Finding (P3 - Positive)**: The health server provides:
-- Liveness and readiness probes (suitable for systemd/k8s)
-- Component-level health (WebSocket, database, risk state)
-- Quote staleness detection (30s threshold)
-- Uptime tracking
+**Historical note**: The repo previously carried a standalone health/metrics server that exposed:
+- liveness/readiness probes
+- component-level health summaries
+- quote staleness detection
+- uptime tracking
 
-**Finding (P2)**: The `get_health()` method (line 140) acquires **four separate read locks** sequentially:
-1. `last_ws_message.read()` (line 131)
+That standalone server was later retired because no runtime path actually started it; the active deployment surface now relies on the API server's `/health` endpoint instead.
 2. `last_ws_message.read()` again (line 167)
 3. `last_db_check.read()` (line 188)
 4. `strategy_state.read()` (line 210, estimated)
 
 This is fine for a health endpoint called infrequently, but the double read of `last_ws_message` is wasteful.
 
-### 7.2 Watchdog Daemon
+### 7.2 Historical Watchdog Daemon
 
-**File**: `src/supervisor/watchdog.rs:318-399`
+**Historical file**: `src/supervisor/watchdog.rs:318-399` (retired in March 2026 cleanup)
 
 **Finding (P3 - Positive)**: The watchdog correctly implements:
 - Exponential backoff for restarts (line 388-399, added in commit 558150b)
@@ -603,7 +601,7 @@ The codebase demonstrates several strong performance and reliability patterns:
 7. **Graceful shutdown with phases** - Proper order draining before connection teardown
 8. **Idempotency protection** - Prevents duplicate orders on retry
 9. **WebSocket reconnection with jitter** - Proper backoff prevents reconnection storms
-10. **Watchdog with exponential backoff** - Prevents restart storms
+10. **Historical watchdog with exponential backoff** - Prevented restart storms before the supervisor layer was retired
 
 ---
 
@@ -628,4 +626,3 @@ Current estimated hot-path latency (WebSocket message to order submission):
 | **Total (with DB)** | **1-50ms** | **~0.4ms** |
 
 The dominant latency is the HTTP order submission to Polymarket's CLOB API (50-200ms). Internal processing overhead is small by comparison, but the DB-on-hot-path issue can add significant jitter.
-

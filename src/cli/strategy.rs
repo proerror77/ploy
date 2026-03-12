@@ -22,6 +22,25 @@ use crate::config::ExecutionConfig;
 use crate::signing::Wallet;
 use crate::strategy::execution::executor::OrderExecutor;
 use crate::strategy::{StrategyFactory, StrategyManager};
+use analysis_commands::{
+    AccuracyArgs, BacktestArgs, BacktestDiffArgs, BacktestListArgs, DirectionalSignalBacktestArgs,
+    ExportCryptoLobDatasetArgs, LiveBacktestCompareArgs,
+};
+use backtest_ops::{run_backtest, run_backtest_diff, run_backtest_list, run_live_backtest_compare};
+use maintenance_ops::{
+    backfill_klines, backfill_pm_replay_tables, backfill_pm_token_settlements, run_integrity_check,
+    run_nba_comeback, seed_nba_stats,
+};
+use runtime_ops::{
+    list_strategies, reload_strategy, show_logs, show_status, start_strategy, stop_strategy,
+};
+use settlement_ops::{export_crypto_lob_dataset, report_accuracy_pm_settlement};
+
+mod analysis_commands;
+mod backtest_ops;
+mod maintenance_ops;
+mod runtime_ops;
+mod settlement_ops;
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CryptoLobDatasetFormat {
@@ -33,6 +52,13 @@ pub enum CryptoLobDatasetFormat {
 pub enum StrategyBacktestMode {
     Replay,
     Settlement,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiquidityVacuumProfile {
+    Prod,
+    Research,
+    ResearchV2,
 }
 
 impl Default for CryptoLobDatasetFormat {
@@ -48,203 +74,6 @@ impl Default for CryptoLobDatasetFormat {
     }
 }
 
-#[derive(Debug, Clone)]
-struct CryptoLobDatasetRow {
-    executed_at: chrono::DateTime<chrono::Utc>,
-    intent_id: uuid::Uuid,
-    account_id: String,
-    agent_id: String,
-    market_slug: String,
-    token_id: String,
-    market_side: String,
-    is_buy: bool,
-    limit_price: rust_decimal::Decimal,
-    p_up: Option<f64>,
-    obi5: f64,
-    obi10: f64,
-    spread_bps: f64,
-    bid_volume_5: f64,
-    ask_volume_5: f64,
-    momentum_1s: f64,
-    momentum_5s: f64,
-    pm_up_ask: Option<f64>,
-    pm_down_ask: Option<f64>,
-    settled_price: rust_decimal::Decimal,
-    y_up: i32,
-    model_type: String,
-    model_version: String,
-    config_hash: String,
-}
-
-fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('\"') || s.contains('\n') || s.contains('\r') {
-        format!("\"{}\"", s.replace('\"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
-
-fn write_crypto_lob_dataset_csv(
-    output: &std::path::Path,
-    rows: &[CryptoLobDatasetRow],
-) -> Result<()> {
-    let mut f = std::fs::File::create(output).context("Failed to create output file")?;
-    writeln!(
-        f,
-        "executed_at,intent_id,account_id,agent_id,market_slug,token_id,market_side,is_buy,limit_price,p_up,obi5,obi10,spread_bps,bid_volume_5,ask_volume_5,momentum_1s,momentum_5s,pm_up_ask,pm_down_ask,settled_price,y_up,model_type,model_version,config_hash"
-    )?;
-
-    for r in rows {
-        writeln!(
-            f,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            csv_escape(&r.executed_at.to_rfc3339()),
-            csv_escape(&r.intent_id.to_string()),
-            csv_escape(&r.account_id),
-            csv_escape(&r.agent_id),
-            csv_escape(&r.market_slug),
-            csv_escape(&r.token_id),
-            csv_escape(&r.market_side),
-            if r.is_buy { "1" } else { "0" },
-            r.limit_price,
-            r.p_up.map(|v| format!("{v:.6}")).unwrap_or_default(),
-            format!("{:.10}", r.obi5),
-            format!("{:.10}", r.obi10),
-            format!("{:.10}", r.spread_bps),
-            format!("{:.10}", r.bid_volume_5),
-            format!("{:.10}", r.ask_volume_5),
-            format!("{:.10}", r.momentum_1s),
-            format!("{:.10}", r.momentum_5s),
-            r.pm_up_ask.map(|v| format!("{v:.10}")).unwrap_or_default(),
-            r.pm_down_ask
-                .map(|v| format!("{v:.10}"))
-                .unwrap_or_default(),
-            r.settled_price,
-            r.y_up,
-            csv_escape(&r.model_type),
-            csv_escape(&r.model_version),
-            csv_escape(&r.config_hash),
-        )?;
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "analysis")]
-fn sanitize_duckdb_copy_path(path: &std::path::Path) -> std::result::Result<String, duckdb::Error> {
-    let s = path.display().to_string();
-    if s.contains('\'') || s.contains(';') || s.contains("--") {
-        return Err(duckdb::Error::InvalidParameterName(
-            "path contains SQL metacharacters".into(),
-        ));
-    }
-    Ok(s)
-}
-
-#[cfg(feature = "analysis")]
-fn write_crypto_lob_dataset_parquet(
-    output: &std::path::Path,
-    rows: &[CryptoLobDatasetRow],
-) -> Result<()> {
-    use duckdb::{params, Connection};
-    use rust_decimal::prelude::ToPrimitive;
-
-    let conn = Connection::open_in_memory().context("Failed to open DuckDB")?;
-    conn.execute_batch(
-        r#"
-        CREATE TABLE dataset (
-          executed_at VARCHAR,
-          intent_id VARCHAR,
-          account_id VARCHAR,
-          agent_id VARCHAR,
-          market_slug VARCHAR,
-          token_id VARCHAR,
-          market_side VARCHAR,
-          is_buy BOOLEAN,
-          limit_price DOUBLE,
-          p_up DOUBLE,
-          obi5 DOUBLE,
-          obi10 DOUBLE,
-          spread_bps DOUBLE,
-          bid_volume_5 DOUBLE,
-          ask_volume_5 DOUBLE,
-          momentum_1s DOUBLE,
-          momentum_5s DOUBLE,
-          pm_up_ask DOUBLE,
-          pm_down_ask DOUBLE,
-          settled_price DOUBLE,
-          y_up INTEGER,
-          model_type VARCHAR,
-          model_version VARCHAR,
-          config_hash VARCHAR
-        );
-        "#,
-    )
-    .context("Failed to create DuckDB dataset table")?;
-
-    let mut stmt = conn
-        .prepare(
-            r#"
-            INSERT INTO dataset VALUES (
-              ?,?,?,?,?,?,?,?,
-              ?,?,?,?,?,?,?,?,
-              ?,?,?,?,?,?,?,?
-            )
-            "#,
-        )
-        .context("Failed to prepare DuckDB insert statement")?;
-
-    for r in rows {
-        let limit_price = r
-            .limit_price
-            .to_f64()
-            .context("Failed to convert limit_price to f64")?;
-        let settled_price = r
-            .settled_price
-            .to_f64()
-            .context("Failed to convert settled_price to f64")?;
-
-        stmt.execute(params![
-            r.executed_at.to_rfc3339(),
-            r.intent_id.to_string(),
-            r.account_id.as_str(),
-            r.agent_id.as_str(),
-            r.market_slug.as_str(),
-            r.token_id.as_str(),
-            r.market_side.as_str(),
-            r.is_buy,
-            limit_price,
-            r.p_up,
-            r.obi5,
-            r.obi10,
-            r.spread_bps,
-            r.bid_volume_5,
-            r.ask_volume_5,
-            r.momentum_1s,
-            r.momentum_5s,
-            r.pm_up_ask,
-            r.pm_down_ask,
-            settled_price,
-            r.y_up,
-            r.model_type.as_str(),
-            r.model_version.as_str(),
-            r.config_hash.as_str(),
-        ])
-        .context("Failed to insert row into DuckDB")?;
-    }
-
-    if output.exists() {
-        std::fs::remove_file(output).context("Failed to remove existing output file")?;
-    }
-    let out = sanitize_duckdb_copy_path(output).context("Invalid output path for DuckDB COPY")?;
-    let copy_sql = format!("COPY dataset TO '{out}' (FORMAT PARQUET);");
-    conn.execute_batch(&copy_sql)
-        .context("Failed to COPY dataset to Parquet")?;
-
-    Ok(())
-}
-
-/// Strategy-related commands
 #[derive(Subcommand, Debug, Clone)]
 pub enum StrategyCommands {
     /// List all available strategies
@@ -315,7 +144,7 @@ pub enum StrategyCommands {
         database_url: Option<String>,
     },
 
-    /// Run the NBA Q3→Q4 comeback trading agent standalone
+    /// Deprecated: standalone NBA comeback runtime (use managed deployments)
     NbaComeback {
         /// Config file path
         #[arg(short, long)]
@@ -327,112 +156,16 @@ pub enum StrategyCommands {
     },
 
     /// Report prediction accuracy using Polymarket official settlement (token pays 1/0)
-    Accuracy {
-        /// Lookback window in hours (scopes which entry intents are scored)
-        #[arg(long, default_value = "12")]
-        lookback_hours: u64,
-
-        /// Filter by domain: crypto|sports|politics
-        #[arg(long)]
-        domain: Option<String>,
-
-        /// Filter by account_id (defaults to all)
-        #[arg(long)]
-        account_id: Option<String>,
-
-        /// Filter by agent_id (defaults to all)
-        #[arg(long)]
-        agent_id: Option<String>,
-
-        /// Only include live orders (exclude dry-run)
-        #[arg(long)]
-        live_only: bool,
-
-        /// Max number of intents to print (latest first)
-        #[arg(long, default_value = "200")]
-        limit: usize,
-
-        /// Skip refreshing settlement status via Gamma API (uses cached DB rows only)
-        #[arg(long)]
-        no_refresh: bool,
-
-        /// Database URL (uses DATABASE_URL env var if omitted)
-        #[arg(long)]
-        database_url: Option<String>,
-    },
+    Accuracy(AccuracyArgs),
 
     /// Backtest directional signals (signal_history) using Polymarket official settlement (token pays 1/0)
     ///
     /// Legacy alias for:
     /// `ploy strategy backtest directional --mode settlement ...`
-    DirectionalSignalBacktest {
-        /// Lookback window in hours (which directional signals are included)
-        #[arg(long, default_value = "168")]
-        lookback_hours: u64,
-
-        /// Filter by account_id (defaults to all)
-        #[arg(long)]
-        account_id: Option<String>,
-
-        /// Filter by agent_id (defaults to all)
-        #[arg(long)]
-        agent_id: Option<String>,
-
-        /// Only include live signals (exclude context->>'dry_run' = true)
-        #[arg(long)]
-        live_only: bool,
-
-        /// Max number of signals to backtest (latest first)
-        #[arg(long, default_value = "50000")]
-        limit: usize,
-
-        /// Skip refreshing settlement status via Gamma API (uses cached DB rows only)
-        #[arg(long)]
-        no_refresh: bool,
-
-        /// Database URL (uses DATABASE_URL env var if omitted)
-        #[arg(long)]
-        database_url: Option<String>,
-    },
+    DirectionalSignalBacktest(DirectionalSignalBacktestArgs),
 
     /// Export a labeled dataset for crypto LOB model training (uses Polymarket settlement y_up).
-    ExportCryptoLobDataset {
-        /// Lookback window in hours (which entry intents are exported)
-        #[arg(long, default_value = "168")]
-        lookback_hours: u64,
-
-        /// Filter by account_id (defaults to all)
-        #[arg(long)]
-        account_id: Option<String>,
-
-        /// Filter by agent_id (defaults to all)
-        #[arg(long)]
-        agent_id: Option<String>,
-
-        /// Only include live orders (exclude dry-run)
-        #[arg(long)]
-        live_only: bool,
-
-        /// Skip refreshing settlement status via Gamma API (uses cached DB rows only)
-        #[arg(long)]
-        no_refresh: bool,
-
-        /// Max number of intents to export (latest first)
-        #[arg(long, default_value = "50000")]
-        limit: usize,
-
-        /// Output format (default: parquet if built with --features analysis, else csv)
-        #[arg(long, value_enum, default_value_t = CryptoLobDatasetFormat::default())]
-        format: CryptoLobDatasetFormat,
-
-        /// Output path (default: ./data/crypto_lob_dataset.{csv|parquet})
-        #[arg(long)]
-        output: Option<PathBuf>,
-
-        /// Database URL (uses DATABASE_URL env var if omitted)
-        #[arg(long)]
-        database_url: Option<String>,
-    },
+    ExportCryptoLobDataset(ExportCryptoLobDatasetArgs),
 
     /// Run data integrity checks on the database
     IntegrityCheck {
@@ -447,7 +180,7 @@ pub enum StrategyCommands {
 
     /// Run a strategy backtest against the integrated DB pipeline
     Backtest {
-        /// Strategy name (momentum, directional)
+        /// Strategy name (momentum, directional, prob-garch/prob_garch, liquidity-vacuum/liquidity_vacuum, staggered-arb/staggered_arb/gamma_scalping)
         name: String,
 
         /// Backtest mode: replay historical feed, or score directional signals by settlement
@@ -510,26 +243,82 @@ pub enum StrategyCommands {
         #[arg(long)]
         verify_run: Option<String>,
 
+        /// Print a database data-availability summary for this backtest and exit
+        #[arg(long)]
+        diagnose_db: bool,
+
         /// Database URL (uses DATABASE_URL env var if omitted)
         #[arg(long)]
         database_url: Option<String>,
+
+        /// Liquidity-vacuum profile preset.
+        ///
+        /// `prod` keeps strict thresholds; `research` is exploratory;
+        /// `research-v2` is a higher-quality research baseline.
+        #[arg(long, value_enum, default_value_t = LiquidityVacuumProfile::Prod)]
+        lv_profile: LiquidityVacuumProfile,
+
+        /// Override liquidity-vacuum price move threshold (fraction, e.g. 0.02 = 2%)
+        #[arg(long)]
+        lv_price_move_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum volume multiplier threshold (e.g. 3.0)
+        #[arg(long)]
+        lv_volume_multiplier_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum order concentration threshold (e.g. 0.7)
+        #[arg(long)]
+        lv_order_concentration_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum entry deviation threshold (fraction)
+        #[arg(long)]
+        lv_entry_deviation_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum entry z-score threshold (0 disables z-score entry gate)
+        #[arg(long)]
+        lv_entry_zscore_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum take-profit z-score threshold (0 disables z-score TP)
+        #[arg(long)]
+        lv_take_profit_zscore_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum stop-loss z-score threshold (0 disables z-score SL)
+        #[arg(long)]
+        lv_stop_loss_zscore_threshold: Option<f64>,
+
+        /// Override liquidity-vacuum EMA-band take-profit threshold (fraction, e.g. 0.03)
+        #[arg(long)]
+        lv_take_profit_ema_band_pct: Option<f64>,
+
+        /// Override liquidity-vacuum stop-loss threshold (fraction, e.g. 0.25)
+        #[arg(long)]
+        lv_stop_loss_pct: Option<f64>,
+
+        /// Override liquidity-vacuum minimum edge buffer above fees (fraction)
+        #[arg(long)]
+        lv_min_edge_buffer: Option<f64>,
+
+        /// Override liquidity-vacuum z-score lookback sample size
+        #[arg(long)]
+        lv_zscore_lookback_samples: Option<usize>,
+
+        /// Override liquidity-vacuum max holding seconds (0 disables max-hold exit)
+        #[arg(long)]
+        lv_max_holding_secs: Option<u64>,
+
+        /// Override staggered-arb entry window (seconds after event start; 0 disables)
+        #[arg(long)]
+        sa_entry_after_start_max_secs: Option<u64>,
     },
 
     /// List historical backtest runs
-    BacktestList {
-        #[arg(long)]
-        database_url: Option<String>,
-        #[arg(long, default_value = "20")]
-        limit: usize,
-    },
+    BacktestList(BacktestListArgs),
 
     /// Compare two backtest runs side by side
-    BacktestDiff {
-        run1: String,
-        run2: String,
-        #[arg(long)]
-        database_url: Option<String>,
-    },
+    BacktestDiff(BacktestDiffArgs),
+
+    /// Compare one backtest run against recent live order outcomes
+    LiveBacktestCompare(LiveBacktestCompareArgs),
 
     /// Backfill Binance klines into the database for historical backtesting
     BackfillKlines {
@@ -548,6 +337,52 @@ pub enum StrategyCommands {
         /// Kline interval (default: 1m)
         #[arg(long, default_value = "1m")]
         interval: String,
+
+        /// Database URL (uses DATABASE_URL env var if omitted)
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+
+    /// Backfill PM replay tables from sync_records for backtesting
+    BackfillPmReplayTables {
+        /// Start date (ISO 8601)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// End date (ISO 8601)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Symbols filter (comma-separated)
+        #[arg(long, default_value = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT")]
+        symbols: String,
+
+        /// Synthetic orderbook depth per snapshot side (shares)
+        #[arg(long, default_value = "1000")]
+        synthetic_depth: u64,
+
+        /// Database URL (uses DATABASE_URL env var if omitted)
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+
+    /// Backfill official Polymarket token settlements into pm_token_settlements
+    BackfillPmTokenSettlements {
+        /// Start date (ISO 8601)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// End date (ISO 8601)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Symbols filter (comma-separated)
+        #[arg(long, default_value = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT")]
+        symbols: String,
+
+        /// Max distinct token_ids to refresh from sync_records
+        #[arg(long, default_value = "5000")]
+        limit: usize,
 
         /// Database URL (uses DATABASE_URL env var if omitted)
         #[arg(long)]
@@ -574,134 +409,16 @@ impl StrategyCommands {
                 database_url,
             } => seed_nba_stats(&season, database_url).await,
             Self::NbaComeback { config, dry_run } => run_nba_comeback(config, dry_run).await,
-            Self::Accuracy {
-                lookback_hours,
-                domain,
-                account_id,
-                agent_id,
-                live_only,
-                limit,
-                no_refresh,
-                database_url,
-            } => {
-                report_accuracy_pm_settlement(
-                    lookback_hours,
-                    domain,
-                    account_id,
-                    agent_id,
-                    live_only,
-                    limit,
-                    no_refresh,
-                    database_url,
-                )
-                .await
-            }
-            Self::DirectionalSignalBacktest {
-                lookback_hours,
-                account_id,
-                agent_id,
-                live_only,
-                limit,
-                no_refresh,
-                database_url,
-            } => {
-                run_backtest(
-                    "directional",
-                    StrategyBacktestMode::Settlement,
-                    None,
-                    None,
-                    "BTCUSDT,ETHUSDT,SOLUSDT",
-                    10000.0,
-                    false,
-                    false,
-                    lookback_hours,
-                    account_id,
-                    agent_id,
-                    live_only,
-                    limit,
-                    no_refresh,
-                    false,
-                    None,
-                    database_url,
-                )
-                .await
-            }
-            Self::ExportCryptoLobDataset {
-                lookback_hours,
-                account_id,
-                agent_id,
-                live_only,
-                no_refresh,
-                limit,
-                format,
-                output,
-                database_url,
-            } => {
-                export_crypto_lob_dataset(
-                    lookback_hours,
-                    account_id,
-                    agent_id,
-                    live_only,
-                    no_refresh,
-                    limit,
-                    format,
-                    output,
-                    database_url,
-                )
-                .await
-            }
+            Self::Accuracy(args) => args.run().await,
+            Self::DirectionalSignalBacktest(args) => args.run().await,
+            Self::ExportCryptoLobDataset(args) => args.run().await,
             Self::IntegrityCheck { json, database_url } => {
                 run_integrity_check(json, database_url).await
             }
-            Self::Backtest {
-                name,
-                mode,
-                from,
-                to,
-                symbols,
-                capital,
-                save,
-                json,
-                lookback_hours,
-                account_id,
-                agent_id,
-                live_only,
-                limit,
-                no_refresh,
-                skip_gamma,
-                verify_run,
-                database_url,
-            } => {
-                run_backtest(
-                    &name,
-                    mode,
-                    from,
-                    to,
-                    &symbols,
-                    capital,
-                    save,
-                    json,
-                    lookback_hours,
-                    account_id,
-                    agent_id,
-                    live_only,
-                    limit,
-                    no_refresh,
-                    skip_gamma,
-                    verify_run,
-                    database_url,
-                )
-                .await
-            }
-            Self::BacktestList {
-                database_url,
-                limit,
-            } => run_backtest_list(database_url, limit).await,
-            Self::BacktestDiff {
-                run1,
-                run2,
-                database_url,
-            } => run_backtest_diff(&run1, &run2, database_url).await,
+            Self::Backtest(args) => args.run().await,
+            Self::BacktestList(args) => args.run().await,
+            Self::BacktestDiff(args) => args.run().await,
+            Self::LiveBacktestCompare(args) => args.run().await,
             Self::BackfillKlines {
                 symbols,
                 from,
@@ -709,6 +426,20 @@ impl StrategyCommands {
                 interval,
                 database_url,
             } => backfill_klines(&symbols, &from, &to, &interval, database_url).await,
+            Self::BackfillPmReplayTables {
+                from,
+                to,
+                symbols,
+                synthetic_depth,
+                database_url,
+            } => backfill_pm_replay_tables(from, to, &symbols, synthetic_depth, database_url).await,
+            Self::BackfillPmTokenSettlements {
+                from,
+                to,
+                symbols,
+                limit,
+                database_url,
+            } => backfill_pm_token_settlements(from, to, &symbols, limit, database_url).await,
         }
     }
 }
@@ -732,151 +463,6 @@ fn log_dir() -> PathBuf {
     std::env::var("PLOY_LOG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/opt/ploy/logs"))
-}
-
-/// List all available strategies
-async fn list_strategies() -> Result<()> {
-    let strategies_dir = config_dir().join("strategies");
-
-    println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║  Available Strategies                                         ║\x1b[0m");
-    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
-
-    // Get strategies from factory
-    let available = StrategyFactory::available_strategies();
-
-    println!("  {:<15} {:<12} {}", "NAME", "STATUS", "DESCRIPTION");
-    println!("  {}", "-".repeat(55));
-
-    for strategy_info in &available {
-        let status = get_strategy_status(&strategy_info.name);
-        let status_str = match status {
-            StrategyStatus::Running(_) => "\x1b[32m● running\x1b[0m",
-            StrategyStatus::Stopped => "\x1b[90m○ stopped\x1b[0m",
-            StrategyStatus::Error(_) => "\x1b[31m✗ error\x1b[0m",
-        };
-        println!(
-            "  {:<15} {:<20} {}",
-            strategy_info.name, status_str, strategy_info.description
-        );
-    }
-
-    // Check for custom strategy configs
-    if strategies_dir.exists() {
-        println!("\n  Custom Configs:");
-        println!("  {}", "-".repeat(55));
-
-        if let Ok(entries) = fs::read_dir(&strategies_dir) {
-            let mut found = false;
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map(|e| e == "toml").unwrap_or(false) {
-                    if let Some(stem) = path.file_stem() {
-                        let name = stem.to_string_lossy();
-                        // Skip default configs
-                        if !name.ends_with("_default") {
-                            println!("  {:<15} (config: {})", name, path.display());
-                            found = true;
-                        }
-                    }
-                }
-            }
-            if !found {
-                println!("  \x1b[90m(no custom configs found)\x1b[0m");
-            }
-        }
-    }
-
-    println!("\n  Commands:");
-    println!("  {}", "-".repeat(55));
-    println!("  ploy strategy start <name>     Start a strategy");
-    println!("  ploy strategy stop <name>      Stop a running strategy");
-    println!("  ploy strategy status           Show all strategy status");
-    println!("  ploy strategy logs <name>      View strategy logs\n");
-
-    Ok(())
-}
-
-async fn start_strategy(
-    name: &str,
-    config: Option<PathBuf>,
-    dry_run: bool,
-    foreground: bool,
-) -> Result<()> {
-    info!("Starting strategy: {}", name);
-
-    if !dry_run {
-        let result = crate::safety::direct_live::enforce_live_gate("ploy strategy start");
-        if let Err(ref e) = result {
-            warn!("{e}");
-            println!("\x1b[31m✗ {e}\x1b[0m");
-        }
-        result?;
-    }
-
-    // Check if already running.
-    //
-    // NOTE: when invoked as a systemd service (ExecStart), the unit can appear "active"
-    // while we are starting. In that case, `get_strategy_status()` would detect the unit
-    // and we'd exit immediately, causing a restart loop. Skip the check under systemd.
-    let under_systemd = std::env::var_os("INVOCATION_ID").is_some()
-        || std::env::var_os("SYSTEMD_EXEC_PID").is_some()
-        || std::env::var_os("JOURNAL_STREAM").is_some();
-
-    if !under_systemd {
-        if let StrategyStatus::Running(pid) = get_strategy_status(name) {
-            println!(
-                "\x1b[33m⚠ Strategy '{}' is already running (PID: {})\x1b[0m",
-                name, pid
-            );
-            println!("  Use 'ploy strategy stop {}' first", name);
-            return Ok(());
-        }
-    }
-
-    // Find config file
-    let config_path = config.unwrap_or_else(|| {
-        config_dir()
-            .join("strategies")
-            .join(format!("{}.toml", name))
-    });
-
-    if !config_path.exists() {
-        // Try to use default config
-        let default_config = config_dir()
-            .join("strategies")
-            .join(format!("{}_default.toml", name));
-        if !default_config.exists() {
-            println!("\x1b[33m⚠ No config found for '{}'.\x1b[0m", name);
-            println!("  Creating default config at: {}", config_path.display());
-            create_default_config(name, &config_path)?;
-        }
-    }
-
-    println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║  Starting Strategy: {:<40}║\x1b[0m", name);
-    println!("\x1b[36m╠══════════════════════════════════════════════════════════════╣\x1b[0m");
-    println!(
-        "\x1b[36m║\x1b[0m  Config: {:<51}\x1b[36m║\x1b[0m",
-        config_path.display()
-    );
-    println!(
-        "\x1b[36m║\x1b[0m  Dry Run: {:<50}\x1b[36m║\x1b[0m",
-        if dry_run { "YES" } else { "NO" }
-    );
-    println!(
-        "\x1b[36m║\x1b[0m  Mode: {:<53}\x1b[36m║\x1b[0m",
-        if foreground { "foreground" } else { "daemon" }
-    );
-    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
-
-    if foreground {
-        // Run in foreground - exec directly
-        run_strategy_foreground(name, &config_path, dry_run).await
-    } else {
-        // Run as daemon
-        run_strategy_daemon(name, &config_path, dry_run).await
-    }
 }
 
 /// Run strategy in foreground using StrategyManager
@@ -920,13 +506,25 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
         match Wallet::from_env(POLYGON_CHAIN_ID) {
             Ok(wallet) => {
                 println!("  \x1b[32m✓ Wallet loaded: {:?}\x1b[0m", wallet.address());
-                match PolymarketClient::new_authenticated(
-                    "https://clob.polymarket.com",
-                    wallet,
-                    false, // neg_risk: use standard risk settings
-                )
-                .await
-                {
+                let funder = std::env::var("POLYMARKET_FUNDER").ok();
+                let auth_result = if let Some(ref funder_addr) = funder {
+                    println!("  Using proxy wallet, funder: {}", funder_addr);
+                    PolymarketClient::new_authenticated_proxy(
+                        "https://clob.polymarket.com",
+                        wallet,
+                        funder_addr,
+                        true, // neg_risk: crypto binary options use NegRisk exchange
+                    )
+                    .await
+                } else {
+                    PolymarketClient::new_authenticated(
+                        "https://clob.polymarket.com",
+                        wallet,
+                        true, // neg_risk: crypto binary options use NegRisk exchange
+                    )
+                    .await
+                };
+                match auth_result {
                     Ok(client) => {
                         println!("  \x1b[32m✓ Authenticated with Polymarket CLOB\x1b[0m");
                         Some(Arc::new(OrderExecutor::new(
@@ -1051,6 +649,13 @@ async fn run_strategy_foreground(name: &str, config_path: &PathBuf, dry_run: boo
 
     println!("\x1b[32m✓ Strategy started\x1b[0m");
 
+    #[cfg(feature = "claimer_daemon")]
+    if !dry_run {
+        if let Err(e) = crate::strategy::ensure_account_claimer_daemon().await {
+            warn!("Failed to start account-level auto-claimer daemon: {}", e);
+        }
+    }
+
     // Start data feeds
     println!("  \x1b[36mStarting data feeds...\x1b[0m");
     feed_manager.start().await?;
@@ -1133,6 +738,7 @@ async fn handle_strategy_actions(
                 client_order_id,
                 mut order,
                 priority: _,
+                ..
             } => {
                 if order.client_order_id != client_order_id {
                     warn!(
@@ -1329,18 +935,6 @@ async fn handle_strategy_actions(
                     strategy_id, event.event_type, event.message
                 );
             }
-            StrategyAction::UpdateRisk { level, reason } => {
-                println!(
-                    "  \x1b[35m[{}]\x1b[0m Risk: {:?} - {}",
-                    strategy_id, level, reason
-                );
-            }
-            StrategyAction::SubscribeFeed { feed } => {
-                println!("  \x1b[90m[{}]\x1b[0m Subscribe: {:?}", strategy_id, feed);
-            }
-            StrategyAction::UnsubscribeFeed { feed } => {
-                println!("  \x1b[90m[{}]\x1b[0m Unsubscribe: {:?}", strategy_id, feed);
-            }
         }
     }
 }
@@ -1394,192 +988,6 @@ async fn run_strategy_daemon(name: &str, config_path: &PathBuf, dry_run: bool) -
     Ok(())
 }
 
-/// Stop a running strategy
-async fn stop_strategy(name: &str, force: bool) -> Result<()> {
-    let pid_file = run_dir().join(format!("{}.pid", name));
-
-    if !pid_file.exists() {
-        println!("\x1b[33m⚠ Strategy '{}' is not running\x1b[0m", name);
-        return Ok(());
-    }
-
-    let pid: u32 = fs::read_to_string(&pid_file)?
-        .trim()
-        .parse()
-        .context("Invalid PID file")?;
-
-    let signal = if force { "SIGKILL" } else { "SIGTERM" };
-
-    println!(
-        "Stopping strategy '{}' (PID: {}) with {}...",
-        name, pid, signal
-    );
-
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::{kill, Signal};
-        use nix::unistd::Pid;
-
-        let sig = if force {
-            Signal::SIGKILL
-        } else {
-            Signal::SIGTERM
-        };
-        match kill(Pid::from_raw(pid as i32), sig) {
-            Ok(_) => {
-                // Remove PID file
-                let _ = fs::remove_file(&pid_file);
-                println!("\x1b[32m✓ Strategy '{}' stopped\x1b[0m", name);
-            }
-            Err(e) => {
-                println!("\x1b[31m✗ Failed to stop: {}\x1b[0m", e);
-                // Clean up stale PID file
-                let _ = fs::remove_file(&pid_file);
-            }
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        println!("\x1b[33m⚠ Signal handling not supported on this platform\x1b[0m");
-        println!("  Manually kill process with PID: {}", pid);
-    }
-
-    Ok(())
-}
-
-/// Show strategy status
-async fn show_status(name: Option<&str>) -> Result<()> {
-    println!("\n{}", "=".repeat(60));
-    println!("  STRATEGY STATUS");
-    println!("{}\n", "=".repeat(60));
-
-    let strategies = if let Some(n) = name {
-        vec![n.to_string()]
-    } else {
-        vec![
-            "momentum".into(),
-            "split_arb".into(),
-            "pattern_memory".into(),
-            "sports".into(),
-            "politics".into(),
-        ]
-    };
-
-    println!(
-        "  {:<15} {:<12} {:<10} {}",
-        "NAME", "STATUS", "PID", "UPTIME"
-    );
-    println!("  {}", "-".repeat(55));
-
-    for strat_name in strategies {
-        let status = get_strategy_status(&strat_name);
-        match status {
-            StrategyStatus::Running(pid) => {
-                let pid_str = if pid == 0 {
-                    "-".to_string()
-                } else {
-                    pid.to_string()
-                };
-                let uptime = if pid == 0 {
-                    "unknown".into()
-                } else {
-                    get_process_uptime(pid).unwrap_or_else(|| "unknown".into())
-                };
-                println!(
-                    "  {:<15} \x1b[32m{:<12}\x1b[0m {:<10} {}",
-                    strat_name, "● running", pid_str, uptime
-                );
-            }
-            StrategyStatus::Stopped => {
-                println!(
-                    "  {:<15} \x1b[90m{:<12}\x1b[0m {:<10} {}",
-                    strat_name, "○ stopped", "-", "-"
-                );
-            }
-            StrategyStatus::Error(e) => {
-                println!(
-                    "  {:<15} \x1b[31m{:<12}\x1b[0m {:<10} {}",
-                    strat_name, "✗ error", "-", e
-                );
-            }
-        }
-    }
-
-    println!("\n{}", "=".repeat(60));
-
-    Ok(())
-}
-
-/// Show strategy logs
-async fn show_logs(name: &str, tail: usize, follow: bool) -> Result<()> {
-    let log_file = log_dir().join(format!("{}.log", name));
-
-    if !log_file.exists() {
-        println!("\x1b[33m⚠ No log file found for '{}'\x1b[0m", name);
-        println!("  Expected: {}", log_file.display());
-        return Ok(());
-    }
-
-    if follow {
-        // Use tail -f
-        let mut child = Command::new("tail")
-            .arg("-f")
-            .arg("-n")
-            .arg(tail.to_string())
-            .arg(&log_file)
-            .spawn()
-            .context("Failed to run tail")?;
-
-        child.wait()?;
-    } else {
-        // Just show last N lines
-        let output = Command::new("tail")
-            .arg("-n")
-            .arg(tail.to_string())
-            .arg(&log_file)
-            .output()
-            .context("Failed to run tail")?;
-
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-    }
-
-    Ok(())
-}
-
-/// Reload strategy configuration
-async fn reload_strategy(name: &str) -> Result<()> {
-    let pid_file = run_dir().join(format!("{}.pid", name));
-
-    if !pid_file.exists() {
-        println!("\x1b[33m⚠ Strategy '{}' is not running\x1b[0m", name);
-        return Ok(());
-    }
-
-    let pid: u32 = fs::read_to_string(&pid_file)?
-        .trim()
-        .parse()
-        .context("Invalid PID file")?;
-
-    println!("Reloading config for strategy '{}' (PID: {})...", name, pid);
-
-    #[cfg(unix)]
-    {
-        use nix::sys::signal::{kill, Signal};
-        use nix::unistd::Pid;
-
-        match kill(Pid::from_raw(pid as i32), Signal::SIGHUP) {
-            Ok(_) => {
-                println!("\x1b[32m✓ Reload signal sent\x1b[0m");
-            }
-            Err(e) => {
-                println!("\x1b[31m✗ Failed to send reload signal: {}\x1b[0m", e);
-            }
-        }
-    }
-
-    Ok(())
-}
 
 // === Helper Types and Functions ===
 
@@ -1720,673 +1128,6 @@ fn create_default_config(name: &str, path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Seed NBA team comeback stats into the database
-async fn seed_nba_stats(season: &str, database_url: Option<String>) -> Result<()> {
-    use crate::adapters::PostgresStore;
-    use crate::strategy::nba_comeback::nba_data_collector::TeamStats;
-
-    let db_url = database_url.unwrap_or_else(|| {
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
-    });
-
-    println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!(
-        "\x1b[36m║  NBA Team Stats Seeder (season: {:<27})║\x1b[0m",
-        season
-    );
-    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
-
-    let store = PostgresStore::new(&db_url, 5)
-        .await
-        .context("Failed to connect to database")?;
-
-    // Pre-computed comeback rates for all 30 NBA teams (2025-26 season estimates)
-    // Format: (name, abbrev, comeback_5pt, comeback_10pt, comeback_15pt, q4_avg_pts, elo)
-    let teams: &[(&str, &str, f64, f64, f64, f64, f64)] = &[
-        ("Atlanta Hawks", "ATL", 0.38, 0.18, 0.06, 28.5, 1490.0),
-        ("Boston Celtics", "BOS", 0.52, 0.30, 0.14, 30.2, 1620.0),
-        ("Brooklyn Nets", "BKN", 0.32, 0.14, 0.04, 27.0, 1430.0),
-        ("Charlotte Hornets", "CHA", 0.30, 0.12, 0.03, 26.8, 1420.0),
-        ("Chicago Bulls", "CHI", 0.35, 0.16, 0.05, 27.5, 1470.0),
-        ("Cleveland Cavaliers", "CLE", 0.48, 0.27, 0.12, 29.8, 1590.0),
-        ("Dallas Mavericks", "DAL", 0.44, 0.24, 0.10, 29.2, 1560.0),
-        ("Denver Nuggets", "DEN", 0.46, 0.26, 0.11, 29.5, 1580.0),
-        ("Detroit Pistons", "DET", 0.28, 0.10, 0.03, 26.2, 1400.0),
-        (
-            "Golden State Warriors",
-            "GSW",
-            0.42,
-            0.22,
-            0.09,
-            28.8,
-            1540.0,
-        ),
-        ("Houston Rockets", "HOU", 0.40, 0.20, 0.08, 28.2, 1510.0),
-        ("Indiana Pacers", "IND", 0.43, 0.23, 0.10, 29.5, 1530.0),
-        ("LA Clippers", "LAC", 0.39, 0.19, 0.07, 28.0, 1500.0),
-        ("Los Angeles Lakers", "LAL", 0.41, 0.21, 0.08, 28.5, 1520.0),
-        ("Memphis Grizzlies", "MEM", 0.42, 0.22, 0.09, 28.8, 1530.0),
-        ("Miami Heat", "MIA", 0.40, 0.20, 0.08, 28.0, 1510.0),
-        ("Milwaukee Bucks", "MIL", 0.45, 0.25, 0.11, 29.5, 1570.0),
-        (
-            "Minnesota Timberwolves",
-            "MIN",
-            0.46,
-            0.26,
-            0.11,
-            29.2,
-            1580.0,
-        ),
-        (
-            "New Orleans Pelicans",
-            "NOP",
-            0.36,
-            0.17,
-            0.06,
-            27.8,
-            1480.0,
-        ),
-        ("New York Knicks", "NYK", 0.44, 0.24, 0.10, 29.0, 1560.0),
-        (
-            "Oklahoma City Thunder",
-            "OKC",
-            0.50,
-            0.29,
-            0.13,
-            30.0,
-            1610.0,
-        ),
-        ("Orlando Magic", "ORL", 0.37, 0.18, 0.07, 27.5, 1490.0),
-        ("Philadelphia 76ers", "PHI", 0.41, 0.21, 0.08, 28.5, 1520.0),
-        ("Phoenix Suns", "PHX", 0.43, 0.23, 0.09, 29.0, 1540.0),
-        (
-            "Portland Trail Blazers",
-            "POR",
-            0.29,
-            0.11,
-            0.03,
-            26.5,
-            1410.0,
-        ),
-        ("Sacramento Kings", "SAC", 0.39, 0.19, 0.07, 28.2, 1500.0),
-        ("San Antonio Spurs", "SAS", 0.31, 0.13, 0.04, 26.8, 1430.0),
-        ("Toronto Raptors", "TOR", 0.33, 0.15, 0.05, 27.2, 1450.0),
-        ("Utah Jazz", "UTA", 0.30, 0.12, 0.03, 26.5, 1420.0),
-        ("Washington Wizards", "WAS", 0.27, 0.09, 0.02, 25.8, 1390.0),
-    ];
-
-    let mut count = 0;
-    for &(name, abbrev, cr5, cr10, cr15, q4_avg, elo) in teams {
-        let stats = TeamStats {
-            team_name: name.to_string(),
-            season: season.to_string(),
-            wins: 0,
-            losses: 0,
-            win_rate: 0.0,
-            avg_points: 0.0,
-            q1_avg_points: 0.0,
-            q2_avg_points: 0.0,
-            q3_avg_points: 0.0,
-            q4_avg_points: q4_avg,
-            comeback_rate_5pt: cr5,
-            comeback_rate_10pt: cr10,
-            comeback_rate_15pt: cr15,
-            elo_rating: Some(elo),
-            offensive_rating: None,
-            defensive_rating: None,
-        };
-
-        store
-            .upsert_nba_team_stats(name, abbrev, season, &stats)
-            .await
-            .context(format!("Failed to upsert {}", abbrev))?;
-
-        println!(
-            "  \x1b[32m✓\x1b[0m {} ({}) — 5pt:{:.0}% 10pt:{:.0}% 15pt:{:.0}%",
-            name,
-            abbrev,
-            cr5 * 100.0,
-            cr10 * 100.0,
-            cr15 * 100.0
-        );
-        count += 1;
-    }
-
-    println!(
-        "\n\x1b[32m✓ Seeded {} teams for season {}\x1b[0m\n",
-        count, season
-    );
-    Ok(())
-}
-
-async fn report_accuracy_pm_settlement(
-    lookback_hours: u64,
-    domain: Option<String>,
-    account_id: Option<String>,
-    agent_id: Option<String>,
-    live_only: bool,
-    limit: usize,
-    no_refresh: bool,
-    database_url: Option<String>,
-) -> Result<()> {
-    use crate::adapters::PostgresStore;
-    use anyhow::bail;
-    use chrono::{DateTime, Utc};
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
-    use sqlx::Row;
-    use std::collections::{BTreeMap, HashMap, HashSet};
-
-    let account_id = account_id.or_else(|| std::env::var("PLOY_ACCOUNT__ID").ok());
-
-    let db_url = database_url
-        .or_else(|| std::env::var("DATABASE_URL").ok())
-        .or_else(|| std::env::var("PLOY_DATABASE__URL").ok())
-        .unwrap_or_else(|| "postgres://localhost/ploy".to_string());
-
-    let domain_norm = domain
-        .as_deref()
-        .map(|d| d.trim().to_lowercase())
-        .filter(|d| !d.is_empty());
-    if let Some(ref d) = domain_norm {
-        if !matches!(d.as_str(), "crypto" | "sports" | "politics") {
-            bail!("invalid --domain: {d} (expected crypto|sports|politics)");
-        }
-    }
-
-    println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║  Accuracy Report (Polymarket Settlement)                      ║\x1b[0m");
-    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
-    println!(
-        "  lookback_hours={} domain={} account_id={} agent_id={} live_only={} limit={} refresh={}",
-        lookback_hours,
-        domain_norm.as_deref().unwrap_or("all"),
-        account_id.as_deref().unwrap_or("all"),
-        agent_id.as_deref().unwrap_or("all"),
-        live_only,
-        limit,
-        !no_refresh
-    );
-
-    let store = PostgresStore::new(&db_url, 5)
-        .await
-        .context("Failed to connect to database")?;
-
-    crate::coordinator::bootstrap::ensure_pm_token_settlements_table(store.pool())
-        .await
-        .context("Failed to ensure pm_token_settlements table")?;
-
-    // Pull latest entry intents within lookback window.
-    //
-    // NOTE:
-    // - Some strategies express "DOWN" exposure via sells (short) rather than buys,
-    //   so we can't filter to `is_buy = TRUE`.
-    // - Prefer the explicit signal_type suffix when present.
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            executed_at,
-            intent_id,
-            agent_id,
-            domain,
-            market_slug,
-            token_id,
-            market_side,
-            is_buy,
-            limit_price,
-            dry_run,
-            filled_shares,
-            metadata
-        FROM agent_order_executions
-        WHERE executed_at >= NOW() - ($1::bigint * INTERVAL '1 hour')
-          AND filled_shares > 0
-          AND (
-                (metadata ? 'signal_type' AND RIGHT(metadata->>'signal_type', 6) = '_entry')
-             OR (NOT (metadata ? 'signal_type') AND is_buy = TRUE)
-          )
-          AND ($2::text IS NULL OR LOWER(domain) = $2)
-          AND ($3::text IS NULL OR account_id = $3)
-          AND ($4::text IS NULL OR agent_id = $4)
-          AND ($5::bool = FALSE OR dry_run = FALSE)
-        ORDER BY executed_at DESC
-        LIMIT $6
-        "#,
-    )
-    .bind(lookback_hours as i64)
-    .bind(domain_norm.as_deref())
-    .bind(account_id.as_deref())
-    .bind(agent_id.as_deref())
-    .bind(live_only)
-    .bind(limit as i64)
-    .fetch_all(store.pool())
-    .await
-    .context("Failed to query agent_order_executions")?;
-
-    if rows.is_empty() {
-        println!("\n  No filled entry intents found in this window.\n");
-        return Ok(());
-    }
-
-    let mut token_ids: Vec<String> = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let token_id: String = row.get("token_id");
-        token_ids.push(token_id);
-    }
-    token_ids.sort();
-    token_ids.dedup();
-
-    if !no_refresh {
-        let existing = sqlx::query(
-            r#"
-            SELECT token_id, resolved
-            FROM pm_token_settlements
-            WHERE token_id = ANY($1)
-            "#,
-        )
-        .bind(&token_ids)
-        .fetch_all(store.pool())
-        .await
-        .context("Failed to query pm_token_settlements")?;
-
-        let mut resolved_map: HashMap<String, bool> = HashMap::new();
-        for row in existing {
-            let token_id: String = row.get("token_id");
-            let resolved: bool = row.get("resolved");
-            resolved_map.insert(token_id, resolved);
-        }
-
-        let mut to_refresh: Vec<String> = token_ids
-            .iter()
-            .filter(|t| !resolved_map.get(*t).copied().unwrap_or(false))
-            .cloned()
-            .collect();
-
-        // Avoid hammering Gamma on large windows; refresh a bounded set.
-        const MAX_REFRESH: usize = 500;
-        if to_refresh.len() > MAX_REFRESH {
-            to_refresh.truncate(MAX_REFRESH);
-        }
-
-        if !to_refresh.is_empty() {
-            println!(
-                "\n  Refreshing settlement status for {} token(s) via Gamma...",
-                to_refresh.len()
-            );
-        }
-
-        let pm = PolymarketClient::new("https://clob.polymarket.com", true)
-            .context("Failed to create Polymarket client")?;
-
-        let mut refreshed_markets = 0usize;
-        let mut refreshed_tokens = 0usize;
-        let mut seen_conditions: HashSet<String> = HashSet::new();
-
-        for token_id in to_refresh {
-            let market = match pm.get_gamma_market_by_token_id(&token_id).await {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(token_id = %token_id, error = %e, "failed to fetch gamma market for token");
-                    continue;
-                }
-            };
-
-            if let Some(ref cond) = market.condition_id {
-                let cond_str = cond.to_string();
-                if !seen_conditions.insert(cond_str) {
-                    continue;
-                }
-            }
-
-            let clob_ids: Vec<String> = market
-                .clob_token_ids
-                .as_ref()
-                .map(|ids| ids.iter().map(|id| id.to_string()).collect())
-                .unwrap_or_default();
-            let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
-            let price_strs: Vec<String> = market
-                .outcome_prices
-                .as_ref()
-                .map(|ps| ps.iter().map(|d| d.to_string()).collect())
-                .unwrap_or_default();
-
-            if clob_ids.is_empty() || price_strs.is_empty() {
-                tracing::debug!(
-                    token_id = %token_id,
-                    market_id = %market.id,
-                    "gamma market missing clob_token_ids or outcome_prices; skipping"
-                );
-                continue;
-            }
-
-            let mut prices: Vec<Decimal> = Vec::new();
-            for s in &price_strs {
-                if let Ok(p) = s.parse::<Decimal>() {
-                    prices.push(p);
-                }
-            }
-
-            // Treat as "officially settled" only once the market is closed and prices are 1/0.
-            let resolved = market.closed.unwrap_or(false) && is_market_resolved(&prices);
-            let resolved_at: Option<DateTime<Utc>> = resolved.then(|| Utc::now());
-            let raw_market = serde_json::to_value(&market).unwrap_or(serde_json::json!({}));
-
-            let market_slug = market.slug.clone();
-            let condition_id = market.condition_id.map(|b| b.to_string());
-
-            for (i, tid) in clob_ids.iter().enumerate() {
-                let outcome = outcomes.get(i).cloned();
-                let settled_price = price_strs.get(i).and_then(|s| s.parse::<Decimal>().ok());
-
-                sqlx::query(
-                    r#"
-                    INSERT INTO pm_token_settlements (
-                        token_id,
-                        condition_id,
-                        market_id,
-                        market_slug,
-                        outcome,
-                        settled_price,
-                        resolved,
-                        resolved_at,
-                        fetched_at,
-                        raw_market
-                    )
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9)
-                    ON CONFLICT (token_id) DO UPDATE SET
-                        condition_id = EXCLUDED.condition_id,
-                        market_id = EXCLUDED.market_id,
-                        market_slug = EXCLUDED.market_slug,
-                        outcome = EXCLUDED.outcome,
-                        settled_price = EXCLUDED.settled_price,
-                        resolved = EXCLUDED.resolved,
-                        resolved_at = COALESCE(pm_token_settlements.resolved_at, EXCLUDED.resolved_at),
-                        fetched_at = NOW(),
-                        raw_market = EXCLUDED.raw_market
-                    "#,
-                )
-                .bind(tid)
-                .bind(condition_id.as_deref())
-                .bind(&market.id)
-                .bind(market_slug.as_deref())
-                .bind(outcome.as_deref())
-                .bind(settled_price)
-                .bind(resolved)
-                .bind(resolved_at)
-                .bind(sqlx::types::Json(raw_market.clone()))
-                .execute(store.pool())
-                .await
-                .context("Failed to upsert pm_token_settlements row")?;
-
-                refreshed_tokens += 1;
-            }
-
-            refreshed_markets += 1;
-        }
-
-        if refreshed_markets > 0 {
-            println!(
-                "  ✓ Refreshed {} market(s), {} token rows",
-                refreshed_markets, refreshed_tokens
-            );
-        }
-    }
-
-    // Final join for scoring.
-    let scored_rows = sqlx::query(
-        r#"
-        SELECT
-            e.executed_at,
-            e.intent_id,
-            e.agent_id,
-            e.domain,
-            e.market_slug,
-            e.token_id,
-            e.market_side,
-            e.is_buy,
-            e.limit_price,
-            e.dry_run,
-            e.metadata,
-            s.resolved as pm_resolved,
-            s.settled_price as pm_settled_price,
-            s.outcome as pm_outcome
-        FROM agent_order_executions e
-        LEFT JOIN pm_token_settlements s
-          ON s.token_id = e.token_id
-        WHERE e.executed_at >= NOW() - ($1::bigint * INTERVAL '1 hour')
-          AND e.filled_shares > 0
-          AND (
-                (e.metadata ? 'signal_type' AND RIGHT(e.metadata->>'signal_type', 6) = '_entry')
-             OR (NOT (e.metadata ? 'signal_type') AND e.is_buy = TRUE)
-          )
-          AND ($2::text IS NULL OR LOWER(e.domain) = $2)
-          AND ($3::text IS NULL OR e.account_id = $3)
-          AND ($4::text IS NULL OR e.agent_id = $4)
-          AND ($5::bool = FALSE OR e.dry_run = FALSE)
-        ORDER BY e.executed_at DESC
-        LIMIT $6
-        "#,
-    )
-    .bind(lookback_hours as i64)
-    .bind(domain_norm.as_deref())
-    .bind(account_id.as_deref())
-    .bind(agent_id.as_deref())
-    .bind(live_only)
-    .bind(limit as i64)
-    .fetch_all(store.pool())
-    .await
-    .context("Failed to query joined accuracy rows")?;
-
-    let mut total = 0usize;
-    let mut scored = 0usize;
-    let mut wins = 0usize;
-    let mut pending = 0usize;
-    let mut by_agent: BTreeMap<String, (usize, usize)> = BTreeMap::new(); // scored, wins
-
-    #[derive(Debug, Clone, Copy, Default)]
-    struct PredAgg {
-        n: usize,
-        correct: usize,
-        brier_sum: f64,
-        logloss_sum: f64,
-    }
-
-    let mut pred_total = 0usize;
-    let mut pred_correct = 0usize;
-    let mut pred_brier_sum = 0.0_f64;
-    let mut pred_logloss_sum = 0.0_f64;
-    let mut pred_by_agent: BTreeMap<String, PredAgg> = BTreeMap::new();
-
-    for row in &scored_rows {
-        total += 1;
-        let resolved: Option<bool> = row.try_get("pm_resolved").ok();
-        let settled_price: Option<Decimal> = row.try_get("pm_settled_price").ok();
-        let is_resolved = resolved.unwrap_or(false) && settled_price.is_some();
-
-        if !is_resolved {
-            pending += 1;
-            continue;
-        }
-
-        scored += 1;
-        let is_buy: bool = row.get("is_buy");
-        let sp = settled_price.unwrap_or(Decimal::ZERO);
-        let won = if is_buy {
-            sp > dec!(0.5)
-        } else {
-            sp < dec!(0.5)
-        };
-        if won {
-            wins += 1;
-        }
-
-        let agent: String = row.get("agent_id");
-        let entry = by_agent.entry(agent).or_insert((0, 0));
-        entry.0 += 1;
-        if won {
-            entry.1 += 1;
-        }
-
-        // Optional: prediction scoring for strategies that log p_up.
-        // We score p_up against official settlement as y_up in {0,1}.
-        let meta: serde_json::Value = row.try_get("metadata").unwrap_or(serde_json::Value::Null);
-        let p_up_opt = meta
-            .get("p_up")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|p| p.is_finite() && (0.0..=1.0).contains(p));
-
-        if let Some(p_up) = p_up_opt {
-            let market_side: String = row.get("market_side");
-            let y_up: f64 = match market_side.as_str() {
-                "UP" => {
-                    if sp > dec!(0.5) {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
-                "DOWN" => {
-                    if sp > dec!(0.5) {
-                        0.0
-                    } else {
-                        1.0
-                    }
-                }
-                _ => continue,
-            };
-
-            let pred_label_up = p_up >= 0.5;
-            let y_label_up = y_up >= 0.5;
-            let correct = pred_label_up == y_label_up;
-
-            let brier = (p_up - y_up).powi(2);
-            let p = p_up.clamp(1e-6, 1.0 - 1e-6);
-            let logloss = -(y_up * p.ln() + (1.0 - y_up) * (1.0 - p).ln());
-
-            pred_total += 1;
-            if correct {
-                pred_correct += 1;
-            }
-            pred_brier_sum += brier;
-            pred_logloss_sum += logloss;
-
-            let agg = pred_by_agent.entry(row.get("agent_id")).or_default();
-            agg.n += 1;
-            if correct {
-                agg.correct += 1;
-            }
-            agg.brier_sum += brier;
-            agg.logloss_sum += logloss;
-        }
-    }
-
-    let losses = scored.saturating_sub(wins);
-    let acc = if scored > 0 {
-        100.0 * (wins as f64) / (scored as f64)
-    } else {
-        0.0
-    };
-
-    println!("\n  Summary:");
-    println!("  - intents_total:    {}", total);
-    println!("  - intents_scored:   {}", scored);
-    println!("  - wins:             {}", wins);
-    println!("  - losses:           {}", losses);
-    println!("  - pending:          {}", pending);
-    println!("  - accuracy:         {:.2}%", acc);
-
-    if !by_agent.is_empty() {
-        println!("\n  By agent (scored, wins, accuracy):");
-        for (agent, (a_scored, a_wins)) in by_agent.iter() {
-            let a_acc = if *a_scored > 0 {
-                100.0 * (*a_wins as f64) / (*a_scored as f64)
-            } else {
-                0.0
-            };
-            println!(
-                "  - {:<20} scored={:<5} wins={:<5} acc={:.2}%",
-                agent, a_scored, a_wins, a_acc
-            );
-        }
-    }
-
-    if pred_total > 0 {
-        let pred_acc = 100.0 * (pred_correct as f64) / (pred_total as f64);
-        let brier = pred_brier_sum / (pred_total as f64);
-        let logloss = pred_logloss_sum / (pred_total as f64);
-        println!("\n  Prediction metrics (p_up vs settlement y_up):");
-        println!("  - preds_scored:      {}", pred_total);
-        println!("  - preds_acc@0.5:     {:.2}%", pred_acc);
-        println!("  - brier_score:       {:.6}", brier);
-        println!("  - log_loss:          {:.6}", logloss);
-
-        if !pred_by_agent.is_empty() {
-            println!("\n  Prediction by agent (n, acc@0.5, brier, logloss):");
-            for (agent, agg) in pred_by_agent.iter() {
-                if agg.n == 0 {
-                    continue;
-                }
-                let a_acc = 100.0 * (agg.correct as f64) / (agg.n as f64);
-                let a_brier = agg.brier_sum / (agg.n as f64);
-                let a_ll = agg.logloss_sum / (agg.n as f64);
-                println!(
-                    "  - {:<20} n={:<5} acc={:>6.2}% brier={:.6} ll={:.6}",
-                    agent, agg.n, a_acc, a_brier, a_ll
-                );
-            }
-        }
-    }
-
-    println!("\n  Latest intents:");
-    println!("  Time (UTC)          Agent              Side  Dir   Entry  Settled Outcome        Result  Intent");
-    println!("  ------------------  ------------------  ----  ----  -----  ------ -------------  ------  ------------------------------------");
-
-    for row in &scored_rows {
-        let executed_at: DateTime<Utc> = row.get("executed_at");
-        let agent: String = row.get("agent_id");
-        let side: String = row.get("market_side");
-        let is_buy: bool = row.get("is_buy");
-        let entry_price: Decimal = row.get("limit_price");
-        let intent_id: uuid::Uuid = row.get("intent_id");
-
-        let resolved: Option<bool> = row.try_get("pm_resolved").ok();
-        let settled_price: Option<Decimal> = row.try_get("pm_settled_price").ok();
-        let outcome: Option<String> = row.try_get("pm_outcome").ok();
-
-        let (settled_str, outcome_str, result_str) =
-            if resolved.unwrap_or(false) && settled_price.is_some() {
-                let sp = settled_price.unwrap_or(Decimal::ZERO);
-                let won = if is_buy {
-                    sp > dec!(0.5)
-                } else {
-                    sp < dec!(0.5)
-                };
-                (
-                    format!("{:.3}", sp),
-                    outcome.unwrap_or_else(|| "-".to_string()),
-                    if won { "WIN" } else { "LOSE" }.to_string(),
-                )
-            } else {
-                ("-".to_string(), "-".to_string(), "PENDING".to_string())
-            };
-
-        println!(
-            "  {}  {:<18}  {:<4}  {:<4}  {:>5.1}¢  {:>6} {:<13}  {:<6}  {}",
-            executed_at.format("%Y-%m-%d %H:%M"),
-            agent,
-            side,
-            if is_buy { "BUY" } else { "SELL" },
-            entry_price * dec!(100),
-            settled_str,
-            outcome_str,
-            result_str,
-            intent_id
-        );
-    }
-
-    println!();
-    Ok(())
-}
 
 async fn backtest_directional_signals_pm_settlement(
     lookback_hours: u64,
@@ -2796,457 +1537,6 @@ async fn backtest_directional_signals_pm_settlement(
     Ok(())
 }
 
-async fn export_crypto_lob_dataset(
-    lookback_hours: u64,
-    account_id: Option<String>,
-    agent_id: Option<String>,
-    live_only: bool,
-    no_refresh: bool,
-    limit: usize,
-    format: CryptoLobDatasetFormat,
-    output: Option<PathBuf>,
-    database_url: Option<String>,
-) -> Result<()> {
-    use crate::adapters::PostgresStore;
-    use anyhow::bail;
-    use chrono::{DateTime, Utc};
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
-    use sqlx::Row;
-    use std::collections::{HashMap, HashSet};
-
-    let db_url = database_url
-        .or_else(|| std::env::var("DATABASE_URL").ok())
-        .unwrap_or_else(|| "postgres://localhost/ploy".to_string());
-
-    let output: PathBuf = output.unwrap_or_else(|| match format {
-        CryptoLobDatasetFormat::Csv => PathBuf::from("./data/crypto_lob_dataset.csv"),
-        CryptoLobDatasetFormat::Parquet => PathBuf::from("./data/crypto_lob_dataset.parquet"),
-    });
-
-    println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║  Export Dataset (crypto LOB)                                  ║\x1b[0m");
-    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
-    println!(
-        "  lookback_hours={} account_id={} agent_id={} live_only={} limit={} refresh={} format={:?} output={}",
-        lookback_hours,
-        account_id.as_deref().unwrap_or("all"),
-        agent_id.as_deref().unwrap_or("all"),
-        live_only,
-        limit,
-        !no_refresh,
-        format,
-        output.display()
-    );
-
-    let store = PostgresStore::new(&db_url, 5)
-        .await
-        .context("Failed to connect to database")?;
-
-    crate::coordinator::bootstrap::ensure_pm_token_settlements_table(store.pool())
-        .await
-        .context("Failed to ensure pm_token_settlements table")?;
-
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            executed_at,
-            intent_id,
-            agent_id,
-            domain,
-            market_slug,
-            token_id,
-            market_side,
-            is_buy,
-            limit_price,
-            dry_run,
-            filled_shares,
-            metadata
-        FROM agent_order_executions
-        WHERE executed_at >= NOW() - ($1::bigint * INTERVAL '1 hour')
-          AND filled_shares > 0
-          AND (
-                (metadata ? 'signal_type' AND RIGHT(metadata->>'signal_type', 6) = '_entry')
-             OR (NOT (metadata ? 'signal_type') AND is_buy = TRUE)
-          )
-          AND LOWER(domain) = 'crypto'
-          AND ($2::text IS NULL OR account_id = $2)
-          AND ($3::text IS NULL OR agent_id = $3)
-          AND ($4::bool = FALSE OR dry_run = FALSE)
-        ORDER BY executed_at DESC
-        LIMIT $5
-        "#,
-    )
-    .bind(lookback_hours as i64)
-    .bind(account_id.as_deref())
-    .bind(agent_id.as_deref())
-    .bind(live_only)
-    .bind(limit as i64)
-    .fetch_all(store.pool())
-    .await
-    .context("Failed to query agent_order_executions")?;
-
-    if rows.is_empty() {
-        println!("\n  No filled entry intents found in this window.\n");
-        return Ok(());
-    }
-
-    let mut token_ids: Vec<String> = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let token_id: String = row.get("token_id");
-        token_ids.push(token_id);
-    }
-    token_ids.sort();
-    token_ids.dedup();
-
-    if !no_refresh {
-        let existing = sqlx::query(
-            r#"
-            SELECT token_id, resolved
-            FROM pm_token_settlements
-            WHERE token_id = ANY($1)
-            "#,
-        )
-        .bind(&token_ids)
-        .fetch_all(store.pool())
-        .await
-        .context("Failed to query pm_token_settlements")?;
-
-        let mut resolved_map: HashMap<String, bool> = HashMap::new();
-        for row in existing {
-            let token_id: String = row.get("token_id");
-            let resolved: bool = row.get("resolved");
-            resolved_map.insert(token_id, resolved);
-        }
-
-        let mut to_refresh: Vec<String> = token_ids
-            .iter()
-            .filter(|t| !resolved_map.get(*t).copied().unwrap_or(false))
-            .cloned()
-            .collect();
-
-        const MAX_REFRESH: usize = 500;
-        if to_refresh.len() > MAX_REFRESH {
-            to_refresh.truncate(MAX_REFRESH);
-        }
-
-        if !to_refresh.is_empty() {
-            println!(
-                "\n  Refreshing settlement status for {} token(s) via Gamma...",
-                to_refresh.len()
-            );
-        }
-
-        let pm = PolymarketClient::new("https://clob.polymarket.com", true)
-            .context("Failed to create Polymarket client")?;
-
-        let mut refreshed_markets = 0usize;
-        let mut refreshed_tokens = 0usize;
-        let mut seen_conditions: HashSet<String> = HashSet::new();
-
-        for token_id in to_refresh {
-            let market = match pm.get_gamma_market_by_token_id(&token_id).await {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(token_id = %token_id, error = %e, "failed to fetch gamma market for token");
-                    continue;
-                }
-            };
-
-            if let Some(ref cond) = market.condition_id {
-                let cond_str = cond.to_string();
-                if !seen_conditions.insert(cond_str) {
-                    continue;
-                }
-            }
-
-            let clob_ids: Vec<String> = market
-                .clob_token_ids
-                .as_ref()
-                .map(|ids| ids.iter().map(|id| id.to_string()).collect())
-                .unwrap_or_default();
-            let outcomes: Vec<String> = market.outcomes.clone().unwrap_or_default();
-            let price_strs: Vec<String> = market
-                .outcome_prices
-                .as_ref()
-                .map(|ps| ps.iter().map(|d| d.to_string()).collect())
-                .unwrap_or_default();
-
-            if clob_ids.is_empty() || price_strs.is_empty() {
-                tracing::debug!(
-                    token_id = %token_id,
-                    market_id = %market.id,
-                    "gamma market missing clob_token_ids or outcome_prices; skipping"
-                );
-                continue;
-            }
-
-            let mut prices: Vec<Decimal> = Vec::new();
-            for s in &price_strs {
-                if let Ok(p) = s.parse::<Decimal>() {
-                    prices.push(p);
-                }
-            }
-
-            let resolved = market.closed.unwrap_or(false) && is_market_resolved(&prices);
-            let resolved_at: Option<DateTime<Utc>> = resolved.then(|| Utc::now());
-            let raw_market = serde_json::to_value(&market).unwrap_or(serde_json::json!({}));
-
-            let market_slug = market.slug.clone();
-            let condition_id = market.condition_id.map(|b| b.to_string());
-
-            for (i, tid) in clob_ids.iter().enumerate() {
-                let outcome = outcomes.get(i).cloned();
-                let settled_price = price_strs.get(i).and_then(|s| s.parse::<Decimal>().ok());
-
-                sqlx::query(
-                    r#"
-                    INSERT INTO pm_token_settlements (
-                        token_id,
-                        condition_id,
-                        market_id,
-                        market_slug,
-                        outcome,
-                        settled_price,
-                        resolved,
-                        resolved_at,
-                        fetched_at,
-                        raw_market
-                    )
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9)
-                    ON CONFLICT (token_id) DO UPDATE SET
-                        condition_id = EXCLUDED.condition_id,
-                        market_id = EXCLUDED.market_id,
-                        market_slug = EXCLUDED.market_slug,
-                        outcome = EXCLUDED.outcome,
-                        settled_price = EXCLUDED.settled_price,
-                        resolved = EXCLUDED.resolved,
-                        resolved_at = COALESCE(pm_token_settlements.resolved_at, EXCLUDED.resolved_at),
-                        fetched_at = NOW(),
-                        raw_market = EXCLUDED.raw_market
-                    "#,
-                )
-                .bind(tid)
-                .bind(condition_id.as_deref())
-                .bind(&market.id)
-                .bind(market_slug.as_deref())
-                .bind(outcome.as_deref())
-                .bind(settled_price)
-                .bind(resolved)
-                .bind(resolved_at)
-                .bind(sqlx::types::Json(raw_market.clone()))
-                .execute(store.pool())
-                .await
-                .context("Failed to upsert pm_token_settlements row")?;
-
-                refreshed_tokens += 1;
-            }
-
-            refreshed_markets += 1;
-        }
-
-        if refreshed_markets > 0 {
-            println!(
-                "  ✓ Refreshed {} market(s), {} token rows",
-                refreshed_markets, refreshed_tokens
-            );
-        }
-    }
-
-    let scored_rows = sqlx::query(
-        r#"
-        SELECT
-            e.executed_at,
-            e.intent_id,
-            e.agent_id,
-            e.account_id,
-            e.market_slug,
-            e.token_id,
-            e.market_side,
-            e.is_buy,
-            e.limit_price,
-            e.dry_run,
-            e.metadata,
-            s.resolved as pm_resolved,
-            s.settled_price as pm_settled_price,
-            s.outcome as pm_outcome
-        FROM agent_order_executions e
-        LEFT JOIN pm_token_settlements s
-          ON s.token_id = e.token_id
-        WHERE e.executed_at >= NOW() - ($1::bigint * INTERVAL '1 hour')
-          AND e.filled_shares > 0
-          AND (
-                (e.metadata ? 'signal_type' AND RIGHT(e.metadata->>'signal_type', 6) = '_entry')
-             OR (NOT (e.metadata ? 'signal_type') AND e.is_buy = TRUE)
-          )
-          AND LOWER(e.domain) = 'crypto'
-          AND ($2::text IS NULL OR e.account_id = $2)
-          AND ($3::text IS NULL OR e.agent_id = $3)
-          AND ($4::bool = FALSE OR e.dry_run = FALSE)
-        ORDER BY e.executed_at DESC
-        LIMIT $5
-        "#,
-    )
-    .bind(lookback_hours as i64)
-    .bind(account_id.as_deref())
-    .bind(agent_id.as_deref())
-    .bind(live_only)
-    .bind(limit as i64)
-    .fetch_all(store.pool())
-    .await
-    .context("Failed to query joined export rows")?;
-
-    if scored_rows.is_empty() {
-        bail!("no rows returned for export query (unexpected)");
-    }
-
-    if let Some(parent) = output.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).context("Failed to create output directory")?;
-        }
-    }
-
-    fn meta_f64(meta: &serde_json::Value, key: &str) -> Option<f64> {
-        let v = meta.get(key)?;
-        match v {
-            serde_json::Value::Number(n) => n.as_f64(),
-            serde_json::Value::String(s) => s.parse::<f64>().ok(),
-            _ => None,
-        }
-        .filter(|x| x.is_finite())
-    }
-
-    fn meta_str<'a>(meta: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-        meta.get(key).and_then(|v| v.as_str())
-    }
-
-    let mut dataset: Vec<CryptoLobDatasetRow> = Vec::new();
-    let mut skipped_pending = 0usize;
-    let mut skipped_missing = 0usize;
-
-    for row in &scored_rows {
-        let resolved: Option<bool> = row.try_get("pm_resolved").ok();
-        let settled_price: Option<Decimal> = row.try_get("pm_settled_price").ok();
-        let is_resolved = resolved.unwrap_or(false) && settled_price.is_some();
-        if !is_resolved {
-            skipped_pending += 1;
-            continue;
-        }
-
-        let sp = settled_price.unwrap_or(Decimal::ZERO);
-        let market_side: String = row.get("market_side");
-        let y_up: i32 = match market_side.as_str() {
-            "UP" => {
-                if sp > dec!(0.5) {
-                    1
-                } else {
-                    0
-                }
-            }
-            "DOWN" => {
-                if sp > dec!(0.5) {
-                    0
-                } else {
-                    1
-                }
-            }
-            _ => continue,
-        };
-
-        let meta: serde_json::Value = row.try_get("metadata").unwrap_or(serde_json::Value::Null);
-
-        let p_up = meta_f64(&meta, "p_up");
-        let obi5 = meta_f64(&meta, "lob_obi_5");
-        let obi10 = meta_f64(&meta, "lob_obi_10");
-        let spread = meta_f64(&meta, "lob_spread_bps");
-        let bidv5 = meta_f64(&meta, "lob_bid_volume_5");
-        let askv5 = meta_f64(&meta, "lob_ask_volume_5");
-        let m1 = meta_f64(&meta, "signal_momentum_1s");
-        let m5 = meta_f64(&meta, "signal_momentum_5s");
-        let pm_up_ask = meta_f64(&meta, "pm_up_ask");
-        let pm_down_ask = meta_f64(&meta, "pm_down_ask");
-        let model_type = meta_str(&meta, "model_type").unwrap_or("").to_string();
-        let model_version = meta_str(&meta, "model_version").unwrap_or("").to_string();
-        let config_hash = meta_str(&meta, "config_hash").unwrap_or("").to_string();
-
-        // Require core features for training a DL model (MLP).
-        if obi5.is_none()
-            || obi10.is_none()
-            || spread.is_none()
-            || bidv5.is_none()
-            || askv5.is_none()
-            || m1.is_none()
-            || m5.is_none()
-        {
-            skipped_missing += 1;
-            continue;
-        }
-
-        let executed_at: DateTime<Utc> = row.get("executed_at");
-        let intent_id: uuid::Uuid = row.get("intent_id");
-        let account_id: String = row.get("account_id");
-        let agent_id: String = row.get("agent_id");
-        let market_slug: String = row.get("market_slug");
-        let token_id: String = row.get("token_id");
-        let is_buy: bool = row.get("is_buy");
-        let limit_price: Decimal = row.get("limit_price");
-
-        dataset.push(CryptoLobDatasetRow {
-            executed_at,
-            intent_id,
-            account_id,
-            agent_id,
-            market_slug,
-            token_id,
-            market_side,
-            is_buy,
-            limit_price,
-            p_up,
-            obi5: obi5.unwrap_or(0.0),
-            obi10: obi10.unwrap_or(0.0),
-            spread_bps: spread.unwrap_or(0.0),
-            bid_volume_5: bidv5.unwrap_or(0.0),
-            ask_volume_5: askv5.unwrap_or(0.0),
-            momentum_1s: m1.unwrap_or(0.0),
-            momentum_5s: m5.unwrap_or(0.0),
-            pm_up_ask,
-            pm_down_ask,
-            settled_price: sp,
-            y_up,
-            model_type,
-            model_version,
-            config_hash,
-        });
-    }
-
-    if dataset.is_empty() {
-        println!("\n  No resolved rows to export (all pending/missing features).\n");
-        return Ok(());
-    }
-
-    match format {
-        CryptoLobDatasetFormat::Csv => write_crypto_lob_dataset_csv(output.as_path(), &dataset)?,
-        CryptoLobDatasetFormat::Parquet => {
-            #[cfg(feature = "analysis")]
-            {
-                write_crypto_lob_dataset_parquet(output.as_path(), &dataset)?;
-            }
-            #[cfg(not(feature = "analysis"))]
-            {
-                bail!("parquet export requires building with --features analysis");
-            }
-        }
-    }
-
-    println!("\n  Export complete:");
-    println!("  - exported_rows:    {}", dataset.len());
-    println!("  - skipped_pending:  {}", skipped_pending);
-    println!("  - skipped_missing:  {}", skipped_missing);
-    println!("  - output:           {}", output.display());
-    println!();
-
-    Ok(())
-}
 
 fn is_market_resolved(prices: &[rust_decimal::Decimal]) -> bool {
     if prices.is_empty() {
@@ -3263,438 +1553,361 @@ fn is_market_resolved(prices: &[rust_decimal::Decimal]) -> bool {
     winners == 1 && losers == prices.len().saturating_sub(1)
 }
 
-/// Run the NBA comeback agent standalone
-async fn run_nba_comeback(_config: Option<PathBuf>, _dry_run: bool) -> Result<()> {
-    use crate::platform::DomainAgent;
-    println!("\n\x1b[36m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-    println!("\x1b[36m║  NBA Q3→Q4 Comeback Trading Agent                            ║\x1b[0m");
-    println!("\x1b[36m╚══════════════════════════════════════════════════════════════╝\x1b[0m\n");
 
-    // Load config
-    let app_config = crate::config::AppConfig::load().context("Failed to load config")?;
-
-    let nba_cfg = app_config.nba_comeback.unwrap_or_else(|| {
-        info!("No [nba_comeback] in config, using defaults");
-        crate::config::NbaComebackConfig {
-            enabled: true,
-            min_edge: rust_decimal::Decimal::new(5, 2),
-            max_entry_price: rust_decimal::Decimal::new(75, 2),
-            shares: 50,
-            cooldown_secs: 300,
-            max_daily_spend_usd: rust_decimal::Decimal::new(100, 0),
-            min_deficit: 1,
-            max_deficit: 15,
-            target_quarter: 3,
-            espn_poll_interval_secs: 30,
-            min_comeback_rate: 0.15,
-            season: "2025-26".to_string(),
-            grok_enabled: false,
-            grok_interval_secs: 300,
-            grok_min_edge: rust_decimal::Decimal::new(8, 2),
-            grok_min_confidence: 0.6,
-            grok_decision_cooldown_secs: 60,
-            grok_fallback_enabled: true,
-            min_reward_risk_ratio: 4.0,
-            min_expected_value: 0.05,
-            kelly_fraction_cap: 0.25,
-            performance_daily_loss_limit_usd: rust_decimal::Decimal::new(30, 0),
-            performance_min_settled_trades: 10,
-            performance_min_win_rate: 0.45,
-            performance_low_winrate_multiplier: 0.60,
-            performance_loss_streak_threshold: 3,
-            performance_loss_streak_multiplier: 0.50,
-            scaling_enabled: false,
-            scaling_max_adds: 3,
-            scaling_min_price_drop_pct: 5.0,
-            scaling_max_game_exposure_usd: rust_decimal::Decimal::new(50, 0),
-            scaling_min_comeback_retention: 0.70,
-            scaling_min_time_remaining_mins: 8.0,
-            early_exit_enabled: true,
-            early_exit_take_profit_pct: 15.0,
-            early_exit_stop_loss_pct: 20.0,
-        }
-    });
-
-    println!("  Season: {}", nba_cfg.season);
-    println!("  Min edge: {}", nba_cfg.min_edge);
-    println!("  Max entry: {}", nba_cfg.max_entry_price);
-    println!("  Shares: {}", nba_cfg.shares);
-    println!("  Target quarter: Q{}", nba_cfg.target_quarter);
-    println!("  ESPN poll interval: {}s", nba_cfg.espn_poll_interval_secs);
-    println!(
-        "  Min comeback rate: {:.0}%",
-        nba_cfg.min_comeback_rate * 100.0
-    );
-    println!();
-
-    // Connect to DB and load stats
-    let db_url = app_config.database.url;
-    let store = crate::adapters::PostgresStore::new(&db_url, 5)
-        .await
-        .context("Failed to connect to database")?;
-
-    let mut stats_provider = crate::strategy::nba_comeback::ComebackStatsProvider::new(
-        store.pool().clone(),
-        nba_cfg.season.clone(),
-    );
-    stats_provider
-        .load_all()
-        .await
-        .context("Failed to load team stats — run 'ploy strategy nba-seed-stats' first")?;
-
-    println!(
-        "  \x1b[32m✓\x1b[0m Loaded {} team profiles",
-        stats_provider.team_count()
-    );
-
-    // Create core + agent
-    let espn = crate::strategy::nba_comeback::EspnClient::new();
-    let core =
-        crate::strategy::nba_comeback::NbaComebackCore::new(espn, stats_provider, nba_cfg.clone());
-
-    let mut agent = crate::platform::NbaComebackAgent::new(core);
-    agent.start().await?;
-
-    println!(
-        "  \x1b[32m✓\x1b[0m Agent running — scanning every {}s",
-        nba_cfg.espn_poll_interval_secs
-    );
-    println!("\nPress Ctrl+C to stop...\n");
-
-    // Main loop: tick the agent
-    let interval = std::time::Duration::from_secs(nba_cfg.espn_poll_interval_secs);
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                println!("\n\x1b[33m⚠ Shutdown signal received\x1b[0m");
-                agent.stop().await?;
-                println!("\x1b[32m✓ Agent stopped\x1b[0m");
-                break;
-            }
-            _ = tokio::time::sleep(interval) => {
-                use crate::platform::DomainAgent;
-                let intents = agent.on_event(crate::platform::DomainEvent::Tick(chrono::Utc::now())).await?;
-                if !intents.is_empty() {
-                    for intent in &intents {
-                        println!("  \x1b[36m📤 ORDER: {} {} shares @ {} (edge: {})\x1b[0m",
-                            intent.metadata.get("trailing_team").unwrap_or(&"?".to_string()),
-                            intent.shares,
-                            intent.limit_price,
-                            intent.metadata.get("edge").unwrap_or(&"?".to_string()),
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────
-// Integrity Check handler
-// ─────────────────────────────────────────────────────────────
-
-async fn run_integrity_check(json_output: bool, database_url: Option<String>) -> Result<()> {
-    use crate::adapters::PostgresStore;
-    use crate::strategy::integrity::IntegrityChecker;
-
-    let db_url = database_url.unwrap_or_else(|| {
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
-    });
-
-    let store = PostgresStore::new(&db_url, 5).await?;
-    let checker = IntegrityChecker::new(store.pool().clone());
-    let report = checker.run_full_check().await?;
-
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print!("{}", report);
-    }
-
-    if !report.healthy {
-        std::process::exit(1);
-    }
-
-    Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────
-// Backtest handler
-// ─────────────────────────────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-async fn run_backtest(
-    name: &str,
-    mode: StrategyBacktestMode,
-    from: Option<String>,
-    to: Option<String>,
-    symbols: &str,
-    capital: f64,
-    save: bool,
-    json_output: bool,
-    lookback_hours: u64,
-    account_id: Option<String>,
-    agent_id: Option<String>,
-    live_only: bool,
-    limit: usize,
-    no_refresh: bool,
-    skip_gamma: bool,
-    verify_run: Option<String>,
-    database_url: Option<String>,
+async fn print_backtest_db_diagnostics(
+    pool: &sqlx::PgPool,
+    symbols: &[String],
+    from: Option<chrono::DateTime<chrono::Utc>>,
+    to: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<()> {
-    use chrono::DateTime;
-    use rust_decimal::prelude::*;
+    use chrono::{DateTime, Utc};
 
-    use crate::adapters::PostgresStore;
-    use crate::strategy::backtest_feed::HistoricalFeed;
-    use crate::strategy::backtest_recorder::{NullRecorder, PgBacktestRecorder};
-    use crate::strategy::backtest_report;
-    use crate::strategy::directional_backtest::{
-        DirectionalBacktestConfig, DirectionalBacktestEngine,
-    };
-    use crate::strategy::momentum_backtest::{MomentumBacktestConfig, MomentumBacktestEngine};
-
-    match name {
-        "momentum" | "directional" | "staggered-arb" => {}
-        other => anyhow::bail!(
-            "Unknown backtest strategy: '{}'. Supported: momentum, directional, staggered-arb",
-            other
-        ),
+    fn fmt_ts(ts: Option<DateTime<Utc>>) -> String {
+        ts.map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string())
     }
 
-    if mode == StrategyBacktestMode::Settlement {
-        if name != "directional" {
-            anyhow::bail!("Settlement mode is only supported for directional strategy");
-        }
-        if json_output {
-            warn!("--json is not supported in settlement mode yet; falling back to text output");
-        }
-        if save {
-            warn!("--save has no effect in settlement mode");
-        }
-        return backtest_directional_signals_pm_settlement(
-            lookback_hours,
-            account_id,
-            agent_id,
-            live_only,
-            limit,
-            no_refresh,
-            database_url,
+    async fn table_exists(pool: &sqlx::PgPool, table: &str) -> Result<bool> {
+        let reg: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+            .bind(format!("public.{table}"))
+            .fetch_one(pool)
+            .await?;
+        Ok(reg.is_some())
+    }
+
+    println!("\n=== Backtest DB diagnostics ===");
+    println!("symbols: {}", symbols.join(", "));
+    println!("from: {}", fmt_ts(from));
+    println!("to:   {}", fmt_ts(to));
+
+    let symbol_list = if symbols.is_empty() {
+        None::<Vec<String>>
+    } else {
+        Some(symbols.to_vec())
+    };
+
+    // ── sync_records (best: integrated BN+PM view) ───────────
+    if !table_exists(pool, "sync_records").await? {
+        println!("\n[sync_records] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              MIN(timestamp),
+              MAX(timestamp),
+              COUNT(DISTINCT pm_market_slug)::bigint
+            FROM sync_records
+            WHERE ($1::text[] IS NULL OR symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR timestamp >= $2)
+              AND ($3::timestamptz IS NULL OR timestamp <= $3)
+            "#,
         )
-        .await;
+        .bind(symbol_list.clone())
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, min_ts, max_ts, slugs)) => {
+                println!("\n[sync_records]");
+                println!(
+                    "rows: {count}, ts_range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
+                println!("distinct pm_market_slug: {slugs}");
+            }
+            Err(e) => {
+                println!("\n[sync_records] query failed: {e}");
+            }
+        }
     }
 
-    // Handle --verify-run: load and print an existing report
-    let db_url = database_url.unwrap_or_else(|| {
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
-    });
-
-    if let Some(ref run_id_str) = verify_run {
-        let run_id: uuid::Uuid = run_id_str.parse().context("Invalid run UUID")?;
-        let store = PostgresStore::new(&db_url, 5).await?;
-        let report = backtest_report::load_report(store.pool(), run_id).await?;
-        if json_output {
-            println!("{}", report.to_json()?);
-        } else {
-            println!("{}", report.print_report());
+    // ── binance_price_ticks (fallback spot) ──────────────────
+    if !table_exists(pool, "binance_price_ticks").await? {
+        println!("\n[binance_price_ticks] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
+            r#"
+            SELECT COUNT(*)::bigint, MIN(trade_time), MAX(trade_time)
+            FROM binance_price_ticks
+            WHERE ($1::text[] IS NULL OR symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR trade_time >= $2)
+              AND ($3::timestamptz IS NULL OR trade_time <= $3)
+            "#,
+        )
+        .bind(symbol_list.clone())
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, min_ts, max_ts)) => {
+                println!("\n[binance_price_ticks]");
+                println!(
+                    "rows: {count}, ts_range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
+            }
+            Err(e) => {
+                println!("\n[binance_price_ticks] query failed: {e}");
+            }
         }
-        return Ok(());
     }
 
-    let symbol_list: Vec<String> = symbols.split(',').map(|s| s.trim().to_string()).collect();
-
-    let from_dt = from
-        .as_deref()
-        .map(|s| {
-            DateTime::parse_from_rfc3339(s)
-                .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%:z"))
-        })
-        .transpose()
-        .context("Invalid --from date (use ISO 8601 format)")?
-        .map(|dt| dt.with_timezone(&chrono::Utc));
-
-    let to_dt = to
-        .as_deref()
-        .map(|s| {
-            DateTime::parse_from_rfc3339(s)
-                .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%:z"))
-        })
-        .transpose()
-        .context("Invalid --to date (use ISO 8601 format)")?
-        .map(|dt| dt.with_timezone(&chrono::Utc));
-
-    // Unified backtest feed path: database only.
-    let store = PostgresStore::new(&db_url, 5).await?;
-    info!("Loading historical data from database");
-    let mut feed =
-        HistoricalFeed::from_database(store.pool(), &symbol_list, from_dt, to_dt).await?;
-
-    let initial_capital = Decimal::from_f64(capital).unwrap_or_else(|| Decimal::new(10000, 0));
-
-    let results = match name {
-        "directional" => {
-            let mut config = DirectionalBacktestConfig::with_symbols(symbol_list.clone());
-            config.initial_capital = initial_capital;
-
-            // Create recorder: PgBacktestRecorder if --save, else NullRecorder
-            let mut saved_run_id: Option<uuid::Uuid> = None;
-            let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
-                let config_json = serde_json::to_value(&config).unwrap_or_default();
-                let pg_recorder = PgBacktestRecorder::new(
-                    store.pool().clone(),
-                    "directional",
-                    "replay",
-                    &config_json,
-                    &symbol_list,
-                )
-                .await?;
-                saved_run_id = Some(pg_recorder.run_id());
-                info!(run_id = %pg_recorder.run_id(), "Recording backtest signals to DB");
-                Box::new(pg_recorder)
-            } else {
-                Box::new(NullRecorder)
-            };
-
-            let mut engine = DirectionalBacktestEngine::new(config, recorder);
-            let results = engine.run(&mut feed);
-
-            // Print directional-specific summary (includes exit reasons, calibration)
-            if !json_output {
-                engine.print_directional_summary();
+    // ── binance_klines (supplement spot) ─────────────────────
+    if !table_exists(pool, "binance_klines").await? {
+        println!("\n[binance_klines] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              MIN(open_time),
+              MAX(close_time),
+              COUNT(DISTINCT interval)::bigint
+            FROM binance_klines
+            WHERE ($1::text[] IS NULL OR symbol = ANY($1))
+              AND ($2::timestamptz IS NULL OR close_time >= $2)
+              AND ($3::timestamptz IS NULL OR open_time <= $3)
+            "#,
+        )
+        .bind(symbol_list.clone())
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, min_ts, max_ts, intervals)) => {
+                println!("\n[binance_klines]");
+                println!(
+                    "rows: {count}, ts_range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
+                println!("distinct intervals: {intervals}");
             }
-
-            // Finalize recorder with summary metrics if saving
-            if save {
-                // Take the recorder back from the engine and downcast to PgBacktestRecorder
-                let mut recorder = engine.take_recorder();
-                if let Some(pg) = recorder.as_any_mut().downcast_mut::<PgBacktestRecorder>() {
-                    pg.finalize(
-                        Some(results.start_time),
-                        Some(results.end_time),
-                        results.total_trades as i32,
-                        results.win_rate,
-                        results.total_pnl,
-                        results.sharpe_ratio,
-                        results.max_drawdown,
-                        results.profit_factor,
-                    )
-                    .await?;
-                }
-
-                // Load and print report
-                let run_id = saved_run_id.expect("run_id should be set when --save is used");
-
-                if !skip_gamma {
-                    if let Err(e) = verify_backtest_trades_gamma(store.pool(), run_id).await {
-                        warn!("Gamma verification failed: {e:#}");
-                    }
-                }
-
-                let report = backtest_report::load_report(store.pool(), run_id).await?;
-                if json_output {
-                    println!("{}", report.to_json()?);
-                } else {
-                    println!("{}", report.print_report());
-                }
+            Err(e) => {
+                println!("\n[binance_klines] query failed: {e}");
             }
-
-            results
         }
-        "staggered-arb" => {
-            use crate::strategy::staggered_arb_backtest::{
-                StaggeredArbBacktestConfig, StaggeredArbBacktestEngine,
-            };
-
-            let mut config = StaggeredArbBacktestConfig::with_symbols(symbol_list.clone());
-            config.initial_capital = initial_capital;
-
-            let mut saved_run_id: Option<uuid::Uuid> = None;
-            let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
-                let config_json = serde_json::to_value(&config).unwrap_or_default();
-                let pg_recorder = PgBacktestRecorder::new(
-                    store.pool().clone(),
-                    "staggered-arb",
-                    "replay",
-                    &config_json,
-                    &symbol_list,
-                )
-                .await?;
-                saved_run_id = Some(pg_recorder.run_id());
-                info!(run_id = %pg_recorder.run_id(), "Recording staggered-arb backtest signals to DB");
-                Box::new(pg_recorder)
-            } else {
-                Box::new(NullRecorder)
-            };
-
-            let mut engine = StaggeredArbBacktestEngine::new(config, recorder);
-            let results = engine.run(&mut feed);
-
-            if !json_output {
-                engine.print_staggered_summary();
-            }
-
-            if save {
-                let mut recorder = engine.take_recorder();
-                if let Some(pg) = recorder.as_any_mut().downcast_mut::<PgBacktestRecorder>() {
-                    pg.finalize(
-                        Some(results.start_time),
-                        Some(results.end_time),
-                        results.total_trades as i32,
-                        results.win_rate,
-                        results.total_pnl,
-                        results.sharpe_ratio,
-                        results.max_drawdown,
-                        results.profit_factor,
-                    )
-                    .await?;
-                }
-
-                let run_id = saved_run_id.expect("run_id should be set when --save is used");
-
-                if !skip_gamma {
-                    if let Err(e) = verify_backtest_trades_gamma(store.pool(), run_id).await {
-                        warn!("Gamma verification failed: {e:#}");
-                    }
-                }
-
-                let report = backtest_report::load_report(store.pool(), run_id).await?;
-                if json_output {
-                    println!("{}", report.to_json()?);
-                } else {
-                    println!("{}", report.print_report());
-                }
-            }
-
-            results
-        }
-        _ => {
-            let config =
-                MomentumBacktestConfig::default_with_symbols(symbol_list.clone(), initial_capital);
-            let mut engine = MomentumBacktestEngine::new(config);
-            let results = engine.run(&mut feed);
-
-            // Optionally save momentum results to DB
-            if save {
-                crate::strategy::momentum_backtest::save_backtest_results(
-                    store.pool(),
-                    &engine.config(),
-                    &results,
-                )
-                .await?;
-                info!("Backtest results saved to database");
-            }
-            results
-        }
-    };
-
-    if json_output && !save {
-        // Only print raw JSON if we didn't already print a report above
-        println!("{}", serde_json::to_string_pretty(&results)?);
-    } else if !json_output && !save {
-        println!("{}", results);
     }
+
+    // ── clob_quote_ticks (PM quotes) ─────────────────────────
+    if !table_exists(pool, "clob_quote_ticks").await? {
+        println!("\n[clob_quote_ticks] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              MIN(received_at),
+              MAX(received_at),
+              COUNT(DISTINCT token_id)::bigint
+            FROM clob_quote_ticks
+            WHERE ($1::timestamptz IS NULL OR received_at >= $1)
+              AND ($2::timestamptz IS NULL OR received_at <= $2)
+            "#,
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, min_ts, max_ts, tokens)) => {
+                println!("\n[clob_quote_ticks]");
+                println!(
+                    "rows: {count}, ts_range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
+                println!("distinct token_id: {tokens}");
+            }
+            Err(e) => {
+                println!("\n[clob_quote_ticks] query failed: {e}");
+            }
+        }
+    }
+
+    // ── clob_orderbook_snapshots (PM depth) ──────────────────
+    if !table_exists(pool, "clob_orderbook_snapshots").await? {
+        println!("\n[clob_orderbook_snapshots] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              MIN(received_at),
+              MAX(received_at),
+              COUNT(DISTINCT token_id)::bigint
+            FROM clob_orderbook_snapshots
+            WHERE ($1::timestamptz IS NULL OR received_at >= $1)
+              AND ($2::timestamptz IS NULL OR received_at <= $2)
+            "#,
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, min_ts, max_ts, tokens)) => {
+                println!("\n[clob_orderbook_snapshots]");
+                println!(
+                    "rows: {count}, ts_range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
+                println!("distinct token_id: {tokens}");
+            }
+            Err(e) => {
+                println!("\n[clob_orderbook_snapshots] query failed: {e}");
+            }
+        }
+    }
+
+    // ── pm_market_metadata (event windows) ───────────────────
+    if !table_exists(pool, "pm_market_metadata").await? {
+        println!("\n[pm_market_metadata] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, i64, i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              COUNT(*) FILTER (WHERE start_time IS NOT NULL AND end_time IS NOT NULL)::bigint,
+              COUNT(*) FILTER (WHERE price_to_beat IS NOT NULL AND price_to_beat > 0)::bigint,
+              MIN(start_time),
+              MAX(end_time)
+            FROM pm_market_metadata
+            WHERE ($1::timestamptz IS NULL OR end_time >= $1)
+              AND ($2::timestamptz IS NULL OR start_time <= $2)
+            "#,
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, windows, with_s0, min_ts, max_ts)) => {
+                println!("\n[pm_market_metadata]");
+                println!("rows: {count}, window_rows: {windows}, with price_to_beat>0: {with_s0}");
+                println!("ts_range: {} .. {}", fmt_ts(min_ts), fmt_ts(max_ts));
+            }
+            Err(e) => {
+                println!("\n[pm_market_metadata] query failed: {e}");
+            }
+        }
+    }
+
+    // ── pm_token_settlements (token→slug mapping + outcomes) ─
+    if !table_exists(pool, "pm_token_settlements").await? {
+        println!("\n[pm_token_settlements] MISSING");
+    } else {
+        match sqlx::query_as::<_, (i64, i64, i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
+            r#"
+            SELECT
+              COUNT(*)::bigint,
+              COUNT(DISTINCT market_slug)::bigint,
+              COUNT(*) FILTER (WHERE resolved = true)::bigint,
+              MIN(resolved_at),
+              MAX(resolved_at)
+            FROM pm_token_settlements
+            WHERE ($1::timestamptz IS NULL OR resolved_at >= $1 OR resolved_at IS NULL)
+              AND ($2::timestamptz IS NULL OR resolved_at <= $2 OR resolved_at IS NULL)
+            "#,
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_one(pool)
+        .await
+        {
+            Ok((count, slugs, resolved, min_ts, max_ts)) => {
+                println!("\n[pm_token_settlements]");
+                println!("rows: {count}, distinct market_slug: {slugs}, resolved_rows: {resolved}");
+                println!(
+                    "resolved_at range: {} .. {}",
+                    fmt_ts(min_ts),
+                    fmt_ts(max_ts)
+                );
+            }
+            Err(e) => {
+                println!("\n[pm_token_settlements] query failed: {e}");
+            }
+        }
+    }
+
+    // ── deribit_iv_ticks (Deribit IV baseline) ──────────────
+    if !table_exists(pool, "deribit_iv_ticks").await? {
+        println!("\n[deribit_iv_ticks] MISSING");
+    } else {
+        let mut printed = false;
+
+        if let Ok((count, min_ts, max_ts, ccy)) =
+            sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+                r#"
+                SELECT
+                  COUNT(*)::bigint,
+                  MIN(timestamp),
+                  MAX(timestamp),
+                  COUNT(DISTINCT currency)::bigint
+                FROM deribit_iv_ticks
+                WHERE ($1::timestamptz IS NULL OR timestamp >= $1)
+                  AND ($2::timestamptz IS NULL OR timestamp <= $2)
+                "#,
+            )
+            .bind(from)
+            .bind(to)
+            .fetch_one(pool)
+            .await
+        {
+            printed = true;
+            println!("\n[deribit_iv_ticks]");
+            println!(
+                "rows: {count}, ts_range: {} .. {}",
+                fmt_ts(min_ts),
+                fmt_ts(max_ts)
+            );
+            println!("distinct currency: {ccy}");
+        }
+
+        if !printed {
+            match sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i64)>(
+                r#"
+                SELECT
+                  COUNT(*)::bigint,
+                  MIN(ts),
+                  MAX(ts),
+                  COUNT(DISTINCT symbol)::bigint
+                FROM deribit_iv_ticks
+                WHERE ($1::timestamptz IS NULL OR ts >= $1)
+                  AND ($2::timestamptz IS NULL OR ts <= $2)
+                "#,
+            )
+            .bind(from)
+            .bind(to)
+            .fetch_one(pool)
+            .await
+            {
+                Ok((count, min_ts, max_ts, symbols)) => {
+                    println!("\n[deribit_iv_ticks]");
+                    println!(
+                        "rows: {count}, ts_range: {} .. {}",
+                        fmt_ts(min_ts),
+                        fmt_ts(max_ts)
+                    );
+                    println!("distinct symbol: {symbols}");
+                }
+                Err(e) => {
+                    println!("\n[deribit_iv_ticks] query failed: {e}");
+                }
+            }
+        }
+    }
+
+    println!("\nHint:");
+    println!("- PM 5m backtest needs: clob_quote_ticks + pm_market_metadata (or pm_token_settlements.raw_market) + spot (sync_records or binance_price_ticks/klines).");
+    println!("- Deribit IV (optional): populate deribit_iv_ticks (e.g. `ploy deribit-iv-backfill`) to enable IV-aware research/backtests.");
 
     Ok(())
 }
@@ -4053,262 +2266,4 @@ async fn verify_backtest_trades_gamma(pool: &sqlx::PgPool, run_id: uuid::Uuid) -
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────
-// Backtest list handler
-// ─────────────────────────────────────────────────────────────
 
-async fn run_backtest_list(database_url: Option<String>, limit: usize) -> Result<()> {
-    use crate::adapters::PostgresStore;
-
-    let db_url = database_url.unwrap_or_else(|| {
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
-    });
-    let store = PostgresStore::new(&db_url, 5).await?;
-
-    let rows: Vec<(
-        uuid::Uuid,
-        String,
-        String,
-        Vec<String>,
-        Option<i32>,
-        Option<f64>,
-        Option<rust_decimal::Decimal>,
-        Option<f64>,
-        Option<rust_decimal::Decimal>,
-        Option<f64>,
-        chrono::DateTime<chrono::Utc>,
-    )> = sqlx::query_as(
-        "SELECT run_id, strategy, mode, symbols, total_trades, win_rate,
-                total_pnl, sharpe_ratio, max_drawdown, profit_factor, created_at
-         FROM backtest_runs ORDER BY created_at DESC LIMIT $1",
-    )
-    .bind(limit as i64)
-    .fetch_all(store.pool())
-    .await?;
-
-    if rows.is_empty() {
-        println!("No backtest runs found.");
-        return Ok(());
-    }
-
-    println!(
-        "\n  {:<36} {:<14} {:<10} {:<8} {:<7} {:<10} {:<7} {:<7} {}",
-        "RUN_ID", "STRATEGY", "MODE", "SYMBOLS", "TRADES", "PNL", "WIN%", "SHARPE", "CREATED"
-    );
-    println!("  {}", "-".repeat(110));
-
-    for (run_id, strategy, mode, symbols, trades, win_rate, pnl, sharpe, _dd, _pf, created) in &rows
-    {
-        let sym_str = if symbols.len() > 2 {
-            format!("{}+{}", symbols[0], symbols.len() - 1)
-        } else {
-            symbols.join(",")
-        };
-        println!(
-            "  {:<36} {:<14} {:<10} {:<8} {:<7} ${:<9.2} {:<6.1}% {:<7.2} {}",
-            run_id,
-            strategy,
-            mode,
-            sym_str,
-            trades.unwrap_or(0),
-            pnl.unwrap_or(rust_decimal::Decimal::ZERO),
-            win_rate.unwrap_or(0.0) * 100.0,
-            sharpe.unwrap_or(0.0),
-            created.format("%Y-%m-%d %H:%M"),
-        );
-    }
-    println!();
-
-    Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────
-// Backtest diff handler
-// ─────────────────────────────────────────────────────────────
-
-async fn run_backtest_diff(run1: &str, run2: &str, database_url: Option<String>) -> Result<()> {
-    use crate::adapters::PostgresStore;
-    use crate::strategy::backtest_report;
-
-    let db_url = database_url.unwrap_or_else(|| {
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
-    });
-    let store = PostgresStore::new(&db_url, 5).await?;
-
-    let id1: uuid::Uuid = run1.parse().context("Invalid run1 UUID")?;
-    let id2: uuid::Uuid = run2.parse().context("Invalid run2 UUID")?;
-
-    let r1 = backtest_report::load_report(store.pool(), id1).await?;
-    let r2 = backtest_report::load_report(store.pool(), id2).await?;
-
-    let w = 64;
-    let bar = "=".repeat(w);
-    let thin = "-".repeat(w);
-
-    println!("\n{}", bar);
-    println!("  BACKTEST COMPARISON");
-    println!("{}\n", bar);
-
-    println!("  {:<24} {:<20} {:<20}", "METRIC", "RUN A", "RUN B");
-    println!("  {}", thin);
-    println!(
-        "  {:<24} {:<20} {:<20}",
-        "Run ID",
-        &r1.run.run_id.to_string()[..8],
-        &r2.run.run_id.to_string()[..8]
-    );
-    println!(
-        "  {:<24} {:<20} {:<20}",
-        "Strategy", r1.run.strategy, r2.run.strategy
-    );
-    println!(
-        "  {:<24} {:<20} {:<20}",
-        "Trades", r1.run.total_trades, r2.run.total_trades
-    );
-    println!(
-        "  {:<24} {:<20} {:<20}",
-        "Win Rate",
-        format!("{:.1}%", r1.run.win_rate * 100.0),
-        format!("{:.1}%", r2.run.win_rate * 100.0)
-    );
-    println!(
-        "  {:<24} {:<20} {:<20}",
-        "PnL",
-        format!("${:.2}", r1.run.total_pnl),
-        format!("${:.2}", r2.run.total_pnl)
-    );
-    println!(
-        "  {:<24} {:<20} {:<20}",
-        "Sharpe",
-        format!("{:.2}", r1.run.sharpe_ratio),
-        format!("{:.2}", r2.run.sharpe_ratio)
-    );
-    println!(
-        "  {:<24} {:<20} {:<20}",
-        "Max Drawdown",
-        format!(
-            "{:.2}%",
-            r1.run.max_drawdown * rust_decimal_macros::dec!(100)
-        ),
-        format!(
-            "{:.2}%",
-            r2.run.max_drawdown * rust_decimal_macros::dec!(100)
-        )
-    );
-    println!(
-        "  {:<24} {:<20} {:<20}",
-        "Profit Factor",
-        format!("{:.2}", r1.run.profit_factor),
-        format!("{:.2}", r2.run.profit_factor)
-    );
-    println!(
-        "  {:<24} {:<20} {:<20}",
-        "Fee Drag",
-        format!("{:.1}%", r1.fee_impact.fee_drag_pct),
-        format!("{:.1}%", r2.fee_impact.fee_drag_pct)
-    );
-    println!(
-        "  {:<24} {:<20} {:<20}",
-        "Calibration Bias",
-        format!("{:+.1}%", r1.calibration.overall_bias * 100.0),
-        format!("{:+.1}%", r2.calibration.overall_bias * 100.0)
-    );
-    println!("\n{}\n", bar);
-
-    Ok(())
-}
-
-/// Backfill Binance klines into the database for historical backtesting.
-async fn backfill_klines(
-    symbols: &str,
-    from: &str,
-    to: &str,
-    interval: &str,
-    database_url: Option<String>,
-) -> Result<()> {
-    use crate::adapters::PostgresStore;
-    use crate::collector::BinanceKlineClient;
-    use chrono::DateTime;
-
-    let symbol_list: Vec<String> = symbols.split(',').map(|s| s.trim().to_string()).collect();
-    if symbol_list.is_empty() {
-        anyhow::bail!("No symbols provided");
-    }
-
-    let from_dt = DateTime::parse_from_rfc3339(from)
-        .or_else(|_| DateTime::parse_from_str(from, "%Y-%m-%dT%H:%M:%S%.f%:z"))
-        .map(|d| d.with_timezone(&chrono::Utc))
-        .context("Invalid --from date (expected ISO 8601, e.g. 2026-02-20T00:00:00Z)")?;
-
-    let to_dt = DateTime::parse_from_rfc3339(to)
-        .or_else(|_| DateTime::parse_from_str(to, "%Y-%m-%dT%H:%M:%S%.f%:z"))
-        .map(|d| d.with_timezone(&chrono::Utc))
-        .context("Invalid --to date (expected ISO 8601, e.g. 2026-02-28T00:00:00Z)")?;
-
-    if to_dt <= from_dt {
-        anyhow::bail!("--to must be after --from");
-    }
-
-    let db_url = database_url.unwrap_or_else(|| {
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/ploy".to_string())
-    });
-    let store = PostgresStore::new(&db_url, 5).await?;
-    let pool = store.pool();
-
-    // Ensure binance_klines table exists
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS binance_klines (
-            id BIGSERIAL PRIMARY KEY,
-            symbol TEXT NOT NULL,
-            interval TEXT NOT NULL,
-            open_time TIMESTAMPTZ NOT NULL,
-            close_time TIMESTAMPTZ NOT NULL,
-            open NUMERIC(20,10) NOT NULL,
-            high NUMERIC(20,10) NOT NULL,
-            low NUMERIC(20,10) NOT NULL,
-            close NUMERIC(20,10) NOT NULL,
-            volume NUMERIC(20,10) NOT NULL,
-            quote_volume NUMERIC(20,10) NOT NULL,
-            trades BIGINT NOT NULL DEFAULT 0,
-            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            UNIQUE (symbol, interval, open_time)
-        )
-        "#,
-    )
-    .execute(pool)
-    .await
-    .context("Failed to ensure binance_klines table")?;
-
-    let client = BinanceKlineClient::new();
-
-    println!(
-        "\nBackfilling klines: {} symbols, interval={}, {} → {}",
-        symbol_list.len(),
-        interval,
-        from_dt.format("%Y-%m-%d"),
-        to_dt.format("%Y-%m-%d")
-    );
-
-    let mut grand_total = 0usize;
-    for sym in &symbol_list {
-        print!("  {} ... ", sym);
-        std::io::stdout().flush().ok();
-
-        let klines = client
-            .fetch_klines_range(sym, interval, from_dt, to_dt)
-            .await
-            .with_context(|| format!("Failed to fetch klines for {}", sym))?;
-
-        let fetched = klines.len();
-        let saved = BinanceKlineClient::save_klines_to_db(pool, sym, interval, &klines)
-            .await
-            .with_context(|| format!("Failed to save klines for {}", sym))?;
-
-        println!("{} fetched, {} new", fetched, saved);
-        grand_total += saved;
-    }
-
-    println!("\nDone. {} new klines inserted total.\n", grand_total);
-    Ok(())
-}

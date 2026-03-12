@@ -264,20 +264,9 @@ Each rejection includes a detailed reason and partial signal for analysis. Appro
 
 ## 7. Multi-Event Monitor
 
-**File:** `src/strategy/multi_event.rs` (~300 lines)
-**Priority:** Medium
-
-### Logic Summary
-
-The `MultiEventMonitor` tracks all active events within a Polymarket series, maintaining per-event `SignalDetector` instances and quote state. It discovers new events via API polling, marks expired events as inactive, and scans for arbitrage opportunities across all tracked events simultaneously.
-
-Each `EventTracker` maintains its own signal detector, UP/DOWN quotes, and tradeability status (active + >30 seconds remaining). The monitor produces `ArbitrageOpportunity` objects that include the dump signal, both quotes, combined ask sum, and estimated profit per share.
-
-### Identified Weaknesses
-
-1. **No deduplication of opportunities.** If the same event produces signals on consecutive ticks, the monitor will emit duplicate `ArbitrageOpportunity` objects. The consumer must handle deduplication.
-
-2. **Event expiry uses `Utc::now()` as fallback.** When `end_date` parsing fails, the tracker defaults to `Utc::now()` as the end time (line 50), which immediately marks the event as expired. This silently drops events with malformed dates.
+Historical note: the repo previously carried a `multi_event` monitor module
+for series-wide arbitrage scanning. That module has since been retired during
+legacy cleanup because it no longer had any runtime or CLI caller.
 
 3. **No rate limiting on API refresh.** The `refresh_events` method calls `get_series_all_tokens` which hits the Polymarket API. There is no built-in cooldown; the caller must manage refresh frequency.
 

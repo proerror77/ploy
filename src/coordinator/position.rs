@@ -1,0 +1,649 @@
+//! Position Aggregator - 倉位聚合管理
+//!
+//! 跨 Agent 和領域的統一倉位追蹤。
+//! 提供組合級別的暴露、損益和風險視圖。
+
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{debug, info};
+
+use crate::domain::Side;
+use crate::platform::Domain;
+
+mod transitions;
+
+/// 單一倉位
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Position {
+    /// 倉位 ID
+    pub position_id: String,
+    /// 所屬 Agent
+    pub agent_id: String,
+    /// 領域
+    pub domain: Domain,
+    /// 市場 slug
+    pub market_slug: String,
+    /// Token ID
+    pub token_id: String,
+    /// 方向 (Up/Down)
+    pub side: Side,
+    /// 數量
+    pub shares: u64,
+    /// 入場價
+    pub entry_price: Decimal,
+    /// 當前價格 (用於計算未實現損益)
+    pub current_price: Option<Decimal>,
+    /// 是否已對沖
+    pub is_hedged: bool,
+    /// 入場時間
+    pub entry_time: DateTime<Utc>,
+    /// 更新時間
+    pub updated_at: DateTime<Utc>,
+    /// 元數據
+    pub metadata: HashMap<String, String>,
+}
+
+impl Position {
+    /// 計算倉位價值
+    pub fn notional_value(&self) -> Decimal {
+        self.entry_price * Decimal::from(self.shares)
+    }
+
+    /// 計算未實現損益
+    pub fn unrealized_pnl(&self) -> Decimal {
+        match self.current_price {
+            Some(current) => (current - self.entry_price) * Decimal::from(self.shares),
+            None => Decimal::ZERO,
+        }
+    }
+
+    /// 更新當前價格
+    pub fn update_price(&mut self, price: Decimal) {
+        self.current_price = Some(price);
+        self.updated_at = Utc::now();
+    }
+
+    /// 標記為已對沖
+    pub fn mark_hedged(&mut self) {
+        self.is_hedged = true;
+        self.updated_at = Utc::now();
+    }
+
+    /// 持倉時間 (秒)
+    pub fn holding_duration_secs(&self) -> i64 {
+        (Utc::now() - self.entry_time).num_seconds()
+    }
+}
+
+/// 聚合後的倉位視圖
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AggregatedPosition {
+    /// 總暴露 (USD)
+    pub total_exposure: Decimal,
+    /// 未實現損益
+    pub unrealized_pnl: Decimal,
+    /// 已實現損益 (今日)
+    pub realized_pnl: Decimal,
+    /// 倉位數量
+    pub position_count: usize,
+    /// 未對沖倉位數量
+    pub unhedged_count: usize,
+    /// 按領域分組的暴露
+    pub exposure_by_domain: HashMap<Domain, Decimal>,
+    /// 按 Agent 分組的暴露
+    pub exposure_by_agent: HashMap<String, Decimal>,
+    /// 按市場分組的暴露
+    pub exposure_by_market: HashMap<String, Decimal>,
+}
+
+impl AggregatedPosition {
+    /// 最大單一領域暴露
+    pub fn max_domain_exposure(&self) -> Decimal {
+        self.exposure_by_domain
+            .values()
+            .cloned()
+            .max()
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    /// 最大單一 Agent 暴露
+    pub fn max_agent_exposure(&self) -> Decimal {
+        self.exposure_by_agent
+            .values()
+            .cloned()
+            .max()
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    /// 最大單一市場暴露
+    pub fn max_market_exposure(&self) -> Decimal {
+        self.exposure_by_market
+            .values()
+            .cloned()
+            .max()
+            .unwrap_or(Decimal::ZERO)
+    }
+}
+
+/// Agent 級別統計
+#[derive(Debug, Clone, Default)]
+pub struct AgentPositionStats {
+    /// 總暴露
+    pub exposure: Decimal,
+    /// 未實現損益
+    pub unrealized_pnl: Decimal,
+    /// 倉位數量
+    pub position_count: usize,
+    /// 未對沖數量
+    pub unhedged_count: usize,
+}
+
+/// 倉位聚合器
+///
+/// 管理所有 Agent 的倉位，提供統一視圖。
+pub struct PositionAggregator {
+    /// 所有倉位 (position_id -> Position)
+    positions: Arc<RwLock<HashMap<String, Position>>>,
+    /// 已實現損益 (agent_id -> pnl)
+    realized_pnl: Arc<RwLock<HashMap<String, Decimal>>>,
+    /// 倉位 ID 計數器
+    position_counter: Arc<RwLock<u64>>,
+}
+
+impl Default for PositionAggregator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PositionAggregator {
+    /// 創建新的聚合器
+    pub fn new() -> Self {
+        Self {
+            positions: Arc::new(RwLock::new(HashMap::new())),
+            realized_pnl: Arc::new(RwLock::new(HashMap::new())),
+            position_counter: Arc::new(RwLock::new(0)),
+        }
+    }
+
+    // ==================== 查詢方法 ====================
+
+    /// 獲取單個倉位
+    pub async fn get_position(&self, position_id: &str) -> Option<Position> {
+        self.positions.read().await.get(position_id).cloned()
+    }
+
+    /// 獲取 Agent 所有倉位
+    pub async fn get_agent_positions(&self, agent_id: &str) -> Vec<Position> {
+        self.positions
+            .read()
+            .await
+            .values()
+            .filter(|p| p.agent_id == agent_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Agent 在特定 token/side 的可用持倉股數（reduce-only SELL 檢查使用）
+    pub async fn agent_open_shares_for_token_side(
+        &self,
+        agent_id: &str,
+        domain: Domain,
+        token_id: &str,
+        side: Side,
+    ) -> u64 {
+        self.positions
+            .read()
+            .await
+            .values()
+            .filter(|p| {
+                p.agent_id == agent_id
+                    && p.domain == domain
+                    && p.side == side
+                    && p.token_id.eq_ignore_ascii_case(token_id)
+            })
+            .map(|p| p.shares)
+            .sum()
+    }
+
+    /// 獲取市場所有倉位
+    pub async fn get_market_positions(&self, market_slug: &str) -> Vec<Position> {
+        self.positions
+            .read()
+            .await
+            .values()
+            .filter(|p| p.market_slug == market_slug)
+            .cloned()
+            .collect()
+    }
+
+    /// 獲取領域所有倉位
+    pub async fn get_domain_positions(&self, domain: Domain) -> Vec<Position> {
+        self.positions
+            .read()
+            .await
+            .values()
+            .filter(|p| p.domain == domain)
+            .cloned()
+            .collect()
+    }
+
+    /// 獲取所有倉位
+    pub async fn all_positions(&self) -> Vec<Position> {
+        self.positions.read().await.values().cloned().collect()
+    }
+
+    // ==================== 聚合統計 ====================
+
+    /// 獲取聚合視圖
+    pub async fn aggregate(&self) -> AggregatedPosition {
+        let positions = self.positions.read().await;
+        let realized = self.realized_pnl.read().await;
+
+        let mut result = AggregatedPosition::default();
+
+        for position in positions.values() {
+            let exposure = position.notional_value();
+            let pnl = position.unrealized_pnl();
+
+            result.total_exposure += exposure;
+            result.unrealized_pnl += pnl;
+            result.position_count += 1;
+
+            if !position.is_hedged {
+                result.unhedged_count += 1;
+            }
+
+            *result
+                .exposure_by_domain
+                .entry(position.domain)
+                .or_insert(Decimal::ZERO) += exposure;
+            *result
+                .exposure_by_agent
+                .entry(position.agent_id.clone())
+                .or_insert(Decimal::ZERO) += exposure;
+            *result
+                .exposure_by_market
+                .entry(position.market_slug.clone())
+                .or_insert(Decimal::ZERO) += exposure;
+        }
+
+        result.realized_pnl = realized.values().sum();
+
+        result
+    }
+
+    /// 獲取 Agent 統計
+    pub async fn agent_stats(&self, agent_id: &str) -> AgentPositionStats {
+        let positions = self.positions.read().await;
+        let _realized = self.realized_pnl.read().await;
+
+        let mut stats = AgentPositionStats::default();
+
+        for position in positions.values() {
+            if position.agent_id == agent_id {
+                stats.exposure += position.notional_value();
+                stats.unrealized_pnl += position.unrealized_pnl();
+                stats.position_count += 1;
+                if !position.is_hedged {
+                    stats.unhedged_count += 1;
+                }
+            }
+        }
+
+        stats
+    }
+
+    /// 獲取總暴露
+    pub async fn total_exposure(&self) -> Decimal {
+        self.positions
+            .read()
+            .await
+            .values()
+            .map(|p| p.notional_value())
+            .sum()
+    }
+
+    /// 獲取 Agent 暴露
+    pub async fn agent_exposure(&self, agent_id: &str) -> Decimal {
+        self.positions
+            .read()
+            .await
+            .values()
+            .filter(|p| p.agent_id == agent_id)
+            .map(|p| p.notional_value())
+            .sum()
+    }
+
+    /// 獲取總未實現損益
+    pub async fn total_unrealized_pnl(&self) -> Decimal {
+        self.positions
+            .read()
+            .await
+            .values()
+            .map(|p| p.unrealized_pnl())
+            .sum()
+    }
+
+    /// 獲取總已實現損益
+    pub async fn total_realized_pnl(&self) -> Decimal {
+        self.realized_pnl.read().await.values().sum()
+    }
+
+    /// 獲取 Agent 已實現損益
+    pub async fn agent_realized_pnl(&self, agent_id: &str) -> Decimal {
+        self.realized_pnl
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    /// 倉位總數
+    pub async fn position_count(&self) -> usize {
+        self.positions.read().await.len()
+    }
+
+    /// 未對沖倉位數
+    pub async fn unhedged_count(&self) -> usize {
+        self.positions
+            .read()
+            .await
+            .values()
+            .filter(|p| !p.is_hedged)
+            .count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_open_close_position() {
+        let agg = PositionAggregator::new();
+
+        // 開倉
+        let pos_id = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "btc-15m",
+                "token-yes",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.50").unwrap(),
+            )
+            .await;
+
+        assert_eq!(agg.position_count().await, 1);
+        assert_eq!(agg.total_exposure().await, Decimal::from(50));
+
+        // 平倉
+        let pnl = agg
+            .close_position(&pos_id, Decimal::from_str_exact("0.55").unwrap())
+            .await;
+        assert!(pnl.is_some());
+        assert_eq!(pnl.unwrap(), Decimal::from(5)); // (0.55 - 0.50) * 100 = 5
+
+        assert_eq!(agg.position_count().await, 0);
+        assert_eq!(agg.total_realized_pnl().await, Decimal::from(5));
+    }
+
+    #[tokio::test]
+    async fn test_reduce_position_partial_close() {
+        let agg = PositionAggregator::new();
+        let pos_id = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "btc-15m",
+                "token-yes",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.50").unwrap(),
+            )
+            .await;
+
+        let pnl = agg
+            .reduce_position(&pos_id, 40, Decimal::from_str_exact("0.60").unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(pnl, Decimal::from(4)); // (0.60 - 0.50) * 40
+        assert_eq!(agg.position_count().await, 1);
+        assert_eq!(agg.total_exposure().await, Decimal::from(30)); // 60 * 0.50
+        assert_eq!(agg.total_realized_pnl().await, Decimal::from(4));
+    }
+
+    #[tokio::test]
+    async fn test_aggregate() {
+        let agg = PositionAggregator::new();
+
+        // 開多個倉位
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "btc-15m",
+            "t1",
+            Side::Up,
+            100,
+            Decimal::from_str_exact("0.50").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "eth-15m",
+            "t2",
+            Side::Down,
+            50,
+            Decimal::from_str_exact("0.40").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent2",
+            Domain::Sports,
+            "nba-123",
+            "t3",
+            Side::Up,
+            200,
+            Decimal::from_str_exact("0.60").unwrap(),
+        )
+        .await;
+
+        let aggregate = agg.aggregate().await;
+
+        assert_eq!(aggregate.position_count, 3);
+        assert_eq!(aggregate.unhedged_count, 3);
+        // 50 + 20 + 120 = 190
+        assert_eq!(aggregate.total_exposure, Decimal::from(190));
+
+        // 按領域
+        assert_eq!(
+            aggregate.exposure_by_domain.get(&Domain::Crypto),
+            Some(&Decimal::from(70))
+        );
+        assert_eq!(
+            aggregate.exposure_by_domain.get(&Domain::Sports),
+            Some(&Decimal::from(120))
+        );
+
+        // 按 Agent
+        assert_eq!(
+            aggregate.exposure_by_agent.get("agent1"),
+            Some(&Decimal::from(70))
+        );
+        assert_eq!(
+            aggregate.exposure_by_agent.get("agent2"),
+            Some(&Decimal::from(120))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_price() {
+        let agg = PositionAggregator::new();
+
+        let pos_id = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "btc-15m",
+                "token-yes",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.50").unwrap(),
+            )
+            .await;
+
+        // 初始未實現損益為 0
+        assert_eq!(agg.total_unrealized_pnl().await, Decimal::ZERO);
+
+        // 更新價格
+        agg.update_price(&pos_id, Decimal::from_str_exact("0.55").unwrap())
+            .await;
+
+        // 未實現損益 = (0.55 - 0.50) * 100 = 5
+        assert_eq!(agg.total_unrealized_pnl().await, Decimal::from(5));
+    }
+
+    #[tokio::test]
+    async fn test_agent_stats() {
+        let agg = PositionAggregator::new();
+
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "btc-15m",
+            "t1",
+            Side::Up,
+            100,
+            Decimal::from_str_exact("0.50").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "eth-15m",
+            "t2",
+            Side::Down,
+            50,
+            Decimal::from_str_exact("0.40").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent2",
+            Domain::Sports,
+            "nba-123",
+            "t3",
+            Side::Up,
+            200,
+            Decimal::from_str_exact("0.60").unwrap(),
+        )
+        .await;
+
+        let stats = agg.agent_stats("agent1").await;
+        assert_eq!(stats.exposure, Decimal::from(70));
+        assert_eq!(stats.position_count, 2);
+        assert_eq!(stats.unhedged_count, 2);
+
+        let stats2 = agg.agent_stats("agent2").await;
+        assert_eq!(stats2.exposure, Decimal::from(120));
+        assert_eq!(stats2.position_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_close_position_no_deadlock_with_reduce() {
+        use std::sync::Arc;
+        use tokio::time::{timeout, Duration};
+
+        let agg = Arc::new(PositionAggregator::new());
+
+        // Open two positions so close and reduce target different ones
+        let pos_close = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "btc-15m",
+                "t1",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.50").unwrap(),
+            )
+            .await;
+        let pos_reduce = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "eth-15m",
+                "t2",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.40").unwrap(),
+            )
+            .await;
+
+        let agg1 = Arc::clone(&agg);
+        let agg2 = Arc::clone(&agg);
+
+        // Run close_position and reduce_position concurrently.
+        // If lock ordering were inconsistent this could deadlock.
+        let result = timeout(Duration::from_secs(5), async move {
+            let (r1, r2) = tokio::join!(
+                agg1.close_position(&pos_close, Decimal::from_str_exact("0.55").unwrap()),
+                agg2.reduce_position(&pos_reduce, 50, Decimal::from_str_exact("0.45").unwrap()),
+            );
+            (r1, r2)
+        })
+        .await;
+
+        let (close_pnl, reduce_pnl) = result.expect("deadlock: close + reduce timed out");
+        assert_eq!(close_pnl, Some(Decimal::from(5))); // (0.55-0.50)*100
+        assert_eq!(reduce_pnl, Some(Decimal::from_str_exact("2.5").unwrap())); // (0.45-0.40)*50
+    }
+
+    #[tokio::test]
+    async fn test_agent_open_shares_for_token_side() {
+        let agg = PositionAggregator::new();
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "btc-15m",
+            "TOKEN-YES",
+            Side::Up,
+            70,
+            Decimal::from_str_exact("0.50").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "btc-15m-2",
+            "token-yes",
+            Side::Up,
+            30,
+            Decimal::from_str_exact("0.45").unwrap(),
+        )
+        .await;
+        agg.open_position(
+            "agent1",
+            Domain::Crypto,
+            "btc-15m",
+            "token-no",
+            Side::Down,
+            50,
+            Decimal::from_str_exact("0.50").unwrap(),
+        )
+        .await;
+
+        let shares = agg
+            .agent_open_shares_for_token_side("agent1", Domain::Crypto, "token-yes", Side::Up)
+            .await;
+        assert_eq!(shares, 100);
+    }
+}

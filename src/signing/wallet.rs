@@ -11,7 +11,6 @@ use zeroize::Zeroize;
 /// This wallet no longer stores the private key in memory after initialization.
 /// The private key is only used during wallet creation and then immediately zeroized.
 /// This prevents memory dumps from exposing the private key.
-#[derive(Clone)]
 pub struct Wallet {
     inner: PrivateKeySigner,
     chain_id: u64,

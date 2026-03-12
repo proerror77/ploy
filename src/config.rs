@@ -1,7 +1,10 @@
 use config::{Config, ConfigError, Environment, File};
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::Path;
+
+use crate::platform::AgentRiskParams;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Deserialize)]
@@ -34,9 +37,6 @@ pub struct AppConfig {
     /// Optional NBA Q3→Q4 comeback trading agent
     #[serde(default)]
     pub nba_comeback: Option<NbaComebackConfig>,
-    /// Optional event registry discovery service
-    #[serde(default)]
-    pub event_registry: Option<DiscoveryConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,17 +101,178 @@ fn default_agent_framework_hard_disable() -> bool {
     false
 }
 
+/// Entry mode for crypto-managed runtime configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CryptoEntryMode {
+    /// Original arbitrage-only mode: require sum_of_asks < threshold.
+    ArbOnly,
+    /// Directional mode: trade based on momentum edge alone, no sum constraint.
+    Directional,
+    /// Volatility straddle: buy both UP and DOWN when sum < straddle_threshold.
+    VolStraddle,
+}
+
+fn default_crypto_entry_mode() -> CryptoEntryMode {
+    CryptoEntryMode::Directional
+}
+
+fn default_crypto_exit_edge_floor() -> Decimal {
+    Decimal::new(2, 2)
+}
+
+fn default_crypto_exit_price_band() -> Decimal {
+    Decimal::new(5, 2)
+}
+
+fn default_crypto_oracle_lag_buffer_secs() -> u64 {
+    3
+}
+
+fn default_crypto_max_spread_pct() -> Decimal {
+    Decimal::new(10, 2)
+}
+
+fn default_crypto_straddle_threshold() -> Decimal {
+    Decimal::new(99, 2)
+}
+
+fn default_crypto_straddle_min_vol() -> Decimal {
+    Decimal::ZERO
+}
+
+fn default_crypto_min_signal_score() -> Decimal {
+    Decimal::new(40, 2)
+}
+
+/// Neutral config owner for the canonical crypto runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CryptoTradingConfig {
+    pub agent_id: String,
+    pub name: String,
+    pub coins: Vec<String>,
+    pub sum_threshold: Decimal,
+    pub min_momentum_1s: f64,
+    #[serde(default)]
+    pub min_window_move_pct: Decimal,
+    #[serde(default = "default_crypto_exit_edge_floor")]
+    pub min_edge: Decimal,
+    pub event_refresh_secs: u64,
+    pub min_time_remaining_secs: u64,
+    pub max_time_remaining_secs: u64,
+    pub prefer_close_to_end: bool,
+    #[serde(default)]
+    pub entry_cooldown_secs: u64,
+    #[serde(default)]
+    pub require_mtf_agreement: bool,
+    pub default_shares: u64,
+    #[serde(default = "default_crypto_exit_edge_floor")]
+    pub exit_edge_floor: Decimal,
+    #[serde(default = "default_crypto_exit_price_band")]
+    pub exit_price_band: Decimal,
+    pub enable_price_exits: bool,
+    pub min_hold_secs: u64,
+    pub risk_params: AgentRiskParams,
+    pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_crypto_entry_mode")]
+    pub entry_mode: CryptoEntryMode,
+    #[serde(default = "default_crypto_oracle_lag_buffer_secs")]
+    pub oracle_lag_buffer_secs: u64,
+    #[serde(default = "default_crypto_max_spread_pct")]
+    pub max_spread_pct: Decimal,
+    #[serde(default = "default_crypto_straddle_threshold")]
+    pub straddle_threshold: Decimal,
+    #[serde(default = "default_crypto_straddle_min_vol")]
+    pub straddle_min_vol: Decimal,
+    #[serde(default = "default_crypto_min_signal_score")]
+    pub min_signal_score: Decimal,
+}
+
+impl Default for CryptoTradingConfig {
+    fn default() -> Self {
+        Self {
+            agent_id: "crypto".into(),
+            name: "Crypto Momentum".into(),
+            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
+            sum_threshold: Decimal::new(96, 2),
+            min_momentum_1s: 0.001,
+            min_window_move_pct: Decimal::new(1, 4),
+            min_edge: Decimal::new(2, 2),
+            event_refresh_secs: 30,
+            min_time_remaining_secs: 60,
+            max_time_remaining_secs: 300,
+            prefer_close_to_end: true,
+            entry_cooldown_secs: 0,
+            require_mtf_agreement: true,
+            default_shares: 100,
+            exit_edge_floor: default_crypto_exit_edge_floor(),
+            exit_price_band: default_crypto_exit_price_band(),
+            enable_price_exits: false,
+            min_hold_secs: 20,
+            risk_params: AgentRiskParams::conservative(),
+            heartbeat_interval_secs: 5,
+            entry_mode: default_crypto_entry_mode(),
+            oracle_lag_buffer_secs: default_crypto_oracle_lag_buffer_secs(),
+            max_spread_pct: default_crypto_max_spread_pct(),
+            straddle_threshold: default_crypto_straddle_threshold(),
+            straddle_min_vol: default_crypto_straddle_min_vol(),
+            min_signal_score: default_crypto_min_signal_score(),
+        }
+    }
+}
+
+/// Neutral config owner for the registered politics/event-edge runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoliticsTradingConfig {
+    pub agent_id: String,
+    pub name: String,
+    pub poll_interval_secs: u64,
+    pub heartbeat_interval_secs: u64,
+    pub risk_params: AgentRiskParams,
+}
+
+impl Default for PoliticsTradingConfig {
+    fn default() -> Self {
+        Self {
+            agent_id: "politics".into(),
+            name: "Event Edge".into(),
+            poll_interval_secs: 300,
+            heartbeat_interval_secs: 5,
+            risk_params: AgentRiskParams::conservative(),
+        }
+    }
+}
+
+/// Neutral config owner for the registered sports runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SportsTradingConfig {
+    #[serde(default = "default_account_id")]
+    pub account_id: String,
+    pub agent_id: String,
+    pub name: String,
+    pub poll_interval_secs: u64,
+    pub heartbeat_interval_secs: u64,
+    pub risk_params: AgentRiskParams,
+}
+
+impl Default for SportsTradingConfig {
+    fn default() -> Self {
+        Self {
+            account_id: default_account_id(),
+            agent_id: "sports".into(),
+            name: "NBA Comeback".into(),
+            poll_interval_secs: 30,
+            heartbeat_interval_secs: 5,
+            risk_params: AgentRiskParams::conservative(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct EventEdgeAgentConfig {
     /// Enable the agent inside `ploy run`
     #[serde(default)]
     pub enabled: bool,
-    /// Agent framework to use:
-    /// - "deterministic" (default): internal loop with fixed rules
-    /// - "event_driven": event-driven + persisted-state loop (Arena `last_updated` gating)
-    /// - "claude_agent_sdk": tool-using agent via `claude-agent-sdk-rs` (Claude Code CLI)
-    #[serde(default = "default_event_edge_framework")]
-    pub framework: String,
     /// Polymarket event IDs to monitor (preferred)
     #[serde(default)]
     pub event_ids: Vec<String>,
@@ -139,13 +300,6 @@ pub struct EventEdgeAgentConfig {
     /// Maximum notional spend per UTC day (simple safety guard)
     #[serde(default = "default_event_edge_max_daily_spend_usd")]
     pub max_daily_spend_usd: Decimal,
-
-    /// Claude model override for framework mode (optional)
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Maximum Claude turns per cycle (framework mode)
-    #[serde(default = "default_event_edge_claude_max_turns")]
-    pub claude_max_turns: u32,
 }
 
 impl EventEdgeAgentConfig {
@@ -170,13 +324,6 @@ impl EventEdgeAgentConfig {
                 self.max_daily_spend_usd
             ));
         }
-        let valid_frameworks = ["deterministic", "event_driven", "claude_agent_sdk"];
-        if !valid_frameworks.contains(&self.framework.as_str()) {
-            errors.push(format!(
-                "framework must be one of {:?}, got \"{}\"",
-                valid_frameworks, self.framework
-            ));
-        }
         errors
     }
 }
@@ -185,7 +332,6 @@ impl Default for EventEdgeAgentConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            framework: default_event_edge_framework(),
             event_ids: Vec::new(),
             titles: Vec::new(),
             interval_secs: default_event_edge_interval_secs(),
@@ -195,14 +341,8 @@ impl Default for EventEdgeAgentConfig {
             trade: false,
             cooldown_secs: default_event_edge_cooldown_secs(),
             max_daily_spend_usd: default_event_edge_max_daily_spend_usd(),
-            model: None,
-            claude_max_turns: default_event_edge_claude_max_turns(),
         }
     }
-}
-
-fn default_event_edge_framework() -> String {
-    "deterministic".to_string()
 }
 
 fn default_event_edge_interval_secs() -> u64 {
@@ -227,10 +367,6 @@ fn default_event_edge_cooldown_secs() -> u64 {
 
 fn default_event_edge_max_daily_spend_usd() -> Decimal {
     Decimal::new(50, 0) // $50
-}
-
-fn default_event_edge_claude_max_turns() -> u32 {
-    20
 }
 
 /// NBA Q3→Q4 comeback trading agent configuration
@@ -481,31 +617,6 @@ fn default_early_exit_stop_loss_pct() -> f64 {
     20.0
 }
 
-/// Event registry discovery service configuration
-#[derive(Debug, Clone, Deserialize)]
-pub struct DiscoveryConfig {
-    /// Enable the background discovery scanner
-    #[serde(default)]
-    pub enabled: bool,
-    /// Scan interval in seconds (default: 300 = 5 minutes)
-    #[serde(default = "default_discovery_scan_interval")]
-    pub scan_interval_secs: u64,
-    /// Sports keywords to scan (e.g. ["NBA", "NFL"])
-    #[serde(default = "default_discovery_sports_keywords")]
-    pub sports_keywords: Vec<String>,
-    /// General keywords to scan
-    #[serde(default)]
-    pub general_keywords: Vec<String>,
-}
-
-fn default_discovery_scan_interval() -> u64 {
-    300
-}
-
-fn default_discovery_sports_keywords() -> Vec<String> {
-    vec!["NBA".to_string(), "NFL".to_string()]
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct MarketConfig {
     /// WebSocket endpoint for market data
@@ -607,7 +718,7 @@ impl Default for ExecutionConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct KalshiConfig {
     /// Kalshi Trade API base URL.
     #[serde(default = "default_kalshi_base_url")]
@@ -618,6 +729,20 @@ pub struct KalshiConfig {
     /// Optional API secret (can also be sourced from env).
     #[serde(default)]
     pub api_secret: Option<String>,
+}
+
+fn redact_optional_secret(secret: &Option<String>) -> Option<&'static str> {
+    secret.as_ref().map(|_| "[REDACTED]")
+}
+
+impl fmt::Debug for KalshiConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KalshiConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &redact_optional_secret(&self.api_key))
+            .field("api_secret", &redact_optional_secret(&self.api_secret))
+            .finish()
+    }
 }
 
 impl Default for KalshiConfig {
@@ -670,13 +795,22 @@ fn default_max_positions_per_symbol() -> u32 {
     1 // Default: only 1 position per symbol
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct DatabaseConfig {
     /// PostgreSQL connection URL
     pub url: String,
     /// Maximum connections in pool
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+}
+
+impl fmt::Debug for DatabaseConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DatabaseConfig")
+            .field("url", &"[REDACTED]")
+            .field("max_connections", &self.max_connections)
+            .finish()
+    }
 }
 
 fn default_max_connections() -> u32 {
@@ -819,7 +953,6 @@ impl AppConfig {
             api_port: Some(8081),
             event_edge_agent: None,
             nba_comeback: None,
-            event_registry: None,
         }
     }
 
@@ -882,234 +1015,12 @@ impl AppConfig {
     }
 
     fn apply_env_overrides(&mut self) {
-        if let Some(v) = env_bool(&["PLOY_DRY_RUN__ENABLED", "PLOY__DRY_RUN__ENABLED"]) {
-            self.dry_run.enabled = v;
-        }
-
-        if let Some(v) = env_string(&["PLOY_ACCOUNT__ID", "PLOY__ACCOUNT__ID", "PLOY_ACCOUNT_ID"]) {
-            if !v.trim().is_empty() {
-                self.account.id = v;
-            }
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_ACCOUNT__WALLET_ADDRESS",
-            "PLOY__ACCOUNT__WALLET_ADDRESS",
-            "PLOY_ACCOUNT_WALLET_ADDRESS",
-        ]) {
-            if !v.trim().is_empty() {
-                self.account.wallet_address = Some(v);
-            }
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_ACCOUNT__LABEL",
-            "PLOY__ACCOUNT__LABEL",
-            "PLOY_ACCOUNT_LABEL",
-        ]) {
-            if !v.trim().is_empty() {
-                self.account.label = Some(v);
-            }
-        }
-
-        if let Some(v) = env_string(&["PLOY_MARKET__MARKET_SLUG", "PLOY__MARKET__MARKET_SLUG"]) {
-            self.market.market_slug = v;
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_EXECUTION__EXCHANGE",
-            "PLOY__EXECUTION__EXCHANGE",
-            "PLOY_EXECUTION_EXCHANGE",
-        ]) {
-            let normalized = v.trim().to_ascii_lowercase();
-            if matches!(normalized.as_str(), "polymarket" | "kalshi") {
-                self.execution.exchange = normalized;
-            }
-        }
-
-        if let Some(v) = env_string_raw(&[
-            "PLOY_KALSHI__BASE_URL",
-            "PLOY__KALSHI__BASE_URL",
-            "PLOY_KALSHI_BASE_URL",
-            "KALSHI_BASE_URL",
-        ]) {
-            if !v.trim().is_empty() {
-                self.kalshi.base_url = v;
-            }
-        }
-
-        if let Some(v) = env_string_raw(&[
-            "PLOY_KALSHI__API_KEY",
-            "PLOY__KALSHI__API_KEY",
-            "PLOY_KALSHI_API_KEY",
-            "KALSHI_API_KEY",
-            "KALSHI_ACCESS_KEY",
-        ]) {
-            if !v.trim().is_empty() {
-                self.kalshi.api_key = Some(v);
-            }
-        }
-
-        if let Some(v) = env_string_raw(&[
-            "PLOY_KALSHI__API_SECRET",
-            "PLOY__KALSHI__API_SECRET",
-            "PLOY_KALSHI_API_SECRET",
-            "KALSHI_API_SECRET",
-            "KALSHI_ACCESS_SECRET",
-        ]) {
-            if !v.trim().is_empty() {
-                self.kalshi.api_secret = Some(v);
-            }
-        }
-
-        if let Some(v) = env_u16(&["PLOY_API_PORT", "PLOY__API_PORT"]) {
-            self.api_port = Some(v);
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_DATABASE__URL",
-            "PLOY__DATABASE__URL",
-            "PLOY_DATABASE_URL",
-            "DATABASE_URL",
-        ]) {
-            self.database.url = v;
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_DATABASE__MAX_CONNECTIONS",
-            "PLOY__DATABASE__MAX_CONNECTIONS",
-            "PLOY_DATABASE_MAX_CONNECTIONS",
-        ])
-        .and_then(|raw| raw.parse::<u32>().ok())
-        {
-            self.database.max_connections = v;
-        }
-
-        if let Some(v) = env_string(&[
-            "PLOY_AGENT_FRAMEWORK__MODE",
-            "PLOY__AGENT_FRAMEWORK__MODE",
-            "PLOY_AGENT_FRAMEWORK_MODE",
-        ]) {
-            let normalized = v.trim().to_ascii_lowercase();
-            if matches!(normalized.as_str(), "internal" | "openclaw") {
-                self.agent_framework.mode = normalized;
-            }
-        }
-
-        if let Some(v) = env_bool(&[
-            "PLOY_AGENT_FRAMEWORK__HARD_DISABLE_INTERNAL_AGENTS",
-            "PLOY__AGENT_FRAMEWORK__HARD_DISABLE_INTERNAL_AGENTS",
-            "PLOY_AGENT_FRAMEWORK_HARD_DISABLE_INTERNAL_AGENTS",
-            "PLOY_OPENCLAW_ONLY",
-        ]) {
-            self.agent_framework.hard_disable_internal_agents = v;
-        }
-
-        let ee_enabled = env_bool(&[
-            "PLOY_EVENT_EDGE_AGENT__ENABLED",
-            "PLOY__EVENT_EDGE_AGENT__ENABLED",
-        ]);
-        let ee_trade = env_bool(&[
-            "PLOY_EVENT_EDGE_AGENT__TRADE",
-            "PLOY__EVENT_EDGE_AGENT__TRADE",
-        ]);
-        let ee_event_ids = env_list(&[
-            "PLOY_EVENT_EDGE_AGENT__EVENT_IDS",
-            "PLOY__EVENT_EDGE_AGENT__EVENT_IDS",
-            "PLOY_EVENT_EDGE_AGENT_EVENT_IDS",
-        ]);
-        let ee_titles = env_list(&[
-            "PLOY_EVENT_EDGE_AGENT__TITLES",
-            "PLOY__EVENT_EDGE_AGENT__TITLES",
-            "PLOY_EVENT_EDGE_AGENT_TITLES",
-        ]);
-        if ee_enabled.is_some() || ee_trade.is_some() {
-            let ee = self
-                .event_edge_agent
-                .get_or_insert_with(EventEdgeAgentConfig::default);
-            if let Some(v) = ee_enabled {
-                ee.enabled = v;
-            }
-            if let Some(v) = ee_trade {
-                ee.trade = v;
-            }
-        }
-        if ee_event_ids.is_some() || ee_titles.is_some() {
-            let ee = self
-                .event_edge_agent
-                .get_or_insert_with(EventEdgeAgentConfig::default);
-            if let Some(v) = ee_event_ids {
-                ee.event_ids = v;
-            }
-            if let Some(v) = ee_titles {
-                ee.titles = v;
-            }
-        }
+        env_overrides::apply_env_overrides(self);
     }
 
     /// Whether built-in Rust agent loops must be disabled in this process.
     pub fn openclaw_runtime_lockdown(&self) -> bool {
         self.agent_framework.is_openclaw_mode() && self.agent_framework.hard_disable_internal_agents
-    }
-}
-
-fn env_string(keys: &[&str]) -> Option<String> {
-    env_string_raw(keys).map(|s| s.to_ascii_lowercase())
-}
-
-fn env_string_raw(keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Ok(v) = std::env::var(key) {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn env_u16(keys: &[&str]) -> Option<u16> {
-    env_string(keys).and_then(|v| v.parse::<u16>().ok())
-}
-
-fn env_bool(keys: &[&str]) -> Option<bool> {
-    env_string(keys).and_then(|v| parse_bool_like(&v))
-}
-
-fn env_list(keys: &[&str]) -> Option<Vec<String>> {
-    env_string(keys).map(|raw| parse_string_list(&raw))
-}
-
-fn parse_string_list(raw: &str) -> Vec<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-
-    if trimmed.starts_with('[') {
-        if let Ok(values) = serde_json::from_str::<Vec<String>>(trimmed) {
-            return values
-                .into_iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-    }
-
-    trimmed
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn parse_bool_like(v: &str) -> Option<bool> {
-    match v.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
     }
 }
 
@@ -1136,13 +1047,13 @@ mod tests {
 
     #[test]
     fn test_parse_string_list_csv() {
-        let parsed = parse_string_list("a,b, c ,,d");
+        let parsed = env_overrides::parse_string_list("a,b, c ,,d");
         assert_eq!(parsed, vec!["a", "b", "c", "d"]);
     }
 
     #[test]
     fn test_parse_string_list_json_array() {
-        let parsed = parse_string_list(r#"["id-1","id-2"]"#);
+        let parsed = env_overrides::parse_string_list(r#"["id-1","id-2"]"#);
         assert_eq!(parsed, vec!["id-1", "id-2"]);
     }
 
@@ -1164,5 +1075,34 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| e.contains("execution.exchange must be one of [polymarket, kalshi]")));
+    }
+
+    #[test]
+    fn test_database_config_debug_redacts_url() {
+        let cfg = DatabaseConfig {
+            url: "postgres://user:password@localhost:5432/ploy".to_string(),
+            max_connections: 7,
+        };
+
+        let rendered = format!("{:?}", cfg);
+
+        assert!(!rendered.contains("password"));
+        assert!(!rendered.contains("postgres://user:password@localhost:5432/ploy"));
+        assert!(rendered.contains("7"));
+    }
+
+    #[test]
+    fn test_kalshi_config_debug_redacts_credentials() {
+        let cfg = KalshiConfig {
+            base_url: "https://example.com".to_string(),
+            api_key: Some("kalshi-key".to_string()),
+            api_secret: Some("kalshi-secret".to_string()),
+        };
+
+        let rendered = format!("{:?}", cfg);
+
+        assert!(!rendered.contains("kalshi-key"));
+        assert!(!rendered.contains("kalshi-secret"));
+        assert!(rendered.contains("https://example.com"));
     }
 }

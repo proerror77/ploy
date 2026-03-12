@@ -2,14 +2,16 @@
 set -euo pipefail
 
 # Build and deploy ploy to an AWS EC2 host.
-# This script uploads source code and builds on EC2 to avoid local/remote arch mismatch.
+# WARNING: Remote source builds are disabled by default to protect trading hosts from OOM.
+# Use ALLOW_REMOTE_BUILD=1 only for non-trading environments.
 
 HOST=""
 USER_NAME="ubuntu"
 SSH_KEY=""
 START_AFTER_DEPLOY="true"
 ENABLE_ON_BOOT="true"
-SERVICES="ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer,ploy-platform-watchdog.timer"
+SERVICES="ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer"
+ALLOW_REMOTE_BUILD="${ALLOW_REMOTE_BUILD:-0}"
 
 usage() {
   cat <<'USAGE'
@@ -23,8 +25,8 @@ Options:
   --start <true|false>     Start services after deploy (default: true)
   --enable <true|false>    Enable services on boot (default: true)
   --services <csv>         Services to enable/start
-                           allowed: ploy,ploy-platform-live,ploy-sports-pm,ploy-crypto-collector,ploy-crypto-dryrun,ploy-crypto-live,ploy-orderbook-history,ploy-maintenance.timer,ploy-platform-watchdog.timer,ploy-strategy-pattern-memory-dryrun,ploy-strategy-momentum-dryrun,ploy-strategy-split-arb-dryrun
-                           default: ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer,ploy-platform-watchdog.timer
+                           allowed: ploy,ploy-platform-live,ploy-sports-pm,ploy-crypto-collector,ploy-crypto-dryrun,ploy-crypto-live,ploy-orderbook-history,ploy-maintenance.timer,ploy-strategy-pattern-memory-dryrun,ploy-strategy-momentum-dryrun,ploy-strategy-split-arb-dryrun
+                           default: ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer
   -h, --help               Show help
 
 Examples:
@@ -40,12 +42,16 @@ What it does:
   4) Install/refresh systemd services (ploy, ploy@, sports, crypto collector)
   5) Install workload config/env templates under /opt/ploy/config and /opt/ploy/env
   6) Enable/start selected services (optional)
+
+Safety:
+  - Remote source build is disabled by default.
+  - To force-enable this legacy path, set ALLOW_REMOTE_BUILD=1 explicitly.
 USAGE
 }
 
 is_allowed_service() {
   case "$1" in
-    ploy|ploy-platform-live|ploy-sports-pm|ploy-crypto-collector|ploy-crypto-dryrun|ploy-crypto-live|ploy-orderbook-history|ploy-maintenance.timer|ploy-platform-watchdog.timer) return 0 ;;
+    ploy|ploy-platform-live|ploy-sports-pm|ploy-crypto-collector|ploy-crypto-dryrun|ploy-crypto-live|ploy-orderbook-history|ploy-maintenance.timer) return 0 ;;
     ploy-strategy-pattern-memory-dryrun|ploy-strategy-momentum-dryrun|ploy-strategy-split-arb-dryrun) return 0 ;;
     *) return 1 ;;
   esac
@@ -61,7 +67,7 @@ normalize_services_csv() {
     [[ -n "$svc" ]] || continue
     if ! is_allowed_service "$svc"; then
       echo "invalid service in --services: $svc" >&2
-      echo "allowed: ploy, ploy-platform-live, ploy-sports-pm, ploy-crypto-collector, ploy-crypto-dryrun, ploy-crypto-live, ploy-orderbook-history, ploy-maintenance.timer, ploy-platform-watchdog.timer, ploy-strategy-pattern-memory-dryrun, ploy-strategy-momentum-dryrun, ploy-strategy-split-arb-dryrun" >&2
+      echo "allowed: ploy, ploy-platform-live, ploy-sports-pm, ploy-crypto-collector, ploy-crypto-dryrun, ploy-crypto-live, ploy-orderbook-history, ploy-maintenance.timer, ploy-strategy-pattern-memory-dryrun, ploy-strategy-momentum-dryrun, ploy-strategy-split-arb-dryrun" >&2
       exit 2
     fi
     out+=("$svc")
@@ -130,6 +136,15 @@ if [[ "$ENABLE_ON_BOOT" != "true" && "$ENABLE_ON_BOOT" != "false" ]]; then
 fi
 
 SERVICES="$(normalize_services_csv "$SERVICES")"
+
+if [[ "$ALLOW_REMOTE_BUILD" != "1" ]]; then
+  cat >&2 <<'MSG'
+Remote source build is disabled by default to protect trading hosts from OOM.
+Use CI artifact deployment instead (for example: .github/workflows/release-aliyun.yml).
+If you really need this legacy script, rerun with ALLOW_REMOTE_BUILD=1.
+MSG
+  exit 3
+fi
 
 SSH_OPTS=(
   -o StrictHostKeyChecking=accept-new
@@ -282,9 +297,7 @@ for unit in \
   "$REMOTE_ROOT/deployment/ploy-strategy-split-arb-dryrun.service" \
   "$REMOTE_ROOT/deployment/ploy-orderbook-history.service" \
   "$REMOTE_ROOT/deployment/ploy-maintenance.service" \
-  "$REMOTE_ROOT/deployment/ploy-maintenance.timer" \
-  "$REMOTE_ROOT/deployment/ploy-platform-watchdog.service" \
-  "$REMOTE_ROOT/deployment/ploy-platform-watchdog.timer"
+  "$REMOTE_ROOT/deployment/ploy-maintenance.timer"
 do
   if [[ -f "$unit" ]]; then
     sudo install -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"

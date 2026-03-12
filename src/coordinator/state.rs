@@ -5,10 +5,11 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::platform::{
-    AgentStatus, AggregatedPosition, CircuitBreakerEvent, Domain, PlatformRiskState, Position,
-    QueueStats,
-};
+use crate::agent_runtime::AgentStatus;
+use crate::platform::Domain;
+
+use super::QueueStats;
+use super::{AggregatedPosition, CircuitBreakerEvent, PlatformRiskState, Position};
 
 /// Per-agent snapshot visible to the coordinator and TUI
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +28,7 @@ pub struct AgentSnapshot {
     pub error_message: Option<String>,
 }
 
-/// Serializable queue stats snapshot (mirrors QueueStats from platform)
+/// Serializable queue stats snapshot (mirrors coordinator-owned QueueStats)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueueStatsSnapshot {
     pub current_size: usize,

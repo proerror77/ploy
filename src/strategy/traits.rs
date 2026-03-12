@@ -1,6 +1,12 @@
-//! Core strategy traits and types
+//! Core strategy traits and types.
 //!
-//! Defines the common interface that all trading strategies must implement.
+//! This module is the canonical Strategy Plane contract for live trading.
+//! New live strategies must implement [`Strategy`] and integrate through the
+//! canonical strategy runtime / coordinator execution path.
+//!
+//! Retired `TradingAgent` / `DomainAgent` paths are mentioned only in
+//! historical design docs and compatibility notes; they are not available
+//! extension points for new live strategy work.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -8,14 +14,18 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::domain::{OrderRequest, OrderStatus, Quote, Side};
+use crate::domain::{OrderRequest, OrderSide, OrderStatus, Quote, Side};
 use crate::error::Result;
+use crate::platform::Domain;
 
 // ============================================================================
 // Strategy Trait
 // ============================================================================
 
-/// Core trait that all trading strategies must implement
+/// Canonical live strategy contract.
+///
+/// New live strategy implementations should enter the system through this
+/// interface. The old `TradingAgent` / `DomainAgent` runtime paths are retired.
 #[async_trait]
 pub trait Strategy: Send + Sync {
     /// Unique strategy identifier
@@ -121,6 +131,21 @@ pub enum MarketUpdate {
         timestamp: DateTime<Utc>,
     },
 
+    /// Binance L2 orderbook snapshot features
+    BinanceL2 {
+        symbol: String,
+        obi_1: Decimal,
+        obi_2: Decimal,
+        obi_3: Decimal,
+        obi_5: Decimal,
+        obi_10: Decimal,
+        obi_20: Decimal,
+        bid_volume_5: Decimal,
+        ask_volume_5: Decimal,
+        spread_bps: Decimal,
+        timestamp: DateTime<Utc>,
+    },
+
     /// Closed kline bar from Binance
     BinanceKline {
         symbol: String,
@@ -153,6 +178,7 @@ impl MarketUpdate {
         match self {
             MarketUpdate::PolymarketQuote { timestamp, .. } => *timestamp,
             MarketUpdate::BinancePrice { timestamp, .. } => *timestamp,
+            MarketUpdate::BinanceL2 { timestamp, .. } => *timestamp,
             MarketUpdate::BinanceKline { timestamp, .. } => *timestamp,
             MarketUpdate::EventDiscovered { .. } => Utc::now(),
             MarketUpdate::EventExpired { .. } => Utc::now(),
@@ -187,18 +213,46 @@ pub struct OrderUpdate {
 // Strategy Actions
 // ============================================================================
 
-/// Actions a strategy can request
+/// Strategy-declared lifecycle purpose for a submitted order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderPurpose {
+    Entry,
+    Exit,
+    Reduce,
+    Hedge,
+}
+
+impl OrderPurpose {
+    pub fn from_order_request(order: &OrderRequest) -> Self {
+        match order.order_side {
+            OrderSide::Buy => Self::Entry,
+            OrderSide::Sell => Self::Exit,
+        }
+    }
+}
+
+/// Actions a strategy can request.
+///
+/// This enum is intentionally limited to decision-layer outcomes. Feed wiring
+/// and governance mutations are owned by the runtime / governance planes, not
+/// by individual strategies.
 #[derive(Debug, Clone)]
 pub enum StrategyAction {
     /// Submit a new order
     SubmitOrder {
         /// Strategy-assigned ID for tracking
         client_order_id: String,
+        /// Lifecycle purpose for deployment draining / execution policy.
+        purpose: OrderPurpose,
         /// Order details
         order: OrderRequest,
         /// Priority (higher = more urgent)
         priority: u8,
     },
+
+    /// Canonical strategy-side submit payload.
+    SubmitIntent { intent: StrategyOrderIntent },
 
     /// Cancel an existing order
     CancelOrder { order_id: String },
@@ -210,20 +264,27 @@ pub enum StrategyAction {
         new_size: Option<u64>,
     },
 
-    /// Update risk state
-    UpdateRisk { level: RiskLevel, reason: String },
-
     /// Log a strategy event
     LogEvent { event: StrategyEvent },
 
     /// Send an alert
     Alert { level: AlertLevel, message: String },
+}
 
-    /// Request data feed subscription change
-    SubscribeFeed { feed: DataFeed },
-
-    /// Request data feed unsubscription
-    UnsubscribeFeed { feed: DataFeed },
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyOrderIntent {
+    pub client_order_id: String,
+    pub domain: Domain,
+    pub market_slug: String,
+    pub token_id: String,
+    pub side: Side,
+    pub is_buy: bool,
+    pub shares: u64,
+    pub limit_price: Decimal,
+    pub order_type: crate::domain::OrderType,
+    pub time_in_force: crate::domain::TimeInForce,
+    pub priority: u8,
+    pub metadata: HashMap<String, String>,
 }
 
 // ============================================================================

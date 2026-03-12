@@ -121,6 +121,14 @@ pub struct PgBacktestRecorder {
 }
 
 impl PgBacktestRecorder {
+    fn config_hash(config: &serde_json::Value) -> String {
+        use std::hash::{Hash, Hasher};
+        let json = serde_json::to_string(config).unwrap_or_default();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        json.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
     /// Create a new recorder and INSERT the `backtest_runs` row.
     ///
     /// This is async because it writes to DB. Call from an async context
@@ -133,7 +141,7 @@ impl PgBacktestRecorder {
         symbols: &[String],
     ) -> anyhow::Result<Self> {
         let run_id = Uuid::new_v4();
-        sqlx::query(
+        let primary_insert = sqlx::query(
             "INSERT INTO backtest_runs (run_id, strategy, mode, config_json, symbols)
              VALUES ($1, $2, $3, $4, $5)",
         )
@@ -141,9 +149,40 @@ impl PgBacktestRecorder {
         .bind(strategy)
         .bind(mode)
         .bind(config)
-        .bind(symbols)
-        .execute(&pool)
-        .await?;
+        .bind(symbols);
+
+        if let Err(primary_err) = primary_insert.execute(&pool).await {
+            // Compatibility path for legacy 019 schema constraints that may still exist
+            // on partially-migrated environments (strategy_id/config_hash/started_at NOT NULL).
+            let compat_insert = sqlx::query(
+                "INSERT INTO backtest_runs
+                 (run_id, strategy, mode, config_json, symbols, strategy_id, config_hash, started_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(run_id)
+            .bind(strategy)
+            .bind(mode)
+            .bind(config)
+            .bind(symbols)
+            .bind(strategy)
+            .bind(Self::config_hash(config))
+            .bind(Utc::now());
+
+            if let Err(compat_err) = compat_insert.execute(&pool).await {
+                return Err(anyhow::anyhow!(
+                    "failed to create backtest run row (primary insert error: {}; compatibility insert error: {})",
+                    primary_err,
+                    compat_err
+                ));
+            }
+
+            tracing::warn!(
+                %run_id,
+                strategy,
+                mode,
+                "backtest run inserted via legacy-compat path (strategy_id/config_hash/started_at)"
+            );
+        }
 
         tracing::info!(%run_id, strategy, mode, "backtest run created");
 

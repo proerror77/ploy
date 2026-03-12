@@ -94,6 +94,15 @@ pub enum Commands {
         /// Duration to collect in minutes (0 = indefinite)
         #[arg(short, long, default_value = "0")]
         duration: u64,
+        /// Print a lightweight collector data-quality report and exit
+        #[arg(long)]
+        check_only: bool,
+        /// Lookback window in minutes for duplicate-ratio checks
+        #[arg(long, default_value = "60")]
+        lookback_minutes: u64,
+        /// Mark a table stale when its latest timestamp is older than this threshold
+        #[arg(long, default_value = "120")]
+        freshness_warn_secs: u64,
     },
 
     /// Backfill Polymarket L2 orderbook history via `clob.polymarket.com/orderbook-history`
@@ -137,6 +146,41 @@ pub enum Commands {
         /// Resume from DB high-water mark per asset (ignores start_ms when set).
         #[arg(long)]
         resume_from_db: bool,
+    },
+
+    /// Backfill Deribit volatility index (DVOL) history into Postgres
+    DeribitIvBackfill {
+        /// Currencies to backfill (comma-separated: BTC,ETH)
+        #[arg(long, default_value = "BTC,ETH")]
+        currencies: String,
+
+        /// Start timestamp (RFC3339). If omitted, uses now - lookback_days.
+        #[arg(long)]
+        start: Option<String>,
+
+        /// End timestamp (RFC3339). If omitted, uses now.
+        #[arg(long)]
+        end: Option<String>,
+
+        /// Lookback window (days) when start is omitted.
+        #[arg(long, default_value = "30")]
+        lookback_days: u64,
+
+        /// Bar resolution in seconds (Deribit TradingView resolution).
+        #[arg(long, default_value = "60")]
+        resolution_secs: u32,
+
+        /// Sleep between API pages (milliseconds).
+        #[arg(long, default_value = "200")]
+        sleep_ms: u64,
+
+        /// Override Deribit public API base URL
+        #[arg(long, default_value = "https://www.deribit.com/api/v2/public")]
+        base_url: String,
+
+        /// Fetch only; don't write to DB
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Crypto market strategies (BTC, ETH, SOL UP/DOWN)
@@ -376,7 +420,7 @@ pub enum CryptoCommands {
 /// Sports market subcommands
 #[derive(Subcommand, Debug)]
 pub enum SportsCommands {
-    /// Split arbitrage on sports markets
+    /// Deprecated: standalone sports split-arb runtime
     SplitArb {
         /// Maximum entry price in cents
         #[arg(long, default_value = "45")]
@@ -610,4 +654,42 @@ pub enum RlCommands {
         #[arg(long)]
         policy_version: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn collect_check_only_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "ploy",
+            "collect",
+            "--symbols",
+            "BTCUSDT,ETHUSDT",
+            "--check-only",
+            "--lookback-minutes",
+            "45",
+            "--freshness-warn-secs",
+            "90",
+        ])
+        .expect("collect check-only args should parse");
+
+        match cli.command.expect("command should parse") {
+            Commands::Collect {
+                symbols,
+                check_only,
+                lookback_minutes,
+                freshness_warn_secs,
+                ..
+            } => {
+                assert_eq!(symbols, "BTCUSDT,ETHUSDT");
+                assert!(check_only);
+                assert_eq!(lookback_minutes, 45);
+                assert_eq!(freshness_warn_secs, 90);
+            }
+            other => panic!("expected Collect command, got {other:?}"),
+        }
+    }
 }

@@ -6,18 +6,21 @@
 //! - Track running strategies
 //! - Provide status information
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
-use super::traits::{
-    MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyStateInfo,
-};
+use super::traits::{MarketUpdate, OrderUpdate, Strategy, StrategyAction};
 use crate::error::Result;
 use anyhow::anyhow;
+
+mod lifecycle;
+
+use lifecycle::RunningStrategy;
+pub use lifecycle::StrategyStatus;
 
 // ============================================================================
 // Strategy Manager
@@ -39,18 +42,6 @@ pub struct StrategyManager {
     tick_interval_ms: u64,
     /// Shutdown signal
     shutdown_tx: broadcast::Sender<()>,
-}
-
-/// A running strategy instance with its task handle
-struct RunningStrategy {
-    /// The strategy instance
-    strategy: Arc<RwLock<Box<dyn Strategy>>>,
-    /// Background task handle
-    task_handle: Option<JoinHandle<()>>,
-    /// When the strategy was started
-    started_at: DateTime<Utc>,
-    /// Configuration used to start the strategy
-    config_path: Option<String>,
 }
 
 impl StrategyManager {
@@ -77,168 +68,6 @@ impl StrategyManager {
         self.action_rx.write().await.take()
     }
 
-    /// Start a strategy
-    pub async fn start_strategy(
-        &self,
-        strategy: Box<dyn Strategy>,
-        config_path: Option<String>,
-    ) -> Result<()> {
-        let strategy_id = strategy.id().to_string();
-        let strategy_name = strategy.name().to_string();
-
-        // Check if already running
-        {
-            let strategies = self.strategies.read().await;
-            if strategies.contains_key(&strategy_id) {
-                return Err(anyhow!("Strategy {} is already running", strategy_id).into());
-            }
-        }
-
-        info!("Starting strategy: {} ({})", strategy_name, strategy_id);
-
-        let strategy = Arc::new(RwLock::new(strategy));
-
-        // Subscribe to data feeds
-        let required_feeds = {
-            let s = strategy.read().await;
-            s.required_feeds()
-        };
-
-        for feed in &required_feeds {
-            debug!("Strategy {} subscribed to feed: {:?}", strategy_id, feed);
-        }
-
-        // Create the background task for this strategy
-        let task_handle = self
-            .spawn_strategy_task(strategy_id.clone(), strategy.clone())
-            .await;
-
-        // Store the running strategy
-        {
-            let mut strategies = self.strategies.write().await;
-            strategies.insert(
-                strategy_id.clone(),
-                RunningStrategy {
-                    strategy,
-                    task_handle: Some(task_handle),
-                    started_at: Utc::now(),
-                    config_path,
-                },
-            );
-        }
-
-        info!("Strategy {} started successfully", strategy_id);
-        Ok(())
-    }
-
-    /// Stop a strategy
-    pub async fn stop_strategy(&self, strategy_id: &str, graceful: bool) -> Result<()> {
-        let mut strategies = self.strategies.write().await;
-
-        let running = strategies
-            .remove(strategy_id)
-            .ok_or_else(|| anyhow!("Strategy {} is not running", strategy_id))?;
-
-        info!("Stopping strategy: {}", strategy_id);
-
-        if graceful {
-            // Call shutdown to close positions gracefully
-            let actions = {
-                let mut strategy = running.strategy.write().await;
-                strategy.shutdown().await?
-            };
-
-            // Process shutdown actions
-            for action in actions {
-                let _ = self.action_tx.send((strategy_id.to_string(), action)).await;
-            }
-        }
-
-        // Cancel the background task
-        if let Some(handle) = running.task_handle {
-            handle.abort();
-        }
-
-        info!("Strategy {} stopped", strategy_id);
-        Ok(())
-    }
-
-    /// Stop all strategies
-    pub async fn stop_all(&self, graceful: bool) -> Result<()> {
-        let strategy_ids: Vec<String> = {
-            let strategies = self.strategies.read().await;
-            strategies.keys().cloned().collect()
-        };
-
-        for id in strategy_ids {
-            if let Err(e) = self.stop_strategy(&id, graceful).await {
-                error!("Error stopping strategy {}: {}", id, e);
-            }
-        }
-
-        // Send shutdown signal
-        let _ = self.shutdown_tx.send(());
-
-        Ok(())
-    }
-
-    /// Get status of all running strategies
-    pub async fn get_status(&self) -> Vec<StrategyStatus> {
-        let strategies = self.strategies.read().await;
-        let mut statuses = Vec::new();
-
-        for (id, running) in strategies.iter() {
-            let strategy = running.strategy.read().await;
-            let state = strategy.state();
-            let positions = strategy.positions();
-
-            statuses.push(StrategyStatus {
-                id: id.clone(),
-                name: strategy.name().to_string(),
-                state,
-                position_count: positions.len(),
-                started_at: running.started_at,
-                config_path: running.config_path.clone(),
-            });
-        }
-
-        statuses
-    }
-
-    /// Get status of a specific strategy
-    pub async fn get_strategy_status(&self, strategy_id: &str) -> Option<StrategyStatus> {
-        let strategies = self.strategies.read().await;
-
-        if let Some(running) = strategies.get(strategy_id) {
-            let strategy = running.strategy.read().await;
-            let state = strategy.state();
-            let positions = strategy.positions();
-
-            Some(StrategyStatus {
-                id: strategy_id.to_string(),
-                name: strategy.name().to_string(),
-                state,
-                position_count: positions.len(),
-                started_at: running.started_at,
-                config_path: running.config_path.clone(),
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Get positions for a specific strategy
-    pub async fn get_positions(&self, strategy_id: &str) -> Option<Vec<PositionInfo>> {
-        let strategies = self.strategies.read().await;
-
-        if let Some(running) = strategies.get(strategy_id) {
-            let strategy = running.strategy.read().await;
-            Some(strategy.positions())
-        } else {
-            None
-        }
-    }
-
     /// Broadcast a market update to all strategies
     pub fn send_market_update(&self, update: MarketUpdate) {
         let _ = self.market_tx.send(update);
@@ -247,18 +76,6 @@ impl StrategyManager {
     /// Broadcast an order update to all strategies
     pub fn send_order_update(&self, update: OrderUpdate) {
         let _ = self.order_tx.send(update);
-    }
-
-    /// List running strategy IDs
-    pub async fn list_running(&self) -> Vec<String> {
-        let strategies = self.strategies.read().await;
-        strategies.keys().cloned().collect()
-    }
-
-    /// Check if a strategy is running
-    pub async fn is_running(&self, strategy_id: &str) -> bool {
-        let strategies = self.strategies.read().await;
-        strategies.contains_key(strategy_id)
     }
 
     /// Spawn the background task for a strategy
@@ -291,8 +108,19 @@ impl StrategyManager {
                             }
                         };
 
+                        let mut dispatch_failed = false;
                         for action in actions {
-                            let _ = action_tx.send((strategy_id.clone(), action)).await;
+                            if let Err(err) = action_tx.send((strategy_id.clone(), action)).await {
+                                error!(
+                                    "Strategy {} failed to dispatch market action (executor channel closed): {}",
+                                    strategy_id, err
+                                );
+                                dispatch_failed = true;
+                                break;
+                            }
+                        }
+                        if dispatch_failed {
+                            break;
                         }
                     }
 
@@ -309,8 +137,19 @@ impl StrategyManager {
                             }
                         };
 
+                        let mut dispatch_failed = false;
                         for action in actions {
-                            let _ = action_tx.send((strategy_id.clone(), action)).await;
+                            if let Err(err) = action_tx.send((strategy_id.clone(), action)).await {
+                                error!(
+                                    "Strategy {} failed to dispatch order action (executor channel closed): {}",
+                                    strategy_id, err
+                                );
+                                dispatch_failed = true;
+                                break;
+                            }
+                        }
+                        if dispatch_failed {
+                            break;
                         }
                     }
 
@@ -327,8 +166,19 @@ impl StrategyManager {
                             }
                         };
 
+                        let mut dispatch_failed = false;
                         for action in actions {
-                            let _ = action_tx.send((strategy_id.clone(), action)).await;
+                            if let Err(err) = action_tx.send((strategy_id.clone(), action)).await {
+                                error!(
+                                    "Strategy {} failed to dispatch tick action (executor channel closed): {}",
+                                    strategy_id, err
+                                );
+                                dispatch_failed = true;
+                                break;
+                            }
+                        }
+                        if dispatch_failed {
+                            break;
                         }
                     }
 
@@ -340,45 +190,6 @@ impl StrategyManager {
                 }
             }
         })
-    }
-}
-
-// ============================================================================
-// Strategy Status
-// ============================================================================
-
-/// Status information for a running strategy
-#[derive(Debug, Clone)]
-pub struct StrategyStatus {
-    /// Strategy ID
-    pub id: String,
-    /// Strategy name
-    pub name: String,
-    /// Current state info
-    pub state: StrategyStateInfo,
-    /// Number of open positions
-    pub position_count: usize,
-    /// When the strategy was started
-    pub started_at: DateTime<Utc>,
-    /// Config file path (if started from config)
-    pub config_path: Option<String>,
-}
-
-impl StrategyStatus {
-    /// Get uptime as a human-readable string
-    pub fn uptime(&self) -> String {
-        let duration = Utc::now() - self.started_at;
-        let hours = duration.num_hours();
-        let minutes = duration.num_minutes() % 60;
-        let seconds = duration.num_seconds() % 60;
-
-        if hours > 0 {
-            format!("{}h {}m {}s", hours, minutes, seconds)
-        } else if minutes > 0 {
-            format!("{}m {}s", minutes, seconds)
-        } else {
-            format!("{}s", seconds)
-        }
     }
 }
 
@@ -406,7 +217,16 @@ impl StrategyFactory {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("Missing strategy.name"))?;
 
-        let strategy_id = format!("{}_{}", strategy_name, chrono::Utc::now().timestamp());
+        let strategy_id_base = if strategy_name == "composable_crypto" {
+            strategy_section
+                .get("plugin_id")
+                .and_then(|v| v.as_str())
+                .map(|plugin_id| plugin_id.replace(['.', '-'], "_"))
+                .unwrap_or_else(|| strategy_name.to_string())
+        } else {
+            strategy_name.to_string()
+        };
+        let strategy_id = format!("{}_{}", strategy_id_base, chrono::Utc::now().timestamp());
 
         match strategy_name {
             "momentum" => {
@@ -416,6 +236,14 @@ impl StrategyFactory {
                     dry_run,
                 )?;
                 Ok(Box::new(adapter))
+            }
+            "composable_crypto" => {
+                let strat = super::composable_crypto::ComposableCryptoStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strat))
             }
             "split_arb" => {
                 let adapter = super::adapters::SplitArbStrategyAdapter::from_toml(
@@ -433,13 +261,70 @@ impl StrategyFactory {
                 )?;
                 Ok(Box::new(strat))
             }
-            "staggered_arb" => {
+            "event_edge" => {
+                let strat = super::event_edge::strategy::EventEdgeStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strat))
+            }
+            "nba_comeback" => {
+                let strat = super::nba_comeback::strategy::NbaComebackStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strat))
+            }
+            "staggered_arb" | "gamma_scalping" => {
                 let adapter = super::staggered_arb_live::StaggeredArbAdapter::from_toml(
                     strategy_id,
                     config_content,
                     dry_run,
                 )?;
                 Ok(Box::new(adapter))
+            }
+            "event_edge" => {
+                let strategy = super::event_edge::strategy::EventEdgeStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strategy))
+            }
+            "crypto_lob_ml" => {
+                let strategy = super::crypto_lob_ml::strategy::CryptoLobMlStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strategy))
+            }
+            "crypto_rl_policy" => {
+                let strategy =
+                    super::crypto_rl_policy::strategy::CryptoRlPolicyStrategy::from_toml(
+                        strategy_id,
+                        config_content,
+                        dry_run,
+                    )?;
+                Ok(Box::new(strategy))
+            }
+            "pm_5m_directional" => {
+                let strategy = super::pm_5m_directional::Pm5mDirectionalStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strategy))
+            }
+            "nba_comeback" => {
+                let strategy = super::nba_comeback::strategy::NbaComebackStrategy::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(strategy))
             }
             other => Err(anyhow!("Unknown strategy type: {}", other).into()),
         }
@@ -448,6 +333,12 @@ impl StrategyFactory {
     /// Get list of available strategy types
     pub fn available_strategies() -> Vec<StrategyInfo> {
         vec![
+            StrategyInfo {
+                name: "composable_crypto".to_string(),
+                description: "Composable crypto strategy runtime backed by plugin blocks"
+                    .to_string(),
+                config_template: "composable_crypto_default.toml".to_string(),
+            },
             StrategyInfo {
                 name: "momentum".to_string(),
                 description: "Trade crypto UP/DOWN based on CEX price momentum".to_string(),
@@ -464,10 +355,53 @@ impl StrategyFactory {
                 config_template: "pattern_memory_default.toml".to_string(),
             },
             StrategyInfo {
+                name: "event_edge".to_string(),
+                description: "External-data event mispricing scanner for politics/event markets"
+                    .to_string(),
+                config_template: "event_edge.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "nba_comeback".to_string(),
+                description: "Q3-to-Q4 NBA comeback scanner on sports markets".to_string(),
+                config_template: "nba_comeback.toml".to_string(),
+            },
+            StrategyInfo {
                 name: "staggered_arb".to_string(),
-                description: "Time-staggered two-leg arb on crypto UP/DOWN binary options"
+                description: "Time-staggered two-leg arb on crypto UP/DOWN binary options; aliases: gamma_scalping, staggered-arb"
                     .to_string(),
                 config_template: "staggered_arb.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "event_edge".to_string(),
+                description: "Politics/event-driven edge strategy on Polymarket events"
+                    .to_string(),
+                config_template: "event_edge.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "crypto_lob_ml".to_string(),
+                description:
+                    "Canonical observe-only crypto LOB ML wrapper for runtime migration"
+                        .to_string(),
+                config_template: "crypto_lob_ml.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "crypto_rl_policy".to_string(),
+                description:
+                    "Canonical observe-only crypto RL policy wrapper for runtime migration"
+                        .to_string(),
+                config_template: "crypto_rl_policy.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "pm_5m_directional".to_string(),
+                description:
+                    "Standalone Polymarket 5m directional strategy driven by Binance direction and PM cost gates"
+                        .to_string(),
+                config_template: "pm_5m_directional_default.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "nba_comeback".to_string(),
+                description: "NBA comeback strategy using ESPN/game-state inputs".to_string(),
+                config_template: "nba_comeback.toml".to_string(),
             },
         ]
     }
@@ -491,8 +425,9 @@ pub struct StrategyInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{OrderRequest, Side};
     use crate::strategy::traits::{
-        AlertLevel, DataFeed, MarketUpdate, OrderUpdate, Strategy, StrategyAction,
+        AlertLevel, DataFeed, MarketUpdate, OrderPurpose, OrderUpdate, Strategy, StrategyAction,
         StrategyStateInfo,
     };
     use async_trait::async_trait;
@@ -503,6 +438,8 @@ mod tests {
     struct TestStrategy {
         id: String,
         name: String,
+        shutdown_actions: Vec<StrategyAction>,
+        market_actions: Vec<StrategyAction>,
     }
 
     impl TestStrategy {
@@ -510,6 +447,29 @@ mod tests {
             Self {
                 id: id.to_string(),
                 name: "test_strategy".to_string(),
+                shutdown_actions: Vec::new(),
+                market_actions: Vec::new(),
+            }
+        }
+
+        fn with_shutdown_action(id: &str) -> Self {
+            Self {
+                id: id.to_string(),
+                name: "test_strategy".to_string(),
+                shutdown_actions: vec![StrategyAction::Alert {
+                    level: AlertLevel::Warning,
+                    message: "shutdown".to_string(),
+                }],
+                market_actions: Vec::new(),
+            }
+        }
+
+        fn with_market_actions(id: &str, market_actions: Vec<StrategyAction>) -> Self {
+            Self {
+                id: id.to_string(),
+                name: "test_strategy".to_string(),
+                shutdown_actions: Vec::new(),
+                market_actions,
             }
         }
     }
@@ -538,10 +498,14 @@ mod tests {
             &mut self,
             _update: &MarketUpdate,
         ) -> crate::error::Result<Vec<StrategyAction>> {
-            Ok(vec![StrategyAction::Alert {
-                level: AlertLevel::Info,
-                message: "market_update".to_string(),
-            }])
+            if self.market_actions.is_empty() {
+                Ok(vec![StrategyAction::Alert {
+                    level: AlertLevel::Info,
+                    message: "market_update".to_string(),
+                }])
+            } else {
+                Ok(self.market_actions.clone())
+            }
         }
 
         async fn on_order_update(
@@ -578,7 +542,7 @@ mod tests {
         }
 
         async fn shutdown(&mut self) -> crate::error::Result<Vec<StrategyAction>> {
-            Ok(Vec::new())
+            Ok(self.shutdown_actions.clone())
         }
 
         fn reset(&mut self) {}
@@ -595,6 +559,36 @@ mod tests {
         let strategies = StrategyFactory::available_strategies();
         assert!(!strategies.is_empty());
         assert!(strategies.iter().any(|s| s.name == "momentum"));
+        assert!(strategies.iter().any(|s| s.name == "event_edge"));
+        assert!(strategies.iter().any(|s| s.name == "nba_comeback"));
+    }
+
+    #[test]
+    fn test_available_strategies_include_pm_5m_directional() {
+        let strategies = StrategyFactory::available_strategies();
+        assert!(strategies.iter().any(|s| s.name == "pm_5m_directional"));
+        assert!(strategies.iter().any(|s| {
+            s.name == "pm_5m_directional" && s.config_template == "pm_5m_directional_default.toml"
+        }));
+    }
+
+    #[test]
+    fn test_factory_builds_pm_5m_directional_from_toml() {
+        let config = r#"
+[strategy]
+name = "pm_5m_directional"
+enabled = true
+
+[pm_5m_directional]
+symbols = ["BTCUSDT"]
+"#;
+
+        let strategy = StrategyFactory::from_toml(config, true).expect("strategy");
+        assert_eq!(strategy.name(), "pm_5m_directional");
+        assert!(strategy.required_feeds().iter().any(|feed| matches!(
+            feed,
+            DataFeed::PolymarketEvents { series_ids } if series_ids == &vec!["10684".to_string()]
+        )));
     }
 
     #[tokio::test]
@@ -657,6 +651,86 @@ mod tests {
         assert_eq!(strategy_id, "s2");
         match action {
             StrategyAction::Alert { message, .. } => assert_eq!(message, "order_update"),
+            other => panic!("unexpected action: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_graceful_stop_reports_closed_action_channel() {
+        let manager = StrategyManager::new(60_000);
+        let action_rx = manager
+            .take_action_receiver()
+            .await
+            .expect("action receiver should be available");
+        drop(action_rx);
+
+        manager
+            .start_strategy(Box::new(TestStrategy::with_shutdown_action("s-stop")), None)
+            .await
+            .expect("start strategy");
+
+        let err = manager
+            .stop_strategy("s-stop", true)
+            .await
+            .expect_err("closed action channel should be surfaced");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Failed to send shutdown action"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_market_submit_order_preserves_order_purpose() {
+        let manager = StrategyManager::new(60_000);
+        let mut action_rx = manager
+            .take_action_receiver()
+            .await
+            .expect("action receiver should be available");
+
+        let order = OrderRequest::buy_limit("token-hedge".to_string(), Side::Up, 4, dec!(0.41));
+
+        manager
+            .start_strategy(
+                Box::new(TestStrategy::with_market_actions(
+                    "s-purpose",
+                    vec![StrategyAction::SubmitOrder {
+                        client_order_id: "cid-purpose".to_string(),
+                        purpose: OrderPurpose::Hedge,
+                        order: order.clone(),
+                        priority: 9,
+                    }],
+                )),
+                None,
+            )
+            .await
+            .expect("start strategy");
+
+        manager.send_market_update(MarketUpdate::BinancePrice {
+            symbol: "BTCUSDT".to_string(),
+            price: dec!(65000.0),
+            timestamp: Utc::now(),
+        });
+
+        let (strategy_id, action) = timeout(Duration::from_secs(1), action_rx.recv())
+            .await
+            .expect("receive timeout")
+            .expect("channel closed");
+        assert_eq!(strategy_id, "s-purpose");
+
+        match action {
+            StrategyAction::SubmitOrder {
+                client_order_id,
+                purpose,
+                order,
+                priority,
+            } => {
+                assert_eq!(client_order_id, "cid-purpose");
+                assert_eq!(purpose, OrderPurpose::Hedge);
+                assert_eq!(priority, 9);
+                assert_eq!(order.token_id, "token-hedge");
+            }
             other => panic!("unexpected action: {:?}", other),
         }
     }

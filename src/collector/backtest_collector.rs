@@ -46,6 +46,9 @@ pub struct CollectorConfig {
     pub continuous: bool,
     /// Duration to collect (if not continuous)
     pub duration_hours: Option<u64>,
+    /// Legacy compatibility sink: write CSV artifacts.
+    /// Default false because primary sink is DB.
+    pub persist_csv: bool,
 }
 
 impl Default for CollectorConfig {
@@ -57,6 +60,7 @@ impl Default for CollectorConfig {
             pm_interval_secs: 30,     // 30 seconds
             continuous: true,
             duration_hours: None,
+            persist_csv: false,
         }
     }
 }
@@ -152,12 +156,14 @@ impl BacktestCollector {
         info!("Symbols: {:?}", self.config.symbols);
         info!("Output directory: {:?}", self.config.output_dir);
 
-        // Create output directory
-        create_dir_all(&self.config.output_dir)
-            .map_err(|e| PloyError::Internal(format!("Failed to create output dir: {}", e)))?;
-
-        // Initialize CSV files with headers
-        self.init_csv_files()?;
+        if self.config.persist_csv {
+            // Legacy CSV sink: optional.
+            create_dir_all(&self.config.output_dir)
+                .map_err(|e| PloyError::Internal(format!("Failed to create output dir: {}", e)))?;
+            self.init_csv_files()?;
+        } else {
+            info!("CSV sink disabled (persist_csv=false)");
+        }
 
         // Set start time
         {
@@ -267,11 +273,21 @@ impl BacktestCollector {
                     match client.fetch_klines(symbol, "15m", 1).await {
                         Ok(klines) => {
                             if let Some(kline) = klines.last() {
-                                if let Err(e) =
-                                    Self::append_kline(&config.output_dir, symbol, kline).await
-                                {
-                                    warn!("Failed to append K-line for {}: {}", symbol, e);
+                                let write_ok = if config.persist_csv {
+                                    match Self::append_kline(&config.output_dir, symbol, kline)
+                                        .await
+                                    {
+                                        Ok(_) => true,
+                                        Err(e) => {
+                                            warn!("Failed to append K-line for {}: {}", symbol, e);
+                                            false
+                                        }
+                                    }
                                 } else {
+                                    true
+                                };
+
+                                if write_ok {
                                     let mut s = stats.write().await;
                                     s.klines_collected += 1;
                                     s.last_kline_time = Some(Utc::now());
@@ -332,12 +348,25 @@ impl BacktestCollector {
                     match Self::fetch_active_markets(client, symbol).await {
                         Ok(markets) => {
                             for market in markets {
-                                if let Err(e) =
-                                    Self::append_pm_price(&config.output_dir, &market, spot_price)
-                                        .await
-                                {
-                                    warn!("Failed to append PM price: {}", e);
+                                let write_ok = if config.persist_csv {
+                                    match Self::append_pm_price(
+                                        &config.output_dir,
+                                        &market,
+                                        spot_price,
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => true,
+                                        Err(e) => {
+                                            warn!("Failed to append PM price: {}", e);
+                                            false
+                                        }
+                                    }
                                 } else {
+                                    true
+                                };
+
+                                if write_ok {
                                     let mut s = stats.write().await;
                                     s.pm_prices_collected += 1;
                                     s.last_pm_time = Some(Utc::now());

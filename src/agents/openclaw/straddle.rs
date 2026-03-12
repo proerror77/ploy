@@ -13,7 +13,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use super::config::StraddleConfig;
+use crate::coordinator::bootstrap::StraddleConfig;
 
 /// State of a single straddle position
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

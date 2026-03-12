@@ -78,7 +78,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/trades/{id}", get(handlers::get_trade_by_id))
         // Position endpoints
         .route("/api/positions", get(handlers::get_positions))
-        // System endpoints
+        // System endpoints (read-side lifecycle visibility for plugin/account planes)
         .route("/api/system/status", get(handlers::get_system_status))
         .route(
             "/api/system/capabilities",

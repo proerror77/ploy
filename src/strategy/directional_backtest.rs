@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, trace};
 
 use crate::adapters::SpotPrice;
+use crate::domain::Side;
 use crate::strategy::backtest::BacktestResults;
 use crate::strategy::backtest_feed::{MarketFeed, UpdateType};
 use crate::strategy::backtest_recorder::{
@@ -171,7 +172,7 @@ pub struct DirectionalBacktestEngine {
     recorder: Box<dyn BacktestRecorder>,
     // Market state
     spot_prices: HashMap<String, SpotPrice>,
-    pm_asks: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
+    pm_asks_by_event: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
     // Active events: symbol -> concurrent windows (5m + 15m can overlap)
     active_events: HashMap<String, Vec<ActiveWindowInfo>>,
     // Positions & trades
@@ -199,7 +200,7 @@ impl DirectionalBacktestEngine {
             execution_sim: ExecutionSimulator::new(),
             recorder,
             spot_prices: HashMap::new(),
-            pm_asks: HashMap::new(),
+            pm_asks_by_event: HashMap::new(),
             active_events: HashMap::new(),
             positions: Vec::new(),
             closed_trades: Vec::new(),
@@ -252,8 +253,19 @@ impl DirectionalBacktestEngine {
                 UpdateType::SpotTrade { price, quantity } => {
                     self.handle_spot_trade(&update.symbol, *price, *quantity, update.timestamp);
                 }
-                UpdateType::PmQuote { up_ask, down_ask } => {
-                    self.handle_pm_quote(&update.symbol, *up_ask, *down_ask, update.timestamp);
+                UpdateType::PmQuote {
+                    event_slug,
+                    side,
+                    best_ask,
+                    ..
+                } => {
+                    self.handle_pm_quote(
+                        &update.symbol,
+                        event_slug,
+                        *side,
+                        *best_ask,
+                        update.timestamp,
+                    );
                 }
                 UpdateType::EventState {
                     event_slug,
@@ -268,6 +280,7 @@ impl DirectionalBacktestEngine {
                         if let Some(events) = self.active_events.get_mut(&update.symbol) {
                             events.retain(|e| e.event_slug != *event_slug);
                         }
+                        self.pm_asks_by_event.remove(event_slug);
                     }
 
                     // Track active window: store S0 (price_to_beat) for probability calc
@@ -289,6 +302,9 @@ impl DirectionalBacktestEngine {
                 }
                 UpdateType::LobSnapshot { .. } => {
                     // LOB depth not used by directional backtest
+                }
+                UpdateType::BinanceL2 { .. } => {
+                    // Binance L2 features are ignored by the directional backtest.
                 }
             }
         }
@@ -317,34 +333,45 @@ impl DirectionalBacktestEngine {
     fn handle_pm_quote(
         &mut self,
         symbol: &str,
-        up_ask: Option<Decimal>,
-        down_ask: Option<Decimal>,
+        event_slug: &str,
+        quote_side: Side,
+        best_ask: Option<Decimal>,
         ts: DateTime<Utc>,
     ) {
-        // Update latest asks
+        // Update latest asks (per event_slug)
         let entry = self
-            .pm_asks
-            .entry(symbol.to_string())
+            .pm_asks_by_event
+            .entry(event_slug.to_string())
             .or_insert((None, None));
-        if up_ask.is_some() {
-            entry.0 = up_ask;
-        }
-        if down_ask.is_some() {
-            entry.1 = down_ask;
+        match quote_side {
+            Side::Up => {
+                if best_ask.is_some() {
+                    entry.0 = best_ask;
+                }
+            }
+            Side::Down => {
+                if best_ask.is_some() {
+                    entry.1 = best_ask;
+                }
+            }
         }
 
         // Update position mark-to-market (cheap — just price assignment)
         for pos in &mut self.positions {
-            if pos.symbol == symbol {
+            if pos.symbol == symbol && pos.event_slug == event_slug {
                 match pos.direction {
                     Direction::Up => {
-                        if let Some(ask) = up_ask {
-                            pos.latest_pm_price = ask;
+                        if quote_side == Side::Up {
+                            if let Some(ask) = best_ask {
+                                pos.latest_pm_price = ask;
+                            }
                         }
                     }
                     Direction::Down => {
-                        if let Some(ask) = down_ask {
-                            pos.latest_pm_price = ask;
+                        if quote_side == Side::Down {
+                            if let Some(ask) = best_ask {
+                                pos.latest_pm_price = ask;
+                            }
                         }
                     }
                 }
@@ -433,34 +460,14 @@ impl DirectionalBacktestEngine {
                 return;
             }
         };
-        let (up_ask, down_ask) = match self.pm_asks.get(symbol) {
-            Some(asks) => *asks,
-            None => {
-                self.recorder.record_filtered(
-                    &BacktestSignal {
-                        signal_type: SignalType::Filtered,
-                        symbol: symbol.to_string(),
-                        direction: String::new(),
-                        timestamp: ts,
-                        p_hat: None,
-                        ev_net: None,
-                        sigma: None,
-                        market_price: None,
-                        spot_price: Some(spot_price),
-                        s0: None,
-                        time_remaining_secs: None,
-                        filter_reason: Some("no_pm_quotes".to_string()),
-                        exit_reason: None,
-                        exit_price: None,
-                    },
-                    "no_pm_quotes",
-                );
-                return;
-            }
-        };
 
         // Try entry on each active event window independently
         for window in windows {
+            let (up_ask, down_ask) = self
+                .pm_asks_by_event
+                .get(&window.event_slug)
+                .copied()
+                .unwrap_or((None, None));
             self.try_entry_for_window(symbol, ts, &window, spot_price, momentum, up_ask, down_ask);
         }
     }
@@ -1430,8 +1437,11 @@ mod tests {
             timestamp: ts(61),
             symbol: "BTCUSDT".into(),
             update_type: UpdateType::PmQuote {
-                up_ask: Some(dec!(0.40)),
-                down_ask: Some(dec!(0.65)),
+                event_slug: "btc-up-100".into(),
+                token_id: "btc-up-100:UP".into(),
+                side: Side::Up,
+                best_bid: None,
+                best_ask: Some(dec!(0.40)),
             },
         });
 
@@ -1505,8 +1515,11 @@ mod tests {
             timestamp: ts(61),
             symbol: "BTCUSDT".into(),
             update_type: UpdateType::PmQuote {
-                up_ask: Some(dec!(0.50)),
-                down_ask: Some(dec!(0.55)),
+                event_slug: "btc-up-100".into(),
+                token_id: "btc-up-100:UP".into(),
+                side: Side::Up,
+                best_bid: None,
+                best_ask: Some(dec!(0.50)),
             },
         });
 
@@ -1566,8 +1579,11 @@ mod tests {
             timestamp: ts(61),
             symbol: "BTCUSDT".into(),
             update_type: UpdateType::PmQuote {
-                up_ask: Some(dec!(0.30)),
-                down_ask: Some(dec!(0.75)),
+                event_slug: "btc-up-100".into(),
+                token_id: "btc-up-100:UP".into(),
+                side: Side::Up,
+                best_bid: None,
+                best_ask: Some(dec!(0.30)),
             },
         });
 
@@ -1576,8 +1592,11 @@ mod tests {
             timestamp: ts(100),
             symbol: "BTCUSDT".into(),
             update_type: UpdateType::PmQuote {
-                up_ask: Some(dec!(0.20)),
-                down_ask: Some(dec!(0.85)),
+                event_slug: "btc-up-100".into(),
+                token_id: "btc-up-100:UP".into(),
+                side: Side::Up,
+                best_bid: None,
+                best_ask: Some(dec!(0.20)),
             },
         });
 
@@ -1585,8 +1604,11 @@ mod tests {
             timestamp: ts(200),
             symbol: "BTCUSDT".into(),
             update_type: UpdateType::PmQuote {
-                up_ask: Some(dec!(0.15)),
-                down_ask: Some(dec!(0.90)),
+                event_slug: "btc-up-100".into(),
+                token_id: "btc-up-100:UP".into(),
+                side: Side::Up,
+                best_bid: None,
+                best_ask: Some(dec!(0.15)),
             },
         });
 
@@ -1649,8 +1671,11 @@ mod tests {
             timestamp: ts(61),
             symbol: "BTCUSDT".into(),
             update_type: UpdateType::PmQuote {
-                up_ask: Some(dec!(0.40)),
-                down_ask: Some(dec!(0.65)),
+                event_slug: "btc-up-100".into(),
+                token_id: "btc-up-100:UP".into(),
+                side: Side::Up,
+                best_bid: None,
+                best_ask: Some(dec!(0.40)),
             },
         });
 
@@ -1659,8 +1684,11 @@ mod tests {
             timestamp: ts(100),
             symbol: "BTCUSDT".into(),
             update_type: UpdateType::PmQuote {
-                up_ask: Some(dec!(0.10)),
-                down_ask: Some(dec!(0.95)),
+                event_slug: "btc-up-100".into(),
+                token_id: "btc-up-100:UP".into(),
+                side: Side::Up,
+                best_bid: None,
+                best_ask: Some(dec!(0.10)),
             },
         });
 

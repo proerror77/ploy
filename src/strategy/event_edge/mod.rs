@@ -6,6 +6,7 @@
 
 pub mod core;
 pub mod data_source;
+pub mod strategy;
 
 use crate::adapters::polymarket_clob::GAMMA_API_URL;
 use crate::adapters::PolymarketClient;
@@ -23,30 +24,9 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventEdgeConfig {
-    /// Polymarket event id (preferred) OR a title to search for.
-    pub event_id: Option<String>,
-    pub title: Option<String>,
-
-    /// Minimum edge (p_true - entry_price) required to trade.
-    pub min_edge: Decimal,
-    /// Do not buy above this entry price.
-    pub max_entry: Decimal,
-    /// Shares to buy per trade.
-    pub shares: u64,
-
-    /// Poll interval for watch mode.
-    pub interval: Duration,
-    /// If true, keep scanning; else run once.
-    pub watch: bool,
-    /// If true, attempt to place trades.
-    pub trade: bool,
-    /// If true, do not send real orders (but still print what would happen).
-    pub dry_run: bool,
-}
+pub use strategy::EventEdgeStrategy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEdgeScan {
@@ -58,22 +38,6 @@ pub struct EventEdgeScan {
     pub arena_last_updated: Option<chrono::NaiveDate>,
     pub arena_staleness_days: Option<f64>,
     pub rows: Vec<EdgeRow>,
-}
-
-impl Default for EventEdgeConfig {
-    fn default() -> Self {
-        Self {
-            event_id: None,
-            title: None,
-            min_edge: dec!(0.08),
-            max_entry: dec!(0.75),
-            shares: 100,
-            interval: Duration::from_secs(30),
-            watch: false,
-            trade: false,
-            dry_run: true,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -277,118 +241,6 @@ pub async fn scan_event_edge_once(
         arena_staleness_days: arena.staleness_days(),
         rows,
     })
-}
-
-pub async fn run_event_edge(client: &PolymarketClient, cfg: EventEdgeConfig) -> Result<()> {
-    let mut last_trade_at: HashMap<String, DateTime<Utc>> = HashMap::new();
-
-    loop {
-        let event_id = match (&cfg.event_id, &cfg.title) {
-            (Some(id), _) => id.clone(),
-            (None, Some(title)) => discover_best_event_id_by_title(title).await?,
-            (None, None) => {
-                return Err(PloyError::Internal(
-                    "EventEdge requires --event or --title".to_string(),
-                ))
-            }
-        };
-
-        let now = Utc::now();
-        let arena = fetch_arena_text_snapshot().await?;
-        let scan = scan_event_edge_once(client, &event_id, Some(arena.clone())).await?;
-
-        info!(
-            "EventEdge: event={} title=\"{}\" end={} arena_last_updated={:?} conf={:.2}",
-            scan.event_id,
-            scan.event_title,
-            scan.end_time.to_rfc3339(),
-            scan.arena_last_updated,
-            scan.confidence
-        );
-
-        if let Some(top) = arena.top_org() {
-            info!("Arena Text current top org: {}", top);
-        }
-
-        for r in scan.rows.iter().take(10) {
-            let ask = r
-                .market_ask
-                .map(|v| format!("{:.2}¢", v * dec!(100)))
-                .unwrap_or("-".into());
-            let p = format!("{:.1}%", r.p_true * dec!(100));
-            let edge = r
-                .edge
-                .map(|v| format!("{:.1}pp", v * dec!(100)))
-                .unwrap_or("-".into());
-            let ev =
-                r.ev.as_ref()
-                    .map(|v| format!("EV={:.4}", v.net_ev))
-                    .unwrap_or("-".into());
-            info!(
-                "  {} | ask={} | p_true={} | edge={} | {}",
-                r.outcome, ask, p, edge, ev
-            );
-        }
-
-        if cfg.trade {
-            // Trade the best +EV row that clears thresholds and isn't on cooldown.
-            for r in &scan.rows {
-                let Some(ask) = r.market_ask else { continue };
-                let Some(edge) = r.edge else { continue };
-                let Some(ev) = &r.ev else { continue };
-
-                if ask > cfg.max_entry {
-                    continue;
-                }
-                if edge < cfg.min_edge {
-                    continue;
-                }
-                if !ev.is_positive_ev {
-                    continue;
-                }
-
-                // Cooldown: don't re-buy the same token too frequently.
-                let cooldown_secs = (cfg.interval.as_secs() * 2).max(30);
-                if let Some(last) = last_trade_at.get(&r.yes_token_id) {
-                    if (now - *last).num_seconds() < cooldown_secs as i64 {
-                        continue;
-                    }
-                }
-
-                if cfg.dry_run {
-                    warn!(
-                        "DRY RUN: would BUY {} shares of {} @ {:.2}¢ (edge {:.1}pp)",
-                        cfg.shares,
-                        r.outcome,
-                        ask * dec!(100),
-                        edge * dec!(100)
-                    );
-                } else {
-                    info!(
-                        "Placing BUY {} shares of {} @ {:.2}¢ (edge {:.1}pp)",
-                        cfg.shares,
-                        r.outcome,
-                        ask * dec!(100),
-                        edge * dec!(100)
-                    );
-                    return Err(PloyError::Validation(
-                        "direct order path disabled: submit TradeIntent via coordinator/gateway"
-                            .to_string(),
-                    ));
-                }
-
-                last_trade_at.insert(r.yes_token_id.clone(), now);
-                break;
-            }
-        }
-
-        if !cfg.watch {
-            break;
-        }
-        tokio::time::sleep(cfg.interval).await;
-    }
-
-    Ok(())
 }
 
 // =============================================================================
