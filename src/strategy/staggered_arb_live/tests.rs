@@ -1,3 +1,5 @@
+//! Focused regressions for live staggered-arb entry, reconciliation, and lifecycle cleanup.
+
 use super::*;
 use crate::domain::OrderStatus;
 use crate::strategy::OrderUpdate;

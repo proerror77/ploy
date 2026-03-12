@@ -5,6 +5,8 @@
 
 use crate::adapters::{DLQEntry, TransactionManager};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -59,10 +61,12 @@ pub enum DLQResult {
 }
 
 /// Handler trait for DLQ operations
-#[async_trait::async_trait]
 pub trait DLQHandler: Send + Sync {
     /// Process a DLQ entry
-    async fn process(&self, entry: &DLQEntry) -> DLQResult;
+    fn process<'a>(
+        &'a self,
+        entry: &'a DLQEntry,
+    ) -> Pin<Box<dyn Future<Output = DLQResult> + Send + 'a>>;
 
     /// Get operation types this handler supports
     fn supported_types(&self) -> Vec<&'static str>;
@@ -71,14 +75,18 @@ pub trait DLQHandler: Send + Sync {
 /// Default handler that just logs
 pub struct LoggingHandler;
 
-#[async_trait::async_trait]
 impl DLQHandler for LoggingHandler {
-    async fn process(&self, entry: &DLQEntry) -> DLQResult {
-        warn!(
-            "DLQ entry {} (type: {}): {}",
-            entry.operation_type, entry.error_message, entry.payload
-        );
-        DLQResult::Skip
+    fn process<'a>(
+        &'a self,
+        entry: &'a DLQEntry,
+    ) -> Pin<Box<dyn Future<Output = DLQResult> + Send + 'a>> {
+        Box::pin(async move {
+            warn!(
+                "DLQ entry {} (type: {}): {}",
+                entry.operation_type, entry.error_message, entry.payload
+            );
+            DLQResult::Skip
+        })
     }
 
     fn supported_types(&self) -> Vec<&'static str> {

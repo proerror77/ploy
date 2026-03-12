@@ -1,11 +1,11 @@
 use axum::{
-    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
+    Json,
 };
 use chrono::Utc;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::warn;
@@ -18,9 +18,137 @@ use crate::config::AppConfig;
 use crate::domain::market::Side;
 
 use super::{
-    SidecarCircuitBreakerEvent, SidecarPosition, SidecarRiskPosition, SidecarRiskState,
-    table_has_account_scope,
+    table_has_account_scope, SidecarCircuitBreakerEvent, SidecarPosition, SidecarRiskPosition,
+    SidecarRiskState,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DailyMetricsScope {
+    Scoped,
+    Global,
+}
+
+fn resolve_risk_fallback_daily_metrics_scope(
+    runtime_state_scoped: bool,
+    daily_metrics_scoped: bool,
+    positions_scoped: bool,
+) -> std::result::Result<DailyMetricsScope, Vec<&'static str>> {
+    let mut missing = Vec::new();
+    if !runtime_state_scoped {
+        missing.push("risk_runtime_state.account_id");
+    }
+    if !positions_scoped {
+        missing.push("positions.account_id");
+    }
+    if !missing.is_empty() {
+        return Err(missing);
+    }
+
+    Ok(if daily_metrics_scoped {
+        DailyMetricsScope::Scoped
+    } else {
+        DailyMetricsScope::Global
+    })
+}
+
+async fn load_daily_metrics_halted(
+    pool: &sqlx::PgPool,
+    account_id: &str,
+    scope: DailyMetricsScope,
+) -> bool {
+    match scope {
+        DailyMetricsScope::Scoped => {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT COALESCE(halted, FALSE) FROM daily_metrics WHERE date = CURRENT_DATE AND account_id = $1",
+            )
+            .bind(account_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+        }
+        DailyMetricsScope::Global => {
+            sqlx::query_scalar!(
+                "SELECT COALESCE(halted, FALSE) AS \"halted!\" FROM daily_metrics WHERE date = CURRENT_DATE"
+            )
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+        }
+    }
+}
+
+async fn load_daily_metrics_total_pnl(
+    pool: &sqlx::PgPool,
+    account_id: &str,
+    scope: DailyMetricsScope,
+) -> Decimal {
+    match scope {
+        DailyMetricsScope::Scoped => {
+            sqlx::query_scalar::<_, Decimal>(
+                "SELECT COALESCE(total_pnl, 0) FROM daily_metrics WHERE date = CURRENT_DATE AND account_id = $1",
+            )
+            .bind(account_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(Decimal::ZERO)
+        }
+        DailyMetricsScope::Global => {
+            sqlx::query_scalar!(
+                "SELECT COALESCE(total_pnl, 0)::numeric AS \"total_pnl!: Decimal\" FROM daily_metrics WHERE date = CURRENT_DATE"
+            )
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(Decimal::ZERO)
+        }
+    }
+}
+
+async fn load_daily_metrics_halt_event(
+    pool: &sqlx::PgPool,
+    account_id: &str,
+    scope: DailyMetricsScope,
+) -> Option<(bool, Option<String>, chrono::DateTime<Utc>)> {
+    match scope {
+        DailyMetricsScope::Scoped => {
+            sqlx::query_as::<_, (bool, Option<String>, chrono::DateTime<Utc>)>(
+                r#"
+                SELECT halted, halt_reason, updated_at
+                FROM daily_metrics
+                WHERE date = CURRENT_DATE
+                  AND account_id = $1
+                "#,
+            )
+            .bind(account_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+        }
+        DailyMetricsScope::Global => sqlx::query!(
+            r#"
+                SELECT
+                    COALESCE(halted, FALSE) AS "halted!",
+                    halt_reason,
+                    updated_at
+                FROM daily_metrics
+                WHERE date = CURRENT_DATE
+                "#,
+        )
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| (row.halted, row.halt_reason, row.updated_at)),
+    }
+}
 
 /// GET /api/sidecar/positions
 ///
@@ -224,24 +352,35 @@ pub async fn sidecar_get_risk(
                 table_has_account_scope(state.store.pool(), "daily_metrics").await;
             let positions_scoped = table_has_account_scope(state.store.pool(), "positions").await;
 
-            if !runtime_state_scoped || !daily_metrics_scoped || !positions_scoped {
-                let mut missing = Vec::new();
-                if !runtime_state_scoped {
-                    missing.push("risk_runtime_state.account_id");
+            let daily_metrics_scope = match resolve_risk_fallback_daily_metrics_scope(
+                runtime_state_scoped,
+                daily_metrics_scoped,
+                positions_scoped,
+            ) {
+                Ok(scope) => scope,
+                Err(missing) => {
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!(
+                            "sidecar risk fallback requires account scope on: {}",
+                            missing.join(", ")
+                        ),
+                    ));
                 }
-                if !daily_metrics_scoped {
-                    missing.push("daily_metrics.account_id");
-                }
-                if !positions_scoped {
-                    missing.push("positions.account_id");
-                }
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    format!(
-                        "sidecar risk fallback requires account scope on: {}",
-                        missing.join(", ")
-                    ),
-                ));
+            };
+
+            let (daily_metrics_scope_label, daily_metrics_filter_label) = match daily_metrics_scope
+            {
+                DailyMetricsScope::Scoped => ("account-scoped", "daily_metrics.account_id"),
+                DailyMetricsScope::Global => ("global", "daily_metrics.date"),
+            };
+
+            if runtime_state_scoped && positions_scoped {
+                tracing::debug!(
+                    daily_metrics_scope = daily_metrics_scope_label,
+                    daily_metrics_filter = daily_metrics_filter_label,
+                    "sidecar risk fallback scope resolved"
+                );
             }
 
             let runtime_row = sqlx::query_as::<
@@ -315,25 +454,18 @@ pub async fn sidecar_get_risk(
                     runtime_event,
                 )
             } else {
-                let halted = sqlx::query_scalar::<_, bool>(
-                    "SELECT COALESCE(halted, FALSE) FROM daily_metrics WHERE date = CURRENT_DATE AND account_id = $1",
+                let halted = load_daily_metrics_halted(
+                    state.store.pool(),
+                    state.account_id.as_str(),
+                    daily_metrics_scope,
                 )
-                .bind(state.account_id.as_str())
-                .fetch_optional(state.store.pool())
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or(false);
-
-                let daily_pnl = sqlx::query_scalar::<_, Decimal>(
-                    "SELECT COALESCE(total_pnl, 0) FROM daily_metrics WHERE date = CURRENT_DATE AND account_id = $1",
+                .await;
+                let daily_pnl = load_daily_metrics_total_pnl(
+                    state.store.pool(),
+                    state.account_id.as_str(),
+                    daily_metrics_scope,
                 )
-                .bind(state.account_id.as_str())
-                .fetch_optional(state.store.pool())
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or(Decimal::ZERO);
+                .await;
                 (
                     if halted {
                         "Halted".to_string()
@@ -380,19 +512,12 @@ pub async fn sidecar_get_risk(
                 })
                 .collect();
 
-            let row = sqlx::query_as::<_, (bool, Option<String>, chrono::DateTime<Utc>)>(
-                r#"
-                SELECT halted, halt_reason, updated_at
-                FROM daily_metrics
-                WHERE date = CURRENT_DATE
-                  AND account_id = $1
-                "#,
+            let row = load_daily_metrics_halt_event(
+                state.store.pool(),
+                state.account_id.as_str(),
+                daily_metrics_scope,
             )
-            .bind(state.account_id.as_str())
-            .fetch_optional(state.store.pool())
-            .await
-            .ok()
-            .flatten();
+            .await;
 
             let mut circuit_breaker_events = match row {
                 Some((true, reason, updated_at)) => vec![SidecarCircuitBreakerEvent {
@@ -421,5 +546,29 @@ pub async fn sidecar_get_risk(
                 circuit_breaker_events,
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_risk_fallback_daily_metrics_scope, DailyMetricsScope};
+
+    #[test]
+    fn risk_fallback_scope_allows_global_daily_metrics_when_other_tables_are_scoped() {
+        assert_eq!(
+            resolve_risk_fallback_daily_metrics_scope(true, false, true),
+            Ok(DailyMetricsScope::Global)
+        );
+    }
+
+    #[test]
+    fn risk_fallback_scope_requires_runtime_state_and_positions_account_scope() {
+        assert_eq!(
+            resolve_risk_fallback_daily_metrics_scope(false, true, false),
+            Err(vec![
+                "risk_runtime_state.account_id",
+                "positions.account_id"
+            ])
+        );
     }
 }

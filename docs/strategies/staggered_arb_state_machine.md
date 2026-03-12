@@ -17,27 +17,45 @@
 7. `Merged` or `ForcedComplete`
 8. back to `Idle`
 
+## Live-path overlay
+
+The coarse state machine above describes the strategy's position lifecycle, not
+the lower-level exchange lifecycle.
+
+- Paper mode collapses `Leg1Submit` and `Leg2Submit` into immediate synthetic
+  fills, so the strategy transitions almost directly between `Leg1Filled`,
+  `Merged`, `ForcedComplete`, or `Settled`.
+- Live mode inserts an order-tracking overlay between each submit state and the
+  eventual position transition.
+- That overlay exists so the strategy can survive delayed acknowledgements,
+  partial fills, cancels, and late terminal exchange updates without losing the
+  event lock or position lock too early.
+
 ## Live order-track lifecycle
 
-The live path has more states than the coarse `Leg1Submit -> Leg1Filled -> Leg2Submit`
-summary above because each submitted order is tracked as a `LiveOrderTrack`.
+The live path has more states than the coarse
+`Leg1Submit -> Leg1Filled -> Leg2Submit` summary above because each submitted
+order is tracked as a `LiveOrderTrack`.
 
-- On `SubmitIntent`, the strategy creates a local order track keyed by the client
-  order id and marks either the Leg1 event lock or the Leg2 position lock as
-  pending.
-- Early exchange updates attach the exchange order id, order status, and first
-  cumulative fill snapshot to that track.
-- Partial fills stay in the pending set while cumulative shares and average fill
-  price are updated in place.
+- On `SubmitIntent`, the strategy creates a local order track keyed by the
+  client order id and marks either the Leg1 event lock or the Leg2 position
+  lock as pending.
+- Each `LiveOrderTrack` stores the event/position identity, leg number,
+  submitted price and shares, optional `exchange_order_id`, optional
+  `cancel_requested_at`, and `acknowledged_filled_qty`.
+- Early exchange updates attach the exchange order id and advance cumulative
+  fill progress without immediately releasing the pending lock.
+- Partial fills stay pending while cumulative shares are updated in place.
 - Leg1 partial-fill cancel/remainder flows keep the track alive until the final
-  cancel/fill result decides whether the cycle promotes to `Leg1Filled` or the
-  entry lock is released.
+  cancel/fill result decides whether the cycle promotes to `Leg1Filled`, is
+  abandoned, or must wait for a late terminal update.
 - Stale live orders are cancelled after roughly 30 seconds if no terminal update
   arrives.
 - Orphaned tracks are archived after roughly 90 seconds so late exchange updates
   can still reconcile without blocking new cycles forever.
-- Terminal live updates clear `pending_leg1_events` or `pending_leg2_positions`
-  so the next cycle can start safely.
+- Terminal live updates clear `pending_leg1_events` or
+  `pending_leg2_positions`, archive or remove the track, and then allow the
+  next cycle to start safely.
 
 ## Foreground vs managed live path
 
@@ -48,7 +66,8 @@ ingress rather than direct exchange execution.
   `src/cli/strategy/runtime_ops/foreground.rs` and
   `foreground_submit.rs`. It requires a `deployment_id`, converts
   `StrategyOrderIntent` into coordinator ingress payloads, and submits through
-  the same risk/admission path as other live traffic.
+  the same risk/admission path as other live traffic. It is operator-driven and
+  does not own managed-runtime persistence or deployment bootstrap.
 - Managed live: deployment-driven runtime execution runs through
   `src/coordinator/strategy_runtime.rs`,
   `src/coordinator/strategy_runtime/actions/order_commands.rs`,
@@ -56,6 +75,14 @@ ingress rather than direct exchange execution.
   `src/coordinator/admission/deployments.rs`. It persists runtime orders,
   converts strategy intents into canonical `OrderIntent`s, and submits through
   the managed runtime control loop.
+
+Operationally the difference is:
+
+- Foreground live is a local operator surface for running one strategy process
+  interactively with the same coordinator ingress checks.
+- Managed live is deployment-owned: runtime startup, deployment resolution,
+  runtime-order persistence, and order-update reconciliation all live in the
+  coordinator-managed strategy runtime.
 
 ## Entry gates (Leg1)
 - Balance pause gate (`balance_pause_until`) when recent balance failures happened.

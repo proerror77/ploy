@@ -5874,3 +5874,79 @@ Use the `tango-1-1` production schema as the source of truth for the first `sqlx
 - 2026-03-12: Validation passed:
   - `DATABASE_URL=<tango-1-1 via ssh tunnel> CARGO_TARGET_DIR=/tmp/ploy-query-pilot rtk cargo check --lib --features api`
   - `DATABASE_URL=<tango-1-1 via ssh tunnel> CARGO_TARGET_DIR=/tmp/ploy-query-pilot rtk cargo test table_has_account_scope_reports_positions_true_and_cycles_false --lib --features api -- --nocapture`
+# Staggered Arb Live Docs Clarification (2026-03-12)
+
+## Goal
+Close the remaining staggered-arb documentation gaps called out by the review by documenting the live runtime overlay, `LiveOrderTrack` lifecycle, and the operational split between foreground live and managed live.
+
+## File ownership
+
+- `docs/strategies/staggered_arb_state_machine.md`
+  - owner: operator-facing staggered-arb lifecycle and runtime-path documentation
+- `src/strategy/staggered_arb_live/tests.rs`
+  - owner: module-level test-surface documentation for the extracted staggered-arb test owner
+
+## Tasks
+
+- [x] Expand the state-machine doc to cover the live-path overlay and `LiveOrderTrack`.
+- [x] Document foreground live vs managed live runtime ownership differences.
+- [x] Ensure every `staggered_arb_live` submodule has a `//!` module description.
+- [x] Re-run compile plus module-doc coverage checks after the doc pass.
+
+## Progress notes
+
+- 2026-03-12: Expanded [staggered_arb_state_machine.md](/Users/proerror/Documents/ploy-order-intent-clean/docs/strategies/staggered_arb_state_machine.md) with a dedicated live-path overlay section, clearer `LiveOrderTrack` lifecycle notes, and explicit foreground-vs-managed runtime ownership notes.
+- 2026-03-12: Added a concise `//!` module description to [tests.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/strategy/staggered_arb_live/tests.rs) and verified that every other `staggered_arb_live` submodule already carries one.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-r37r38-check rtk cargo check --lib --message-format=short`
+  - `rg -n "^//!" src/strategy/staggered_arb_live/*.rs`
+
+# Sidecar Daily Metrics Scope Compatibility (2026-03-12)
+
+## Goal
+Use the `tango-1-1` production schema as the source of truth for the next SQLx pilot and fix the sidecar risk fallback so it works when `daily_metrics` is global-only while `risk_runtime_state` and `positions` remain account-scoped.
+
+## File ownership
+
+- `src/api/handlers/sidecar/read_side.rs`
+  - owner: sidecar risk fallback scope resolution, `daily_metrics` query helpers, and focused scope regressions
+
+## Tasks
+
+- [x] Reproduce the compile-time SQLx failure against the `tango-1-1` schema.
+- [x] Add a pure scope resolver so fallback behavior is testable without a live DB.
+- [x] Support both account-scoped and global `daily_metrics` reads while keeping scoped `risk_runtime_state` / `positions` mandatory.
+- [x] Re-run `api` compile plus focused scope tests against the forwarded `tango-1-1` database.
+
+## Progress notes
+
+- 2026-03-12: Reproduced the `sqlx::query_scalar!` failure against the `tango-1-1` schema and confirmed that `daily_metrics` currently lacks `account_id`, so the sidecar fallback needed dual scoped/global handling instead of a hard scoped-only assumption.
+- 2026-03-12: Added a pure `resolve_risk_fallback_daily_metrics_scope(...)` owner plus focused regressions in [read_side.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/api/handlers/sidecar/read_side.rs).
+- 2026-03-12: Reworked the sidecar fallback to use global `daily_metrics` reads when that table is unscoped, while still requiring account scope on `risk_runtime_state` and `positions`.
+- 2026-03-12: Validation passed:
+  - `DATABASE_URL=<tango-1-1 via ssh tunnel> CARGO_TARGET_DIR=/tmp/ploy-read-side-wave rtk cargo check --lib --features api`
+  - `DATABASE_URL=<tango-1-1 via ssh tunnel> CARGO_TARGET_DIR=/tmp/ploy-read-side-wave rtk cargo test risk_fallback_scope_ --lib --features api -- --nocapture`
+
+# DLQ Handler Native Futures Pilot (2026-03-12)
+
+## Goal
+Remove one more internal `async_trait` seam by converting the DLQ handler contract to explicit boxed futures without changing DLQ processing behavior.
+
+## File ownership
+
+- `src/persistence/dlq_processor.rs`
+  - owner: `DLQHandler` trait surface, default handler implementation, and focused DLQ regressions
+
+## Tasks
+
+- [x] Remove `#[async_trait]` from the internal `DLQHandler` trait.
+- [x] Convert `LoggingHandler` to return explicit boxed futures.
+- [x] Re-run focused DLQ regressions after the conversion.
+
+## Progress notes
+
+- 2026-03-12: Updated [dlq_processor.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/persistence/dlq_processor.rs) so `DLQHandler` now returns explicit `Pin<Box<dyn Future<...>>>` values instead of relying on `#[async_trait]`.
+- 2026-03-12: Kept the object-safe `Arc<dyn DLQHandler>` call sites unchanged while shrinking one more internal async-trait surface.
+- 2026-03-12: Validation passed:
+  - `DATABASE_URL=<tango-1-1 via ssh tunnel> CARGO_TARGET_DIR=/tmp/ploy-dlq-wave rtk cargo test test_logging_handler_types --lib -- --exact --nocapture`
+  - `DATABASE_URL=<tango-1-1 via ssh tunnel> CARGO_TARGET_DIR=/tmp/ploy-dlq-wave rtk cargo test test_backoff_calculation --lib -- --exact --nocapture`
