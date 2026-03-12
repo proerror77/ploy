@@ -1,4 +1,4 @@
-use super::{MarketUpdate, UpdateType};
+use super::{BookAskLevel, MarketUpdate, UpdateType};
 use crate::domain::Side;
 use alloy::primitives::U256;
 use anyhow::Result;
@@ -8,6 +8,8 @@ use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tracing::info;
+
+const MAX_REPLAY_ASK_LEVELS: usize = 5;
 
 pub(super) async fn load_database_updates(
     pool: &PgPool,
@@ -511,11 +513,13 @@ async fn load_quote_updates(
         String,
         Option<Decimal>,
         Option<Decimal>,
+        Option<Decimal>,
+        Option<Decimal>,
     )> = if quote_ticks_exists && !known_token_ids.is_empty() {
         sqlx::query_as(
             r#"
                     SELECT DISTINCT ON (date_trunc('second', received_at), token_id, side)
-                           received_at, token_id, side, best_bid, best_ask
+                           received_at, token_id, side, best_bid, best_ask, bid_size, ask_size
                     FROM clob_quote_ticks
                     WHERE ($1::timestamptz IS NULL OR received_at >= $1)
                       AND ($2::timestamptz IS NULL OR received_at <= $2)
@@ -533,7 +537,7 @@ async fn load_quote_updates(
         Vec::new()
     };
 
-    for (ts, token_id, side, best_bid, best_ask) in &quote_rows {
+    for (ts, token_id, side, best_bid, best_ask, bid_size, ask_size) in &quote_rows {
         let event_slug = match mappings.token_to_slug.get(token_id.as_str()) {
             Some(s) => s.clone(),
             None => continue,
@@ -559,6 +563,8 @@ async fn load_quote_updates(
                 side,
                 best_bid: *best_bid,
                 best_ask: *best_ask,
+                bid_size: *bid_size,
+                ask_size: *ask_size,
             },
         });
     }
@@ -618,6 +624,8 @@ async fn load_quote_updates(
                                 side: Side::Up,
                                 best_bid: None,
                                 best_ask: Some(ask),
+                                bid_size: None,
+                                ask_size: None,
                             },
                         });
                     }
@@ -631,6 +639,8 @@ async fn load_quote_updates(
                                 side: Side::Down,
                                 best_bid: None,
                                 best_ask: Some(ask),
+                                bid_size: None,
+                                ask_size: None,
                             },
                         });
                     }
@@ -1099,25 +1109,38 @@ fn build_lob_update(
         return None;
     }
 
-    let (total_depth, best_ask_price) = match asks_json {
+    let (total_depth, best_ask_size, ask_levels, best_ask_price) = match asks_json {
         Some(arr) if arr.is_array() => {
             let levels = arr.as_array().unwrap();
-            let mut depth = Decimal::ZERO;
-            let mut best = None;
+            let mut depth = 0u64;
+            let mut parsed_levels = Vec::new();
             for level in levels {
                 if let Some((price, size)) = parse_lob_level(level) {
-                    depth += size;
-                    if best.is_none() {
-                        best = Some(price);
+                    let size_shares = size.floor().to_u64().unwrap_or(0);
+                    if size_shares > 0 {
+                        depth += size_shares;
+                        parsed_levels.push(BookAskLevel { price, size_shares });
                     }
                 }
             }
-            (depth.floor().to_u64().unwrap_or(0), best)
+            parsed_levels.sort_by(|left, right| left.price.cmp(&right.price));
+            let best = parsed_levels.first().copied();
+            let ask_levels = parsed_levels
+                .iter()
+                .copied()
+                .take(MAX_REPLAY_ASK_LEVELS)
+                .collect::<Vec<_>>();
+            (
+                depth,
+                best.map(|level| level.size_shares).unwrap_or(0),
+                ask_levels,
+                best.map(|level| level.price),
+            )
         }
         _ => return None,
     };
 
-    if total_depth == 0 {
+    if total_depth == 0 || best_ask_size == 0 || ask_levels.is_empty() {
         return None;
     }
 
@@ -1125,8 +1148,12 @@ fn build_lob_update(
         timestamp: ts,
         symbol,
         update_type: UpdateType::LobSnapshot {
-            side: side.as_str().to_ascii_uppercase(),
+            event_slug,
+            token_id: token_id.to_string(),
+            side,
             ask_depth_shares: total_depth,
+            best_ask_size_shares: best_ask_size,
+            ask_levels,
             best_ask: best_ask_price,
         },
     })
@@ -1242,12 +1269,22 @@ mod tests {
 
         match update.update_type {
             UpdateType::LobSnapshot {
+                event_slug,
+                token_id,
                 side,
                 ask_depth_shares,
+                best_ask_size_shares,
+                ask_levels,
                 best_ask,
             } => {
-                assert_eq!(side, "DOWN");
+                assert_eq!(event_slug, "btc-updown-5m-test");
+                assert_eq!(token_id, "101");
+                assert_eq!(side, Side::Down);
                 assert_eq!(ask_depth_shares, 12);
+                assert_eq!(best_ask_size_shares, 7);
+                assert_eq!(ask_levels.len(), 2);
+                assert_eq!(ask_levels[0].price, dec!(0.56));
+                assert_eq!(ask_levels[0].size_shares, 7);
                 assert_eq!(best_ask, Some(dec!(0.56)));
             }
             other => panic!("unexpected update: {other:?}"),
