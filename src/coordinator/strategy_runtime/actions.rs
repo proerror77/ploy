@@ -1,10 +1,11 @@
 use serde_json::json;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64},
     Arc,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
 use crate::adapters::PostgresStore;
@@ -40,8 +41,10 @@ pub(super) async fn handle_strategy_actions_runtime(
     coordinator_handle: CoordinatorHandle,
     executor: Arc<OrderExecutor>,
     paused: Arc<AtomicBool>,
+    runtime_alive: Arc<AtomicBool>,
     orders_submitted: Arc<AtomicU64>,
     orders_filled: Arc<AtomicU64>,
+    split_arb_poll_registry: Arc<Mutex<HashSet<String>>>,
     observability_pool: Option<PgPool>,
     observability_account_id: String,
 ) {
@@ -154,7 +157,9 @@ pub(super) async fn handle_strategy_actions_runtime(
                     &manager,
                     runtime_order_store.as_ref(),
                     &executor,
+                    &runtime_alive,
                     &orders_filled,
+                    &split_arb_poll_registry,
                     observability_pool.as_ref(),
                     observability_account_id.as_str(),
                     split_arb_managed,

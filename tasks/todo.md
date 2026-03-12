@@ -5742,3 +5742,35 @@ Replace over-serialized `SeqCst` run-flag atomics with tighter acquire/release o
   - `CARGO_TARGET_DIR=/tmp/ploy-atomic-ordering rtk cargo test test_watchdog_register --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-atomic-ordering rtk cargo test test_backoff_calculation --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-atomic-ordering rtk cargo test test_mock_checkpoint --lib -- --exact --nocapture`
+# Split-Arb Poll Task Guard (2026-03-12)
+
+## Goal
+Stop managed split-arb runtimes from spawning duplicate order poll tasks for the same exchange order, and tie those pollers to runtime shutdown so detached tasks do not outlive the owning session.
+
+## File ownership
+
+- `src/coordinator/strategy_runtime/startup.rs`
+  - owner: managed runtime session bootstrap wiring
+- `src/coordinator/strategy_runtime/session.rs`
+  - owner: managed runtime lifetime/shutdown state
+- `src/coordinator/strategy_runtime/actions.rs`
+  - owner: runtime action/update dispatch wiring
+- `src/coordinator/strategy_runtime/actions/update_flow.rs`
+  - owner: split-arb poll task dedupe and lifecycle
+
+## Tasks
+
+- [x] Add a runtime-owned split-arb poll registry shared by action/update handlers.
+- [x] Prevent duplicate poll task spawns for the same exchange order id.
+- [x] Tie poll loops to runtime liveness so shutdown stops further polling.
+- [x] Add focused regression coverage for poll registration/deduplication.
+- [x] Re-run compile plus focused split-arb poll regressions after the cut.
+
+## Progress notes
+
+- 2026-03-12: Added runtime-owned split-arb poll registration to [startup.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/strategy_runtime/startup.rs), [session.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/strategy_runtime/session.rs), [actions.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/strategy_runtime/actions.rs), and [update_flow.rs](/Users/proerror/Documents/ploy-order-intent-clean/src/coordinator/strategy_runtime/actions/update_flow.rs).
+- 2026-03-12: Managed split-arb poll tasks now dedupe by exchange order id and stop polling once the owning runtime is shutting down.
+- 2026-03-12: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-split-poll-guard rtk cargo check --lib`
+  - `CARGO_TARGET_DIR=/tmp/ploy-split-poll-guard rtk cargo test test_split_arb_poll_registry_deduplicates_active_order --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-split-poll-guard rtk cargo test test_split_arb_poll_registry_rejects_dead_runtime --lib -- --exact --nocapture`

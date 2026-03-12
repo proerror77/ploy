@@ -1,10 +1,11 @@
 use chrono::Utc;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64},
     Arc,
 };
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{sync::{mpsc, Mutex}, task::JoinHandle};
 use tracing::warn;
 
 use crate::adapters::{PolymarketClient, PolymarketWebSocket};
@@ -36,8 +37,10 @@ pub(super) async fn start_managed_runtime_session(
     let required_feeds = strategy.required_feeds();
     let started_at = Utc::now();
     let paused = Arc::new(AtomicBool::new(false));
+    let runtime_alive = Arc::new(AtomicBool::new(true));
     let orders_submitted = Arc::new(AtomicU64::new(0));
     let orders_filled = Arc::new(AtomicU64::new(0));
+    let split_arb_poll_registry = Arc::new(Mutex::new(HashSet::new()));
     let status = crate::agent_runtime::AgentStatus::Running;
 
     let manager = Arc::new(StrategyManager::new(1000));
@@ -79,8 +82,10 @@ pub(super) async fn start_managed_runtime_session(
         coordinator_handle,
         pm_client,
         paused.clone(),
+        runtime_alive.clone(),
         orders_submitted.clone(),
         orders_filled.clone(),
+        split_arb_poll_registry.clone(),
         observability_pool,
         observability_account_id,
     );
@@ -90,9 +95,11 @@ pub(super) async fn start_managed_runtime_session(
         started_at,
         manager,
         paused,
+        runtime_alive,
         orders_submitted,
         orders_filled,
         status,
+        split_arb_poll_registry,
         subscribed_token_count,
         action_task,
     })
@@ -229,8 +236,10 @@ fn spawn_action_task(
     coordinator_handle: CoordinatorHandle,
     pm_client: PolymarketClient,
     paused: Arc<AtomicBool>,
+    runtime_alive: Arc<AtomicBool>,
     orders_submitted: Arc<AtomicU64>,
     orders_filled: Arc<AtomicU64>,
+    split_arb_poll_registry: Arc<Mutex<HashSet<String>>>,
     observability_pool: Option<PgPool>,
     observability_account_id: String,
 ) -> JoinHandle<()> {
@@ -253,8 +262,10 @@ fn spawn_action_task(
             coordinator_handle,
             executor,
             paused,
+            runtime_alive,
             orders_submitted,
             orders_filled,
+            split_arb_poll_registry,
             observability_pool,
             observability_account_id,
         )

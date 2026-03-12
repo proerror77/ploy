@@ -1,11 +1,13 @@
 use chrono::Utc;
 use serde_json::json;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::domain::OrderStatus;
@@ -28,7 +30,9 @@ pub(super) async fn handle_runtime_order_update(
     manager: &Arc<StrategyManager>,
     runtime_order_store: Option<&Arc<dyn RuntimeOrderStore>>,
     executor: &Arc<OrderExecutor>,
+    runtime_alive: &Arc<std::sync::atomic::AtomicBool>,
     orders_filled: &Arc<AtomicU64>,
+    split_arb_poll_registry: &Arc<Mutex<HashSet<String>>>,
     observability_pool: Option<&PgPool>,
     observability_account_id: &str,
     split_arb_managed: bool,
@@ -97,11 +101,14 @@ pub(super) async fn handle_runtime_order_update(
             manager.clone(),
             executor.clone(),
             runtime_order_store.cloned(),
+            runtime_alive.clone(),
             orders_filled.clone(),
+            split_arb_poll_registry.clone(),
             observability_pool.cloned(),
             observability_account_id.to_string(),
             update,
-        );
+        )
+        .await;
     }
 }
 
@@ -194,13 +201,15 @@ pub(super) async fn persist_runtime_observability(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_split_arb_poll_task(
+async fn spawn_split_arb_poll_task(
     strategy_label: String,
     strategy_id: String,
     manager: Arc<StrategyManager>,
     executor: Arc<OrderExecutor>,
     runtime_order_store: Option<Arc<dyn RuntimeOrderStore>>,
+    runtime_alive: Arc<std::sync::atomic::AtomicBool>,
     orders_filled: Arc<AtomicU64>,
+    split_arb_poll_registry: Arc<Mutex<HashSet<String>>>,
     observability_pool: Option<PgPool>,
     observability_account_id: String,
     update: OrderUpdate,
@@ -210,6 +219,22 @@ fn spawn_split_arb_poll_task(
         .clone()
         .unwrap_or_else(|| update.order_id.clone());
     let exchange_order_id = update.order_id.clone();
+    if !try_register_split_arb_poll_task(
+        &split_arb_poll_registry,
+        &runtime_alive,
+        exchange_order_id.as_str(),
+    )
+    .await
+    {
+        debug!(
+            strategy = strategy_label.as_str(),
+            strategy_id = %strategy_id,
+            client_order_id = %client_order_id,
+            exchange_order_id = %exchange_order_id,
+            "managed strategy poll task already active; skipping duplicate spawn"
+        );
+        return;
+    }
     let mut last_status = update.status;
     let mut last_filled_qty = update.filled_qty;
     let mut last_fill_price = update.avg_fill_price;
@@ -218,9 +243,15 @@ fn spawn_split_arb_poll_task(
         env_u64("PLOY_MANAGED_STRATEGY_ORDER_POLL_MAX_MS", 600_000).max(poll_interval_ms);
 
     tokio::spawn(async move {
+        let poll_key = exchange_order_id.clone();
         let started_at = std::time::Instant::now();
-        while started_at.elapsed().as_millis() < poll_max_ms as u128 {
+        while runtime_alive.load(Ordering::Acquire)
+            && started_at.elapsed().as_millis() < poll_max_ms as u128
+        {
             tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
+            if !runtime_alive.load(Ordering::Acquire) {
+                break;
+            }
 
             let polled = match executor.query_order_status(&exchange_order_id).await {
                 Ok(result) => result,
@@ -305,5 +336,59 @@ fn spawn_split_arb_poll_task(
                 break;
             }
         }
+
+        release_split_arb_poll_task(&split_arb_poll_registry, poll_key.as_str()).await;
     });
+}
+
+async fn try_register_split_arb_poll_task(
+    split_arb_poll_registry: &Arc<Mutex<HashSet<String>>>,
+    runtime_alive: &Arc<std::sync::atomic::AtomicBool>,
+    poll_key: &str,
+) -> bool {
+    if !runtime_alive.load(Ordering::Acquire) {
+        return false;
+    }
+
+    let mut registry = split_arb_poll_registry.lock().await;
+    if !runtime_alive.load(Ordering::Acquire) {
+        return false;
+    }
+
+    registry.insert(poll_key.to_string())
+}
+
+async fn release_split_arb_poll_task(
+    split_arb_poll_registry: &Arc<Mutex<HashSet<String>>>,
+    poll_key: &str,
+) {
+    split_arb_poll_registry.lock().await.remove(poll_key);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[tokio::test]
+    async fn test_split_arb_poll_registry_deduplicates_active_order() {
+        let registry = Arc::new(Mutex::new(HashSet::new()));
+        let runtime_alive = Arc::new(AtomicBool::new(true));
+
+        assert!(try_register_split_arb_poll_task(&registry, &runtime_alive, "exchange-1").await);
+        assert!(!try_register_split_arb_poll_task(&registry, &runtime_alive, "exchange-1").await);
+
+        release_split_arb_poll_task(&registry, "exchange-1").await;
+
+        assert!(try_register_split_arb_poll_task(&registry, &runtime_alive, "exchange-1").await);
+    }
+
+    #[tokio::test]
+    async fn test_split_arb_poll_registry_rejects_dead_runtime() {
+        let registry = Arc::new(Mutex::new(HashSet::new()));
+        let runtime_alive = Arc::new(AtomicBool::new(false));
+
+        assert!(!try_register_split_arb_poll_task(&registry, &runtime_alive, "exchange-1").await);
+        assert!(registry.lock().await.is_empty());
+    }
 }
