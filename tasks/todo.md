@@ -6224,3 +6224,54 @@ Keep collapsing active-core owners in parallel by moving remaining transport/rep
   - `CARGO_TARGET_DIR=/tmp/ploy-wave16-integrated rtk cargo test --lib adapters::binance_kline_ws::tests::characterization_freshness_recorded_on_kline -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave16-integrated rtk cargo test --lib strategy::directional_backtest::tests::test_settlement_binary_payout -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave16-integrated rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_single_leg_settlement -- --exact --nocapture`
+
+# Structural Wave 17 (2026-03-13)
+
+## Goal
+Keep collapsing remaining backtest/reporting roots in parallel by extracting support owners instead of leaving analysis, persistence, and reporting logic piled into single files:
+- liquidity-vacuum backtest reporting
+- generic backtest paper-trader/reporting ownership
+- backtest collector PM/csv support ownership
+- backtest report analysis builders
+
+## File ownership
+
+- `src/strategy/liquidity_vacuum_backtest.rs`
+  - owner: liquidity-vacuum engine/state machine and runtime tests
+- `src/strategy/liquidity_vacuum_backtest/reporting.rs`
+  - owner: result building, Sharpe calculation, summary printing, and closed-trade display
+- `src/strategy/backtest.rs`
+  - owner: backtest engine, CSV loaders, core models, and root tests
+- `src/strategy/backtest/paper_trader.rs`
+  - owner: `PaperTrader`, `PaperSignal`, `PaperTradingStats`, and paper-trading persistence/logging
+- `src/strategy/backtest/reporting.rs`
+  - owner: `BacktestResults` reporting/json serialization
+- `src/collector/backtest_collector.rs`
+  - owner: collector façade, kline loop, orchestration, and root tests
+- `src/collector/backtest_collector/csv_sink.rs`
+  - owner: CSV initialization, append flows, and outcome-file updates
+- `src/collector/backtest_collector/pm_collection.rs`
+  - owner: PM market collection, resolution checks, and PM-specific async loops
+- `src/strategy/backtest_report.rs`
+  - owner: DB loading, report façade, and terminal/json rendering
+- `src/strategy/backtest_report/analysis.rs`
+  - owner: run/calibration/profitability/fee/gamma analysis builders and suggestion engine
+
+## Tasks
+
+- [x] Extract liquidity-vacuum reporting into a sibling module.
+- [x] Extract `backtest.rs` paper-trader and reporting ownership into sibling modules.
+- [x] Extract backtest-collector PM/csv support ownership into sibling modules.
+- [x] Extract backtest-report analysis builders into a sibling module.
+- [x] Re-run integrated compile plus focused regressions for the wave.
+
+## Progress notes
+
+- 2026-03-13: Cherry-picked `strategy: extract liquidity vacuum reporting`, adding [reporting.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/liquidity_vacuum_backtest/reporting.rs) and reducing [liquidity_vacuum_backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/liquidity_vacuum_backtest.rs) to engine/state ownership.
+- 2026-03-13: Cherry-picked `strategy: extract backtest paper and reporting owners`, adding [paper_trader.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/backtest/paper_trader.rs) and [reporting.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/backtest/reporting.rs), reducing [backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/backtest.rs) from the old all-in-one owner shape.
+- 2026-03-13: Cherry-picked `collector: split backtest collector support owners`, adding [csv_sink.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/collector/backtest_collector/csv_sink.rs) and [pm_collection.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/collector/backtest_collector/pm_collection.rs), so [backtest_collector.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/collector/backtest_collector.rs) no longer owns PM collection or CSV sink details.
+- 2026-03-13: Added [analysis.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/backtest_report/analysis.rs) and reduced [backtest_report.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/backtest_report.rs) so the root report module no longer owns calibration/profitability/fee/suggestion builders.
+- 2026-03-13: Integrated validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave17-integrated rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave17-integrated rtk cargo test --lib strategy::backtest::tests::test_paper_trader -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave17-integrated rtk cargo test --lib collector::backtest_collector::tests::test_next_15min_boundary -- --exact --nocapture`
