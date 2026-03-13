@@ -6593,11 +6593,23 @@ assigning three disjoint files that still carry runtime/backtest orchestration:
 
 ## Tasks
 
-- [ ] Extract the next cohesive owner from `momentum_backtest`.
-- [ ] Extract the next cohesive owner from `backtest`.
-- [ ] Extract the next cohesive owner from `momentum_strat`.
-- [ ] Integrate the completed parallel cuts and re-run focused validation.
+- [x] Extract the next cohesive owner from `momentum_backtest`.
+- [x] Extract the next cohesive owner from `backtest`.
+- [x] Extract the next cohesive owner from `momentum_strat`.
+- [x] Integrate the completed parallel cuts and re-run focused validation.
 
 ## Progress notes
 
 - 2026-03-13: Pre-assigned disjoint file ownership for the next three parallel cuts after Wave 24 landed cleanly on `session/order-intent-wave24-continuation`.
+- 2026-03-13: Moved `MomentumStrategy::on_market_update()` and event/quote flow out of [momentum_strat.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/strategies/momentum_strat.rs) into [market_flow.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/strategies/momentum_strat/market_flow.rs), leaving the root strategy file focused on trait entrypoints.
+- 2026-03-13: Moved `BacktestTrade` / `BacktestResults` / `SymbolStats` and `BacktestEngine::calculate_statistics()` out of [backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/backtest.rs) into [statistics.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/backtest/statistics.rs), and added `Display for BacktestResults` in [reporting.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/backtest/reporting.rs) for CLI callers.
+- 2026-03-13: Moved `MomentumBacktestEngine` result/persistence ownership out of [momentum_backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/momentum_backtest.rs) into [results.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/momentum_backtest/results.rs), including `build_results()`, `calculate_sharpe()`, and `save_backtest_results(...)`.
+- 2026-03-13: Wave 25 landed as the following atomic commits:
+  - `0313b38` `strategy: extract momentum market flow`
+  - `15a783b` `strategy: extract backtest statistics owner`
+  - `4f97de6` `strategy: extract momentum backtest results owner`
+- 2026-03-13: Integrated validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave25-integrated rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave25-integrated rtk cargo test test_paper_trader --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave25-integrated rtk cargo test test_engine_empty_feed --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave25-integrated rtk cargo test test_sharpe_calculation --lib -- --exact --nocapture`
