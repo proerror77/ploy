@@ -6401,3 +6401,32 @@ Continue shrinking the remaining `staggered_arb_backtest` root after the Wave 19
   - `CARGO_TARGET_DIR=/tmp/ploy-staggered-config-cut rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_strong_obi_bonus_adjusts_entry_thresholds -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-staggered-config-cut rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_entry_requires_persistent_other_ask_before_opening_leg1 -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-staggered-config-cut rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_record_pm_quote_clears_disappearing_ask_side -- --exact --nocapture`
+
+# Structural Wave 21 (2026-03-13)
+
+## Goal
+Start the next backtest-owner reduction after Wave 20 by separating `volatility_arb` analysis concerns from mutable engine state:
+- pricing math / implied-vol helpers
+- volatility estimate + signal types
+- `estimate_volatility` / `analyze_market`
+
+## File ownership
+
+- `src/strategy/volatility_arb.rs`
+  - owner: config, engine state, trade lifecycle integration, and root tests
+- `src/strategy/volatility_arb/analysis.rs`
+  - owner: pricing math, analysis types, and volatility/signal generation logic
+
+## Tasks
+
+- [x] Extract the volatility-arb pricing/analysis seam into a sibling module.
+- [x] Re-run compile plus focused math/engine regressions for the cut.
+
+## Progress notes
+
+- 2026-03-13: Added [analysis.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/volatility_arb/analysis.rs) and reduced [volatility_arb.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/volatility_arb.rs) so pricing math, `VolatilityEstimate`/`VolArbSignal`, and the `estimate_volatility`/`analyze_market` surface no longer live in the root engine file.
+- 2026-03-13: Root [volatility_arb.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/volatility_arb.rs) now keeps the mutable engine owner and re-exports the extracted analysis surface for existing callers.
+- 2026-03-13: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-volarb-analysis-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-volarb-analysis-cut rtk cargo test --lib strategy::volatility_arb::tests::test_norm_cdf -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-volarb-analysis-cut rtk cargo test --lib strategy::volatility_arb::tests::test_vol_arb_engine -- --exact --nocapture`
