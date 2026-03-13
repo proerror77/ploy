@@ -15,23 +15,22 @@
 //! ploy paper-trade vol-arb --symbols BTC,ETH,SOL
 //! ```
 
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::strategy::volatility_arb::{
     VolArbSignal, VolatilityArbConfig, VolatilityArbEngine, calculate_implied_volatility,
 };
 
+mod loaders;
 mod paper_trader;
 mod reporting;
 
+pub use loaders::{load_klines_from_csv, load_pm_prices_from_csv};
 pub use paper_trader::{PaperSignal, PaperTrader, PaperTradingStats};
 
 // ============================================================================
@@ -170,135 +169,6 @@ impl Default for BacktestResults {
             equity_curve: Vec::new(),
         }
     }
-}
-
-// ============================================================================
-// Data Loading
-// ============================================================================
-
-/// Load K-line data from CSV file
-/// Expected format: timestamp,symbol,open,high,low,close,volume
-pub fn load_klines_from_csv<P: AsRef<Path>>(path: P) -> Result<Vec<KlineRecord>, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
-    let reader = BufReader::new(file);
-    let mut records = Vec::new();
-
-    for (i, line) in reader.lines().enumerate() {
-        if i == 0 {
-            continue; // Skip header
-        }
-
-        let line = line.map_err(|e| format!("Failed to read line {}: {}", i, e))?;
-        let parts: Vec<&str> = line.split(',').collect();
-
-        if parts.len() < 7 {
-            warn!("Skipping malformed line {}: insufficient columns", i);
-            continue;
-        }
-
-        let timestamp =
-            parse_timestamp(parts[0]).ok_or_else(|| format!("Invalid timestamp at line {}", i))?;
-
-        let record = KlineRecord {
-            timestamp,
-            symbol: parts[1].to_string(),
-            open: Decimal::from_str(parts[2]).unwrap_or(Decimal::ZERO),
-            high: Decimal::from_str(parts[3]).unwrap_or(Decimal::ZERO),
-            low: Decimal::from_str(parts[4]).unwrap_or(Decimal::ZERO),
-            close: Decimal::from_str(parts[5]).unwrap_or(Decimal::ZERO),
-            volume: Decimal::from_str(parts[6]).unwrap_or(Decimal::ZERO),
-        };
-
-        records.push(record);
-    }
-
-    info!("Loaded {} K-line records", records.len());
-    Ok(records)
-}
-
-/// Load PM price data from CSV file
-/// Expected format: timestamp,market_id,condition_id,symbol,threshold,yes_price,no_price,yes_bid,yes_ask,resolution_time,outcome
-pub fn load_pm_prices_from_csv<P: AsRef<Path>>(path: P) -> Result<Vec<PMPriceRecord>, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
-    let reader = BufReader::new(file);
-    let mut records = Vec::new();
-
-    for (i, line) in reader.lines().enumerate() {
-        if i == 0 {
-            continue; // Skip header
-        }
-
-        let line = line.map_err(|e| format!("Failed to read line {}: {}", i, e))?;
-        let parts: Vec<&str> = line.split(',').collect();
-
-        if parts.len() < 11 {
-            warn!("Skipping malformed line {}: insufficient columns", i);
-            continue;
-        }
-
-        let timestamp =
-            parse_timestamp(parts[0]).ok_or_else(|| format!("Invalid timestamp at line {}", i))?;
-        let resolution_time = parse_timestamp(parts[9])
-            .ok_or_else(|| format!("Invalid resolution_time at line {}", i))?;
-
-        let outcome = match parts[10].trim().to_lowercase().as_str() {
-            "yes" | "true" | "1" => Some(true),
-            "no" | "false" | "0" => Some(false),
-            _ => None,
-        };
-
-        let record = PMPriceRecord {
-            timestamp,
-            market_id: parts[1].to_string(),
-            condition_id: parts[2].to_string(),
-            symbol: parts[3].to_string(),
-            threshold_price: Decimal::from_str(parts[4]).unwrap_or(Decimal::ZERO),
-            yes_price: Decimal::from_str(parts[5]).unwrap_or(dec!(0.5)),
-            no_price: Decimal::from_str(parts[6]).unwrap_or(dec!(0.5)),
-            yes_bid: Decimal::from_str(parts[7]).unwrap_or(dec!(0.5)),
-            yes_ask: Decimal::from_str(parts[8]).unwrap_or(dec!(0.5)),
-            resolution_time,
-            outcome,
-        };
-
-        records.push(record);
-    }
-
-    info!("Loaded {} PM price records", records.len());
-    Ok(records)
-}
-
-fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
-    // Try various formats
-    if let Ok(ts) = s.parse::<i64>() {
-        // Unix timestamp (seconds or milliseconds)
-        if ts > 1_000_000_000_000 {
-            return Utc.timestamp_millis_opt(ts).single();
-        } else {
-            return Utc.timestamp_opt(ts, 0).single();
-        }
-    }
-
-    // Try ISO 8601 format
-    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return Some(dt.with_timezone(&Utc));
-    }
-
-    // Try common datetime formats
-    let formats = [
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S%.f",
-    ];
-
-    for fmt in &formats {
-        if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
-            return Some(Utc.from_utc_datetime(&dt));
-        }
-    }
-
-    None
 }
 
 // ============================================================================
