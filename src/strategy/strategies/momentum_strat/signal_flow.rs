@@ -56,24 +56,42 @@ impl MomentumStrategy {
         pos: &ActivePosition,
         current_bid: Decimal,
     ) -> Option<ExitReason> {
+        Self::check_exit_with_thresholds(
+            pos,
+            current_bid,
+            self.config.take_profit_pct,
+            self.config.stop_loss_pct,
+            self.config.trailing_stop_pct,
+            self.config.exit_before_resolution_secs as i64,
+        )
+    }
+
+    pub(super) fn check_exit_with_thresholds(
+        pos: &ActivePosition,
+        current_bid: Decimal,
+        take_profit_pct: Decimal,
+        stop_loss_pct: Decimal,
+        trailing_stop_pct: Decimal,
+        exit_before_resolution_secs: i64,
+    ) -> Option<ExitReason> {
         let pnl_pct = pos.pnl_pct(current_bid);
 
-        if pnl_pct >= self.config.take_profit_pct {
+        if pnl_pct >= take_profit_pct {
             return Some(ExitReason::TakeProfit);
         }
 
-        if pnl_pct <= -self.config.stop_loss_pct {
+        if pnl_pct <= -stop_loss_pct {
             return Some(ExitReason::StopLoss);
         }
 
         if pos.highest_price > pos.entry_price && current_bid < pos.highest_price {
             let drop = (pos.highest_price - current_bid) / pos.highest_price;
-            if drop >= self.config.trailing_stop_pct {
+            if drop >= trailing_stop_pct {
                 return Some(ExitReason::TrailingStop);
             }
         }
 
-        if pos.time_remaining() < self.config.exit_before_resolution_secs as i64 {
+        if pos.time_remaining() < exit_before_resolution_secs {
             return Some(ExitReason::TimeExit);
         }
 

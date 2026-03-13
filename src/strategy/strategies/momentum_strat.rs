@@ -28,6 +28,7 @@ use crate::strategy::traits::{
 
 mod signal_flow;
 mod lifecycle;
+mod market_flow;
 
 /// Momentum strategy configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,117 +282,7 @@ impl Strategy for MomentumStrategy {
     }
 
     async fn on_market_update(&mut self, update: &MarketUpdate) -> Result<Vec<StrategyAction>> {
-        let mut actions = Vec::new();
-
-        match update {
-            MarketUpdate::BinancePrice {
-                symbol,
-                price,
-                timestamp,
-            } => {
-                actions.extend(self.on_binance_price(symbol, *price, *timestamp));
-            }
-            MarketUpdate::PolymarketQuote {
-                token_id,
-                side,
-                quote,
-                ..
-            } => {
-                // Update position high water mark and check exit - collect info first to avoid borrow conflicts
-                let exit_info: Option<(String, Decimal, ExitReason)> = {
-                    if let Some(pos) = self.positions.get_mut(token_id) {
-                        if let Some(bid) = quote.best_bid {
-                            pos.update_high(bid);
-                            self.check_exit(pos, bid)
-                                .map(|reason| (pos.symbol.clone(), bid, reason))
-                        } else {
-                            None
-                        }
-                    } else {
-                        // Try finding by token_id in case key differs
-                        let mut found = None;
-                        for pos in self.positions.values_mut() {
-                            if pos.token_id == *token_id {
-                                if let Some(bid) = quote.best_bid {
-                                    pos.update_high(bid);
-                                    if let Some(reason) = self.check_exit(pos, bid) {
-                                        found = Some((pos.symbol.clone(), bid, reason));
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                        found
-                    }
-                };
-
-                // Create exit order outside the borrow
-                if let Some((symbol, price, reason)) = exit_info {
-                    actions.extend(self.create_exit_order(&symbol, price, reason));
-                }
-
-                // Check for entry confirmation - collect signals first
-                let signals_to_process: Vec<EntrySignal> = self
-                    .pending_orders
-                    .values()
-                    .filter_map(|pending| {
-                        if pending.is_entry {
-                            if let Some(signal) = &pending.signal {
-                                if signal.token_id == *token_id {
-                                    if let Some(ask) = quote.best_ask {
-                                        let mut updated_signal = signal.clone();
-                                        updated_signal.pm_price = ask;
-                                        updated_signal.edge =
-                                            self.estimate_fair_value(signal.cex_move_pct) - ask;
-                                        return Some(updated_signal);
-                                    }
-                                }
-                            }
-                        }
-                        None
-                    })
-                    .collect();
-
-                // Create entry orders outside the borrow
-                for signal in signals_to_process {
-                    actions.extend(self.create_entry_order(signal));
-                }
-            }
-            MarketUpdate::EventDiscovered {
-                event_id,
-                series_id,
-                up_token,
-                down_token,
-                end_time,
-                price_to_beat: _,
-                title: _,
-                condition_id: _,
-            } => {
-                // Find which symbol this series belongs to
-                for mapping in SeriesMapping::standard_mappings() {
-                    if mapping.series_ids.contains(series_id) {
-                        let event = EventContext {
-                            event_id: event_id.clone(),
-                            symbol: mapping.symbol.clone(),
-                            up_token_id: up_token.clone(),
-                            down_token_id: down_token.clone(),
-                            end_time: *end_time,
-                        };
-
-                        self.active_events.insert(event_id.clone(), event);
-
-                        info!("Discovered event for {}: {}", mapping.symbol, event_id);
-                        break;
-                    }
-                }
-            }
-            MarketUpdate::EventExpired { event_id } => {
-                self.active_events.remove(event_id);
-            }
-            _ => {}
-        }
-
-        Ok(actions)
+        Ok(self.handle_market_update(update))
     }
 
     async fn on_order_update(&mut self, update: &OrderUpdate) -> Result<Vec<StrategyAction>> {
@@ -477,5 +368,32 @@ mod tests {
             }
             other => panic!("expected submit intent, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn handle_market_update_registers_and_expires_events() {
+        let mut strategy = MomentumStrategy::new(MomentumConfig::default());
+        let end_time = Utc::now();
+
+        let actions = strategy.handle_market_update(&MarketUpdate::EventDiscovered {
+            event_id: "event-1".to_string(),
+            series_id: "41".to_string(),
+            up_token: "token-up".to_string(),
+            down_token: "token-down".to_string(),
+            end_time,
+            price_to_beat: None,
+            title: None,
+            condition_id: None,
+        });
+
+        assert!(actions.is_empty());
+        assert!(strategy.active_events.contains_key("event-1"));
+
+        let actions = strategy.handle_market_update(&MarketUpdate::EventExpired {
+            event_id: "event-1".to_string(),
+        });
+
+        assert!(actions.is_empty());
+        assert!(!strategy.active_events.contains_key("event-1"));
     }
 }
