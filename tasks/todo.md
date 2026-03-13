@@ -6325,3 +6325,31 @@ Keep shrinking active backtest owners by moving entry/position lifecycle and res
   - `CARGO_TARGET_DIR=/tmp/ploy-wave18-integrated rtk cargo check --lib --message-format=short`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave18-integrated rtk cargo test --lib strategy::directional_backtest::tests::test_settlement_binary_payout -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave18-integrated rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_fill_leg2_partial_keeps_position_open_until_remaining_shares_fill -- --exact --nocapture`
+
+# Structural Wave 19 (2026-03-13)
+
+## Goal
+Keep collapsing the heaviest remaining backtest owners by pulling focused runtime seams into sibling modules instead of leaving entry logic, loaders, and strategy state transitions bundled into single roots:
+- staggered-arb backtest entry/runtime seams
+- liquidity-vacuum backtest signal/entry seams
+- generic backtest loader/runtime seams
+- GARCH probability backtest lifecycle seams
+
+## File ownership
+
+- `src/strategy/staggered_arb_backtest.rs`
+  - owner: staggered-arb façade, config/runtime surface, and root tests
+- `src/strategy/liquidity_vacuum_backtest.rs`
+  - owner: liquidity-vacuum façade, shared models, and root tests
+- `src/strategy/backtest.rs`
+  - owner: generic backtest façade, public models, and root tests
+- `src/strategy/garch_probability_backtest.rs`
+  - owner: GARCH backtest façade, public models, and root tests
+
+## Tasks
+
+- [ ] Extract one focused staggered-arb backtest runtime seam into a sibling module.
+- [ ] Extract one focused liquidity-vacuum signal/entry seam into a sibling module.
+- [ ] Extract one focused generic backtest loader/runtime seam into a sibling module.
+- [ ] Extract one focused GARCH lifecycle seam into a sibling module.
+- [ ] Re-run integrated compile plus focused regressions for the wave.
