@@ -6348,11 +6348,11 @@ Keep collapsing the heaviest remaining backtest owners by pulling focused runtim
 
 ## Tasks
 
-- [ ] Extract one focused staggered-arb backtest runtime seam into a sibling module.
+- [x] Extract one focused staggered-arb backtest runtime seam into a sibling module.
 - [x] Extract one focused liquidity-vacuum signal/entry seam into a sibling module.
 - [x] Extract one focused generic backtest loader/runtime seam into a sibling module.
 - [x] Extract one focused GARCH lifecycle seam into a sibling module.
-- [ ] Re-run integrated compile plus focused regressions for the wave.
+- [x] Re-run integrated compile plus focused regressions for the wave.
 
 ## Progress notes
 
@@ -6360,8 +6360,11 @@ Keep collapsing the heaviest remaining backtest owners by pulling focused runtim
 - 2026-03-13: Added [loaders.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/backtest/loaders.rs) and reduced [backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/backtest.rs) so CSV loader ownership no longer lives in the root engine file.
 - 2026-03-13: Added [signal_logic.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/liquidity_vacuum_backtest/signal_logic.rs) and reduced [liquidity_vacuum_backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/liquidity_vacuum_backtest.rs) so common signal-state, entry gating, and filtered-signal recording no longer live in the root engine.
 - 2026-03-13: Added [trade_lifecycle.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/volatility_arb/trade_lifecycle.rs) and reduced [volatility_arb.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/volatility_arb.rs) so trade/position bookkeeping no longer sits in the root strategy owner.
+- 2026-03-13: Added [entry_logic.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/staggered_arb_backtest/entry_logic.rs) and reduced [staggered_arb_backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/staggered_arb_backtest.rs) so entry/window evaluation no longer lives in the root backtest engine owner.
 - 2026-03-13: Focused validation passed so far:
   - `CARGO_TARGET_DIR=/tmp/ploy-wave19-main rtk cargo check --lib --message-format=short`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave19-backtest rtk cargo check --lib --message-format=short`
   - `CARGO_TARGET_DIR=/tmp/ploy-lv-signal-cut rtk cargo check --lib --message-format=short`
   - `CARGO_TARGET_DIR=/tmp/ploy-volarb-cut rtk cargo test --lib strategy::volatility_arb::tests::test_vol_arb_engine -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-staggered-entry-cut rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_entry_requires_persistent_other_ask_before_opening_leg1 -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave19-final rtk cargo check --lib --message-format=short`
