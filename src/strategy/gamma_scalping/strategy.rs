@@ -20,6 +20,7 @@ use super::rebalancer::{Rebalancer, Straddle};
 
 mod decision_flow;
 mod runtime_support;
+mod state_view;
 
 /// Metadata for a tracked event (discovered from Polymarket).
 #[derive(Debug, Clone)]
@@ -153,99 +154,11 @@ impl Strategy for GammaScalpingStrategy {
     }
 
     fn state(&self) -> StrategyStateInfo {
-        let total_exposure: Decimal = self.straddles.values().map(|s| s.cost_basis).sum();
-
-        let unrealized: Decimal = self
-            .straddles
-            .values()
-            .map(|s| {
-                let up_val = self
-                    .quote_cache
-                    .get(&s.up_token_id)
-                    .and_then(|q| q.best_bid)
-                    .unwrap_or(s.up_entry_price)
-                    * Decimal::from(s.up_shares);
-                let down_val = self
-                    .quote_cache
-                    .get(&s.down_token_id)
-                    .and_then(|q| q.best_bid)
-                    .unwrap_or(s.down_entry_price)
-                    * Decimal::from(s.down_shares);
-                up_val + down_val - s.cost_basis + s.realized_pnl
-            })
-            .sum();
-
-        let mut metrics = HashMap::new();
-        metrics.insert("straddles".to_string(), self.straddles.len().to_string());
-        metrics.insert("trade_count".to_string(), self.trade_count.to_string());
-        metrics.insert("daily_loss".to_string(), self.daily_loss.to_string());
-        metrics.insert("dry_run".to_string(), self.config.dry_run.to_string());
-
-        StrategyStateInfo {
-            strategy_id: self.config.id.clone(),
-            phase: if self.straddles.is_empty() {
-                "scanning".to_string()
-            } else {
-                "active".to_string()
-            },
-            enabled: self.config.enabled,
-            active: self.active,
-            position_count: self.straddles.len(),
-            pending_order_count: self.pending_orders.len(),
-            total_exposure,
-            unrealized_pnl: unrealized,
-            realized_pnl_today: self.realized_pnl,
-            last_update: Utc::now(),
-            metrics,
-        }
+        self.state_info()
     }
 
     fn positions(&self) -> Vec<PositionInfo> {
-        self.straddles
-            .values()
-            .flat_map(|s| {
-                let mut positions = Vec::new();
-                if s.up_shares > 0 {
-                    let mut p = PositionInfo::new(
-                        s.up_token_id.clone(),
-                        Side::Up,
-                        s.up_shares,
-                        s.up_entry_price,
-                        self.config.id.clone(),
-                    );
-                    if let Some(q) = self.quote_cache.get(&s.up_token_id) {
-                        if let Some(bid) = q.best_bid {
-                            p.update_price(bid);
-                        }
-                    }
-                    p.metadata
-                        .insert("event_id".to_string(), s.event_id.clone());
-                    p.metadata
-                        .insert("leg".to_string(), "straddle_up".to_string());
-                    positions.push(p);
-                }
-                if s.down_shares > 0 {
-                    let mut p = PositionInfo::new(
-                        s.down_token_id.clone(),
-                        Side::Down,
-                        s.down_shares,
-                        s.down_entry_price,
-                        self.config.id.clone(),
-                    );
-                    if let Some(q) = self.quote_cache.get(&s.down_token_id) {
-                        if let Some(bid) = q.best_bid {
-                            p.update_price(bid);
-                        }
-                    }
-                    p.metadata
-                        .insert("event_id".to_string(), s.event_id.clone());
-                    p.metadata
-                        .insert("leg".to_string(), "straddle_down".to_string());
-                    positions.push(p);
-                }
-                positions
-            })
-            .collect()
+        self.position_snapshots()
     }
 
     fn is_active(&self) -> bool {
