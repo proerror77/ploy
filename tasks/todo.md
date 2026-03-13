@@ -6124,3 +6124,50 @@ Finish collapsing `queue` into a thin core owner by moving queue maintenance/que
 - 2026-03-13: Validation passed:
   - `CARGO_TARGET_DIR=/tmp/ploy-wave14q1 cargo test --lib coordinator::queue::tests::test_concurrent_enqueue_dequeue_pressure -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave14q1 cargo test --lib coordinator::queue::tests::test_pending_buy_notional_excluding_domains -- --exact --nocapture`
+
+# Structural Wave 15 (2026-03-13)
+
+## Goal
+Keep shrinking adapter and live-strategy root owners by moving focused parsing/cache/auth seams into sibling modules:
+- Binance spot-cache statistics and bounded history handling
+- Kalshi auth/http request signing flow
+- NBA comeback Grok prompt/response shaping
+
+## File ownership
+
+- `src/adapters/binance_ws.rs`
+  - owner: Binance websocket surface, message parsing, broadcast wiring, and adapter-facing tests
+- `src/adapters/binance_ws/spot_cache.rs`
+  - owner: `SpotPrice`, `PriceCache`, bounded history, momentum/VWAP/volatility helpers, and cache-focused tests
+- `src/adapters/kalshi_rest.rs`
+  - owner: Kalshi REST client surface, order/market APIs, and root client tests
+- `src/adapters/kalshi_rest/auth_http.rs`
+  - owner: HTTP client construction, auth header generation, signed request execution, and HMAC payload helpers
+- `src/strategy/nba_comeback/grok_decision.rs`
+  - owner: Grok decision surface, request orchestration, public types, and root regressions
+- `src/strategy/nba_comeback/grok_decision/prompt.rs`
+  - owner: unified prompt construction
+- `src/strategy/nba_comeback/grok_decision/response.rs`
+  - owner: decision JSON parsing and response normalization
+
+## Tasks
+
+- [x] Extract Binance spot cache ownership into a sibling module.
+- [x] Extract Kalshi auth/http signing helpers into a sibling module.
+- [x] Extract NBA comeback Grok prompt/response helpers into sibling modules.
+- [x] Re-run compile plus focused regressions for the integrated wave.
+
+## Progress notes
+
+- 2026-03-13: Added [spot_cache.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/adapters/binance_ws/spot_cache.rs) and reduced [binance_ws.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/adapters/binance_ws.rs) so the root adapter no longer owns bounded spot-cache analytics/history helpers.
+- 2026-03-13: Added [auth_http.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/adapters/kalshi_rest/auth_http.rs) and reduced [kalshi_rest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/adapters/kalshi_rest.rs) so auth-header construction, signed requests, and HMAC helpers live behind a dedicated sibling owner.
+- 2026-03-13: Added [prompt.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/nba_comeback/grok_decision/prompt.rs) and [response.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/nba_comeback/grok_decision/response.rs), reducing [grok_decision.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/nba_comeback/grok_decision.rs) to decision orchestration and public decision types.
+- 2026-03-13: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib adapters::binance_ws::spot_cache::tests::test_price_cache -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib adapters::binance_ws::tests::characterization_trade_updates_price_cache -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib adapters::kalshi_rest::tests::build_sign_payload_is_stable -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib adapters::kalshi_rest::tests::hmac_signature_for_payload_is_stable -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib adapters::kalshi_rest::tests::submit_order_body_keeps_compat_fields_and_internal_trace_price -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib strategy::nba_comeback::grok_decision::tests::test_parse_trade_decision -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib strategy::nba_comeback::grok_decision::tests::test_prompt_contains_all_sections -- --exact --nocapture`
