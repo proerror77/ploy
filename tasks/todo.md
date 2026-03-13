@@ -6536,7 +6536,7 @@ disjoint runtime/support files to parallel workers:
 
 - [x] Extract the next cohesive owner from `runtime_configs`.
 - [ ] Extract the next cohesive owner from `position_manager`.
-- [ ] Extract the next cohesive owner from `trade_logger`.
+- [x] Extract the next cohesive owner from `trade_logger`.
 - [ ] Integrate the completed parallel cuts and re-run focused validation.
 
 ## Progress notes
@@ -6548,3 +6548,7 @@ disjoint runtime/support files to parallel workers:
   - `rtk cargo check --lib --message-format=short`
   - `rtk cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --exact --nocapture`
   - `rtk cargo test build_split_arb_runtime_config_renders_symbols_and_series_ids --lib -- --exact --nocapture`
+- 2026-03-13: Moved trade logger write-side ownership out of [trade_logger.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/trade_logger.rs) into [write_flow.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/trade_logger/write_flow.rs), leaving the root module focused on type definitions, constructors, and read/query helpers.
+- 2026-03-13: Trade logger validation passed:
+  - `rtk cargo check --lib --message-format=short`
+  - `rtk cargo test test_symbol_stats --lib -- --exact --nocapture`
