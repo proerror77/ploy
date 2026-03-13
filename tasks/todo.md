@@ -6510,3 +6510,41 @@ Keep using parallel file ownership to cut the next tier of medium-large strategy
   - `CARGO_TARGET_DIR=/tmp/ploy-wave23-verify-target rtk cargo test --lib test_active_event -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave23-verify-target rtk cargo test --lib test_event_tracker -- --exact --nocapture`
 - 2026-03-13: `test_state_transitions` still filters out under the current lib harness, so Wave 23 two-leg coverage is compile-only on the integrated branch until that test surface is wired back in.
+
+# Structural Wave 24 (2026-03-13)
+
+## Goal
+Keep collapsing the remaining medium-large strategy owners by assigning three
+disjoint runtime/support files to parallel workers:
+- `runtime_specs/runtime_configs`
+- `position_manager`
+- `trade_logger`
+
+## File ownership
+
+- Worker A
+  - `src/strategy/runtime_specs/runtime_configs.rs`
+  - optional new sibling modules under `src/strategy/runtime_specs/`
+- Worker B
+  - `src/strategy/position_manager.rs`
+  - optional new sibling modules under `src/strategy/position_manager/`
+- Worker C
+  - `src/strategy/trade_logger.rs`
+  - optional new sibling modules under `src/strategy/trade_logger/`
+
+## Tasks
+
+- [x] Extract the next cohesive owner from `runtime_configs`.
+- [ ] Extract the next cohesive owner from `position_manager`.
+- [ ] Extract the next cohesive owner from `trade_logger`.
+- [ ] Integrate the completed parallel cuts and re-run focused validation.
+
+## Progress notes
+
+- 2026-03-13: Started Wave 24 from clean continuation branch `session/order-intent-wave24-continuation`, based directly on `origin/session/order-intent-wave13`, after aborting a noisy `main` merge attempt with unrelated conflicts.
+- 2026-03-13: Pre-assigned disjoint file ownership for the next three parallel subagents before implementation.
+- 2026-03-13: Moved momentum/split-arb template loading and rendering out of [runtime_configs.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/runtime_specs/runtime_configs.rs) into [crypto_templates.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/runtime_specs/runtime_configs/crypto_templates.rs), leaving the root module focused on direct table-building runtime config owners.
+- 2026-03-13: Validation passed:
+  - `rtk cargo check --lib --message-format=short`
+  - `rtk cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --exact --nocapture`
+  - `rtk cargo test build_split_arb_runtime_config_renders_symbols_and_series_ids --lib -- --exact --nocapture`
