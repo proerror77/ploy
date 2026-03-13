@@ -1,9 +1,9 @@
-use super::{
-    CryptoRlPolicyStrategy, PloyError, Result, STRATEGY_NAME, default_max_entry_price,
-    default_observation_version, default_policy_output,
-};
 #[cfg(feature = "onnx")]
 use super::load_policy_model;
+use super::{
+    default_max_entry_price, default_observation_version, default_policy_output,
+    CryptoRlPolicyStrategy, PloyError, Result, STRATEGY_NAME,
+};
 use crate::adapters::SpotPrice;
 use crate::collector::LobSnapshot;
 use crate::domain::Quote;
@@ -116,7 +116,10 @@ struct CryptoRlPolicyStrategyToml {
     crypto_rl_policy: CryptoRlPolicyStrategyConfig,
 }
 
-pub(super) fn build_strategy_from_toml(id: String, config_str: &str) -> Result<CryptoRlPolicyStrategy> {
+pub(super) fn build_strategy_from_toml(
+    id: String,
+    config_str: &str,
+) -> Result<CryptoRlPolicyStrategy> {
     let parsed: CryptoRlPolicyStrategyToml = toml::from_str(config_str)
         .map_err(|e| PloyError::Internal(format!("Invalid TOML: {e}")))?;
     if parsed.strategy.name != STRATEGY_NAME {
