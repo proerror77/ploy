@@ -6171,3 +6171,56 @@ Keep shrinking adapter and live-strategy root owners by moving focused parsing/c
   - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib adapters::kalshi_rest::tests::submit_order_body_keeps_compat_fields_and_internal_trace_price -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib strategy::nba_comeback::grok_decision::tests::test_parse_trade_decision -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib strategy::nba_comeback::grok_decision::tests::test_prompt_contains_all_sections -- --exact --nocapture`
+
+# Structural Wave 16 (2026-03-13)
+
+## Goal
+Keep collapsing active-core owners in parallel by moving remaining transport/reporting/support seams out of their root files:
+- Binance kline proxy/connection flow
+- directional backtest reporting/result shaping
+- staggered-arb backtest test surface
+- Postgres support subdomains
+
+## File ownership
+
+- `src/adapters/binance_kline_ws.rs`
+  - owner: Binance kline websocket surface, message parsing, broadcast flow, and adapter-facing tests
+- `src/adapters/binance_kline_ws_connection.rs`
+  - owner: proxy discovery, HTTP CONNECT tunneling, and websocket handshake setup
+- `src/strategy/directional_backtest.rs`
+  - owner: directional backtest engine, entry/exit flow, equity tracking, and runtime tests
+- `src/strategy/directional_backtest/reporting.rs`
+  - owner: result building, Sharpe calculation, summary printing, and `Display` formatting
+- `src/strategy/staggered_arb_backtest.rs`
+  - owner: staggered-arb backtest engine/runtime ownership
+- `src/strategy/staggered_arb_backtest/tests.rs`
+  - owner: full staggered-arb backtest regression surface
+- `src/adapters/postgres.rs`
+  - owner: `PostgresStore` façade and re-exports
+- `src/adapters/postgres/daily_metrics.rs`
+  - owner: daily metrics persistence helpers
+- `src/adapters/postgres/strategy_state.rs`
+  - owner: persisted strategy-state read/write helpers
+- `src/adapters/postgres/nba_team_stats.rs`
+  - owner: NBA team stats load/upsert support
+
+## Tasks
+
+- [x] Extract Binance kline proxy/connection flow into a sibling module.
+- [x] Extract directional backtest reporting into a sibling module.
+- [x] Extract staggered-arb backtest tests into a sibling module.
+- [x] Extract Postgres daily-metrics/strategy-state/NBA support owners into sibling modules.
+- [x] Re-run integrated compile plus focused regressions for the wave.
+
+## Progress notes
+
+- 2026-03-13: Added [binance_kline_ws_connection.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/adapters/binance_kline_ws_connection.rs) and reduced [binance_kline_ws.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/adapters/binance_kline_ws.rs) so the root adapter no longer owns proxy parsing, CONNECT tunneling, or websocket handshake setup.
+- 2026-03-13: Cherry-picked `strategy: extract directional backtest reporting`, adding [reporting.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/directional_backtest/reporting.rs) and reducing [directional_backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/directional_backtest.rs) to engine/runtime ownership.
+- 2026-03-13: Cherry-picked `strategy: extract staggered arb backtest tests`, moving the full regression surface into [tests.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/staggered_arb_backtest/tests.rs).
+- 2026-03-13: Cherry-picked `adapters: split postgres support owners`, adding [daily_metrics.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/adapters/postgres/daily_metrics.rs), [strategy_state.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/adapters/postgres/strategy_state.rs), and [nba_team_stats.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/adapters/postgres/nba_team_stats.rs).
+- 2026-03-13: Integrated validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave16-integrated rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave16-integrated rtk cargo test --lib adapters::binance_kline_ws::tests::characterization_closed_kline_emits_update -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave16-integrated rtk cargo test --lib adapters::binance_kline_ws::tests::characterization_freshness_recorded_on_kline -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave16-integrated rtk cargo test --lib strategy::directional_backtest::tests::test_settlement_binary_payout -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave16-integrated rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_single_leg_settlement -- --exact --nocapture`
