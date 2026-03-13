@@ -6275,3 +6275,53 @@ Keep collapsing remaining backtest/reporting roots in parallel by extracting sup
   - `CARGO_TARGET_DIR=/tmp/ploy-wave17-integrated rtk cargo check --lib --message-format=short`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave17-integrated rtk cargo test --lib strategy::backtest::tests::test_paper_trader -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave17-integrated rtk cargo test --lib collector::backtest_collector::tests::test_next_15min_boundary -- --exact --nocapture`
+
+# Structural Wave 18 (2026-03-13)
+
+## Goal
+Keep shrinking active backtest owners by moving entry/position lifecycle and result shaping out of root engines instead of leaving control flow, settlement, and reporting interleaved in single files:
+- directional backtest lifecycle ownership
+- liquidity-vacuum backtest lifecycle ownership
+- staggered-arb backtest lifecycle ownership
+- GARCH probability backtest reporting ownership
+
+## File ownership
+
+- `src/strategy/directional_backtest.rs`
+  - owner: directional engine loop, feed/event handling, equity tracking, and runtime tests
+- `src/strategy/directional_backtest/entry_lifecycle.rs`
+  - owner: directional entry gating, fair-value estimation, and momentum-to-edge mapping
+- `src/strategy/directional_backtest/position_lifecycle.rs`
+  - owner: exit checks, settlement resolution, and position close flows
+- `src/strategy/liquidity_vacuum_backtest.rs`
+  - owner: liquidity-vacuum engine, runtime orchestration, and root tests
+- `src/strategy/liquidity_vacuum_backtest/lifecycle.rs`
+  - owner: fill/abort/resolve/settlement lifecycle and residual close flows
+- `src/strategy/staggered_arb_backtest.rs`
+  - owner: staggered-arb engine/runtime state and regression surface entry point
+- `src/strategy/staggered_arb_backtest/lifecycle.rs`
+  - owner: leg2 fill/abort/resolve/settlement lifecycle and remaining-position teardown
+- `src/strategy/garch_probability_backtest.rs`
+  - owner: GARCH probability engine/runtime ownership and root tests
+- `src/strategy/garch_probability_backtest/reporting.rs`
+  - owner: result building and Sharpe/report summary calculations
+
+## Tasks
+
+- [x] Extract directional backtest entry/position lifecycle into sibling modules.
+- [x] Extract liquidity-vacuum lifecycle into a sibling module.
+- [x] Extract staggered-arb lifecycle into a sibling module.
+- [x] Extract GARCH probability backtest reporting into a sibling module.
+- [x] Re-run integrated compile plus focused regressions for the wave.
+
+## Progress notes
+
+- 2026-03-13: Cherry-picked `strategy: split directional backtest lifecycle`, adding [entry_lifecycle.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/directional_backtest/entry_lifecycle.rs) and [position_lifecycle.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/directional_backtest/position_lifecycle.rs), so [directional_backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/directional_backtest.rs) no longer owns entry filters, fair-value helpers, or close/settlement flows.
+- 2026-03-13: Cherry-picked `strategy: extract liquidity vacuum lifecycle`, adding [lifecycle.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/liquidity_vacuum_backtest/lifecycle.rs) and reducing [liquidity_vacuum_backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/liquidity_vacuum_backtest.rs) to engine/runtime ownership.
+- 2026-03-13: Cherry-picked `strategy: extract staggered arb lifecycle`, adding [lifecycle.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/staggered_arb_backtest/lifecycle.rs) and moving leg2/settlement teardown out of [staggered_arb_backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/staggered_arb_backtest.rs).
+- 2026-03-13: Added [reporting.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/garch_probability_backtest/reporting.rs) and reduced [garch_probability_backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/garch_probability_backtest.rs) so the root engine no longer owns aggregate result shaping.
+- 2026-03-13: Followed up with `strategy: fix directional lifecycle visibility`, promoting the root-called directional lifecycle methods to `pub(super)` after the module split.
+- 2026-03-13: Integrated validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave18-integrated rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave18-integrated rtk cargo test --lib strategy::directional_backtest::tests::test_settlement_binary_payout -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave18-integrated rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_fill_leg2_partial_keeps_position_open_until_remaining_shares_fill -- --exact --nocapture`
