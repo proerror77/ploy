@@ -4,75 +4,29 @@
 //! associative memory over recent kline return patterns.
 
 use super::engine::{PatternMemory, Posterior};
-use crate::domain::{OrderType, Side, TimeInForce};
-use crate::error::{PloyError, Result};
 use crate::domain::Domain;
+use crate::domain::{OrderType, Side, TimeInForce};
+use crate::error::Result;
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
     StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 
+mod config_loader;
 #[path = "decision_runtime.rs"]
 mod decision_runtime;
+
+use self::config_loader::Config;
 
 const PATTERN_LEN: usize = 20;
 const TF_5M: &str = "5m";
 const TF_15M: &str = "15m";
-
-#[derive(Debug, Clone)]
-struct MarketMapping {
-    symbol: String,
-    series_id: String,
-}
-
-#[derive(Debug, Clone)]
-struct TimingConfig {
-    target_remaining_secs: i64,
-    tolerance_secs: i64,
-    min_remaining_secs: i64,
-}
-
-#[derive(Debug, Clone)]
-struct Filter15mConfig {
-    enabled: bool,
-    min_confidence: f64,
-    min_n_eff: f64,
-}
-
-#[derive(Debug, Clone)]
-struct PatternConfig {
-    corr_threshold: f64,
-    alpha: f64,
-    beta: f64,
-    min_matches: usize,
-    min_n_eff: f64,
-    min_confidence: f64,
-    age_decay_lambda: f64,
-    max_samples: usize,
-}
-
-#[derive(Debug, Clone)]
-struct TradeConfig {
-    shares: u64,
-    max_entry_price: Decimal,
-    min_net_ev: Decimal,
-    cooldown_secs: i64,
-}
-
-#[derive(Debug, Clone)]
-struct Config {
-    markets: Vec<MarketMapping>,
-    timing: TimingConfig,
-    pattern: PatternConfig,
-    filter_15m: Filter15mConfig,
-    trade: TradeConfig,
-}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -132,154 +86,7 @@ pub struct PatternMemoryStrategy {
     last_decision: HashMap<String, LastDecision>, // symbol -> decision
 }
 
-impl PatternMemoryStrategy {
-    pub fn from_toml(id: String, config_str: &str, dry_run: bool) -> Result<Self> {
-        use toml::Value;
-
-        let config: Value = toml::from_str(config_str)
-            .map_err(|e| PloyError::Internal(format!("Invalid TOML: {e}")))?;
-
-        let markets = config
-            .get("markets")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| PloyError::Internal("Missing [[markets]]".to_string()))?;
-
-        let mut parsed_markets: Vec<MarketMapping> = Vec::new();
-        for m in markets {
-            let symbol = m
-                .get("symbol")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| PloyError::Internal("markets.symbol missing".to_string()))?;
-            let series_id = m
-                .get("series_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| PloyError::Internal("markets.series_id missing".to_string()))?;
-            parsed_markets.push(MarketMapping {
-                symbol: symbol.to_string(),
-                series_id: series_id.to_string(),
-            });
-        }
-
-        let empty = Value::Table(Default::default());
-        let pattern = config.get("pattern").unwrap_or(&empty);
-        let filter_15m = config.get("filter_15m").unwrap_or(&empty);
-        let trade = config.get("trade").unwrap_or(&empty);
-        let timing = config.get("timing").unwrap_or(&empty);
-
-        let cfg = Config {
-            markets: parsed_markets,
-            timing: TimingConfig {
-                target_remaining_secs: timing
-                    .get("target_remaining_secs")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(300) as i64,
-                tolerance_secs: timing
-                    .get("tolerance_secs")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(45) as i64,
-                min_remaining_secs: timing
-                    .get("min_remaining_secs")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(60) as i64,
-            },
-            pattern: PatternConfig {
-                corr_threshold: pattern
-                    .get("corr_threshold")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.70),
-                alpha: pattern
-                    .get("alpha")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(5.0),
-                beta: pattern
-                    .get("beta")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(5.0),
-                min_matches: pattern
-                    .get("min_matches")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(10) as usize,
-                min_n_eff: pattern
-                    .get("min_n_eff")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(5.0),
-                min_confidence: pattern
-                    .get("min_confidence")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.60),
-                age_decay_lambda: pattern
-                    .get("age_decay_lambda")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.001),
-                max_samples: pattern
-                    .get("max_samples")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(2000) as usize,
-            },
-            filter_15m: Filter15mConfig {
-                enabled: filter_15m
-                    .get("enabled")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true),
-                min_confidence: filter_15m
-                    .get("min_confidence")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.55),
-                min_n_eff: filter_15m
-                    .get("min_n_eff")
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(1.0),
-            },
-            trade: TradeConfig {
-                shares: trade
-                    .get("shares")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(100) as u64,
-                max_entry_price: Decimal::from_f64(
-                    trade
-                        .get("max_entry_price")
-                        .and_then(|v| v.as_float())
-                        .unwrap_or(0.55),
-                )
-                .unwrap_or(dec!(0.55)),
-                min_net_ev: Decimal::from_f64(
-                    trade
-                        .get("min_net_ev")
-                        .and_then(|v| v.as_float())
-                        .unwrap_or(0.0),
-                )
-                .unwrap_or(Decimal::ZERO),
-                cooldown_secs: trade
-                    .get("cooldown_secs")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(30) as i64,
-            },
-        };
-
-        let mut symbol_by_series = HashMap::new();
-        let mut series_by_symbol = HashMap::new();
-        for m in &cfg.markets {
-            symbol_by_series.insert(m.series_id.clone(), m.symbol.clone());
-            series_by_symbol.insert(m.symbol.clone(), m.series_id.clone());
-        }
-
-        Ok(Self {
-            id,
-            dry_run,
-            cfg,
-            enabled: true,
-            symbol_by_series,
-            series_by_symbol,
-            mem_5m: HashMap::new(),
-            mem_15m: HashMap::new(),
-            quotes: HashMap::new(),
-            events: HashMap::new(),
-            traded_events: HashSet::new(),
-            cooldowns: HashMap::new(),
-            last_decision: HashMap::new(),
-        })
-    }
-}
+impl PatternMemoryStrategy {}
 
 #[async_trait]
 impl Strategy for PatternMemoryStrategy {
@@ -554,11 +361,9 @@ min_net_ev = 0.0
             other => panic!("expected submit intent, got {other:?}"),
         };
 
-        assert!(
-            intent
-                .client_order_id
-                .starts_with("pattern-memory-test_BTC_event-1_up_")
-        );
+        assert!(intent
+            .client_order_id
+            .starts_with("pattern-memory-test_BTC_event-1_up_"));
         assert_eq!(intent.domain, Domain::Crypto);
         assert_eq!(intent.market_slug, "event-1");
         assert_eq!(intent.token_id, "token-up");
