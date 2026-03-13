@@ -6654,3 +6654,77 @@ disjoint files that still mix runtime logic, calculations, and orchestration:
   - `CARGO_TARGET_DIR=/tmp/ploy-wave26-check rtk cargo test strategy::deribit_probability_arb::order_flow::tests::build_order_request_uses_canonical_deribit_prob_fields --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave26-check rtk cargo test strategy::calculations::calibration::tests::test_calibration_adjusted_edge --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave26-check rtk cargo test test_ev_calculation --lib -- --exact --nocapture`
+
+# Structural Wave 27 (2026-03-13)
+
+## Goal
+Continue collapsing medium-large active strategy owners that still mix runtime
+orchestration with domain logic:
+- `event_edge`
+- `crypto_lob_ml`
+- `claimer`
+
+## File ownership
+
+- Worker A
+  - `src/strategy/event_edge/strategy.rs`
+  - optional new sibling modules under `src/strategy/event_edge/strategy/`
+- Worker B
+  - `src/strategy/crypto_lob_ml/strategy.rs`
+  - optional new sibling modules under `src/strategy/crypto_lob_ml/strategy/`
+- Worker C
+  - `src/strategy/claimer.rs`
+  - optional new sibling modules under `src/strategy/claimer/`
+
+## Tasks
+
+- [x] Extract the next cohesive owner from `event_edge`.
+- [x] Extract the next cohesive owner from `crypto_lob_ml`.
+- [x] Extract the next cohesive owner from `claimer`.
+- [x] Integrate the completed parallel cuts and re-run focused validation.
+
+## Progress notes
+
+- 2026-03-13: Pre-assigned three disjoint strategy owners after pushing the Wave 26 checkpoint on `origin/session/order-intent-wave24-continuation`.
+- 2026-03-13: Added [config_loader.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/event_edge/strategy/config_loader.rs) and reduced [strategy.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/event_edge/strategy.rs) so the root owner no longer carries TOML parsing and config override validation.
+- 2026-03-13: Added [config_loader.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/crypto_lob_ml/strategy/config_loader.rs) and reduced [strategy.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/crypto_lob_ml/strategy.rs) so the root owner no longer carries TOML parsing, symbol normalization, or config regression tests.
+- 2026-03-13: Added [daemon.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/claimer/daemon.rs) and reduced [claimer.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/claimer.rs) so the root owner no longer carries environment helpers or process-wide daemon bootstrap.
+- 2026-03-13: Wave 27 landed as the following atomic commits:
+  - `d67df54` `strategy: extract event edge config loader`
+  - `f213dd3` `strategy: extract crypto lob ml config loader`
+  - `524d3a7` `strategy: extract claimer daemon bootstrap`
+- 2026-03-13: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave27-check rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave27-check rtk cargo test from_toml_builds_expected_feeds --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave27-check rtk cargo test on_tick_emits_inference_log_once_sequence_is_ready --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-claimer-daemon rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-claimer-daemon cargo test claimer --lib -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave27-check cargo test from_toml_builds_event_edge_strategy_and_overrides_config --lib -- --exact --nocapture`
+  - Note: the current lib test harness filtered the exact `event_edge` and `claimer` name-based invocations to `0 tests`; compile remained the effective gate for those structural cuts.
+
+# Structural Wave 28 (2026-03-13)
+
+## Goal
+Keep shrinking adjacent strategy owners while Wave 27 integration is in flight by
+extracting the dump-and-hedge engine flow from the root owner.
+
+## File ownership
+
+- Integrator
+  - `src/strategy/dump_hedge.rs`
+  - `src/strategy/dump_hedge/engine_flow.rs`
+
+## Tasks
+
+- [x] Extract the dump-and-hedge engine flow into a sibling module.
+- [x] Re-run focused validation for the extracted flow.
+
+## Progress notes
+
+- 2026-03-13: Added [engine_flow.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/dump_hedge/engine_flow.rs) and reduced [dump_hedge.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/dump_hedge.rs) so the root owner no longer carries Leg 1 entry, progressive hedge, and stop-loss flow.
+- 2026-03-13: Wave 28 landed as the following atomic commit:
+  - `7287731` `strategy: extract dump hedge engine flow`
+- 2026-03-13: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-dump-hedge-flow rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-dump-hedge-flow rtk cargo test test_dynamic_sum_target --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-dump-hedge-flow rtk cargo test test_hedge_profit_calculation --lib -- --exact --nocapture`
