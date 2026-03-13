@@ -6430,3 +6430,42 @@ Start the next backtest-owner reduction after Wave 20 by separating `volatility_
   - `CARGO_TARGET_DIR=/tmp/ploy-volarb-analysis-cut rtk cargo check --lib --message-format=short`
   - `CARGO_TARGET_DIR=/tmp/ploy-volarb-analysis-cut rtk cargo test --lib strategy::volatility_arb::tests::test_norm_cdf -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-volarb-analysis-cut rtk cargo test --lib strategy::volatility_arb::tests::test_vol_arb_engine -- --exact --nocapture`
+
+# Structural Wave 22 (2026-03-13)
+
+## Goal
+Use parallel file ownership to reduce the next tier of backtest owners instead of continuing one file at a time:
+- `directional_backtest`
+- `liquidity_vacuum_backtest`
+- `backtest`
+
+## File ownership
+
+- Worker A
+  - `src/strategy/directional_backtest.rs`
+  - optional new sibling modules under `src/strategy/directional_backtest/`
+- Worker B
+  - `src/strategy/liquidity_vacuum_backtest.rs`
+  - optional new sibling modules under `src/strategy/liquidity_vacuum_backtest/`
+- Worker C
+  - `src/strategy/backtest.rs`
+  - optional new sibling modules under `src/strategy/backtest/`
+
+## Tasks
+
+- [x] Extract the next cohesive owner from `directional_backtest`.
+- [x] Extract the next cohesive owner from `liquidity_vacuum_backtest`.
+- [x] Extract the next cohesive owner from `backtest`.
+- [x] Integrate the completed parallel cuts and re-run focused validation.
+
+## Progress notes
+
+- 2026-03-13: Pre-assigned disjoint file ownership for three parallel subagents before starting the next batch.
+- 2026-03-13: Landed `5b0f372` `strategy: extract directional backtest runtime flow`, moving the runtime/feed-handling owner into [runtime_flow.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/directional_backtest/runtime_flow.rs).
+- 2026-03-13: Landed `5e96d4f` `strategy: extract liquidity vacuum state support`, moving EMA/symbol-state support and binary-quote helpers into [state_support.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/liquidity_vacuum_backtest/state_support.rs).
+- 2026-03-13: Landed `3fea7e7` `strategy: extract backtest runtime flow`, moving runtime orchestration into [runtime.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/backtest/runtime.rs).
+- 2026-03-13: Integrated validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave22-integrated rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave22-integrated rtk cargo test --lib test_binary_quote_price_bounds -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave22-integrated rtk cargo test --lib test_paper_trader -- --exact --nocapture`
+- 2026-03-13: `test_settlement_binary_payout` no longer resolves as an exact test name on the integrated branch, so Wave 22 directional coverage is currently compile-only until a stable targeted test name is restored.
