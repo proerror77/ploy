@@ -6535,9 +6535,9 @@ disjoint runtime/support files to parallel workers:
 ## Tasks
 
 - [x] Extract the next cohesive owner from `runtime_configs`.
-- [ ] Extract the next cohesive owner from `position_manager`.
+- [x] Extract the next cohesive owner from `position_manager`.
 - [x] Extract the next cohesive owner from `trade_logger`.
-- [ ] Integrate the completed parallel cuts and re-run focused validation.
+- [x] Integrate the completed parallel cuts and re-run focused validation.
 
 ## Progress notes
 
@@ -6552,3 +6552,52 @@ disjoint runtime/support files to parallel workers:
 - 2026-03-13: Trade logger validation passed:
   - `rtk cargo check --lib --message-format=short`
   - `rtk cargo test test_symbol_stats --lib -- --exact --nocapture`
+- 2026-03-13: Split direct managed-crypto config builders out of [runtime_configs.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/runtime_specs/runtime_configs.rs) into [crypto_managed_configs.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/runtime_specs/runtime_configs/crypto_managed_configs.rs), keeping the root file focused on shared TOML mutation helpers and cross-strategy builders.
+- 2026-03-13: Added the missing [stats.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/trade_logger/stats.rs) module so [trade_logger.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/trade_logger.rs) can fully externalize its stats types and rebuild helpers.
+- 2026-03-13: Moved position-manager read/query ownership out of [position_manager.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/position_manager.rs) into [queries.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/position_manager/queries.rs), leaving the root file focused on open/close lifecycle and trading-cost-aware PnL.
+- 2026-03-13: Wave 24 landed as the following atomic commits:
+  - `e549831` `strategy: extract runtime config template loaders`
+  - `9c0f333` `strategy: split managed crypto runtime configs`
+  - `c32cc34` `strategy: extract trade logger stats rebuild`
+  - `74e6010` `strategy: extract trade logger write flow`
+  - `9d6f202` `strategy: add trade logger stats module`
+  - `5ebf93a` `strategy: extract position manager queries`
+- 2026-03-13: Integrated validation passed:
+  - `rtk cargo check --lib --message-format=short`
+  - `rtk cargo test build_momentum_runtime_config_renders_directional_crypto_settings --lib -- --exact --nocapture`
+  - `rtk cargo test build_split_arb_runtime_config_renders_symbols_and_series_ids --lib -- --exact --nocapture`
+  - `rtk cargo test build_crypto_lob_ml_runtime_config_renders_coin_filters --lib -- --exact --nocapture`
+  - `rtk cargo test test_symbol_stats --lib -- --exact --nocapture`
+  - `rtk cargo test test_position_lifecycle --lib -- --ignored --exact --nocapture`
+
+# Structural Wave 25 (2026-03-13)
+
+## Goal
+Keep trimming the next tier of medium-large strategy owners after Wave 24 by
+assigning three disjoint files that still carry runtime/backtest orchestration:
+- `momentum_backtest`
+- `backtest`
+- `momentum_strat`
+
+## File ownership
+
+- Worker A
+  - `src/strategy/momentum_backtest.rs`
+  - optional new sibling modules under `src/strategy/momentum_backtest/`
+- Worker B
+  - `src/strategy/backtest.rs`
+  - optional new sibling modules under `src/strategy/backtest/`
+- Worker C
+  - `src/strategy/strategies/momentum_strat.rs`
+  - optional new sibling modules under `src/strategy/strategies/momentum_strat/`
+
+## Tasks
+
+- [ ] Extract the next cohesive owner from `momentum_backtest`.
+- [ ] Extract the next cohesive owner from `backtest`.
+- [ ] Extract the next cohesive owner from `momentum_strat`.
+- [ ] Integrate the completed parallel cuts and re-run focused validation.
+
+## Progress notes
+
+- 2026-03-13: Pre-assigned disjoint file ownership for the next three parallel cuts after Wave 24 landed cleanly on `session/order-intent-wave24-continuation`.
