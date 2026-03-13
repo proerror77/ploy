@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 mod summary;
+mod stats_rebuild;
 
 /// Trade record for logging with full market context
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -514,103 +515,7 @@ impl TradeLogger {
     /// Recalculate statistics from trades
     async fn recalculate_stats(&self) {
         let trades = self.trades.read().await;
-        let mut stats = TradingStats::default();
-
-        for trade in trades.iter() {
-            stats.total_trades += 1;
-            stats.total_cost += trade.cost_usd;
-
-            let pnl = trade.pnl_usd.unwrap_or(Decimal::ZERO);
-            let is_closed = matches!(&trade.outcome, TradeOutcome::Won | TradeOutcome::Lost);
-
-            match &trade.outcome {
-                TradeOutcome::Open => stats.open += 1,
-                TradeOutcome::Won => {
-                    stats.wins += 1;
-                    stats.total_payout += trade.payout_usd.unwrap_or(Decimal::ZERO);
-                    stats.total_pnl += pnl;
-                }
-                TradeOutcome::Lost => {
-                    stats.losses += 1;
-                    stats.total_pnl += pnl;
-                }
-                TradeOutcome::ExitedEarly { .. } | TradeOutcome::Cancelled => {}
-            }
-
-            // Per-symbol stats
-            let symbol_stats = stats
-                .by_symbol
-                .entry(trade.symbol.clone())
-                .or_insert_with(|| SymbolStats {
-                    symbol: trade.symbol.clone(),
-                    ..Default::default()
-                });
-
-            symbol_stats.total_trades += 1;
-            symbol_stats.total_cost += trade.cost_usd;
-
-            match &trade.outcome {
-                TradeOutcome::Open => symbol_stats.open += 1,
-                TradeOutcome::Won => {
-                    symbol_stats.wins += 1;
-                    symbol_stats.total_payout += trade.payout_usd.unwrap_or(Decimal::ZERO);
-                    symbol_stats.total_pnl += pnl;
-                }
-                TradeOutcome::Lost => {
-                    symbol_stats.losses += 1;
-                    symbol_stats.total_pnl += pnl;
-                }
-                _ => {}
-            }
-
-            if symbol_stats
-                .last_trade
-                .map_or(true, |last| trade.timestamp > last)
-            {
-                symbol_stats.last_trade = Some(trade.timestamp);
-            }
-
-            // === Time Bucket Stats ===
-            if let Some(ref bucket) = trade.context.time_bucket {
-                let bucket_stats = stats
-                    .by_time_bucket
-                    .entry(bucket.clone())
-                    .or_insert_with(BucketStats::default);
-
-                bucket_stats.trades += 1;
-                bucket_stats.cost += trade.cost_usd;
-
-                if is_closed {
-                    bucket_stats.pnl += pnl;
-                    match &trade.outcome {
-                        TradeOutcome::Won => bucket_stats.wins += 1,
-                        TradeOutcome::Lost => bucket_stats.losses += 1,
-                        _ => {}
-                    }
-                }
-            }
-
-            // === Strategy Mode Stats ===
-            if let Some(ref mode) = trade.context.strategy_mode {
-                let mode_stats = stats
-                    .by_strategy_mode
-                    .entry(mode.clone())
-                    .or_insert_with(BucketStats::default);
-
-                mode_stats.trades += 1;
-                mode_stats.cost += trade.cost_usd;
-
-                if is_closed {
-                    mode_stats.pnl += pnl;
-                    match &trade.outcome {
-                        TradeOutcome::Won => mode_stats.wins += 1,
-                        TradeOutcome::Lost => mode_stats.losses += 1,
-                        _ => {}
-                    }
-                }
-            }
-        }
-
+        let stats = stats_rebuild::rebuild_stats(&trades);
         let mut cached_stats = self.stats.write().await;
         *cached_stats = stats;
     }
