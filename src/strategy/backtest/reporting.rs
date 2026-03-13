@@ -1,4 +1,5 @@
 use rust_decimal_macros::dec;
+use std::fmt;
 
 use super::BacktestResults;
 
@@ -103,5 +104,11 @@ impl BacktestResults {
 
     pub fn to_json(&self) -> Result<String, String> {
         serde_json::to_string_pretty(self).map_err(|e| e.to_string())
+    }
+}
+
+impl fmt::Display for BacktestResults {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.report())
     }
 }
