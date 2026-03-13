@@ -6728,3 +6728,49 @@ extracting the dump-and-hedge engine flow from the root owner.
   - `CARGO_TARGET_DIR=/tmp/ploy-dump-hedge-flow rtk cargo check --lib --message-format=short`
   - `CARGO_TARGET_DIR=/tmp/ploy-dump-hedge-flow rtk cargo test test_dynamic_sum_target --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-dump-hedge-flow rtk cargo test test_hedge_profit_calculation --lib -- --exact --nocapture`
+
+# Structural Wave 29 (2026-03-13)
+
+## Goal
+Continue shrinking medium-large active strategy owners without dropping back to
+test-only modules:
+- `crypto_rl_policy`
+- `reverse_engineered`
+- `multi_outcome`
+
+## File ownership
+
+- Worker A
+  - `src/strategy/crypto_rl_policy/strategy.rs`
+  - optional new sibling modules under `src/strategy/crypto_rl_policy/strategy/`
+- Worker B
+  - `src/strategy/reverse_engineered.rs`
+  - optional new sibling modules under `src/strategy/reverse_engineered/`
+- Worker C
+  - `src/strategy/multi_outcome.rs`
+  - optional new sibling modules under `src/strategy/multi_outcome/`
+
+## Tasks
+
+- [x] Extract the next cohesive owner from `crypto_rl_policy`.
+- [x] Extract the next cohesive owner from `reverse_engineered`.
+- [x] Extract the next cohesive owner from `multi_outcome`.
+- [x] Integrate the completed parallel cuts and re-run focused validation.
+
+## Progress notes
+
+- 2026-03-13: Pre-assigned three disjoint strategy owners after landing Waves 27 and 28 on `origin/session/order-intent-wave24-continuation`.
+- 2026-03-13: Added [config_loader.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/crypto_rl_policy/strategy/config_loader.rs) and reduced [strategy.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/crypto_rl_policy/strategy.rs) so the root owner no longer carries TOML parsing, symbol normalization, or config assembly for RL policy runtime setup.
+- 2026-03-13: Added [dry_run_flow.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/reverse_engineered/dry_run_flow.rs) and reduced [reverse_engineered.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/reverse_engineered.rs) so the root owner no longer carries dry-run inventory execution and mark-to-market refresh flow.
+- 2026-03-13: Added [analysis.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/multi_outcome/analysis.rs) and reduced [multi_outcome.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/multi_outcome.rs) so the root owner no longer carries EV, split/merge, market-making, or near-settlement analysis logic.
+- 2026-03-13: Wave 29 landed as the following atomic commits:
+  - `8bc2db0` `strategy: extract crypto rl policy config loader`
+  - `860477c` `strategy: extract reverse engineered dry run flow`
+  - `d84000c` `strategy: extract multi outcome analysis`
+- 2026-03-13: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave29-rl rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave29-rl rtk cargo test from_toml_builds_expected_feeds --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave29-combined rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave29-combined rtk cargo test test_detect_split_merge_opportunity_flags_buy_and_merge --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave29-combined rtk cargo test test_analyze_near_settlement_marks_negative_ev_as_high_risk --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave29-combined rtk cargo test test_reverse_engine_executes_buys_and_sells --lib -- --exact --nocapture`
