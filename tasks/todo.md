@@ -6368,3 +6368,36 @@ Keep collapsing the heaviest remaining backtest owners by pulling focused runtim
   - `CARGO_TARGET_DIR=/tmp/ploy-volarb-cut rtk cargo test --lib strategy::volatility_arb::tests::test_vol_arb_engine -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-staggered-entry-cut rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_entry_requires_persistent_other_ask_before_opening_leg1 -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave19-final rtk cargo check --lib --message-format=short`
+
+# Structural Wave 20 (2026-03-13)
+
+## Goal
+Continue shrinking the remaining `staggered_arb_backtest` root after the Wave 19 entry cut by moving the two largest cohesive owners out of the façade:
+- runtime/feed-update/equity ownership
+- config/policy/TOML ownership
+
+## File ownership
+
+- `src/strategy/staggered_arb_backtest.rs`
+  - owner: façade, shared quote/position types, engine state, and root tests
+- `src/strategy/staggered_arb_backtest/runtime.rs`
+  - owner: main backtest loop, feed handlers, PM quote recording, and equity tracking
+- `src/strategy/staggered_arb_backtest/config.rs`
+  - owner: config schema, defaults, TOML parsing, and policy helpers shared by entry/lifecycle logic
+
+## Tasks
+
+- [x] Extract the staggered-arb runtime/feed-update seam into a sibling module.
+- [x] Extract the staggered-arb config/policy seam into a sibling module.
+- [x] Re-run compile plus focused config/runtime regressions for the cut.
+
+## Progress notes
+
+- 2026-03-13: Added [runtime.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/staggered_arb_backtest/runtime.rs) and reduced [staggered_arb_backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/staggered_arb_backtest.rs) so `run`, feed handlers, PM quote recording, and equity tracking no longer live in the root engine owner.
+- 2026-03-13: Added [config.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/staggered_arb_backtest/config.rs) and reduced [staggered_arb_backtest.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/staggered_arb_backtest.rs) so policy thresholds, OBI helpers, and TOML parsing no longer live in the root façade.
+- 2026-03-13: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-staggered-config-cut rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-staggered-config-cut rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_config_from_toml_matches_checked_in_template -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-staggered-config-cut rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_strong_obi_bonus_adjusts_entry_thresholds -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-staggered-config-cut rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_entry_requires_persistent_other_ask_before_opening_leg1 -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-staggered-config-cut rtk cargo test --lib strategy::staggered_arb_backtest::tests::test_record_pm_quote_clears_disappearing_ask_side -- --exact --nocapture`
