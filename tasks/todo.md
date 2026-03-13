@@ -6469,3 +6469,44 @@ Use parallel file ownership to reduce the next tier of backtest owners instead o
   - `CARGO_TARGET_DIR=/tmp/ploy-wave22-integrated rtk cargo test --lib test_binary_quote_price_bounds -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave22-integrated rtk cargo test --lib test_paper_trader -- --exact --nocapture`
 - 2026-03-13: `test_settlement_binary_payout` no longer resolves as an exact test name on the integrated branch, so Wave 22 directional coverage is currently compile-only until a stable targeted test name is restored.
+
+# Structural Wave 23 (2026-03-13)
+
+## Goal
+Keep using parallel file ownership to cut the next tier of medium-large strategy owners:
+- `momentum_backtest`
+- `volatility`
+- `two_leg`
+
+## File ownership
+
+- Worker A
+  - `src/strategy/momentum_backtest.rs`
+  - optional new sibling modules under `src/strategy/momentum_backtest/`
+- Worker B
+  - `src/strategy/volatility.rs`
+  - optional new sibling modules under `src/strategy/volatility/`
+- Worker C
+  - `src/strategy/strategies/two_leg.rs`
+  - optional new sibling modules under `src/strategy/strategies/two_leg/`
+
+## Tasks
+
+- [x] Extract the next cohesive owner from `momentum_backtest`.
+- [x] Extract the next cohesive owner from `volatility`.
+- [x] Extract the next cohesive owner from `two_leg`.
+- [x] Integrate the completed parallel cuts and re-run focused validation.
+
+## Progress notes
+
+- 2026-03-13: Pre-assigned disjoint file ownership for the next three parallel subagents before implementation.
+- 2026-03-13: Landed `5f09c79` `strategy: extract momentum backtest lifecycle`, moving position/trade lifecycle ownership into [lifecycle.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/momentum_backtest/lifecycle.rs).
+- 2026-03-13: Landed `f681645` `strategy: extract volatility event state`, moving `ActiveEvent` / `EventRecord` / `EventTracker` and their tests into [state.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/volatility/state.rs).
+- 2026-03-13: Landed `a3fdc45` `strategy: extract two-leg lifecycle helpers`, moving signal-to-order and cycle-transition ownership into [lifecycle.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave13/src/strategy/strategies/two_leg/lifecycle.rs).
+- 2026-03-13: Clean-worktree integrated validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave23-verify-target rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave23-verify-target rtk cargo test --lib test_engine_empty_feed -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave23-verify-target rtk cargo test --lib test_sharpe_calculation -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave23-verify-target rtk cargo test --lib test_active_event -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave23-verify-target rtk cargo test --lib test_event_tracker -- --exact --nocapture`
+- 2026-03-13: `test_state_transitions` still filters out under the current lib harness, so Wave 23 two-leg coverage is compile-only on the integrated branch until that test surface is wired back in.
