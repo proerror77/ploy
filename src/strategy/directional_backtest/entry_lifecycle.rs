@@ -12,7 +12,7 @@ use super::{ActiveWindowInfo, DirectionalBacktestEngine};
 impl DirectionalBacktestEngine {
     // ─── Entry logic (momentum + fair value + edge) ─────────
 
-    fn try_directional_entry(&mut self, symbol: &str, ts: DateTime<Utc>) {
+    pub(super) fn try_directional_entry(&mut self, symbol: &str, ts: DateTime<Utc>) {
         // 1. Need: active events with S0, spot price history, PM asks
         let windows: Vec<ActiveWindowInfo> = match self.active_events.get(symbol) {
             Some(w) if !w.is_empty() => w.clone(),
