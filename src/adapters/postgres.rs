@@ -1,16 +1,21 @@
+mod daily_metrics;
 mod event_registry;
 mod market_data;
+mod nba_team_stats;
 mod recovery;
+mod strategy_state;
 
 use crate::domain::{Cycle, DumpSignal, Order, OrderStatus, Side, StrategyState};
 use crate::error::{PloyError, Result};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::Utc;
 use rust_decimal::Decimal;
-use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
+use sqlx::postgres::{PgPool, PgPoolOptions};
 use tracing::info;
 
+pub use daily_metrics::DailyMetrics;
 pub use recovery::{IncompleteCycle, OrphanedOrder, RecoverySummary};
+pub use strategy_state::PersistedState;
 
 /// PostgreSQL storage adapter
 #[derive(Clone)]
@@ -332,185 +337,6 @@ impl PostgresStore {
         Ok(())
     }
 
-    // ==================== Daily Metrics ====================
-
-    /// Get or create today's metrics
-    pub async fn get_or_create_daily_metrics(&self, date: NaiveDate) -> Result<DailyMetrics> {
-        sqlx::query(
-            r#"
-            INSERT INTO daily_metrics (date)
-            VALUES ($1)
-            ON CONFLICT (date) DO NOTHING
-            "#,
-        )
-        .bind(date)
-        .execute(&self.pool)
-        .await?;
-
-        let row = sqlx::query(
-            r#"
-            SELECT date, total_cycles, completed_cycles, aborted_cycles, leg2_completions,
-                   total_pnl, max_drawdown, consecutive_failures, halted, halt_reason
-            FROM daily_metrics WHERE date = $1
-            "#,
-        )
-        .bind(date)
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(DailyMetrics {
-            date: row.get("date"),
-            total_cycles: row.get("total_cycles"),
-            completed_cycles: row.get("completed_cycles"),
-            aborted_cycles: row.get("aborted_cycles"),
-            leg2_completions: row.get("leg2_completions"),
-            total_pnl: row.get("total_pnl"),
-            max_drawdown: row.get("max_drawdown"),
-            consecutive_failures: row.get("consecutive_failures"),
-            halted: row.get("halted"),
-            halt_reason: row.get("halt_reason"),
-        })
-    }
-
-    /// Increment cycle count
-    pub async fn increment_cycle_count(&self, date: NaiveDate) -> Result<()> {
-        self.ensure_daily_metrics_row(date).await?;
-        sqlx::query("UPDATE daily_metrics SET total_cycles = total_cycles + 1 WHERE date = $1")
-            .bind(date)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// Record cycle completion
-    pub async fn record_cycle_completion(&self, date: NaiveDate, pnl: Decimal) -> Result<()> {
-        self.ensure_daily_metrics_row(date).await?;
-        sqlx::query(
-            r#"
-            UPDATE daily_metrics SET
-                completed_cycles = completed_cycles + 1,
-                leg2_completions = leg2_completions + 1,
-                total_pnl = total_pnl + $1,
-                consecutive_failures = 0
-            WHERE date = $2
-            "#,
-        )
-        .bind(pnl)
-        .bind(date)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Record cycle abort
-    pub async fn record_cycle_abort(&self, date: NaiveDate) -> Result<()> {
-        self.ensure_daily_metrics_row(date).await?;
-        sqlx::query(
-            r#"
-            UPDATE daily_metrics SET
-                aborted_cycles = aborted_cycles + 1,
-                consecutive_failures = consecutive_failures + 1
-            WHERE date = $1
-            "#,
-        )
-        .bind(date)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Record cycle abort without counting as a failure.
-    ///
-    /// Useful for expected/neutral aborts (e.g. IOC order got 0 fill) where we should track
-    /// the abort rate but not trip consecutive-failure logic.
-    pub async fn record_cycle_abort_neutral(&self, date: NaiveDate) -> Result<()> {
-        self.ensure_daily_metrics_row(date).await?;
-        sqlx::query(
-            r#"
-            UPDATE daily_metrics SET
-                aborted_cycles = aborted_cycles + 1
-            WHERE date = $1
-            "#,
-        )
-        .bind(date)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Halt trading
-    pub async fn halt_trading(&self, date: NaiveDate, reason: &str) -> Result<()> {
-        self.ensure_daily_metrics_row(date).await?;
-        sqlx::query("UPDATE daily_metrics SET halted = TRUE, halt_reason = $1 WHERE date = $2")
-            .bind(reason)
-            .bind(date)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    async fn ensure_daily_metrics_row(&self, date: NaiveDate) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO daily_metrics (date)
-            VALUES ($1)
-            ON CONFLICT (date) DO NOTHING
-            "#,
-        )
-        .bind(date)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    // ==================== Strategy State ====================
-
-    /// Get current strategy state
-    pub async fn get_strategy_state(&self) -> Result<PersistedState> {
-        let row = sqlx::query(
-            r#"
-            SELECT current_state, current_round_id, current_cycle_id, risk_state, last_updated
-            FROM strategy_state WHERE id = 1
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(PersistedState {
-            current_state: StrategyState::try_from(row.get::<&str, _>("current_state"))
-                .map_err(|e| PloyError::Internal(e))?,
-            current_round_id: row.get("current_round_id"),
-            current_cycle_id: row.get("current_cycle_id"),
-            risk_state: row.get("risk_state"),
-            last_updated: row.get("last_updated"),
-        })
-    }
-
-    /// Update strategy state
-    pub async fn update_strategy_state(
-        &self,
-        state: StrategyState,
-        round_id: Option<i32>,
-        cycle_id: Option<i32>,
-    ) -> Result<()> {
-        sqlx::query(
-            r#"
-            UPDATE strategy_state SET
-                current_state = $1,
-                current_round_id = $2,
-                current_cycle_id = $3,
-                last_updated = NOW()
-            WHERE id = 1
-            "#,
-        )
-        .bind(state.as_str())
-        .bind(round_id)
-        .bind(cycle_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     // ==================== Dump Signals ====================
 
     /// Insert dump signal
@@ -540,144 +366,8 @@ impl PostgresStore {
     }
 }
 
-/// Daily metrics structure
-#[derive(Debug, Clone)]
-pub struct DailyMetrics {
-    pub date: NaiveDate,
-    pub total_cycles: i32,
-    pub completed_cycles: i32,
-    pub aborted_cycles: i32,
-    pub leg2_completions: i32,
-    pub total_pnl: Decimal,
-    pub max_drawdown: Decimal,
-    pub consecutive_failures: i32,
-    pub halted: bool,
-    pub halt_reason: Option<String>,
-}
-
-/// Persisted strategy state
-#[derive(Debug, Clone)]
-pub struct PersistedState {
-    pub current_state: StrategyState,
-    pub current_round_id: Option<i32>,
-    pub current_cycle_id: Option<i32>,
-    pub risk_state: String,
-    pub last_updated: DateTime<Utc>,
-}
-
 impl PostgresStore {
     // ==================== NBA Comeback Stats ====================
-
-    /// Load all team stats for a given season
-    pub async fn load_nba_team_stats(
-        &self,
-        season: &str,
-    ) -> Result<Vec<crate::strategy::nba_comeback::nba_data_collector::TeamStats>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT team_name, team_abbrev, season,
-                   wins, losses, win_rate, avg_points,
-                   q1_avg_points, q2_avg_points, q3_avg_points, q4_avg_points,
-                   comeback_rate_5pt, comeback_rate_10pt, comeback_rate_15pt,
-                   q4_net_rating, q4_pace,
-                   elo_rating, offensive_rating, defensive_rating
-            FROM nba_team_stats
-            WHERE season = $1
-            "#,
-        )
-        .bind(season)
-        .fetch_all(&self.pool)
-        .await?;
-
-        let stats = rows
-            .iter()
-            .map(
-                |r| crate::strategy::nba_comeback::nba_data_collector::TeamStats {
-                    team_name: r.get("team_name"),
-                    season: r.get("season"),
-                    wins: r.get("wins"),
-                    losses: r.get("losses"),
-                    win_rate: r.get("win_rate"),
-                    avg_points: r.get("avg_points"),
-                    q1_avg_points: r.get("q1_avg_points"),
-                    q2_avg_points: r.get("q2_avg_points"),
-                    q3_avg_points: r.get("q3_avg_points"),
-                    q4_avg_points: r.get("q4_avg_points"),
-                    comeback_rate_5pt: r.get("comeback_rate_5pt"),
-                    comeback_rate_10pt: r.get("comeback_rate_10pt"),
-                    comeback_rate_15pt: r.get("comeback_rate_15pt"),
-                    elo_rating: r.get("elo_rating"),
-                    offensive_rating: r.get("offensive_rating"),
-                    defensive_rating: r.get("defensive_rating"),
-                },
-            )
-            .collect();
-
-        Ok(stats)
-    }
-
-    /// Upsert a single team's stats (insert or update on conflict)
-    pub async fn upsert_nba_team_stats(
-        &self,
-        team_name: &str,
-        team_abbrev: &str,
-        season: &str,
-        stats: &crate::strategy::nba_comeback::nba_data_collector::TeamStats,
-    ) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO nba_team_stats (
-                team_name, team_abbrev, season,
-                wins, losses, win_rate, avg_points,
-                q1_avg_points, q2_avg_points, q3_avg_points, q4_avg_points,
-                comeback_rate_5pt, comeback_rate_10pt, comeback_rate_15pt,
-                q4_net_rating,
-                elo_rating, offensive_rating, defensive_rating,
-                updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, NOW())
-            ON CONFLICT (team_abbrev, season) DO UPDATE SET
-                team_name = EXCLUDED.team_name,
-                wins = EXCLUDED.wins,
-                losses = EXCLUDED.losses,
-                win_rate = EXCLUDED.win_rate,
-                avg_points = EXCLUDED.avg_points,
-                q1_avg_points = EXCLUDED.q1_avg_points,
-                q2_avg_points = EXCLUDED.q2_avg_points,
-                q3_avg_points = EXCLUDED.q3_avg_points,
-                q4_avg_points = EXCLUDED.q4_avg_points,
-                comeback_rate_5pt = EXCLUDED.comeback_rate_5pt,
-                comeback_rate_10pt = EXCLUDED.comeback_rate_10pt,
-                comeback_rate_15pt = EXCLUDED.comeback_rate_15pt,
-                q4_net_rating = EXCLUDED.q4_net_rating,
-                elo_rating = EXCLUDED.elo_rating,
-                offensive_rating = EXCLUDED.offensive_rating,
-                defensive_rating = EXCLUDED.defensive_rating,
-                updated_at = NOW()
-            "#,
-        )
-        .bind(team_name)
-        .bind(team_abbrev)
-        .bind(season)
-        .bind(stats.wins)
-        .bind(stats.losses)
-        .bind(stats.win_rate)
-        .bind(stats.avg_points)
-        .bind(stats.q1_avg_points)
-        .bind(stats.q2_avg_points)
-        .bind(stats.q3_avg_points)
-        .bind(stats.q4_avg_points)
-        .bind(stats.comeback_rate_5pt)
-        .bind(stats.comeback_rate_10pt)
-        .bind(stats.comeback_rate_15pt)
-        .bind(0.0f64) // q4_net_rating placeholder
-        .bind(stats.elo_rating)
-        .bind(stats.offensive_rating)
-        .bind(stats.defensive_rating)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
 }
 
 // Implement Side::try_from for database strings
