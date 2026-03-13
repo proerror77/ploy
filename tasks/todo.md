@@ -6613,3 +6613,44 @@ assigning three disjoint files that still carry runtime/backtest orchestration:
   - `CARGO_TARGET_DIR=/tmp/ploy-wave25-integrated rtk cargo test test_paper_trader --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave25-integrated rtk cargo test test_engine_empty_feed --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave25-integrated rtk cargo test test_sharpe_calculation --lib -- --exact --nocapture`
+
+# Structural Wave 26 (2026-03-13)
+
+## Goal
+Continue reducing the next tier of large strategy owners by assigning three
+disjoint files that still mix runtime logic, calculations, and orchestration:
+- `deribit_probability_arb`
+- `calculations`
+- `live_arbitrage`
+
+## File ownership
+
+- Worker A
+  - `src/strategy/deribit_probability_arb.rs`
+  - optional new sibling modules under `src/strategy/deribit_probability_arb/`
+- Worker B
+  - `src/strategy/calculations.rs`
+  - optional new sibling modules under `src/strategy/calculations/`
+- Worker C
+  - `src/strategy/live_arbitrage.rs`
+  - optional new sibling modules under `src/strategy/live_arbitrage/`
+
+## Tasks
+
+- [x] Extract the next cohesive owner from `deribit_probability_arb`.
+- [x] Extract the next cohesive owner from `calculations`.
+- [x] Extract the next cohesive owner from `live_arbitrage`.
+- [x] Integrate the completed parallel cuts and re-run focused validation.
+
+## Progress notes
+
+- 2026-03-13: Pre-assigned the next three disjoint strategy owners after pushing the Wave 25 checkpoint on `origin/session/order-intent-wave24-continuation`.
+- 2026-03-13: Added [order_flow.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/deribit_probability_arb/order_flow.rs) and reduced [deribit_probability_arb.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/deribit_probability_arb.rs) to runtime orchestration plus surface-model helpers.
+- 2026-03-13: Added [calibration.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/calculations/calibration.rs) and reduced [calculations.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/calculations.rs) to trading calculator ownership plus `MarketCalibration` re-export.
+- 2026-03-13: Added [analysis.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/live_arbitrage/analysis.rs) and reduced [live_arbitrage.rs](/Users/proerror/Documents/ploy/.worktrees/session/order-intent-wave24-continuation/src/strategy/live_arbitrage.rs) to live monitor orchestration plus top-level presentation helpers.
+- 2026-03-13: Integrated validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave26-check rtk cargo check --lib --message-format=short`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave26-check rtk cargo test strategy::deribit_probability_arb::order_flow::tests::compute_shares_respects_symbol_exposure_budget --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave26-check rtk cargo test strategy::deribit_probability_arb::order_flow::tests::build_order_request_uses_canonical_deribit_prob_fields --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave26-check rtk cargo test strategy::calculations::calibration::tests::test_calibration_adjusted_edge --lib -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-wave26-check rtk cargo test test_ev_calculation --lib -- --exact --nocapture`
