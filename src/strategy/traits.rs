@@ -93,6 +93,12 @@ pub enum DataFeed {
 
     /// Periodic tick at specified interval
     Tick { interval_ms: u64 },
+
+    /// Binance perpetual funding rate + liquidation stream
+    BinancePerp { symbols: Vec<String> },
+
+    /// Deribit options IV (ATM + 25-delta skew)
+    DeribitIV { symbols: Vec<String> },
 }
 
 // ============================================================================
@@ -171,6 +177,40 @@ pub enum MarketUpdate {
 
     /// Event expired/closed
     EventExpired { event_id: String },
+
+    /// Binance perpetual funding rate update
+    BinanceFunding {
+        symbol: String,
+        /// Current funding rate (e.g. 0.0001 = 0.01%)
+        funding_rate: f64,
+        /// Mark price at time of update
+        mark_price: Decimal,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Binance forced liquidation (forceOrder stream)
+    BinanceLiquidation {
+        symbol: String,
+        side: Side,
+        /// Quantity liquidated
+        qty: Decimal,
+        /// Price at liquidation
+        price: Decimal,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Deribit options implied volatility snapshot
+    DeribitIV {
+        /// Underlying symbol (e.g. "BTCUSDT")
+        symbol: String,
+        /// ATM implied vol (annualized, e.g. 0.65 = 65%)
+        atm_iv: f64,
+        /// 25-delta risk reversal: call_iv - put_iv (positive = bullish skew)
+        skew_25d: f64,
+        /// Days to nearest expiry used for ATM calculation
+        term_days: f64,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 impl MarketUpdate {
@@ -182,6 +222,9 @@ impl MarketUpdate {
             MarketUpdate::BinanceKline { timestamp, .. } => *timestamp,
             MarketUpdate::EventDiscovered { .. } => Utc::now(),
             MarketUpdate::EventExpired { .. } => Utc::now(),
+            MarketUpdate::BinanceFunding { timestamp, .. } => *timestamp,
+            MarketUpdate::BinanceLiquidation { timestamp, .. } => *timestamp,
+            MarketUpdate::DeribitIV { timestamp, .. } => *timestamp,
         }
     }
 }

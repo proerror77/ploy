@@ -73,6 +73,22 @@ struct Pm5mDirectionalConfig {
     exit_reversion_pct: f64,
     /// Exit when OBI sign flips against position direction
     exit_obi_flip: bool,
+    // ── Route C: Binance perp funding + liquidation ──
+    /// Enable funding rate as additional confirmation (Route C)
+    use_funding_signal: bool,
+    /// Extreme funding rate threshold (e.g. 0.0001 = 0.01%); contrarian signal
+    funding_extreme_threshold: f64,
+    /// Rolling liquidation window in seconds for cascade detection
+    liquidation_window_secs: u64,
+    /// Minimum liquidation volume (USD) to count as a cascade signal
+    min_liquidation_cascade_usd: f64,
+    // ── Route B: Deribit IV regime filter ──
+    /// Enable Deribit IV as regime filter (Route B)
+    use_deribit_regime: bool,
+    /// ATM IV above this → reduce position size (high vol regime)
+    deribit_high_vol_threshold: f64,
+    /// ATM IV above this → pause trading (extreme vol regime)
+    deribit_extreme_vol_threshold: f64,
 }
 
 impl Default for Pm5mDirectionalConfig {
@@ -114,6 +130,13 @@ impl Default for Pm5mDirectionalConfig {
             enable_early_exit: true,
             exit_reversion_pct: 0.003,
             exit_obi_flip: true,
+            use_funding_signal: false,
+            funding_extreme_threshold: 0.0001,
+            liquidation_window_secs: 120,
+            min_liquidation_cascade_usd: 500_000.0,
+            use_deribit_regime: false,
+            deribit_high_vol_threshold: 0.80,
+            deribit_extreme_vol_threshold: 1.20,
         }
     }
 }
@@ -267,6 +290,14 @@ pub struct Pm5mDirectionalStrategy {
     ewma_var: HashMap<String, f64>,
     /// Last spot price per symbol for EWMA return calculation
     ewma_last_price: HashMap<String, f64>,
+    /// Latest funding rate per symbol (Route C)
+    funding_rate: HashMap<String, f64>,
+    /// Rolling liquidation volume per symbol: (timestamp, side, usd_value)
+    liquidation_history: HashMap<String, VecDeque<(DateTime<Utc>, Side, f64)>>,
+    /// Latest Deribit ATM IV per symbol (Route B)
+    deribit_atm_iv: HashMap<String, f64>,
+    /// Latest Deribit 25-delta skew per symbol (Route B)
+    deribit_skew: HashMap<String, f64>,
 }
 
 impl Pm5mDirectionalStrategy {
@@ -312,6 +343,10 @@ impl Pm5mDirectionalStrategy {
             bayesian: BayesianPrior::new(),
             ewma_var: HashMap::new(),
             ewma_last_price: HashMap::new(),
+            funding_rate: HashMap::new(),
+            liquidation_history: HashMap::new(),
+            deribit_atm_iv: HashMap::new(),
+            deribit_skew: HashMap::new(),
         })
     }
 
@@ -390,6 +425,65 @@ impl Pm5mDirectionalStrategy {
         const SECS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
         let var = self.ewma_var.get(symbol).copied().unwrap_or(0.0);
         (var * SECS_PER_YEAR).sqrt().max(self.cfg.vol_floor)
+    }
+
+    /// Route C: funding rate directional bias.
+    /// Returns Some(1.0) for bullish, Some(-1.0) for bearish, None if no signal.
+    /// Contrarian: extreme positive funding → bearish (overleveraged longs).
+    fn funding_signal(&self, symbol: &str) -> Option<f64> {
+        if !self.cfg.use_funding_signal {
+            return None;
+        }
+        let rate = self.funding_rate.get(symbol).copied()?;
+        let threshold = self.cfg.funding_extreme_threshold;
+        if rate > threshold {
+            Some(-1.0) // extreme positive funding → contrarian bearish
+        } else if rate < -threshold {
+            Some(1.0) // extreme negative funding → contrarian bullish
+        } else {
+            None // neutral zone, no signal
+        }
+    }
+
+    /// Route C: rolling liquidation cascade signal.
+    /// Returns net signed liquidation volume (positive = more longs liquidated = bearish).
+    fn liquidation_cascade(&self, symbol: &str, now: DateTime<Utc>) -> f64 {
+        let history = match self.liquidation_history.get(symbol) {
+            Some(h) => h,
+            None => return 0.0,
+        };
+        let cutoff = now - chrono::Duration::seconds(self.cfg.liquidation_window_secs as i64);
+        let mut long_liq = 0.0f64;
+        let mut short_liq = 0.0f64;
+        for (ts, side, usd) in history.iter() {
+            if *ts >= cutoff {
+                match side {
+                    Side::Up => long_liq += usd,   // long liquidation
+                    Side::Down => short_liq += usd, // short liquidation
+                }
+            }
+        }
+        // Positive = more long liquidations (bearish pressure)
+        long_liq - short_liq
+    }
+
+    /// Route B: Deribit regime position size multiplier.
+    /// Returns 1.0 (normal), 0.5 (high vol), 0.0 (extreme vol → pause).
+    fn deribit_size_multiplier(&self, symbol: &str) -> f64 {
+        if !self.cfg.use_deribit_regime {
+            return 1.0;
+        }
+        let atm_iv = match self.deribit_atm_iv.get(symbol).copied() {
+            Some(iv) => iv,
+            None => return 1.0, // no data, don't restrict
+        };
+        if atm_iv >= self.cfg.deribit_extreme_vol_threshold {
+            0.0 // pause trading
+        } else if atm_iv >= self.cfg.deribit_high_vol_threshold {
+            0.5 // reduce size
+        } else {
+            1.0 // normal
+        }
     }
 
     fn signed_flow_2s(&self, symbol: &str, now: DateTime<Utc>) -> Option<f64> {
@@ -696,8 +790,29 @@ impl Pm5mDirectionalStrategy {
             return None;
         }
 
+        // Route B: Deribit regime filter — pause or reduce in high-vol environments
+        let deribit_mult = self.deribit_size_multiplier(symbol);
+        if deribit_mult == 0.0 {
+            self.last_reason = Some(format!("{symbol}:deribit_extreme_vol"));
+            return None;
+        }
+
+        // Route C: funding rate confirmation (optional, contrarian)
+        if self.cfg.use_funding_signal {
+            if let Some(funding_dir) = self.funding_signal(symbol) {
+                let side_dir = match side { Side::Up => 1.0, Side::Down => -1.0 };
+                if funding_dir != side_dir {
+                    // Funding signal contradicts our direction — skip
+                    self.last_reason = Some(format!("{symbol}:funding_signal_conflict"));
+                    return None;
+                }
+            }
+        }
+
         let shares =
             self.kelly_scaled_shares(self.cfg.shares_per_trade, effective_p, effective_cost);
+        // Apply Deribit regime multiplier to position size
+        let shares = ((shares as f64 * deribit_mult).floor() as u64).max(0);
         if shares < self.cfg.min_shares {
             self.last_reason = Some(format!("{symbol}:shares_below_min"));
             return None;
@@ -750,6 +865,15 @@ impl Pm5mDirectionalStrategy {
                 .to_string(),
         );
         metadata.insert("dry_run".to_string(), self.dry_run.to_string());
+        // Route B/C signals
+        metadata.insert("deribit_mult".to_string(), format!("{deribit_mult:.2}"));
+        if let Some(fr) = self.funding_rate.get(symbol) {
+            metadata.insert("funding_rate".to_string(), format!("{fr:.6}"));
+        }
+        let liq_cascade = self.liquidation_cascade(symbol, now);
+        if liq_cascade.abs() > 0.0 {
+            metadata.insert("liq_cascade_usd".to_string(), format!("{liq_cascade:.0}"));
+        }
 
         Some(vec![
             StrategyAction::LogEvent {
@@ -1055,6 +1179,46 @@ impl Strategy for Pm5mDirectionalStrategy {
                     .retain(|_, position| position.event_id != *event_id);
             }
             MarketUpdate::BinanceKline { .. } => {}
+            MarketUpdate::BinanceFunding {
+                symbol,
+                funding_rate,
+                timestamp: _,
+                ..
+            } => {
+                if self.symbols.iter().any(|s| s == symbol) {
+                    self.funding_rate.insert(symbol.clone(), *funding_rate);
+                }
+            }
+            MarketUpdate::BinanceLiquidation {
+                symbol,
+                side,
+                qty,
+                price,
+                timestamp,
+            } => {
+                if self.symbols.iter().any(|s| s == symbol) {
+                    let usd_value = qty.to_f64().unwrap_or(0.0) * price.to_f64().unwrap_or(0.0);
+                    let history = self.liquidation_history.entry(symbol.clone()).or_default();
+                    history.push_back((*timestamp, *side, usd_value));
+                    // Prune old entries
+                    let cutoff = *timestamp - chrono::Duration::seconds(self.cfg.liquidation_window_secs as i64 * 2);
+                    while history.front().map(|(ts, _, _)| *ts < cutoff).unwrap_or(false) {
+                        history.pop_front();
+                    }
+                }
+            }
+            MarketUpdate::DeribitIV {
+                symbol,
+                atm_iv,
+                skew_25d,
+                timestamp: _,
+                ..
+            } => {
+                if self.symbols.iter().any(|s| s == symbol) {
+                    self.deribit_atm_iv.insert(symbol.clone(), *atm_iv);
+                    self.deribit_skew.insert(symbol.clone(), *skew_25d);
+                }
+            }
         }
 
         Ok(actions)

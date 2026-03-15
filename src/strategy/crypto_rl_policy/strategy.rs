@@ -348,6 +348,9 @@ impl Strategy for CryptoRlPolicyStrategy {
                 self.last_logged_at.remove(event_id);
             }
             MarketUpdate::BinanceKline { .. } => {}
+            MarketUpdate::BinanceFunding { .. } => {}
+            MarketUpdate::BinanceLiquidation { .. } => {}
+            MarketUpdate::DeribitIV { .. } => {}
         }
 
         Ok(Vec::new())

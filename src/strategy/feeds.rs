@@ -277,6 +277,9 @@ mod tests {
                 MarketUpdate::BinanceKline { .. } => "binance_kline",
                 MarketUpdate::EventDiscovered { .. } => "event_discovered",
                 MarketUpdate::EventExpired { .. } => "event_expired",
+                MarketUpdate::BinanceFunding { .. } => "binance_funding",
+                MarketUpdate::BinanceLiquidation { .. } => "binance_liquidation",
+                MarketUpdate::DeribitIV { .. } => "deribit_iv",
             };
             Ok(vec![StrategyAction::Alert {
                 level: AlertLevel::Info,
