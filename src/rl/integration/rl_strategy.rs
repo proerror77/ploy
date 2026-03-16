@@ -281,14 +281,9 @@ impl RLStrategy {
                                 OrderType::Limit
                             },
                             time_in_force: TimeInForce::GTC,
-                        };
+                        ));
 
-                        actions.push(StrategyAction::SubmitOrder {
-                            client_order_id: format!("rl_sell_{}", self.step_count),
-                            purpose: OrderPurpose::Exit,
-                            order,
-                            priority: 10, // High priority for exits
-                        });
+                        // Note: SellPosition should submit the intent and then update position state
                     }
                 }
             }

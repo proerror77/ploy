@@ -32,8 +32,6 @@ use crate::rl::memory::ReplayBuffer;
 use crate::rl::{CryptoEvent, DomainEvent, ExecutionReport};
 use crate::{AgentStatus, Domain, OrderIntent};
 
-mod policy;
-
 fn default_policy_output() -> String {
     "continuous".to_string()
 }
