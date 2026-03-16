@@ -86,6 +86,8 @@ pub enum PersistenceEvent {
     ChainlinkPrice(ChainlinkPriceTick),
     /// CLOB orderbook snapshot (from Polymarket WS).
     ClobOrderbook(ClobOrderbookSnapshot),
+    /// CLOB price change tick (from Polymarket WS price-change stream).
+    ClobPriceChange(ClobPriceChangeTick),
 }
 
 #[derive(Debug, Clone)]
@@ -145,9 +147,15 @@ pub struct ClobOrderbookSnapshot {
     pub context: Option<serde_json::Value>,
 }
 
-// ---------------------------------------------------------------------------
-// Dedup state — mirrors the existing per-spawner HashMap logic
-// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct ClobPriceChangeTick {
+    pub token_id: String,
+    pub market: Option<String>,
+    pub side: Option<String>,
+    pub price: rust_decimal::Decimal,
+    pub domain: Domain,
+    pub received_at: chrono::DateTime<chrono::Utc>,
+}
 
 // ---------------------------------------------------------------------------
 // Pipeline handle — the public API for producers
@@ -234,6 +242,7 @@ pub struct PipelineStats {
     pub chainlink_prices_persisted: u64,
     pub clob_orderbooks_persisted: u64,
     pub clob_orderbooks_deduped: u64,
+    pub clob_price_changes_persisted: u64,
     pub events_dropped: u64,
 }
 

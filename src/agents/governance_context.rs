@@ -14,7 +14,8 @@ use crate::coordinator::{
     GovernancePolicyUpdate,
 };
 use crate::error::Result;
-use crate::platform::{AgentStatus, Domain};
+use crate::agent_runtime::AgentStatus;
+use crate::platform::Domain;
 
 /// Narrowed coordinator access for governance-only agents such as OpenClaw.
 pub struct GovernanceContext {

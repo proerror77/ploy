@@ -14,7 +14,7 @@ mod governance;
 mod journal;
 mod position;
 mod queue;
-mod risk;
+pub mod risk;
 pub mod state;
 pub(crate) mod runtime_specs;
 pub(crate) mod strategy_runtime;

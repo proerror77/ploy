@@ -172,3 +172,22 @@ pub async fn ensure_clob_orderbook_snapshots_table(pool: &PgPool) -> Result<()> 
 
     Ok(())
 }
+
+pub async fn ensure_clob_price_change_ticks_table(pool: &sqlx::PgPool) -> crate::error::Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS clob_price_change_ticks (
+            id BIGSERIAL PRIMARY KEY,
+            token_id TEXT NOT NULL,
+            market TEXT,
+            side TEXT,
+            price NUMERIC NOT NULL,
+            domain TEXT,
+            received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}

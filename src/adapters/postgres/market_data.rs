@@ -1,8 +1,8 @@
 use super::PostgresStore;
 use crate::domain::{Round, Side, Tick};
 use crate::error::Result;
-use sqlx::postgres::PgRow;
 use sqlx::Row;
+use sqlx::postgres::PgRow;
 use tracing::{debug, instrument};
 
 impl PostgresStore {

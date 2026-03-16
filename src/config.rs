@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
 
-use crate::platform::AgentRiskParams;
+mod env_overrides;
+
+use crate::agent_runtime::AgentRiskParams;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Deserialize)]
@@ -300,6 +302,15 @@ pub struct EventEdgeAgentConfig {
     /// Maximum notional spend per UTC day (simple safety guard)
     #[serde(default = "default_event_edge_max_daily_spend_usd")]
     pub max_daily_spend_usd: Decimal,
+    /// Agent framework to use: "deterministic", "event_driven", or "claude_agent_sdk"
+    #[serde(default = "default_event_edge_framework")]
+    pub framework: String,
+    /// Claude model override for framework mode (optional)
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Maximum Claude turns per cycle (framework mode)
+    #[serde(default = "default_event_edge_claude_max_turns")]
+    pub claude_max_turns: u32,
 }
 
 impl EventEdgeAgentConfig {
@@ -341,6 +352,9 @@ impl Default for EventEdgeAgentConfig {
             trade: false,
             cooldown_secs: default_event_edge_cooldown_secs(),
             max_daily_spend_usd: default_event_edge_max_daily_spend_usd(),
+            framework: default_event_edge_framework(),
+            model: None,
+            claude_max_turns: default_event_edge_claude_max_turns(),
         }
     }
 }
@@ -367,6 +381,14 @@ fn default_event_edge_cooldown_secs() -> u64 {
 
 fn default_event_edge_max_daily_spend_usd() -> Decimal {
     Decimal::new(50, 0) // $50
+}
+
+fn default_event_edge_framework() -> String {
+    "deterministic".to_string()
+}
+
+fn default_event_edge_claude_max_turns() -> u32 {
+    30
 }
 
 /// NBA Q3→Q4 comeback trading agent configuration

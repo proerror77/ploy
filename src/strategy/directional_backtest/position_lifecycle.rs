@@ -9,7 +9,7 @@ use super::{DirectionalBacktestEngine, DirectionalClosedTrade};
 impl DirectionalBacktestEngine {
     // ─── Exit logic (directional, NOT arb) ───────────────────
 
-    fn check_exits(&mut self, ts: DateTime<Utc>) {
+    pub(super) fn check_exits(&mut self, ts: DateTime<Utc>) {
         let mut to_close: Vec<(usize, Decimal, &str)> = Vec::new();
 
         for (i, pos) in self.positions.iter().enumerate() {
@@ -53,7 +53,7 @@ impl DirectionalBacktestEngine {
 
     // ─── Settlement ──────────────────────────────────────────
 
-    fn resolve_positions(
+    pub(super) fn resolve_positions(
         &mut self,
         symbol: &str,
         event_slug: &str,
@@ -171,7 +171,7 @@ impl DirectionalBacktestEngine {
     }
 
     /// Force-close remaining positions at latest PM price (data exhausted).
-    fn close_remaining_positions(&mut self) {
+    pub(super) fn close_remaining_positions(&mut self) {
         let ts = self.data_range_end.unwrap_or(Utc::now());
         let indices: Vec<usize> = (0..self.positions.len()).rev().collect();
         for idx in indices {
