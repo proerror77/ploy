@@ -3631,15 +3631,12 @@ pub async fn start_platform(
     };
     let runtime_crypto_targets =
         collect_runtime_crypto_strategy_targets(&account_id, config.dry_run);
-<<<<<<< HEAD
-=======
     let compat_crypto_runtimes_enabled = compat_crypto_runtimes_enabled();
     let compat_sports_runtimes_enabled = compat_sports_runtimes_enabled();
     #[cfg(feature = "rl")]
     let crypto_rl_policy_enabled = config.enable_crypto_rl_policy;
     #[cfg(not(feature = "rl"))]
     let crypto_rl_policy_enabled = false;
->>>>>>> 3df4370 (architecture: gate compatibility sports live runtime)
 
     info!(
         account_id = %account_id,
@@ -3647,13 +3644,10 @@ pub async fn start_platform(
         crypto_momentum = config.enable_crypto_momentum,
         crypto_pattern_memory = config.enable_crypto_pattern_memory,
         crypto_split_arb = config.enable_crypto_split_arb,
-<<<<<<< HEAD
-=======
         crypto_lob_ml = config.enable_crypto_lob_ml,
         crypto_rl_policy = crypto_rl_policy_enabled,
         compat_crypto_runtimes = compat_crypto_runtimes_enabled,
         compat_sports_runtimes = compat_sports_runtimes_enabled,
->>>>>>> 3df4370 (architecture: gate compatibility sports live runtime)
         sports = config.enable_sports,
         politics = config.enable_politics,
         economics = config.enable_economics,
@@ -4720,8 +4714,6 @@ pub async fn start_platform(
             split_arb_enabled,
         )
         .await;
-<<<<<<< HEAD
-=======
 
         if lob_agent_enabled {
             if compat_crypto_runtimes_enabled {
@@ -4762,35 +4754,10 @@ pub async fn start_platform(
                 );
             }
         }
->>>>>>> 583bdeb (coordinator: extract domain startup helpers)
     }
 
     if config.enable_sports {
         if let Some(ref nba_cfg) = app_config.nba_comeback {
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 583bdeb (coordinator: extract domain startup helpers)
-            start_sports_strategy_runtime(
-                &mut agent_handles,
-                &mut coordinator,
-                &shutdown_tx,
-<<<<<<< HEAD
-=======
-                &handle,
->>>>>>> 583bdeb (coordinator: extract domain startup helpers)
-                app_config,
-                shared_pool.clone(),
-                Arc::clone(&freshness),
-                pm_client.clone(),
-                &account_id,
-                config.dry_run,
-                config.sports.clone(),
-<<<<<<< HEAD
-                nba_cfg,
-            )
-            .await?;
-=======
             let sports_cfg = config.sports.clone();
             let managed_runtime_spec = build_nba_comeback_managed_runtime_spec(
                 &app_config.database.url,
@@ -4841,13 +4808,6 @@ pub async fn start_platform(
                     "grok-enabled nba_comeback compatibility runtime disabled; set PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true to allow temporary startup or disable grok_enabled for canonical runtime"
                 );
             }
->>>>>>> 3df4370 (architecture: gate compatibility sports live runtime)
-=======
-                nba_cfg,
-                compat_sports_runtimes_enabled,
-            )
-            .await?;
->>>>>>> 583bdeb (coordinator: extract domain startup helpers)
         }
     }
 
@@ -5825,8 +5785,6 @@ symbols = ["SOLUSDT"]
         }
     }
 
-<<<<<<< HEAD
-=======
     #[test]
     fn from_app_config_ignores_legacy_enable_price_exits_env() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -5918,5 +5876,4 @@ symbols = ["SOLUSDT"]
             None => set_env(key, None),
         }
     }
->>>>>>> 3df4370 (architecture: gate compatibility sports live runtime)
 }
