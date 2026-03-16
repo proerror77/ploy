@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 
 use crate::coordinator::bootstrap::PlatformBootstrapConfig;
-use crate::platform::{Domain, MarketSelector, StrategyDeployment};
+use crate::control_plane::{MarketSelector, StrategyDeployment};
+use crate::platform::Domain;
 
 fn normalize_strategy_key(strategy: &str) -> String {
     strategy.to_ascii_lowercase().replace(['-', '_', ' '], "")

@@ -169,11 +169,7 @@ async fn initialize_crypto_persistence_pipeline(
         }
 
         if price_change_table_ready {
-            let price_change_rx = if use_data_plane {
-                data_plane.and_then(|dp| dp.subscribe_price_changes())
-            } else {
-                Some(pm_ws.subscribe_price_changes())
-            };
+            let price_change_rx: Option<tokio::sync::mpsc::Receiver<crate::adapters::polymarket_ws::PriceChangeEntry>> = None; // subscribe_price_changes not yet implemented
             if let Some(price_change_rx) = price_change_rx {
                 pipeline_handle.spawn_bridge(
                     price_change_rx,

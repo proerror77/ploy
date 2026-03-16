@@ -271,11 +271,7 @@ pub(super) async fn enter_leg1(engine: &StrategyEngine, side: Side, price: Decim
             )
             .await
         {
-            Ok(true) => None,
-            Ok(false) => Some(PloyError::InvalidState(format!(
-                "Cycle {} version conflict while persisting Leg1 fill",
-                cycle_id
-            ))),
+            Ok(()) => None,
             Err(err) => Some(err),
         };
 

@@ -216,11 +216,7 @@ impl StrategyEngine {
             )
             .await
         {
-            Ok(true) => None,
-            Ok(false) => Some(PloyError::InvalidState(format!(
-                "Cycle {} version conflict while moving to LEG2_PENDING",
-                ctx.cycle_id
-            ))),
+            Ok(()) => None,
             Err(err) => Some(err),
         };
 
@@ -431,11 +427,7 @@ impl StrategyEngine {
                 )
                 .await
             {
-                Ok(true) => None,
-                Ok(false) => Some(PloyError::InvalidState(format!(
-                    "Cycle {} version conflict while persisting Leg2 fill",
-                    ctx.cycle_id
-                ))),
+                Ok(()) => None,
                 Err(err) => Some(err),
             };
 

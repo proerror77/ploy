@@ -56,7 +56,7 @@ impl IntentDuplicateGuard {
             .retain(|_, ts| now.signed_duration_since(*ts) < self.window);
     }
 
-    pub(super) fn register_or_block(
+    pub(in crate::coordinator) fn register_or_block(
         &mut self,
         intent: &OrderIntent,
         now: chrono::DateTime<Utc>,

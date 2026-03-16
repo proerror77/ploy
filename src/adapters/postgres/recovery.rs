@@ -285,11 +285,13 @@ mod tests {
         };
 
         assert!(order.can_cancel_on_exchange());
-        assert!(!OrphanedOrder {
-            status: "Cancelled".to_string(),
-            ..order.clone()
-        }
-        .can_cancel_on_exchange());
+        assert!(
+            !OrphanedOrder {
+                status: "Cancelled".to_string(),
+                ..order.clone()
+            }
+            .can_cancel_on_exchange()
+        );
     }
 
     #[test]
@@ -304,11 +306,13 @@ mod tests {
         };
 
         assert!(summary.needs_recovery());
-        assert!(!RecoverySummary {
-            incomplete_cycle_count: 0,
-            orphaned_order_count: 0,
-            ..summary
-        }
-        .needs_recovery());
+        assert!(
+            !RecoverySummary {
+                incomplete_cycle_count: 0,
+                orphaned_order_count: 0,
+                ..summary
+            }
+            .needs_recovery()
+        );
     }
 }

@@ -1,6 +1,5 @@
 use super::PolymarketWebSocket;
 use crate::error::{PloyError, Result};
-use crate::services::HealthState;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use std::future::Future;
@@ -269,16 +268,13 @@ impl PolymarketWebSocket {
 
     /// Connect and subscribe to token updates
     async fn connect_and_subscribe(&self, token_ids: &[String]) -> Result<()> {
-        let health = self.health_state.get().cloned();
+        let health: Option<std::sync::Arc<()>> = None; // health_state removed
+        let _ = health;
         let freshness = self.freshness.get().cloned();
 
-        struct WsHealthGuard(Option<Arc<HealthState>>);
+        struct WsHealthGuard;
         impl Drop for WsHealthGuard {
-            fn drop(&mut self) {
-                if let Some(ref h) = self.0 {
-                    h.set_ws_connected(false);
-                }
-            }
+            fn drop(&mut self) {}
         }
 
         struct WsFreshnessGuard(Option<Arc<crate::platform::DataPlaneFreshness>>);
@@ -290,7 +286,7 @@ impl PolymarketWebSocket {
             }
         }
 
-        let _guard = WsHealthGuard(health.clone());
+        let _guard = WsHealthGuard;
         let _fresh_guard = WsFreshnessGuard(freshness.clone());
 
         let url = Url::parse(&self.ws_url)
@@ -301,9 +297,6 @@ impl PolymarketWebSocket {
         let ws_stream = connect_websocket_with_proxy(&url).await?;
 
         info!("WebSocket connected");
-        if let Some(ref h) = health {
-            h.set_ws_connected(true);
-        }
         if let Some(ref f) = freshness {
             f.set_source_connected(crate::platform::DataSource::PolymarketWs, true);
         }

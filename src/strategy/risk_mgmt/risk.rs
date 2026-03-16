@@ -1,10 +1,9 @@
 use crate::config::RiskConfig;
 use crate::domain::{RiskState, Round, Side};
 use crate::error::{Result, RiskError};
-use crate::platform::{
-    AgentRiskParams, BlockReason, Domain, OrderIntent, PlatformRiskState,
-    RiskCheckResult, RiskConfig as GateRiskConfig, RiskGate,
-};
+use crate::agent_runtime::AgentRiskParams;
+use crate::coordinator::risk::{BlockReason, PlatformRiskState, RiskCheckResult, RiskConfig as GateRiskConfig, RiskGate};
+use crate::platform::{Domain, OrderIntent};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use tokio::sync::RwLock;

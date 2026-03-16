@@ -19,7 +19,7 @@ pub(in crate::coordinator) use duplicate_guard::IntentDuplicateGuard;
 
 pub(super) struct AdmissionController {
     config: CoordinatorConfig,
-    duplicate_guard: RwLock<IntentDuplicateGuard>,
+    pub(in crate::coordinator) duplicate_guard: RwLock<IntentDuplicateGuard>,
     deployments: Arc<RwLock<HashMap<String, StrategyDeployment>>>,
 }
 

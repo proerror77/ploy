@@ -5,7 +5,7 @@ name = "pm_5m_directional"
 enabled = true
 
 [pm_5m_directional]
-symbols = ["BTCUSDT"]
+symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 tick_interval_ms = 1000
 
 # Entry timing window
@@ -47,3 +47,22 @@ max_daily_trades = 0
 use_kelly_sizing = true
 kelly_fraction_scale = 0.15
 kelly_fraction_cap = 0.25
+
+# EWMA volatility (Route A v2)
+ewma_lambda = 0.94
+
+# Early exit (Route A v2)
+enable_early_exit = true
+exit_reversion_pct = 0.003
+exit_obi_flip = true
+
+# Route C: Binance perp funding + liquidation (disabled by default)
+use_funding_signal = false
+funding_extreme_threshold = 0.0001
+liquidation_window_secs = 120
+min_liquidation_cascade_usd = 500000.0
+
+# Route B: Deribit IV regime filter (disabled by default)
+use_deribit_regime = false
+deribit_high_vol_threshold = 0.80
+deribit_extreme_vol_threshold = 1.20

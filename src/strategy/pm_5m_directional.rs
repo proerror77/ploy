@@ -16,6 +16,7 @@ use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
     StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
+use crate::strategy::pm_5m_bayesian::BayesianPrior;
 use crate::strategy::volatility::normal_cdf;
 
 const STRATEGY_NAME: &str = "pm_5m_directional";
@@ -60,6 +61,34 @@ struct Pm5mDirectionalConfig {
     use_kelly_sizing: bool,
     kelly_fraction_scale: f64,
     kelly_fraction_cap: f64,
+    /// Enable Bayesian posterior gate (default: true)
+    use_bayesian: bool,
+    /// z-score for Bayesian lower-bound credible interval (default: 1.645 = 95%)
+    bayesian_credible_z: f64,
+    /// EWMA lambda for volatility estimation (0.94 = RiskMetrics standard)
+    ewma_lambda: f64,
+    /// Enable early exit on adverse signal reversal
+    enable_early_exit: bool,
+    /// Exit when Binance price reverses by this fraction (e.g. 0.003 = 0.3%)
+    exit_reversion_pct: f64,
+    /// Exit when OBI sign flips against position direction
+    exit_obi_flip: bool,
+    // ── Route C: Binance perp funding + liquidation ──
+    /// Enable funding rate as additional confirmation (Route C)
+    use_funding_signal: bool,
+    /// Extreme funding rate threshold (e.g. 0.0001 = 0.01%); contrarian signal
+    funding_extreme_threshold: f64,
+    /// Rolling liquidation window in seconds for cascade detection
+    liquidation_window_secs: u64,
+    /// Minimum liquidation volume (USD) to count as a cascade signal
+    min_liquidation_cascade_usd: f64,
+    // ── Route B: Deribit IV regime filter ──
+    /// Enable Deribit IV as regime filter (Route B)
+    use_deribit_regime: bool,
+    /// ATM IV above this → reduce position size (high vol regime)
+    deribit_high_vol_threshold: f64,
+    /// ATM IV above this → pause trading (extreme vol regime)
+    deribit_extreme_vol_threshold: f64,
 }
 
 impl Default for Pm5mDirectionalConfig {
@@ -95,6 +124,19 @@ impl Default for Pm5mDirectionalConfig {
             use_kelly_sizing: true,
             kelly_fraction_scale: 0.15,
             kelly_fraction_cap: 0.25,
+            use_bayesian: true,
+            bayesian_credible_z: 1.645,
+            ewma_lambda: 0.94,
+            enable_early_exit: true,
+            exit_reversion_pct: 0.003,
+            exit_obi_flip: true,
+            use_funding_signal: false,
+            funding_extreme_threshold: 0.0001,
+            liquidation_window_secs: 120,
+            min_liquidation_cascade_usd: 500_000.0,
+            use_deribit_regime: false,
+            deribit_high_vol_threshold: 0.80,
+            deribit_extreme_vol_threshold: 1.20,
         }
     }
 }
@@ -200,6 +242,9 @@ struct PendingOrder {
     side: Side,
     shares: u64,
     event_id: String,
+    entry_sigma: f64,
+    entry_time_remaining_secs: f64,
+    entry_price: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +258,12 @@ struct DirectionalPosition {
     current_price: Option<Decimal>,
     opened_at: DateTime<Utc>,
     end_time: DateTime<Utc>,
+    /// Sigma at entry time — needed for Bayesian bucket lookup at settlement
+    entry_sigma: f64,
+    /// Time remaining at entry — needed for Bayesian bucket lookup at settlement
+    entry_time_remaining_secs: f64,
+    /// Binance spot price at entry — needed for early exit reversion check
+    entry_spot: Decimal,
 }
 
 pub struct Pm5mDirectionalStrategy {
@@ -234,6 +285,19 @@ pub struct Pm5mDirectionalStrategy {
     daily_trades: u32,
     last_reset: DateTime<Utc>,
     last_reason: Option<String>,
+    bayesian: BayesianPrior,
+    /// EWMA variance per symbol (per-second log returns, not annualized)
+    ewma_var: HashMap<String, f64>,
+    /// Last spot price per symbol for EWMA return calculation
+    ewma_last_price: HashMap<String, f64>,
+    /// Latest funding rate per symbol (Route C)
+    funding_rate: HashMap<String, f64>,
+    /// Rolling liquidation volume per symbol: (timestamp, side, usd_value)
+    liquidation_history: HashMap<String, VecDeque<(DateTime<Utc>, Side, f64)>>,
+    /// Latest Deribit ATM IV per symbol (Route B)
+    deribit_atm_iv: HashMap<String, f64>,
+    /// Latest Deribit 25-delta skew per symbol (Route B)
+    deribit_skew: HashMap<String, f64>,
 }
 
 impl Pm5mDirectionalStrategy {
@@ -276,6 +340,13 @@ impl Pm5mDirectionalStrategy {
             daily_trades: 0,
             last_reset: Utc::now(),
             last_reason: None,
+            bayesian: BayesianPrior::new(),
+            ewma_var: HashMap::new(),
+            ewma_last_price: HashMap::new(),
+            funding_rate: HashMap::new(),
+            liquidation_history: HashMap::new(),
+            deribit_atm_iv: HashMap::new(),
+            deribit_skew: HashMap::new(),
         })
     }
 
@@ -333,6 +404,88 @@ impl Pm5mDirectionalStrategy {
         }
     }
 
+    /// Update EWMA variance with a new price observation.
+    /// Returns the current annualized sigma estimate.
+    fn update_ewma_vol(&mut self, symbol: &str, price_f: f64) -> f64 {
+        let lambda = self.cfg.ewma_lambda;
+        if let Some(prev) = self.ewma_last_price.get(symbol).copied() {
+            if prev > 0.0 {
+                let log_ret = (price_f / prev).ln();
+                let var = self.ewma_var.entry(symbol.to_string()).or_insert(0.0);
+                *var = lambda * *var + (1.0 - lambda) * log_ret * log_ret;
+            }
+        }
+        self.ewma_last_price.insert(symbol.to_string(), price_f);
+        self.ewma_sigma_annualized(symbol)
+    }
+
+    /// Current annualized sigma from EWMA variance.
+    fn ewma_sigma_annualized(&self, symbol: &str) -> f64 {
+        // Per-second variance → annualize: σ_annual = sqrt(var_1s * seconds_per_year)
+        const SECS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
+        let var = self.ewma_var.get(symbol).copied().unwrap_or(0.0);
+        (var * SECS_PER_YEAR).sqrt().max(self.cfg.vol_floor)
+    }
+
+    /// Route C: funding rate directional bias.
+    /// Returns Some(1.0) for bullish, Some(-1.0) for bearish, None if no signal.
+    /// Contrarian: extreme positive funding → bearish (overleveraged longs).
+    fn funding_signal(&self, symbol: &str) -> Option<f64> {
+        if !self.cfg.use_funding_signal {
+            return None;
+        }
+        let rate = self.funding_rate.get(symbol).copied()?;
+        let threshold = self.cfg.funding_extreme_threshold;
+        if rate > threshold {
+            Some(-1.0) // extreme positive funding → contrarian bearish
+        } else if rate < -threshold {
+            Some(1.0) // extreme negative funding → contrarian bullish
+        } else {
+            None // neutral zone, no signal
+        }
+    }
+
+    /// Route C: rolling liquidation cascade signal.
+    /// Returns net signed liquidation volume (positive = more longs liquidated = bearish).
+    fn liquidation_cascade(&self, symbol: &str, now: DateTime<Utc>) -> f64 {
+        let history = match self.liquidation_history.get(symbol) {
+            Some(h) => h,
+            None => return 0.0,
+        };
+        let cutoff = now - chrono::Duration::seconds(self.cfg.liquidation_window_secs as i64);
+        let mut long_liq = 0.0f64;
+        let mut short_liq = 0.0f64;
+        for (ts, side, usd) in history.iter() {
+            if *ts >= cutoff {
+                match side {
+                    Side::Up => long_liq += usd,   // long liquidation
+                    Side::Down => short_liq += usd, // short liquidation
+                }
+            }
+        }
+        // Positive = more long liquidations (bearish pressure)
+        long_liq - short_liq
+    }
+
+    /// Route B: Deribit regime position size multiplier.
+    /// Returns 1.0 (normal), 0.5 (high vol), 0.0 (extreme vol → pause).
+    fn deribit_size_multiplier(&self, symbol: &str) -> f64 {
+        if !self.cfg.use_deribit_regime {
+            return 1.0;
+        }
+        let atm_iv = match self.deribit_atm_iv.get(symbol).copied() {
+            Some(iv) => iv,
+            None => return 1.0, // no data, don't restrict
+        };
+        if atm_iv >= self.cfg.deribit_extreme_vol_threshold {
+            0.0 // pause trading
+        } else if atm_iv >= self.cfg.deribit_high_vol_threshold {
+            0.5 // reduce size
+        } else {
+            1.0 // normal
+        }
+    }
+
     fn signed_flow_2s(&self, symbol: &str, now: DateTime<Utc>) -> Option<f64> {
         let ticks = self.recent_ticks.get(symbol)?;
         let cutoff = now - chrono::Duration::seconds(2);
@@ -376,11 +529,23 @@ impl Pm5mDirectionalStrategy {
         event: &TrackedEvent,
         now: DateTime<Utc>,
     ) -> Option<(f64, f64, f64)> {
-        let sigma = spot
-            .volatility(self.cfg.vol_lookback_secs)
-            .and_then(|value| value.to_f64())
-            .unwrap_or(self.cfg.vol_floor)
-            .max(self.cfg.vol_floor);
+        // Use EWMA annualized vol; fall back to rolling vol if EWMA not yet warm
+        let symbol = &event.symbol;
+        let sigma_annual = {
+            let ewma = self.ewma_sigma_annualized(symbol);
+            if ewma > self.cfg.vol_floor {
+                ewma
+            } else {
+                // Fallback: annualize the old rolling vol
+                // rolling vol is per-second std dev, annualize it
+                const SECS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
+                spot.volatility(self.cfg.vol_lookback_secs)
+                    .and_then(|value| value.to_f64())
+                    .map(|v| (v * v * SECS_PER_YEAR).sqrt())
+                    .unwrap_or(self.cfg.vol_floor)
+                    .max(self.cfg.vol_floor)
+            }
+        };
 
         let spot_f = spot.price.to_f64()?;
         let beat_f = event.price_to_beat.to_f64()?;
@@ -389,11 +554,12 @@ impl Pm5mDirectionalStrategy {
         }
 
         let remaining_secs = (event.end_time - now).num_seconds().max(0) as f64;
-        let tau_scale = (remaining_secs / 300.0).max(PROB_FLOOR);
+        // Correct: annualized time to expiry
+        let tau_years = remaining_secs / (365.25 * 24.0 * 3600.0);
         let d_t = (spot_f / beat_f).ln();
-        let z = d_t / (sigma * tau_scale.sqrt()).max(PROB_FLOOR);
+        let z = d_t / (sigma_annual * tau_years.sqrt()).max(PROB_FLOOR);
         let p_base = normal_cdf(z).clamp(PROB_FLOOR, 1.0 - PROB_FLOOR);
-        Some((p_base, sigma, z))
+        Some((p_base, sigma_annual, z))
     }
 
     fn quote_for_event_side(&self, event: &TrackedEvent, side: Side) -> Option<&Quote> {
@@ -458,6 +624,8 @@ impl Pm5mDirectionalStrategy {
         cumulative_filled_qty: u64,
         fill_price: Decimal,
         timestamp: DateTime<Utc>,
+        entry_sigma: f64,
+        entry_time_remaining_secs: f64,
     ) -> bool {
         if cumulative_filled_qty == 0 {
             return false;
@@ -469,6 +637,11 @@ impl Pm5mDirectionalStrategy {
             .map(|event| event.end_time)
             .unwrap_or(timestamp + chrono::Duration::seconds(300));
         let is_new = !self.positions.contains_key(&pending.token_id);
+        let entry_spot = self
+            .spot_prices
+            .get(&pending.symbol)
+            .map(|s| s.price)
+            .unwrap_or(Decimal::ZERO);
         self.positions
             .entry(pending.token_id.clone())
             .and_modify(|position| {
@@ -487,6 +660,9 @@ impl Pm5mDirectionalStrategy {
                 current_price: Some(fill_price),
                 opened_at: timestamp,
                 end_time,
+                entry_sigma,
+                entry_time_remaining_secs,
+                entry_spot,
             });
         is_new
     }
@@ -594,8 +770,49 @@ impl Pm5mDirectionalStrategy {
             return None;
         }
 
+        // Bayesian gate: require posterior lower bound >= p_entry
+        // This prevents overconfidence when the bucket has few observations.
+        let remaining_secs_f = (event.end_time - now).num_seconds().max(0) as f64;
+        let ask_f = ask.to_f64().unwrap_or(0.5);
+        let bayes_lb = if self.cfg.use_bayesian {
+            self.bayesian.posterior_lower_bound(
+                ask_f,
+                remaining_secs_f,
+                sigma,
+                effective_p,
+                self.cfg.bayesian_credible_z,
+            )
+        } else {
+            effective_p
+        };
+        if bayes_lb < self.cfg.p_entry {
+            self.last_reason = Some(format!("{symbol}:bayesian_lb_below_threshold"));
+            return None;
+        }
+
+        // Route B: Deribit regime filter — pause or reduce in high-vol environments
+        let deribit_mult = self.deribit_size_multiplier(symbol);
+        if deribit_mult == 0.0 {
+            self.last_reason = Some(format!("{symbol}:deribit_extreme_vol"));
+            return None;
+        }
+
+        // Route C: funding rate confirmation (optional, contrarian)
+        if self.cfg.use_funding_signal {
+            if let Some(funding_dir) = self.funding_signal(symbol) {
+                let side_dir = match side { Side::Up => 1.0, Side::Down => -1.0 };
+                if funding_dir != side_dir {
+                    // Funding signal contradicts our direction — skip
+                    self.last_reason = Some(format!("{symbol}:funding_signal_conflict"));
+                    return None;
+                }
+            }
+        }
+
         let shares =
             self.kelly_scaled_shares(self.cfg.shares_per_trade, effective_p, effective_cost);
+        // Apply Deribit regime multiplier to position size
+        let shares = ((shares as f64 * deribit_mult).floor() as u64).max(0);
         if shares < self.cfg.min_shares {
             self.last_reason = Some(format!("{symbol}:shares_below_min"));
             return None;
@@ -620,6 +837,9 @@ impl Pm5mDirectionalStrategy {
                 side,
                 shares,
                 event_id: event.event_id.clone(),
+                entry_sigma: sigma,
+                entry_time_remaining_secs: remaining_secs_f,
+                entry_price: ask,
             },
         );
         self.last_reason = Some(format!("{symbol}:submit"));
@@ -637,7 +857,23 @@ impl Pm5mDirectionalStrategy {
         metadata.insert("flow_2s".to_string(), format!("{flow_2s:.6}"));
         metadata.insert("microgap_proxy".to_string(), format!("{microgap:.6}"));
         metadata.insert("edge".to_string(), format!("{edge:.6}"));
+        metadata.insert("bayes_lb".to_string(), format!("{bayes_lb:.6}"));
+        metadata.insert(
+            "bayes_obs".to_string(),
+            self.bayesian
+                .bucket_obs(ask_f, remaining_secs_f, sigma)
+                .to_string(),
+        );
         metadata.insert("dry_run".to_string(), self.dry_run.to_string());
+        // Route B/C signals
+        metadata.insert("deribit_mult".to_string(), format!("{deribit_mult:.2}"));
+        if let Some(fr) = self.funding_rate.get(symbol) {
+            metadata.insert("funding_rate".to_string(), format!("{fr:.6}"));
+        }
+        let liq_cascade = self.liquidation_cascade(symbol, now);
+        if liq_cascade.abs() > 0.0 {
+            metadata.insert("liq_cascade_usd".to_string(), format!("{liq_cascade:.0}"));
+        }
 
         Some(vec![
             StrategyAction::LogEvent {
@@ -676,6 +912,106 @@ impl Pm5mDirectionalStrategy {
         self.pending_orders
             .retain(|_, pending| self.active_events.contains_key(&pending.event_id));
         self.positions.retain(|_, position| position.end_time > now);
+    }
+
+    /// Check if any open position for this symbol should be exited early.
+    fn check_early_exit(
+        &self,
+        symbol: &str,
+        current_spot: Decimal,
+        now: DateTime<Utc>,
+    ) -> Option<Vec<StrategyAction>> {
+        let positions_to_exit: Vec<_> = self
+            .positions
+            .values()
+            .filter(|p| p.symbol == symbol)
+            .filter(|p| {
+                if p.entry_spot.is_zero() {
+                    return false;
+                }
+                let spot_f = current_spot.to_f64().unwrap_or(0.0);
+                let entry_f = p.entry_spot.to_f64().unwrap_or(0.0);
+                if entry_f == 0.0 {
+                    return false;
+                }
+                let pct_change = (spot_f - entry_f) / entry_f;
+
+                // Price reversion check
+                let price_reversed = match p.side {
+                    Side::Up => pct_change < -self.cfg.exit_reversion_pct,
+                    Side::Down => pct_change > self.cfg.exit_reversion_pct,
+                };
+
+                // OBI flip check
+                let obi_flipped = if self.cfg.exit_obi_flip {
+                    self.l2_by_symbol.get(symbol).map_or(false, |l2| {
+                        let obi = l2.obi_3.to_f64().unwrap_or(0.0);
+                        match p.side {
+                            Side::Up => obi < -self.cfg.min_obi as f64,
+                            Side::Down => obi > self.cfg.min_obi as f64,
+                        }
+                    })
+                } else {
+                    false
+                };
+
+                price_reversed || obi_flipped
+            })
+            .cloned()
+            .collect();
+
+        if positions_to_exit.is_empty() {
+            return None;
+        }
+
+        let mut actions = Vec::new();
+        for pos in &positions_to_exit {
+            // Sell at best bid via IOC
+            let bid = self
+                .quotes
+                .get(&pos.token_id)
+                .and_then(|q| q.best_bid)
+                .unwrap_or(dec!(0.01));
+
+            let client_order_id = format!(
+                "{}_exit_{}_{}",
+                self.id,
+                pos.symbol.to_ascii_lowercase(),
+                now.timestamp_millis()
+            );
+
+            let mut metadata = HashMap::new();
+            metadata.insert("strategy".to_string(), STRATEGY_NAME.to_string());
+            metadata.insert("signal_type".to_string(), "early_exit".to_string());
+            metadata.insert("event_id".to_string(), pos.event_id.clone());
+
+            actions.push(StrategyAction::LogEvent {
+                event: StrategyEvent::new(
+                    StrategyEventType::ExitTriggered,
+                    format!(
+                        "{STRATEGY_NAME} early_exit {} {} shares={} bid={}",
+                        pos.symbol, pos.side, pos.shares, bid
+                    ),
+                ),
+            });
+            actions.push(StrategyAction::SubmitIntent {
+                intent: StrategyOrderIntent {
+                    client_order_id,
+                    domain: Domain::Crypto,
+                    market_slug: pos.symbol.clone(),
+                    token_id: pos.token_id.clone(),
+                    side: pos.side,
+                    is_buy: false,
+                    shares: pos.shares,
+                    limit_price: bid,
+                    order_type: OrderType::Limit,
+                    time_in_force: TimeInForce::IOC,
+                    priority: 8,
+                    metadata,
+                },
+            });
+        }
+        Some(actions)
     }
 }
 
@@ -725,6 +1061,18 @@ impl Strategy for Pm5mDirectionalStrategy {
                     .and_modify(|spot| spot.update(*price, None, *timestamp))
                     .or_insert_with(|| SpotPrice::new(*price, None, *timestamp));
                 self.update_tick_history(symbol, *price, *timestamp);
+
+                // Update EWMA vol estimate
+                if let Some(price_f) = price.to_f64() {
+                    self.update_ewma_vol(symbol, price_f);
+                }
+
+                // Check early exit for open positions
+                if self.cfg.enable_early_exit {
+                    if let Some(exit_actions) = self.check_early_exit(symbol, *price, *timestamp) {
+                        actions.extend(exit_actions);
+                    }
+                }
 
                 if let Some(mut entry_actions) = self.evaluate_symbol(symbol, *timestamp) {
                     actions.append(&mut entry_actions);
@@ -799,6 +1147,31 @@ impl Strategy for Pm5mDirectionalStrategy {
                 );
             }
             MarketUpdate::EventExpired { event_id } => {
+                // Record Bayesian outcomes using actual spot vs price_to_beat
+                // comparison, not stale PM quotes which may not reflect settlement.
+                let settled: Vec<_> = self
+                    .positions
+                    .values()
+                    .filter(|p| p.event_id == *event_id)
+                    .filter_map(|p| {
+                        let event = self.active_events.get(event_id)?;
+                        let spot = self.spot_prices.get(&p.symbol)?;
+                        let spot_f = spot.price.to_f64()?;
+                        let beat_f = event.price_to_beat.to_f64()?;
+                        // Actual outcome: did spot finish above price_to_beat?
+                        let spot_above = spot_f > beat_f;
+                        let won = match p.side {
+                            Side::Up => spot_above,
+                            Side::Down => !spot_above,
+                        };
+                        let entry_price_f = p.entry_price.to_f64().unwrap_or(0.5);
+                        Some((entry_price_f, p.entry_time_remaining_secs, p.entry_sigma, won))
+                    })
+                    .collect();
+                for (price, time_rem, sigma, won) in settled {
+                    self.bayesian.record_outcome(price, time_rem, sigma, won);
+                }
+
                 self.active_events.remove(event_id);
                 self.pending_orders
                     .retain(|_, pending| pending.event_id != *event_id);
@@ -806,6 +1179,46 @@ impl Strategy for Pm5mDirectionalStrategy {
                     .retain(|_, position| position.event_id != *event_id);
             }
             MarketUpdate::BinanceKline { .. } => {}
+            MarketUpdate::BinanceFunding {
+                symbol,
+                funding_rate,
+                timestamp: _,
+                ..
+            } => {
+                if self.symbols.iter().any(|s| s == symbol) {
+                    self.funding_rate.insert(symbol.clone(), *funding_rate);
+                }
+            }
+            MarketUpdate::BinanceLiquidation {
+                symbol,
+                side,
+                qty,
+                price,
+                timestamp,
+            } => {
+                if self.symbols.iter().any(|s| s == symbol) {
+                    let usd_value = qty.to_f64().unwrap_or(0.0) * price.to_f64().unwrap_or(0.0);
+                    let history = self.liquidation_history.entry(symbol.clone()).or_default();
+                    history.push_back((*timestamp, *side, usd_value));
+                    // Prune old entries
+                    let cutoff = *timestamp - chrono::Duration::seconds(self.cfg.liquidation_window_secs as i64 * 2);
+                    while history.front().map(|(ts, _, _)| *ts < cutoff).unwrap_or(false) {
+                        history.pop_front();
+                    }
+                }
+            }
+            MarketUpdate::DeribitIV {
+                symbol,
+                atm_iv,
+                skew_25d,
+                timestamp: _,
+                ..
+            } => {
+                if self.symbols.iter().any(|s| s == symbol) {
+                    self.deribit_atm_iv.insert(symbol.clone(), *atm_iv);
+                    self.deribit_skew.insert(symbol.clone(), *skew_25d);
+                }
+            }
         }
 
         Ok(actions)
@@ -827,6 +1240,8 @@ impl Strategy for Pm5mDirectionalStrategy {
                         cumulative_filled,
                         update.avg_fill_price.unwrap_or(dec!(0)),
                         update.timestamp,
+                        pending.entry_sigma,
+                        pending.entry_time_remaining_secs,
                     );
                     if is_new_position {
                         self.daily_trades += 1;
@@ -860,6 +1275,8 @@ impl Strategy for Pm5mDirectionalStrategy {
                         cumulative_filled,
                         fill_price,
                         update.timestamp,
+                        pending.entry_sigma,
+                        pending.entry_time_remaining_secs,
                     );
                     if is_new_position {
                         self.daily_trades += 1;
@@ -889,6 +1306,8 @@ impl Strategy for Pm5mDirectionalStrategy {
                         partial_fill_qty,
                         update.avg_fill_price.unwrap_or(dec!(0)),
                         update.timestamp,
+                        pending.entry_sigma,
+                        pending.entry_time_remaining_secs,
                     );
                     if is_new_position {
                         self.daily_trades += 1;
@@ -947,6 +1366,14 @@ impl Strategy for Pm5mDirectionalStrategy {
         if let Some(reason) = &self.last_reason {
             metrics.insert("last_reason".to_string(), reason.clone());
         }
+        metrics.insert(
+            "bayes_total_obs".to_string(),
+            self.bayesian.total_observations().to_string(),
+        );
+        metrics.insert(
+            "bayes_mature_buckets".to_string(),
+            self.bayesian.mature_buckets().len().to_string(),
+        );
 
         StrategyStateInfo {
             strategy_id: self.id.clone(),

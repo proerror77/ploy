@@ -28,4 +28,4 @@ pub use persistence_pipeline::{
 pub use subscription_planner::{
     ConsumerId, PlanDelta, SubscriptionKey, SubscriptionPlan, SubscriptionPlanner,
 };
-pub use types::{Domain, OrderIntent, OrderPriority};
+pub use types::{Domain, IntentPurpose, OrderIntent, OrderPriority};
