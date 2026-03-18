@@ -8,10 +8,10 @@ use crate::ai_clients::{EventDetails, LiveGameMarket, PolymarketSportsClient, NB
 use crate::config::NbaComebackConfig;
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::error::Result;
+use crate::strategy::nba_comeback::core::ComebackCandidate;
 use crate::strategy::nba_comeback::{
     ComebackOpportunity, ComebackStatsProvider, EspnClient, NbaComebackCore,
 };
-use crate::strategy::nba_comeback::core::ComebackCandidate;
 use crate::strategy::traits::{
     DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
     StrategyEventType, StrategyStateInfo,
@@ -90,10 +90,7 @@ impl NbaComebackStrategy {
                 performance.get("daily_loss_limit_usd"),
                 Decimal::new(30, 0),
             ),
-            performance_min_settled_trades: u64_value(
-                performance.get("min_settled_trades"),
-                10,
-            ),
+            performance_min_settled_trades: u64_value(performance.get("min_settled_trades"), 10),
             performance_min_win_rate: f64_value(performance.get("min_win_rate"), 0.45),
             performance_low_winrate_multiplier: f64_value(
                 performance.get("low_winrate_multiplier"),
@@ -114,14 +111,8 @@ impl NbaComebackStrategy {
                 scaling.get("max_game_exposure_usd"),
                 Decimal::new(50, 0),
             ),
-            scaling_min_comeback_retention: f64_value(
-                scaling.get("min_comeback_retention"),
-                0.70,
-            ),
-            scaling_min_time_remaining_mins: f64_value(
-                scaling.get("min_time_remaining_mins"),
-                8.0,
-            ),
+            scaling_min_comeback_retention: f64_value(scaling.get("min_comeback_retention"), 0.70),
+            scaling_min_time_remaining_mins: f64_value(scaling.get("min_time_remaining_mins"), 8.0),
             early_exit_enabled: bool_value(exit.get("enabled"), true),
             early_exit_take_profit_pct: f64_value(exit.get("take_profit_pct"), 15.0),
             early_exit_stop_loss_pct: f64_value(exit.get("stop_loss_pct"), 20.0),
@@ -133,9 +124,7 @@ impl NbaComebackStrategy {
             .map(ToString::to_string)
             .or_else(|| std::env::var("DATABASE_URL").ok())
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "nba_comeback strategy requires [database].url or DATABASE_URL"
-                )
+                anyhow::anyhow!("nba_comeback strategy requires [database].url or DATABASE_URL")
             })?;
         let espn = EspnClient::new();
         let stats = ComebackStatsProvider::new(
@@ -268,12 +257,8 @@ impl NbaComebackStrategy {
             &candidate.trailing_abbrev,
         )?;
 
-        self.core.evaluate_opportunity(
-            candidate,
-            market_price,
-            event.slug.clone(),
-            token_id,
-        )
+        self.core
+            .evaluate_opportunity(candidate, market_price, event.slug.clone(), token_id)
     }
 
     fn build_submit_action(
@@ -355,10 +340,10 @@ impl NbaComebackStrategy {
                 continue;
             };
 
-            if self.core.is_duplicate_initial_entry(
-                &opportunity.game.espn_game_id,
-                &opportunity.token_id,
-            ) {
+            if self
+                .core
+                .is_duplicate_initial_entry(&opportunity.game.espn_game_id, &opportunity.token_id)
+            {
                 continue;
             }
             if self.pending_orders.values().any(|pending| {
@@ -428,8 +413,9 @@ impl Strategy for NbaComebackStrategy {
                     };
                     let delta = cumulative_filled.saturating_sub(pending.recorded_filled_qty);
                     if delta > 0 {
-                        let fill_price =
-                            update.avg_fill_price.unwrap_or(pending.opportunity.market_price);
+                        let fill_price = update
+                            .avg_fill_price
+                            .unwrap_or(pending.opportunity.market_price);
                         if !pending.entry_recorded {
                             self.core.state.record_initial_entry(
                                 &pending.opportunity.game.espn_game_id,
@@ -505,7 +491,9 @@ impl Strategy for NbaComebackStrategy {
             return Ok(Vec::new());
         }
 
-        let pm_events = pm_sports.fetch_todays_games_with_details(NBA_SERIES_ID).await?;
+        let pm_events = pm_sports
+            .fetch_todays_games_with_details(NBA_SERIES_ID)
+            .await?;
         Ok(self.build_actions_from_candidates(&candidates, &pm_events))
     }
 
@@ -519,10 +507,9 @@ impl Strategy for NbaComebackStrategy {
             active: self.is_active(),
             position_count: self.positions.len(),
             pending_order_count: self.pending_orders.len(),
-            total_exposure: self
-                .positions
-                .values()
-                .fold(Decimal::ZERO, |acc, pos| acc + Decimal::from(pos.shares) * pos.entry_price),
+            total_exposure: self.positions.values().fold(Decimal::ZERO, |acc, pos| {
+                acc + Decimal::from(pos.shares) * pos.entry_price
+            }),
             unrealized_pnl: self
                 .positions
                 .values()
@@ -800,7 +787,12 @@ url = "postgres://localhost/unused"
         let strategy = NbaComebackStrategy::from_toml("nba_test".to_string(), toml, true)
             .expect("strategy should parse");
 
-        assert_eq!(strategy.required_feeds(), vec![DataFeed::Tick { interval_ms: 45_000 }]);
+        assert_eq!(
+            strategy.required_feeds(),
+            vec![DataFeed::Tick {
+                interval_ms: 45_000
+            }]
+        );
         assert_eq!(strategy.core.cfg.min_edge, dec!(0.07));
         assert_eq!(strategy.core.cfg.max_entry_price, dec!(0.68));
         assert_eq!(strategy.core.cfg.shares, 25);
@@ -813,7 +805,8 @@ url = "postgres://localhost/unused"
     #[tokio::test]
     async fn build_actions_matches_trailing_market() {
         let mut strategy = NbaComebackStrategy::new_for_tests("nba_test", test_core());
-        let actions = strategy.build_actions_from_candidates(&[sample_candidate()], &[sample_event()]);
+        let actions =
+            strategy.build_actions_from_candidates(&[sample_candidate()], &[sample_event()]);
 
         assert_eq!(actions.len(), 2);
         match &actions[1] {
@@ -840,7 +833,10 @@ url = "postgres://localhost/unused"
             .expect("opportunity");
         let action = strategy.build_submit_action(opportunity, 25);
 
-        let StrategyAction::SubmitOrder { client_order_id, .. } = action else {
+        let StrategyAction::SubmitOrder {
+            client_order_id, ..
+        } = action
+        else {
             panic!("expected submit order");
         };
 
@@ -865,13 +861,14 @@ url = "postgres://localhost/unused"
         assert_eq!(position.token_id, "token-lal");
         assert_eq!(position.shares, 25);
         assert_eq!(position.entry_price, dec!(0.30));
-        assert_eq!(position.metadata.get("market_slug"), Some(&"lakers-vs-celtics".to_string()));
-        assert!(
-            strategy
-                .core
-                .state
-                .is_initial_entry_recorded("401", "token-lal")
+        assert_eq!(
+            position.metadata.get("market_slug"),
+            Some(&"lakers-vs-celtics".to_string())
         );
+        assert!(strategy
+            .core
+            .state
+            .is_initial_entry_recorded("401", "token-lal"));
     }
 
     #[tokio::test]
@@ -882,7 +879,10 @@ url = "postgres://localhost/unused"
             .expect("opportunity");
         let action = strategy.build_submit_action(opportunity, 25);
 
-        let StrategyAction::SubmitOrder { client_order_id, .. } = action else {
+        let StrategyAction::SubmitOrder {
+            client_order_id, ..
+        } = action
+        else {
             panic!("expected submit order");
         };
 
@@ -900,12 +900,10 @@ url = "postgres://localhost/unused"
             .expect("rejected order should update strategy");
 
         assert_eq!(strategy.core.state.daily_spend_usd, Decimal::ZERO);
-        assert!(
-            !strategy
-                .core
-                .state
-                .is_initial_entry_recorded("401", "token-lal")
-        );
+        assert!(!strategy
+            .core
+            .state
+            .is_initial_entry_recorded("401", "token-lal"));
         assert!(strategy.pending_orders.is_empty());
     }
 
@@ -917,7 +915,10 @@ url = "postgres://localhost/unused"
             .expect("opportunity");
         let action = strategy.build_submit_action(opportunity, 25);
 
-        let StrategyAction::SubmitOrder { client_order_id, .. } = action else {
+        let StrategyAction::SubmitOrder {
+            client_order_id, ..
+        } = action
+        else {
             panic!("expected submit order");
         };
 

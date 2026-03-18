@@ -222,7 +222,10 @@ fn render_momentum_runtime_config(
     )
 }
 
-fn load_momentum_config_file(symbols: &[String], crypto_cfg: &CryptoTradingConfig) -> Option<String> {
+fn load_momentum_config_file(
+    symbols: &[String],
+    crypto_cfg: &CryptoTradingConfig,
+) -> Option<String> {
     let candidates = [
         std::env::var("PLOY_MOMENTUM_CONFIG").ok(),
         Some("config/strategies/momentum.toml".to_string()),
@@ -263,7 +266,10 @@ pub(crate) fn build_event_edge_runtime_config(
     let mut root = toml::value::Table::new();
 
     let mut strategy = toml::value::Table::new();
-    strategy.insert("name".to_string(), toml::Value::String("event_edge".to_string()));
+    strategy.insert(
+        "name".to_string(),
+        toml::Value::String("event_edge".to_string()),
+    );
     strategy.insert("enabled".to_string(), toml::Value::Boolean(cfg.enabled));
     strategy.insert("trade".to_string(), toml::Value::Boolean(cfg.trade));
     root.insert("strategy".to_string(), toml::Value::Table(strategy));
@@ -292,8 +298,16 @@ pub(crate) fn build_event_edge_runtime_config(
     root.insert("events".to_string(), toml::Value::Table(events));
 
     let mut entry = toml::value::Table::new();
-    insert_toml_float(&mut entry, "min_edge", cfg.min_edge.to_f64().unwrap_or(0.08));
-    insert_toml_float(&mut entry, "max_entry", cfg.max_entry.to_f64().unwrap_or(0.75));
+    insert_toml_float(
+        &mut entry,
+        "min_edge",
+        cfg.min_edge.to_f64().unwrap_or(0.08),
+    );
+    insert_toml_float(
+        &mut entry,
+        "max_entry",
+        cfg.max_entry.to_f64().unwrap_or(0.75),
+    );
     insert_toml_int(&mut entry, "shares", cfg.shares as i64);
     root.insert("entry".to_string(), toml::Value::Table(entry));
 
@@ -375,7 +389,11 @@ pub(crate) fn build_nba_comeback_runtime_config(
     root.insert("strategy".to_string(), toml::Value::Table(strategy));
 
     let mut entry = toml::value::Table::new();
-    insert_toml_float(&mut entry, "min_edge", cfg.min_edge.to_f64().unwrap_or(0.05));
+    insert_toml_float(
+        &mut entry,
+        "min_edge",
+        cfg.min_edge.to_f64().unwrap_or(0.05),
+    );
     insert_toml_float(
         &mut entry,
         "max_entry_price",
@@ -413,7 +431,10 @@ pub(crate) fn build_nba_comeback_runtime_config(
     insert_toml_int(&mut scan, "max_deficit", cfg.max_deficit as i64);
     insert_toml_int(&mut scan, "target_quarter", cfg.target_quarter as i64);
     insert_toml_float(&mut scan, "min_comeback_rate", cfg.min_comeback_rate);
-    scan.insert("season".to_string(), toml::Value::String(cfg.season.clone()));
+    scan.insert(
+        "season".to_string(),
+        toml::Value::String(cfg.season.clone()),
+    );
     root.insert("scan".to_string(), toml::Value::Table(scan));
 
     let mut database = toml::value::Table::new();
@@ -424,7 +445,10 @@ pub(crate) fn build_nba_comeback_runtime_config(
     root.insert("database".to_string(), toml::Value::Table(database));
 
     let mut grok = toml::value::Table::new();
-    grok.insert("enabled".to_string(), toml::Value::Boolean(cfg.grok_enabled));
+    grok.insert(
+        "enabled".to_string(),
+        toml::Value::Boolean(cfg.grok_enabled),
+    );
     insert_toml_int(&mut grok, "interval_secs", cfg.grok_interval_secs as i64);
     insert_toml_float(
         &mut grok,
@@ -447,7 +471,9 @@ pub(crate) fn build_nba_comeback_runtime_config(
     insert_toml_float(
         &mut performance,
         "daily_loss_limit_usd",
-        cfg.performance_daily_loss_limit_usd.to_f64().unwrap_or(30.0),
+        cfg.performance_daily_loss_limit_usd
+            .to_f64()
+            .unwrap_or(30.0),
     );
     insert_toml_int(
         &mut performance,
@@ -509,16 +535,8 @@ pub(crate) fn build_nba_comeback_runtime_config(
         "enabled".to_string(),
         toml::Value::Boolean(cfg.early_exit_enabled),
     );
-    insert_toml_float(
-        &mut exit,
-        "take_profit_pct",
-        cfg.early_exit_take_profit_pct,
-    );
-    insert_toml_float(
-        &mut exit,
-        "stop_loss_pct",
-        cfg.early_exit_stop_loss_pct,
-    );
+    insert_toml_float(&mut exit, "take_profit_pct", cfg.early_exit_take_profit_pct);
+    insert_toml_float(&mut exit, "stop_loss_pct", cfg.early_exit_stop_loss_pct);
     root.insert("exit".to_string(), toml::Value::Table(exit));
 
     format!(

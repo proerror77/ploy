@@ -11,10 +11,10 @@ use uuid::Uuid;
 
 use crate::config::EventEdgeAgentConfig;
 use crate::error::Result;
+use crate::platform::traits::DomainAgent;
 use crate::platform::{
     AgentStatus, Domain, DomainEvent, ExecutionReport, OrderIntent, OrderPriority,
 };
-use crate::platform::traits::DomainAgent;
 use crate::strategy::event_edge::core::{EventEdgeCore, TradeDecision};
 use crate::strategy::event_edge::data_source::{ArenaTextSource, EventDataSource};
 

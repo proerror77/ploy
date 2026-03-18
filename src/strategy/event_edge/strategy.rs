@@ -178,7 +178,8 @@ impl EventEdgeStrategy {
     fn record_pending_trade_if_needed(&mut self, client_order_id: &str) {
         if let Some(pending) = self.pending_orders.get_mut(client_order_id) {
             if !pending.cooldown_recorded {
-                self.core.record_trade(&pending.decision.token_id, pending.spend);
+                self.core
+                    .record_trade(&pending.decision.token_id, pending.spend);
                 pending.cooldown_recorded = true;
             }
         }
@@ -225,7 +226,9 @@ impl Strategy for EventEdgeStrategy {
         match update.status {
             OrderStatus::PartiallyFilled | OrderStatus::Filled => {
                 if let Some(pending) = self.pending_orders.get(client_order_id) {
-                    let price = update.avg_fill_price.unwrap_or(pending.decision.limit_price);
+                    let price = update
+                        .avg_fill_price
+                        .unwrap_or(pending.decision.limit_price);
                     let shares = if update.filled_qty > 0 {
                         update.filled_qty
                     } else {
@@ -246,7 +249,10 @@ impl Strategy for EventEdgeStrategy {
                     self.pending_orders.remove(client_order_id);
                 }
             }
-            OrderStatus::Rejected | OrderStatus::Cancelled | OrderStatus::Expired | OrderStatus::Failed => {
+            OrderStatus::Rejected
+            | OrderStatus::Cancelled
+            | OrderStatus::Expired
+            | OrderStatus::Failed => {
                 self.pending_orders.remove(client_order_id);
             }
             OrderStatus::Pending | OrderStatus::Submitted => {}
@@ -309,12 +315,9 @@ impl Strategy for EventEdgeStrategy {
             active: self.is_active(),
             position_count: self.positions.len(),
             pending_order_count: self.pending_orders.len(),
-            total_exposure: self
-                .positions
-                .values()
-                .fold(Decimal::ZERO, |acc, pos| {
-                    acc + Decimal::from(pos.shares) * pos.entry_price
-                }),
+            total_exposure: self.positions.values().fold(Decimal::ZERO, |acc, pos| {
+                acc + Decimal::from(pos.shares) * pos.entry_price
+            }),
             unrealized_pnl: Decimal::ZERO,
             realized_pnl_today: Decimal::ZERO,
             last_update: self.last_update,
@@ -423,7 +426,12 @@ rest_url = "https://clob.polymarket.com"
         let strategy = EventEdgeStrategy::from_toml("event_edge_test".to_string(), toml, true)
             .expect("strategy should parse");
 
-        assert_eq!(strategy.required_feeds(), vec![DataFeed::Tick { interval_ms: 180_000 }]);
+        assert_eq!(
+            strategy.required_feeds(),
+            vec![DataFeed::Tick {
+                interval_ms: 180_000
+            }]
+        );
         assert_eq!(strategy.core.cfg.event_ids, vec!["evt-1".to_string()]);
         assert_eq!(strategy.core.cfg.titles, vec!["Best AI model".to_string()]);
         assert_eq!(strategy.core.cfg.shares, 25);
@@ -466,7 +474,10 @@ rest_url = "https://clob.polymarket.com"
             } => {
                 assert!(client_order_id.starts_with("event_edge_evt-1_token-1_"));
                 assert_eq!(order.client_order_id, client_order_id);
-                assert_eq!(order.idempotency_key.as_deref(), Some(client_order_id.as_str()));
+                assert_eq!(
+                    order.idempotency_key.as_deref(),
+                    Some(client_order_id.as_str())
+                );
                 assert_eq!(order.token_id, "token-1");
                 assert_eq!(order.shares, 42);
             }
@@ -501,7 +512,10 @@ rest_url = "https://clob.polymarket.com"
             net_ev: Decimal::new(8, 2),
         });
 
-        let StrategyAction::SubmitOrder { client_order_id, .. } = action else {
+        let StrategyAction::SubmitOrder {
+            client_order_id, ..
+        } = action
+        else {
             panic!("expected submit order");
         };
         strategy

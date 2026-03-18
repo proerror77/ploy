@@ -96,9 +96,7 @@ impl Rebalancer {
         now: DateTime<Utc>,
     ) -> bool {
         // Check minimum interval
-        let secs_since_last = (now - straddle.last_rebalance)
-            .num_seconds()
-            .max(0) as u64;
+        let secs_since_last = (now - straddle.last_rebalance).num_seconds().max(0) as u64;
         if secs_since_last < self.min_interval_secs {
             return false;
         }
