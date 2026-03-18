@@ -14,10 +14,10 @@ use uuid::Uuid;
 
 use crate::domain::Side;
 use crate::error::Result;
+use crate::platform::traits::DomainAgent;
 use crate::platform::{
     AgentStatus, Domain, DomainEvent, ExecutionReport, OrderIntent, OrderPriority,
 };
-use crate::platform::traits::DomainAgent;
 use crate::strategy::nba_comeback::core::{ComebackOpportunity, NbaComebackCore};
 
 const DEPLOYMENT_ID_NBA_COMEBACK: &str = "sports.pm.nba.comeback";

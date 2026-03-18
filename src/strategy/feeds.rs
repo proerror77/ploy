@@ -958,7 +958,8 @@ impl DataFeedManager {
             }
         }
 
-        self.ensure_binance_l2_feed_started(binance_l2_symbols).await;
+        self.ensure_binance_l2_feed_started(binance_l2_symbols)
+            .await;
 
         // Subscribe to Polymarket tokens.
         //

@@ -13,11 +13,10 @@ use tracing::{debug, info, warn};
 
 use crate::domain::Side;
 use crate::error::Result;
-use crate::platform::{
-    AgentRiskParams, AgentStatus, Domain, DomainEvent, ExecutionReport, OrderIntent,
-    OrderPriority,
-};
 use crate::platform::traits::DomainAgent;
+use crate::platform::{
+    AgentRiskParams, AgentStatus, Domain, DomainEvent, ExecutionReport, OrderIntent, OrderPriority,
+};
 
 const DEPLOYMENT_ID_CRYPTO_SPLIT_ARB: &str = "crypto.pm.split_arb";
 

@@ -117,10 +117,7 @@ pub fn realized_vol_from_closes(closes: &[f64], _window_secs: f64) -> Option<f64
         return None;
     }
 
-    let log_returns: Vec<f64> = closes
-        .windows(2)
-        .map(|w| (w[1] / w[0]).ln())
-        .collect();
+    let log_returns: Vec<f64> = closes.windows(2).map(|w| (w[1] / w[0]).ln()).collect();
 
     let n = log_returns.len() as f64;
     let mean = log_returns.iter().sum::<f64>() / n;
@@ -148,7 +145,11 @@ mod tests {
         let g = binary_greeks(100.0, 100.0, 0.01, 450.0, 900.0).unwrap();
 
         // Fair value should be close to 0.5 at ATM
-        assert!((g.fair_value - 0.5).abs() < 0.05, "fair_value={}", g.fair_value);
+        assert!(
+            (g.fair_value - 0.5).abs() < 0.05,
+            "fair_value={}",
+            g.fair_value
+        );
 
         // Delta should be positive (call delta)
         assert!(g.delta > 0.0, "delta={}", g.delta);

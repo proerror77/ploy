@@ -211,13 +211,7 @@ fn select_polymarket_price_for_symbol(
     }
 
     if let Some((_, _, yes, no, slug, yes_token_id, no_token_id)) = best {
-        (
-            Some(yes),
-            Some(no),
-            Some(slug),
-            yes_token_id,
-            no_token_id,
-        )
+        (Some(yes), Some(no), Some(slug), yes_token_id, no_token_id)
     } else {
         (None, None, None, None, None)
     }
@@ -482,9 +476,11 @@ impl SyncCollector {
             .execute(pool)
             .await?;
 
-            sqlx::query("CREATE INDEX IF NOT EXISTS idx_sync_records_ts ON sync_records(timestamp)")
-                .execute(pool)
-                .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_sync_records_ts ON sync_records(timestamp)",
+            )
+            .execute(pool)
+            .await?;
             sqlx::query(
                 "CREATE INDEX IF NOT EXISTS idx_sync_records_symbol ON sync_records(symbol)",
             )
