@@ -363,6 +363,20 @@ jobs:
                 | $SUDO tee "${dropin_dir}/10-memory-restart.conf" >/dev/null
             }
 
+            wait_for_unit_active() {
+              local unit="$1"
+              local attempts="${2:-20}"
+              local delay_secs="${3:-2}"
+              local i
+              for i in $(seq 1 "$attempts"); do
+                if systemctl is-active --quiet "$unit"; then
+                  return 0
+                fi
+                sleep "$delay_secs"
+              done
+              return 1
+            }
+
             for unit in ploy ploy-platform ploy-platform-live; do
               if unit_exists "$unit"; then
                 write_guardrail_dropin "$unit"
@@ -375,14 +389,16 @@ jobs:
             for unit in ploy ploy-platform ploy-platform-live; do
               unit_exists "$unit" || continue
               if systemctl is-active --quiet "$unit"; then
+                action="restart"
                 $SUDO systemctl restart "$unit"
-                sleep 2
-                $SUDO systemctl is-active --quiet "$unit"
-                $SUDO systemctl show "$unit" -p Restart -p RestartUSec -p MemoryHigh -p MemoryMax -p OOMPolicy
-                restarted_any=1
               else
-                echo "${unit}.service is installed but inactive; skip restart."
+                action="start"
+                $SUDO systemctl start "$unit"
               fi
+              wait_for_unit_active "$unit" 20 2
+              $SUDO systemctl show "$unit" -p Restart -p RestartUSec -p MemoryHigh -p MemoryMax -p OOMPolicy
+              echo "${unit}.service ${action}ed successfully."
+              restarted_any=1
             done
 
             if [ "$restarted_any" -eq 0 ]; then
