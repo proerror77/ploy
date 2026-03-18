@@ -8,6 +8,20 @@ use diagnostics::{print_backtest_db_diagnostics, verify_backtest_trades_gamma};
 
 pub(super) use reporting::{run_backtest_diff, run_backtest_list, run_live_backtest_compare};
 
+fn backtest_db_max_connections() -> u32 {
+    for key in [
+        "PLOY_DATABASE__MAX_CONNECTIONS",
+        "PLOY__DATABASE__MAX_CONNECTIONS",
+        "PLOY_DATABASE_MAX_CONNECTIONS",
+    ] {
+        if let Ok(raw) = std::env::var(key) {
+            if let Ok(parsed) = raw.trim().parse::<u32>() {
+                return parsed.max(1);
+            }
+        }
+    }
+    5
+}
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_backtest(
     name: &str,
@@ -108,7 +122,7 @@ pub(super) async fn run_backtest(
 
     if let Some(ref run_id_str) = verify_run {
         let run_id: uuid::Uuid = run_id_str.parse().context("Invalid run UUID")?;
-        let store = PostgresStore::new(&db_url, 5).await?;
+        let store = PostgresStore::new(&db_url, backtest_db_max_connections()).await?;
         let report = backtest_report::load_report(store.pool(), run_id).await?;
         if json_output {
             println!("{}", report.to_json()?);
@@ -141,7 +155,7 @@ pub(super) async fn run_backtest(
         .map(|dt| dt.with_timezone(&chrono::Utc));
 
     // Unified backtest feed path: database only.
-    let store = PostgresStore::new(&db_url, 5).await?;
+    let store = PostgresStore::new(&db_url, backtest_db_max_connections()).await?;
     if diagnose_db {
         print_backtest_db_diagnostics(store.pool(), &symbol_list, from_dt, to_dt).await?;
         return Ok(());
