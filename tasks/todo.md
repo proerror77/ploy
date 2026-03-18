@@ -6774,3 +6774,35 @@ test-only modules:
   - `CARGO_TARGET_DIR=/tmp/ploy-wave29-combined rtk cargo test test_detect_split_merge_opportunity_flags_buy_and_merge --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave29-combined rtk cargo test test_analyze_near_settlement_marks_negative_ev_as_high_risk --lib -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave29-combined rtk cargo test test_reverse_engine_executes_buys_and_sells --lib -- --exact --nocapture`
+
+# Structural Wave 30 (2026-03-13)
+
+## Goal
+Continue shrinking active strategy owners that still mix orchestration with
+runtime logic or internal state management:
+- `gamma_scalping`
+- `pattern_memory`
+- `manager`
+
+## File ownership
+
+- Worker A
+  - `src/strategy/gamma_scalping/strategy.rs`
+  - optional new sibling modules under `src/strategy/gamma_scalping/strategy/`
+- Worker B
+  - `src/strategy/pattern_memory/strategy.rs`
+  - optional new sibling modules under `src/strategy/pattern_memory/strategy/`
+- Worker C
+  - `src/strategy/manager.rs`
+  - optional new sibling modules under `src/strategy/manager/`
+
+## Tasks
+
+- [ ] Extract the next cohesive owner from `gamma_scalping`.
+- [ ] Extract the next cohesive owner from `pattern_memory`.
+- [ ] Extract the next cohesive owner from `manager`.
+- [ ] Integrate the completed parallel cuts and re-run focused validation.
+
+## Progress notes
+
+- 2026-03-13: Pre-assigned three disjoint strategy owners after landing Wave 29 on `origin/session/order-intent-wave24-continuation`.
