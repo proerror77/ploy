@@ -38,12 +38,11 @@ pub mod traits;
 
 pub use runtime_facade::{
     engine, engine_store, executor, fund_manager, idempotency, AlertLevel, DataFeed,
-    DataFeedBuilder, DataFeedManager, FundManager, FundStatus,
-    IdempotencyManager, IdempotencyResult, MarketUpdate, MomentumStrategyAdapter, OrderExecutor,
-    OrderUpdate, PositionInfo, PositionSizeResult, RiskLevel, SplitArbStrategyAdapter,
-    StaggeredArbAdapter, Strategy, StrategyAction, StrategyConfig, StrategyEngine, StrategyEvent,
-    StrategyEventType, StrategyFactory, StrategyInfo, StrategyManager, StrategyStateInfo,
-    StrategyStatus,
+    DataFeedBuilder, DataFeedManager, FundManager, FundStatus, IdempotencyManager,
+    IdempotencyResult, MarketUpdate, MomentumStrategyAdapter, OrderExecutor, OrderUpdate,
+    PositionInfo, PositionSizeResult, RiskLevel, SplitArbStrategyAdapter, StaggeredArbAdapter,
+    Strategy, StrategyAction, StrategyConfig, StrategyEngine, StrategyEvent, StrategyEventType,
+    StrategyFactory, StrategyInfo, StrategyManager, StrategyStateInfo, StrategyStatus,
 };
 
 // =============================================================================

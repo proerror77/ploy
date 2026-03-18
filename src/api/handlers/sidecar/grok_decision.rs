@@ -1,7 +1,7 @@
 use axum::{
-    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
+    Json,
 };
 use chrono::Utc;
 use rust_decimal::Decimal;
@@ -13,8 +13,8 @@ use uuid::Uuid;
 use crate::api::{auth::ensure_sidecar_authorized, state::AppState};
 use crate::strategy::nba_comeback::espn::{GameStatus, LiveGame};
 use crate::strategy::nba_comeback::grok_decision::{
-    ComebackSnapshot, DecisionTrigger, GrokDecision, MarketSnapshot, RiskMetrics,
-    UnifiedDecisionRequest, build_unified_prompt, parse_decision_response,
+    build_unified_prompt, parse_decision_response, ComebackSnapshot, DecisionTrigger, GrokDecision,
+    MarketSnapshot, RiskMetrics, UnifiedDecisionRequest,
 };
 use crate::strategy::nba_comeback::grok_intel::{
     GrokGameIntel, InjuryImpact, InjuryUpdate, MomentumDirection,

@@ -7,8 +7,8 @@ use crate::coordinator::governance::{GovernanceController, IngressMode};
 use crate::coordinator::position::PositionAggregator;
 use crate::coordinator::queue::OrderQueue;
 use crate::coordinator::OrderIntent;
-use crate::error::{PloyError, Result};
 use crate::domain::Domain;
+use crate::error::{PloyError, Result};
 
 use super::super::admission::{
     buy_intent_missing_deployment_reason, sell_reduce_only_violation_reason,
@@ -119,7 +119,8 @@ impl CoordinatorHandle {
             return Err(PloyError::Validation(reason));
         }
 
-        if let Some(reason) = reduce_only_violation(&self.positions, &self.order_queue, intent).await
+        if let Some(reason) =
+            reduce_only_violation(&self.positions, &self.order_queue, intent).await
         {
             return Err(PloyError::Validation(reason));
         }
@@ -145,7 +146,8 @@ impl Coordinator {
             return Some((reason, "order blocked due to missing deployment identity"));
         }
 
-        if let Some(reason) = reduce_only_violation(&self.positions, &self.order_queue, intent).await
+        if let Some(reason) =
+            reduce_only_violation(&self.positions, &self.order_queue, intent).await
         {
             return Some((reason, "order blocked by reduce-only sell guard"));
         }

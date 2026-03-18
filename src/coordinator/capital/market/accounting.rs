@@ -6,8 +6,8 @@ use crate::coordinator::command::{AllocatorLedgerSnapshot, DeploymentLedgerSnaps
 use crate::coordinator::OrderIntent;
 
 use super::{
-    MarketCapitalAllocator, intent_deployment_scope, intent_market_identity,
-    sell_release_reference_price,
+    intent_deployment_scope, intent_market_identity, sell_release_reference_price,
+    MarketCapitalAllocator,
 };
 
 #[derive(Debug, Clone)]

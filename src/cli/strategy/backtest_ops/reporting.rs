@@ -40,8 +40,7 @@ pub(crate) async fn run_backtest_list(database_url: Option<String>, limit: usize
     );
     println!("  {}", "-".repeat(110));
 
-    for (run_id, strategy, mode, symbols, trades, win_rate, pnl, sharpe, _dd, _pf, created) in
-        &rows
+    for (run_id, strategy, mode, symbols, trades, win_rate, pnl, sharpe, _dd, _pf, created) in &rows
     {
         let sym_str = if symbols.len() > 2 {
             format!("{}+{}", symbols[0], symbols.len() - 1)

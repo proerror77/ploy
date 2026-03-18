@@ -353,7 +353,14 @@ impl MomentumEngine {
 
         trace!(
             "🎯 {} {} p_hat={:.3} eff_p={:.3} ask={:.3} cost={:.4} ev_net={:.4} σ={:.5}",
-            symbol, direction, p_hat, effective_p, market_ask_f64, cost_total_f64, ev_net, sigma
+            symbol,
+            direction,
+            p_hat,
+            effective_p,
+            market_ask_f64,
+            cost_total_f64,
+            ev_net,
+            sigma
         );
 
         if ev_net < self.entry_threshold {

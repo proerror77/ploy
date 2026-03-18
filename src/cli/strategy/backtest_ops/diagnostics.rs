@@ -344,8 +344,8 @@ pub(super) async fn verify_backtest_trades_gamma(
     pool: &sqlx::PgPool,
     run_id: uuid::Uuid,
 ) -> Result<()> {
-    use crate::adapters::PolymarketClient;
     use super::super::settlement_ops::is_market_resolved;
+    use crate::adapters::PolymarketClient;
 
     crate::persistence::ensure_pm_token_settlements_table(pool)
         .await
@@ -668,7 +668,8 @@ pub(super) async fn verify_backtest_trades_gamma(
 }
 
 fn fmt_ts(ts: Option<DateTime<Utc>>) -> String {
-    ts.map(|t| t.to_rfc3339()).unwrap_or_else(|| "-".to_string())
+    ts.map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 async fn table_exists(pool: &sqlx::PgPool, table: &str) -> Result<bool> {

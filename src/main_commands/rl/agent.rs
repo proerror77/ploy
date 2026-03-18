@@ -29,9 +29,9 @@ pub(super) async fn run_agent(
     policy_version: &Option<String>,
 ) -> Result<()> {
     use ploy::adapters::PolymarketClient;
+    use ploy::data_plane::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
     use ploy::domain::Side;
     use ploy::error::PloyError;
-    use ploy::data_plane::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
     use ploy::rl::cli_agent::{RLCryptoAgent, RLCryptoAgentConfig};
     use ploy::rl::config::RLConfig;
     use ploy::rl::{CryptoEvent, DomainEvent, ExecutionReport, QuoteData};
@@ -433,8 +433,5 @@ async fn submit_intent_via_coordinator(intent: &OrderIntent) -> Result<Execution
         ))
     })?;
 
-    Ok(ExecutionReport::submitted(
-        intent,
-        Some(response.intent_id),
-    ))
+    Ok(ExecutionReport::submitted(intent, Some(response.intent_id)))
 }

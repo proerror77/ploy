@@ -1,4 +1,4 @@
-use super::{NBA_COMEBACK_STRATEGY_NAME, NbaComebackStrategy};
+use super::{NbaComebackStrategy, NBA_COMEBACK_STRATEGY_NAME};
 use crate::config::NbaComebackConfig;
 use crate::error::Result;
 use crate::strategy::nba_comeback::comeback_stats::ComebackStatsProvider;

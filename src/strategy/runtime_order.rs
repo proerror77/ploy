@@ -43,9 +43,9 @@ fn map_strategy_priority(priority: u8) -> OrderPriority {
 #[cfg(test)]
 mod tests {
     use super::order_intent_from_strategy_intent;
-    use crate::domain::{OrderType, TimeInForce};
     use crate::coordinator::OrderPriority;
     use crate::domain::Domain;
+    use crate::domain::{OrderType, TimeInForce};
     use crate::strategy::traits::StrategyOrderIntent;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;

@@ -8,9 +8,9 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::domain::Domain;
 use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
-use crate::domain::Domain;
 
 // ============================================================================
 // Strategy Trait

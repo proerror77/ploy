@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tracing::info;
 
 use super::lifecycle::{LiveOrderTrack, PaperPositionState, PaperTrade};
 use super::{
-    Direction, StaggeredArbAdapter, StrategyAction, StrategyEvent, StrategyEventType,
-    crypto_submit_intent, estimate_probability, polymarket_order_meets_minimum,
+    crypto_submit_intent, estimate_probability, polymarket_order_meets_minimum, Direction,
+    StaggeredArbAdapter, StrategyAction, StrategyEvent, StrategyEventType,
 };
 use crate::domain::Side;
 

@@ -88,9 +88,9 @@ impl CryptoCapitalAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::Side;
     use crate::coordinator::OrderIntent;
     use crate::domain::Domain;
+    use crate::domain::Side;
     use rust_decimal_macros::dec;
 
     fn make_allocator_config(total_cap: Decimal) -> CoordinatorConfig {

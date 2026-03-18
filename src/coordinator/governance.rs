@@ -5,8 +5,8 @@ use chrono::Utc;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 
-use crate::error::Result;
 use crate::domain::Domain;
+use crate::error::Result;
 
 use super::command::{
     DomainIngressSnapshot, GovernancePolicyHistoryEntry, GovernancePolicySnapshot,

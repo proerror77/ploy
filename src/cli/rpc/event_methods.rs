@@ -6,7 +6,7 @@ use crate::strategy::event_edge::{discover_best_event_id_by_title, scan_event_ed
 use crate::strategy::event_models::arena_text::fetch_arena_text_snapshot;
 use crate::strategy::multi_outcome::fetch_multi_outcome_event;
 use crate::strategy::registry::{EventFilter, EventStatus, EventUpsertRequest};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 pub(super) async fn handle_event_method(
     request_id: &Option<Value>,

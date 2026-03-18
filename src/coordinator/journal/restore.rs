@@ -1,7 +1,7 @@
 use super::*;
-use chrono::NaiveDate;
 use crate::coordinator::DrawdownSnapshot;
 use crate::domain::{Domain, Side};
+use chrono::NaiveDate;
 use sqlx::Row;
 use std::collections::HashMap;
 

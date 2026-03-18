@@ -16,15 +16,15 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tracing::{debug, info, warn};
 
 use super::momentum::Direction;
 use super::probability::estimate_probability;
 use super::staggered_arb_backtest::{
-    PmEventQuoteState, StaggeredArbBacktestConfig, polymarket_order_meets_minimum,
+    polymarket_order_meets_minimum, PmEventQuoteState, StaggeredArbBacktestConfig,
 };
 use super::traits::{
     DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,

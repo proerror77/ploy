@@ -3,8 +3,8 @@ use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use crate::domain::OrderStatus;
 use crate::coordinator::OrderIntent;
+use crate::domain::OrderStatus;
 use crate::strategy::{executor::ExecutionResult, OrderUpdate};
 
 use super::Coordinator;

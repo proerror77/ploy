@@ -9,8 +9,8 @@ use tracing::warn;
 
 use crate::adapters::{PolymarketClient, PolymarketWebSocket};
 use crate::coordinator::CoordinatorHandle;
-use crate::error::{PloyError, Result};
 use crate::data_plane::PlatformDataPlane;
+use crate::error::{PloyError, Result};
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::{DataFeed, DataFeedManager, OrderUpdate, StrategyFactory, StrategyManager};
 

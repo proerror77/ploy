@@ -3,8 +3,8 @@ use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info};
 
-use crate::error::Result;
 use crate::domain::Domain;
+use crate::error::Result;
 
 use super::super::governance::load_governance_policy;
 use super::Coordinator;

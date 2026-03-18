@@ -17,8 +17,8 @@ mod position;
 mod queue;
 mod risk;
 pub mod state;
-pub mod subscription_planner;
 pub mod strategy_runtime;
+pub mod subscription_planner;
 
 pub use bootstrap::{start_platform, PlatformBootstrapConfig, PlatformStartControl};
 pub use command::{

@@ -7,14 +7,14 @@
 //! 4. Exit via take-profit, stop-loss, trailing stop, or hold to resolution
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::adapters::{
@@ -25,7 +25,6 @@ use crate::config::RiskConfig;
 use crate::data_plane::CryptoDataPlaneHandle;
 use crate::domain::{OrderRequest, Side};
 use crate::error::Result;
-use crate::strategy::OrderExecutor;
 use crate::strategy::crypto::{
     horizon_for_series as crypto_horizon_for_series, known_binance_symbols,
     series_ids_for_symbol as crypto_series_ids_for_symbol,
@@ -35,6 +34,7 @@ use crate::strategy::fee_model::FeeModel;
 use crate::strategy::fund_manager::{FundManager, PositionSizeResult};
 use crate::strategy::probability;
 use crate::strategy::volatility::{EventTracker, VolatilityConfig, VolatilityDetector};
+use crate::strategy::OrderExecutor;
 
 mod best_edge;
 mod config;

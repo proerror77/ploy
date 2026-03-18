@@ -18,9 +18,9 @@ use super::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
     StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
+use crate::domain::Domain;
 use crate::domain::{OrderType, Side, TimeInForce};
 use crate::error::Result;
-use crate::domain::Domain;
 use crate::strategy::crypto::{all_updown_series_ids, symbol_and_window_for_series};
 mod momentum_adapter;
 mod split_arb_adapter;

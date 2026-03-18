@@ -1,9 +1,9 @@
-use crate::adapters::PolymarketClient;
 use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
+use crate::adapters::PolymarketClient;
 use crate::error::Result;
 use crate::signing::Wallet;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::path::PathBuf;
 
 mod event_methods;
@@ -15,9 +15,9 @@ use event_methods::handle_event_method;
 use intent_methods::handle_coordinator_intent_method;
 use pm_read_methods::handle_pm_read_method;
 use write_support::{
-    IdempotencyContext, finalize_write_response, hash_idempotency_params, idempotency_record_path,
-    is_write_method, load_app_config, load_idempotency_record, parse_idempotency_key, parse_str,
-    require_write_enabled, write_enabled,
+    finalize_write_response, hash_idempotency_params, idempotency_record_path, is_write_method,
+    load_app_config, load_idempotency_record, parse_idempotency_key, parse_str,
+    require_write_enabled, write_enabled, IdempotencyContext,
 };
 // (keep logs minimal; stdout is reserved for JSON-RPC responses)
 
