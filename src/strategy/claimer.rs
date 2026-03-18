@@ -360,8 +360,7 @@ pub async fn ensure_account_claimer_daemon() -> Result<()> {
             }
         }
     } else {
-        match PolymarketClient::new_authenticated("https://clob.polymarket.com", wallet, true)
-            .await
+        match PolymarketClient::new_authenticated("https://clob.polymarket.com", wallet, true).await
         {
             Ok(c) => c,
             Err(e) => {
@@ -909,8 +908,7 @@ impl AutoClaimer {
             if !api_says_redeemable && allow_price_fallback && is_winner && settled_hint {
                 debug!(
                     "Using settlement fallback for condition {:?} (cur_price={:?})",
-                    p.condition_id,
-                    p.cur_price
+                    p.condition_id, p.cur_price
                 );
             }
 

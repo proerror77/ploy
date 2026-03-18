@@ -5,10 +5,10 @@
 
 use chrono::{Duration, Utc};
 use ploy::strategy::backtest_feed::{HistoricalFeed, MarketUpdate, UpdateType};
+use ploy::strategy::backtest_recorder::NullRecorder;
 use ploy::strategy::staggered_arb_backtest::{
     StaggeredArbBacktestConfig, StaggeredArbBacktestEngine,
 };
-use ploy::strategy::backtest_recorder::NullRecorder;
 use rust_decimal_macros::dec;
 
 fn main() {
@@ -63,7 +63,10 @@ fn main() {
     println!("  Max Leg1 Price: ${}", config.max_leg1_price);
     println!("  Merge Target Sum: ${}", config.merge_target_sum);
     println!("  Min Profit Target: ${}", config.min_profit_target);
-    println!("  Direction Threshold: {:.1}%", config.direction_threshold * 100.0);
+    println!(
+        "  Direction Threshold: {:.1}%",
+        config.direction_threshold * 100.0
+    );
     println!("  Greeks Enabled: {}\n", config.use_greeks);
 
     // Run backtest
@@ -115,7 +118,10 @@ fn main() {
                 println!("    Delta: {:.6}", delta);
                 println!("    Gamma: {:.6}", trade.entry_gamma.unwrap_or(0.0));
                 println!("    Theta: {:.6}/s", trade.entry_theta.unwrap_or(0.0));
-                println!("    Fair Value: {:.4}", trade.entry_fair_value.unwrap_or(0.0));
+                println!(
+                    "    Fair Value: {:.4}",
+                    trade.entry_fair_value.unwrap_or(0.0)
+                );
             }
             println!();
         }

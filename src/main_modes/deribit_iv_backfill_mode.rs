@@ -169,9 +169,10 @@ fn parse_rfc3339(raw: &str) -> Result<DateTime<Utc>> {
 }
 
 async fn deribit_iv_table_exists(pool: &PgPool) -> Result<bool> {
-    let reg: Option<String> = sqlx::query_scalar("SELECT to_regclass('public.deribit_iv_ticks')::text")
-        .fetch_one(pool)
-        .await?;
+    let reg: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public.deribit_iv_ticks')::text")
+            .fetch_one(pool)
+            .await?;
     Ok(reg.is_some())
 }
 
@@ -299,12 +300,20 @@ async fn build_insert_plan(pool: &PgPool) -> Result<InsertPlan> {
     }
 
     // Validate: must have at least timestamp + currency + iv.
-    let has_ts = columns.iter().any(|c| matches!(c.value, InsertValue::Timestamp));
-    let has_ccy = columns.iter().any(|c| matches!(c.value, InsertValue::Currency));
+    let has_ts = columns
+        .iter()
+        .any(|c| matches!(c.value, InsertValue::Timestamp));
+    let has_ccy = columns
+        .iter()
+        .any(|c| matches!(c.value, InsertValue::Currency));
     let has_iv = columns.iter().any(|c| {
         matches!(
             c.value,
-            InsertValue::IvSingle | InsertValue::IvOpen | InsertValue::IvHigh | InsertValue::IvLow | InsertValue::IvClose
+            InsertValue::IvSingle
+                | InsertValue::IvOpen
+                | InsertValue::IvHigh
+                | InsertValue::IvLow
+                | InsertValue::IvClose
         )
     });
 
@@ -344,8 +353,9 @@ async fn backfill_currency(
     );
 
     for page_idx in 0.. {
-        let page = fetch_vol_index_page(http, base_url, currency, start_ms, end_ms, resolution_secs)
-            .await?;
+        let page =
+            fetch_vol_index_page(http, base_url, currency, start_ms, end_ms, resolution_secs)
+                .await?;
 
         if page.data.is_empty() {
             debug!(
@@ -394,8 +404,8 @@ async fn backfill_currency(
             let plan = insert_plan.ok_or_else(|| {
                 PloyError::Internal("insert_plan missing (this is a bug)".to_string())
             })?;
-            let inserted = insert_bars(pool, plan, currency, resolution_secs, DEFAULT_SOURCE, &bars)
-                .await?;
+            let inserted =
+                insert_bars(pool, plan, currency, resolution_secs, DEFAULT_SOURCE, &bars).await?;
             total_inserted += inserted;
         }
 
@@ -496,9 +506,8 @@ async fn insert_bars(
         .map(|c| c.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let mut qb = QueryBuilder::<Postgres>::new(format!(
-        "INSERT INTO deribit_iv_ticks ({cols_joined}) "
-    ));
+    let mut qb =
+        QueryBuilder::<Postgres>::new(format!("INSERT INTO deribit_iv_ticks ({cols_joined}) "));
 
     qb.push_values(bars.iter(), |mut b, bar| {
         for col in &plan.columns {
