@@ -3174,62 +3174,6 @@ async fn spawn_canonical_crypto_strategy_runtimes(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn start_sports_strategy_runtime(
-    agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
-    coordinator: &mut Coordinator,
-    shutdown_tx: &broadcast::Sender<()>,
-    app_config: &AppConfig,
-    shared_pool: Option<PgPool>,
-    freshness: Arc<crate::platform::DataPlaneFreshness>,
-    pm_client: Option<PolymarketClient>,
-    account_id: &str,
-    dry_run: bool,
-    sports_cfg: SportsTradingConfig,
-    nba_cfg: &crate::config::NbaComebackConfig,
-) -> Result<()> {
-    let registry = PluginRegistry::builtin_runtime_registry()?;
-    let definition = registry
-        .plugin("sports.nba_comeback.v1")
-        .ok_or_else(|| anyhow::anyhow!("missing sports.nba_comeback.v1 plugin definition"))?;
-    let managed_runtime_spec = crate::plugins::projector::project_nba_comeback_runtime_spec(
-        definition,
-        &PluginSpec::RegisteredStrategy(RegisteredStrategySpec::nba_comeback()),
-        &PluginDeployment {
-            deployment_id: format!("deploy.sports.nba_comeback.{}", sports_cfg.agent_id),
-            plugin_id: definition.plugin_id.clone(),
-            account_id: account_id.to_string(),
-            state: crate::plugins::DeploymentState::Enabled,
-        },
-        &app_config.database.url,
-        &sports_cfg,
-        nba_cfg,
-    )?;
-
-    let pool = start_sports_market_data_support(shared_pool, app_config, freshness, &sports_cfg)
-        .await?;
-
-    spawn_managed_strategy_runtime_spec(
-        agent_handles,
-        coordinator,
-        shutdown_tx,
-        managed_runtime_spec,
-        sports_cfg.risk_params.clone(),
-        dry_run,
-        pm_client,
-        &app_config.market.ws_url,
-        None,
-        Some(pool.clone()),
-        account_id,
-    )?;
-    info!(
-        agent = %sports_cfg.agent_id,
-        "sports nba_comeback strategy runtime spawned"
-    );
-
-    Ok(())
-}
-
 fn spawn_politics_strategy_runtime(
     agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     coordinator: &mut Coordinator,
@@ -3275,6 +3219,10 @@ fn spawn_politics_strategy_runtime(
     )?;
     info!(agent = %strategy_agent_id, "politics event_edge strategy runtime spawned");
     Ok(())
+}
+
+fn compat_crypto_runtimes_enabled() -> bool {
+    env_bool("PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES", false)
 }
 
 fn compat_sports_runtimes_enabled() -> bool {

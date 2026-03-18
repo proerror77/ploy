@@ -1491,6 +1491,25 @@ no_trade_override_flow = 99.0
 "#
     }
 
+    fn nav_kelly_toml() -> &'static str {
+        r#"
+[strategy]
+name = "pm_5m_directional"
+enabled = true
+
+[pm_5m_directional]
+symbols = ["BTCUSDT"]
+shares_per_trade = 500
+min_shares = 1
+min_time_remaining_secs = 15
+max_time_remaining_secs = 300
+kelly_fraction_scale = 1.0
+kelly_fraction_cap = 0.25
+initial_nav_usd = 1000
+max_nav_fraction_per_trade = 0.01
+"#
+    }
+
     fn event_update(now: DateTime<Utc>) -> MarketUpdate {
         MarketUpdate::EventDiscovered {
             event_id: "evt-btc-5m".to_string(),
@@ -1636,6 +1655,62 @@ no_trade_override_flow = 99.0
         }
 
         assert!(saw_submit, "expected IOC submit intent for up side");
+    }
+
+    #[tokio::test]
+    async fn nav_based_kelly_sizing_uses_current_nav_cap() {
+        let mut strategy =
+            Pm5mDirectionalStrategy::from_toml("pm5-test".to_string(), nav_kelly_toml(), true)
+                .expect("strategy");
+        let start = Utc::now();
+
+        for second in 0..30 {
+            let ts = start + chrono::Duration::seconds(second);
+            let price = dec!(100.05) + Decimal::new(second as i64, 3);
+            strategy
+                .on_market_update(&price_update(ts, price))
+                .await
+                .expect("history price");
+        }
+
+        let anchor = start + chrono::Duration::seconds(31);
+        strategy
+            .on_market_update(&event_update(anchor))
+            .await
+            .expect("event");
+        strategy
+            .on_market_update(&up_quote(anchor, dec!(0.20), dec!(0.19)))
+            .await
+            .expect("up quote");
+        strategy
+            .on_market_update(&down_quote(anchor, dec!(0.82), dec!(0.81)))
+            .await
+            .expect("down quote");
+        strategy
+            .on_market_update(&l2_update(anchor, dec!(0.30), dec!(0.25), dec!(1.0)))
+            .await
+            .expect("l2");
+
+        let mut submitted_shares = None;
+        for step in 0..8 {
+            let ts = anchor + chrono::Duration::milliseconds((step as i64) * 250);
+            let price = dec!(100.220) + Decimal::new(step as i64, 3);
+            let actions = strategy
+                .on_market_update(&price_update(ts, price))
+                .await
+                .expect("price");
+            for action in actions {
+                if let StrategyAction::SubmitIntent { intent } = action {
+                    submitted_shares = Some(intent.shares);
+                    break;
+                }
+            }
+            if submitted_shares.is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(submitted_shares, Some(50));
     }
 
     #[tokio::test]
@@ -1860,5 +1935,50 @@ no_trade_override_flow = 99.0
         assert_eq!(state.unrealized_pnl, dec!(0.50));
         assert_eq!(positions.len(), 1);
         assert_eq!(positions[0].unrealized_pnl, dec!(0.50));
+    }
+
+    #[tokio::test]
+    async fn event_expiry_realizes_marked_pnl_into_strategy_state() {
+        let mut strategy =
+            Pm5mDirectionalStrategy::from_toml("pm5-test".to_string(), nav_kelly_toml(), true)
+                .expect("strategy");
+        let start = Utc::now();
+
+        strategy.positions.insert(
+            "up-token".to_string(),
+            DirectionalPosition {
+                event_id: "evt-btc-5m".to_string(),
+                token_id: "up-token".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                side: Side::Up,
+                shares: 10,
+                entry_price: dec!(0.40),
+                current_price: Some(dec!(0.75)),
+                opened_at: start,
+                end_time: start + chrono::Duration::seconds(180),
+            },
+        );
+        strategy.active_events.insert(
+            "evt-btc-5m".to_string(),
+            TrackedEvent {
+                event_id: "evt-btc-5m".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                up_token_id: "up-token".to_string(),
+                down_token_id: "down-token".to_string(),
+                end_time: start + chrono::Duration::seconds(180),
+                price_to_beat: dec!(100),
+            },
+        );
+
+        strategy
+            .on_market_update(&MarketUpdate::EventExpired {
+                event_id: "evt-btc-5m".to_string(),
+            })
+            .await
+            .expect("event expired");
+
+        let state = strategy.state();
+        assert_eq!(state.realized_pnl_today, dec!(3.50));
+        assert!(strategy.positions.is_empty());
     }
 }

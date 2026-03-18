@@ -823,6 +823,14 @@ pub(super) async fn run_backtest(
 #[cfg(test)]
 mod tests {
     use super::normalize_backtest_strategy_name;
+    use super::{build_pm_event_replay_selection, PmReplayQuality};
+    use crate::adapters::PostgresStore;
+    use crate::strategy::backtest_feed::HistoricalFeed;
+    use crate::strategy::pm_5m_directional_backtest::{
+        Pm5mDirectionalBacktestConfig, Pm5mDirectionalBacktestEngine,
+    };
+    use chrono::{DateTime, Utc};
+    use rust_decimal::Decimal;
 
     #[test]
     fn normalize_backtest_strategy_name_accepts_pm_5m_directional_aliases() {
@@ -840,6 +848,81 @@ mod tests {
                 .expect("compact alias should parse"),
             "pm_5m_directional"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "DB smoke test for recent pm5 segmented replay"]
+    async fn smoke_pm5_recent_db_strict_vs_research() {
+        let database_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/ploy".to_string());
+        let store = PostgresStore::new(&database_url, 5)
+            .await
+            .expect("postgres store");
+        let symbols = vec!["BTCUSDT".to_string()];
+        let from_dt = Some(
+            DateTime::parse_from_rfc3339("2026-03-12T00:00:00Z")
+                .expect("from")
+                .with_timezone(&Utc),
+        );
+        let to_dt = Some(
+            DateTime::parse_from_rfc3339("2026-03-13T00:00:00Z")
+                .expect("to")
+                .with_timezone(&Utc),
+        );
+
+        for minimum_quality in [PmReplayQuality::Strict, PmReplayQuality::Research] {
+            let replay_selection = build_pm_event_replay_selection(
+                store.pool(),
+                &symbols,
+                from_dt,
+                to_dt,
+                minimum_quality,
+            )
+            .await
+            .expect("replay selection");
+            println!(
+                "quality={minimum_quality:?} total={} kept={} strict={} research={} dropped={} effective={}..{}",
+                replay_selection.total_windows,
+                replay_selection.kept_windows,
+                replay_selection.kept_strict_windows,
+                replay_selection.kept_research_windows,
+                replay_selection.dropped_windows,
+                replay_selection
+                    .effective_from
+                    .map(|ts| ts.to_rfc3339())
+                    .unwrap_or_else(|| "-".to_string()),
+                replay_selection
+                    .effective_to
+                    .map(|ts| ts.to_rfc3339())
+                    .unwrap_or_else(|| "-".to_string()),
+            );
+
+            if replay_selection.windows.is_empty() {
+                println!("quality={minimum_quality:?} produced no replayable windows");
+                continue;
+            }
+
+            let mut feed = HistoricalFeed::from_database(store.pool(), &symbols, from_dt, to_dt)
+                .await
+                .expect("historical feed");
+            let filter_stats = feed.retain_pm_event_windows(&replay_selection.windows);
+            let mut config = Pm5mDirectionalBacktestConfig::with_symbols(symbols.clone());
+            config.initial_capital = Decimal::from(10_000u64);
+            let mut engine =
+                Pm5mDirectionalBacktestEngine::new_without_recorder(config).expect("engine");
+            let results = engine.run(&mut feed);
+
+            println!(
+                "quality={minimum_quality:?} updates={}=>{} trades={} wins={} pnl={} sharpe={} mdd={}",
+                filter_stats.total_updates_before,
+                filter_stats.total_updates_after,
+                results.total_trades,
+                results.winning_trades,
+                results.total_pnl,
+                results.sharpe_ratio,
+                results.max_drawdown,
+            );
+        }
     }
 }
 
