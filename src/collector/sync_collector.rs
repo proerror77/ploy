@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
-use ploy_data::binance::{BinanceDepthStream, LobUpdate};
 use crate::error::Result;
+use ploy_data::binance::{BinanceDepthStream, LobUpdate};
 
 /// Synchronized price record for lag analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
