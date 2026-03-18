@@ -566,7 +566,6 @@ pub(crate) fn build_nba_comeback_runtime_config(
     )
 }
 
-#[cfg(test)]
 pub(crate) fn build_nba_comeback_managed_runtime_spec(
     database_url: &str,
     sports_cfg: &SportsTradingConfig,

@@ -27,6 +27,10 @@ pub struct PlatformBootstrapConfig {
     pub enable_crypto_split_arb: bool,
     #[serde(default)]
     pub enable_crypto_pm_5m_directional: bool,
+    #[serde(default)]
+    pub enable_crypto_lob_ml: bool,
+    #[serde(default)]
+    pub enable_crypto_rl_policy: bool,
     pub enable_sports: bool,
     pub enable_politics: bool,
     #[serde(default)]
@@ -54,6 +58,8 @@ impl Default for PlatformBootstrapConfig {
             enable_crypto_pattern_memory: false,
             enable_crypto_split_arb: false,
             enable_crypto_pm_5m_directional: false,
+            enable_crypto_lob_ml: false,
+            enable_crypto_rl_policy: false,
             enable_sports: false,
             enable_politics: false,
             enable_economics: false,
@@ -120,6 +126,8 @@ impl PlatformBootstrapConfig {
             cfg.enable_crypto_pattern_memory = false;
             cfg.enable_crypto_split_arb = false;
             cfg.enable_crypto_pm_5m_directional = false;
+            cfg.enable_crypto_lob_ml = false;
+            cfg.enable_crypto_rl_policy = false;
             cfg.managed_crypto.enable_lob_ml = false;
             #[cfg(feature = "rl")]
             {
