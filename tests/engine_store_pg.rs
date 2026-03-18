@@ -356,7 +356,8 @@ async fn concurrent_cycle_updates_yield_one_success_and_one_conflict() {
             .await
     });
     let t2 = tokio::spawn(async move {
-        s2.update_cycle_state(cycle_id, StrategyState::Abort, 1).await
+        s2.update_cycle_state(cycle_id, StrategyState::Abort, 1)
+            .await
     });
 
     let r1 = t1.await.expect("join should succeed");

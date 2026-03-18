@@ -2,8 +2,8 @@ use crate::config::RiskConfig;
 use crate::domain::{RiskState, Round, Side};
 use crate::error::{Result, RiskError};
 use crate::platform::{
-    AgentRiskParams, BlockReason, Domain, OrderIntent, PlatformRiskState,
-    RiskCheckResult, RiskConfig as GateRiskConfig, RiskGate,
+    AgentRiskParams, BlockReason, Domain, OrderIntent, PlatformRiskState, RiskCheckResult,
+    RiskConfig as GateRiskConfig, RiskGate,
 };
 use rust_decimal::Decimal;
 use std::sync::Arc;

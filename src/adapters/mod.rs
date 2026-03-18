@@ -15,13 +15,13 @@ pub use api_server::{
     start_api_server, start_api_server_background, start_api_server_platform_background,
 };
 // Re-export Binance types from ploy-data
-pub use ploy_data::binance::{
-    BinanceKlineBar, BinanceKlineWebSocket, KlineUpdate,
-    BinanceWebSocket, PriceCache, PriceUpdate, SpotPrice,
-};
 pub use chainlink_rtds::{ChainlinkPriceCache, ChainlinkRtds, ChainlinkSpot, ChainlinkUpdate};
 pub use feishu::FeishuNotifier;
 pub use kalshi_rest::KalshiClient;
+pub use ploy_data::binance::{
+    BinanceKlineBar, BinanceKlineWebSocket, BinanceWebSocket, KlineUpdate, PriceCache, PriceUpdate,
+    SpotPrice,
+};
 pub use polymarket_clob::{
     AccountSummary, BalanceResponse, GammaEventInfo, MarketResponse, MarketSummary, OrderResponse,
     PolymarketClient, PositionResponse, TradeResponse,
