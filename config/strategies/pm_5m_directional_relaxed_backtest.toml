@@ -1,0 +1,53 @@
+# Polymarket 5m directional strategy
+# Temporary relaxed profile for dry-run/backtest investigation.
+
+[strategy]
+name = "pm_5m_directional"
+enabled = true
+
+[pm_5m_directional]
+symbols = ["BTCUSDT"]
+tick_interval_ms = 1000
+
+# Entry timing window
+min_time_remaining_secs = 15
+max_time_remaining_secs = 300
+final_no_entry_secs = 10
+
+# Probability model
+vol_lookback_secs = 30
+vol_floor = 0.0012
+p_entry = 0.60
+min_edge = 0.03
+min_abs_z = 0.30
+
+# Binance confirmation
+min_obi = 0.03
+min_flow_2s = 0.00
+obi_weight = 0.75
+obi_shape_weight = 0.30
+flow_weight = 1.10
+microgap_weight = 0.40
+max_l2_age_secs = 2
+
+# Polymarket execution gate
+max_pm_spread = 0.03
+min_pm_ask_size = 20
+max_entry_price = 0.75
+
+# Mid-band no-trade zone
+no_trade_price_min = 0.45
+no_trade_price_max = 0.55
+no_trade_override_z = 0.75
+no_trade_override_flow = 0.25
+
+# Position sizing
+shares_per_trade = 25
+min_shares = 5
+cooldown_secs = 30
+max_daily_trades = 0
+use_kelly_sizing = true
+kelly_fraction_scale = 0.08
+kelly_fraction_cap = 0.25
+initial_nav_usd = 5000
+max_nav_fraction_per_trade = 0.005
