@@ -19,8 +19,8 @@ fn governance_agent_path_does_not_use_async_trait_macro() {
         .into_iter()
         .filter_map(|relative_path| {
             let content = repo_file(relative_path);
-            let uses_async_trait =
-                content.contains("#[async_trait]") || content.contains("use async_trait::async_trait;");
+            let uses_async_trait = content.contains("#[async_trait]")
+                || content.contains("use async_trait::async_trait;");
             uses_async_trait.then(|| relative_path.to_string())
         })
         .collect();

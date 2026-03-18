@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::coordinator::OrderIntent;
 use crate::coordinator::governance::{GovernanceIntentSnapshot, IngressMode};
 use crate::coordinator::position::PositionAggregator;
 use crate::coordinator::queue::OrderQueue;
+use crate::coordinator::OrderIntent;
 use crate::domain::Domain;
 use crate::error::{PloyError, Result};
 
@@ -147,8 +147,8 @@ async fn shared_ingress_preflight(
         if let Some((runtime_reason, runtime_log_message)) =
             runtime_buy_ingress_block_reason(snapshot, intent)
         {
-            let handle_reason =
-                handle_buy_ingress_block_reason(snapshot, intent).unwrap_or_else(|| runtime_reason.clone());
+            let handle_reason = handle_buy_ingress_block_reason(snapshot, intent)
+                .unwrap_or_else(|| runtime_reason.clone());
             return Some(IngressPreflightRejection {
                 handle_reason,
                 runtime_reason,

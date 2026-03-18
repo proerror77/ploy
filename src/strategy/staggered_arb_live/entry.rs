@@ -388,10 +388,8 @@ fn build_entry_order_plan(
     bc: &StaggeredArbBacktestConfig,
     context: &PreparedEntryContext,
 ) -> Option<EntryOrderPlan> {
-    let allowed_entry_window_secs = bc.entry_after_start_max_secs_now(
-        window.window_secs,
-        context.strong_obi_bonus_active,
-    );
+    let allowed_entry_window_secs =
+        bc.entry_after_start_max_secs_now(window.window_secs, context.strong_obi_bonus_active);
     if allowed_entry_window_secs > 0
         && context.elapsed_since_start > allowed_entry_window_secs as i64
     {
@@ -588,7 +586,11 @@ fn submit_entry_order(
         });
     }
 
-    let client_order_id = format!("stag_leg1_{}_{}", window.event_id, Utc::now().timestamp_millis());
+    let client_order_id = format!(
+        "stag_leg1_{}_{}",
+        window.event_id,
+        Utc::now().timestamp_millis()
+    );
     adapter.live_orders.insert(
         client_order_id.clone(),
         LiveOrderTrack {

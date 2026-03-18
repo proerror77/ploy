@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tracing::{debug, info};
 
@@ -232,7 +232,11 @@ impl VolatilityArbEngine {
         let combined = (wk * kline_vol * kline_vol + wt * tick_vol * tick_vol).sqrt();
 
         let mut confidence = if self.kline_vol_cache.contains_key(symbol) {
-            if tick_volatility.is_some() { 0.9 } else { 0.7 }
+            if tick_volatility.is_some() {
+                0.9
+            } else {
+                0.7
+            }
         } else if tick_volatility.is_some() {
             0.5
         } else {

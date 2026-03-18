@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use tracing::info;
 
 use crate::strategy::volatility_arb::{
-    VolatilityArbConfig, VolatilityArbEngine, calculate_implied_volatility,
+    calculate_implied_volatility, VolatilityArbConfig, VolatilityArbEngine,
 };
 
 #[cfg(test)]

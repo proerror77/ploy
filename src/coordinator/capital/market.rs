@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use uuid::Uuid;
 
-use crate::coordinator::OrderIntent;
 use crate::coordinator::config::CoordinatorConfig;
+use crate::coordinator::OrderIntent;
 use crate::domain::Domain;
 
 #[path = "market/accounting.rs"]

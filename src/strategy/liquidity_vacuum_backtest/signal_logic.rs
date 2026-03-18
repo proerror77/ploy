@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tracing::{debug, trace};
 
@@ -392,7 +392,8 @@ impl LiquidityVacuumBacktestEngine {
         if total_entry_cost > self.equity {
             trace!(
                 "Skipping entry: insufficient equity {} < {}",
-                self.equity, total_entry_cost
+                self.equity,
+                total_entry_cost
             );
             return;
         }

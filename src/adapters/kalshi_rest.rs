@@ -8,7 +8,7 @@ use chrono::Utc;
 use reqwest::{Client, Method};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::{Decimal, RoundingStrategy};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -16,8 +16,8 @@ mod auth_http;
 mod market_data;
 
 use super::{
-    BalanceResponse, MarketResponse, MarketSummary, OrderResponse, PositionResponse, TradeResponse,
-    polymarket_clob::OrderBookResponse,
+    polymarket_clob::OrderBookResponse, BalanceResponse, MarketResponse, MarketSummary,
+    OrderResponse, PositionResponse, TradeResponse,
 };
 use crate::domain::{OrderRequest, OrderSide, OrderStatus};
 use crate::error::{PloyError, Result};

@@ -10,9 +10,9 @@
 //! Retail panic creates mispricings at different times.
 
 use crate::adapters::PolymarketClient;
+use crate::data_plane::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::domain::Side;
 use crate::error::{PloyError, Result};
-use crate::data_plane::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::strategy::OrderExecutor;
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;

@@ -16,11 +16,10 @@ use crate::strategy::{OrderUpdate, StrategyAction, StrategyManager};
 mod order_commands;
 mod update_flow;
 
-use super::signal_history::{
-    is_managed_staggered_arb_label, persist_split_arb_signal_history,
-    split_arb_event_signal_type,
-};
 use super::order_store::RuntimeOrderStore;
+use super::signal_history::{
+    is_managed_staggered_arb_label, persist_split_arb_signal_history, split_arb_event_signal_type,
+};
 use order_commands::{handle_cancel_order, handle_submit_intent};
 use update_flow::handle_runtime_order_update;
 

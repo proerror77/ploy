@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::domain::Side;
 use crate::domain::Domain;
+use crate::domain::Side;
 
 /// Unified strategy output contract (agent -> coordinator).
 #[derive(Debug, Clone, Serialize, Deserialize)]

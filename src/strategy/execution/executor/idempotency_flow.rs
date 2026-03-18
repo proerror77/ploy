@@ -6,7 +6,7 @@ use crate::strategy::execution::idempotency::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 use tracing::{debug, info, warn};
 
 pub(super) struct IdempotencyExecution {

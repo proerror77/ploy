@@ -4,8 +4,8 @@ use tracing::warn;
 use crate::error::Result;
 
 use super::{
-    AutoClaimer, CONDITIONAL_TOKENS_POLYGON, POLYGON_CHAIN_ID, POLYGON_RPC_DEFAULT,
-    RedeemablePosition, USDC_E_POLYGON, env_flag, env_string_any, env_u64_any,
+    env_flag, env_string_any, env_u64_any, AutoClaimer, RedeemablePosition,
+    CONDITIONAL_TOKENS_POLYGON, POLYGON_CHAIN_ID, POLYGON_RPC_DEFAULT, USDC_E_POLYGON,
 };
 
 mod legacy_flow;

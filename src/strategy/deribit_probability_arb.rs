@@ -14,8 +14,8 @@ use chrono::{DateTime, Utc};
 use chrono::{Datelike, Timelike};
 #[cfg(test)]
 use ordered_float::OrderedFloat;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -28,14 +28,14 @@ mod support;
 
 #[cfg(test)]
 use support::parse_deribit_expiry;
-use support::{
-    DERIBIT_PUBLIC_API, DeribitPublicClient, SECONDS_PER_YEAR, infer_yes_index,
-    kelly_fraction_binary, normalize_symbol, parse_event_end, parse_string_array, spread_bps,
-    symbol_to_deribit_currency,
-};
 pub use support::{
-    ParsedPolymarketQuestion, SurfacePoint, VolSurfaceSnapshot, binary_call_prob_forward,
-    interpolate_iv_linear, net_edge, norm_cdf, parse_polymarket_question,
+    binary_call_prob_forward, interpolate_iv_linear, net_edge, norm_cdf, parse_polymarket_question,
+    ParsedPolymarketQuestion, SurfacePoint, VolSurfaceSnapshot,
+};
+use support::{
+    infer_yes_index, kelly_fraction_binary, normalize_symbol, parse_event_end, parse_string_array,
+    spread_bps, symbol_to_deribit_currency, DeribitPublicClient, DERIBIT_PUBLIC_API,
+    SECONDS_PER_YEAR,
 };
 
 /// Runtime configuration for Deribit probability arbitrage.

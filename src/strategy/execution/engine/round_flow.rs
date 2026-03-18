@@ -162,7 +162,8 @@ pub(super) async fn set_round(engine: &StrategyEngine, round: Round) -> Result<(
         state.current_round = Some(round_with_id);
 
         if state.strategy_state == StrategyState::Idle {
-            if !round.has_ended() && round.minutes_elapsed() < engine.config.strategy.window_min as i64
+            if !round.has_ended()
+                && round.minutes_elapsed() < engine.config.strategy.window_min as i64
             {
                 state.strategy_state = StrategyState::WatchWindow;
                 info!("Entering watch window for round: {}", round.slug);

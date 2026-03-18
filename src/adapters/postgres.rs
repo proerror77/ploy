@@ -9,8 +9,8 @@ use crate::domain::{Cycle, DumpSignal, Order, OrderStatus, Side, StrategyState};
 use crate::error::{PloyError, Result};
 use chrono::Utc;
 use rust_decimal::Decimal;
-use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::Row;
 use tracing::info;
 
 pub use daily_metrics::DailyMetrics;

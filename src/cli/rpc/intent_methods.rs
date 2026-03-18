@@ -6,7 +6,7 @@ use super::{jsonrpc_err, jsonrpc_ok};
 use crate::control_plane::TradeIntent;
 use crate::domain::{OrderSide, Side};
 use rust_decimal::prelude::ToPrimitive;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use uuid::Uuid;
 

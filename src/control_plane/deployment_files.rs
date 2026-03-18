@@ -68,7 +68,11 @@ fn validate_override_file_kind(candidate: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_deployments_override(raw: &str, cwd: &Path, allow_unsafe: bool) -> Result<PathBuf, String> {
+fn resolve_deployments_override(
+    raw: &str,
+    cwd: &Path,
+    allow_unsafe: bool,
+) -> Result<PathBuf, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("override path is empty".to_string());
@@ -193,12 +197,8 @@ mod tests {
     #[test]
     fn accepts_repo_absolute_deployments_override() {
         let cwd = Path::new("/repo");
-        let resolved = resolve_deployments_override(
-            "/repo/data/state/deployments.json",
-            cwd,
-            false,
-        )
-        .unwrap();
+        let resolved =
+            resolve_deployments_override("/repo/data/state/deployments.json", cwd, false).unwrap();
         assert_eq!(resolved, PathBuf::from("/repo/data/state/deployments.json"));
     }
 
@@ -212,24 +212,22 @@ mod tests {
     #[test]
     fn rejects_wrong_basename_override() {
         let cwd = Path::new("/repo");
-        let err = resolve_deployments_override("/repo/data/state/secrets.txt", cwd, false)
-            .unwrap_err();
+        let err =
+            resolve_deployments_override("/repo/data/state/secrets.txt", cwd, false).unwrap_err();
         assert!(err.contains("must target deployments.json"));
     }
 
     #[test]
     fn rejects_absolute_path_outside_supported_roots_without_escape_hatch() {
         let cwd = Path::new("/repo");
-        let err =
-            resolve_deployments_override("/tmp/deployments.json", cwd, false).unwrap_err();
+        let err = resolve_deployments_override("/tmp/deployments.json", cwd, false).unwrap_err();
         assert!(err.contains("outside the supported deployments roots"));
     }
 
     #[test]
     fn unsafe_escape_hatch_allows_nonstandard_path() {
         let cwd = Path::new("/repo");
-        let resolved =
-            resolve_deployments_override("/tmp/deployments.json", cwd, true).unwrap();
+        let resolved = resolve_deployments_override("/tmp/deployments.json", cwd, true).unwrap();
         assert_eq!(resolved, PathBuf::from("/tmp/deployments.json"));
     }
 

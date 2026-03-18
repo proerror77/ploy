@@ -1,7 +1,7 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
@@ -219,7 +219,11 @@ impl StaggeredArbBacktestConfig {
     }
 
     fn obi_directional_value(&self, predicted_up: bool, obi: f64) -> f64 {
-        if predicted_up { obi } else { -obi }
+        if predicted_up {
+            obi
+        } else {
+            -obi
+        }
     }
 
     pub(crate) fn obi_confirms_direction(

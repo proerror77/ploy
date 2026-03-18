@@ -34,8 +34,8 @@ use std::collections::HashMap;
 use tracing::{debug, info};
 
 pub use analysis::{
-    MarketPricing, VolArbSignal, VolatilityEstimate, calculate_fair_yes_price,
-    calculate_implied_volatility, calculate_kelly_fraction, norm_cdf,
+    calculate_fair_yes_price, calculate_implied_volatility, calculate_kelly_fraction, norm_cdf,
+    MarketPricing, VolArbSignal, VolatilityEstimate,
 };
 
 mod config_defaults {

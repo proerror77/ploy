@@ -45,10 +45,7 @@ async fn spawn_ctf_merge(condition_id: &str, shares: u64) -> std::result::Result
 }
 
 #[cfg(not(feature = "pm_ctf"))]
-async fn spawn_ctf_merge(
-    _condition_id: &str,
-    _shares: u64,
-) -> std::result::Result<String, String> {
+async fn spawn_ctf_merge(_condition_id: &str, _shares: u64) -> std::result::Result<String, String> {
     Err("CTF merge not available (pm_ctf feature disabled)".to_string())
 }
 
@@ -437,7 +434,11 @@ impl SplitArbStrategyAdapter {
                     "[{}] Unhedged exit: {} {} @ {:.2}c ({} shares)",
                     self.id,
                     market_id,
-                    if pos.first_side == Side::Up { "YES" } else { "NO" },
+                    if pos.first_side == Side::Up {
+                        "YES"
+                    } else {
+                        "NO"
+                    },
                     exit_price * dec!(100),
                     pos.shares,
                 );

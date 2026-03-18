@@ -7,8 +7,8 @@ use tracing::debug;
 use crate::strategy::volatility_arb::VolArbSignal;
 
 use super::{
-    BacktestEngine, BacktestTrade, KlineRecord, PMPriceRecord, SymbolStats,
-    calculate_implied_volatility, calculate_kline_volatility,
+    calculate_implied_volatility, calculate_kline_volatility, BacktestEngine, BacktestTrade,
+    KlineRecord, PMPriceRecord, SymbolStats,
 };
 
 impl BacktestEngine {

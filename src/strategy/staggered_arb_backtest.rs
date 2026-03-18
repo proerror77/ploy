@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, trace};
 
@@ -29,7 +29,7 @@ use crate::strategy::backtest_recorder::{
 };
 use crate::strategy::execution_sim::ExecutionSimulator;
 use crate::strategy::fee_model::FeeModel;
-use crate::strategy::gamma_scalping::greeks::{BinaryGreeks, binary_greeks};
+use crate::strategy::gamma_scalping::greeks::{binary_greeks, BinaryGreeks};
 use crate::strategy::momentum::Direction;
 use crate::strategy::probability::estimate_probability;
 

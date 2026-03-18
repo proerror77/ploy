@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use crate::adapters::SpotPrice;

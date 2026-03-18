@@ -1,8 +1,8 @@
 mod connection;
 mod messages;
 mod runtime_support;
-mod surface;
 mod subscriptions;
+mod surface;
 
 #[cfg(test)]
 use self::messages::extract_book_top;

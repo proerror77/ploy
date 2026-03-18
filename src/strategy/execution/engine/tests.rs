@@ -7,8 +7,8 @@ use crate::strategy::execution::engine_store::mock::MockStore;
 use async_trait::async_trait;
 use chrono::{Duration, NaiveDate, Utc};
 use rust_decimal_macros::dec;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::Mutex;
 
 struct MockExchangeClient;
 
@@ -146,10 +146,8 @@ fn expired_round() -> Round {
 
 async fn test_engine() -> StrategyEngine {
     let config = test_config();
-    let executor = OrderExecutor::new_with_exchange(
-        Arc::new(MockExchangeClient),
-        config.execution.clone(),
-    );
+    let executor =
+        OrderExecutor::new_with_exchange(Arc::new(MockExchangeClient), config.execution.clone());
     let quote_cache = QuoteCache::new();
     StrategyEngine::new(config, MockStore::new(), executor, quote_cache)
         .await
@@ -158,10 +156,8 @@ async fn test_engine() -> StrategyEngine {
 
 async fn test_engine_with_store(store: impl EngineStore + 'static) -> StrategyEngine {
     let config = test_config();
-    let executor = OrderExecutor::new_with_exchange(
-        Arc::new(MockExchangeClient),
-        config.execution.clone(),
-    );
+    let executor =
+        OrderExecutor::new_with_exchange(Arc::new(MockExchangeClient), config.execution.clone());
     let quote_cache = QuoteCache::new();
     StrategyEngine::new(config, store, executor, quote_cache)
         .await

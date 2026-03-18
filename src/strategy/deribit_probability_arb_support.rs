@@ -1,8 +1,8 @@
 use crate::error::{PloyError, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use ordered_float::OrderedFloat;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Deserialize;
 use std::cmp::Ordering;
@@ -492,7 +492,11 @@ fn pick_iv(row: &DeribitBookSummary) -> Option<f64> {
 }
 
 fn normalize_iv(raw: f64) -> f64 {
-    if raw > 3.0 { raw / 100.0 } else { raw }
+    if raw > 3.0 {
+        raw / 100.0
+    } else {
+        raw
+    }
 }
 
 fn parse_deribit_instrument(name: &str) -> Option<(DateTime<Utc>, f64)> {

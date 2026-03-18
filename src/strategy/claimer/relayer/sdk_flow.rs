@@ -1,11 +1,11 @@
 #[cfg(feature = "builder_relayer_sdk")]
-use super::AutoClaimer;
-#[cfg(feature = "builder_relayer_sdk")]
 use super::proxy_support::RelayerBuilderCredentials;
 #[cfg(feature = "builder_relayer_sdk")]
+use super::AutoClaimer;
+#[cfg(feature = "builder_relayer_sdk")]
 use super::{
-    CONDITIONAL_TOKENS_POLYGON, POLYGON_CHAIN_ID, POLYGON_RPC_DEFAULT, RedeemablePosition,
-    relayer_base_url, relayer_poll_interval_ms, relayer_poll_max,
+    relayer_base_url, relayer_poll_interval_ms, relayer_poll_max, RedeemablePosition,
+    CONDITIONAL_TOKENS_POLYGON, POLYGON_CHAIN_ID, POLYGON_RPC_DEFAULT,
 };
 #[cfg(feature = "builder_relayer_sdk")]
 use crate::error::Result;

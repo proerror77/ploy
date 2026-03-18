@@ -4,11 +4,11 @@ use crate::config::ExecutionConfig;
 use crate::domain::{OrderRequest, OrderStatus, Side};
 use crate::error::Result;
 use crate::exchange::ExchangeClient;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{sleep, timeout, Instant};
 use tracing::{debug, error, info, warn};
 
 mod execution_flow;

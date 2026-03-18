@@ -116,7 +116,6 @@ impl SplitArbStrategyAdapter {
             enabled: true,
         }
     }
-
 }
 
 #[async_trait]

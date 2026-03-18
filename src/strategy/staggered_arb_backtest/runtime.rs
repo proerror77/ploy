@@ -65,7 +65,8 @@ impl StaggeredArbBacktestEngine {
                             if !allowed {
                                 trace!(
                                     "Skipping event {} with duration {}s (not in allowed list)",
-                                    event_slug, duration_secs
+                                    event_slug,
+                                    duration_secs
                                 );
                             } else {
                                 let events =

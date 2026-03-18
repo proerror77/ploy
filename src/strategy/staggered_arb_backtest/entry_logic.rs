@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use tracing::{debug, trace};
 
 use crate::strategy::gamma_scalping::greeks::binary_greeks;
@@ -36,7 +36,9 @@ impl StaggeredArbBacktestEngine {
             if up_ask.is_none() || down_ask.is_none() {
                 trace!(
                     "try_entry: {} missing quotes (up={:?} down={:?})",
-                    window.event_slug, up_ask, down_ask
+                    window.event_slug,
+                    up_ask,
+                    down_ask
                 );
             }
             self.try_entry_for_window(
@@ -122,14 +124,16 @@ impl StaggeredArbBacktestEngine {
         if sigma < self.config.min_entry_sigma {
             trace!(
                 "Skipping: sigma {:.6} < min_entry_sigma {:.6}",
-                sigma, self.config.min_entry_sigma
+                sigma,
+                self.config.min_entry_sigma
             );
             return;
         }
         if self.config.max_entry_sigma > 0.0 && sigma > self.config.max_entry_sigma {
             trace!(
                 "Skipping: sigma {:.6} > max_entry_sigma {:.6}",
-                sigma, self.config.max_entry_sigma
+                sigma,
+                self.config.max_entry_sigma
             );
             return;
         }
@@ -172,7 +176,8 @@ impl StaggeredArbBacktestEngine {
             {
                 trace!(
                     "Skipping: fair_value {:.4} outside long-gamma band 0.5 +/- {:.4}",
-                    g.fair_value, self.config.max_fair_value_distance
+                    g.fair_value,
+                    self.config.max_fair_value_distance
                 );
                 return;
             }
@@ -228,7 +233,8 @@ impl StaggeredArbBacktestEngine {
         {
             trace!(
                 "Skipping: OBI {:.4} not aligned with required {:.4}",
-                obi, required_obi_strength
+                obi,
+                required_obi_strength
             );
             return;
         }
@@ -269,7 +275,9 @@ impl StaggeredArbBacktestEngine {
         if allowed_entry_window_secs > 0 && elapsed_since_start > allowed_entry_window_secs as i64 {
             trace!(
                 "Skipping: elapsed_since_start {}s > allowed {}s (strong_obi={})",
-                elapsed_since_start, allowed_entry_window_secs, strong_obi_bonus_active
+                elapsed_since_start,
+                allowed_entry_window_secs,
+                strong_obi_bonus_active
             );
             return;
         }
@@ -364,7 +372,8 @@ impl StaggeredArbBacktestEngine {
         if total_cost > self.equity {
             trace!(
                 "Skipping: insufficient equity ({} < {})",
-                self.equity, total_cost
+                self.equity,
+                total_cost
             );
             return;
         }

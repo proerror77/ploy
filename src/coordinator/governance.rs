@@ -6,12 +6,12 @@ use tokio::sync::RwLock;
 
 use crate::domain::Domain;
 
-use super::OrderIntent;
 use super::command::{
     DomainIngressSnapshot, GovernancePolicyHistoryEntry, GovernancePolicySnapshot,
     GovernancePolicyUpdate,
 };
 use super::config::CoordinatorConfig;
+use super::OrderIntent;
 
 #[path = "governance/persistence.rs"]
 mod persistence;
@@ -433,11 +433,9 @@ mod tests {
             dec!(0.50),
         );
         let reason = governance_block_reason(&policy, &intent, dec!(90));
-        assert!(
-            reason
-                .unwrap_or_default()
-                .contains("max_total_notional_usd")
-        );
+        assert!(reason
+            .unwrap_or_default()
+            .contains("max_total_notional_usd"));
     }
 
     #[test]
@@ -629,11 +627,9 @@ mod tests {
                 .get(&Domain::Sports),
             Some(&IngressMode::Halted)
         );
-        assert!(
-            restored
-                .runtime_state
-                .paused_agent_ids
-                .contains("sports_agent")
-        );
+        assert!(restored
+            .runtime_state
+            .paused_agent_ids
+            .contains("sports_agent"));
     }
 }

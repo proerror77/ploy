@@ -8,7 +8,11 @@ impl PatternMemoryStrategy {
     }
 
     fn direction_from_p_up(p_up: f64) -> Side {
-        if p_up >= 0.5 { Side::Up } else { Side::Down }
+        if p_up >= 0.5 {
+            Side::Up
+        } else {
+            Side::Down
+        }
     }
 
     fn confidence_from_p_up(p_up: f64) -> f64 {

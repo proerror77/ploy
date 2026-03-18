@@ -3,8 +3,8 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::FromStr;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tracing::{info, warn};
 

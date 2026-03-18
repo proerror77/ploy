@@ -4,8 +4,8 @@ use std::io::Write as IoWrite;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
