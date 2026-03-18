@@ -19,6 +19,7 @@ use crate::agents::openclaw::OpenClawAgent;
 use crate::agents::governance_agent::GovernanceAgent;
 use crate::config::{
     AppConfig, CryptoEntryMode, CryptoTradingConfig, PoliticsTradingConfig, SportsTradingConfig,
+    NbaComebackConfig,
 };
 use crate::coordinator::config::DuplicateGuardScope;
 use crate::coordinator::{Coordinator, CoordinatorConfig, CoordinatorHandle, GlobalState};
@@ -38,6 +39,10 @@ use crate::strategy::executor::OrderExecutor;
 use crate::strategy::idempotency::IdempotencyManager;
 use crate::strategy::momentum::EventMatcher;
 use crate::strategy::{DataFeed, StrategyAction, StrategyManager};
+use crate::strategy::crypto_lob_ml::CryptoLobMlConfig;
+#[cfg(feature = "rl")]
+use crate::strategy::crypto_rl_policy::CryptoRlPolicyConfig;
+use crate::collector::LobCache;
 use chrono::Utc;
 use futures_util::StreamExt;
 use polymarket_client_sdk::data::types::request::TradesRequest as DataTradesRequest;
@@ -3277,8 +3282,65 @@ fn spawn_politics_strategy_runtime(
     Ok(())
 }
 
+fn compat_crypto_runtimes_enabled() -> bool {
+    env_bool("PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES", false)
+}
+
 fn compat_sports_runtimes_enabled() -> bool {
     env_bool("PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES", false)
+}
+
+// Stub implementations for compatibility runtime agents
+// TODO: Implement full compatibility runtime agents
+
+#[allow(clippy::too_many_arguments)]
+fn maybe_spawn_compat_crypto_lob_ml_agent(
+    _agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    _coordinator: &mut Coordinator,
+    _handle: &CoordinatorHandle,
+    _lob_cfg: &crate::strategy::crypto_lob_ml::CryptoLobMlConfig,
+    _shared_pool: &Option<PgPool>,
+    _crypto_market_data: Option<Arc<crate::platform::BinanceDataPlaneHandle>>,
+    _event_matcher: Option<Arc<crate::strategy::momentum::EventMatcher>>,
+    _lob_cache_opt: &Option<Arc<crate::collector::LobCache>>,
+) -> Result<()> {
+    warn!(
+        agent = "crypto_lob_ml",
+        "compat crypto lob-ml agent not implemented; set PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true and implement to enable"
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(feature = "rl")]
+fn maybe_spawn_compat_crypto_rl_policy_agent(
+    _agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    _coordinator: &mut Coordinator,
+    _handle: &CoordinatorHandle,
+    _rl_cfg: &crate::strategy::crypto_rl_policy::CryptoRlPolicyConfig,
+    _crypto_market_data: Option<Arc<crate::platform::BinanceDataPlaneHandle>>,
+    _event_matcher: Option<Arc<crate::strategy::momentum::EventMatcher>>,
+    _lob_cache_opt: &Option<Arc<crate::collector::LobCache>>,
+) {
+    warn!(
+        agent = "crypto_rl_policy",
+        "compat crypto rl-policy agent not implemented; set PLOY_ENABLE_COMPAT_CRYPTO_RUNTIMES=true and implement to enable"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_legacy_nba_comeback_agent(
+    _agent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    _coordinator: &mut Coordinator,
+    _handle: &CoordinatorHandle,
+    _sports_cfg: SportsTradingConfig,
+    _nba_cfg: crate::config::NbaComebackConfig,
+    _pool: PgPool,
+) {
+    warn!(
+        agent = "nba_comeback",
+        "legacy nba_comeback agent not implemented; set PLOY_ENABLE_COMPAT_SPORTS_RUNTIMES=true and implement to enable"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4034,6 +4096,17 @@ pub async fn start_platform(
         let momentum_enabled = config.enable_crypto_momentum;
         let pattern_memory_enabled = config.enable_crypto_pattern_memory;
         let split_arb_enabled = config.enable_crypto_split_arb;
+        let lob_agent_enabled = config.enable_crypto_lob_ml;
+        let rl_agent_enabled = config.enable_crypto_rl_policy;
+
+        // Get the lob_ml and rl_policy configs from managed_crypto
+        let lob_cfg = config.managed_crypto.lob_ml.clone();
+        #[cfg(feature = "rl")]
+        let rl_cfg = config.managed_crypto.rl_policy.clone();
+
+        // Stub variables for compat runtime agents (not yet implemented)
+        let crypto_market_data: Option<Arc<BinanceDataPlaneHandle>> = None;
+        let lob_cache_opt: Option<Arc<LobCache>> = None;
 
         // Discover active crypto events and token IDs (Gamma API) via EventMatcher
         let pm_client_ref = pm_client.as_ref().ok_or_else(|| {
@@ -4724,7 +4797,7 @@ pub async fn start_platform(
                     &lob_cfg,
                     &shared_pool,
                     crypto_market_data.clone(),
-                    event_matcher.clone(),
+                    Some(event_matcher.clone()),
                     &lob_cache_opt,
                 )?;
             } else {
@@ -4744,7 +4817,7 @@ pub async fn start_platform(
                     &handle,
                     &rl_cfg,
                     crypto_market_data.clone(),
-                    event_matcher.clone(),
+                    Some(event_matcher.clone()),
                     &lob_cache_opt,
                 );
             } else {
