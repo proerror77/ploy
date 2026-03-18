@@ -1,8 +1,8 @@
 use rust_decimal::Decimal;
 
 use crate::config::AppConfig;
-use crate::coordinator::RiskConfig;
 use crate::coordinator::config::DuplicateGuardScope;
+use crate::coordinator::RiskConfig;
 
 use super::PlatformBootstrapConfig;
 use crate::coordinator::bootstrap::support::{env_bool, env_decimal_opt, env_u64};

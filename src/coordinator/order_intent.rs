@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::control_plane::TradeIntent;
-use crate::domain::{OrderType, Side, TimeInForce};
 use crate::domain::Domain;
+use crate::domain::{OrderType, Side, TimeInForce};
 
 /// 訂單優先級
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

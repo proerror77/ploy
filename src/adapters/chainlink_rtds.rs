@@ -641,7 +641,10 @@ impl ChainlinkRtds {
 
         // Record per-symbol freshness for the data plane.
         if let Some(f) = self.freshness.get() {
-            f.record_update(crate::data_plane::DataSource::ChainlinkRtds, &payload.symbol);
+            f.record_update(
+                crate::data_plane::DataSource::ChainlinkRtds,
+                &payload.symbol,
+            );
         }
 
         // Broadcast update
@@ -794,7 +797,8 @@ mod tests {
         let msg = r#"{"symbol":"sol/usd","timestamp":1700000000000,"value":101.01}"#;
         rtds.ingest_test_message(msg).await;
 
-        let staleness = freshness.staleness(crate::data_plane::DataSource::ChainlinkRtds, "sol/usd");
+        let staleness =
+            freshness.staleness(crate::data_plane::DataSource::ChainlinkRtds, "sol/usd");
         assert!(staleness.is_some(), "freshness should be recorded");
         assert!(staleness.unwrap() < 1.0);
     }

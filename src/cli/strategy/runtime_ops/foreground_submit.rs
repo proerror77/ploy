@@ -89,7 +89,9 @@ pub(super) async fn handle_submit_intent(
             );
         }
         Ok(ForegroundSubmitOutcome::Skipped { reason }) => {
-            println!("  \x1b[33m⚠ Coordinator ingress required - order logged but not submitted\x1b[0m");
+            println!(
+                "  \x1b[33m⚠ Coordinator ingress required - order logged but not submitted\x1b[0m"
+            );
             println!("    Reason: {}\n", reason);
             warn!("Order {} not submitted: {}", tracked_order_id, reason);
             mark_order_status(store, &tracked_order_id, OrderStatus::Failed, None).await;
@@ -335,8 +337,8 @@ fn coordinator_ingress_http_client() -> Result<&'static reqwest::Client> {
 #[cfg(test)]
 mod tests {
     use super::{build_coordinator_payload, external_priority_label};
-    use crate::domain::{OrderType, Side, TimeInForce};
     use crate::domain::Domain;
+    use crate::domain::{OrderType, Side, TimeInForce};
     use crate::strategy::traits::StrategyOrderIntent;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;

@@ -1,16 +1,16 @@
 use axum::http::StatusCode;
 use chrono::Utc;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 
 use crate::api::{
     state::AppState,
     types::{MarketData, PositionResponse, TradeResponse, WsMessage},
 };
-use crate::domain::market::Side;
-use crate::error::PloyError;
 use crate::coordinator::OrderPriority;
+use crate::domain::market::Side;
 use crate::domain::Domain;
+use crate::error::PloyError;
 
 mod deployment_gate;
 

@@ -16,6 +16,8 @@ use crate::adapters::{BinanceWebSocket, PolymarketClient, PolymarketWebSocket, P
 use crate::config::AppConfig;
 use crate::control_plane::StrategyDeployment;
 use crate::coordinator::{Coordinator, CoordinatorHandle};
+use crate::data_plane::{BinanceDataPlaneHandle, DataPlaneConfig, PlatformDataPlane};
+use crate::domain::Domain;
 use crate::domain::Side;
 use crate::error::Result;
 use crate::exchange::{build_exchange_client, parse_exchange_kind, ExchangeKind};
@@ -23,8 +25,6 @@ use crate::persistence::{
     ensure_clob_trade_alerts_table, spawn_pm_token_settlement_persistence,
     spawn_polymarket_trade_persistence, spawn_polymarket_trade_persistence_from_collector_targets,
 };
-use crate::data_plane::{BinanceDataPlaneHandle, DataPlaneConfig, PlatformDataPlane};
-use crate::domain::Domain;
 use crate::signing::Wallet;
 use crate::strategy::executor::OrderExecutor;
 use crate::strategy::idempotency::IdempotencyManager;

@@ -11,7 +11,7 @@
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -24,7 +24,7 @@ use super::admission::AdmissionController;
 use super::capital::CapitalPolicy;
 use super::command::{CoordinatorCommand, CoordinatorControlCommand};
 use super::config::CoordinatorConfig;
-use super::governance::{GovernanceController, governance_block_reason};
+use super::governance::{governance_block_reason, GovernanceController};
 use super::journal::ExecutionJournal;
 use super::position::PositionAggregator;
 use super::queue::OrderQueue;

@@ -1,7 +1,7 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::{SPORTS_KEYWORDS, deserialize_bool_from_null, deserialize_optional_number};
+use super::{deserialize_bool_from_null, deserialize_optional_number, SPORTS_KEYWORDS};
 
 /// Live game event from series endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]

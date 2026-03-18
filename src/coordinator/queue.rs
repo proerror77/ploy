@@ -364,7 +364,7 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
     use tokio::sync::{Barrier, Mutex};
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{timeout, Duration};
 
     fn make_intent(agent: &str, priority: OrderPriority) -> OrderIntent {
         OrderIntent::new(

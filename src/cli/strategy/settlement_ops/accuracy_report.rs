@@ -209,7 +209,11 @@ pub(in crate::cli::strategy) async fn report_accuracy_pm_settlement(
         scored += 1;
         let is_buy: bool = row.get("is_buy");
         let sp = settled_price.unwrap_or(Decimal::ZERO);
-        let won = if is_buy { sp > dec!(0.5) } else { sp < dec!(0.5) };
+        let won = if is_buy {
+            sp > dec!(0.5)
+        } else {
+            sp < dec!(0.5)
+        };
         if won {
             wins += 1;
         }

@@ -13,7 +13,7 @@ use crate::adapters::polymarket_clob::{GammaMarketInfo, MarketSummary as GammaMa
 use crate::adapters::{GammaEventInfo, PolymarketClient};
 use crate::ai_clients::client::{AgentClientConfig, ClaudeAgentClient};
 use crate::ai_clients::grok::GrokClient;
-use crate::ai_clients::sports_data::{SportsDataFetcher, StructuredGameData, format_for_claude};
+use crate::ai_clients::sports_data::{format_for_claude, SportsDataFetcher, StructuredGameData};
 use crate::error::{PloyError, Result};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

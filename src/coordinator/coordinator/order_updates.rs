@@ -5,7 +5,7 @@ use tracing::warn;
 
 use crate::coordinator::OrderIntent;
 use crate::domain::OrderStatus;
-use crate::strategy::{OrderUpdate, executor::ExecutionResult};
+use crate::strategy::{executor::ExecutionResult, OrderUpdate};
 
 use super::Coordinator;
 

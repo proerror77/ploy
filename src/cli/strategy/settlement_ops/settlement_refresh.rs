@@ -7,7 +7,7 @@ use tracing::warn;
 
 use crate::adapters::PolymarketClient;
 
-use super::{Result, is_market_resolved};
+use super::{is_market_resolved, Result};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct SettlementRefreshSummary {

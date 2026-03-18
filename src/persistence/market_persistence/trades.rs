@@ -1,11 +1,11 @@
 use super::alerts::{
-    InsertedTradeTickRow, TradeAlertConfig, TradeAlertState, maybe_emit_trade_alerts,
+    maybe_emit_trade_alerts, InsertedTradeTickRow, TradeAlertConfig, TradeAlertState,
 };
 use crate::error::Result;
 use chrono::Utc;
-use polymarket_client_sdk::data::Client as DataApiClient;
-use polymarket_client_sdk::data::types::MarketFilter as DataMarketFilter;
 use polymarket_client_sdk::data::types::request::TradesRequest as DataTradesRequest;
+use polymarket_client_sdk::data::types::MarketFilter as DataMarketFilter;
+use polymarket_client_sdk::data::Client as DataApiClient;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;

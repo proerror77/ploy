@@ -223,8 +223,14 @@ mod tests {
         let state = build_runtime_health_state(&app_config, &freshness, true, Some(&pm_ws))
             .expect("health state should be enabled when health_port is set");
 
-        assert!(state.freshness.is_some(), "freshness tracker should be attached");
-        assert!(state.metrics.is_some(), "metrics collector should be attached");
+        assert!(
+            state.freshness.is_some(),
+            "freshness tracker should be attached"
+        );
+        assert!(
+            state.metrics.is_some(),
+            "metrics collector should be attached"
+        );
         assert!(
             state.db_connected.load(Ordering::SeqCst),
             "shared db should mark db connectivity"
@@ -244,7 +250,10 @@ mod tests {
 
         let state = build_runtime_health_state(&app_config, &freshness, false, Some(&pm_ws));
 
-        assert!(state.is_none(), "health state should be disabled without a port");
+        assert!(
+            state.is_none(),
+            "health state should be disabled without a port"
+        );
         assert!(
             pm_ws.health_state().is_none(),
             "ws should not receive health wiring when health server is disabled"
