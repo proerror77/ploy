@@ -616,10 +616,7 @@ impl BinanceWebSocket {
     /// Attach a shared freshness tracker for the data plane.
     pub fn set_freshness(&self, freshness: Arc<dyn FreshnessTracker>) {
         if self.freshness.set(Arc::clone(&freshness)).is_ok() {
-            freshness.set_subscription_count(
-                DataSource::BinanceSpot,
-                self.symbols.len() as u64,
-            );
+            freshness.set_subscription_count(DataSource::BinanceSpot, self.symbols.len() as u64);
             freshness.set_source_connected(DataSource::BinanceSpot, false);
         }
     }
@@ -943,8 +940,8 @@ mod tests {
     /// Freshness tracker should record updates when attached.
     #[tokio::test]
     async fn characterization_freshness_recorded_on_trade() {
-        use std::sync::atomic::{AtomicU64, Ordering};
         use crate::freshness::{DataSource, FreshnessTracker};
+        use std::sync::atomic::{AtomicU64, Ordering};
 
         #[derive(Debug)]
         struct MockFreshness {

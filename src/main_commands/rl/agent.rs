@@ -18,5 +18,7 @@ pub(super) async fn run_agent(
     _policy_output: &str,
     _policy_version: &Option<String>,
 ) -> Result<()> {
-    anyhow::bail!("RLCryptoAgent (push-based) has been removed. Use the pull-based agent system instead.")
+    anyhow::bail!(
+        "RLCryptoAgent (push-based) has been removed. Use the pull-based agent system instead."
+    )
 }

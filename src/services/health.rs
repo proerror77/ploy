@@ -345,12 +345,13 @@ async fn metrics_handler(State(state): State<Arc<HealthState>>) -> impl IntoResp
         };
 
     // Get risk metrics
-    let (daily_pnl, cycle_count, consecutive_failures) = if let Some(ref risk_view) = state.risk_view {
-        let (pnl, cycles, _) = risk_view.daily_stats().await;
-        (pnl.to_string(), cycles, risk_view.consecutive_failures())
-    } else {
-        ("0".to_string(), 0, 0)
-    };
+    let (daily_pnl, cycle_count, consecutive_failures) =
+        if let Some(ref risk_view) = state.risk_view {
+            let (pnl, cycles, _) = risk_view.daily_stats().await;
+            (pnl.to_string(), cycles, risk_view.consecutive_failures())
+        } else {
+            ("0".to_string(), 0, 0)
+        };
 
     let health_status = match health.status {
         HealthStatus::Healthy => 1,

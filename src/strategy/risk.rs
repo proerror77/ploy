@@ -5,7 +5,9 @@
 //! `strategy::risk` namespace.
 
 pub use super::risk_mgmt::risk::RiskManager;
-pub use super::risk_mgmt::slippage::{MarketDepth, SlippageCheck, SlippageConfig, SlippageProtection};
+pub use super::risk_mgmt::slippage::{
+    MarketDepth, SlippageCheck, SlippageConfig, SlippageProtection,
+};
 pub use super::risk_mgmt::validation::{
     leg1_entry_chain, leg2_entry_chain, ExposureValidator, RiskStateValidator, SpreadValidator,
     SumTargetValidator, TimeRemainingValidator, ValidationChain, ValidationContext,

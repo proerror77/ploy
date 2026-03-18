@@ -121,13 +121,15 @@ impl HmacAuth {
         );
         headers.insert(
             "POLY_SIGNATURE",
-            HeaderValue::from_str(&signature)
-                .map_err(|e| PolymarketError::Internal(format!("Invalid signature header: {}", e)))?,
+            HeaderValue::from_str(&signature).map_err(|e| {
+                PolymarketError::Internal(format!("Invalid signature header: {}", e))
+            })?,
         );
         headers.insert(
             "POLY_TIMESTAMP",
-            HeaderValue::from_str(&timestamp.to_string())
-                .map_err(|e| PolymarketError::Internal(format!("Invalid timestamp header: {}", e)))?,
+            HeaderValue::from_str(&timestamp.to_string()).map_err(|e| {
+                PolymarketError::Internal(format!("Invalid timestamp header: {}", e))
+            })?,
         );
         headers.insert(
             "POLY_API_KEY",
@@ -136,8 +138,9 @@ impl HmacAuth {
         );
         headers.insert(
             "POLY_PASSPHRASE",
-            HeaderValue::from_str(&self.credentials.passphrase)
-                .map_err(|e| PolymarketError::Internal(format!("Invalid passphrase header: {}", e)))?,
+            HeaderValue::from_str(&self.credentials.passphrase).map_err(|e| {
+                PolymarketError::Internal(format!("Invalid passphrase header: {}", e))
+            })?,
         );
 
         Ok(headers)

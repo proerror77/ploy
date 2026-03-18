@@ -5497,7 +5497,9 @@ pub async fn start_platform(
             let pm_ws = Arc::new(PolymarketWebSocket::new(&app_config.market.ws_url));
 
             // Attach per-symbol freshness tracker to WS adapters.
-            binance_ws.set_freshness(Arc::clone(&freshness) as Arc<dyn ploy_data::freshness::FreshnessTracker>);
+            binance_ws.set_freshness(
+                Arc::clone(&freshness) as Arc<dyn ploy_data::freshness::FreshnessTracker>
+            );
             pm_ws.set_freshness(Arc::clone(&freshness));
             info!("data plane freshness tracker attached to WS adapters");
             (binance_ws, pm_ws)
@@ -6705,7 +6707,9 @@ pub async fn start_platform(
         // We create a dedicated one for OpenClaw using the configured BTC symbol.
         let oc_symbols = vec![config.openclaw.btc_symbol.clone()];
         let oc_binance_ws = Arc::new(BinanceWebSocket::new(oc_symbols));
-        oc_binance_ws.set_freshness(Arc::clone(&freshness) as Arc<dyn ploy_data::freshness::FreshnessTracker>);
+        oc_binance_ws.set_freshness(
+            Arc::clone(&freshness) as Arc<dyn ploy_data::freshness::FreshnessTracker>
+        );
 
         // Spawn Binance WS feed for OpenClaw
         let oc_ws = oc_binance_ws.clone();

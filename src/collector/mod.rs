@@ -14,8 +14,8 @@ pub use backtest_collector::{
 };
 // Re-export Binance types from ploy-data
 pub use ploy_data::binance::{
-    BinanceDepthStream, DepthUpdate, LobCache, LobSnapshot, LobUpdate, OrderBookState,
-    BinanceKlineClient, Kline, VolatilityStats,
+    BinanceDepthStream, BinanceKlineClient, DepthUpdate, Kline, LobCache, LobSnapshot, LobUpdate,
+    OrderBookState, VolatilityStats,
 };
 pub use polymarket_orderbook_history::*;
 pub use sync_collector::*;

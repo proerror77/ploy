@@ -139,6 +139,15 @@
 
 ---
 
+## 2026-03-06 Workspace Restructure Slice (Phase 6 momentum module split: config + detector)
+
+- [ ] Extract `MomentumConfig` and `ExitConfig` into `src/strategy/momentum/config.rs`
+- [ ] Extract `Direction`, `MomentumSignal`, and `MomentumDetector` into `src/strategy/momentum/detector.rs`
+- [ ] Re-export those types from `src/strategy/momentum.rs` without changing external call sites
+- [ ] Re-run targeted momentum and backtest compile/test coverage
+
+---
+
 ## 2026-03-06 Workspace Restructure Slice (agent-team handoff)
 
 - [ ] Phase 6.4 split `src/strategy/momentum.rs` into `src/strategy/momentum/`

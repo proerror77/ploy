@@ -141,7 +141,9 @@ impl PlatformDataPlane {
             None
         } else {
             let ws = Arc::new(BinanceWebSocket::new(config.binance_spot_symbols.clone()));
-            ws.set_freshness(Arc::clone(&freshness) as Arc<dyn ploy_data::freshness::FreshnessTracker>);
+            ws.set_freshness(
+                Arc::clone(&freshness) as Arc<dyn ploy_data::freshness::FreshnessTracker>
+            );
             Some(ws)
         };
 
@@ -155,7 +157,9 @@ impl PlatformDataPlane {
                 config.binance_kline_intervals.clone(),
                 config.binance_kline_closed_only,
             ));
-            ws.set_freshness(Arc::clone(&freshness) as Arc<dyn ploy_data::freshness::FreshnessTracker>);
+            ws.set_freshness(
+                Arc::clone(&freshness) as Arc<dyn ploy_data::freshness::FreshnessTracker>
+            );
             Some(ws)
         };
 

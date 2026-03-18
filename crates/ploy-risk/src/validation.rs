@@ -3,8 +3,8 @@
 //! Consolidates validation logic from risk.rs, signal.rs, and engine.rs
 //! into reusable, composable validators.
 
-use ploy_core::{RiskState, Round};
 use crate::error::RiskError;
+use ploy_core::{RiskState, Round};
 use rust_decimal::Decimal;
 use std::fmt;
 

@@ -656,8 +656,8 @@ mod tests {
 
     #[tokio::test]
     async fn characterization_freshness_recorded_on_kline() {
-        use std::sync::atomic::{AtomicU64, Ordering};
         use crate::freshness::{DataSource, FreshnessTracker};
+        use std::sync::atomic::{AtomicU64, Ordering};
 
         #[derive(Debug)]
         struct MockFreshness {
