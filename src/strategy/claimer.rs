@@ -11,8 +11,7 @@ use alloy::signers::{local::PrivateKeySigner, Signer as _};
 use alloy::sol;
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
-use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -20,12 +19,17 @@ use tracing::{debug, error, info, warn};
 
 use crate::adapters::PolymarketClient;
 use crate::error::Result;
-use crate::signing::Wallet;
 
-mod claim_flow;
+mod daemon;
 mod discovery;
+mod claim_flow;
 mod relayer;
 
+pub(crate) use self::daemon::{
+    auto_topup_enabled, env_flag, env_string_any, env_u128_any, env_u64_any,
+    min_native_gas_wei, needs_native_gas_preflight, u256_to_u128_saturating,
+};
+pub use self::daemon::ensure_account_claimer_daemon;
 use self::relayer::{
     missing_relayer_builder_credential_groups, relayer_base_url,
     relayer_builder_credentials_available, relayer_claim_enabled, relayer_fallback_onchain_enabled,
@@ -42,7 +46,7 @@ const DEFAULT_AUTO_TOPUP_MAX_PER_TX_WEI: u128 = 20_000_000_000_000_000; // 0.02 
 const DEFAULT_AUTO_TOPUP_DAILY_CAP_WEI: u128 = 100_000_000_000_000_000; // 0.1 MATIC
 const DEFAULT_AUTO_TOPUP_RESERVE_WEI: u128 = 5_000_000_000_000_000; // keep 0.005 MATIC on top-up wallet
 
-static ACCOUNT_CLAIMER_DAEMON_STARTED: OnceLock<AtomicBool> = OnceLock::new();
+pub(super) static ACCOUNT_CLAIMER_DAEMON_STARTED: OnceLock<AtomicBool> = OnceLock::new();
 
 // Generate contract bindings for ConditionalTokens
 sol! {
@@ -60,178 +64,6 @@ sol! {
         /// Get balance of a token for an account
         function balanceOf(address account, uint256 id) external view returns (uint256);
     }
-}
-
-fn env_flag(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "y" | "on"
-            )
-        })
-        .unwrap_or(default)
-}
-
-fn env_string_any(keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Ok(v) = std::env::var(key) {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn env_u128_any(keys: &[&str]) -> Option<u128> {
-    for key in keys {
-        if let Ok(v) = std::env::var(key) {
-            if let Ok(parsed) = v.trim().parse::<u128>() {
-                return Some(parsed);
-            }
-        }
-    }
-    None
-}
-
-fn env_u64_any(keys: &[&str]) -> Option<u64> {
-    for key in keys {
-        if let Ok(v) = std::env::var(key) {
-            if let Ok(parsed) = v.trim().parse::<u64>() {
-                return Some(parsed);
-            }
-        }
-    }
-    None
-}
-
-fn min_native_gas_wei() -> U256 {
-    std::env::var("CLAIMER_MIN_NATIVE_GAS_WEI")
-        .ok()
-        .and_then(|v| v.trim().parse::<u128>().ok())
-        .map(U256::from)
-        .unwrap_or_else(|| U256::from(DEFAULT_MIN_NATIVE_GAS_WEI))
-}
-
-fn auto_topup_enabled() -> bool {
-    env_flag(
-        "CLAIMER_AUTO_TOPUP_ENABLED",
-        env_flag("CLAIMER_GAS_TOPUP_ENABLED", false),
-    )
-}
-
-/// Start one global account-level auto-claimer daemon (process-wide).
-///
-/// This is intentionally strategy-agnostic: it scans the account for redeemable
-/// positions every minute (configurable), independent of any strategy lifecycle.
-///
-/// Canonical callers should prefer `crate::account::ensure_account_claimer_daemon()`;
-/// this module retains the implementation while ownership moves into the account plane.
-pub async fn ensure_account_claimer_daemon() -> Result<()> {
-    if !env_flag("CLAIMER_DAEMON_ENABLED", true) {
-        return Ok(());
-    }
-
-    let gate = ACCOUNT_CLAIMER_DAEMON_STARTED.get_or_init(|| AtomicBool::new(false));
-    if gate
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Ok(());
-    }
-
-    let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
-        .or_else(|_| std::env::var("PRIVATE_KEY"))
-        .ok();
-    let Some(private_key) = private_key else {
-        warn!("Auto-claimer daemon disabled: no POLYMARKET_PRIVATE_KEY/PRIVATE_KEY");
-        gate.store(false, Ordering::SeqCst);
-        return Ok(());
-    };
-
-    let wallet = match Wallet::from_env(POLYGON_CHAIN_ID) {
-        Ok(w) => w,
-        Err(e) => {
-            warn!("Auto-claimer daemon wallet init failed: {}", e);
-            gate.store(false, Ordering::SeqCst);
-            return Ok(());
-        }
-    };
-
-    let funder = std::env::var("POLYMARKET_FUNDER")
-        .or_else(|_| std::env::var("POLYMARKET_FUNDER_ADDRESS"))
-        .ok();
-    let client = if let Some(ref funder_addr) = funder {
-        match PolymarketClient::new_authenticated_proxy(
-            "https://clob.polymarket.com",
-            wallet,
-            funder_addr,
-            true,
-        )
-        .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                gate.store(false, Ordering::SeqCst);
-                return Err(e);
-            }
-        }
-    } else {
-        match PolymarketClient::new_authenticated("https://clob.polymarket.com", wallet, true).await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                gate.store(false, Ordering::SeqCst);
-                return Err(e);
-            }
-        }
-    };
-
-    let interval_secs = env_u64_any(&["CLAIMER_CHECK_INTERVAL_SECS", "CLAIMER_INTERVAL_SECS"])
-        .unwrap_or(60)
-        .max(10);
-    let min_claim_size = env_string_any(&["CLAIMER_MIN_CLAIM_SIZE", "CLAIMER_MIN_SIZE_USDC"])
-        .and_then(|v| Decimal::from_str(v.trim()).ok())
-        .unwrap_or(Decimal::ONE);
-
-    let claimer = AutoClaimer::new(
-        client,
-        ClaimerConfig {
-            check_interval_secs: interval_secs,
-            min_claim_size,
-            auto_claim: true,
-            private_key: Some(private_key),
-        },
-    );
-
-    let gate_ref = ACCOUNT_CLAIMER_DAEMON_STARTED
-        .get()
-        .expect("claimer gate should be initialized");
-    tokio::spawn(async move {
-        if let Err(e) = claimer.start().await {
-            error!("Auto-claimer daemon stopped with error: {}", e);
-            gate_ref.store(false, Ordering::SeqCst);
-        }
-    });
-
-    info!(
-        interval_secs,
-        min_claim_size = %min_claim_size,
-        "Auto-claimer daemon started (account-level)"
-    );
-
-    Ok(())
-}
-
-fn u256_to_u128_saturating(value: U256) -> u128 {
-    value.to_string().parse::<u128>().unwrap_or(u128::MAX)
-}
-
-fn needs_native_gas_preflight(auto_claim: bool, relayer_ready: bool) -> bool {
-    auto_claim && !relayer_ready
 }
 
 #[derive(Debug, Clone)]
@@ -506,7 +338,8 @@ impl AutoClaimer {
         current_balance: U256,
         min_balance: U256,
     ) -> Result<Option<U256>> {
-        claim_flow::maybe_auto_topup_wallet(self, target_wallet, current_balance, min_balance).await
+        claim_flow::maybe_auto_topup_wallet(self, target_wallet, current_balance, min_balance)
+            .await
     }
 
     /// Claim a specific condition by calling the ConditionalTokens redeem function
