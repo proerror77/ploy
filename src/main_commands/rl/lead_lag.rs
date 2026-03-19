@@ -137,7 +137,7 @@ pub(super) async fn run_lead_lag(
 
         loop {
             let action_idx = if rand::random::<f32>() < exploration_rate {
-                rand::random::<usize>() % num_actions
+                (rand::random::<u64>() as usize) % num_actions
             } else {
                 action_values
                     .iter()
