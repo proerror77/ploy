@@ -7,9 +7,8 @@ use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 
 use crate::adapters::SpotPrice;
-use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
+use crate::domain::{Domain, OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::{PloyError, Result};
-use crate::platform::Domain;
 use crate::strategy::crypto::{horizon_for_series, known_binance_symbols, series_ids_for_symbol};
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::traits::{
@@ -61,6 +60,8 @@ struct Pm5mDirectionalConfig {
     use_kelly_sizing: bool,
     kelly_fraction_scale: f64,
     kelly_fraction_cap: f64,
+    initial_nav_usd: Decimal,
+    max_nav_fraction_per_trade: Decimal,
     /// Enable Bayesian posterior gate (default: true)
     use_bayesian: bool,
     /// z-score for Bayesian lower-bound credible interval (default: 1.645 = 95%)
@@ -124,6 +125,8 @@ impl Default for Pm5mDirectionalConfig {
             use_kelly_sizing: true,
             kelly_fraction_scale: 0.15,
             kelly_fraction_cap: 0.25,
+            initial_nav_usd: dec!(1000),
+            max_nav_fraction_per_trade: dec!(0.01),
             use_bayesian: true,
             bayesian_credible_z: 1.645,
             ewma_lambda: 0.94,
@@ -177,6 +180,10 @@ impl Pm5mDirectionalConfig {
         self.shares_per_trade = self.shares_per_trade.max(self.min_shares);
         self.kelly_fraction_scale = self.kelly_fraction_scale.max(0.0);
         self.kelly_fraction_cap = self.kelly_fraction_cap.clamp(0.01, 1.0);
+        self.initial_nav_usd = self.initial_nav_usd.max(Decimal::ZERO);
+        self.max_nav_fraction_per_trade = self
+            .max_nav_fraction_per_trade
+            .clamp(Decimal::ZERO, Decimal::ONE);
     }
 
     fn configured_symbols(&self) -> Vec<String> {
@@ -283,6 +290,7 @@ pub struct Pm5mDirectionalStrategy {
     positions: HashMap<String, DirectionalPosition>,
     last_trade_at: HashMap<String, DateTime<Utc>>,
     daily_trades: u32,
+    realized_pnl_today: Decimal,
     last_reset: DateTime<Utc>,
     last_reason: Option<String>,
     bayesian: BayesianPrior,
@@ -338,6 +346,7 @@ impl Pm5mDirectionalStrategy {
             positions: HashMap::new(),
             last_trade_at: HashMap::new(),
             daily_trades: 0,
+            realized_pnl_today: Decimal::ZERO,
             last_reset: Utc::now(),
             last_reason: None,
             bayesian: BayesianPrior::new(),
@@ -590,6 +599,27 @@ impl Pm5mDirectionalStrategy {
         scaled.max(self.cfg.min_shares)
     }
 
+    fn current_nav_usd(&self) -> Decimal {
+        (self.cfg.initial_nav_usd + self.realized_pnl_today).max(Decimal::ZERO)
+    }
+
+    fn nav_capped_shares(&self, shares: u64, entry_price: Decimal) -> u64 {
+        if shares == 0 || entry_price <= Decimal::ZERO {
+            return shares;
+        }
+        if self.cfg.max_nav_fraction_per_trade <= Decimal::ZERO {
+            return shares;
+        }
+
+        let notional_cap = self.current_nav_usd() * self.cfg.max_nav_fraction_per_trade;
+        if notional_cap <= Decimal::ZERO {
+            return 0;
+        }
+
+        let capped = (notional_cap / entry_price).floor().to_u64().unwrap_or(0);
+        shares.min(capped)
+    }
+
     fn build_submit_intent(
         &self,
         client_order_id: String,
@@ -813,6 +843,7 @@ impl Pm5mDirectionalStrategy {
             self.kelly_scaled_shares(self.cfg.shares_per_trade, effective_p, effective_cost);
         // Apply Deribit regime multiplier to position size
         let shares = ((shares as f64 * deribit_mult).floor() as u64).max(0);
+        let shares = self.nav_capped_shares(shares, ask);
         if shares < self.cfg.min_shares {
             self.last_reason = Some(format!("{symbol}:shares_below_min"));
             return None;
@@ -1165,11 +1196,20 @@ impl Strategy for Pm5mDirectionalStrategy {
                             Side::Down => !spot_above,
                         };
                         let entry_price_f = p.entry_price.to_f64().unwrap_or(0.5);
-                        Some((entry_price_f, p.entry_time_remaining_secs, p.entry_sigma, won))
+                        let exit_price = if won { Decimal::ONE } else { Decimal::ZERO };
+                        let realized_pnl = (exit_price - p.entry_price) * Decimal::from(p.shares);
+                        Some((
+                            entry_price_f,
+                            p.entry_time_remaining_secs,
+                            p.entry_sigma,
+                            won,
+                            realized_pnl,
+                        ))
                     })
                     .collect();
-                for (price, time_rem, sigma, won) in settled {
+                for (price, time_rem, sigma, won, realized_pnl) in settled {
                     self.bayesian.record_outcome(price, time_rem, sigma, won);
+                    self.realized_pnl_today += realized_pnl;
                 }
 
                 self.active_events.remove(event_id);
@@ -1384,7 +1424,7 @@ impl Strategy for Pm5mDirectionalStrategy {
             pending_order_count: self.pending_orders.len(),
             total_exposure,
             unrealized_pnl,
-            realized_pnl_today: Decimal::ZERO,
+            realized_pnl_today: self.realized_pnl_today,
             last_update: Utc::now(),
             metrics,
         }
@@ -1438,6 +1478,7 @@ impl Strategy for Pm5mDirectionalStrategy {
         self.positions.clear();
         self.last_trade_at.clear();
         self.daily_trades = 0;
+        self.realized_pnl_today = Decimal::ZERO;
         self.last_reset = Utc::now();
         self.last_reason = None;
     }
@@ -1805,6 +1846,9 @@ max_nav_fraction_per_trade = 0.01
                 side: Side::Up,
                 shares: 25,
                 event_id: "evt-btc-5m".to_string(),
+                entry_sigma: 0.0,
+                entry_time_remaining_secs: 180.0,
+                entry_price: dec!(0.41),
             },
         );
 
@@ -1851,6 +1895,9 @@ max_nav_fraction_per_trade = 0.01
                 side: Side::Up,
                 shares: 25,
                 event_id: "evt-btc-5m".to_string(),
+                entry_sigma: 0.0,
+                entry_time_remaining_secs: 180.0,
+                entry_price: dec!(0.41),
             },
         );
 
@@ -1895,6 +1942,9 @@ max_nav_fraction_per_trade = 0.01
                 current_price: Some(dec!(0.45)),
                 opened_at: start,
                 end_time: start + chrono::Duration::seconds(180),
+                entry_sigma: 0.0,
+                entry_time_remaining_secs: 180.0,
+                entry_spot: dec!(100),
             },
         );
 
@@ -1926,6 +1976,9 @@ max_nav_fraction_per_trade = 0.01
                 current_price: Some(dec!(0.45)),
                 opened_at: start,
                 end_time: start + chrono::Duration::seconds(180),
+                entry_sigma: 0.0,
+                entry_time_remaining_secs: 180.0,
+                entry_spot: dec!(100),
             },
         );
 
@@ -1938,7 +1991,7 @@ max_nav_fraction_per_trade = 0.01
     }
 
     #[tokio::test]
-    async fn event_expiry_realizes_marked_pnl_into_strategy_state() {
+    async fn event_expiry_realizes_settlement_pnl_into_strategy_state() {
         let mut strategy =
             Pm5mDirectionalStrategy::from_toml("pm5-test".to_string(), nav_kelly_toml(), true)
                 .expect("strategy");
@@ -1956,6 +2009,9 @@ max_nav_fraction_per_trade = 0.01
                 current_price: Some(dec!(0.75)),
                 opened_at: start,
                 end_time: start + chrono::Duration::seconds(180),
+                entry_sigma: 0.0,
+                entry_time_remaining_secs: 180.0,
+                entry_spot: dec!(100),
             },
         );
         strategy.active_events.insert(
@@ -1971,6 +2027,14 @@ max_nav_fraction_per_trade = 0.01
         );
 
         strategy
+            .on_market_update(&price_update(
+                start + chrono::Duration::seconds(181),
+                dec!(101),
+            ))
+            .await
+            .expect("settlement spot");
+
+        strategy
             .on_market_update(&MarketUpdate::EventExpired {
                 event_id: "evt-btc-5m".to_string(),
             })
@@ -1978,7 +2042,7 @@ max_nav_fraction_per_trade = 0.01
             .expect("event expired");
 
         let state = strategy.state();
-        assert_eq!(state.realized_pnl_today, dec!(3.50));
+        assert_eq!(state.realized_pnl_today, dec!(6.00));
         assert!(strategy.positions.is_empty());
     }
 }

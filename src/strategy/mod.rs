@@ -55,6 +55,8 @@ pub mod crypto_lob_ml;
 pub mod crypto_rl_policy;
 pub mod nba_comeback;
 pub mod pattern_memory;
+pub mod pm_5m_bayesian;
+pub mod pm_5m_directional;
 pub mod sports;
 
 // =============================================================================
@@ -146,6 +148,7 @@ pub use multi_outcome::{
     SplitMergeType,
     POLYMARKET_FEE_RATE,
 };
+pub use pm_5m_directional::Pm5mDirectionalStrategy;
 pub use position_manager::{
     Position as PersistedPosition, PositionManager, PositionStatus as PersistedPositionStatus,
     PositionSummary,
