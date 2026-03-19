@@ -14,6 +14,12 @@ use crate::plugins::DeploymentState;
 use crate::platform::{Domain, IntentPurpose, OrderIntent, OrderPriority};
 use crate::strategy::OrderPurpose;
 
+pub(crate) mod deployment_files;
+mod deployments;
+mod evaluation;
+mod risk_decision;
+mod trade_intent;
+
 /// Timeframe for deployment / intent routing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

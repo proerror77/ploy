@@ -13,15 +13,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
+use crate::domain::Domain;
 use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
-use crate::platform::Domain;
 
 use crate::strategy::detectors::{DumpDetector, DumpDetectorConfig, DumpSignal};
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
     StrategyConfig, StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
+
+mod lifecycle;
 
 /// Two-leg strategy configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,22 +46,6 @@ pub struct TwoLegConfig {
     pub min_time_remaining_secs: u64,
     /// Dump detector configuration
     pub dump_config: DumpDetectorConfig,
-    /// Polymarket series to monitor for event discovery.
-    #[serde(default = "default_two_leg_series_ids")]
-    pub series_ids: Vec<String>,
-}
-
-fn default_two_leg_series_ids() -> Vec<String> {
-    vec![
-        "10684".to_string(), // BTC 5m
-        "10683".to_string(), // ETH 5m
-        "10686".to_string(), // SOL 5m
-        "10685".to_string(), // XRP 5m
-        "10192".to_string(), // BTC 15m
-        "10191".to_string(), // ETH 15m
-        "10423".to_string(), // SOL 15m
-        "10422".to_string(), // XRP 15m
-    ]
 }
 
 impl Default for TwoLegConfig {
@@ -74,7 +60,6 @@ impl Default for TwoLegConfig {
             window_min: 2,
             min_time_remaining_secs: 30,
             dump_config: DumpDetectorConfig::default(),
-            series_ids: default_two_leg_series_ids(),
         }
     }
 }
@@ -208,233 +193,6 @@ impl TwoLegStrategy {
             TwoLegState::Leg1Pending | TwoLegState::Leg1Filled | TwoLegState::Leg2Pending
         )
     }
-
-    /// Process dump signal
-    fn handle_dump_signal(&mut self, signal: DumpSignal) -> Vec<StrategyAction> {
-        let mut actions = Vec::new();
-
-        // Validate signal
-        if !signal.spread_ok(self.config.dump_config.max_spread_bps) {
-            debug!(
-                "Signal rejected: spread {} > max {}",
-                signal.spread_bps, self.config.dump_config.max_spread_bps
-            );
-            return actions;
-        }
-
-        // Check time remaining
-        if let Some(remaining) = self.seconds_remaining() {
-            if remaining < self.config.min_time_remaining_secs as i64 {
-                debug!("Signal rejected: only {}s remaining", remaining);
-                return actions;
-            }
-        }
-
-        // Get token ID
-        let Some(token_id) = self.token_id(signal.side) else {
-            return actions;
-        };
-
-        // Create Leg1 order
-        let client_order_id = format!("{}-leg1-{}", self.config.id, Utc::now().timestamp_millis());
-
-        // Track pending order
-        self.pending_orders.insert(
-            client_order_id.clone(),
-            PendingOrder {
-                client_order_id: client_order_id.clone(),
-                order_id: None,
-                side: signal.side,
-                is_leg1: true,
-            },
-        );
-
-        // Update state
-        self.state = TwoLegState::Leg1Pending;
-
-        info!(
-            "Entering Leg1: {} {} shares @ {}",
-            signal.side, self.config.shares, signal.trigger_price
-        );
-
-        actions.push(StrategyAction::SubmitIntent {
-            intent: self.submit_intent(
-                client_order_id,
-                token_id.to_string(),
-                signal.side,
-                true,
-                self.config.shares,
-                signal.trigger_price,
-                10,
-            ),
-        });
-
-        actions.push(StrategyAction::LogEvent {
-            event: StrategyEvent::new(StrategyEventType::EntryTriggered, "Leg1 entry triggered")
-                .with_data("side", signal.side.to_string())
-                .with_data("price", signal.trigger_price.to_string())
-                .with_data(
-                    "drop_pct",
-                    (signal.drop_pct * Decimal::from(100)).to_string(),
-                ),
-        });
-
-        actions
-    }
-
-    /// Check for Leg2 opportunity
-    fn check_leg2_opportunity(&self) -> Option<(Side, Decimal)> {
-        let ctx = self.current_cycle.as_ref()?;
-        let opposite_side = ctx.leg1_side.opposite();
-
-        // Get opposite side quote
-        let opposite_quote = match opposite_side {
-            Side::Up => self.last_up_quote.as_ref(),
-            Side::Down => self.last_down_quote.as_ref(),
-        };
-
-        let ask = opposite_quote?.best_ask?;
-
-        // Check sum condition
-        if self.detector.check_leg2_condition(ctx.leg1_price, ask) {
-            Some((opposite_side, ask))
-        } else {
-            None
-        }
-    }
-
-    /// Enter Leg2
-    fn enter_leg2(&mut self, side: Side, price: Decimal) -> Vec<StrategyAction> {
-        let mut actions = Vec::new();
-
-        let Some(ctx) = &self.current_cycle else {
-            return actions;
-        };
-
-        let Some(token_id) = self.token_id(side) else {
-            return actions;
-        };
-
-        let client_order_id = format!("{}-leg2-{}", self.config.id, Utc::now().timestamp_millis());
-
-
-        self.pending_orders.insert(
-            client_order_id.clone(),
-            PendingOrder {
-                client_order_id: client_order_id.clone(),
-                order_id: None,
-                side,
-                is_leg1: false,
-            },
-        );
-
-        self.state = TwoLegState::Leg2Pending;
-
-        info!(
-            "Entering Leg2: {} {} shares @ {}",
-            side, ctx.leg1_shares, price
-        );
-
-        actions.push(StrategyAction::SubmitIntent {
-            intent: self.submit_intent(
-                client_order_id,
-                token_id.to_string(),
-                side,
-                true,
-                ctx.leg1_shares,
-                price,
-                10,
-            ),
-        });
-
-        actions
-    }
-
-    fn submit_intent(
-        &self,
-        client_order_id: String,
-        token_id: String,
-        side: Side,
-        is_buy: bool,
-        shares: u64,
-        limit_price: Decimal,
-        priority: u8,
-    ) -> StrategyOrderIntent {
-        let market_slug = self
-            .current_event
-            .as_ref()
-            .map(|event| event.event_id.clone())
-            .unwrap_or_else(|| token_id.clone());
-
-        StrategyOrderIntent {
-            client_order_id,
-            domain: Domain::Crypto,
-            market_slug,
-            token_id,
-            side,
-            is_buy,
-            shares,
-            limit_price,
-            order_type: OrderType::Limit,
-            time_in_force: TimeInForce::GTC,
-            priority,
-            metadata: HashMap::new(),
-        }
-    }
-
-    /// Force Leg2 or abort
-    fn force_leg2_or_abort(&mut self) -> Vec<StrategyAction> {
-        let mut actions = Vec::new();
-
-        let Some(ctx) = &self.current_cycle else {
-            return actions;
-        };
-
-        let opposite_side = ctx.leg1_side.opposite();
-
-        // Try to get opposite side quote with slippage
-        let opposite_quote = match opposite_side {
-            Side::Up => self.last_up_quote.as_ref(),
-            Side::Down => self.last_down_quote.as_ref(),
-        };
-
-        if let Some(quote) = opposite_quote {
-            if let Some(ask) = quote.best_ask {
-                // Use higher price with slippage
-                let forced_price = ask * (Decimal::ONE + self.config.dump_config.slippage_buffer);
-                warn!("Forcing Leg2 at {}", forced_price);
-                return self.enter_leg2(opposite_side, forced_price);
-            }
-        }
-
-        // Can't force, must abort
-        self.abort_cycle("No quote for forced Leg2");
-        actions.push(StrategyAction::Alert {
-            level: AlertLevel::Warning,
-            message: "Cycle aborted: No quote for forced Leg2".to_string(),
-        });
-
-        actions
-    }
-
-    /// Abort current cycle
-    fn abort_cycle(&mut self, reason: &str) {
-        warn!("Aborting cycle: {}", reason);
-
-        self.state = TwoLegState::Abort;
-        self.current_cycle = None;
-        self.positions.clear();
-    }
-
-    /// Transition to idle
-    fn transition_to_idle(&mut self) {
-        self.state = TwoLegState::Idle;
-        self.current_cycle = None;
-        self.current_event = None;
-        self.positions.clear();
-        self.detector.reset(None);
-        debug!("Transitioned to IDLE");
-    }
 }
 
 #[async_trait]
@@ -452,12 +210,7 @@ impl Strategy for TwoLegStrategy {
     }
 
     fn required_feeds(&self) -> Vec<DataFeed> {
-        vec![
-            DataFeed::PolymarketEvents {
-                series_ids: self.config.series_ids.clone(),
-            },
-            DataFeed::Tick { interval_ms: 1000 },
-        ]
+        vec![DataFeed::Tick { interval_ms: 1000 }]
     }
 
     async fn on_market_update(&mut self, update: &MarketUpdate) -> Result<Vec<StrategyAction>> {
@@ -522,7 +275,6 @@ impl Strategy for TwoLegStrategy {
                     self.state = TwoLegState::WatchWindow;
 
                     info!("Started monitoring event: {}", event_id);
-
                 }
             }
             MarketUpdate::EventExpired { event_id } => {
@@ -751,8 +503,6 @@ impl Strategy for TwoLegStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
-    use rust_decimal_macros::dec;
 
     #[test]
     fn test_state_transitions() {
@@ -761,108 +511,5 @@ mod tests {
 
         assert_eq!(strategy.state, TwoLegState::Idle);
         assert!(!strategy.is_active());
-    }
-
-    #[test]
-    fn required_feeds_include_static_polymarket_event_feed() {
-        let strategy = TwoLegStrategy::new(TwoLegConfig::default());
-        let feeds = strategy.required_feeds();
-
-        assert!(feeds.iter().any(|feed| matches!(
-            feed,
-            DataFeed::PolymarketEvents { series_ids } if !series_ids.is_empty()
-        )));
-    }
-
-    #[tokio::test]
-    async fn event_discovery_starts_watch_window_without_feed_action() {
-        let mut strategy = TwoLegStrategy::new(TwoLegConfig::default());
-        let actions = strategy
-            .on_market_update(&MarketUpdate::EventDiscovered {
-                event_id: "evt-1".to_string(),
-                series_id: "ignored".to_string(),
-                up_token: "up-token".to_string(),
-                down_token: "down-token".to_string(),
-                end_time: Utc::now() + Duration::minutes(5),
-                price_to_beat: None,
-                title: None,
-                condition_id: None,
-            })
-            .await
-            .expect("event discovery should succeed");
-
-        assert!(actions.is_empty(), "feed lifecycle is runtime-owned");
-        assert_eq!(strategy.state, TwoLegState::WatchWindow);
-        let event = strategy.current_event.expect("event should be tracked");
-        assert_eq!(event.up_token_id, "up-token");
-        assert_eq!(event.down_token_id, "down-token");
-    }
-
-    #[tokio::test]
-    async fn event_expiry_emits_warning_alert_instead_of_risk_mutation() {
-        let mut strategy = TwoLegStrategy::new(TwoLegConfig::default());
-        strategy.current_event = Some(EventContext {
-            event_id: "evt-1".to_string(),
-            up_token_id: "up-token".to_string(),
-            down_token_id: "down-token".to_string(),
-            end_time: Utc::now() + Duration::minutes(5),
-            start_time: Utc::now(),
-        });
-        strategy.state = TwoLegState::Leg1Filled;
-
-        let actions = strategy
-            .on_market_update(&MarketUpdate::EventExpired {
-                event_id: "evt-1".to_string(),
-            })
-            .await
-            .expect("event expiry should succeed");
-
-        assert_eq!(actions.len(), 1);
-        match &actions[0] {
-            StrategyAction::Alert { level, message } => {
-                assert_eq!(*level, AlertLevel::Warning);
-                assert!(message.contains("event expiration"));
-            }
-            other => panic!("unexpected action: {other:?}"),
-        }
-        assert_eq!(strategy.state, TwoLegState::Idle);
-    }
-
-    #[tokio::test]
-    async fn leg2_failure_keeps_only_critical_alert_path() {
-        let mut strategy = TwoLegStrategy::new(TwoLegConfig::default());
-        strategy.state = TwoLegState::Leg2Pending;
-        strategy.pending_orders.insert(
-            "client-1".to_string(),
-            PendingOrder {
-                client_order_id: "client-1".to_string(),
-                order_id: Some("order-1".to_string()),
-                side: Side::Down,
-                is_leg1: false,
-            },
-        );
-
-        let actions = strategy
-            .on_order_update(&OrderUpdate {
-                order_id: "order-1".to_string(),
-                client_order_id: Some("client-1".to_string()),
-                status: OrderStatus::Rejected,
-                filled_qty: 0,
-                avg_fill_price: None,
-                timestamp: Utc::now(),
-                error: Some("rejected".to_string()),
-            })
-            .await
-            .expect("order update should succeed");
-
-        assert_eq!(actions.len(), 1);
-        match &actions[0] {
-            StrategyAction::Alert { level, message } => {
-                assert_eq!(*level, AlertLevel::Critical);
-                assert!(message.contains("OPEN EXPOSURE"));
-            }
-            other => panic!("unexpected action: {other:?}"),
-        }
-        assert_eq!(strategy.state, TwoLegState::Abort);
     }
 }

@@ -12,6 +12,7 @@ use tokio::time::{sleep, timeout, Instant};
 use tracing::{debug, error, info, warn};
 
 mod execution_flow;
+mod idempotency_flow;
 
 /// Order executor for managing order lifecycle
 pub struct OrderExecutor {

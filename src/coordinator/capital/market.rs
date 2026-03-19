@@ -3,13 +3,17 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use uuid::Uuid;
 
+use crate::coordinator::OrderIntent;
 use crate::coordinator::config::CoordinatorConfig;
-use crate::platform::{Domain, OrderIntent};
+use crate::domain::Domain;
 
 #[path = "market/accounting.rs"]
 mod accounting;
+#[path = "market/config.rs"]
+mod config;
 
 use accounting::{MarketExposureBook, PendingMarketIntent};
+use config::MarketAllocatorDomainConfig;
 
 pub(in crate::coordinator) fn normalized_identity_component(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
@@ -109,71 +113,18 @@ impl MarketCapitalAllocator {
     }
 
     fn new_for_domain(config: &CoordinatorConfig, domain: Domain) -> Self {
-        let (
-            domain_label,
-            enabled,
-            configured_cap,
-            risk_cap,
-            market_cap_pct,
-            auto_split_by_active_markets,
-        ) = match domain {
-            Domain::Sports => (
-                "sports",
-                config.sports_allocator_enabled,
-                config.sports_allocator_total_cap_usd,
-                config.risk.sports_max_exposure,
-                config.sports_market_cap_pct,
-                config.sports_auto_split_by_active_markets,
-            ),
-            Domain::Politics => (
-                "politics",
-                config.politics_allocator_enabled,
-                config.politics_allocator_total_cap_usd,
-                config.risk.politics_max_exposure,
-                config.politics_market_cap_pct,
-                config.politics_auto_split_by_active_markets,
-            ),
-            Domain::Economics => (
-                "economics",
-                config.economics_allocator_enabled,
-                config.economics_allocator_total_cap_usd,
-                config.risk.economics_max_exposure,
-                config.economics_market_cap_pct,
-                config.economics_auto_split_by_active_markets,
-            ),
-            Domain::Crypto | Domain::Custom(_) => {
-                panic!("market allocator does not support domain {:?}", domain)
-            }
-        };
-
-        let configured_cap = configured_cap
-            .or(risk_cap)
-            .unwrap_or(config.risk.max_platform_exposure);
-        let total_cap = risk_cap
-            .map(|cap| configured_cap.min(cap))
-            .unwrap_or(configured_cap)
-            .max(Decimal::ZERO);
+        let domain_config = MarketAllocatorDomainConfig::for_domain(config, domain);
 
         Self {
             domain,
-            domain_label,
-            enabled,
-            total_cap,
-            market_cap_pct: Self::normalize_pct(market_cap_pct),
-            auto_split_by_active_markets,
+            domain_label: domain_config.domain_label,
+            enabled: domain_config.enabled,
+            total_cap: domain_config.total_cap,
+            market_cap_pct: domain_config.market_cap_pct,
+            auto_split_by_active_markets: domain_config.auto_split_by_active_markets,
             open: MarketExposureBook::default(),
             pending: MarketExposureBook::default(),
             pending_by_intent: HashMap::new(),
-        }
-    }
-
-    fn normalize_pct(value: Decimal) -> Decimal {
-        if value <= Decimal::ZERO {
-            Decimal::ZERO
-        } else if value >= Decimal::ONE {
-            Decimal::ONE
-        } else {
-            value
         }
     }
 
@@ -278,6 +229,27 @@ mod tests {
         assert!(allocator.reserve_buy(&game1_buy).is_ok());
         assert!(allocator.reserve_buy(&game2_buy).is_ok());
         assert!(allocator.reserve_buy(&game1_extra).is_err());
+    }
+
+    #[test]
+    fn test_sports_allocator_auto_split_deduplicates_current_pending_market() {
+        let mut cfg = make_allocator_config(dec!(100));
+        cfg.sports_allocator_enabled = true;
+        cfg.sports_allocator_total_cap_usd = Some(dec!(36));
+        cfg.sports_market_cap_pct = dec!(1.0);
+        cfg.sports_auto_split_by_active_markets = true;
+
+        let mut allocator = MarketCapitalAllocator::for_sports(&cfg);
+
+        let game1_open = make_sports_intent("nba-game-1", true, 100, dec!(0.10));
+        assert!(allocator.reserve_buy(&game1_open).is_ok());
+        allocator.settle_buy_execution(&game1_open, 100, dec!(0.10));
+
+        let game2_pending = make_sports_intent("nba-game-2", true, 100, dec!(0.10));
+        assert!(allocator.reserve_buy(&game2_pending).is_ok());
+
+        let game2_extra = make_sports_intent("nba-game-2", true, 50, dec!(0.10));
+        assert!(allocator.reserve_buy(&game2_extra).is_ok());
     }
 
     #[test]

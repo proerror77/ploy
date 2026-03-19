@@ -13,6 +13,9 @@ use tracing::{info, warn};
 
 use crate::error::{PloyError, Result};
 
+mod dry_run_flow;
+mod profile_payload;
+
 /// Canonical strategy slug for reverse-engineered profile dry-run mode.
 pub const REVERSE_PROFILE_STRATEGY_SLUG: &str = "shadow_pulse";
 /// Human-readable strategy name for reverse-engineered profile dry-run mode.

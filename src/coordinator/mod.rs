@@ -12,12 +12,13 @@ pub mod config;
 pub mod coordinator;
 mod governance;
 mod journal;
+mod order_intent;
 mod position;
 mod queue;
-pub mod risk;
+mod risk;
 pub mod state;
-pub(crate) mod runtime_specs;
-pub(crate) mod strategy_runtime;
+pub mod subscription_planner;
+pub mod strategy_runtime;
 
 pub use bootstrap::{start_platform, PlatformBootstrapConfig, PlatformStartControl};
 pub use command::{
@@ -27,6 +28,7 @@ pub use command::{
 };
 pub use config::CoordinatorConfig;
 pub use coordinator::{Coordinator, CoordinatorHandle};
+pub use order_intent::{OrderIntent, OrderPriority};
 pub use position::{AggregatedPosition, Position, PositionAggregator};
 pub use queue::{OrderQueue, QueueStats};
 pub use risk::{

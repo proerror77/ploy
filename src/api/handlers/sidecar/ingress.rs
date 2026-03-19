@@ -13,6 +13,8 @@ use crate::domain::market::Side;
 use crate::error::PloyError;
 use crate::platform::{Domain, OrderPriority};
 
+mod deployment_gate;
+
 fn parse_boolish(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),

@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+mod event_methods;
 mod intent_methods;
 mod pm_read_methods;
 mod write_support;
 
+use event_methods::handle_event_method;
 use intent_methods::handle_coordinator_intent_method;
 use pm_read_methods::handle_pm_read_method;
 use write_support::{

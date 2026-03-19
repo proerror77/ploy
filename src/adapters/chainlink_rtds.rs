@@ -11,25 +11,21 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tokio::time::interval;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{
-    client_async_tls_with_config, connect_async, MaybeTlsStream, WebSocketStream,
-};
 use tracing::{debug, error, info, warn};
 use url::Url;
 
 use crate::error::{PloyError, Result};
 
+#[path = "chainlink_rtds_connection.rs"]
+mod connection;
+
+use connection::connect_websocket_with_proxy;
+
 /// Chainlink RTDS WebSocket endpoint (Polymarket-hosted)
 const CHAINLINK_RTDS_WS_URL: &str = "wss://ws-live-data.polymarket.com";
-
-/// Target host for proxy CONNECT
-const CHAINLINK_WS_HOST: &str = "ws-live-data.polymarket.com";
-const CHAINLINK_WS_PORT: u16 = 443;
 
 /// Server requires frequent pings to maintain connection
 const PING_INTERVAL_SECS: u64 = 5;
@@ -42,137 +38,6 @@ const CHANNEL_CAPACITY: usize = 1000;
 
 /// Maximum price samples per symbol (1 sample/sec = ~83 min window)
 const MAX_PRICE_HISTORY: usize = 5_000;
-
-// ---------------------------------------------------------------------------
-// Proxy helpers (mirrors binance_ws.rs pattern)
-// ---------------------------------------------------------------------------
-
-/// Get proxy URL from environment variables
-fn get_proxy_url() -> Option<String> {
-    std::env::var("HTTPS_PROXY")
-        .or_else(|_| std::env::var("https_proxy"))
-        .or_else(|_| std::env::var("HTTP_PROXY"))
-        .or_else(|_| std::env::var("http_proxy"))
-        .or_else(|_| std::env::var("ALL_PROXY"))
-        .or_else(|_| std::env::var("all_proxy"))
-        .ok()
-}
-
-/// Parse proxy URL into host and port
-fn parse_proxy_url(proxy_url: &str) -> Option<(String, u16)> {
-    let url = if proxy_url.contains("://") {
-        Url::parse(proxy_url).ok()?
-    } else {
-        Url::parse(&format!("http://{}", proxy_url)).ok()?
-    };
-
-    let host = url.host_str()?.to_string();
-    let port = url.port().unwrap_or(8080);
-    Some((host, port))
-}
-
-/// Connect to target host through HTTP CONNECT proxy
-async fn connect_via_proxy(
-    proxy_host: &str,
-    proxy_port: u16,
-    target_host: &str,
-    target_port: u16,
-) -> Result<TcpStream> {
-    debug!(
-        "Connecting to {}:{} via proxy {}:{}",
-        target_host, target_port, proxy_host, proxy_port
-    );
-
-    let proxy_addr = format!("{}:{}", proxy_host, proxy_port);
-    let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&proxy_addr))
-        .await
-        .map_err(|_| PloyError::Internal(format!("Proxy connection timeout: {}", proxy_addr)))?
-        .map_err(|e| PloyError::Internal(format!("Failed to connect to proxy: {}", e)))?;
-
-    let connect_request = format!(
-        "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n\r\n",
-        target_host, target_port, target_host, target_port
-    );
-
-    let (reader, mut writer) = stream.into_split();
-    writer
-        .write_all(connect_request.as_bytes())
-        .await
-        .map_err(|e| PloyError::Internal(format!("Failed to send CONNECT: {}", e)))?;
-
-    let mut buf_reader = BufReader::new(reader);
-    let mut response_line = String::new();
-    buf_reader
-        .read_line(&mut response_line)
-        .await
-        .map_err(|e| PloyError::Internal(format!("Failed to read proxy response: {}", e)))?;
-
-    if !response_line.contains("200") {
-        return Err(PloyError::Internal(format!(
-            "Proxy CONNECT failed: {}",
-            response_line.trim()
-        )));
-    }
-
-    // Consume remaining headers
-    loop {
-        let mut line = String::new();
-        buf_reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| PloyError::Internal(format!("Failed to read proxy headers: {}", e)))?;
-        if line.trim().is_empty() {
-            break;
-        }
-    }
-
-    let reader = buf_reader.into_inner();
-    let stream = reader
-        .reunite(writer)
-        .map_err(|e| PloyError::Internal(format!("Failed to reunite stream: {}", e)))?;
-
-    debug!(
-        "Proxy tunnel established to {}:{}",
-        target_host, target_port
-    );
-    Ok(stream)
-}
-
-/// Connect WebSocket, using proxy if available
-async fn connect_websocket_with_proxy(
-    url: &Url,
-) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
-    let host = url.host_str().unwrap_or(CHAINLINK_WS_HOST);
-    let port = url.port().unwrap_or(CHAINLINK_WS_PORT);
-
-    if let Some(proxy_url) = get_proxy_url() {
-        if let Some((proxy_host, proxy_port)) = parse_proxy_url(&proxy_url) {
-            info!(
-                "Using proxy {}:{} for Chainlink RTDS WebSocket",
-                proxy_host, proxy_port
-            );
-
-            let tcp_stream = connect_via_proxy(&proxy_host, proxy_port, host, port).await?;
-
-            let (ws_stream, _response) =
-                client_async_tls_with_config(url.as_str(), tcp_stream, None, None)
-                    .await
-                    .map_err(|e| {
-                        PloyError::Internal(format!("WebSocket handshake failed: {}", e))
-                    })?;
-
-            return Ok(ws_stream);
-        }
-    }
-
-    // No proxy — connect directly
-    let (ws_stream, _) = tokio::time::timeout(Duration::from_secs(10), connect_async(url.as_str()))
-        .await
-        .map_err(|_| PloyError::Internal("Chainlink RTDS WebSocket connection timeout".into()))?
-        .map_err(PloyError::WebSocket)?;
-
-    Ok(ws_stream)
-}
 
 // ---------------------------------------------------------------------------
 // Symbol mapping: Chainlink RTDS <-> Binance
@@ -428,7 +293,7 @@ pub struct ChainlinkRtds {
     price_cache: ChainlinkPriceCache,
     symbols: Vec<String>,
     // Optional: per-symbol freshness tracking for the data plane.
-    freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
+    freshness: OnceLock<Arc<crate::data_plane::DataPlaneFreshness>>,
 }
 
 impl ChainlinkRtds {
@@ -448,13 +313,13 @@ impl ChainlinkRtds {
     }
 
     /// Attach a shared freshness tracker for the data plane.
-    pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
+    pub fn set_freshness(&self, freshness: Arc<crate::data_plane::DataPlaneFreshness>) {
         if self.freshness.set(Arc::clone(&freshness)).is_ok() {
             freshness.set_subscription_count(
-                crate::platform::DataSource::ChainlinkRtds,
+                crate::data_plane::DataSource::ChainlinkRtds,
                 self.symbols.len() as u64,
             );
-            freshness.set_source_connected(crate::platform::DataSource::ChainlinkRtds, false);
+            freshness.set_source_connected(crate::data_plane::DataSource::ChainlinkRtds, false);
         }
     }
 
@@ -520,7 +385,7 @@ impl ChainlinkRtds {
         impl Drop for ConnectionGuard<'_> {
             fn drop(&mut self) {
                 if let Some(f) = self.0.freshness.get() {
-                    f.set_source_connected(crate::platform::DataSource::ChainlinkRtds, false);
+                    f.set_source_connected(crate::data_plane::DataSource::ChainlinkRtds, false);
                 }
             }
         }
@@ -535,7 +400,7 @@ impl ChainlinkRtds {
 
         info!("Connected to Chainlink RTDS WebSocket");
         if let Some(f) = self.freshness.get() {
-            f.set_source_connected(crate::platform::DataSource::ChainlinkRtds, true);
+            f.set_source_connected(crate::data_plane::DataSource::ChainlinkRtds, true);
         }
 
         let (mut write, mut read) = ws_stream.split();
@@ -641,7 +506,10 @@ impl ChainlinkRtds {
 
         // Record per-symbol freshness for the data plane.
         if let Some(f) = self.freshness.get() {
-            f.record_update(crate::platform::DataSource::ChainlinkRtds, &payload.symbol);
+            f.record_update(
+                crate::data_plane::DataSource::ChainlinkRtds,
+                &payload.symbol,
+            );
         }
 
         // Broadcast update
@@ -788,13 +656,14 @@ mod tests {
     #[tokio::test]
     async fn characterization_rtds_records_freshness() {
         let rtds = ChainlinkRtds::new(vec!["sol/usd".to_string()]);
-        let freshness = Arc::new(crate::platform::DataPlaneFreshness::new());
+        let freshness = Arc::new(crate::data_plane::DataPlaneFreshness::new());
         rtds.set_freshness(freshness.clone());
 
         let msg = r#"{"symbol":"sol/usd","timestamp":1700000000000,"value":101.01}"#;
         rtds.ingest_test_message(msg).await;
 
-        let staleness = freshness.staleness(crate::platform::DataSource::ChainlinkRtds, "sol/usd");
+        let staleness =
+            freshness.staleness(crate::data_plane::DataSource::ChainlinkRtds, "sol/usd");
         assert!(staleness.is_some(), "freshness should be recorded");
         assert!(staleness.unwrap() < 1.0);
     }

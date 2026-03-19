@@ -24,6 +24,8 @@ use sqlx::types::chrono::{DateTime, Utc};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+mod queries;
+
 /// Position status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "TEXT")]

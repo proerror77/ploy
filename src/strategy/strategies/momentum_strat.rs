@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::domain::{OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::Result;
-use crate::platform::Domain;
+use crate::domain::Domain;
 
 use crate::strategy::detectors::{
     MomentumDetector, MomentumDetectorConfig, MomentumSignal, TrendDirection,
@@ -27,6 +27,8 @@ use crate::strategy::traits::{
 };
 
 mod signal_flow;
+mod lifecycle;
+mod market_flow;
 
 /// Momentum strategy configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,290 +245,6 @@ impl MomentumStrategy {
         }
         false
     }
-
-    /// Calculate momentum from price history
-    fn calculate_momentum(&self, symbol: &str) -> Option<Decimal> {
-        let history = self.price_history.get(symbol)?;
-        if history.len() < 2 {
-            return None;
-        }
-
-        let now = Utc::now();
-        let lookback = chrono::Duration::seconds(self.config.detector_config.long_window_secs);
-        let cutoff = now - lookback;
-
-        // Get old price
-        let old_price = history
-            .iter()
-            .rev()
-            .find(|(ts, _)| *ts < cutoff)
-            .or_else(|| history.first())?
-            .1;
-
-        // Get current price
-        let current_price = history.last()?.1;
-
-        if old_price.is_zero() {
-            return None;
-        }
-
-        Some((current_price - old_price) / old_price)
-    }
-
-    /// Estimate fair value based on momentum (piecewise sigmoid-like scaling)
-    fn estimate_fair_value(&self, momentum: Decimal) -> Decimal {
-        let base_prob = dec!(0.50);
-
-        // Scale: 0.1% move -> ~5% shift, 0.5% -> ~21%, 1.0% -> ~36%
-        let abs_momentum = momentum.abs();
-        let momentum_factor = if abs_momentum < dec!(0.001) {
-            abs_momentum * dec!(50)
-        } else if abs_momentum < dec!(0.005) {
-            dec!(0.05) + (abs_momentum - dec!(0.001)) * dec!(40)
-        } else {
-            dec!(0.21) + (abs_momentum - dec!(0.005)) * dec!(30)
-        };
-
-        (base_prob + momentum_factor).min(dec!(0.90))
-    }
-
-    /// Check exit conditions for a position
-    fn check_exit(&self, pos: &ActivePosition, current_bid: Decimal) -> Option<ExitReason> {
-        let pnl_pct = pos.pnl_pct(current_bid);
-
-        // Take profit
-        if pnl_pct >= self.config.take_profit_pct {
-            return Some(ExitReason::TakeProfit);
-        }
-
-        // Stop loss
-        if pnl_pct <= -self.config.stop_loss_pct {
-            return Some(ExitReason::StopLoss);
-        }
-
-        // Trailing stop
-        if pos.highest_price > pos.entry_price && current_bid < pos.highest_price {
-            let drop = (pos.highest_price - current_bid) / pos.highest_price;
-            if drop >= self.config.trailing_stop_pct {
-                return Some(ExitReason::TrailingStop);
-            }
-        }
-
-        // Time exit
-        if pos.time_remaining() < self.config.exit_before_resolution_secs as i64 {
-            return Some(ExitReason::TimeExit);
-        }
-
-        None
-    }
-
-    /// Process Binance price update
-    fn on_binance_price(
-        &mut self,
-        symbol: &str,
-        price: Decimal,
-        timestamp: DateTime<Utc>,
-    ) -> Vec<StrategyAction> {
-        let mut actions = Vec::new();
-
-        if !self.config.symbols.contains(&symbol.to_string()) {
-            return actions;
-        }
-
-        // Update price history
-        let history = self.price_history.entry(symbol.to_string()).or_default();
-        history.push((timestamp, price));
-
-        // Keep only recent history
-        let cutoff = timestamp - chrono::Duration::seconds(300);
-        history.retain(|(ts, _)| *ts > cutoff);
-
-        self.last_binance_prices
-            .insert(symbol.to_string(), (price, timestamp));
-
-        // Check for momentum signal
-        if let Some(momentum) = self.calculate_momentum(symbol) {
-            if momentum.abs() >= self.config.min_move_pct {
-                // Find matching event
-                if let Some(event) = self.find_event_for_symbol(symbol) {
-                    let side = if momentum > Decimal::ZERO {
-                        Side::Up
-                    } else {
-                        Side::Down
-                    };
-
-                    // Check entry conditions
-                    if self.can_enter(symbol, side, &event) {
-                        let fair_value = self.estimate_fair_value(momentum);
-
-                        let signal = EntrySignal {
-                            symbol: symbol.to_string(),
-                            side,
-                            cex_move_pct: momentum,
-                            pm_price: dec!(0.50), // Will be updated from PM quote
-                            edge: fair_value - dec!(0.50),
-                            event_end_time: event.end_time,
-                            token_id: match side {
-                                Side::Up => event.up_token_id.clone(),
-                                Side::Down => event.down_token_id.clone(),
-                            },
-                        };
-
-                        // Request PM quotes to confirm entry
-                        actions.push(StrategyAction::LogEvent {
-                            event: StrategyEvent::new(
-                                StrategyEventType::SignalDetected,
-                                format!(
-                                    "Momentum signal: {} {:?} ({:.2}%)",
-                                    symbol,
-                                    side,
-                                    momentum * dec!(100)
-                                ),
-                            ),
-                        });
-                    }
-                }
-            }
-        }
-
-        actions
-    }
-
-    /// Find event for a symbol
-    fn find_event_for_symbol(&self, symbol: &str) -> Option<&EventContext> {
-        self.active_events.values().find(|e| e.symbol == symbol)
-    }
-
-    /// Check if we can enter a position
-    fn can_enter(&self, symbol: &str, _side: Side, _event: &EventContext) -> bool {
-        // Check position limit
-        if self.positions.len() >= self.config.max_positions {
-            return false;
-        }
-
-        // Check if already have position in this symbol
-        if self.positions.values().any(|p| p.symbol == symbol) {
-            return false;
-        }
-
-        // Check cooldown
-        if self.in_cooldown(symbol) {
-            return false;
-        }
-
-        true
-    }
-
-    /// Create entry order
-    fn create_entry_order(&mut self, signal: EntrySignal) -> Vec<StrategyAction> {
-        let mut actions = Vec::new();
-
-        // Check if PM price is attractive
-        if signal.pm_price > self.config.max_entry_price {
-            debug!(
-                "PM price {:.2}¢ > max {:.2}¢, skipping",
-                signal.pm_price * dec!(100),
-                self.config.max_entry_price * dec!(100)
-            );
-            return actions;
-        }
-
-        // Check edge
-        if signal.edge < self.config.min_edge {
-            debug!(
-                "Edge {:.2}% < min {:.2}%, skipping",
-                signal.edge * dec!(100),
-                self.config.min_edge * dec!(100)
-            );
-            return actions;
-        }
-
-        let client_order_id = format!("{}-entry-{}", self.config.id, Utc::now().timestamp_millis());
-
-        let order = OrderRequest::buy_limit(
-            signal.token_id.clone(),
-            signal.side,
-            self.config.shares_per_trade,
-            signal.pm_price,
-        );
-
-        self.pending_orders.insert(
-            client_order_id.clone(),
-            PendingOrder {
-                client_order_id: client_order_id.clone(),
-                symbol: signal.symbol.clone(),
-                side: signal.side,
-                is_entry: true,
-                signal: Some(signal.clone()),
-            },
-        );
-
-        info!(
-            "ENTRY: {} {:?} @ {:.2}¢ (CEX: {:.2}%, edge: {:.2}%)",
-            signal.symbol,
-            signal.side,
-            signal.pm_price * dec!(100),
-            signal.cex_move_pct * dec!(100),
-            signal.edge * dec!(100)
-        );
-
-        actions.push(StrategyAction::SubmitOrder {
-            client_order_id,
-            order,
-            priority: 5,
-        });
-
-        actions
-    }
-
-    /// Create exit order
-    fn create_exit_order(
-        &mut self,
-        symbol: &str,
-        price: Decimal,
-        reason: ExitReason,
-    ) -> Vec<StrategyAction> {
-        let mut actions = Vec::new();
-
-        let pos = match self.positions.get(symbol) {
-            Some(p) => p.clone(),
-            None => return actions,
-        };
-
-        let pnl_pct = pos.pnl_pct(price);
-
-        info!(
-            "EXIT: {} {:?} @ {:.2}¢ - {} (P&L: {:.2}%)",
-            symbol,
-            pos.side,
-            price * dec!(100),
-            reason,
-            pnl_pct * dec!(100)
-        );
-
-        let client_order_id = format!("{}-exit-{}", self.config.id, Utc::now().timestamp_millis());
-
-        let order = OrderRequest::sell_limit(pos.token_id.clone(), pos.side, pos.shares, price);
-
-        self.pending_orders.insert(
-            client_order_id.clone(),
-            PendingOrder {
-                client_order_id: client_order_id.clone(),
-                symbol: symbol.to_string(),
-                side: pos.side,
-                is_entry: false,
-                signal: None,
-            },
-        );
-
-        actions.push(StrategyAction::SubmitOrder {
-            client_order_id,
-            order,
-            priority: 10,
-        });
-
-        actions
-    }
 }
 
 #[async_trait]
@@ -564,349 +282,41 @@ impl Strategy for MomentumStrategy {
     }
 
     async fn on_market_update(&mut self, update: &MarketUpdate) -> Result<Vec<StrategyAction>> {
-        let mut actions = Vec::new();
-
-        match update {
-            MarketUpdate::BinancePrice {
-                symbol,
-                price,
-                timestamp,
-            } => {
-                actions.extend(self.on_binance_price(symbol, *price, *timestamp));
-            }
-            MarketUpdate::PolymarketQuote {
-                token_id,
-                side,
-                quote,
-                ..
-            } => {
-                // Update position high water mark and check exit - collect info first to avoid borrow conflicts
-                let exit_info: Option<(String, Decimal, ExitReason)> = {
-                    if let Some(pos) = self.positions.get_mut(token_id) {
-                        if let Some(bid) = quote.best_bid {
-                            pos.update_high(bid);
-                            self.check_exit(pos, bid)
-                                .map(|reason| (pos.symbol.clone(), bid, reason))
-                        } else {
-                            None
-                        }
-                    } else {
-                        // Try finding by token_id in case key differs
-                        let mut found = None;
-                        for pos in self.positions.values_mut() {
-                            if pos.token_id == *token_id {
-                                if let Some(bid) = quote.best_bid {
-                                    pos.update_high(bid);
-                                    if let Some(reason) = self.check_exit(pos, bid) {
-                                        found = Some((pos.symbol.clone(), bid, reason));
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                        found
-                    }
-                };
-
-                // Create exit order outside the borrow
-                if let Some((symbol, price, reason)) = exit_info {
-                    actions.extend(self.create_exit_order(&symbol, price, reason));
-                }
-
-                // Check for entry confirmation - collect signals first
-                let signals_to_process: Vec<EntrySignal> = self
-                    .pending_orders
-                    .values()
-                    .filter_map(|pending| {
-                        if pending.is_entry {
-                            if let Some(signal) = &pending.signal {
-                                if signal.token_id == *token_id {
-                                    if let Some(ask) = quote.best_ask {
-                                        let mut updated_signal = signal.clone();
-                                        updated_signal.pm_price = ask;
-                                        updated_signal.edge =
-                                            self.estimate_fair_value(signal.cex_move_pct) - ask;
-                                        return Some(updated_signal);
-                                    }
-                                }
-                            }
-                        }
-                        None
-                    })
-                    .collect();
-
-                // Create entry orders outside the borrow
-                for signal in signals_to_process {
-                    actions.extend(self.create_entry_order(signal));
-                }
-            }
-            MarketUpdate::EventDiscovered {
-                event_id,
-                series_id,
-                up_token,
-                down_token,
-                end_time,
-                price_to_beat: _,
-                title: _,
-                condition_id: _,
-            } => {
-                // Find which symbol this series belongs to
-                for mapping in SeriesMapping::standard_mappings() {
-                    if mapping.series_ids.contains(series_id) {
-                        let event = EventContext {
-                            event_id: event_id.clone(),
-                            symbol: mapping.symbol.clone(),
-                            up_token_id: up_token.clone(),
-                            down_token_id: down_token.clone(),
-                            end_time: *end_time,
-                        };
-
-                        self.active_events.insert(event_id.clone(), event);
-
-                        info!("Discovered event for {}: {}", mapping.symbol, event_id);
-                        break;
-                    }
-                }
-            }
-            MarketUpdate::EventExpired { event_id } => {
-                self.active_events.remove(event_id);
-            }
-            _ => {}
-        }
-
-        Ok(actions)
+        Ok(self.handle_market_update(update))
     }
 
     async fn on_order_update(&mut self, update: &OrderUpdate) -> Result<Vec<StrategyAction>> {
-        let mut actions = Vec::new();
-
-        let pending = self
-            .pending_orders
-            .iter()
-            .find(|(_, p)| p.client_order_id == update.client_order_id.as_deref().unwrap_or(""))
-            .map(|(k, v)| (k.clone(), v.clone()));
-
-        let Some((client_id, pending)) = pending else {
-            return Ok(actions);
-        };
-
-        match update.status {
-            OrderStatus::Filled => {
-                let fill_price = update.avg_fill_price.unwrap_or(Decimal::ZERO);
-
-                if pending.is_entry {
-                    // Entry filled
-                    if let Some(signal) = &pending.signal {
-                        let position = ActivePosition {
-                            token_id: signal.token_id.clone(),
-                            symbol: pending.symbol.clone(),
-                            side: pending.side,
-                            entry_price: fill_price,
-                            shares: update.filled_qty,
-                            entry_time: Utc::now(),
-                            highest_price: fill_price,
-                            event_end_time: signal.event_end_time,
-                            client_order_id: client_id.clone(),
-                        };
-
-                        self.positions.insert(pending.symbol.clone(), position);
-                        self.last_trade_time
-                            .insert(pending.symbol.clone(), Utc::now());
-
-                        info!(
-                            "Entry filled: {} {:?} {} shares @ {:.2}¢",
-                            pending.symbol,
-                            pending.side,
-                            update.filled_qty,
-                            fill_price * dec!(100)
-                        );
-
-                        actions.push(StrategyAction::LogEvent {
-                            event: StrategyEvent::new(
-                                StrategyEventType::OrderFilled,
-                                "Entry filled",
-                            )
-                            .with_data("symbol", pending.symbol.clone())
-                            .with_data("price", fill_price.to_string()),
-                        });
-                    }
-                } else {
-                    // Exit filled
-                    if let Some(pos) = self.positions.remove(&pending.symbol) {
-                        let pnl = (fill_price - pos.entry_price) * Decimal::from(pos.shares);
-                        self.realized_pnl += pnl;
-
-                        info!(
-                            "Exit filled: {} {} shares @ {:.2}¢ (P&L: ${:.2})",
-                            pending.symbol,
-                            update.filled_qty,
-                            fill_price * dec!(100),
-                            pnl
-                        );
-
-                        actions.push(StrategyAction::LogEvent {
-                            event: StrategyEvent::new(
-                                StrategyEventType::ExitTriggered,
-                                "Exit filled",
-                            )
-                            .with_data("symbol", pending.symbol.clone())
-                            .with_data("pnl", pnl.to_string()),
-                        });
-                    }
-                }
-
-                self.pending_orders.remove(&client_id);
-            }
-            OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired => {
-                if !pending.is_entry {
-                    // Exit failed - critical
-                    error!(
-                        "Exit order failed for {}: {:?}",
-                        pending.symbol, update.status
-                    );
-                    actions.push(StrategyAction::Alert {
-                        level: AlertLevel::Critical,
-                        message: format!("Exit order failed for {}", pending.symbol),
-                    });
-                }
-                self.pending_orders.remove(&client_id);
-            }
-            _ => {}
-        }
-
-        Ok(actions)
+        Ok(self.handle_order_update(update))
     }
 
     async fn on_tick(&mut self, _now: DateTime<Utc>) -> Result<Vec<StrategyAction>> {
-        let mut actions = Vec::new();
-
-        // Check for time-based exits
-        let positions_to_exit: Vec<(String, Decimal)> = self
-            .positions
-            .iter()
-            .filter_map(|(symbol, pos)| {
-                if pos.time_remaining() < self.config.exit_before_resolution_secs as i64 {
-                    Some((symbol.clone(), pos.highest_price))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for (symbol, price) in positions_to_exit {
-            actions.extend(self.create_exit_order(&symbol, price, ExitReason::TimeExit));
-        }
-
-        Ok(actions)
+        Ok(self.handle_tick())
     }
 
     fn state(&self) -> StrategyStateInfo {
-        let exposure = self
-            .positions
-            .values()
-            .map(|p| p.entry_price * Decimal::from(p.shares))
-            .sum();
-
-        let unrealized_pnl = self
-            .positions
-            .values()
-            .map(|p| {
-                let current = p.highest_price;
-                (current - p.entry_price) * Decimal::from(p.shares)
-            })
-            .sum();
-
-        let mut metrics = HashMap::new();
-        metrics.insert(
-            "active_events".to_string(),
-            self.active_events.len().to_string(),
-        );
-        metrics.insert("symbols".to_string(), self.config.symbols.join(","));
-
-        StrategyStateInfo {
-            strategy_id: self.config.id.clone(),
-            phase: if self.positions.is_empty() {
-                "waiting"
-            } else {
-                "in_position"
-            }
-            .to_string(),
-            enabled: self.config.enabled,
-            active: !self.positions.is_empty() || !self.pending_orders.is_empty(),
-            position_count: self.positions.len(),
-            pending_order_count: self.pending_orders.len(),
-            total_exposure: exposure,
-            unrealized_pnl,
-            realized_pnl_today: self.realized_pnl,
-            last_update: Utc::now(),
-            metrics,
-        }
+        self.build_state()
     }
 
     fn positions(&self) -> Vec<PositionInfo> {
-        self.positions
-            .values()
-            .map(|p| {
-                let mut info = PositionInfo::new(
-                    p.token_id.clone(),
-                    p.side,
-                    p.shares,
-                    p.entry_price,
-                    self.config.id.clone(),
-                );
-                info.current_price = Some(p.highest_price);
-                info.unrealized_pnl = (p.highest_price - p.entry_price) * Decimal::from(p.shares);
-                info.metadata.insert("symbol".to_string(), p.symbol.clone());
-                info
-            })
-            .collect()
+        self.build_positions()
     }
 
     fn is_active(&self) -> bool {
-        !self.positions.is_empty() || !self.pending_orders.is_empty()
+        self.runtime_is_active()
     }
 
     async fn shutdown(&mut self) -> Result<Vec<StrategyAction>> {
-        let mut actions = Vec::new();
-
-        // Cancel all pending orders
-        for (client_id, _) in &self.pending_orders {
-            actions.push(StrategyAction::CancelOrder {
-                order_id: client_id.clone(),
-            });
-        }
-
-        // Collect position info first to avoid borrow conflict
-        let positions_to_exit: Vec<(String, Decimal)> = self
-            .positions
-            .iter()
-            .map(|(symbol, pos)| (symbol.clone(), pos.highest_price))
-            .collect();
-
-        // Exit all positions at market
-        for (symbol, price) in positions_to_exit {
-            actions.extend(self.create_exit_order(&symbol, price, ExitReason::Manual));
-        }
-
-        Ok(actions)
+        Ok(self.shutdown_actions())
     }
 
     fn reset(&mut self) {
-        self.positions.clear();
-        self.pending_orders.clear();
-        self.last_trade_time.clear();
-        self.last_binance_prices.clear();
-        self.price_history.clear();
-        self.active_events.clear();
-        self.realized_pnl = Decimal::ZERO;
-        self.detector.reset();
+        self.reset_runtime();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
 
     #[test]
     fn test_config_default() {
@@ -924,31 +334,66 @@ mod tests {
         assert!(btc.series_ids.contains(&"41".to_string()));
     }
 
-    #[tokio::test]
-    async fn event_discovery_updates_state_without_requesting_feed_rewire() {
+    #[test]
+    fn create_entry_order_emits_submit_intent() {
         let mut strategy = MomentumStrategy::new(MomentumConfig::default());
-        let update = MarketUpdate::EventDiscovered {
-            event_id: "evt-1".to_string(),
+        strategy.active_events.insert(
+            "event-1".to_string(),
+            EventContext {
+                event_id: "event-1".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                up_token_id: "token-up".to_string(),
+                down_token_id: "token-down".to_string(),
+                end_time: Utc::now(),
+            },
+        );
+
+        let actions = strategy.create_entry_order(EntrySignal {
+            symbol: "BTCUSDT".to_string(),
+            side: Side::Up,
+            cex_move_pct: dec!(0.01),
+            pm_price: dec!(0.40),
+            edge: dec!(0.05),
+            event_end_time: Utc::now(),
+            token_id: "token-up".to_string(),
+        });
+
+        match actions.first() {
+            Some(StrategyAction::SubmitIntent { intent }) => {
+                assert_eq!(intent.domain, Domain::Crypto);
+                assert_eq!(intent.market_slug, "event-1");
+                assert_eq!(intent.token_id, "token-up");
+                assert!(intent.is_buy);
+                assert_eq!(intent.shares, 100);
+            }
+            other => panic!("expected submit intent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_market_update_registers_and_expires_events() {
+        let mut strategy = MomentumStrategy::new(MomentumConfig::default());
+        let end_time = Utc::now();
+
+        let actions = strategy.handle_market_update(&MarketUpdate::EventDiscovered {
+            event_id: "event-1".to_string(),
             series_id: "41".to_string(),
-            up_token: "up-token".to_string(),
-            down_token: "down-token".to_string(),
-            end_time: Utc::now() + Duration::minutes(5),
+            up_token: "token-up".to_string(),
+            down_token: "token-down".to_string(),
+            end_time,
             price_to_beat: None,
             title: None,
             condition_id: None,
-        };
+        });
 
-        let actions = strategy
-            .on_market_update(&update)
-            .await
-            .expect("event discovery should succeed");
+        assert!(actions.is_empty());
+        assert!(strategy.active_events.contains_key("event-1"));
 
-        assert!(actions.is_empty(), "feed lifecycle is runtime-owned");
-        let event = strategy
-            .active_events
-            .get("evt-1")
-            .expect("event should be tracked after discovery");
-        assert_eq!(event.up_token_id, "up-token");
-        assert_eq!(event.down_token_id, "down-token");
+        let actions = strategy.handle_market_update(&MarketUpdate::EventExpired {
+            event_id: "event-1".to_string(),
+        });
+
+        assert!(actions.is_empty());
+        assert!(!strategy.active_events.contains_key("event-1"));
     }
 }
