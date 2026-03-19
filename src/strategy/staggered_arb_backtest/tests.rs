@@ -174,18 +174,18 @@ fn test_config_from_toml_matches_checked_in_template() {
         ]
     );
     assert_eq!(config.shares_per_trade, 20);
-    assert_eq!(config.direction_threshold, 0.05);
+    assert_eq!(config.direction_threshold, 0.04);
     assert_eq!(config.obi_confirm_threshold, 0.005);
     assert_eq!(config.strong_obi_threshold, 0.015);
-    assert_eq!(config.max_initial_sum, Decimal::ZERO);
-    assert_eq!(config.max_leg1_price, dec!(0.56));
+    assert_eq!(config.max_initial_sum, dec!(0.92));
+    assert_eq!(config.max_leg1_price, dec!(0.65));
     assert_eq!(config.entry_after_start_min_secs, 30);
-    assert_eq!(config.entry_after_start_max_secs, 240);
+    assert_eq!(config.entry_after_start_max_secs, 0);
     assert_eq!(config.pm_quote_max_stale_secs, 10);
     assert_eq!(config.entry_quote_persistence_secs, 8);
     assert_eq!(config.strong_obi_window_bonus_secs, 60);
-    assert_eq!(config.allowed_window_durations, vec![300]);
-    assert_eq!(config.force_complete_threshold, dec!(1.06));
+    assert_eq!(config.allowed_window_durations, vec![300, 900]);
+    assert_eq!(config.force_complete_threshold, dec!(0.00));
     assert_eq!(config.protective_close_threshold, dec!(1.06));
     assert_eq!(config.protective_recovery_window_secs, 0);
     assert_eq!(config.obi_decay_exit_ratio, 0.35);

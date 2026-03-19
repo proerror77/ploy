@@ -26,47 +26,46 @@ fn main() {
     let mut feed = create_synthetic_feed();
 
     // Configure backtest
-    let config = StaggeredArbBacktestConfig {
-        symbols: vec!["BTCUSDT".to_string()],
-        initial_capital: dec!(1000),
-        shares_per_trade: 10,
-        max_concurrent_positions: 3,
-        direction_threshold: 0.03,
-        premium_sum_threshold: Decimal::ONE,
-        premium_sum_direction_slope: 1.25,
-        premium_sum_obi_slope: 0.25,
-        reverse_signal: false,
-        max_initial_sum: dec!(1.20),
-        max_leg1_price: dec!(0.80),
-        merge_target_sum: dec!(0.95),
-        min_profit_target: dec!(0.02),
-        max_wait_secs: 180,
-        entry_after_start_max_secs: 30,
-        no_trade_last_secs: 30,
-        max_wait_pct: 0.40,
-        min_time_remaining_secs: 60,
-        max_leg1_loss: dec!(0),
-        force_complete_threshold: dec!(0.95),
-        protective_close_threshold: dec!(1.03),
-        min_ask_price: dec!(0.05),
-        min_entry_sum: dec!(0.70),
-        allowed_window_durations: vec![300], // 5m only
-        window_duration_tolerance: 30,
-        min_leg2_delay_secs: 3,
-        max_trades_per_event: 0, // unlimited
-        mu: 0.0,
-        vol_lookback_secs: 300,
-        vol_floor: 0.005,
-        min_entry_sigma: 0.005,
-        max_entry_sigma: 0.03,
-        cooldown_secs: 5,
-        // Greeks integration
-        use_greeks: true,
-        min_gamma: 0.0,
-        max_theta_cost: 0.0,
-        max_fair_value_distance: 0.15,
-        delta_weighted_sizing: false,
-    };
+    let mut config = StaggeredArbBacktestConfig::default();
+    config.symbols = vec!["BTCUSDT".to_string()];
+    config.initial_capital = dec!(1000);
+    config.shares_per_trade = 10;
+    config.max_concurrent_positions = 3;
+    config.direction_threshold = 0.03;
+    config.premium_sum_threshold = Decimal::ONE;
+    config.premium_sum_direction_slope = 1.25;
+    config.premium_sum_obi_slope = 0.25;
+    config.reverse_signal = false;
+    config.max_initial_sum = dec!(1.20);
+    config.max_leg1_price = dec!(0.80);
+    config.merge_target_sum = dec!(0.95);
+    config.min_profit_target = dec!(0.02);
+    config.max_wait_secs = 180;
+    config.entry_after_start_max_secs = 30;
+    config.no_trade_last_secs = 30;
+    config.max_wait_pct = 0.40;
+    config.min_time_remaining_secs = 60;
+    config.max_leg1_loss = dec!(0);
+    config.force_complete_threshold = dec!(0.95);
+    config.protective_close_threshold = dec!(1.03);
+    config.min_ask_price = dec!(0.05);
+    config.min_entry_sum = dec!(0.70);
+    config.allowed_window_durations = vec![300]; // 5m only
+    config.window_duration_tolerance = 30;
+    config.min_leg2_delay_secs = 3;
+    config.max_trades_per_event = 0; // unlimited
+    config.mu = 0.0;
+    config.vol_lookback_secs = 300;
+    config.vol_floor = 0.005;
+    config.min_entry_sigma = 0.005;
+    config.max_entry_sigma = 0.03;
+    config.cooldown_secs = 5;
+    // Greeks integration
+    config.use_greeks = true;
+    config.min_gamma = 0.0;
+    config.max_theta_cost = 0.0;
+    config.max_fair_value_distance = 0.15;
+    config.delta_weighted_sizing = false;
 
     println!("Config:");
     println!("  Initial Capital: ${}", config.initial_capital);

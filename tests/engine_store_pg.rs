@@ -1,7 +1,6 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use ploy::adapters::PostgresStore;
 use ploy::domain::{Round, Side, StrategyState};
-use ploy::error::PloyError;
 use rust_decimal_macros::dec;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
@@ -240,24 +239,6 @@ async fn cycle_state(store: &PostgresStore, cycle_id: i32) -> String {
         .get("state")
 }
 
-fn assert_version_conflict(err: PloyError, cycle_id: i32, expected_version: i32) {
-    match err {
-        PloyError::VersionConflict {
-            entity,
-            id,
-            expected_version: got,
-        } => {
-            assert_eq!(entity, "cycle", "conflict entity should be cycle");
-            assert_eq!(id, cycle_id, "conflict cycle id should match");
-            assert_eq!(
-                got, expected_version,
-                "conflict should expose expected version"
-            );
-        }
-        other => panic!("expected VersionConflict, got: {other:?}"),
-    }
-}
-
 #[tokio::test]
 async fn update_cycle_state_success_increments_version() {
     let Some(ctx) = TestDb::new().await else {
@@ -268,55 +249,55 @@ async fn update_cycle_state_success_increments_version() {
 
     assert_eq!(cycle_version(&ctx.store, cycle_id).await, 1);
 
-    ctx.store
+    let updated = ctx
+        .store
         .update_cycle_state(cycle_id, StrategyState::Leg1Filled, 1)
         .await
         .expect("update_cycle_state should succeed with matching version");
+    assert!(updated, "matching version should update the cycle");
 
     assert_eq!(cycle_version(&ctx.store, cycle_id).await, 2);
     assert_eq!(cycle_state(&ctx.store, cycle_id).await, "LEG1_FILLED");
 }
 
 #[tokio::test]
-async fn update_cycle_state_conflict_returns_version_conflict() {
+async fn update_cycle_state_conflict_returns_false() {
     let Some(ctx) = TestDb::new().await else {
         return;
     };
 
     let cycle_id = create_round_and_cycle(&ctx.store, "state-conflict").await;
 
-    let err = ctx
+    let updated = ctx
         .store
         .update_cycle_state(cycle_id, StrategyState::Leg1Filled, 0)
         .await
-        .expect_err("stale expected version should conflict");
-
-    assert_version_conflict(err, cycle_id, 0);
+        .expect("stale expected version should return without updating");
+    assert!(!updated, "stale expected version should not update the cycle");
     assert_eq!(cycle_version(&ctx.store, cycle_id).await, 1);
     assert_eq!(cycle_state(&ctx.store, cycle_id).await, "LEG1_PENDING");
 }
 
 #[tokio::test]
-async fn update_cycle_leg1_conflict_returns_version_conflict() {
+async fn update_cycle_leg1_conflict_returns_false() {
     let Some(ctx) = TestDb::new().await else {
         return;
     };
 
     let cycle_id = create_round_and_cycle(&ctx.store, "leg1-conflict").await;
 
-    let err = ctx
+    let updated = ctx
         .store
         .update_cycle_leg1(cycle_id, Side::Up, dec!(0.42), 100, 0)
         .await
-        .expect_err("stale expected version should conflict");
-
-    assert_version_conflict(err, cycle_id, 0);
+        .expect("stale expected version should return without updating");
+    assert!(!updated, "stale expected version should not update leg1");
     assert_eq!(cycle_version(&ctx.store, cycle_id).await, 1);
     assert_eq!(cycle_state(&ctx.store, cycle_id).await, "LEG1_PENDING");
 }
 
 #[tokio::test]
-async fn update_cycle_leg2_conflict_returns_version_conflict() {
+async fn update_cycle_leg2_conflict_returns_false() {
     let Some(ctx) = TestDb::new().await else {
         return;
     };
@@ -329,13 +310,12 @@ async fn update_cycle_leg2_conflict_returns_version_conflict() {
         .await
         .expect("leg1 update should succeed before leg2 stale-check");
 
-    let err = ctx
+    let updated = ctx
         .store
         .update_cycle_leg2(cycle_id, dec!(0.55), 120, dec!(0.06), 1)
         .await
-        .expect_err("stale leg2 expected version should conflict");
-
-    assert_version_conflict(err, cycle_id, 1);
+        .expect("stale expected version should return without updating");
+    assert!(!updated, "stale expected version should not update leg2");
     assert_eq!(cycle_version(&ctx.store, cycle_id).await, 2);
     assert_eq!(cycle_state(&ctx.store, cycle_id).await, "LEG1_FILLED");
 }
@@ -367,8 +347,8 @@ async fn concurrent_cycle_updates_yield_one_success_and_one_conflict() {
 
     for result in [r1, r2] {
         match result {
-            Ok(()) => success += 1,
-            Err(PloyError::VersionConflict { .. }) => conflicts += 1,
+            Ok(true) => success += 1,
+            Ok(false) => conflicts += 1,
             Err(other) => panic!("unexpected concurrent update result: {other:?}"),
         }
     }
