@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{OrderStatus, Quote, Side};
 use crate::strategy::backtest::{BacktestResults, BacktestTrade, SymbolStats};
 use crate::strategy::backtest_feed::{
-    BookAskLevel, MarketFeed, MarketUpdate as HistoricalMarketUpdate, UpdateType,
+    MarketFeed, MarketUpdate as HistoricalMarketUpdate, UpdateType,
 };
 use crate::strategy::backtest_recorder::{
     BacktestRecorder, BacktestSignal, NullRecorder, PendingTrade, SignalType,
@@ -92,7 +92,8 @@ impl Pm5mDirectionalBacktestEngine {
         config: Pm5mDirectionalBacktestConfig,
         recorder: Box<dyn BacktestRecorder>,
     ) -> anyhow::Result<Self> {
-        let strategy_config_toml = build_pm_5m_directional_runtime_config(&config.symbols)?;
+        let strategy_config_toml =
+            build_backtest_strategy_config(&config.symbols, config.initial_capital)?;
         let strategy = Pm5mDirectionalStrategy::from_toml(
             "pm_5m_directional_backtest".to_string(),
             &strategy_config_toml,
@@ -180,8 +181,6 @@ impl Pm5mDirectionalBacktestEngine {
                 side,
                 best_bid,
                 best_ask,
-                bid_size,
-                ask_size,
             } => {
                 {
                     let state = self
@@ -215,12 +214,6 @@ impl Pm5mDirectionalBacktestEngine {
                     });
                     quote.best_bid = best_bid;
                     quote.best_ask = best_ask;
-                    if bid_size.is_some() {
-                        quote.bid_size = bid_size;
-                    }
-                    if ask_size.is_some() {
-                        quote.ask_size = ask_size;
-                    }
                     quote.timestamp = ts;
                     Quote {
                         side,
@@ -241,47 +234,49 @@ impl Pm5mDirectionalBacktestEngine {
                 });
             }
             UpdateType::LobSnapshot {
-                event_slug,
-                token_id,
                 side,
                 ask_depth_shares,
-                best_ask_size_shares,
                 best_ask,
                 ..
             } => {
-                self.token_to_event
-                    .insert(token_id.clone(), event_slug.clone());
-                let top_of_book_size =
-                    Decimal::from(best_ask_size_shares.min(ask_depth_shares));
-                let merged_quote = {
-                    let quote = self.quotes.entry(token_id.clone()).or_insert(QuoteState {
-                        best_bid: None,
-                        best_ask: None,
-                        bid_size: None,
-                        ask_size: None,
+                let parsed_side = parse_lob_side(&side);
+                let targets = self.resolve_lob_targets(&update.symbol, parsed_side);
+                let update_best_ask = best_ask.filter(|_| parsed_side.is_some());
+                let top_of_book_size = Decimal::from(ask_depth_shares);
+
+                for (event_slug, token_id, quote_side) in targets {
+                    self.token_to_event
+                        .insert(token_id.clone(), event_slug.clone());
+                    let merged_quote = {
+                        let quote = self.quotes.entry(token_id.clone()).or_insert(QuoteState {
+                            best_bid: None,
+                            best_ask: None,
+                            bid_size: None,
+                            ask_size: None,
+                            timestamp: ts,
+                        });
+                        quote.ask_size = Some(top_of_book_size);
+                        if update_best_ask.is_some() {
+                            quote.best_ask = update_best_ask;
+                        }
+                        quote.timestamp = ts;
+                        Quote {
+                            side: quote_side,
+                            best_bid: quote.best_bid,
+                            best_ask: quote.best_ask,
+                            bid_size: quote.bid_size,
+                            ask_size: quote.ask_size,
+                            timestamp: ts,
+                        }
+                    };
+                    self.maybe_discover_event(&event_slug);
+                    self.dispatch_market_update(StrategyMarketUpdate::PolymarketQuote {
+                        token_id,
+                        side: quote_side,
+                        quote: merged_quote,
                         timestamp: ts,
                     });
-                    quote.ask_size = Some(top_of_book_size);
-                    if best_ask.is_some() {
-                        quote.best_ask = best_ask;
-                    }
-                    quote.timestamp = ts;
-                    Quote {
-                        side,
-                        best_bid: quote.best_bid,
-                        best_ask: quote.best_ask,
-                        bid_size: quote.bid_size,
-                        ask_size: quote.ask_size,
-                        timestamp: ts,
-                    }
-                };
-                self.maybe_discover_event(&event_slug);
-                self.dispatch_market_update(StrategyMarketUpdate::PolymarketQuote {
-                    token_id,
-                    side,
-                    quote: merged_quote,
-                    timestamp: ts,
-                });
+                }
             }
             UpdateType::EventState {
                 event_slug,
@@ -332,6 +327,51 @@ impl Pm5mDirectionalBacktestEngine {
         if let Ok(actions) = block_on(self.strategy.on_market_update(&update)) {
             self.handle_actions(actions, update.timestamp());
         }
+    }
+
+    fn resolve_lob_targets(
+        &self,
+        symbol: &str,
+        side: Option<Side>,
+    ) -> Vec<(String, String, Side)> {
+        let Some(state) = self.current_event_state_for_symbol(symbol) else {
+            return Vec::new();
+        };
+
+        match side {
+            Some(Side::Up) => state
+                .up_token_id
+                .clone()
+                .map(|token_id| vec![(state.event_slug.clone(), token_id, Side::Up)])
+                .unwrap_or_default(),
+            Some(Side::Down) => state
+                .down_token_id
+                .clone()
+                .map(|token_id| vec![(state.event_slug.clone(), token_id, Side::Down)])
+                .unwrap_or_default(),
+            None => {
+                let mut targets = Vec::new();
+                if let Some(token_id) = state.up_token_id.clone() {
+                    targets.push((state.event_slug.clone(), token_id, Side::Up));
+                }
+                if let Some(token_id) = state.down_token_id.clone() {
+                    targets.push((state.event_slug.clone(), token_id, Side::Down));
+                }
+                targets
+            }
+        }
+    }
+
+    fn current_event_state_for_symbol(&self, symbol: &str) -> Option<&FeedEventState> {
+        self.event_states
+            .values()
+            .filter(|state| state.symbol == symbol)
+            .max_by_key(|state| {
+                state
+                    .end_time
+                    .map(|end_time| end_time.timestamp())
+                    .unwrap_or(i64::MIN)
+            })
     }
 
     fn maybe_discover_event(&mut self, event_slug: &str) {
@@ -760,6 +800,31 @@ fn parse_f64(raw: Option<&String>) -> Option<f64> {
     raw.and_then(|value| value.parse::<f64>().ok())
 }
 
+fn build_backtest_strategy_config(
+    symbols: &[String],
+    initial_capital: Decimal,
+) -> anyhow::Result<String> {
+    let config = build_pm_5m_directional_runtime_config(symbols)?;
+    let mut value: toml::Value = toml::from_str(&config)?;
+    value
+        .get_mut("pm_5m_directional")
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| anyhow::anyhow!("pm_5m_directional runtime config missing section"))?
+        .insert(
+            "initial_nav_usd".to_string(),
+            toml::Value::Float(initial_capital.to_f64().unwrap_or(0.0)),
+        );
+    toml::to_string_pretty(&value).map_err(Into::into)
+}
+
+fn parse_lob_side(raw: &str) -> Option<Side> {
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "UP" | "YES" => Some(Side::Up),
+        "DOWN" | "NO" => Some(Side::Down),
+        _ => None,
+    }
+}
+
 fn calculate_trade_sharpe(trades: &[BacktestTrade]) -> f64 {
     if trades.len() < 2 {
         return 0.0;
@@ -871,8 +936,6 @@ mod tests {
                 side: Side::Up,
                 best_bid: Some(dec!(0.39)),
                 best_ask: Some(dec!(0.40)),
-                bid_size: Some(dec!(100)),
-                ask_size: Some(dec!(100)),
             },
         });
         updates.push(MarketUpdate {
@@ -884,20 +947,14 @@ mod tests {
                 side: Side::Down,
                 best_bid: Some(dec!(0.59)),
                 best_ask: Some(dec!(0.60)),
-                bid_size: Some(dec!(100)),
-                ask_size: Some(dec!(100)),
             },
         });
         updates.push(MarketUpdate {
             timestamp: ts(35),
             symbol: "BTCUSDT".to_string(),
             update_type: UpdateType::LobSnapshot {
-                event_slug: event_slug.to_string(),
-                token_id: format!("{event_slug}:UP"),
-                side: Side::Up,
+                side: "UP".to_string(),
                 ask_depth_shares: 100,
-                best_ask_size_shares: 100,
-                ask_levels: vec![],
                 best_ask: Some(dec!(0.40)),
             },
         });
@@ -935,12 +992,12 @@ mod tests {
     }
 
     #[test]
-    fn quote_size_can_trigger_entry_without_lob_snapshot() {
+    fn symbol_level_lob_snapshot_can_trigger_entry_without_token_context() {
         let config = Pm5mDirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".to_string()]);
         let mut engine =
             Pm5mDirectionalBacktestEngine::new_without_recorder(config).expect("engine");
 
-        let event_slug = "btc-updown-5m-quote-size";
+        let event_slug = "btc-updown-5m-symbol-lob";
         let end_time = ts(300);
         let mut updates = vec![MarketUpdate {
             timestamp: ts(0),
@@ -984,8 +1041,6 @@ mod tests {
                 side: Side::Up,
                 best_bid: Some(dec!(0.39)),
                 best_ask: Some(dec!(0.40)),
-                bid_size: Some(dec!(120)),
-                ask_size: Some(dec!(120)),
             },
         });
         updates.push(MarketUpdate {
@@ -997,8 +1052,15 @@ mod tests {
                 side: Side::Down,
                 best_bid: Some(dec!(0.59)),
                 best_ask: Some(dec!(0.60)),
-                bid_size: Some(dec!(120)),
-                ask_size: Some(dec!(120)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(35),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::LobSnapshot {
+                side: "BOTH".to_string(),
+                ask_depth_shares: 120,
+                best_ask: Some(dec!(0.40)),
             },
         });
         updates.push(MarketUpdate {
@@ -1078,8 +1140,6 @@ mod tests {
                 side: Side::Up,
                 best_bid: Some(dec!(0.39)),
                 best_ask: Some(dec!(0.40)),
-                bid_size: Some(dec!(100)),
-                ask_size: Some(dec!(100)),
             },
         });
         updates.push(MarketUpdate {
@@ -1091,20 +1151,14 @@ mod tests {
                 side: Side::Down,
                 best_bid: Some(dec!(0.59)),
                 best_ask: Some(dec!(0.60)),
-                bid_size: Some(dec!(100)),
-                ask_size: Some(dec!(100)),
             },
         });
         updates.push(MarketUpdate {
             timestamp: ts(35),
             symbol: "BTCUSDT".to_string(),
             update_type: UpdateType::LobSnapshot {
-                event_slug: event_slug.to_string(),
-                token_id: format!("{event_slug}:UP"),
-                side: Side::Up,
+                side: "UP".to_string(),
                 ask_depth_shares: 100,
-                best_ask_size_shares: 100,
-                ask_levels: vec![],
                 best_ask: Some(dec!(0.40)),
             },
         });
@@ -1135,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn lob_snapshot_updates_explicit_token_when_events_overlap() {
+    fn lob_snapshot_updates_current_event_for_symbol_when_events_overlap() {
         let config = Pm5mDirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".to_string()]);
         let mut engine =
             Pm5mDirectionalBacktestEngine::new_without_recorder(config).expect("engine");
@@ -1179,8 +1233,6 @@ mod tests {
                     side,
                     best_bid: Some(price - dec!(0.01)),
                     best_ask: Some(price),
-                    bid_size: Some(dec!(50)),
-                    ask_size: Some(dec!(50)),
                 },
             });
         }
@@ -1191,26 +1243,19 @@ mod tests {
             timestamp: ts(302),
             symbol: "BTCUSDT".to_string(),
             update_type: UpdateType::LobSnapshot {
-                event_slug: current_slug.to_string(),
-                token_id: current_up_token.clone(),
-                side: Side::Up,
+                side: "UP".to_string(),
                 ask_depth_shares: 125,
-                best_ask_size_shares: 25,
-                ask_levels: vec![BookAskLevel {
-                    price: dec!(0.45),
-                    size_shares: 25,
-                }],
                 best_ask: Some(dec!(0.45)),
             },
         });
 
         assert_eq!(
             engine.quotes.get(&current_up_token).and_then(|quote| quote.ask_size),
-            Some(dec!(25))
+            Some(dec!(125))
         );
         assert_eq!(
             engine.quotes.get(&prev_up_token).and_then(|quote| quote.ask_size),
-            Some(dec!(50))
+            None
         );
     }
 }

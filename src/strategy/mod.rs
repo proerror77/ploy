@@ -57,6 +57,7 @@ pub mod nba_comeback;
 pub mod pattern_memory;
 pub mod pm_5m_bayesian;
 pub mod pm_5m_directional;
+pub mod pm_5m_directional_backtest;
 pub mod sports;
 
 // =============================================================================
