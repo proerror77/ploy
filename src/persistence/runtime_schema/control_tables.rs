@@ -188,7 +188,6 @@ pub(crate) async fn ensure_coordinator_governance_policies_table(pool: &PgPool) 
     )
     .execute(pool)
     .await?;
-
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_coordinator_governance_policies_updated_at ON coordinator_governance_policies(updated_at DESC)",
     )
