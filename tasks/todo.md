@@ -13,9 +13,9 @@ back onto `main`.
   `git log --cherry-pick`.
 - [x] Confirm that no remaining branch has patch-unique commits relative to the
   integration branch.
-- [ ] Fast-forward `main` to `integration/remaining-fixes-lvbt` in a clean
+- [x] Fast-forward `main` to `integration/remaining-fixes-lvbt` in a clean
   merge worktree.
-- [ ] Re-run compile validation on the merged `main` worktree.
+- [x] Re-run compile validation on the merged `main` worktree.
 
 ## Progress notes
 
@@ -28,6 +28,10 @@ back onto `main`.
   `git rev-list --left-right --count`, but those diffs are already subsumed by
   the integration branch. The next meaningful action is to advance `main`, not
   merge another residual worktree.
+- 2026-03-19: Added clean merge worktree
+  `/Users/proerror/Documents/ploy/.worktrees/main-merge-20260319`, fast-forwarded
+  `main` from `8cbc58b` to `83a21d0`, and verified the merged tree with
+  `CARGO_TARGET_DIR=/tmp/ploy-mainline-check rtk cargo check --bin ploy`.
 
 # Sports Analyst Analysis Outcome Split (2026-03-11)
 
