@@ -334,6 +334,30 @@ jobs:
             mkdir -p "${WORKDIR}"
             tar xzf "${BUNDLE}" -C "${WORKDIR}"
 
+            host_arch_info() {
+              case "$(uname -m)" in
+                x86_64|amd64)
+                  printf '%s\t%s\n' "x86_64-unknown-linux-gnu" 'x86-64|x86_64'
+                  ;;
+                aarch64|arm64)
+                  printf '%s\t%s\n' "aarch64-unknown-linux-gnu" 'ARM aarch64|ARM64|aarch64'
+                  ;;
+                *)
+                  echo "Unsupported host architecture: $(uname -m)" >&2
+                  exit 1
+                  ;;
+              esac
+            }
+
+            IFS=$'\t' read -r HOST_RUST_TARGET HOST_FILE_REGEX <<EOF
+            $(host_arch_info)
+            EOF
+
+            file "${WORKDIR}/ploy" | tee "${WORKDIR}/ploy.file.txt"
+            grep -q "ELF 64-bit LSB" "${WORKDIR}/ploy.file.txt"
+            grep -Eq "${HOST_FILE_REGEX}" "${WORKDIR}/ploy.file.txt"
+            grep -q "Target: ${HOST_RUST_TARGET}" "${WORKDIR}/RELEASE.txt"
+
             $SUDO mkdir -p \
               "${RELEASE_DIR}" \
               "${DEPLOY_ROOT}/bin" \
@@ -356,6 +380,7 @@ jobs:
             $SUDO cp -R "${WORKDIR}/migrations/." "${DEPLOY_ROOT}/migrations/"
 
             file "${DEPLOY_ROOT}/bin/ploy" | grep -q "ELF 64-bit LSB"
+            file "${DEPLOY_ROOT}/bin/ploy" | grep -Eq "${HOST_FILE_REGEX}"
             echo "${RELEASE_TAG}" | $SUDO tee "${DEPLOY_ROOT}/bin/.current_release" >/dev/null
 
             if [ -f "${DEPLOY_ROOT}/.env" ]; then

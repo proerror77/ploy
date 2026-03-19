@@ -42,9 +42,6 @@ pub struct AppConfig {
     /// Optional NBA Q3→Q4 comeback trading agent
     #[serde(default)]
     pub nba_comeback: Option<NbaComebackConfig>,
-    /// Optional event registry discovery service
-    #[serde(default)]
-    pub event_registry: Option<DiscoveryConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -410,7 +407,6 @@ impl AppConfig {
             api_port: Some(8081),
             event_edge_agent: None,
             nba_comeback: None,
-            event_registry: None,
         }
     }
 

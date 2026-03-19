@@ -54,7 +54,7 @@ The `src/` directory contains 18 top-level modules:
 ```
 src/
   adapters/     - External service clients (Polymarket, Binance, Postgres, Feishu)
-  agent/        - LLM-powered advisory/autonomous agents (Grok, Claude)
+  ai_clients/   - LLM/data client integrations (Grok, Claude, sports data)
   api/          - REST API server (feature-gated behind "api")
   cli/          - Command-line interface definitions
   collector/    - Market data collection (Binance depth, klines)
@@ -67,12 +67,10 @@ src/
   persistence/  - Checkpoint, DLQ, event store
   platform/     - Unified order platform with risk gates
   rl/           - Reinforcement learning (optional, feature-gated)
-  services/     - Background services (health, metrics, event edge)
   signing/      - Wallet, HMAC, nonce management
   strategy/     - Trading strategies (24,971 lines across 40+ files)
-  supervisor/   - Watchdog, alert manager, recovery playbook
+  coordination/ - Circuit breaker, lifecycle, emergency stop
   tui/          - Terminal UI (ratatui)
-  validation.rs - Input validation for external API data
 ```
 
 **Verdict**: The top-level decomposition is logical and follows a clean layered
@@ -200,7 +198,6 @@ The heaviest users:
 - `src/strategy/adapters.rs` (44) -- wrapping legacy types for new trait
 - `src/strategy/momentum.rs` (43) -- config/state cloning across async boundaries
 - `src/strategy/split_arb.rs` (25) -- position state management
-- `src/strategy/multi_event.rs` (24) -- event tracking
 
 Most clones are on `Arc<RwLock<T>>` handles (cheap) or `String`/`Decimal`
 (small). The `adapters.rs` clones are concerning because they clone entire
@@ -214,7 +211,6 @@ across async boundaries instead of cloning the full struct each time.
 The codebase uses `async-trait` consistently for async trait definitions:
 
 - `Strategy` trait (`src/strategy/traits.rs:20`)
-- `DomainAgent` trait (`src/platform/traits.rs:120`)
 - `Checkpointable` trait (`src/persistence/checkpoint.rs`)
 
 This is the correct approach for Rust 2021 edition. When the project upgrades
@@ -320,7 +316,7 @@ definitions:
 | `ExecutionConfig` | `src/config.rs:144` | `src/strategy/core/executor.rs:21` | -- |
 | `OrderExecutor` | `src/strategy/executor.rs:14` | `src/strategy/core/executor.rs:110` | -- |
 | `ArbSide` | `src/strategy/split_arb.rs:137` | `src/strategy/core/position.rs:11` | -- |
-| `ReconciliationResult` | `src/strategy/reconciliation.rs:54` | `src/services/order_monitor.rs:467` | -- |
+| `ReconciliationResult` | retired legacy module | -- | -- |
 
 This creates real confusion. The `mod.rs` re-exports use aliases to avoid
 collisions (e.g., `ArbSide as CoreArbSide`), but downstream code must know
@@ -493,7 +489,7 @@ most for a trading system are under-tested:
 - Signal detection (`strategy/signal.rs`)
 - NBA win probability model (`strategy/nba_winprob.rs`)
 - Circuit breaker logic (`coordination/circuit_breaker.rs`)
-- Validation functions (`validation.rs`)
+- Risk validation chain (`strategy/risk_mgmt/validation.rs`)
 
 **Under-tested areas:**
 - Order execution flow (no mock-based integration tests)
@@ -511,8 +507,8 @@ using mocked adapters are essential.
 
 The `mockall` crate is listed in `dev-dependencies` but there is no
 evidence of mock-based testing in the codebase. The `Strategy` trait
-and `DomainAgent` trait are well-suited for mock-based testing, but
-no mocks have been created.
+and execution/order-plane contracts are well-suited for mock-based testing,
+but no mocks have been created.
 
 **Recommendation**: Create integration tests in `tests/` that:
 1. Mock `PolymarketClient` to simulate order fills and failures
@@ -620,23 +616,14 @@ There are **18 TODO comments** across the codebase in production code:
 | `src/main.rs` | 4803 | `// TODO: Execute real order` |
 | `src/adapters/postgres.rs` | 822 | `// TODO: use config` (hardcoded 500) |
 | `src/platform/platform.rs` | 432 | `// TODO: get domain from report` |
-| `src/cli/service.rs` | 71 | `// TODO: Actually start services` |
-| `src/cli/service.rs` | 91 | `// TODO: Actually stop services` |
-| `src/cli/service.rs` | 120 | `// TODO: Check actual status` |
 | `src/cli/strategy.rs` | 821 | `// TODO: Implement actual uptime calculation` |
-| `src/agent/autonomous.rs` | 467 | `// TODO: Integrate with actual order executor` |
-| `src/agent/autonomous.rs` | 489 | `// TODO: Integrate with actual order executor` |
-| `src/agent/autonomous.rs` | 532 | `// TODO: Integrate with RiskManager` |
+| `src/ai_clients/autonomous.rs` | 565 | `// TODO: Integrate with RiskManager` |
 | `src/api/handlers/system.rs` | 31 | `// TODO: Get from config` |
 | `src/api/handlers/stats.rs` | 271 | `// TODO: Get current price from market data` |
-| `src/agent/sports_data_aggregator.rs` | 318 | `// TODO: Implement ESPN API integration` |
 
 The most concerning TODOs are the four "Execute real order" entries in
 `main.rs` (lines 4770-4803), which suggest that some command paths have
 **stub order execution** that silently does nothing in production.
-
-The three TODOs in `cli/service.rs` indicate that the `ploy service
-start/stop/status` commands are entirely non-functional stubs.
 
 ### 8.2 Dead Code Markers [LOW]
 
@@ -649,13 +636,10 @@ items by making everything public.
 
 ### 8.3 Untracked New Files [MEDIUM]
 
-The git status shows several untracked files that appear to be
+The git status originally showed several untracked files that appeared to be
 work-in-progress or experimental:
 
 ```
-?? src/services/event_edge_agent.rs
-?? src/services/event_edge_claude_framework.rs
-?? src/services/event_edge_event_driven.rs
 ?? src/strategy/event_edge.rs
 ?? src/strategy/event_models/
 ```
@@ -677,10 +661,10 @@ Files over 1,000 lines warrant attention for potential decomposition:
 | `src/adapters/polymarket_clob.rs` | 1,622 | API client; reasonable for scope |
 | `src/strategy/engine.rs` | 1,558 | Core engine; reasonable but untested |
 | `src/strategy/backtest.rs` | 1,239 | Backtesting; reasonable |
-| `src/agent/sports_data.rs` | 1,142 | Data fetching; could split by source |
+| `src/ai_clients/sports_data.rs` | 1,142 | Data fetching; could split by source |
 | `src/adapters/polymarket_ws.rs` | 1,113 | WebSocket client; reasonable |
 | `src/strategy/multi_outcome.rs` | 1,102 | Multi-outcome analysis |
-| `src/agent/polymarket_sports.rs` | 1,102 | Sports agent |
+| `src/ai_clients/polymarket_sports.rs` | 1,102 | Sports agent |
 
 ---
 
@@ -729,13 +713,10 @@ failures because fill confirmation was not enabled.
 
 ### 9.3 Validation at Boundaries [GOOD]
 
-**File**: `src/validation.rs`
-
-The validation module provides defensive checks for external API data:
-prices must be in `[0, 1]`, share quantities must be non-zero and below
-a maximum, and timestamps must not be in the future. This is critical
-for a system that consumes data from external APIs where malformed
-responses could trigger incorrect trades.
+Historical note: the repo previously carried a top-level
+`src/validation.rs` helper module for boundary validation. That module
+has since been retired in favor of the remaining canonical validation
+surfaces under strategy/risk-management code.
 
 ### 9.4 Comment Language Mixing [LOW]
 
@@ -777,7 +758,6 @@ language for maintainability by a broader team.
 | 8 | Introduce newtype wrappers for domain IDs (`TokenId`, `ConditionId`, `EventId`, `OrderId`) | Medium | Compile-time prevention of ID mixups |
 | 9 | Consolidate config defaults to a single mechanism (either `impl Default` or `serde(default)`, not both) | Small | Eliminates dual-default divergence risk |
 | 10 | Replace production `.unwrap()` calls with `.expect("reason")` (focus on `platform/queue.rs` with 22 occurrences and `platform/position.rs` with 11) | Small | Documents invariants, improves panic messages |
-| 11 | Remove or implement the 3 stub commands in `cli/service.rs` (start/stop/status all contain `// TODO: Actually ...`) | Small | Prevents user confusion from non-functional commands |
 | 12 | Decouple `strategy/core/split_engine.rs` from `PolymarketClient` -- accept an `OrderSubmitter` trait instead | Medium | Makes the "generic" core engine actually generic |
 
 ### Priority 4: Low (backlog)

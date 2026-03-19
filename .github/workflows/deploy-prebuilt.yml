@@ -1,3 +1,4 @@
+# DEPRECATED: Use release-aliyun.yml. SECURITY: Writes POLYMARKET_PRIVATE_KEY into systemd unit file on disk.
 name: Build and Deploy (Pre-built Binary)
 
 on:

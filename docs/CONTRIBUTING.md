@@ -148,7 +148,7 @@ src/
   agents/       -- Domain trading agents (crypto, sports, politics)
   coordinator/  -- Multi-agent coordinator and bootstrap
   strategy/     -- Strategy logic (arb, momentum, registry)
-  services/     -- External service integrations (CLOB, discovery)
+  ai_clients/   -- External AI/data client integrations
   risk/         -- Risk management (circuit breaker, position limits)
   tui/          -- Terminal UI (ratatui)
   api/          -- HTTP/WebSocket API server (axum)

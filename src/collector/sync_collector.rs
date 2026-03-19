@@ -519,6 +519,42 @@ impl LagAnalyzer {
     }
 }
 
+fn depth_levels_json(
+    state: &super::binance_depth::OrderBookState,
+    is_bid: bool,
+    max_levels: usize,
+) -> serde_json::Value {
+    let levels: Vec<serde_json::Value> = if is_bid {
+        state
+            .bids
+            .iter()
+            .rev()
+            .take(max_levels)
+            .map(|(p, q)| {
+                let price = Decimal::from(*p) / Decimal::from(100);
+                serde_json::json!({
+                    "price": price.to_string(),
+                    "size": q.to_string(),
+                })
+            })
+            .collect()
+    } else {
+        state
+            .asks
+            .iter()
+            .take(max_levels)
+            .map(|(p, q)| {
+                let price = Decimal::from(*p) / Decimal::from(100);
+                serde_json::json!({
+                    "price": price.to_string(),
+                    "size": q.to_string(),
+                })
+            })
+            .collect()
+    };
+    serde_json::Value::Array(levels)
+}
+
 /// Result of lag analysis
 #[derive(Debug, Clone, Serialize)]
 pub struct LagAnalysisResult {

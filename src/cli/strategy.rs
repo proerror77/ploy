@@ -20,7 +20,7 @@ use crate::adapters::polymarket_clob::POLYGON_CHAIN_ID;
 use crate::adapters::{PolymarketClient, PostgresStore};
 use crate::config::ExecutionConfig;
 use crate::signing::Wallet;
-use crate::strategy::executor::OrderExecutor;
+use crate::strategy::execution::executor::OrderExecutor;
 use crate::strategy::{StrategyFactory, StrategyManager};
 use analysis_commands::{
     AccuracyArgs, BacktestArgs, BacktestDiffArgs, BacktestListArgs, DirectionalSignalBacktestArgs,

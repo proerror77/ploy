@@ -579,7 +579,7 @@ impl Strategy for MomentumStrategy {
     }
 
     fn is_active(&self) -> bool {
-        !self.positions.is_empty() || !self.pending_orders.is_empty()
+        self.runtime_is_active()
     }
 
     async fn shutdown(&mut self) -> Result<Vec<StrategyAction>> {
@@ -608,14 +608,7 @@ impl Strategy for MomentumStrategy {
     }
 
     fn reset(&mut self) {
-        self.positions.clear();
-        self.pending_orders.clear();
-        self.last_trade_time.clear();
-        self.last_binance_prices.clear();
-        self.price_history.clear();
-        self.active_events.clear();
-        self.realized_pnl = Decimal::ZERO;
-        self.detector.reset();
+        self.reset_runtime();
     }
 }
 

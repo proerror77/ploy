@@ -6,7 +6,13 @@
 
 ## 0) TL;DR
 
-- 你列的四大策略 **在 repo 內都有對應落地**，但目前不是以「四類策略」作為最高層架構；而是以 **多個執行框架並存**（Legacy bot loop / StrategyManager / Multi-agent platform）。
+- 你列的四大策略 **在 repo 內都有對應落地**，而且 live runtime 現在已經明確朝 **四層分工** 收斂：
+  - Strategy Plane
+  - Capital Governance Plane
+  - Execution Plane
+  - Control Plane
+- `src/strategy/*` 已是 canonical live strategy path；`TradingAgent` / `DomainAgent` 已退休。
+- 平台啟動面已不再保留 compatibility crypto/sports live runtimes 或對應 env gate。
 - 本文件的目標是把「策略分類」變成可追蹤的工程邊界：每一類策略要能回答：
   - 入口在哪（CLI / service / agent）
   - 核心邏輯在哪（module）
@@ -28,16 +34,12 @@
 - 主要入口
   - CLI：`ploy event-edge ...`（Legacy CLI，見 `src/main.rs` 的 `run_event_edge_mode`）
   - 常駐背景 agent（跟著 `ploy platform start --politics` 起）：`[event_edge_agent]`（見 `config/default.toml`、`docs/EVENT_EDGE_AGENT.md`）
-  - 三種 framework runner：
-    - `src/services/event_edge_agent.rs`（deterministic）
-    - `src/services/event_edge_event_driven.rs`（event-driven + persisted state）
-    - `src/services/event_edge_claude_framework.rs`（Claude agent SDK + MCP tools）
+  - Canonical runtime：`src/strategy/event_edge/strategy.rs`（registered strategy plugin through the managed strategy runtime）
 - 已完成
   - `p_true` 估計 → `edge/EV` → 下單（可 dry-run）
-  - 狀態持久化（event_driven framework）
 - 缺口/下一步
   - 外部資料源目前幾乎只有 Arena（想覆蓋「選舉/監管事件」需新增 `event_models/*`）
-  - 把 EventEdge 作為 StrategyManager 的一級 Strategy（目前主要走 services/agents 路徑）
+  - 擴充更多事件資料源與 discovery path
 
 ### 1.2 套利策略（Arbitrage）
 
@@ -46,12 +48,11 @@
 - 主要實作
   - 時間套利（分時對沖）：`src/strategy/split_arb.rs`
   - 兩腿套利狀態機（time-bounded binary）：`src/strategy/engine.rs`
-  - 多事件/多市場掃描：`src/strategy/multi_event.rs`
   - 多結果/單調性/拆合套利/EV：`src/strategy/multi_outcome.rs`
   - 波動套利：`src/strategy/volatility_arb.rs`
 - 跨市場（傳統博彩）相關
-  - Odds 來源：`src/agent/odds_provider.rs`（The Odds API：DraftKings/FanDuel...）
-  - 比較/edge：`src/agent/sports_analyst.rs`（含 DK 對照）
+  - Odds 來源：`src/ai_clients/odds_provider.rs`（The Odds API：DraftKings/FanDuel...）
+  - 比較/edge：`src/ai_clients/sports_analyst.rs`（含 DK 對照）
 - 已完成
   - Polymarket 內部套利（split/two-leg/multi-outcome）能力完整
   - Sportsbook odds 拉取與 bookmaker 間 arb 偵測（The Odds API）
@@ -96,24 +97,44 @@ ploy momentum --symbols BTCUSDT,ETHUSDT --vwap-confirm --vwap-lookback 60 --vwap
   - Polymarket CLOB/WS adapters（`src/adapters/polymarket_*.rs`）
 - Tier 2：專業/模型
   - NBA winprob：`src/strategy/nba_winprob.rs`
-  - Politics poll edge：`src/agent/polymarket_politics.rs`
-  - Odds/博彩：`src/agent/odds_provider.rs`
+  - Odds/博彩：`src/ai_clients/odds_provider.rs`
 - Tier 3：市場資訊/情緒
-  - Grok/X：`src/agent/grok.rs`
-  - 多源資料聚合：`src/agent/sports_data_aggregator.rs`（品質分數、降級、快取）
+  - Grok/X：`src/ai_clients/grok.rs`
+  - 多源資料聚合：`src/ai_clients/sports_data.rs`（品質分數、降級、快取）
   - OBI/深度不平衡：`src/strategy/momentum.rs`、`src/strategy/nba_filters.rs` 等
 
 ---
 
-## 2) 執行框架現況（為什麼策略分散）
+## 2) 執行框架現況（目前的穩態）
 
-目前 repo 同時存在 3 套「跑策略」的方式：
+目前 repo 的穩態已經不是「3 套框架並存」，而是：
 
-1. Legacy bot loop（`ploy run` / `src/main.rs`，live 已封鎖）
-2. StrategyManager（`src/strategy/traits.rs` + `src/strategy/manager.rs` + `src/strategy/feeds.rs`）
-3. Multi-agent platform（`src/agents/*` + `src/coordinator/*` + `src/platform/*`）
+1. `src/strategy/*` + coordinator managed runtime = 正式 live path
+2. `src/agents/*` = governance-only surface
+3. `src/platform/*` = execution / shared contracts，不再承載另一套 live strategy runtime
 
-這導致「同一個策略概念」可能有多份實作（例如 Momentum：legacy 高級版 vs StrategyManager 版）。
+具體來說：
+
+- `TradingAgent` / `DomainAgent` 已退休，不再是 live 策略入口
+- sports / politics live path 只走 canonical managed runtime
+- crypto live path 只走 canonical runtime
+
+所以今天最大的架構現實，不是「策略分散在三套正式 runtime」，而是：
+canonical runtime 已經確立，舊 trait / platform-agent 層也已經退休；剩下的是 plugin / account / order plane 的持續產品化。
+
+### 2.1 讀側可見性
+
+現在 API 已經可以直接把 plugin/account lifecycle 暴露給 operator：
+
+- `GET /api/system/capabilities`
+  - deployment state counts：`enabled|draining|disabled|archived`
+  - scoped deployment state counts（account + dry_run scope）
+  - builtin plugin summaries（`plugin_id` / `kind` / `domain` / `version`）
+- `GET /api/system/accounts`
+  - per-account deployment state counts
+  - runtime budget snapshot
+
+這表示 `draining` 不再只是 runtime 內部默契，而是正式可觀測的 control-plane 狀態。
 
 ---
 

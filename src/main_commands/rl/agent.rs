@@ -9,7 +9,71 @@ use std::sync::OnceLock;
 #[cfg(feature = "rl")]
 use tokio::signal;
 #[cfg(feature = "rl")]
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
+
+#[cfg(feature = "rl")]
+fn intent_to_request(intent: &ploy::platform::OrderIntent) -> ploy::domain::OrderRequest {
+    let mut request = if intent.is_buy {
+        ploy::domain::OrderRequest::buy_limit(
+            intent.token_id.clone(),
+            intent.side,
+            intent.shares,
+            intent.limit_price,
+        )
+    } else {
+        ploy::domain::OrderRequest::sell_limit(
+            intent.token_id.clone(),
+            intent.side,
+            intent.shares,
+            intent.limit_price,
+        )
+    };
+    let client_order_id = format!("intent:{}", intent.intent_id);
+    request.client_order_id = client_order_id.clone();
+    request.idempotency_key = Some(client_order_id);
+    request
+}
+
+#[cfg(feature = "rl")]
+async fn execute_intent(
+    executor: &ploy::strategy::OrderExecutor,
+    intent: &ploy::platform::OrderIntent,
+) -> Result<ploy::platform::ExecutionReport> {
+    let request = intent_to_request(intent);
+    match executor.execute(&request).await {
+        Ok(result) => {
+            use ploy::domain::OrderStatus;
+            use ploy::platform::ExecutionStatus;
+
+            let status = match result.status {
+                OrderStatus::Pending => ExecutionStatus::Pending,
+                OrderStatus::Submitted => ExecutionStatus::Submitted,
+                OrderStatus::PartiallyFilled => ExecutionStatus::PartiallyFilled,
+                OrderStatus::Filled => ExecutionStatus::Filled,
+                OrderStatus::Cancelled => ExecutionStatus::Cancelled,
+                OrderStatus::Rejected | OrderStatus::Failed => ExecutionStatus::Rejected,
+                OrderStatus::Expired => ExecutionStatus::Expired,
+            };
+
+            Ok(ploy::platform::ExecutionReport {
+                intent_id: intent.intent_id,
+                agent_id: intent.agent_id.clone(),
+                order_id: Some(result.order_id),
+                status,
+                filled_shares: result.filled_shares,
+                avg_fill_price: result.avg_fill_price,
+                fees: rust_decimal::Decimal::ZERO,
+                error_message: None,
+                executed_at: chrono::Utc::now(),
+                latency_ms: result.elapsed_ms,
+            })
+        }
+        Err(err) => Ok(ploy::platform::ExecutionReport::rejected(
+            intent,
+            err.to_string(),
+        )),
+    }
+}
 
 #[cfg(feature = "rl")]
 #[allow(clippy::too_many_arguments)]
@@ -86,7 +150,7 @@ pub(super) async fn run_agent(
     rl_config.training.online_learning = online_learning;
     rl_config.training.exploration_rate = exploration;
 
-    let agent_config = RLCryptoAgentConfig {
+    let mut runtime = RLCryptoRuntime::new(RLCryptoRuntimeConfig {
         id: "rl-crypto-agent".to_string(),
         name: format!("RL Agent - {}", symbol),
         coins: vec![symbol.replace("USDT", "")],
@@ -128,13 +192,13 @@ pub(super) async fn run_agent(
     })?;
 
     let price_cache = bn_ws.price_cache().clone();
-    pm_ws.register_token(up_token, Side::Up).await;
-    pm_ws.register_token(down_token, Side::Down).await;
+    pm_ws.register_token(up_token, ploy::domain::Side::Up).await;
+    pm_ws.register_token(down_token, ploy::domain::Side::Down)
+        .await;
     data_plane.start(Vec::new()).await?;
-
     let quote_cache = pm_ws.quote_cache().clone();
 
-    println!("🚀 Agent started. Listening for market data...\n");
+    println!("🚀 Runtime started. Listening for market data...\n");
     println!("📡 Binance: {} | Polymarket: UP/DOWN tokens", symbol_upper);
 
     let tick_duration = std::time::Duration::from_millis(tick_interval);
@@ -143,6 +207,9 @@ pub(super) async fn run_agent(
     let mut events_received = 0u64;
     let mut intents_generated = 0u64;
     let mut quotes_received = false;
+    let mut intents_generated = 0u64;
+    let mut executions_success = 0u64;
+    let mut executions_failed = 0u64;
 
     loop {
         tokio::select! {
@@ -159,7 +226,6 @@ pub(super) async fn run_agent(
                     let m5 = price_cache.momentum(&symbol_upper, 5).await;
                     let m15 = price_cache.momentum(&symbol_upper, 15).await;
                     let m60 = price_cache.momentum(&symbol_upper, 60).await;
-
                     match (m1, m5, m15, m60) {
                         (Some(a), Some(b), Some(c), Some(d)) => Some([
                             a.to_f64().unwrap_or(0.0),
@@ -210,7 +276,7 @@ pub(super) async fn run_agent(
                     }
                 };
 
-                let event = DomainEvent::Crypto(CryptoEvent {
+                let intents = runtime.on_crypto_event(&CryptoEvent {
                     symbol: symbol.to_string(),
                     spot_price,
                     round_slug: Some(market.to_string()),
@@ -256,16 +322,14 @@ pub(super) async fn run_agent(
                             }
                         }
                     }
-                    Err(e) => {
-                        warn!("Dispatch error: {}", e);
-                    }
                 }
 
                 if step_count % 30 == 0 {
                     let up_ask = up_quote.as_ref().and_then(|q| q.best_ask).unwrap_or(Decimal::ZERO);
                     let down_ask = down_quote.as_ref().and_then(|q| q.best_ask).unwrap_or(Decimal::ZERO);
                     let sum_asks = up_ask + down_ask;
-                    println!("📊 Step {}: spot={} | UP={}/{} DOWN={}/{} | sum_asks={}",
+                    println!(
+                        "📊 Step {}: spot={} | UP={}/{} DOWN={}/{} | sum_asks={}",
                         step_count,
                         spot_price,
                         up_quote.as_ref().and_then(|q| q.best_bid).unwrap_or(Decimal::ZERO),
@@ -284,6 +348,7 @@ pub(super) async fn run_agent(
                 println!("║  Events Received: {:>10}                                   ║", events_received);
                 println!("║  Intents Gen:     {:>10}                                   ║", intents_generated);
                 println!("╚══════════════════════════════════════════════════════════════╝");
+                runtime.stop().await?;
                 break;
             }
         }

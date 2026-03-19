@@ -1,7 +1,7 @@
 # Agent Instructions
 
-This repository supports both Codex-style `AGENTS.md` and Claude-style `CLAUDE.md`.
-Keep `AGENTS.md` and the repo-root `CLAUDE.md` aligned (same intent, same rules).
+This repository supports both Codex-style `AGENTS.md` and Claude-style
+`CLAUDE.md`. Keep them aligned.
 
 ## CLI Output Compression
 
@@ -16,7 +16,16 @@ explicitly supported by RTK.
 
 ## Tool Mapping
 
-When instructions mention Claude Code tools, map them like this in Codex:
+- `src/coordinator/`: coordinator-managed order ingress, risk, queueing, and
+  runtime control.
+- `src/strategy/`: trading strategies, runtime specs, and backtests.
+- `src/persistence/`: event store, checkpoints, and schema helpers.
+- `src/adapters/`: Polymarket, Binance, Postgres, and other external clients.
+- `src/api/` and `src/tui/`: API surface and terminal dashboard.
+- `config/` and `migrations/`: runtime TOML and PostgreSQL schema changes.
+- `ploy-frontend/` and `ploy-sidecar/`: TypeScript frontend and sidecar
+  projects.
+- `docs/`, `tasks/`, and `todos/`: runbooks, plans, and tracked follow-up work.
 
 - Read: use `rtk read`, `sed`, or `rg`
 - Write: create or edit files with `apply_patch`
@@ -30,7 +39,13 @@ When instructions mention Claude Code tools, map them like this in Codex:
 - If `curl` cannot fetch meaningful page content (JS-rendered pages, anti-bot/Cloudflare, login walls), switch to the `agent-browser` skill workflow (`open` -> `snapshot -i` -> `get text body`) before trying mirrors.
 - Parallel: use `multi_tool_use.parallel` for parallel shell reads/searches
 
-## Git / Atomic Commits
+- Default safe local smoke path: `cargo run --bin ploy -- platform start
+  --crypto --dry-run`
+- Demo dashboard: `cargo run --bin ploy -- dashboard --demo`
+- Frontend dev: `cd ploy-frontend && npm run dev`
+- Sidecar dev: `cd ploy-sidecar && npm run dev`
+- Full runtime setup, credentials, and command coverage live in
+  [README.md](README.md).
 
 Prefer **atomic commits** for landed repo changes:
 
@@ -41,23 +56,30 @@ Prefer **atomic commits** for landed repo changes:
 - Avoid WIP commits on shared branches.
 - Pure review, research, and question-answer tasks do not require a commit by default.
 
-### Atomic Commit Execution Standard
+## Engineering Conventions
 
-- Do not commit per command; commit per completed intent.
-- One commit unit should be independently testable and reversible.
-- Before commit: stage explicit paths, review staged diff, run smallest relevant validation.
-- If work is incomplete, keep it uncommitted or stash it; do not push partial WIP.
-- Use commit message format `<scope>: <intent>` with concrete scope (for example `build`, `api`, `docs`, `strategy`, `ci`).
+- Keep changes small, focused, and atomic.
+- Prefer `rg` for search and `apply_patch` for manual edits.
+- Use `rtk` wrappers for supported high-output commands.
+- For non-trivial work, write and maintain a short plan in `tasks/todo.md`.
+- Use a relevant `SKILL.md` when the user names it or the task clearly matches
+  one.
+- Follow [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for broader contributor
+  guidance.
+- Detailed workflow rules live in [docs/agent-workflow.md](docs/agent-workflow.md).
 
-### Parallel Agent Isolation (Required)
+## Constraints And Do-Not Rules
 
-- Use one branch and one worktree per agent for parallel work.
-- Assign file ownership before coding; avoid overlapping edits across agents.
-- Reserve high-conflict files (for example `Cargo.lock`, root workflows, route registries) to a single integrator.
-- Integrate agent work with `cherry-pick` into the integration branch.
-- If overlap is unavoidable, run those file changes sequentially instead of in parallel.
+- Default to dry-run and safe local validation. Do not enable live trading
+  paths without explicit user intent and the required credentials.
+- Prefer coordinator-managed live ingress via `ploy platform start`; avoid
+  direct live order paths unless explicitly required.
+- Do not build Rust on live trading hosts. Ship CI-built artifacts instead.
+- Use separate worktrees when parallel agents or live sessions may touch the
+  same files.
+- Preserve user changes and never revert unrelated diffs.
 
-### Multi-Session Workflow (Required)
+## Done Means
 
 - Treat each session as isolated: one session = one worktree + one branch.
 - Create sessions from updated main (example: `git fetch origin && git worktree add ../ploy-s1 -b session/s1 origin/main`).

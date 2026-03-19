@@ -1,3 +1,4 @@
+# DEPRECATED: Use release-aliyun.yml. Builds Rust on-host (policy violation). Target: AWS EC2.
 name: Deploy to tango-2-1
 
 on:

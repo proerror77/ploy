@@ -277,6 +277,9 @@ mod tests {
                 MarketUpdate::BinanceKline { .. } => "binance_kline",
                 MarketUpdate::EventDiscovered { .. } => "event_discovered",
                 MarketUpdate::EventExpired { .. } => "event_expired",
+                MarketUpdate::BinanceFunding { .. } => "binance_funding",
+                MarketUpdate::BinanceLiquidation { .. } => "binance_liquidation",
+                MarketUpdate::DeribitIV { .. } => "deribit_iv",
             };
             Ok(vec![StrategyAction::Alert {
                 level: AlertLevel::Info,
@@ -368,8 +371,8 @@ mod tests {
         assert!(builder.build_binance().is_none());
     }
 
-    #[test]
-    fn test_from_data_plane_reuses_singleton_adapters() {
+    #[tokio::test]
+    async fn test_from_data_plane_reuses_singleton_adapters() {
         let manager = Arc::new(StrategyManager::new(1000));
         let data_plane = Arc::new(PlatformDataPlane::new(
             DataPlaneConfig {

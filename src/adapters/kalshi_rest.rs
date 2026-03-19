@@ -71,7 +71,7 @@ impl OutcomeSide {
 
 #[derive(Clone)]
 pub struct KalshiClient {
-    http: Client,
+    http: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
     api_secret: Option<String>,

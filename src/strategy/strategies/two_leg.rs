@@ -23,6 +23,8 @@ use crate::strategy::traits::{
     StrategyConfig, StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
 
+mod lifecycle;
+
 /// Two-leg strategy configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TwoLegConfig {

@@ -63,6 +63,7 @@ pub(crate) async fn run(cli: &Cli) -> Result<()> {
             symbols,
             markets,
             duration,
+            ..
         }) => {
             crate::main_runtime::init_logging();
             crate::main_modes::run_collect_mode(symbols, markets.as_deref(), *duration).await?;
