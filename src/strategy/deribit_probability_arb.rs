@@ -21,6 +21,8 @@ use std::str::FromStr;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+mod order_flow;
+
 const SECONDS_PER_YEAR: f64 = 365.0 * 24.0 * 60.0 * 60.0;
 const DERIBIT_PUBLIC_API: &str = "https://www.deribit.com/api/v2/public";
 

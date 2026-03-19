@@ -17,6 +17,8 @@ use super::token_targets::{
 };
 use crate::error::Result;
 
+mod persistence;
+
 /// Synchronized price record for lag analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRecord {

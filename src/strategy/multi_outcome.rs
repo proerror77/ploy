@@ -15,6 +15,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
+mod analysis;
 mod monitor;
 
 pub use monitor::{

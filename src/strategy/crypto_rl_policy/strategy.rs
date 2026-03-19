@@ -17,6 +17,8 @@ use crate::strategy::traits::{
     DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyEvent,
     StrategyEventType, StrategyStateInfo,
 };
+mod config_loader;
+mod runtime_support;
 #[path = "signal_flow.rs"]
 mod signal_flow;
 use self::signal_flow::{RlSignalSummary, RlTrackedEvent};

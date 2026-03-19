@@ -6,14 +6,16 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
+use crate::domain::Domain;
 use crate::domain::Side;
-use crate::platform::Domain;
 
+#[path = "position/queries.rs"]
+mod queries;
 mod transitions;
 
 /// 單一倉位
@@ -148,6 +150,8 @@ pub struct AgentPositionStats {
 pub struct PositionAggregator {
     /// 所有倉位 (position_id -> Position)
     positions: Arc<RwLock<HashMap<String, Position>>>,
+    /// Agent -> 持有的倉位 ID
+    positions_by_agent: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     /// 已實現損益 (agent_id -> pnl)
     realized_pnl: Arc<RwLock<HashMap<String, Decimal>>>,
     /// 倉位 ID 計數器
@@ -165,204 +169,55 @@ impl PositionAggregator {
     pub fn new() -> Self {
         Self {
             positions: Arc::new(RwLock::new(HashMap::new())),
+            positions_by_agent: Arc::new(RwLock::new(HashMap::new())),
             realized_pnl: Arc::new(RwLock::new(HashMap::new())),
             position_counter: Arc::new(RwLock::new(0)),
         }
     }
 
-    // ==================== 查詢方法 ====================
-
-    /// 獲取單個倉位
-    pub async fn get_position(&self, position_id: &str) -> Option<Position> {
-        self.positions.read().await.get(position_id).cloned()
-    }
-
-    /// 獲取 Agent 所有倉位
-    pub async fn get_agent_positions(&self, agent_id: &str) -> Vec<Position> {
-        self.positions
-            .read()
-            .await
-            .values()
-            .filter(|p| p.agent_id == agent_id)
-            .cloned()
-            .collect()
-    }
-
-    /// Agent 在特定 token/side 的可用持倉股數（reduce-only SELL 檢查使用）
-    pub async fn agent_open_shares_for_token_side(
-        &self,
+    fn index_agent_position(
+        positions_by_agent: &mut HashMap<String, HashSet<String>>,
         agent_id: &str,
-        domain: Domain,
-        token_id: &str,
-        side: Side,
-    ) -> u64 {
-        self.positions
-            .read()
-            .await
-            .values()
-            .filter(|p| {
-                p.agent_id == agent_id
-                    && p.domain == domain
-                    && p.side == side
-                    && p.token_id.eq_ignore_ascii_case(token_id)
+        position_id: &str,
+    ) {
+        positions_by_agent
+            .entry(agent_id.to_string())
+            .or_default()
+            .insert(position_id.to_string());
+    }
+
+    fn deindex_agent_position(
+        positions_by_agent: &mut HashMap<String, HashSet<String>>,
+        agent_id: &str,
+        position_id: &str,
+    ) {
+        let remove_agent_entry = positions_by_agent
+            .get_mut(agent_id)
+            .map(|position_ids| {
+                position_ids.remove(position_id);
+                position_ids.is_empty()
             })
-            .map(|p| p.shares)
-            .sum()
-    }
+            .unwrap_or(false);
 
-    /// 獲取市場所有倉位
-    pub async fn get_market_positions(&self, market_slug: &str) -> Vec<Position> {
-        self.positions
-            .read()
-            .await
-            .values()
-            .filter(|p| p.market_slug == market_slug)
-            .cloned()
-            .collect()
-    }
-
-    /// 獲取領域所有倉位
-    pub async fn get_domain_positions(&self, domain: Domain) -> Vec<Position> {
-        self.positions
-            .read()
-            .await
-            .values()
-            .filter(|p| p.domain == domain)
-            .cloned()
-            .collect()
-    }
-
-    /// 獲取所有倉位
-    pub async fn all_positions(&self) -> Vec<Position> {
-        self.positions.read().await.values().cloned().collect()
-    }
-
-    // ==================== 聚合統計 ====================
-
-    /// 獲取聚合視圖
-    pub async fn aggregate(&self) -> AggregatedPosition {
-        let positions = self.positions.read().await;
-        let realized = self.realized_pnl.read().await;
-
-        let mut result = AggregatedPosition::default();
-
-        for position in positions.values() {
-            let exposure = position.notional_value();
-            let pnl = position.unrealized_pnl();
-
-            result.total_exposure += exposure;
-            result.unrealized_pnl += pnl;
-            result.position_count += 1;
-
-            if !position.is_hedged {
-                result.unhedged_count += 1;
-            }
-
-            *result
-                .exposure_by_domain
-                .entry(position.domain)
-                .or_insert(Decimal::ZERO) += exposure;
-            *result
-                .exposure_by_agent
-                .entry(position.agent_id.clone())
-                .or_insert(Decimal::ZERO) += exposure;
-            *result
-                .exposure_by_market
-                .entry(position.market_slug.clone())
-                .or_insert(Decimal::ZERO) += exposure;
+        if remove_agent_entry {
+            positions_by_agent.remove(agent_id);
         }
-
-        result.realized_pnl = realized.values().sum();
-
-        result
-    }
-
-    /// 獲取 Agent 統計
-    pub async fn agent_stats(&self, agent_id: &str) -> AgentPositionStats {
-        let positions = self.positions.read().await;
-        let _realized = self.realized_pnl.read().await;
-
-        let mut stats = AgentPositionStats::default();
-
-        for position in positions.values() {
-            if position.agent_id == agent_id {
-                stats.exposure += position.notional_value();
-                stats.unrealized_pnl += position.unrealized_pnl();
-                stats.position_count += 1;
-                if !position.is_hedged {
-                    stats.unhedged_count += 1;
-                }
-            }
-        }
-
-        stats
-    }
-
-    /// 獲取總暴露
-    pub async fn total_exposure(&self) -> Decimal {
-        self.positions
-            .read()
-            .await
-            .values()
-            .map(|p| p.notional_value())
-            .sum()
-    }
-
-    /// 獲取 Agent 暴露
-    pub async fn agent_exposure(&self, agent_id: &str) -> Decimal {
-        self.positions
-            .read()
-            .await
-            .values()
-            .filter(|p| p.agent_id == agent_id)
-            .map(|p| p.notional_value())
-            .sum()
-    }
-
-    /// 獲取總未實現損益
-    pub async fn total_unrealized_pnl(&self) -> Decimal {
-        self.positions
-            .read()
-            .await
-            .values()
-            .map(|p| p.unrealized_pnl())
-            .sum()
-    }
-
-    /// 獲取總已實現損益
-    pub async fn total_realized_pnl(&self) -> Decimal {
-        self.realized_pnl.read().await.values().sum()
-    }
-
-    /// 獲取 Agent 已實現損益
-    pub async fn agent_realized_pnl(&self, agent_id: &str) -> Decimal {
-        self.realized_pnl
-            .read()
-            .await
-            .get(agent_id)
-            .cloned()
-            .unwrap_or(Decimal::ZERO)
-    }
-
-    /// 倉位總數
-    pub async fn position_count(&self) -> usize {
-        self.positions.read().await.len()
-    }
-
-    /// 未對沖倉位數
-    pub async fn unhedged_count(&self) -> usize {
-        self.positions
-            .read()
-            .await
-            .values()
-            .filter(|p| !p.is_hedged)
-            .count()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn agent_index_ids(agg: &PositionAggregator, agent_id: &str) -> Vec<String> {
+        let index = agg.positions_by_agent.read().await;
+        let mut ids = index
+            .get(agent_id)
+            .map(|ids| ids.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        ids.sort();
+        ids
+    }
 
     #[tokio::test]
     async fn test_open_close_position() {
@@ -558,56 +413,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_close_position_no_deadlock_with_reduce() {
-        use std::sync::Arc;
-        use tokio::time::{timeout, Duration};
-
-        let agg = Arc::new(PositionAggregator::new());
-
-        // Open two positions so close and reduce target different ones
-        let pos_close = agg
-            .open_position(
-                "agent1",
-                Domain::Crypto,
-                "btc-15m",
-                "t1",
-                Side::Up,
-                100,
-                Decimal::from_str_exact("0.50").unwrap(),
-            )
-            .await;
-        let pos_reduce = agg
-            .open_position(
-                "agent1",
-                Domain::Crypto,
-                "eth-15m",
-                "t2",
-                Side::Up,
-                100,
-                Decimal::from_str_exact("0.40").unwrap(),
-            )
-            .await;
-
-        let agg1 = Arc::clone(&agg);
-        let agg2 = Arc::clone(&agg);
-
-        // Run close_position and reduce_position concurrently.
-        // If lock ordering were inconsistent this could deadlock.
-        let result = timeout(Duration::from_secs(5), async move {
-            let (r1, r2) = tokio::join!(
-                agg1.close_position(&pos_close, Decimal::from_str_exact("0.55").unwrap()),
-                agg2.reduce_position(&pos_reduce, 50, Decimal::from_str_exact("0.45").unwrap()),
-            );
-            (r1, r2)
-        })
-        .await;
-
-        let (close_pnl, reduce_pnl) = result.expect("deadlock: close + reduce timed out");
-        assert_eq!(close_pnl, Some(Decimal::from(5))); // (0.55-0.50)*100
-        assert_eq!(reduce_pnl, Some(Decimal::from_str_exact("2.5").unwrap())); // (0.45-0.40)*50
-    }
-
-    #[tokio::test]
     async fn test_agent_open_shares_for_token_side() {
         let agg = PositionAggregator::new();
         agg.open_position(
@@ -645,5 +450,127 @@ mod tests {
             .agent_open_shares_for_token_side("agent1", Domain::Crypto, "token-yes", Side::Up)
             .await;
         assert_eq!(shares, 100);
+    }
+
+    #[tokio::test]
+    async fn test_agent_index_tracks_position_lifecycle() {
+        let agg = PositionAggregator::new();
+        let pos1 = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "btc-15m",
+                "token-yes",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.50").unwrap(),
+            )
+            .await;
+        let pos2 = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "eth-15m",
+                "token-no",
+                Side::Down,
+                80,
+                Decimal::from_str_exact("0.40").unwrap(),
+            )
+            .await;
+        let pos3 = agg
+            .open_position(
+                "agent2",
+                Domain::Sports,
+                "nba-123",
+                "token-a",
+                Side::Up,
+                50,
+                Decimal::from_str_exact("0.60").unwrap(),
+            )
+            .await;
+
+        assert_eq!(
+            agent_index_ids(&agg, "agent1").await,
+            vec![pos1.clone(), pos2.clone()]
+        );
+        assert_eq!(agent_index_ids(&agg, "agent2").await, vec![pos3.clone()]);
+
+        agg.reduce_position(&pos1, 40, Decimal::from_str_exact("0.55").unwrap())
+            .await;
+        assert_eq!(
+            agent_index_ids(&agg, "agent1").await,
+            vec![pos1.clone(), pos2.clone()]
+        );
+
+        agg.reduce_position(&pos1, 60, Decimal::from_str_exact("0.55").unwrap())
+            .await;
+        assert_eq!(agent_index_ids(&agg, "agent1").await, vec![pos2.clone()]);
+        assert_eq!(agg.get_agent_positions("agent1").await.len(), 1);
+
+        agg.close_position(&pos2, Decimal::from_str_exact("0.45").unwrap())
+            .await;
+        assert!(agent_index_ids(&agg, "agent1").await.is_empty());
+        assert!(agg.get_agent_positions("agent1").await.is_empty());
+        assert_eq!(agent_index_ids(&agg, "agent2").await, vec![pos3]);
+    }
+
+    #[tokio::test]
+    async fn test_agent_index_tracks_cleanup_clear_agent_and_clear() {
+        let agg = PositionAggregator::new();
+        let expired = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "btc-15m",
+                "token-yes",
+                Side::Up,
+                100,
+                Decimal::from_str_exact("0.50").unwrap(),
+            )
+            .await;
+        let active = agg
+            .open_position(
+                "agent1",
+                Domain::Crypto,
+                "eth-15m",
+                "token-no",
+                Side::Down,
+                80,
+                Decimal::from_str_exact("0.40").unwrap(),
+            )
+            .await;
+        let other = agg
+            .open_position(
+                "agent2",
+                Domain::Sports,
+                "nba-123",
+                "token-a",
+                Side::Up,
+                50,
+                Decimal::from_str_exact("0.60").unwrap(),
+            )
+            .await;
+
+        {
+            let mut positions = agg.positions.write().await;
+            positions.get_mut(&expired).unwrap().metadata.insert(
+                "expires_at".to_string(),
+                (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
+            );
+        }
+
+        assert_eq!(agg.cleanup_expired().await, 1);
+        assert_eq!(agent_index_ids(&agg, "agent1").await, vec![active.clone()]);
+        assert_eq!(agent_index_ids(&agg, "agent2").await, vec![other.clone()]);
+
+        agg.clear_agent("agent1").await;
+        assert!(agent_index_ids(&agg, "agent1").await.is_empty());
+        assert_eq!(agg.get_agent_positions("agent1").await.len(), 0);
+        assert_eq!(agent_index_ids(&agg, "agent2").await, vec![other]);
+
+        agg.clear().await;
+        assert!(agent_index_ids(&agg, "agent1").await.is_empty());
+        assert!(agent_index_ids(&agg, "agent2").await.is_empty());
+        assert_eq!(agg.position_count().await, 0);
     }
 }

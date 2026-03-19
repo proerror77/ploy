@@ -1,20 +1,7 @@
-use crate::domain::{Quote, Side};
-use crate::error::{PloyError, Result};
-use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::sync::OnceLock;
-use std::time::Duration;
-use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, error, info, warn};
-
 mod connection;
 mod messages;
 mod runtime_support;
+mod surface;
 mod subscriptions;
 
 #[cfg(test)]
@@ -25,83 +12,20 @@ pub use self::messages::{
 pub use self::runtime_support::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerState, DisplayQuote, QuoteCache,
 };
+pub use self::surface::{PolymarketWebSocket, QuoteUpdate};
 
-/// Polymarket WebSocket client with circuit breaker
-pub struct PolymarketWebSocket {
-    ws_url: String,
-    quote_cache: QuoteCache,
-    token_to_side: Arc<RwLock<HashMap<String, Side>>>,
-    /// Token IDs that should be subscribed for full book snapshots, but do not have an `Up/Down`
-    /// `Side` mapping (ex: YES/NO sports markets).
-    extra_tokens: Arc<RwLock<HashSet<String>>>,
-    update_tx: broadcast::Sender<QuoteUpdate>,
-    book_tx: broadcast::Sender<Arc<BookMessage>>,
-    reconnect_delay: Duration,
-    max_reconnect_attempts: u32,
-    circuit_breaker: Arc<CircuitBreaker>,
-    resubscribe_requested: Arc<std::sync::atomic::AtomicBool>,
-    // Optional: per-symbol freshness tracking for the data plane.
-    freshness: OnceLock<Arc<crate::platform::DataPlaneFreshness>>,
-}
-
-/// Quote update notification
-#[derive(Debug, Clone)]
-pub struct QuoteUpdate {
-    pub token_id: String,
-    pub side: Side,
-    pub quote: Quote,
-}
-
+#[cfg(test)]
 impl PolymarketWebSocket {
-    /// Create a new WebSocket client
-    pub fn new(ws_url: &str) -> Self {
-        Self::with_circuit_breaker(ws_url, CircuitBreakerConfig::default())
+    /// Test-only hook: inject a raw WebSocket message into the parser/broadcast path.
+    pub async fn ingest_test_message(&self, text: &str) -> bool {
+        self.handle_message(text).await
     }
-
-    /// Create a new WebSocket client with custom circuit breaker config
-    pub fn with_circuit_breaker(ws_url: &str, cb_config: CircuitBreakerConfig) -> Self {
-        let (update_tx, _) = broadcast::channel(1000);
-        // Book snapshots can be significantly larger than quotes; keep a smaller buffer.
-        let (book_tx, _) = broadcast::channel(256);
-
-        Self {
-            ws_url: ws_url.to_string(),
-            quote_cache: QuoteCache::new(),
-            token_to_side: Arc::new(RwLock::new(HashMap::new())),
-            extra_tokens: Arc::new(RwLock::new(HashSet::new())),
-            update_tx,
-            book_tx,
-            reconnect_delay: Duration::from_secs(1),
-            max_reconnect_attempts: 10,
-            circuit_breaker: Arc::new(CircuitBreaker::new(cb_config)),
-            resubscribe_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            freshness: OnceLock::new(),
-        }
-    }
-
-    /// Wire an optional `DataPlaneFreshness` for per-symbol tracking.
-    pub fn set_freshness(&self, freshness: Arc<crate::platform::DataPlaneFreshness>) {
-        if self.freshness.set(Arc::clone(&freshness)).is_ok() {
-            freshness.set_source_connected(crate::platform::DataSource::PolymarketWs, false);
-            freshness.set_subscription_count(crate::platform::DataSource::PolymarketWs, 0);
-        }
-    }
-
-    /// Get the circuit breaker (for external monitoring)
-    pub fn circuit_breaker(&self) -> Arc<CircuitBreaker> {
-        Arc::clone(&self.circuit_breaker)
-    }
-
-    /// Get the quote cache
-    pub fn quote_cache(&self) -> &QuoteCache {
-        &self.quote_cache
-    }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Side;
     use rust_decimal_macros::dec;
 
     #[test]
@@ -309,13 +233,13 @@ mod tests {
         let ws = PolymarketWebSocket::new("wss://example.invalid");
         ws.register_token("0xfresh", Side::Up).await;
 
-        let freshness = std::sync::Arc::new(crate::platform::DataPlaneFreshness::new());
+        let freshness = std::sync::Arc::new(crate::data_plane::DataPlaneFreshness::new());
         ws.set_freshness(freshness.clone());
 
         let json = r#"[{"asset_id":"0xfresh","market":"m","bids":[{"price":"0.50","size":"10"}],"asks":[{"price":"0.51","size":"10"}]}]"#;
         ws.handle_message(json).await;
 
-        let staleness = freshness.staleness(crate::platform::DataSource::PolymarketWs, "0xfresh");
+        let staleness = freshness.staleness(crate::data_plane::DataSource::PolymarketWs, "0xfresh");
         assert!(
             staleness.is_some(),
             "freshness should be recorded after book update"

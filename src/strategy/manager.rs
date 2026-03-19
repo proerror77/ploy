@@ -17,6 +17,7 @@ use super::traits::{MarketUpdate, OrderUpdate, Strategy, StrategyAction};
 use crate::error::Result;
 use anyhow::anyhow;
 
+mod factory;
 mod lifecycle;
 
 use lifecycle::RunningStrategy;

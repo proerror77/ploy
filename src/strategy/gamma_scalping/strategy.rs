@@ -26,6 +26,8 @@ use super::greeks::{binary_greeks, realized_vol_from_closes};
 use super::rebalancer::{RebalanceAction, Rebalancer, Straddle};
 
 mod decision_flow;
+mod runtime_support;
+mod state_view;
 
 /// Metadata for a tracked event (discovered from Polymarket).
 #[derive(Debug, Clone)]

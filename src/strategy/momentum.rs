@@ -33,6 +33,9 @@ use crate::strategy::dump_hedge::{DumpHedgeConfig, DumpHedgeEngine};
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::execution::fund_manager::{FundManager, PositionSizeResult};
 use crate::strategy::probability;
+
+mod best_edge;
+mod constructor;
 use crate::strategy::volatility::{EventTracker, VolatilityConfig, VolatilityDetector};
 use crate::strategy::execution::executor::OrderExecutor;
 
