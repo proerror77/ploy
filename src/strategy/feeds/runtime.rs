@@ -118,12 +118,27 @@ impl DataFeedManager {
                 loop {
                     match rx.recv().await {
                         Ok(update) => {
+                            let symbol = update.symbol;
+                            let price = update.price;
+                            let quantity = update.quantity;
+                            let is_buyer_maker = update.is_buyer_maker;
+                            let timestamp = update.timestamp;
+
                             let market_update = MarketUpdate::BinancePrice {
-                                symbol: update.symbol,
-                                price: update.price,
-                                timestamp: Utc::now(),
+                                symbol: symbol.clone(),
+                                price,
+                                timestamp,
                             };
                             manager.send_market_update(market_update);
+
+                            if let (Some(qty), Some(is_buyer_maker)) = (quantity, is_buyer_maker) {
+                                manager.send_market_update(MarketUpdate::BinanceTrade {
+                                    symbol,
+                                    qty,
+                                    is_buyer_maker,
+                                    timestamp,
+                                });
+                            }
                         }
                         Err(RecvError::Lagged(n)) => {
                             warn!("Binance price feed lagged by {} messages", n);

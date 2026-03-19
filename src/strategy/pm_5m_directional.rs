@@ -243,6 +243,12 @@ struct TickObservation {
 }
 
 #[derive(Debug, Clone)]
+struct TradeFlowObservation {
+    signed_qty: Decimal,
+    timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
 struct PendingOrder {
     symbol: String,
     token_id: String,
@@ -286,6 +292,7 @@ pub struct Pm5mDirectionalStrategy {
     quotes: HashMap<String, Quote>,
     active_events: HashMap<String, TrackedEvent>,
     recent_ticks: HashMap<String, VecDeque<TickObservation>>,
+    trade_flow: HashMap<String, VecDeque<TradeFlowObservation>>,
     pending_orders: HashMap<String, PendingOrder>,
     positions: HashMap<String, DirectionalPosition>,
     last_trade_at: HashMap<String, DateTime<Utc>>,
@@ -342,6 +349,7 @@ impl Pm5mDirectionalStrategy {
             quotes: HashMap::new(),
             active_events: HashMap::new(),
             recent_ticks: HashMap::new(),
+            trade_flow: HashMap::new(),
             pending_orders: HashMap::new(),
             positions: HashMap::new(),
             last_trade_at: HashMap::new(),
@@ -410,6 +418,29 @@ impl Pm5mDirectionalStrategy {
             .unwrap_or(false)
         {
             let _ = ticks.pop_front();
+        }
+    }
+
+    fn update_trade_flow(
+        &mut self,
+        symbol: &str,
+        qty: Decimal,
+        is_buyer_maker: bool,
+        timestamp: DateTime<Utc>,
+    ) {
+        let trades = self.trade_flow.entry(symbol.to_string()).or_default();
+        let signed_qty = if is_buyer_maker { -qty } else { qty };
+        trades.push_back(TradeFlowObservation {
+            signed_qty,
+            timestamp,
+        });
+        let cutoff = timestamp - chrono::Duration::seconds(30);
+        while trades
+            .front()
+            .map(|trade| trade.timestamp < cutoff)
+            .unwrap_or(false)
+        {
+            let _ = trades.pop_front();
         }
     }
 
@@ -524,6 +555,56 @@ impl Pm5mDirectionalStrategy {
         } else {
             Some((signed / count as f64).clamp(-1.0, 1.0))
         }
+    }
+
+    fn cvd_10s(&self, symbol: &str, now: DateTime<Utc>) -> Option<f64> {
+        let trades = self.trade_flow.get(symbol)?;
+        let cutoff = now - chrono::Duration::seconds(10);
+        let mut signed = Decimal::ZERO;
+        let mut total = Decimal::ZERO;
+
+        for trade in trades.iter().filter(|trade| trade.timestamp >= cutoff) {
+            signed += trade.signed_qty;
+            total += trade.signed_qty.abs();
+        }
+
+        if total.is_zero() {
+            None
+        } else {
+            Some((signed / total).to_f64().unwrap_or(0.0).clamp(-1.0, 1.0))
+        }
+    }
+
+    fn active_event_for_symbol(&self, symbol: &str) -> Option<&TrackedEvent> {
+        self.active_events
+            .values()
+            .filter(|event| event.symbol == symbol)
+            .min_by_key(|event| event.end_time)
+    }
+
+    fn lag_estimate_secs(&self, symbol: &str) -> Option<f64> {
+        let spot_ts = self.spot_prices.get(symbol)?.timestamp;
+        let event = self.active_event_for_symbol(symbol)?;
+        let up_ts = self.quotes.get(&event.up_token_id)?.timestamp;
+        let down_ts = self.quotes.get(&event.down_token_id)?.timestamp;
+        let pm_ts = up_ts.min(down_ts);
+        let lag_ms = (spot_ts - pm_ts).num_milliseconds().max(0);
+        Some(lag_ms as f64 / 1000.0)
+    }
+
+    fn flow_pressure(
+        &self,
+        symbol: &str,
+        _l2: &BinanceL2State,
+        flow_2s: f64,
+        now: DateTime<Utc>,
+    ) -> f64 {
+        let cvd = self.cvd_10s(symbol, now).unwrap_or(0.0);
+        let lag_weight = self
+            .lag_estimate_secs(symbol)
+            .map(|lag_s| (lag_s / 5.0).clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        ((1.0 - lag_weight) * flow_2s + lag_weight * cvd).clamp(-1.0, 1.0)
     }
 
     fn microgap_proxy(l2: &BinanceL2State) -> f64 {
@@ -732,9 +813,10 @@ impl Pm5mDirectionalStrategy {
         let (p_base, sigma, z) = self.compute_probability(&spot, &event, now)?;
         let logit_base = (p_base / (1.0 - p_base)).ln();
         let microgap = Self::microgap_proxy(&l2);
+        let pressure = self.flow_pressure(symbol, &l2, flow_2s, now);
         let adjusted_logit = logit_base
             + self.cfg.obi_weight * l2.obi_3.to_f64().unwrap_or(0.0)
-            + self.cfg.flow_weight * flow_2s
+            + self.cfg.flow_weight * pressure
             + self.cfg.microgap_weight * microgap;
         let p_hat = (1.0 / (1.0 + (-adjusted_logit).exp())).clamp(PROB_FLOOR, 1.0 - PROB_FLOOR);
         let (side, effective_p) = Self::select_side(p_hat);
@@ -747,13 +829,17 @@ impl Pm5mDirectionalStrategy {
         let obi_3 = l2.obi_3.to_f64().unwrap_or(0.0);
         match side {
             Side::Up => {
-                if obi_3 < self.cfg.min_obi || flow_2s < self.cfg.min_flow_2s || microgap < 0.0 {
+                if obi_3 < self.cfg.min_obi || pressure < self.cfg.min_flow_2s || microgap < 0.0
+                {
                     self.last_reason = Some(format!("{symbol}:up_confirmation_failed"));
                     return None;
                 }
             }
             Side::Down => {
-                if obi_3 > -self.cfg.min_obi || flow_2s > -self.cfg.min_flow_2s || microgap > 0.0 {
+                if obi_3 > -self.cfg.min_obi
+                    || pressure > -self.cfg.min_flow_2s
+                    || microgap > 0.0
+                {
                     self.last_reason = Some(format!("{symbol}:down_confirmation_failed"));
                     return None;
                 }
@@ -781,7 +867,7 @@ impl Pm5mDirectionalStrategy {
             ask >= self.cfg.no_trade_price_min && ask <= self.cfg.no_trade_price_max;
         if in_no_trade_zone
             && !(z.abs() >= self.cfg.no_trade_override_z
-                && flow_2s.abs() >= self.cfg.no_trade_override_flow)
+                && pressure.abs() >= self.cfg.no_trade_override_flow)
         {
             self.last_reason = Some(format!("{symbol}:no_trade_zone"));
             return None;
@@ -886,6 +972,14 @@ impl Pm5mDirectionalStrategy {
         metadata.insert("z".to_string(), format!("{z:.6}"));
         metadata.insert("obi_3".to_string(), format!("{obi_3:.6}"));
         metadata.insert("flow_2s".to_string(), format!("{flow_2s:.6}"));
+        metadata.insert("flow_pressure".to_string(), format!("{pressure:.6}"));
+        metadata.insert(
+            "cvd_10s".to_string(),
+            format!("{:.6}", self.cvd_10s(symbol, now).unwrap_or(0.0)),
+        );
+        if let Some(lag_s) = self.lag_estimate_secs(symbol) {
+            metadata.insert("lag_estimate_secs".to_string(), format!("{lag_s:.3}"));
+        }
         metadata.insert("microgap_proxy".to_string(), format!("{microgap:.6}"));
         metadata.insert("edge".to_string(), format!("{edge:.6}"));
         metadata.insert("bayes_lb".to_string(), format!("{bayes_lb:.6}"));
@@ -939,6 +1033,16 @@ impl Pm5mDirectionalStrategy {
                 let _ = ticks.pop_front();
             }
             !ticks.is_empty()
+        });
+        self.trade_flow.retain(|_, trades| {
+            while trades
+                .front()
+                .map(|trade| trade.timestamp < now - chrono::Duration::seconds(30))
+                .unwrap_or(false)
+            {
+                let _ = trades.pop_front();
+            }
+            !trades.is_empty()
         });
         self.pending_orders
             .retain(|_, pending| self.active_events.contains_key(&pending.event_id));
@@ -1105,6 +1209,21 @@ impl Strategy for Pm5mDirectionalStrategy {
                     }
                 }
 
+                if let Some(mut entry_actions) = self.evaluate_symbol(symbol, *timestamp) {
+                    actions.append(&mut entry_actions);
+                }
+            }
+            MarketUpdate::BinanceTrade {
+                symbol,
+                qty,
+                is_buyer_maker,
+                timestamp,
+            } => {
+                if !self.symbols.iter().any(|tracked| tracked == symbol) {
+                    return Ok(actions);
+                }
+
+                self.update_trade_flow(symbol, *qty, *is_buyer_maker, *timestamp);
                 if let Some(mut entry_actions) = self.evaluate_symbol(symbol, *timestamp) {
                     actions.append(&mut entry_actions);
                 }
@@ -1414,6 +1533,28 @@ impl Strategy for Pm5mDirectionalStrategy {
             "bayes_mature_buckets".to_string(),
             self.bayesian.mature_buckets().len().to_string(),
         );
+        for symbol in &self.symbols {
+            let now = self
+                .spot_prices
+                .get(symbol)
+                .map(|spot| spot.timestamp)
+                .or_else(|| self.l2_by_symbol.get(symbol).map(|l2| l2.timestamp));
+            let Some(now) = now else {
+                continue;
+            };
+
+            if let Some(cvd) = self.cvd_10s(symbol, now) {
+                metrics.insert(format!("cvd_10s_{symbol}"), format!("{cvd:.4}"));
+            }
+            if let Some(lag_s) = self.lag_estimate_secs(symbol) {
+                metrics.insert(format!("lag_estimate_secs_{symbol}"), format!("{lag_s:.3}"));
+            }
+            if let Some(l2) = self.l2_by_symbol.get(symbol) {
+                let flow_2s = self.signed_flow_2s(symbol, now).unwrap_or(0.0);
+                let pressure = self.flow_pressure(symbol, l2, flow_2s, now);
+                metrics.insert(format!("flow_pressure_{symbol}"), format!("{pressure:.4}"));
+            }
+        }
 
         StrategyStateInfo {
             strategy_id: self.id.clone(),
@@ -1474,6 +1615,7 @@ impl Strategy for Pm5mDirectionalStrategy {
         self.quotes.clear();
         self.active_events.clear();
         self.recent_ticks.clear();
+        self.trade_flow.clear();
         self.pending_orders.clear();
         self.positions.clear();
         self.last_trade_at.clear();
@@ -1621,6 +1763,19 @@ max_nav_fraction_per_trade = 0.01
         MarketUpdate::BinancePrice {
             symbol: "BTCUSDT".to_string(),
             price,
+            timestamp: ts,
+        }
+    }
+
+    fn binance_trade_update(
+        ts: DateTime<Utc>,
+        qty: Decimal,
+        is_buyer_maker: bool,
+    ) -> MarketUpdate {
+        MarketUpdate::BinanceTrade {
+            symbol: "BTCUSDT".to_string(),
+            qty,
+            is_buyer_maker,
             timestamp: ts,
         }
     }
@@ -1824,6 +1979,64 @@ max_nav_fraction_per_trade = 0.01
         assert_eq!(
             strategy.last_reason.as_deref(),
             Some("BTCUSDT:no_trade_zone")
+        );
+    }
+
+    #[tokio::test]
+    async fn binance_trade_flow_metrics_capture_cvd_and_lag() {
+        let mut strategy =
+            Pm5mDirectionalStrategy::from_toml("pm5-test".to_string(), minimal_toml(), true)
+                .expect("strategy");
+        let start = Utc::now();
+        let lagged_now = start + chrono::Duration::seconds(4);
+
+        strategy
+            .on_market_update(&event_update(start))
+            .await
+            .expect("event");
+        strategy
+            .on_market_update(&up_quote(start, dec!(0.38), dec!(0.36)))
+            .await
+            .expect("up quote");
+        strategy
+            .on_market_update(&down_quote(start, dec!(0.66), dec!(0.64)))
+            .await
+            .expect("down quote");
+        strategy
+            .on_market_update(&l2_update(lagged_now, dec!(0.20), dec!(0.18), dec!(2.0)))
+            .await
+            .expect("l2");
+        strategy
+            .on_market_update(&price_update(lagged_now, dec!(100.200)))
+            .await
+            .expect("price");
+        strategy
+            .on_market_update(&binance_trade_update(lagged_now, dec!(4.0), false))
+            .await
+            .expect("trade");
+
+        let metrics = strategy.state().metrics;
+        let cvd = metrics
+            .get("cvd_10s_BTCUSDT")
+            .expect("cvd metric")
+            .parse::<f64>()
+            .expect("cvd numeric");
+        let lag_s = metrics
+            .get("lag_estimate_secs_BTCUSDT")
+            .expect("lag metric")
+            .parse::<f64>()
+            .expect("lag numeric");
+        let pressure = metrics
+            .get("flow_pressure_BTCUSDT")
+            .expect("pressure metric")
+            .parse::<f64>()
+            .expect("pressure numeric");
+
+        assert!(cvd > 0.0, "buyer taker flow should make 10s CVD positive");
+        assert!(lag_s >= 3.5, "stale PM quotes should show positive lag");
+        assert!(
+            pressure > 0.0,
+            "lagged positive CVD should lift flow pressure"
         );
     }
 

@@ -14,7 +14,7 @@ resolver = "2"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "fs", "io-util", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "fs", "io-util", "io-std", "process"] }
 
 # WebSocket
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }

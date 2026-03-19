@@ -122,6 +122,14 @@ pub enum MarketUpdate {
         timestamp: DateTime<Utc>,
     },
 
+    /// Binance trade-direction update derived from trade/aggTrade taker side.
+    BinanceTrade {
+        symbol: String,
+        qty: Decimal,
+        is_buyer_maker: bool,
+        timestamp: DateTime<Utc>,
+    },
+
     /// Binance L2 orderbook snapshot features
     BinanceL2 {
         symbol: String,
@@ -203,6 +211,7 @@ impl MarketUpdate {
         match self {
             MarketUpdate::PolymarketQuote { timestamp, .. } => *timestamp,
             MarketUpdate::BinancePrice { timestamp, .. } => *timestamp,
+            MarketUpdate::BinanceTrade { timestamp, .. } => *timestamp,
             MarketUpdate::BinanceL2 { timestamp, .. } => *timestamp,
             MarketUpdate::BinanceKline { timestamp, .. } => *timestamp,
             MarketUpdate::BinanceFunding { timestamp, .. } => *timestamp,

@@ -406,6 +406,7 @@ impl MomentumStrategyAdapter {
                 }
             }
 
+            MarketUpdate::BinanceTrade { .. } => {}
             MarketUpdate::BinanceL2 { .. } => {}
 
             MarketUpdate::PolymarketQuote {

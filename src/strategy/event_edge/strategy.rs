@@ -262,6 +262,7 @@ impl Strategy for EventEdgeStrategy {
                 }
             }
             MarketUpdate::BinancePrice { .. }
+            | MarketUpdate::BinanceTrade { .. }
             | MarketUpdate::BinanceL2 { .. }
             | MarketUpdate::BinanceKline { .. }
             | MarketUpdate::BinanceFunding { .. }

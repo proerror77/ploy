@@ -210,7 +210,8 @@ impl Strategy for GammaScalpingStrategy {
                 Ok(vec![])
             }
 
-            MarketUpdate::BinanceL2 { .. }
+            MarketUpdate::BinanceTrade { .. }
+            | MarketUpdate::BinanceL2 { .. }
             | MarketUpdate::BinanceFunding { .. }
             | MarketUpdate::BinanceLiquidation { .. }
             | MarketUpdate::DeribitIV { .. } => Ok(vec![]),

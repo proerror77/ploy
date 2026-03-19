@@ -273,6 +273,7 @@ mod tests {
             let tag = match update {
                 MarketUpdate::PolymarketQuote { .. } => "polymarket_quote",
                 MarketUpdate::BinancePrice { .. } => "binance_price",
+                MarketUpdate::BinanceTrade { .. } => "binance_trade",
                 MarketUpdate::BinanceL2 { .. } => "binance_l2",
                 MarketUpdate::BinanceKline { .. } => "binance_kline",
                 MarketUpdate::EventDiscovered { .. } => "event_discovered",
@@ -413,13 +414,43 @@ mod tests {
 
         let ws = data_plane.binance_ws().expect("binance ws");
         ws.ingest_test_message(
-            r#"{"e":"aggTrade","E":1700000000000,"s":"BTCUSDT","p":"43250.50","q":"0.123","T":1700000000000}"#,
+            r#"{"e":"aggTrade","E":1700000000000,"s":"BTCUSDT","p":"43250.50","q":"0.123","T":1700000000000,"m":false}"#,
         )
         .await;
 
         let (sid, message) = recv_market_alert(&mut action_rx).await;
         assert_eq!(sid, "feed_s1");
         assert_eq!(message, "market:binance_price");
+    }
+
+    #[tokio::test]
+    async fn characterization_replay_binance_trade_direction_to_strategy_market_update() {
+        let (manager, mut action_rx) = setup_manager_with_strategy("feed_trade").await;
+        let data_plane = Arc::new(PlatformDataPlane::new(
+            DataPlaneConfig {
+                binance_spot_symbols: vec!["BTCUSDT".to_string()],
+                ..DataPlaneConfig::default()
+            },
+            Arc::new(DataPlaneFreshness::new()),
+        ));
+
+        let feed = DataFeedManager::from_data_plane(data_plane.clone(), manager);
+        feed.start().await.expect("start feed manager");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let ws = data_plane.binance_ws().expect("binance ws");
+        ws.ingest_test_message(
+            r#"{"e":"aggTrade","E":1700000000000,"s":"BTCUSDT","p":"43250.50","q":"0.123","T":1700000000000,"m":false}"#,
+        )
+        .await;
+
+        let first = recv_market_alert(&mut action_rx).await;
+        let second = recv_market_alert(&mut action_rx).await;
+
+        assert_eq!(first.0, "feed_trade");
+        assert_eq!(first.1, "market:binance_price");
+        assert_eq!(second.0, "feed_trade");
+        assert_eq!(second.1, "market:binance_trade");
     }
 
     #[tokio::test]
