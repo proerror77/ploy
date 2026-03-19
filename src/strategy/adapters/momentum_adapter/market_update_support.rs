@@ -575,7 +575,10 @@ impl MomentumStrategyAdapter {
                 }
             }
 
-            MarketUpdate::BinanceKline { .. } => {}
+            MarketUpdate::BinanceKline { .. }
+            | MarketUpdate::BinanceFunding { .. }
+            | MarketUpdate::BinanceLiquidation { .. }
+            | MarketUpdate::DeribitIV { .. } => {}
         }
 
         Ok(actions)

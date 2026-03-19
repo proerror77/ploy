@@ -145,6 +145,40 @@ pub enum MarketUpdate {
         timestamp: DateTime<Utc>,
     },
 
+    /// Binance perpetual funding rate update
+    BinanceFunding {
+        symbol: String,
+        /// Current funding rate (e.g. 0.0001 = 0.01%)
+        funding_rate: f64,
+        /// Mark price at time of update
+        mark_price: Decimal,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Binance forced liquidation (forceOrder stream)
+    BinanceLiquidation {
+        symbol: String,
+        side: Side,
+        /// Quantity liquidated
+        qty: Decimal,
+        /// Price at liquidation
+        price: Decimal,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Deribit options implied volatility snapshot
+    DeribitIV {
+        /// Underlying symbol (e.g. "BTCUSDT")
+        symbol: String,
+        /// ATM implied vol (annualized, e.g. 0.65 = 65%)
+        atm_iv: f64,
+        /// 25-delta risk reversal: call_iv - put_iv (positive = bullish skew)
+        skew_25d: f64,
+        /// Days to nearest expiry used for ATM calculation
+        term_days: f64,
+        timestamp: DateTime<Utc>,
+    },
+
     /// New event discovered
     EventDiscovered {
         event_id: String,
@@ -171,6 +205,9 @@ impl MarketUpdate {
             MarketUpdate::BinancePrice { timestamp, .. } => *timestamp,
             MarketUpdate::BinanceL2 { timestamp, .. } => *timestamp,
             MarketUpdate::BinanceKline { timestamp, .. } => *timestamp,
+            MarketUpdate::BinanceFunding { timestamp, .. } => *timestamp,
+            MarketUpdate::BinanceLiquidation { timestamp, .. } => *timestamp,
+            MarketUpdate::DeribitIV { timestamp, .. } => *timestamp,
             MarketUpdate::EventDiscovered { .. } => Utc::now(),
             MarketUpdate::EventExpired { .. } => Utc::now(),
         }

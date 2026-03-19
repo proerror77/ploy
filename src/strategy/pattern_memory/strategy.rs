@@ -407,6 +407,9 @@ impl Strategy for PatternMemoryStrategy {
             // pattern_memory doesn't need trade ticks / spot prices.
             MarketUpdate::BinancePrice { .. } => {}
             MarketUpdate::BinanceL2 { .. } => {}
+            MarketUpdate::BinanceFunding { .. } => {}
+            MarketUpdate::BinanceLiquidation { .. } => {}
+            MarketUpdate::DeribitIV { .. } => {}
         }
 
         Ok(actions)

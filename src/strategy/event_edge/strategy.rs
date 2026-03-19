@@ -263,7 +263,10 @@ impl Strategy for EventEdgeStrategy {
             }
             MarketUpdate::BinancePrice { .. }
             | MarketUpdate::BinanceL2 { .. }
-            | MarketUpdate::BinanceKline { .. } => {}
+            | MarketUpdate::BinanceKline { .. }
+            | MarketUpdate::BinanceFunding { .. }
+            | MarketUpdate::BinanceLiquidation { .. }
+            | MarketUpdate::DeribitIV { .. } => {}
         }
 
         Ok(Vec::new())
