@@ -103,6 +103,7 @@ impl DirectionalSignalBacktestArgs {
             false,
             None,
             false,
+            false,
             self.database_url,
             None,
             None,
@@ -248,6 +249,10 @@ pub struct BacktestArgs {
     #[arg(long)]
     diagnose_db: bool,
 
+    /// For `pm_5m_directional` only, auto-trim sparse requested ranges to the longest contiguous common-coverage window
+    #[arg(long)]
+    pm5_auto_trim_window: bool,
+
     /// Database URL (uses DATABASE_URL env var if omitted)
     #[arg(long)]
     database_url: Option<String>,
@@ -332,6 +337,7 @@ impl BacktestArgs {
             self.skip_gamma,
             self.verify_run,
             self.diagnose_db,
+            self.pm5_auto_trim_window,
             self.database_url,
             Some(self.lv_profile),
             self.lv_price_move_threshold,

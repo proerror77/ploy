@@ -1,9 +1,439 @@
 use super::*;
-use chrono::{DateTime, Utc};
+use alloy::primitives::U256;
+use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sqlx::Row;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+
+const PM5_BUCKET_SECS: i64 = 300;
+const PM5_EDGE_SLACK_BUCKETS: i64 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BucketRun {
+    start: DateTime<Utc>,
+    end_exclusive: DateTime<Utc>,
+    buckets: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Pm5mReplayWindow {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub auto_trim_message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Pm5mCoverageSnapshot {
+    spot_buckets: BTreeSet<DateTime<Utc>>,
+    l2_buckets: BTreeSet<DateTime<Utc>>,
+    quote_buckets: BTreeSet<DateTime<Utc>>,
+    lob_buckets: BTreeSet<DateTime<Utc>>,
+    event_buckets: BTreeSet<DateTime<Utc>>,
+}
+
+impl Pm5mCoverageSnapshot {
+    fn common_buckets(&self) -> BTreeSet<DateTime<Utc>> {
+        let mut common = self
+            .spot_buckets
+            .intersection(&self.l2_buckets)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        common = common
+            .intersection(&self.quote_buckets)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        common = common
+            .intersection(&self.lob_buckets)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        common
+            .intersection(&self.event_buckets)
+            .copied()
+            .collect::<BTreeSet<_>>()
+    }
+
+    fn longest_common_run(&self) -> Option<BucketRun> {
+        longest_contiguous_bucket_run(&self.common_buckets())
+    }
+}
+
+pub(super) async fn resolve_pm5_replay_window(
+    pool: &sqlx::PgPool,
+    symbols: &[String],
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    auto_trim: bool,
+) -> Result<Pm5mReplayWindow> {
+    if from.is_none() || to.is_none() {
+        return Ok(Pm5mReplayWindow {
+            from,
+            to,
+            auto_trim_message: None,
+        });
+    }
+
+    let snapshot = load_pm5_coverage_snapshot(pool, symbols, from, to).await?;
+    evaluate_pm5_requested_window(&snapshot, from, to, auto_trim)
+}
+
+fn evaluate_pm5_requested_window(
+    snapshot: &Pm5mCoverageSnapshot,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    auto_trim: bool,
+) -> Result<Pm5mReplayWindow> {
+    let from = from.expect("checked by caller");
+    let to = to.expect("checked by caller");
+    let requested_start = bucket_floor_5m(from);
+    let requested_end_exclusive = bucket_floor_5m(to) + Duration::seconds(PM5_BUCKET_SECS);
+    let slack = Duration::seconds(PM5_BUCKET_SECS * PM5_EDGE_SLACK_BUCKETS);
+
+    let Some(run) = snapshot.longest_common_run() else {
+        anyhow::bail!(
+            "pm_5m_directional replay coverage is empty for requested window {} .. {}. \
+critical 5m feeds have no common buckets across spot/L2/PM quote/PM LOB/event data. \
+Bucket counts: spot={}, l2={}, pm_quote={}, pm_lob={}, event={}. \
+Run `--diagnose-db` and choose a shorter contiguous window.",
+            from.to_rfc3339(),
+            to.to_rfc3339(),
+            snapshot.spot_buckets.len(),
+            snapshot.l2_buckets.len(),
+            snapshot.quote_buckets.len(),
+            snapshot.lob_buckets.len(),
+            snapshot.event_buckets.len(),
+        );
+    };
+
+    let start_ok = run.start <= requested_start + slack;
+    let end_ok = run.end_exclusive >= requested_end_exclusive - slack;
+    if start_ok && end_ok {
+        return Ok(Pm5mReplayWindow {
+            from: Some(from),
+            to: Some(to),
+            auto_trim_message: None,
+        });
+    }
+
+    if auto_trim {
+        let effective_from = from.max(run.start);
+        let effective_to = to.min(run.end_exclusive);
+        if effective_from < effective_to {
+            return Ok(Pm5mReplayWindow {
+                from: Some(effective_from),
+                to: Some(effective_to),
+                auto_trim_message: Some(format!(
+                    "Auto-trimming pm_5m_directional replay window {} .. {} to {} .. {} inside \
+the longest contiguous common-coverage range {} .. {} ({} buckets, {:.2} hours).",
+                    from.to_rfc3339(),
+                    to.to_rfc3339(),
+                    effective_from.to_rfc3339(),
+                    effective_to.to_rfc3339(),
+                    run.start.to_rfc3339(),
+                    run.end_exclusive.to_rfc3339(),
+                    run.buckets,
+                    run.buckets as f64 * 5.0 / 60.0,
+                )),
+            });
+        }
+    }
+
+    anyhow::bail!(
+        "pm_5m_directional replay coverage is incomplete for requested window {} .. {}. \
+Longest contiguous common 5m coverage across spot/L2/PM quote/PM LOB/event data is {} .. {} \
+({} buckets, {:.2} hours). Bucket counts: spot={}, l2={}, pm_quote={}, pm_lob={}, event={}. \
+Use a shorter window inside that range or run `--diagnose-db`.",
+        from.to_rfc3339(),
+        to.to_rfc3339(),
+        run.start.to_rfc3339(),
+        run.end_exclusive.to_rfc3339(),
+        run.buckets,
+        run.buckets as f64 * 5.0 / 60.0,
+        snapshot.spot_buckets.len(),
+        snapshot.l2_buckets.len(),
+        snapshot.quote_buckets.len(),
+        snapshot.lob_buckets.len(),
+        snapshot.event_buckets.len(),
+    );
+}
+
+async fn load_pm5_coverage_snapshot(
+    pool: &sqlx::PgPool,
+    symbols: &[String],
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<Pm5mCoverageSnapshot> {
+    let symbol_list = if symbols.is_empty() {
+        None::<Vec<String>>
+    } else {
+        Some(symbols.to_vec())
+    };
+
+    let token_ids = load_pm5_token_ids(pool, &symbol_list, from, to).await?;
+    Ok(Pm5mCoverageSnapshot {
+        spot_buckets: load_pm5_spot_buckets(pool, &symbol_list, from, to).await?,
+        l2_buckets: load_bucket_set(
+            pool,
+            "binance_lob_ticks",
+            "event_time",
+            Some("symbol = ANY($1)"),
+            symbol_list.clone(),
+            from,
+            to,
+        )
+        .await?,
+        quote_buckets: load_bucket_set_for_tokens(
+            pool,
+            "clob_quote_ticks",
+            "received_at",
+            &token_ids,
+            from,
+            to,
+        )
+        .await?,
+        lob_buckets: load_bucket_set_for_tokens(
+            pool,
+            "clob_orderbook_snapshots",
+            "received_at",
+            &token_ids,
+            from,
+            to,
+        )
+        .await?,
+        event_buckets: load_bucket_set(
+            pool,
+            "pm_market_metadata",
+            "start_time",
+            Some("symbol = ANY($1)"),
+            symbol_list,
+            from,
+            to,
+        )
+        .await?,
+    })
+}
+
+async fn load_pm5_token_ids(
+    pool: &sqlx::PgPool,
+    symbols: &Option<Vec<String>>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<Vec<String>> {
+    if !table_exists(pool, "pm_market_metadata").await? {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT jsonb_array_elements_text((raw_market->>'clobTokenIds')::jsonb) AS token_id
+        FROM pm_market_metadata
+        WHERE raw_market IS NOT NULL
+          AND raw_market ? 'clobTokenIds'
+          AND ($1::text[] IS NULL OR symbol = ANY($1))
+          AND ($2::timestamptz IS NULL OR end_time >= $2)
+          AND ($3::timestamptz IS NULL OR start_time <= $3)
+        "#,
+    )
+    .bind(symbols.clone())
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut normalized = rows
+        .into_iter()
+        .filter_map(|token_id| normalize_clob_token_id(&token_id))
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
+}
+
+async fn load_pm5_spot_buckets(
+    pool: &sqlx::PgPool,
+    symbols: &Option<Vec<String>>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<BTreeSet<DateTime<Utc>>> {
+    let mut buckets = BTreeSet::new();
+
+    buckets.extend(
+        load_bucket_set(
+            pool,
+            "sync_records",
+            "timestamp",
+            Some("symbol = ANY($1)"),
+            symbols.clone(),
+            from,
+            to,
+        )
+        .await?,
+    );
+    buckets.extend(
+        load_bucket_set(
+            pool,
+            "binance_price_ticks",
+            "trade_time",
+            Some("symbol = ANY($1)"),
+            symbols.clone(),
+            from,
+            to,
+        )
+        .await?,
+    );
+    buckets.extend(
+        load_bucket_set(
+            pool,
+            "binance_klines",
+            "close_time",
+            Some("symbol = ANY($1)"),
+            symbols.clone(),
+            from,
+            to,
+        )
+        .await?,
+    );
+
+    Ok(buckets)
+}
+
+async fn load_bucket_set(
+    pool: &sqlx::PgPool,
+    table: &str,
+    ts_column: &str,
+    symbol_predicate: Option<&str>,
+    symbols: Option<Vec<String>>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<BTreeSet<DateTime<Utc>>> {
+    if !table_exists(pool, table).await? {
+        return Ok(BTreeSet::new());
+    }
+
+    let symbol_clause = symbol_predicate
+        .map(|predicate| format!("AND ($1::text[] IS NULL OR {predicate})"))
+        .unwrap_or_default();
+    let sql = format!(
+        r#"
+        SELECT DISTINCT to_timestamp(floor(EXTRACT(EPOCH FROM {ts_column}) / {bucket}) * {bucket}) AS bucket
+        FROM {table}
+        WHERE 1=1
+          {symbol_clause}
+          AND ($2::timestamptz IS NULL OR {ts_column} >= $2)
+          AND ($3::timestamptz IS NULL OR {ts_column} <= $3)
+        ORDER BY bucket
+        "#,
+        bucket = PM5_BUCKET_SECS,
+        table = table,
+        ts_column = ts_column,
+        symbol_clause = symbol_clause,
+    );
+
+    let rows = sqlx::query_scalar::<_, DateTime<Utc>>(&sql)
+        .bind(symbols)
+        .bind(from)
+        .bind(to)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+    Ok(rows.into_iter().collect())
+}
+
+async fn load_bucket_set_for_tokens(
+    pool: &sqlx::PgPool,
+    table: &str,
+    ts_column: &str,
+    token_ids: &[String],
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<BTreeSet<DateTime<Utc>>> {
+    if token_ids.is_empty() || !table_exists(pool, table).await? {
+        return Ok(BTreeSet::new());
+    }
+
+    let sql = format!(
+        r#"
+        SELECT DISTINCT to_timestamp(floor(EXTRACT(EPOCH FROM {ts_column}) / {bucket}) * {bucket}) AS bucket
+        FROM {table}
+        WHERE token_id = ANY($1)
+          AND ($2::timestamptz IS NULL OR {ts_column} >= $2)
+          AND ($3::timestamptz IS NULL OR {ts_column} <= $3)
+        ORDER BY bucket
+        "#,
+        bucket = PM5_BUCKET_SECS,
+        table = table,
+        ts_column = ts_column,
+    );
+
+    let rows = sqlx::query_scalar::<_, DateTime<Utc>>(&sql)
+        .bind(token_ids)
+        .bind(from)
+        .bind(to)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+    Ok(rows.into_iter().collect())
+}
+
+fn longest_contiguous_bucket_run(buckets: &BTreeSet<DateTime<Utc>>) -> Option<BucketRun> {
+    let step = Duration::seconds(PM5_BUCKET_SECS);
+    let mut iter = buckets.iter().copied();
+    let first = iter.next()?;
+
+    let mut best = BucketRun {
+        start: first,
+        end_exclusive: first + step,
+        buckets: 1,
+    };
+    let mut current = best;
+    let mut prev = first;
+
+    for bucket in iter {
+        if bucket == prev + step {
+            current.end_exclusive = bucket + step;
+            current.buckets += 1;
+        } else {
+            if current.buckets > best.buckets {
+                best = current;
+            }
+            current = BucketRun {
+                start: bucket,
+                end_exclusive: bucket + step,
+                buckets: 1,
+            };
+        }
+        prev = bucket;
+    }
+
+    if current.buckets > best.buckets {
+        best = current;
+    }
+
+    Some(best)
+}
+
+fn normalize_clob_token_id(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        return U256::from_str_radix(hex, 16).ok().map(|u| u.to_string());
+    }
+    if s.chars().all(|c| c.is_ascii_digit()) {
+        return Some(s.to_string());
+    }
+    U256::from_str_radix(s, 16).ok().map(|u| u.to_string())
+}
+
+fn bucket_floor_5m(ts: DateTime<Utc>) -> DateTime<Utc> {
+    let secs = ts.timestamp();
+    let floored = secs - secs.rem_euclid(PM5_BUCKET_SECS);
+    DateTime::<Utc>::from_timestamp(floored, 0).unwrap_or(ts)
+}
 
 pub(super) async fn print_backtest_db_diagnostics(
     pool: &sqlx::PgPool,
@@ -678,4 +1108,240 @@ async fn table_exists(pool: &sqlx::PgPool, table: &str) -> Result<bool> {
         .fetch_one(pool)
         .await?;
     Ok(reg.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use std::collections::BTreeSet;
+
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn longest_contiguous_bucket_run_prefers_longest_segment() {
+        let buckets = [
+            ts("2026-03-07T00:00:00Z"),
+            ts("2026-03-07T00:05:00Z"),
+            ts("2026-03-07T00:20:00Z"),
+            ts("2026-03-07T00:25:00Z"),
+            ts("2026-03-07T00:30:00Z"),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+        let run = longest_contiguous_bucket_run(&buckets).expect("run");
+        assert_eq!(run.start, ts("2026-03-07T00:20:00Z"));
+        assert_eq!(run.end_exclusive, ts("2026-03-07T00:35:00Z"));
+        assert_eq!(run.buckets, 3);
+    }
+
+    #[test]
+    fn coverage_snapshot_intersects_all_critical_feeds() {
+        let snapshot = Pm5mCoverageSnapshot {
+            spot_buckets: [
+                ts("2026-03-07T00:00:00Z"),
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            l2_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            quote_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            lob_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            event_buckets: [
+                ts("2026-03-07T00:00:00Z"),
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let run = snapshot.longest_common_run().expect("common run");
+        assert_eq!(run.start, ts("2026-03-07T00:05:00Z"));
+        assert_eq!(run.end_exclusive, ts("2026-03-07T00:15:00Z"));
+        assert_eq!(run.buckets, 2);
+    }
+
+    #[test]
+    fn evaluate_pm5_requested_window_rejects_sparse_range_by_default() {
+        let snapshot = Pm5mCoverageSnapshot {
+            spot_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            l2_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            quote_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            lob_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            event_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let error = evaluate_pm5_requested_window(
+            &snapshot,
+            Some(ts("2026-03-07T00:00:00Z")),
+            Some(ts("2026-03-07T00:20:00Z")),
+            false,
+        )
+        .expect_err("strict mode should reject sparse window");
+
+        assert!(error
+            .to_string()
+            .contains("pm_5m_directional replay coverage is incomplete"));
+    }
+
+    #[test]
+    fn evaluate_pm5_requested_window_auto_trims_to_overlap() {
+        let snapshot = Pm5mCoverageSnapshot {
+            spot_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            l2_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            quote_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            lob_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            event_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let resolved = evaluate_pm5_requested_window(
+            &snapshot,
+            Some(ts("2026-03-07T00:00:00Z")),
+            Some(ts("2026-03-07T00:20:00Z")),
+            true,
+        )
+        .expect("auto-trim should recover overlap");
+
+        assert_eq!(resolved.from, Some(ts("2026-03-07T00:05:00Z")));
+        assert_eq!(resolved.to, Some(ts("2026-03-07T00:15:00Z")));
+        assert!(resolved
+            .auto_trim_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Auto-trimming pm_5m_directional replay window"));
+    }
+
+    #[test]
+    fn evaluate_pm5_requested_window_keeps_valid_range_unchanged() {
+        let snapshot = Pm5mCoverageSnapshot {
+            spot_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            l2_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            quote_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            lob_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+            event_buckets: [
+                ts("2026-03-07T00:05:00Z"),
+                ts("2026-03-07T00:10:00Z"),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let resolved = evaluate_pm5_requested_window(
+            &snapshot,
+            Some(ts("2026-03-07T00:05:00Z")),
+            Some(ts("2026-03-07T00:14:59Z")),
+            true,
+        )
+        .expect("valid window should pass unchanged");
+
+        assert_eq!(resolved.from, Some(ts("2026-03-07T00:05:00Z")));
+        assert_eq!(resolved.to, Some(ts("2026-03-07T00:14:59Z")));
+        assert!(resolved.auto_trim_message.is_none());
+    }
+
+    #[test]
+    fn bucket_floor_5m_rounds_down() {
+        let floored = bucket_floor_5m(ts("2026-03-07T00:07:42Z"));
+        assert_eq!(floored, Utc.with_ymd_and_hms(2026, 3, 7, 0, 5, 0).unwrap());
+    }
+
+    #[test]
+    fn normalize_clob_token_id_accepts_hex_with_prefix() {
+        assert_eq!(
+            normalize_clob_token_id("0x0f"),
+            Some(alloy::primitives::U256::from(15u8).to_string())
+        );
+    }
 }
