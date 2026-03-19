@@ -22,7 +22,7 @@ use crate::rl::core::{
 use crate::rl::memory::ReplayBuffer;
 use crate::strategy::traits::StrategyOrderIntent;
 use crate::strategy::{
-    DataFeed, MarketUpdate, OrderPurpose, OrderUpdate, PositionInfo, Strategy, StrategyAction,
+    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
     StrategyStateInfo,
 };
 
