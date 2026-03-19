@@ -11,7 +11,6 @@ use tracing::info;
 use crate::error::Result;
 use crate::rl::cli_agent::{RLCryptoAgent, RLCryptoAgentConfig};
 use crate::rl::core::{HybridAction, RawObservation};
-use crate::rl::memory::replay_buffer::Transition;
 use crate::rl::memory::ReplayBuffer;
 use crate::rl::{CryptoEvent, DomainEvent, ExecutionReport};
 use crate::OrderIntent;
@@ -88,28 +87,15 @@ impl RLCryptoRuntime {
         let state_vec = vec![0.0f32; 64];
         let next_state_vec = vec![0.0f32; 64];
 
-        let action_vec = match action {
-            HybridAction::Continuous(c) => vec![c.position_size, c.stop_loss, c.take_profit],
-            HybridAction::Discrete(_) => vec![0.0; 3],
-            HybridAction::Hybrid(c, _) => vec![c.position_size, c.stop_loss, c.take_profit],
-        };
-
-        let discrete_action = match action {
-            HybridAction::Discrete(d) => Some(d),
-            HybridAction::Hybrid(_, d) => Some(d),
-            _ => None,
-        };
-
-        let transition = Transition {
-            state: state_vec,
-            action: action_vec,
-            discrete_action,
-            reward,
-            reward_signal: crate::rl::core::RewardSignal::PnL(reward),
-            next_state: next_state_vec,
-            done,
-            log_prob: 0.0,
-        };
+        let transition =
+            crate::rl::memory::replay_buffer::Transition::new(
+                state_vec,
+                vec![action.size, action.aggressiveness],
+                reward,
+                next_state_vec,
+                done,
+            )
+            .with_discrete_action(action.action);
 
         self.replay_buffer.write().await.push(transition);
     }
