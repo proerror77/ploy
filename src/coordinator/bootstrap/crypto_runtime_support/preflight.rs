@@ -36,8 +36,7 @@ pub(super) async fn initialize_crypto_runtime_preflight(
         crate::coordinator::subscription_planner::ConsumerId,
         Domain,
         Vec<DataFeed>,
-    )> =
-        Vec::new();
+    )> = Vec::new();
     if momentum_enabled {
         let symbols: Vec<String> = crypto_cfg
             .coins

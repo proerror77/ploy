@@ -19,10 +19,10 @@ fn release_workflows_use_sqlx_migrate_instead_of_raw_psql_files() {
     for workflow in workflows {
         let content = workflow_contents(workflow);
 
-        let uses_raw_migration_file =
-            content.contains("psql \"${DATABASE_URL}\" -v ON_ERROR_STOP=1 -f")
-                || content.contains("for file in ~/ploy/migrations/*.sql; do")
-                || content.contains("psql -U ploy -d ploy -f \"$file\"");
+        let uses_raw_migration_file = content
+            .contains("psql \"${DATABASE_URL}\" -v ON_ERROR_STOP=1 -f")
+            || content.contains("for file in ~/ploy/migrations/*.sql; do")
+            || content.contains("psql -U ploy -d ploy -f \"$file\"");
         if uses_raw_migration_file {
             offenders.push(format!("{workflow}: raw psql migration path still present"));
         }
@@ -53,10 +53,12 @@ fn ci_build_prepares_database_for_sqlx_compile_checks() {
         offenders.push("test.yml: missing sqlx migrate run before cargo build".to_string());
     }
 
-    let build_step_has_database_url =
-        content.contains("- name: Build") && content.contains("DATABASE_URL: postgres://ploy:ploy@localhost:5432/ploy_test");
+    let build_step_has_database_url = content.contains("- name: Build")
+        && content.contains("DATABASE_URL: postgres://ploy:ploy@localhost:5432/ploy_test");
     if !build_step_has_database_url {
-        offenders.push("test.yml: Build step missing DATABASE_URL for sqlx::query! compile checks".to_string());
+        offenders.push(
+            "test.yml: Build step missing DATABASE_URL for sqlx::query! compile checks".to_string(),
+        );
     }
 
     assert!(

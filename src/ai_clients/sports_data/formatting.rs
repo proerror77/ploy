@@ -42,7 +42,11 @@ pub fn format_for_claude(data: &StructuredGameData) -> String {
         data.betting_lines.implied_probability * 100.0
     );
     if let Some(ref movement) = data.betting_lines.line_movement {
-        let _ = writeln!(output, "- Line Movement: {}", sanitize_for_llm_prompt(movement));
+        let _ = writeln!(
+            output,
+            "- Line Movement: {}",
+            sanitize_for_llm_prompt(movement)
+        );
     }
 
     output.push_str("\n## Market Sentiment\n");

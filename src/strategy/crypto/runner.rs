@@ -4,9 +4,9 @@
 
 use super::CryptoMarketDiscovery;
 use crate::adapters::PolymarketClient;
+use crate::data_plane::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::domain::Side;
 use crate::error::{PloyError, Result};
-use crate::data_plane::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::strategy::core::{MarketDiscovery, SplitArbConfig, SplitArbEngine};
 use crate::strategy::execution::executor::OrderExecutor;
 use rust_decimal::Decimal;

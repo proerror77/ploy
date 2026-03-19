@@ -70,8 +70,7 @@ impl DataCollector {
         }
 
         if self.persist_canonical_quotes {
-            crate::persistence::ensure_clob_quote_ticks_table(self.store.pool())
-                .await?;
+            crate::persistence::ensure_clob_quote_ticks_table(self.store.pool()).await?;
         }
 
         // Spawn round discovery task

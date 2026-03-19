@@ -9,8 +9,8 @@ use super::super::command::{
     GovernancePolicyUpdate, GovernanceStatusSnapshot,
 };
 use super::super::governance::{
-    GovernancePolicy, governance_domain_snapshot_label, load_governance_policy_history,
-    persist_governance_policy,
+    governance_domain_snapshot_label, load_governance_policy_history, persist_governance_policy,
+    GovernancePolicy,
 };
 use super::super::state::{AgentSnapshot, GlobalState, QueueStatsSnapshot};
 use super::{Coordinator, CoordinatorHandle};

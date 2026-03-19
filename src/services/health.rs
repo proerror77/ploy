@@ -3,8 +3,8 @@
 //! Provides liveness and readiness probes for process supervision (systemd/launchd)
 //! and Prometheus metrics endpoint.
 
-use crate::domain::StrategyState;
 use crate::data_plane::DataPlaneFreshness;
+use crate::domain::StrategyState;
 use crate::services::Metrics;
 use crate::strategy::RiskManager;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};

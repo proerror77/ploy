@@ -20,10 +20,7 @@ pub struct WsAuth {
 
 fn websocket_admin_authorized(headers: &HeaderMap, auth: &WsAuth) -> bool {
     ensure_admin_authorized(headers).is_ok()
-        || auth
-            .token
-            .as_deref()
-            .is_some_and(is_valid_admin_token)
+        || auth.token.as_deref().is_some_and(is_valid_admin_token)
 }
 
 /// WebSocket handler — accepts the normal admin auth surface (cookie/header),
@@ -141,7 +138,10 @@ mod tests {
                     AUTHORIZATION,
                     HeaderValue::from_static("Bearer super-secret-admin-token"),
                 );
-                assert!(websocket_admin_authorized(&header_auth, &WsAuth { token: None }));
+                assert!(websocket_admin_authorized(
+                    &header_auth,
+                    &WsAuth { token: None }
+                ));
 
                 let mut cookie_auth = HeaderMap::new();
                 cookie_auth.insert(
@@ -149,7 +149,10 @@ mod tests {
                     HeaderValue::from_str(&build_admin_session_cookie("super-secret-admin-token"))
                         .expect("cookie header"),
                 );
-                assert!(websocket_admin_authorized(&cookie_auth, &WsAuth { token: None }));
+                assert!(websocket_admin_authorized(
+                    &cookie_auth,
+                    &WsAuth { token: None }
+                ));
 
                 let empty_headers = HeaderMap::new();
                 assert!(websocket_admin_authorized(

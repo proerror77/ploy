@@ -1,7 +1,7 @@
 use super::settlement_refresh::refresh_pm_token_settlements_for_tokens;
 use crate::adapters::PostgresStore;
 use crate::cli::strategy::CryptoLobDatasetFormat;
-use anyhow::{Context, bail};
+use anyhow::{bail, Context};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -46,10 +46,7 @@ fn csv_escape(s: &str) -> String {
     }
 }
 
-fn write_crypto_lob_dataset_csv(
-    output: &Path,
-    rows: &[CryptoLobDatasetRow],
-) -> anyhow::Result<()> {
+fn write_crypto_lob_dataset_csv(output: &Path, rows: &[CryptoLobDatasetRow]) -> anyhow::Result<()> {
     let mut f = std::fs::File::create(output).context("Failed to create output file")?;
     writeln!(
         f,

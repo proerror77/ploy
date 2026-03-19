@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::domain::{OrderType, Side, TimeInForce};
 use crate::domain::Domain;
+use crate::domain::{OrderType, Side, TimeInForce};
 use crate::strategy::traits::{
     StrategyAction, StrategyEvent, StrategyEventType, StrategyOrderIntent,
 };

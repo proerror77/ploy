@@ -1,7 +1,7 @@
 use super::super::{MarketUpdate, UpdateType};
 use super::{
     symbol_filter,
-    token_mappings::{TokenMappings, infer_symbol_from_slug},
+    token_mappings::{infer_symbol_from_slug, TokenMappings},
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -88,7 +88,11 @@ pub(super) async fn load_event_updates(
                         .and_then(|s| s.parse::<Decimal>().ok())
                         .unwrap_or(Decimal::ZERO);
                     let mid = (upper + lower) / Decimal::from(2);
-                    if mid > Decimal::ZERO { Some(mid) } else { None }
+                    if mid > Decimal::ZERO {
+                        Some(mid)
+                    } else {
+                        None
+                    }
                 });
 
             let symbol = infer_symbol_from_slug(&slug);

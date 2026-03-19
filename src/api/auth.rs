@@ -1,6 +1,6 @@
 use axum::http::{header::AUTHORIZATION, header::COOKIE, HeaderMap, StatusCode};
 use hmac::{Hmac, Mac};
-use rand::{TryRng, rngs::SysRng};
+use rand::{rngs::SysRng, TryRng};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 
@@ -110,8 +110,7 @@ fn generated_admin_cookie_secret() -> &'static str {
 }
 
 fn admin_cookie_secret() -> String {
-    expected_admin_cookie_secret()
-        .unwrap_or_else(|| generated_admin_cookie_secret().to_string())
+    expected_admin_cookie_secret().unwrap_or_else(|| generated_admin_cookie_secret().to_string())
 }
 
 pub fn admin_token_fingerprint(token: &str) -> String {
@@ -313,7 +312,10 @@ mod tests {
 
     fn cookie_headers(cookie: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(COOKIE, HeaderValue::from_str(cookie).expect("cookie header"));
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_str(cookie).expect("cookie header"),
+        );
         headers
     }
 
@@ -381,8 +383,12 @@ mod tests {
                 ("PLOY_API_AUTH_COOKIE_SECRET", Some("cookie-secret")),
             ],
             || {
-                let headers = cookie_headers(&format!("{}=v2:not-the-right-signature", ADMIN_SESSION_COOKIE));
-                let err = ensure_admin_authorized(&headers).expect_err("wrong v2 cookie should fail");
+                let headers = cookie_headers(&format!(
+                    "{}=v2:not-the-right-signature",
+                    ADMIN_SESSION_COOKIE
+                ));
+                let err =
+                    ensure_admin_authorized(&headers).expect_err("wrong v2 cookie should fail");
                 assert_eq!(err.0, StatusCode::UNAUTHORIZED);
             },
         );

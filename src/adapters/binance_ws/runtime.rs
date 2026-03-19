@@ -5,13 +5,13 @@ use tokio::net::TcpStream;
 use tokio::time::interval;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, client_async_tls_with_config, connect_async,
+    client_async_tls_with_config, connect_async, MaybeTlsStream, WebSocketStream,
 };
 use tracing::{debug, error, info};
 use url::Url;
 
 use super::{
-    BINANCE_WS_HOST, BINANCE_WS_PORT, BinanceWebSocket, MAX_RECONNECT_DELAY_SECS,
+    BinanceWebSocket, BINANCE_WS_HOST, BINANCE_WS_PORT, MAX_RECONNECT_DELAY_SECS,
     PING_INTERVAL_SECS,
 };
 use crate::error::{PloyError, Result};

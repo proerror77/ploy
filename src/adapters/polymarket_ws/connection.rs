@@ -3,15 +3,15 @@ use crate::error::{PloyError, Result};
 use crate::services::HealthState;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::time::{Instant, interval, timeout};
+use tokio::time::{interval, timeout, Instant};
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, client_async_tls_with_config, connect_async,
-    tungstenite::Message,
+    client_async_tls_with_config, connect_async, tungstenite::Message, MaybeTlsStream,
+    WebSocketStream,
 };
 use tracing::{debug, error, info, warn};
 use url::Url;

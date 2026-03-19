@@ -8,8 +8,8 @@ use crate::coordinator::{
     AgentSnapshot, CoordinatorCommand, CoordinatorHandle, GlobalState, GovernancePolicySnapshot,
     GovernancePolicyUpdate,
 };
-use crate::error::Result;
 use crate::domain::Domain;
+use crate::error::Result;
 
 /// Governance-only context given to non-trading control-plane agents.
 ///

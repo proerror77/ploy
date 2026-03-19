@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 mod monitor;
 
 pub use monitor::{
-    ArbitrageType, MultiOutcomeArbitrage, MultiOutcomeMonitor, Outcome, OutcomeDirection,
-    OutcomeSummary, fetch_multi_outcome_event,
+    fetch_multi_outcome_event, ArbitrageType, MultiOutcomeArbitrage, MultiOutcomeMonitor, Outcome,
+    OutcomeDirection, OutcomeSummary,
 };
 
 /// Polymarket fee rate (approximately 2%)

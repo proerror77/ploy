@@ -22,8 +22,8 @@ use crate::adapters::PolymarketClient;
 use crate::error::Result;
 use crate::signing::Wallet;
 
-mod discovery;
 mod claim_flow;
+mod discovery;
 mod relayer;
 
 use self::relayer::{
@@ -518,8 +518,7 @@ impl AutoClaimer {
         current_balance: U256,
         min_balance: U256,
     ) -> Result<Option<U256>> {
-        claim_flow::maybe_auto_topup_wallet(self, target_wallet, current_balance, min_balance)
-            .await
+        claim_flow::maybe_auto_topup_wallet(self, target_wallet, current_balance, min_balance).await
     }
 
     /// Claim a specific condition by calling the ConditionalTokens redeem function

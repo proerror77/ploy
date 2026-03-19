@@ -1,5 +1,5 @@
-use super::NbaComebackStrategy;
 use super::config_loader::default_nba_comeback_config;
+use super::NbaComebackStrategy;
 use crate::domain::OrderStatus;
 use crate::strategy::nba_comeback::core::ComebackOpportunity;
 use crate::strategy::nba_comeback::espn::{GameStatus, LiveGame};

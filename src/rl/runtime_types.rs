@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use crate::domain::Side;
 use crate::domain::Domain;
+use crate::domain::Side;
 
 /// RL CLI domain events used by the compatibility runtime.
 #[derive(Debug, Clone)]
