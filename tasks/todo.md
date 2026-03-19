@@ -1,3 +1,34 @@
+# Remaining Fixes Mainline Sweep (2026-03-19)
+
+## Goal
+Confirm whether any remaining cleanup/backtest/runtime worktrees still contain
+patches that are not already absorbed by
+`integration/remaining-fixes-lvbt`, and if not, promote the integration branch
+back onto `main`.
+
+## Tasks
+
+- [x] Compare every remaining worktree branch against
+  `integration/remaining-fixes-lvbt` with `git rev-list` and
+  `git log --cherry-pick`.
+- [x] Confirm that no remaining branch has patch-unique commits relative to the
+  integration branch.
+- [ ] Fast-forward `main` to `integration/remaining-fixes-lvbt` in a clean
+  merge worktree.
+- [ ] Re-run compile validation on the merged `main` worktree.
+
+## Progress notes
+
+- 2026-03-19: `session/order-intent-clean`, `session/backtest-feed-db-cut`,
+  `session/staggered-backtest-cut`, `hotfix/leg2-reconcile-20260306`,
+  `session/lvbt-cut`, and the other remaining cleanup/runtime branches all show
+  `0` right-side patch-unique commits under `git log --cherry-pick` versus
+  `integration/remaining-fixes-lvbt`.
+- 2026-03-19: Several branches still have ancestry-only commits under raw
+  `git rev-list --left-right --count`, but those diffs are already subsumed by
+  the integration branch. The next meaningful action is to advance `main`, not
+  merge another residual worktree.
+
 # Sports Analyst Analysis Outcome Split (2026-03-11)
 
 ## Goal
