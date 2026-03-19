@@ -29,6 +29,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   PLOY_RELEASE_FEATURES: claimer_daemon,api,pm_ctf,tokio/io-std
+  SQLX_CLI_VERSION: 0.8.6
   DEPLOY_ROOT: ${{ vars.ALIYUN_PLOY_ROOT || '/root/ploy' }}
   PLOY_SYSTEMD_MEMORY_HIGH: ${{ vars.PLOY_SYSTEMD_MEMORY_HIGH || '1280M' }}
   PLOY_SYSTEMD_MEMORY_MAX: ${{ vars.PLOY_SYSTEMD_MEMORY_MAX || '1536M' }}
@@ -102,6 +103,18 @@ jobs:
           cargo build --release --locked --features "${PLOY_RELEASE_FEATURES}"
           strip target/release/ploy || true
 
+      - name: Build SQLx CLI
+        env:
+          CARGO_TARGET_DIR: /tmp/sqlx-cli-target
+        run: |
+          cargo install sqlx-cli \
+            --locked \
+            --version "${SQLX_CLI_VERSION}" \
+            --root "${RUNNER_TEMP}/sqlx-cli" \
+            --no-default-features \
+            --features rustls,postgres
+          ls -lh "${RUNNER_TEMP}/sqlx-cli/bin/sqlx"
+
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
@@ -115,9 +128,10 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/ploy dist/ploy
+          cp "${RUNNER_TEMP}/sqlx-cli/bin/sqlx" dist/sqlx
           cp config/strategies/momentum.toml dist/momentum.toml
           cp config/strategies/staggered_arb.toml dist/staggered_arb.toml
-          cp migrations/022_order_strategy_tracking.sql dist/022_order_strategy_tracking.sql
+          cp -R migrations dist/migrations
           sha256sum dist/ploy > dist/ploy.sha256
           cat > dist/RELEASE.txt <<EOF
           Release: ${{ steps.meta.outputs.release_tag }}
@@ -126,7 +140,7 @@ jobs:
           Built at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
           EOF
           tar czf "dist/ploy-release-${{ steps.meta.outputs.release_tag }}.tar.gz" -C dist \
-            ploy ploy.sha256 RELEASE.txt momentum.toml staggered_arb.toml 022_order_strategy_tracking.sql
+            ploy sqlx ploy.sha256 RELEASE.txt momentum.toml staggered_arb.toml migrations
 
       - name: Upload release bundle
         uses: actions/upload-artifact@v4
@@ -246,6 +260,7 @@ jobs:
           username: ${{ secrets.ALIYUN_ECS_USER || 'root' }}
           key: ${{ secrets.ALIYUN_ECS_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
           port: ${{ secrets.ALIYUN_ECS_SSH_PORT || 22 }}
+          fingerprint: ${{ secrets.ALIYUN_ECS_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT }}
           source: dist/ploy-release-${{ needs.build.outputs.release_tag }}.tar.gz
           target: /tmp/
           strip_components: 1
@@ -257,6 +272,7 @@ jobs:
           username: ${{ secrets.ALIYUN_ECS_USER || 'root' }}
           key: ${{ secrets.ALIYUN_ECS_SSH_KEY || secrets.AWS_EC2_PRIVATE_KEY }}
           port: ${{ secrets.ALIYUN_ECS_SSH_PORT || 22 }}
+          fingerprint: ${{ secrets.ALIYUN_ECS_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT }}
           script_stop: true
           envs: DEPLOY_ROOT,PLOY_SYSTEMD_MEMORY_HIGH,PLOY_SYSTEMD_MEMORY_MAX,PLOY_SYSTEMD_RESTART_SEC
           script: |
@@ -324,9 +340,11 @@ jobs:
 
             $SUDO install -m 755 "${WORKDIR}/ploy" "${RELEASE_DIR}/ploy"
             $SUDO install -m 755 "${WORKDIR}/ploy" "${DEPLOY_ROOT}/bin/ploy"
+            $SUDO install -m 755 "${WORKDIR}/sqlx" "${DEPLOY_ROOT}/bin/sqlx"
             $SUDO install -m 600 "${WORKDIR}/momentum.toml" "${DEPLOY_ROOT}/config/strategies/momentum.toml"
             $SUDO install -m 600 "${WORKDIR}/staggered_arb.toml" "${DEPLOY_ROOT}/config/strategies/staggered_arb.toml"
-            $SUDO install -m 644 "${WORKDIR}/022_order_strategy_tracking.sql" "${DEPLOY_ROOT}/migrations/022_order_strategy_tracking.sql"
+            $SUDO rm -rf "${DEPLOY_ROOT}/migrations"
+            $SUDO cp -R "${WORKDIR}/migrations" "${DEPLOY_ROOT}/migrations"
 
             file "${DEPLOY_ROOT}/bin/ploy" | grep -q "ELF 64-bit LSB"
             echo "${RELEASE_TAG}" | $SUDO tee "${DEPLOY_ROOT}/bin/.current_release" >/dev/null
@@ -339,7 +357,7 @@ jobs:
             fi
 
             if [ -n "${DATABASE_URL:-}" ]; then
-              psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -f "${DEPLOY_ROOT}/migrations/022_order_strategy_tracking.sql"
+              "${DEPLOY_ROOT}/bin/sqlx" migrate run --source "${DEPLOY_ROOT}/migrations" --database-url "${DATABASE_URL}"
             else
               echo "DATABASE_URL not set; skip migration."
             fi
@@ -355,6 +373,8 @@ jobs:
               $SUDO mkdir -p "$dropin_dir"
               printf '%s\n' \
                 '[Service]' \
+                'StartLimitIntervalSec=300' \
+                'StartLimitBurst=5' \
                 'Restart=always' \
                 "RestartSec=${PLOY_SYSTEMD_RESTART_SEC}" \
                 "MemoryHigh=${PLOY_SYSTEMD_MEMORY_HIGH}" \
