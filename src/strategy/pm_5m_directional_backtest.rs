@@ -1028,6 +1028,113 @@ mod tests {
     }
 
     #[test]
+    fn low_initial_capital_blocks_trades_below_min_shares() {
+        let mut config = Pm5mDirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".to_string()]);
+        config.initial_capital = dec!(100);
+        let mut engine =
+            Pm5mDirectionalBacktestEngine::new_without_recorder(config).expect("engine");
+
+        let event_slug = "btc-updown-5m-low-capital";
+        let end_time = ts(300);
+        let mut updates = vec![MarketUpdate {
+            timestamp: ts(0),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::EventState {
+                event_slug: event_slug.to_string(),
+                end_time: Some(end_time),
+                price_to_beat: Some(dec!(100)),
+                outcome: None,
+            },
+        }];
+
+        for i in 1..=35 {
+            updates.push(MarketUpdate {
+                timestamp: ts(i),
+                symbol: "BTCUSDT".to_string(),
+                update_type: UpdateType::SpotTrade {
+                    price: dec!(100) + Decimal::from(i) * dec!(0.05),
+                    quantity: Some(dec!(1)),
+                },
+            });
+        }
+
+        updates.push(MarketUpdate {
+            timestamp: ts(34),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::BinanceL2 {
+                obi_5: dec!(0.35),
+                obi_10: dec!(0.28),
+                bid_volume_5: dec!(200),
+                ask_volume_5: dec!(100),
+                spread_bps: dec!(1),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(35),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::PmQuote {
+                event_slug: event_slug.to_string(),
+                token_id: format!("{event_slug}:UP"),
+                side: Side::Up,
+                best_bid: Some(dec!(0.39)),
+                best_ask: Some(dec!(0.40)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(35),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::PmQuote {
+                event_slug: event_slug.to_string(),
+                token_id: format!("{event_slug}:DOWN"),
+                side: Side::Down,
+                best_bid: Some(dec!(0.59)),
+                best_ask: Some(dec!(0.60)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(35),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::LobSnapshot {
+                event_slug: event_slug.to_string(),
+                token_id: format!("{event_slug}:UP"),
+                side: Side::Up,
+                ask_depth_shares: 100,
+                best_ask_size_shares: 100,
+                ask_levels: vec![],
+                best_ask: Some(dec!(0.40)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: ts(36),
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::SpotTrade {
+                price: dec!(101.90),
+                quantity: Some(dec!(1)),
+            },
+        });
+        updates.push(MarketUpdate {
+            timestamp: end_time,
+            symbol: "BTCUSDT".to_string(),
+            update_type: UpdateType::EventState {
+                event_slug: event_slug.to_string(),
+                end_time: Some(end_time),
+                price_to_beat: Some(dec!(100)),
+                outcome: Some(true),
+            },
+        });
+
+        let mut feed = mock_feed(updates);
+        let results = engine.run(&mut feed);
+
+        assert_eq!(results.total_trades, 0);
+        assert!(engine.closed_trades().is_empty());
+    }
+
+    #[test]
     fn lob_snapshot_updates_explicit_token_when_events_overlap() {
         let config = Pm5mDirectionalBacktestConfig::with_symbols(vec!["BTCUSDT".to_string()]);
         let mut engine =
