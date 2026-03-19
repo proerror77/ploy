@@ -34,6 +34,11 @@ class PloyMaintenanceDefaultsTest(unittest.TestCase):
         expected = {var: "7" for var in DB_RETENTION_VARS}
         self.assertEqual(actual, expected)
 
+    def test_database_url_is_preferred_when_available(self) -> None:
+        script = SCRIPT_PATH.read_text()
+        self.assertIn('if [[ -n "${DATABASE_URL:-}" ]]; then', script)
+        self.assertIn('PSQL=(psql "$DATABASE_URL" -v ON_ERROR_STOP=1)', script)
+
 
 if __name__ == "__main__":
     unittest.main()
