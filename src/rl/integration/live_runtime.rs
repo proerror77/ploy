@@ -4,11 +4,12 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::rl::config::RLConfig;
+use crate::rl::core::{ContinuousAction, DiscreteAction, HybridAction, RawObservation};
+use crate::rl::memory::replay_buffer::Transition;
 use crate::rl::memory::ReplayBuffer;
-use crate::rl::networks::{Actor, Critic};
 
 /// Runtime configuration for live RL trading
 #[derive(Debug, Clone)]
@@ -52,21 +53,42 @@ impl RLCryptoRuntime {
     /// Record a transition in the replay buffer
     pub async fn record_transition(
         &self,
-        state: crate::rl::core::RawObservation,
-        action: crate::rl::core::HybridAction,
-        reward: f64,
-        next_state: crate::rl::core::RawObservation,
+        state: RawObservation,
+        action: HybridAction,
+        reward: f32,
+        next_state: RawObservation,
         done: bool,
     ) {
-        let transition = crate::rl::core::RewardTransition {
-            state,
-            action,
-            reward,
-            next_state,
-            done,
+        // Convert RawObservation to Vec<f32> for state encoding
+        let state_vec = vec![0.0f32; 64]; // Placeholder - proper encoding needed
+        let next_state_vec = vec![0.0f32; 64]; // Placeholder - proper encoding needed
+
+        // Extract continuous action values
+        let action_vec = match action {
+            HybridAction::Continuous(c) => vec![c.position_size, c.stop_loss, c.take_profit],
+            HybridAction::Discrete(_) => vec![0.0; 3],
+            HybridAction::Hybrid(c, _) => vec![c.position_size, c.stop_loss, c.take_profit],
         };
+
+        // Extract discrete action if present
+        let discrete_action = match action {
+            HybridAction::Discrete(d) => Some(d),
+            HybridAction::Hybrid(_, d) => Some(d),
+            _ => None,
+        };
+
+        let transition = Transition {
+            state: state_vec,
+            action: action_vec,
+            discrete_action,
+            reward,
+            reward_signal: crate::rl::core::RewardSignal::PnL(reward),
+            next_state: next_state_vec,
+            done,
+            log_prob: 0.0,
+        };
+
         self.replay_buffer.write().await.push(transition);
-        self.step_count += 1;
     }
 
     /// Get current step count
