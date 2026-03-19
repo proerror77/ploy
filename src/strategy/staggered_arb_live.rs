@@ -2613,7 +2613,7 @@ min_balance_usd = 9.0
 
         let action = adapter.fill_leg2(0, dec!(0.62), "forced_timeout", now);
         assert!(
-            matches!(action, Some(StrategyAction::SubmitOrder { .. })),
+            matches!(action, Some(StrategyAction::SubmitIntent { .. })),
             "live leg2 should still submit even if active window already expired"
         );
     }
@@ -2745,7 +2745,8 @@ min_balance_usd = 9.0
 
         let action = adapter.fill_leg2(0, dec!(0.40), "merge", now);
         match action {
-            Some(StrategyAction::SubmitOrder { order, .. }) => {
+            Some(StrategyAction::SubmitIntent { intent }) => {
+                let order = crate::domain::order_request_from_strategy_intent(&intent);
                 assert_eq!(order.shares, 13, "should only submit remaining shares")
             }
             _ => panic!("expected leg2 submit action"),

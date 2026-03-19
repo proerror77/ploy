@@ -284,23 +284,19 @@ type = "fixed_shares"
         let entry_order = actions
             .into_iter()
             .find_map(|action| match action {
-                StrategyAction::SubmitOrder {
-                    client_order_id,
-                    purpose,
-                    order,
-                    ..
-                } => Some((client_order_id, purpose, order)),
+                StrategyAction::SubmitIntent { intent } => Some(intent),
                 _ => None,
             })
             .expect("entry order");
-        assert_eq!(entry_order.1, crate::strategy::OrderPurpose::Entry);
+        let entry_request = crate::domain::order_request_from_strategy_intent(&entry_order);
+        assert!(entry_order.is_buy, "entry intent should be a buy");
 
         strategy
             .on_order_update(&crate::strategy::OrderUpdate {
                 order_id: "entry-order".to_string(),
-                client_order_id: Some(entry_order.0.clone()),
+                client_order_id: Some(entry_order.client_order_id.clone()),
                 status: OrderStatus::Filled,
-                filled_qty: entry_order.2.shares,
+                filled_qty: entry_request.shares,
                 avg_fill_price: Some(dec!(0.40)),
                 timestamp: now + Duration::seconds(1),
                 error: None,
@@ -326,9 +322,9 @@ type = "fixed_shares"
             .expect("trigger exit");
 
         let exit_order = exit_actions.into_iter().find_map(|action| match action {
-            StrategyAction::SubmitOrder { purpose, .. } => Some(purpose),
+            StrategyAction::SubmitIntent { intent } => Some(intent),
             _ => None,
         });
-        assert_eq!(exit_order, Some(crate::strategy::OrderPurpose::Exit));
+        assert_eq!(exit_order.as_ref().map(|intent| intent.is_buy), Some(false));
     }
 }
