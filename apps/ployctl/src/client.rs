@@ -155,8 +155,10 @@ impl ControlPlaneClient {
     }
 
     fn read_status_snapshot(&self) -> Result<SystemStatus, String> {
-        if let Ok(status) = self.read_status_over_http() {
-            return Ok(status);
+        match self.read_status_over_http() {
+            Ok(status) => return Ok(status),
+            Err(err) if !should_fallback_to_snapshot(&err) => return Err(err),
+            Err(_) => {}
         }
         let body = fs::read_to_string(self.runtime_root.join("system-status.json"))
             .map_err(|err| format!("read status snapshot: {err}"))?;
@@ -164,8 +166,10 @@ impl ControlPlaneClient {
     }
 
     fn read_deployment_snapshots(&self) -> Result<Vec<DeploymentSummary>, String> {
-        if let Ok(deployments) = self.read_deployments_over_http() {
-            return Ok(deployments);
+        match self.read_deployments_over_http() {
+            Ok(deployments) => return Ok(deployments),
+            Err(err) if !should_fallback_to_snapshot(&err) => return Err(err),
+            Err(_) => {}
         }
         let body = fs::read_to_string(self.runtime_root.join("deployments.json"))
             .map_err(|err| format!("read deployment snapshot: {err}"))?;
@@ -173,8 +177,10 @@ impl ControlPlaneClient {
     }
 
     fn read_trading_state_snapshot(&self) -> Result<Vec<TradingStateSnapshot>, String> {
-        if let Ok(snapshot) = self.read_trading_state_over_http() {
-            return Ok(snapshot);
+        match self.read_trading_state_over_http() {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(err) if !should_fallback_to_snapshot(&err) => return Err(err),
+            Err(_) => {}
         }
         let body = fs::read_to_string(self.runtime_root.join("trading-state.json"))
             .map_err(|err| format!("read trading state snapshot: {err}"))?;
@@ -580,5 +586,53 @@ mod tests {
         assert!(error.contains("404"));
         assert!(error.contains("deployment_not_found"));
         assert!(error.contains("missing.paper"));
+    }
+
+    #[test]
+    fn client_does_not_fallback_to_stale_status_snapshot_on_structured_http_error() {
+        let runtime_root = temp_dir("status-http-error");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+        fs::write(
+            runtime_root.join("system-status.json"),
+            serde_json::json!({
+                "status": "stale-snapshot",
+                "uptime_seconds": 1,
+                "version": "0.1.0",
+                "strategy": "platform",
+                "last_trade_time": null,
+                "websocket_connected": false,
+                "database_connected": false,
+                "error_count_1h": 0
+            })
+            .to_string(),
+        )
+        .expect("write stale snapshot");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).expect("read request");
+            let body = serde_json::json!({
+                "error": "daemon_lock_poisoned",
+                "message": "daemon state is unavailable",
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = addr.to_string();
+
+        let error = client.system_snapshot().expect_err("structured http error");
+        assert!(error.contains("daemon_lock_poisoned"));
+        assert!(!error.contains("stale-snapshot"));
     }
 }

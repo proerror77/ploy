@@ -273,21 +273,19 @@ fn handle_runtime_request(
         },
         ("GET", _) if path.starts_with("/api/deployments/") && !path.ends_with("/control") => {
             let deployment_id = path.trim_start_matches("/api/deployments/");
-            match state
-                .daemon
-                .lock()
-                .ok()
-                .and_then(|daemon| daemon.inspect_deployment(deployment_id))
-            {
-                Some(record) => (
-                    200,
-                    serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
-                ),
-                None => json_error(
-                    404,
-                    "deployment_not_found",
-                    Some(format!("deployment `{deployment_id}` was not found")),
-                ),
+            match state.daemon.lock() {
+                Ok(daemon) => match daemon.inspect_deployment(deployment_id) {
+                    Some(record) => (
+                        200,
+                        serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
+                    ),
+                    None => json_error(
+                        404,
+                        "deployment_not_found",
+                        Some(format!("deployment `{deployment_id}` was not found")),
+                    ),
+                },
+                Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
         }
         ("PUT", _) if path.starts_with("/api/deployments/") => {
@@ -858,5 +856,28 @@ mod tests {
         assert!(body.contains("\"error\":\"deployment_not_found\""));
         assert!(body.contains("\"message\""));
         assert!(body.contains("missing.paper"));
+    }
+
+    #[test]
+    fn handle_runtime_request_reports_poisoned_lock_as_503() {
+        let daemon = crate::runtime::PloyDaemon::boot(&crate::config::PlatformConfig::default())
+            .expect("boot daemon");
+        let poisoned = Arc::new(Mutex::new(daemon));
+        let poison_handle = poisoned.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_handle.lock().expect("lock daemon");
+            panic!("poison daemon lock for test");
+        })
+        .join();
+
+        let state = Arc::new(AppState {
+            daemon: poisoned,
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (status_code, body) =
+            handle_runtime_request("GET", "/api/deployments/missing.paper", None, &state);
+        assert_eq!(status_code, 503);
+        assert!(body.contains("\"error\":\"daemon_lock_poisoned\""));
     }
 }

@@ -3,10 +3,9 @@ use ploy_operator_contracts::{DeploymentApplyRequest, DesiredState};
 use std::fs;
 use std::path::Path;
 
-pub fn render_deployments(client: &ControlPlaneClient) -> String {
-    client
-        .deployment_summaries()
-        .unwrap_or_default()
+pub fn render_deployments(client: &ControlPlaneClient) -> Result<String, String> {
+    Ok(client
+        .deployment_summaries()?
         .into_iter()
         .map(|deployment| {
             format!(
@@ -15,7 +14,7 @@ pub fn render_deployments(client: &ControlPlaneClient) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n"))
 }
 
 pub fn render_deployment(
@@ -98,7 +97,8 @@ mod tests {
         )
         .expect("write deployments");
 
-        let output = render_deployments(&ControlPlaneClient::from_runtime_root(&runtime_root));
+        let output = render_deployments(&ControlPlaneClient::from_runtime_root(&runtime_root))
+            .expect("list deployments");
         assert!(output.contains("example.paper"));
     }
 
@@ -183,5 +183,50 @@ mod tests {
         let paused =
             control_deployment(&client, "example.paper", DesiredState::Paused).expect("pause");
         assert!(paused.contains("Paused"));
+    }
+
+    #[test]
+    fn list_deployments_returns_structured_http_error_instead_of_empty_success() {
+        let runtime_root = temp_dir("list-http-error");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+        fs::write(
+            runtime_root.join("deployments.json"),
+            serde_json::json!([
+                {
+                    "deployment_id": "stale.paper",
+                    "desired_state": "running",
+                    "observed_state": "running"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write stale deployments");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).expect("read request");
+            let body = serde_json::json!({
+                "error": "daemon_lock_poisoned",
+                "message": "daemon state is unavailable",
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = addr.to_string();
+
+        let error = render_deployments(&client).expect_err("structured list error");
+        assert!(error.contains("daemon_lock_poisoned"));
+        assert!(!error.contains("stale.paper"));
     }
 }
