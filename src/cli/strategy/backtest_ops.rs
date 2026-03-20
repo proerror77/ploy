@@ -764,9 +764,11 @@ fn build_pm5_backtest_config_json(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_pm5_backtest_config_json, normalize_backtest_strategy_name, Pm5mReplayWindow};
-    use chrono::{TimeZone, Utc};
+    use super::{
+        build_pm5_backtest_config_json, normalize_backtest_strategy_name, Pm5mReplayWindow,
+    };
     use crate::strategy::pm_5m_directional_backtest::Pm5mDirectionalBacktestConfig;
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn normalize_backtest_strategy_name_accepts_pm_5m_directional_aliases() {
@@ -776,8 +778,7 @@ mod tests {
             "pm_5m_directional"
         );
         assert_eq!(
-            normalize_backtest_strategy_name("pm-5m-directional")
-                .expect("dash alias should parse"),
+            normalize_backtest_strategy_name("pm-5m-directional").expect("dash alias should parse"),
             "pm_5m_directional"
         );
         assert_eq!(

@@ -22,8 +22,7 @@ use crate::rl::core::{
 use crate::rl::memory::ReplayBuffer;
 use crate::strategy::traits::StrategyOrderIntent;
 use crate::strategy::{
-    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
-    StrategyStateInfo,
+    DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction, StrategyStateInfo,
 };
 
 /// RL-based trading strategy

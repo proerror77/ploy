@@ -468,7 +468,7 @@ pub async fn run_orderbook_history_mode(
             "starting orderbook-history backfill"
         );
 
-        let condition_id_override = match sqlx::query_scalar::<_, String>(
+        let condition_id_override: Option<String> = sqlx::query_scalar::<_, String>(
             r#"
             SELECT NULLIF(BTRIM(metadata->>'condition_id'), '')
             FROM collector_token_targets
@@ -478,10 +478,7 @@ pub async fn run_orderbook_history_mode(
         .bind(asset_id)
         .fetch_optional(store.pool())
         .await
-        {
-            Ok(v) => v,
-            Err(_) => None,
-        };
+        .unwrap_or_default();
 
         let inserted = collector
             .backfill_asset_with_condition(

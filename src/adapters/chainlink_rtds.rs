@@ -11,7 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{broadcast, RwLock};
 use tokio::time::interval;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};

@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, client_async_tls_with_config, connect_async,
+    client_async_tls_with_config, connect_async, MaybeTlsStream, WebSocketStream,
 };
 use tracing::{debug, info};
 use url::Url;

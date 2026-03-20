@@ -31,16 +31,16 @@ use self::relayer::{
     relayer_builder_credentials_available, relayer_claim_enabled, relayer_fallback_onchain_enabled,
 };
 
+mod claim_flow;
 mod daemon;
 mod discovery;
-mod claim_flow;
 mod relayer;
 
-pub(crate) use self::daemon::{
-    auto_topup_enabled, env_flag, env_string_any, env_u128_any, env_u64_any,
-    min_native_gas_wei, needs_native_gas_preflight, u256_to_u128_saturating,
-};
 pub use self::daemon::ensure_account_claimer_daemon;
+pub(crate) use self::daemon::{
+    auto_topup_enabled, env_flag, env_string_any, env_u128_any, env_u64_any, min_native_gas_wei,
+    needs_native_gas_preflight, u256_to_u128_saturating,
+};
 use self::relayer::{
     missing_relayer_builder_credential_groups, relayer_base_url,
     relayer_builder_credentials_available, relayer_claim_enabled, relayer_fallback_onchain_enabled,

@@ -501,8 +501,7 @@ mod tests {
         let strategies = StrategyFactory::available_strategies();
         assert!(strategies.iter().any(|s| s.name == "pm_5m_directional"));
         assert!(strategies.iter().any(|s| {
-            s.name == "pm_5m_directional"
-                && s.config_template == "pm_5m_directional_default.toml"
+            s.name == "pm_5m_directional" && s.config_template == "pm_5m_directional_default.toml"
         }));
     }
 

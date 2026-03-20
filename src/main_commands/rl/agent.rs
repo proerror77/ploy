@@ -101,8 +101,7 @@ pub(super) async fn run_agent(
             risk_params: AgentRiskParams {
                 max_order_value: Decimal::try_from(max_exposure / 2.0)
                     .unwrap_or(Decimal::new(50, 0)),
-                max_total_exposure: Decimal::try_from(max_exposure)
-                    .unwrap_or(Decimal::new(100, 0)),
+                max_total_exposure: Decimal::try_from(max_exposure).unwrap_or(Decimal::new(100, 0)),
                 ..Default::default()
             },
             rl_config,

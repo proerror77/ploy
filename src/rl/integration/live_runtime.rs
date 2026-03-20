@@ -87,15 +87,14 @@ impl RLCryptoRuntime {
         let state_vec = vec![0.0f32; 64];
         let next_state_vec = vec![0.0f32; 64];
 
-        let transition =
-            crate::rl::memory::replay_buffer::Transition::new(
-                state_vec,
-                vec![action.size, action.aggressiveness],
-                reward,
-                next_state_vec,
-                done,
-            )
-            .with_discrete_action(action.action);
+        let transition = crate::rl::memory::replay_buffer::Transition::new(
+            state_vec,
+            vec![action.size, action.aggressiveness],
+            reward,
+            next_state_vec,
+            done,
+        )
+        .with_discrete_action(action.action);
 
         self.replay_buffer.write().await.push(transition);
     }

@@ -825,11 +825,9 @@ mod tests {
 
     #[test]
     fn build_pm_5m_directional_runtime_config_sets_strategy_and_symbols() {
-        let config = build_pm_5m_directional_runtime_config(&[
-            "ethusdt".to_string(),
-            "btc".to_string(),
-        ])
-        .expect("pm5 runtime config");
+        let config =
+            build_pm_5m_directional_runtime_config(&["ethusdt".to_string(), "btc".to_string()])
+                .expect("pm5 runtime config");
         let value: toml::Value = toml::from_str(&config).expect("valid toml");
 
         assert_eq!(

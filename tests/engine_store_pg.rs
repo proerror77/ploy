@@ -273,7 +273,10 @@ async fn update_cycle_state_conflict_returns_false() {
         .update_cycle_state(cycle_id, StrategyState::Leg1Filled, 0)
         .await
         .expect("stale expected version should return without updating");
-    assert!(!updated, "stale expected version should not update the cycle");
+    assert!(
+        !updated,
+        "stale expected version should not update the cycle"
+    );
     assert_eq!(cycle_version(&ctx.store, cycle_id).await, 1);
     assert_eq!(cycle_state(&ctx.store, cycle_id).await, "LEG1_PENDING");
 }
@@ -336,7 +339,8 @@ async fn concurrent_cycle_updates_yield_one_success_and_one_conflict() {
             .await
     });
     let t2 = tokio::spawn(async move {
-        s2.update_cycle_state(cycle_id, StrategyState::Abort, 1).await
+        s2.update_cycle_state(cycle_id, StrategyState::Abort, 1)
+            .await
     });
 
     let r1 = t1.await.expect("join should succeed");

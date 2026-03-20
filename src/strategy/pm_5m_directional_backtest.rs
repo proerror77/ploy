@@ -329,11 +329,7 @@ impl Pm5mDirectionalBacktestEngine {
         }
     }
 
-    fn resolve_lob_targets(
-        &self,
-        symbol: &str,
-        side: Option<Side>,
-    ) -> Vec<(String, String, Side)> {
+    fn resolve_lob_targets(&self, symbol: &str, side: Option<Side>) -> Vec<(String, String, Side)> {
         let Some(state) = self.current_event_state_for_symbol(symbol) else {
             return Vec::new();
         };
@@ -1250,11 +1246,17 @@ mod tests {
         });
 
         assert_eq!(
-            engine.quotes.get(&current_up_token).and_then(|quote| quote.ask_size),
+            engine
+                .quotes
+                .get(&current_up_token)
+                .and_then(|quote| quote.ask_size),
             Some(dec!(125))
         );
         assert_eq!(
-            engine.quotes.get(&prev_up_token).and_then(|quote| quote.ask_size),
+            engine
+                .quotes
+                .get(&prev_up_token)
+                .and_then(|quote| quote.ask_size),
             None
         );
     }

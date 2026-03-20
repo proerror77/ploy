@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
 use crate::error::{PloyError, Result};
-use connection::{BINANCE_WS_HOST, BINANCE_WS_PORT, connect_websocket_with_proxy};
+use connection::{connect_websocket_with_proxy, BINANCE_WS_HOST, BINANCE_WS_PORT};
 
 /// How often to send ping frames
 const PING_INTERVAL_SECS: u64 = 30;

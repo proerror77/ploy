@@ -515,9 +515,17 @@ impl VolatilityArbEngine {
 
         // Confidence based on data availability
         let mut confidence = if self.kline_vol_cache.contains_key(symbol) {
-            if tick_volatility.is_some() { 0.9 } else { 0.7 }
+            if tick_volatility.is_some() {
+                0.9
+            } else {
+                0.7
+            }
         } else {
-            if tick_volatility.is_some() { 0.5 } else { 0.3 }
+            if tick_volatility.is_some() {
+                0.5
+            } else {
+                0.3
+            }
         };
 
         // Penalize confidence when kline/tick disagree (proxy for vol-of-vol / instability).

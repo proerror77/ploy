@@ -64,7 +64,10 @@ impl PositionManager {
         Ok(positions)
     }
 
-    pub(super) async fn fetch_open_positions_by_symbol(&self, symbol: &str) -> Result<Vec<Position>> {
+    pub(super) async fn fetch_open_positions_by_symbol(
+        &self,
+        symbol: &str,
+    ) -> Result<Vec<Position>> {
         let rows = sqlx::query_as::<_, PositionRow>(
             r#"
             SELECT id, event_id, symbol, token_id, market_side,
@@ -146,7 +149,10 @@ impl PositionManager {
         Ok(count)
     }
 
-    pub(super) async fn fetch_open_position_by_token(&self, token_id: &str) -> Result<Option<Position>> {
+    pub(super) async fn fetch_open_position_by_token(
+        &self,
+        token_id: &str,
+    ) -> Result<Option<Position>> {
         let row = sqlx::query_as::<_, PositionRow>(
             r#"
             SELECT id, event_id, symbol, token_id, market_side,

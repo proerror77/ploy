@@ -1117,9 +1117,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     fn ts(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s)
-            .unwrap()
-            .with_timezone(&Utc)
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
     #[test]
@@ -1150,24 +1148,15 @@ mod tests {
             ]
             .into_iter()
             .collect(),
-            l2_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            quote_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            lob_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
+            l2_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            quote_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            lob_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
             event_buckets: [
                 ts("2026-03-07T00:00:00Z"),
                 ts("2026-03-07T00:05:00Z"),
@@ -1186,36 +1175,21 @@ mod tests {
     #[test]
     fn evaluate_pm5_requested_window_rejects_sparse_range_by_default() {
         let snapshot = Pm5mCoverageSnapshot {
-            spot_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            l2_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            quote_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            lob_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            event_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
+            spot_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            l2_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            quote_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            lob_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            event_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
         };
 
         let error = evaluate_pm5_requested_window(
@@ -1234,36 +1208,21 @@ mod tests {
     #[test]
     fn evaluate_pm5_requested_window_auto_trims_to_overlap() {
         let snapshot = Pm5mCoverageSnapshot {
-            spot_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            l2_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            quote_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            lob_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            event_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
+            spot_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            l2_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            quote_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            lob_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            event_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
         };
 
         let resolved = evaluate_pm5_requested_window(
@@ -1286,36 +1245,21 @@ mod tests {
     #[test]
     fn evaluate_pm5_requested_window_keeps_valid_range_unchanged() {
         let snapshot = Pm5mCoverageSnapshot {
-            spot_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            l2_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            quote_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            lob_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
-            event_buckets: [
-                ts("2026-03-07T00:05:00Z"),
-                ts("2026-03-07T00:10:00Z"),
-            ]
-            .into_iter()
-            .collect(),
+            spot_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            l2_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            quote_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            lob_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
+            event_buckets: [ts("2026-03-07T00:05:00Z"), ts("2026-03-07T00:10:00Z")]
+                .into_iter()
+                .collect(),
         };
 
         let resolved = evaluate_pm5_requested_window(

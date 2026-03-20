@@ -125,7 +125,9 @@ fn build_platform_capabilities_response(
                 active_domains.insert(domain_label(deployment.domain));
             }
         }
-        *by_domain.entry(domain_label(deployment.domain)).or_insert(0) += 1;
+        *by_domain
+            .entry(domain_label(deployment.domain))
+            .or_insert(0) += 1;
     }
 
     let mut supported_domains = vec![
@@ -139,13 +141,10 @@ fn build_platform_capabilities_response(
     }
 
     let deployment_states = summarize_deployment_states(deployments.iter());
-    let scoped_deployment_states = summarize_deployment_states(
-        deployments
-            .iter()
-            .filter(|deployment| {
-                deployment.matches_account(account_id) && deployment.matches_execution_mode(dry_run)
-            }),
-    );
+    let scoped_deployment_states =
+        summarize_deployment_states(deployments.iter().filter(|deployment| {
+            deployment.matches_account(account_id) && deployment.matches_execution_mode(dry_run)
+        }));
 
     PlatformCapabilities {
         account_id: account_id.to_string(),
@@ -747,11 +746,11 @@ mod tests {
     use rust_decimal::Decimal;
 
     use crate::account::{AccountBudgetSnapshot, AccountRegistryEntry};
-    use crate::plugins::{DeploymentState, PluginRegistry};
     use crate::platform::{
         DeploymentExecutionMode, Domain, MarketSelector, StrategyDeployment,
         StrategyLifecycleStage, StrategyProductType, Timeframe,
     };
+    use crate::plugins::{DeploymentState, PluginRegistry};
 
     use super::{build_accounts_overview, build_platform_capabilities_response};
 

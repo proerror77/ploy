@@ -573,8 +573,7 @@ impl StaggeredArbAdapter {
         let total_shares = prev_shares + add_shares;
         let total_notional = prev_notional + add_notional;
         let avg_price = total_notional / Decimal::from(total_shares);
-        let total_fee =
-            prev_fee + fill_price * Decimal::from(add_shares) * self.config.fee_rate;
+        let total_fee = prev_fee + fill_price * Decimal::from(add_shares) * self.config.fee_rate;
 
         pos.leg2_shares = Some(total_shares);
         pos.leg2_price = Some(avg_price);
@@ -1907,8 +1906,7 @@ impl Strategy for StaggeredArbAdapter {
             OrderStatus::Filled => {
                 let fill_price = update.avg_fill_price.unwrap_or(track.price);
                 let ts = update.timestamp;
-                let filled_shares =
-                    Self::effective_filled_shares(update.filled_qty, track.shares);
+                let filled_shares = Self::effective_filled_shares(update.filled_qty, track.shares);
 
                 if track.leg == 1 {
                     self.record_leg1_fill(&track, filled_shares, fill_price, ts, &mut actions);
@@ -2648,7 +2646,11 @@ min_balance_usd = 9.0
             !adapter.live_orders.contains_key(&client_id),
             "partial-cancelled leg1 should be removed from live order tracking"
         );
-        assert_eq!(adapter.positions.len(), 1, "leg1 partial fill should open position");
+        assert_eq!(
+            adapter.positions.len(),
+            1,
+            "leg1 partial fill should open position"
+        );
         let pos = &adapter.positions[0];
         assert_eq!(pos.leg1_shares, 7);
         assert_eq!(pos.leg1_price, dec!(0.52));

@@ -11,11 +11,11 @@ use crate::domain::{Domain, OrderStatus, OrderType, Quote, Side, TimeInForce};
 use crate::error::{PloyError, Result};
 use crate::strategy::crypto::{horizon_for_series, known_binance_symbols, series_ids_for_symbol};
 use crate::strategy::fee_model::FeeModel;
+use crate::strategy::pm_5m_bayesian::BayesianPrior;
 use crate::strategy::traits::{
     AlertLevel, DataFeed, MarketUpdate, OrderUpdate, PositionInfo, Strategy, StrategyAction,
     StrategyEvent, StrategyEventType, StrategyOrderIntent, StrategyStateInfo,
 };
-use crate::strategy::pm_5m_bayesian::BayesianPrior;
 use crate::strategy::volatility::normal_cdf;
 
 const STRATEGY_NAME: &str = "pm_5m_directional";
@@ -498,7 +498,7 @@ impl Pm5mDirectionalStrategy {
         for (ts, side, usd) in history.iter() {
             if *ts >= cutoff {
                 match side {
-                    Side::Up => long_liq += usd,   // long liquidation
+                    Side::Up => long_liq += usd,    // long liquidation
                     Side::Down => short_liq += usd, // short liquidation
                 }
             }
@@ -829,17 +829,13 @@ impl Pm5mDirectionalStrategy {
         let obi_3 = l2.obi_3.to_f64().unwrap_or(0.0);
         match side {
             Side::Up => {
-                if obi_3 < self.cfg.min_obi || pressure < self.cfg.min_flow_2s || microgap < 0.0
-                {
+                if obi_3 < self.cfg.min_obi || pressure < self.cfg.min_flow_2s || microgap < 0.0 {
                     self.last_reason = Some(format!("{symbol}:up_confirmation_failed"));
                     return None;
                 }
             }
             Side::Down => {
-                if obi_3 > -self.cfg.min_obi
-                    || pressure > -self.cfg.min_flow_2s
-                    || microgap > 0.0
-                {
+                if obi_3 > -self.cfg.min_obi || pressure > -self.cfg.min_flow_2s || microgap > 0.0 {
                     self.last_reason = Some(format!("{symbol}:down_confirmation_failed"));
                     return None;
                 }
@@ -916,7 +912,10 @@ impl Pm5mDirectionalStrategy {
         // Route C: funding rate confirmation (optional, contrarian)
         if self.cfg.use_funding_signal {
             if let Some(funding_dir) = self.funding_signal(symbol) {
-                let side_dir = match side { Side::Up => 1.0, Side::Down => -1.0 };
+                let side_dir = match side {
+                    Side::Up => 1.0,
+                    Side::Down => -1.0,
+                };
                 if funding_dir != side_dir {
                     // Funding signal contradicts our direction — skip
                     self.last_reason = Some(format!("{symbol}:funding_signal_conflict"));
@@ -1360,8 +1359,13 @@ impl Strategy for Pm5mDirectionalStrategy {
                     let history = self.liquidation_history.entry(symbol.clone()).or_default();
                     history.push_back((*timestamp, *side, usd_value));
                     // Prune old entries
-                    let cutoff = *timestamp - chrono::Duration::seconds(self.cfg.liquidation_window_secs as i64 * 2);
-                    while history.front().map(|(ts, _, _)| *ts < cutoff).unwrap_or(false) {
+                    let cutoff = *timestamp
+                        - chrono::Duration::seconds(self.cfg.liquidation_window_secs as i64 * 2);
+                    while history
+                        .front()
+                        .map(|(ts, _, _)| *ts < cutoff)
+                        .unwrap_or(false)
+                    {
                         history.pop_front();
                     }
                 }
@@ -1767,11 +1771,7 @@ max_nav_fraction_per_trade = 0.01
         }
     }
 
-    fn binance_trade_update(
-        ts: DateTime<Utc>,
-        qty: Decimal,
-        is_buyer_maker: bool,
-    ) -> MarketUpdate {
+    fn binance_trade_update(ts: DateTime<Utc>, qty: Decimal, is_buyer_maker: bool) -> MarketUpdate {
         MarketUpdate::BinanceTrade {
             symbol: "BTCUSDT".to_string(),
             qty,
