@@ -869,8 +869,8 @@ mod tests {
 
         let trading_body =
             fs::read_to_string(root.join("run/platform/trading-state.json")).expect("snapshot");
-        assert!(trading_body.contains("\"state\": \"rejected\""));
-        assert!(trading_body.contains("gateway offline"));
+        assert!(trading_body.contains("\"state\": \"pending\""));
+        assert!(trading_body.contains("\"deployment_id\": \"example.live\""));
     }
 
     #[test]

@@ -258,11 +258,6 @@ impl PloyDaemon {
                 })
             }
             Err(err) => {
-                let reason = err.to_string();
-                self.trading
-                    .entry(intent.deployment_id.clone())
-                    .or_default()
-                    .reject_order(&order_id, reason.clone());
                 Err(io_error_from_execution_error(err))
             }
         }
@@ -918,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_surfaces_live_gateway_transport_failure_as_error() {
+    fn daemon_surfaces_live_gateway_transport_failure_as_error_without_finalizing_order() {
         let root = temp_dir("live-intent-transport-error");
         let runtime_root = root.join("run/platform");
         let registry_file = root.join("data/state/deployments.json");
@@ -972,12 +967,8 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::ConnectionAborted);
         let trading_state = daemon.trading_state();
         assert_eq!(trading_state[0].orders.len(), 1);
-        assert_eq!(trading_state[0].orders[0].state, "rejected");
-        assert!(trading_state[0].orders[0]
-            .rejection_reason
-            .as_deref()
-            .expect("rejection reason")
-            .contains("gateway offline"));
+        assert_eq!(trading_state[0].orders[0].state, "pending");
+        assert!(trading_state[0].orders[0].rejection_reason.is_none());
     }
 
     #[test]
