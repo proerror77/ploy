@@ -1,5 +1,5 @@
-# DEPRECATED: Use release-aliyun.yml. SECURITY: Writes POLYMARKET_PRIVATE_KEY into systemd unit file on disk.
-name: Build and Deploy (Pre-built Binary)
+# LEGACY SINGLE-BINARY: Use release-platform.yml for the workspace-default deploy path. SECURITY: Writes POLYMARKET_PRIVATE_KEY into systemd unit file on disk.
+name: Legacy Single-Binary Build and Deploy (Pre-built Binary)
 
 on:
   workflow_dispatch:  # 手動觸發

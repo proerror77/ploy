@@ -16,10 +16,11 @@ Start the single-host trading platform runtime with:
 cargo run -p ployd
 ```
 
-2. Check the operator client boots:
+2. In a second shell, check the operator client against the runtime snapshot:
 
 ```bash
-cargo run -p ployctl
+cargo run -p ployctl -- system status
+cargo run -p ployctl -- deployments list
 ```
 
 3. Run the smoke test:
@@ -30,13 +31,15 @@ rtk cargo test --test platform_smoke -- --nocapture
 
 ## Intended Operator Contract
 
-The target operator flow is:
+The current operator flow is:
 
 ```bash
-ployd start
-ployctl deployments apply config/deployments/example.toml
+ployd
+ployctl system status
 ployctl deployments list
 ployctl deployments inspect example.paper
 ```
 
-At this stage the command wiring is still skeletal, but the workspace now has a stable platform shape for daemon, control client, deployment supervisor, and trading lifecycle crates.
+This branch now treats `ployd` as the default long-running daemon entrypoint and
+`ployctl` as the snapshot-backed operator client. Deployment CRUD is still
+simplified, but the daemon/client/runtime contract is no longer a placeholder.

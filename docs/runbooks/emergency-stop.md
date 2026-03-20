@@ -20,7 +20,7 @@ Use this when:
 Sends SIGTERM to the process. The application has a 30s graceful shutdown window.
 
 ```bash
-sudo systemctl stop ploy
+sudo systemctl stop ployd
 ```
 
 Use this when:
@@ -33,7 +33,7 @@ Use this when:
 Last resort. No graceful shutdown, no state persistence.
 
 ```bash
-sudo systemctl kill -s SIGKILL ploy
+sudo systemctl kill -s SIGKILL ployd
 ```
 
 Use only when systemctl stop hangs beyond 30s.
@@ -41,9 +41,9 @@ Use only when systemctl stop hangs beyond 30s.
 ## Post-stop Verification
 
 ```bash
-systemctl is-active ploy          # should say "inactive"
+systemctl is-active ployd         # should say "inactive"
 ss -tlnp | grep 8081              # port should be free
-journalctl -u ploy -n 50 --no-pager  # check shutdown logs
+journalctl -u ployd -n 50 --no-pager  # check shutdown logs
 ```
 
 ## Resuming

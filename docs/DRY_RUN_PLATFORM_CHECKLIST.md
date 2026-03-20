@@ -8,9 +8,8 @@
 - `PLOY_DEPLOYMENTS_FILE` 指向有效矩陣檔（建議 `data/state/deployments.json`）
 - `PLOY_RUN_SQLX_MIGRATIONS=false` 僅限本機實驗，不建議上線前保留
 - `.env` / workload env 已備齊且 `ploy-sidecar` 相關憑證不可用於 dry-run
-- EC2 staging 目標固定為 `tango-2-1`，正式 staging 釋出走
-  `.github/workflows/release-staging.yml`
-- staging workflow 只會重啟 dry-run/staging workloads，不應帶入 live services
+- 預設平台釋出路徑為 `.github/workflows/release-platform.yml`
+- 任何仍然指向 `ploy` 單體 binary 的 workflow 都視為 legacy，不是 workspace 預設 deploy 面
 
 ## 1. 工具與快照檢查
 
@@ -18,7 +17,8 @@
 - `rtk cargo check -p ployd`
 - `rtk cargo check -p ployctl`
 - `cargo run -p ployd`
-- `cargo run -p ployctl`
+- `cargo run -p ployctl -- system status`
+- `cargo run -p ployctl -- deployments list`
 - `rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture`
 
 ## 2. 策略矩陣檢查
@@ -36,11 +36,11 @@
 
 ## 4. 部署腳本固化檢查
 
-- `scripts/archive/legacy-root-runtime/aws_ec2_deploy.sh` / `scripts/install-service.sh` 會在 env 補齊：
-  - `PLOY_RUN_SQLX_MIGRATIONS=true`
-  - `PLOY_REQUIRE_SQLX_MIGRATIONS=true`
-  - `PLOY_COORDINATOR__HEARTBEAT_STALE_WARN_COOLDOWN_SECS=300`
+- `scripts/install-platform-service.sh` 會在 env 補齊：
   - `PLOY_DEPLOYMENTS_FILE=/opt/ploy/data/state/deployments.json`
+  - `PLOY_RUNTIME_ROOT=/opt/ploy/run/platform`
+  - `PLOY_SYSTEM_STATUS_FILE=/opt/ploy/run/platform/system-status.json`
+  - `PLOY_DEPLOYMENT_STATUS_FILE=/opt/ploy/run/platform/deployments.json`
 - 遠端首次部署若 `data/state/deployments.json` 不存在，會使用 repo 內 `data/state/deployments.json.sample` 初始化
 
 ## 5. 通過條件

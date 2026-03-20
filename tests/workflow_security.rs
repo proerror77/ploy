@@ -197,3 +197,38 @@ fn appleboy_workflows_pin_host_fingerprints() {
         offenders.join("\n")
     );
 }
+
+#[test]
+fn checked_in_platform_service_enforces_guardrails() {
+    let content = workflow_contents("deployment/ployd.service");
+    let required = [
+        "Restart=always",
+        "RestartSec=5",
+        "StartLimitIntervalSec=300",
+        "StartLimitBurst=5",
+        "MemoryHigh=",
+        "MemoryMax=",
+        "OOMPolicy=kill",
+        "EnvironmentFile=-/opt/ploy/.env",
+        "ExecStart=/opt/ploy/bin/ployd",
+    ];
+    let mut offenders = Vec::new();
+
+    if content.contains("StartLimitInterval=") {
+        offenders.push(
+            "deployment/ployd.service: still uses deprecated StartLimitInterval=".to_string(),
+        );
+    }
+
+    for needle in required {
+        if !content.contains(needle) {
+            offenders.push(format!("deployment/ployd.service: missing guardrail `{needle}`"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "checked-in ployd.service guardrail check failed:\n{}",
+        offenders.join("\n")
+    );
+}
