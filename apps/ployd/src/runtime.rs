@@ -77,14 +77,6 @@ impl PloyDaemon {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub fn run_forever(&mut self) -> io::Result<()> {
-        loop {
-            self.write_runtime_snapshots()?;
-            thread::sleep(Duration::from_millis(self.config.tick_interval_ms));
-        }
-    }
-
     pub fn inspect_deployment(&self, deployment_id: &str) -> Option<DeploymentRecord> {
         self.control_plane.deployments.get(deployment_id).cloned()
     }
