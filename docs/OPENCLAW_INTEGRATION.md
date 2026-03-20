@@ -14,27 +14,24 @@ cargo build --release
 export PATH="$(pwd)/target/release:$PATH"
 ```
 
-2. 推薦用本 repo 內建的 daemon wrapper（給 OpenClaw 呼叫更穩）：
+2. 舊單體 runtime 的 daemon wrapper 已歸檔在：
 
 ```bash
-scripts/event_edge_daemon.sh start false true   # safe observe (trade=false, dry_run=true)
-scripts/event_edge_daemon.sh start false true 123,456  # optional event_ids CSV override
-scripts/event_edge_daemon.sh status
-scripts/event_edge_daemon.sh logs 200
-scripts/event_edge_daemon.sh stop
+scripts/archive/legacy-root-runtime/event_edge_daemon.sh start false true
+scripts/archive/legacy-root-runtime/event_edge_daemon.sh status
 ```
 
-（它會把 PID/Logs 放到 `data/state/`、`data/logs/`，方便 OpenClaw 做 health/status。）
+這是歷史參考，不是目前 workspace 預設運維面。
 
 3. 遠端 gateway 控制這台機器（推薦：SSH forced command allowlist）
 
-在交易機器上（跑 `ploy` 的那台）：
+在交易機器上（跑 legacy `ploy` 單體 runtime 的那台）：
 
 - 建一個專用使用者（例如 `ploy`），並把 repo 放在固定路徑
 - 把你的 SSH public key 加到 `~ploy/.ssh/authorized_keys`，用 forced command 綁死可執行的指令（只允許 start/stop/status/logs/rpc）：
 
 ```text
-command="/ABS/PATH/TO/ploy/scripts/ssh_ployctl.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA...
+command="/ABS/PATH/TO/ploy/scripts/archive/legacy-root-runtime/ssh_ployctl.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA...
 ```
 
 然後在遠端（OpenClaw gateway 所在機器）就可以安全地只呼叫 allowlist：
@@ -59,17 +56,17 @@ ssh ploy@TRADING_HOST "svc-logs crypto 200"
 
 4. 在 OpenClaw 裡建立一個自訂 skill，內容用 bash 直接跑：
 
-- 掃描一次（不下單）：`ploy event-edge --title "Which company has the best AI model end of February?"`
-- 常駐自動循環：`ploy platform start --politics`（由 `config/default.toml` 的 `[event_edge_agent]` 控制）
-- 或改用 wrapper：`scripts/event_edge_daemon.sh start false true`
+- 掃描一次（歷史 CLI 參考）：`ploy event-edge --title "Which company has the best AI model end of February?"`
+- 舊常駐循環（歷史參考）：`ploy platform start --politics`
+- 舊 wrapper（已歸檔）：`scripts/archive/legacy-root-runtime/event_edge_daemon.sh start false true`
 
-這樣 OpenClaw 可以用自己的 always-on daemon + channel inbox 來觸發、監控、或切換策略；而交易邏輯仍由 `ploy` 控制（含 `dry_run` / risk guard）。
+新的 workspace 路徑應改成讓 OpenClaw 呼叫 `ployctl` / control-plane API，而不是再啟動 retired root runtime。
 
 （可直接用本 repo 提供的 OpenClaw skill 模板：`examples/openclaw/skill-ploy-rpc/`）
 
 ### RPC（給 agent 用的工具介面）
 
-交易機器提供 `ploy rpc`（JSON-RPC 2.0，stdin→stdout），可透過 forced-command 的 allowlist 安全轉發：
+若你仍在維護 legacy 單體 runtime，交易機器可提供 `ploy rpc`（JSON-RPC 2.0，stdin→stdout），並透過 forced-command 的 allowlist 安全轉發：
 
 ```bash
 cat <<'JSON' | ssh ploy@TRADING_HOST "rpc"

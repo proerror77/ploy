@@ -134,7 +134,7 @@ sqlx migrate run
 | `PLOY_DEPLOYMENTS_REQUIRED_STAGES` | No | Required evidence stages CSV (default `backtest,paper`) |
 | `PLOY_DEPLOYMENTS_MAX_EVIDENCE_AGE_HOURS` | No | Max evidence staleness window in hours (default `168`) |
 | `PLOY_ALLOW_DIRECT_LIVE` | No | Allow direct (non-Coordinator) live order paths. Not recommended. |
-| `PLOY_ALLOW_DIRECT_STRATEGY_LIVE` | No | Allow direct `ploy strategy start` live runtime. Prefer `ploy platform start`. |
+| `PLOY_ALLOW_DIRECT_STRATEGY_LIVE` | No | Archived compatibility flag for the retired single-binary runtime; not part of the workspace default path. |
 
 ### Config File
 
@@ -160,10 +160,7 @@ See the inline comments in `config/default.toml` for a full explanation of every
 
 Ploy uses a **Coordinator-only** live execution plane. For live orders, use the platform entry point:
 
-```bash
-ploy platform start --crypto --sports              # Coordinator + canonical live strategies
-ploy platform start --crypto --dry-run             # Safe dry-run
-```
+Historical reference only: the old `ploy platform start ...` path has been retired from this branch. Use the `ployd` / `ployctl` workspace runbook instead.
 
 Legacy commands that can place orders (example: `ploy run`, `ploy momentum`, `ploy split-arb`, `ploy crypto split-arb`, `ploy sports split-arb`, `ploy event-edge --trade`, `ploy agent --enable-trading`) are **blocked for live execution by default**.
 
@@ -312,13 +309,10 @@ ploy strategy nba-comeback --dry-run            # Run NBA comeback agent standal
 ploy strategy accuracy --lookback-hours 12      # Report prediction accuracy
 ```
 
-### Multi-Agent Platform
+### Archived Single-Binary Platform CLI
 
-```bash
-ploy platform start --crypto --sports              # Start all domain agents
-ploy platform start --crypto --dry-run             # Crypto agent only, dry-run
-ploy platform start --sports --pause sports        # Start paused
-```
+The old `ploy platform start ...` commands are no longer runnable in this branch.
+Use [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md) for the workspace daemon/client flow.
 
 ### Operator Terminal
 

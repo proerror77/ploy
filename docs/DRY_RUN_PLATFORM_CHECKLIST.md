@@ -36,7 +36,7 @@
 
 ## 4. 部署腳本固化檢查
 
-- `scripts/aws_ec2_deploy.sh` / `scripts/install-service.sh` 會在 env 補齊：
+- `scripts/archive/legacy-root-runtime/aws_ec2_deploy.sh` / `scripts/install-service.sh` 會在 env 補齊：
   - `PLOY_RUN_SQLX_MIGRATIONS=true`
   - `PLOY_REQUIRE_SQLX_MIGRATIONS=true`
   - `PLOY_COORDINATOR__HEARTBEAT_STALE_WARN_COOLDOWN_SECS=300`
