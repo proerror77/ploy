@@ -2,6 +2,29 @@
 
 A high-performance Polymarket trading bot focused on crypto and sports prediction markets. Ships with a terminal dashboard, multi-agent coordinator, AI-assisted analysis, and optional reinforcement learning.
 
+## Trading Platform Workspace
+
+The workspace now also includes the platform-refactor spine:
+
+- `ployd`: daemon entrypoint
+- `ployctl`: operator client entrypoint
+- `crates/ploy-platform`: control-plane core
+- `crates/ploy-trading`: canonical trading lifecycle
+- `crates/ploy-deployments`: worker protocol and supervisor
+- `crates/ploy-operator-contracts`: shared DTO and event contracts
+- `crates/ploy-strategy-bundles`: signal-to-intent runtime
+- `crates/ploy-research`: replay and backtesting consumer of trading models
+
+Current smoke path:
+
+```bash
+cargo run -p ployd
+cargo run -p ployctl
+rtk cargo test --test platform_smoke -- --nocapture
+```
+
+Runbook: [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md)
+
 ## Features
 
 - **Two runtime domains** -- Crypto (BTC/ETH/SOL UP/DOWN), Sports (NBA/NFL live odds)

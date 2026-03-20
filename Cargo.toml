@@ -43,6 +43,11 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dev-dependencies]
+ploy-deployments.workspace = true
+ploy-operator-contracts.workspace = true
+ploy-platform.workspace = true
+
 [profile.release]
 lto = "thin"
 codegen-units = 4
