@@ -44,7 +44,7 @@ export interface PositionResponse {
 export type Position = PositionResponse;
 
 export interface SystemStatus {
-  status: 'running' | 'stopped' | 'error';
+  status: string;
   uptime_seconds: number;
   version: string;
   strategy: string;

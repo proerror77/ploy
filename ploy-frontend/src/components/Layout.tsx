@@ -38,6 +38,15 @@ export function Layout() {
   const location = useLocation();
   const queryClient = useQueryClient();
   const { wsConnected, systemStatus } = useStore();
+
+  const systemStatusLabel: Record<string, string> = {
+    starting: '启动中',
+    running: '运行中',
+    recovering: '恢复中',
+    degraded: '降级',
+    stopped: '已停止',
+    error: '错误',
+  };
   const [authStatus, setAuthStatus] = useState<'checking' | 'authed' | 'guest'>('checking');
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
@@ -187,14 +196,14 @@ export function Layout() {
               <span className="text-muted-foreground">系统状态</span>
               <span
                 className={cn('text-xs font-medium', {
+                  'text-amber-600': systemStatus === 'starting' || systemStatus === 'recovering',
                   'text-success': systemStatus === 'running',
+                  'text-yellow-600': systemStatus === 'degraded',
                   'text-muted-foreground': systemStatus === 'stopped',
                   'text-destructive': systemStatus === 'error',
                 })}
               >
-                {systemStatus === 'running' && '运行中'}
-                {systemStatus === 'stopped' && '已停止'}
-                {systemStatus === 'error' && '错误'}
+                {systemStatusLabel[systemStatus] ?? systemStatus}
               </span>
             </div>
           </div>
