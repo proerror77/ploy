@@ -15,4 +15,5 @@ thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [dev-dependencies]
+chrono.workspace = true
 rust_decimal_macros.workspace = true

@@ -3,6 +3,7 @@ use crate::events::EventBroker;
 use crate::http::publish_snapshot_events;
 use ploy_connectivity::{
     ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, PolymarketExecutionGateway,
+    TrackedOrder,
 };
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{
@@ -63,6 +64,7 @@ impl PloyDaemon {
     pub fn write_runtime_snapshots(&mut self) -> io::Result<()> {
         self.load_registry()?;
         self.tick();
+        self.reconcile_live_fills()?;
         self.persist_registry()?;
         fs::create_dir_all(&self.config.runtime_root)?;
         write_json(
@@ -271,6 +273,68 @@ impl PloyDaemon {
                 }
             }
         }
+    }
+
+    pub fn reconcile_live_fills(&mut self) -> io::Result<usize> {
+        let mut tracked_orders = Vec::new();
+        let mut order_deployments = BTreeMap::new();
+
+        for record in self.control_plane.deployments.records() {
+            if record.runtime_mode != "live" || record.desired_state != DesiredState::Running {
+                continue;
+            }
+
+            let Some(runtime) = self.trading.get(&record.deployment_id) else {
+                continue;
+            };
+
+            for order in runtime
+                .snapshot(&BTreeMap::new())
+                .orders
+                .into_iter()
+                .filter(|order| {
+                    order.venue_order_id.is_some()
+                        && matches!(
+                            order.state,
+                            OrderState::Acknowledged | OrderState::PartiallyFilled
+                        )
+                })
+            {
+                let Some(venue_order_id) = order.venue_order_id.clone() else {
+                    continue;
+                };
+                order_deployments.insert(order.order_id.clone(), record.deployment_id.clone());
+                tracked_orders.push(TrackedOrder {
+                    order_id: order.order_id,
+                    venue_order_id,
+                    token_id: order.token_id,
+                });
+            }
+        }
+
+        if tracked_orders.is_empty() {
+            return Ok(0);
+        }
+
+        let fills = self
+            .live_execution
+            .reconcile_fills(&tracked_orders)
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+
+        let mut recorded = 0;
+        for fill in fills {
+            let Some(deployment_id) = order_deployments.get(&fill.order_id) else {
+                continue;
+            };
+            let Some(runtime) = self.trading.get_mut(deployment_id) else {
+                continue;
+            };
+            if runtime.record_fill(fill) {
+                recorded += 1;
+            }
+        }
+
+        Ok(recorded)
     }
 
     #[cfg(test)]
@@ -846,5 +910,150 @@ mod tests {
             trading_state[0].orders[0].rejection_reason.as_deref(),
             Some("market closed")
         );
+    }
+
+    #[test]
+    fn daemon_reconciles_live_fill_into_canonical_ledger() {
+        let root = temp_dir("live-fill-reconcile");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let fill = FillRecord {
+            fill_id: "fill-live-1".to_string(),
+            order_id: "order-intent-live-3".to_string(),
+            token_id: "yes-token".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(3),
+            price: dec!(0.44),
+            fee: dec!(0.02),
+            timestamp: chrono::Utc::now(),
+        };
+
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(
+                StaticExecutionGateway::acknowledged("venue-live-3")
+                    .with_reconciled_fills(vec![fill]),
+            ),
+        )
+        .expect("boot");
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-3".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(3),
+                limit_price: Some(dec!(0.44)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit live intent");
+
+        let reconciled = daemon.reconcile_live_fills().expect("reconcile fills");
+        assert_eq!(reconciled, 1);
+
+        let trading_state = daemon.trading_state();
+        assert_eq!(trading_state[0].fills.len(), 1);
+        assert_eq!(trading_state[0].orders[0].state, "filled");
+        assert_eq!(trading_state[0].positions[0].net_qty, dec!(3));
+    }
+
+    #[test]
+    fn daemon_reconcile_is_idempotent_for_duplicate_fill_ids() {
+        let root = temp_dir("live-fill-idempotent");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let fill = FillRecord {
+            fill_id: "fill-live-dup".to_string(),
+            order_id: "order-intent-live-4".to_string(),
+            token_id: "yes-token".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(1),
+            price: dec!(0.41),
+            fee: dec!(0.01),
+            timestamp: chrono::Utc::now(),
+        };
+
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(
+                StaticExecutionGateway::acknowledged("venue-live-4")
+                    .with_reconciled_fills(vec![fill]),
+            ),
+        )
+        .expect("boot");
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-4".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                limit_price: Some(dec!(0.41)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit live intent");
+
+        assert_eq!(daemon.reconcile_live_fills().expect("reconcile fills"), 1);
+        assert_eq!(daemon.reconcile_live_fills().expect("reconcile fills"), 0);
+
+        let trading_state = daemon.trading_state();
+        assert_eq!(trading_state[0].fills.len(), 1);
+        assert_eq!(trading_state[0].orders[0].filled_qty, dec!(1));
     }
 }

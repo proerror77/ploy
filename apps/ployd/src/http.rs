@@ -6,16 +6,18 @@ use ploy_operator_contracts::{
     TradingSnapshotEvent,
 };
 use ploy_trading::{TradeSide, TradingIntent};
-use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 #[cfg(test)]
 use crate::config::PlatformConfig;
+#[cfg(test)]
+use std::fs;
+#[cfg(test)]
+use std::path::Path;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -30,6 +32,7 @@ pub fn render_status(status: &SystemStatus) -> String {
     )
 }
 
+#[cfg(test)]
 pub fn route_request(path: &str, runtime_root: &Path) -> (u16, String) {
     let target = match path {
         "/health" | "/api/system/status" => runtime_root.join("system-status.json"),
@@ -225,16 +228,30 @@ fn handle_runtime_request(
     body: Option<&str>,
     state: &Arc<AppState>,
 ) -> (u16, String) {
-    let runtime_root = match state.daemon.lock() {
-        Ok(daemon) => daemon.config.runtime_root.clone(),
-        Err(_) => return (500, "{\"error\":\"daemon_lock_poisoned\"}".to_string()),
-    };
-
     match (method, path) {
-        ("GET", "/health")
-        | ("GET", "/api/system/status")
-        | ("GET", "/api/deployments")
-        | ("GET", "/api/trading/state") => route_request(path, &runtime_root),
+        ("GET", "/health") | ("GET", "/api/system/status") => match state.daemon.lock() {
+            Ok(daemon) => (
+                200,
+                serde_json::to_string(&daemon.control_plane.system.status())
+                    .unwrap_or_else(|_| "{}".to_string()),
+            ),
+            Err(_) => (500, "{\"error\":\"daemon_lock_poisoned\"}".to_string()),
+        },
+        ("GET", "/api/deployments") => match state.daemon.lock() {
+            Ok(daemon) => (
+                200,
+                serde_json::to_string(&daemon.control_plane.deployments.summaries())
+                    .unwrap_or_else(|_| "[]".to_string()),
+            ),
+            Err(_) => (500, "{\"error\":\"daemon_lock_poisoned\"}".to_string()),
+        },
+        ("GET", "/api/trading/state") => match state.daemon.lock() {
+            Ok(daemon) => (
+                200,
+                serde_json::to_string(&daemon.trading_state()).unwrap_or_else(|_| "[]".to_string()),
+            ),
+            Err(_) => (500, "{\"error\":\"daemon_lock_poisoned\"}".to_string()),
+        },
         ("GET", _) if path.starts_with("/api/deployments/") && !path.ends_with("/control") => {
             let deployment_id = path.trim_start_matches("/api/deployments/");
             match state
@@ -444,6 +461,7 @@ mod tests {
     use crate::events::EventBroker;
     use ploy_connectivity::StaticExecutionGateway;
     use ploy_operator_contracts::PaperIntentRequest;
+    use ploy_trading::{IntentPurpose as TradingIntentPurpose, TradeSide, TradingIntent};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -725,5 +743,65 @@ mod tests {
             fs::read_to_string(runtime_root.join("trading-state.json")).expect("trading snapshot");
         assert!(trading_body.contains("\"deployment_id\": \"example.live\""));
         assert!(trading_body.contains("\"venue_order_id\": \"venue-live-http-1\""));
+    }
+
+    #[test]
+    fn handle_runtime_request_reads_trading_state_from_shared_daemon() {
+        let root = temp_dir("runtime-live-read");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "running"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("registry");
+
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root,
+            status_file: root.join("run/platform/system-status.json"),
+            deployment_status_file: root.join("run/platform/deployments.json"),
+            trading_state_file: root.join("run/platform/trading-state.json"),
+            ..crate::config::PlatformConfig::default()
+        };
+
+        let mut daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("venue-live-http-2")),
+        )
+        .expect("boot daemon");
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-http-2".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "token-1".to_string(),
+                side: TradeSide::Buy,
+                quantity: rust_decimal::Decimal::ONE,
+                limit_price: Some(rust_decimal::Decimal::ONE),
+                purpose: TradingIntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit intent");
+
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (status_code, body) = handle_runtime_request("GET", "/api/trading/state", None, &state);
+        assert_eq!(status_code, 200);
+        assert!(body.contains("\"deployment_id\":\"example.live\""));
+        assert!(body.contains("\"venue_order_id\":\"venue-live-http-2\""));
     }
 }

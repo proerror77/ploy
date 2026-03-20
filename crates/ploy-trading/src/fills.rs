@@ -21,9 +21,16 @@ pub struct FillLedger {
 }
 
 impl FillLedger {
-    pub fn record(&mut self, fill: FillRecord) -> &FillRecord {
+    pub fn contains(&self, fill_id: &str) -> bool {
+        self.fills.iter().any(|fill| fill.fill_id == fill_id)
+    }
+
+    pub fn record(&mut self, fill: FillRecord) -> Option<&FillRecord> {
+        if self.contains(&fill.fill_id) {
+            return None;
+        }
         self.fills.push(fill);
-        self.fills.last().expect("fill recorded")
+        self.fills.last()
     }
 
     pub fn all(&self) -> &[FillRecord] {

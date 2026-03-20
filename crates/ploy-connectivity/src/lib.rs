@@ -1,5 +1,7 @@
-use ploy_trading::TradeSide;
+use ploy_trading::{FillRecord, TradeSide};
 use polymarket_client_sdk::auth::{LocalSigner, Signer};
+use polymarket_client_sdk::clob::types::request::TradesRequest;
+use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
 use polymarket_client_sdk::clob::types::{OrderType, Side, SignatureType};
 use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::types::{Address, U256};
@@ -20,6 +22,13 @@ pub struct ExecutionRequest {
     pub limit_price: Option<Decimal>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackedOrder {
+    pub order_id: String,
+    pub venue_order_id: String,
+    pub token_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutionOutcome {
     Acknowledged { venue_order_id: String },
@@ -38,11 +47,17 @@ pub enum ExecutionError {
 
 pub trait LiveExecutionGateway: Send + Sync + std::fmt::Debug {
     fn submit(&self, request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError>;
+
+    fn reconcile_fills(
+        &self,
+        tracked_orders: &[TrackedOrder],
+    ) -> Result<Vec<FillRecord>, ExecutionError>;
 }
 
 #[derive(Debug, Clone)]
 pub struct StaticExecutionGateway {
     result: Result<ExecutionOutcome, ExecutionError>,
+    reconciled_fills: Vec<FillRecord>,
 }
 
 impl StaticExecutionGateway {
@@ -51,6 +66,7 @@ impl StaticExecutionGateway {
             result: Ok(ExecutionOutcome::Acknowledged {
                 venue_order_id: venue_order_id.into(),
             }),
+            reconciled_fills: Vec::new(),
         }
     }
 
@@ -59,17 +75,33 @@ impl StaticExecutionGateway {
             result: Ok(ExecutionOutcome::Rejected {
                 reason: reason.into(),
             }),
+            reconciled_fills: Vec::new(),
         }
     }
 
     pub fn failed(error: ExecutionError) -> Self {
-        Self { result: Err(error) }
+        Self {
+            result: Err(error),
+            reconciled_fills: Vec::new(),
+        }
+    }
+
+    pub fn with_reconciled_fills(mut self, fills: Vec<FillRecord>) -> Self {
+        self.reconciled_fills = fills;
+        self
     }
 }
 
 impl LiveExecutionGateway for StaticExecutionGateway {
     fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
         self.result.clone()
+    }
+
+    fn reconcile_fills(
+        &self,
+        _tracked_orders: &[TrackedOrder],
+    ) -> Result<Vec<FillRecord>, ExecutionError> {
+        Ok(self.reconciled_fills.clone())
     }
 }
 
@@ -255,6 +287,88 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
             }
         })
     }
+
+    fn reconcile_fills(
+        &self,
+        tracked_orders: &[TrackedOrder],
+    ) -> Result<Vec<FillRecord>, ExecutionError> {
+        if tracked_orders.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let private_key = self.config.private_key.as_deref().ok_or_else(|| {
+            ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
+        })?;
+        let funder = self
+            .config
+            .funder
+            .as_deref()
+            .map(Address::from_str)
+            .transpose()
+            .map_err(|err| ExecutionError::Configuration(format!("invalid POLY_FUNDER: {err}")))?;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| ExecutionError::Transport(format!("create tokio runtime: {err}")))?;
+
+        runtime.block_on(async {
+            let signer = LocalSigner::from_str(private_key)
+                .map_err(|err| {
+                    ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
+                })?
+                .with_chain_id(Some(POLYGON));
+
+            let client = Client::new(
+                &self.config.host,
+                Config::builder()
+                    .use_server_time(self.config.use_server_time)
+                    .build(),
+            )
+            .map_err(|err| ExecutionError::Transport(format!("build client: {err}")))?;
+
+            let mut auth = client.authentication_builder(&signer);
+            auth = auth.signature_type(self.config.signature_type.into_sdk());
+            if let Some(funder) = funder {
+                auth = auth.funder(funder);
+            }
+
+            let client = auth
+                .authenticate()
+                .await
+                .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))?;
+
+            let mut fills = Vec::new();
+            for tracked_order in tracked_orders {
+                let asset_id = U256::from_str(&tracked_order.token_id).map_err(|err| {
+                    ExecutionError::Validation(format!(
+                        "invalid token_id `{}`: {err}",
+                        tracked_order.token_id
+                    ))
+                })?;
+                let request = TradesRequest::builder().asset_id(asset_id).build();
+                let mut next_cursor = None;
+                loop {
+                    let page = client
+                        .trades(&request, next_cursor.clone())
+                        .await
+                        .map_err(|err| ExecutionError::Transport(format!("load trades: {err}")))?;
+                    for trade in &page.data {
+                        if let Some(fill) = tracked_trade_fill(tracked_order, trade) {
+                            fills.push(fill);
+                        }
+                    }
+
+                    if page.next_cursor.is_empty() {
+                        break;
+                    }
+                    next_cursor = Some(page.next_cursor);
+                }
+            }
+
+            Ok(fills)
+        })
+    }
 }
 
 fn polymarket_side(side: TradeSide) -> Side {
@@ -262,6 +376,60 @@ fn polymarket_side(side: TradeSide) -> Side {
         TradeSide::Buy => Side::Buy,
         TradeSide::Sell => Side::Sell,
     }
+}
+
+fn tracked_trade_fill(tracked_order: &TrackedOrder, trade: &TradeResponse) -> Option<FillRecord> {
+    if trade.taker_order_id == tracked_order.venue_order_id {
+        return Some(FillRecord {
+            fill_id: trade.id.clone(),
+            order_id: tracked_order.order_id.clone(),
+            token_id: tracked_order.token_id.clone(),
+            side: trade_side(trade.side.clone()),
+            quantity: trade.size,
+            price: trade.price,
+            fee: fee_from_bps(trade.size, trade.price, trade.fee_rate_bps),
+            timestamp: trade.match_time,
+        });
+    }
+
+    trade
+        .maker_orders
+        .iter()
+        .find(|maker_order| maker_order.order_id == tracked_order.venue_order_id)
+        .map(|maker_order| tracked_maker_fill(tracked_order, trade, maker_order))
+}
+
+fn tracked_maker_fill(
+    tracked_order: &TrackedOrder,
+    trade: &TradeResponse,
+    maker_order: &MakerOrder,
+) -> FillRecord {
+    FillRecord {
+        fill_id: trade.id.clone(),
+        order_id: tracked_order.order_id.clone(),
+        token_id: tracked_order.token_id.clone(),
+        side: trade_side(maker_order.side.clone()),
+        quantity: maker_order.matched_amount,
+        price: maker_order.price,
+        fee: fee_from_bps(
+            maker_order.matched_amount,
+            maker_order.price,
+            maker_order.fee_rate_bps,
+        ),
+        timestamp: trade.match_time,
+    }
+}
+
+fn trade_side(side: Side) -> TradeSide {
+    match side {
+        Side::Buy => TradeSide::Buy,
+        Side::Sell => TradeSide::Sell,
+        _ => TradeSide::Buy,
+    }
+}
+
+fn fee_from_bps(quantity: Decimal, price: Decimal, fee_rate_bps: Decimal) -> Decimal {
+    quantity * price * fee_rate_bps / Decimal::from(10_000_u64)
 }
 
 pub fn crate_marker() -> &'static str {
@@ -273,9 +441,10 @@ mod tests {
     use super::{
         ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
         PolymarketExecutionConfig, PolymarketExecutionGateway, StaticExecutionGateway,
-        WalletSignatureType,
+        TrackedOrder, WalletSignatureType,
     };
-    use ploy_trading::TradeSide;
+    use chrono::Utc;
+    use ploy_trading::{FillRecord, TradeSide};
     use rust_decimal_macros::dec;
 
     #[test]
@@ -325,5 +494,31 @@ mod tests {
                 "live Polymarket execution currently requires a limit price".to_string()
             )
         );
+    }
+
+    #[test]
+    fn static_gateway_replays_reconciled_fills() {
+        let fill = FillRecord {
+            fill_id: "fill-1".to_string(),
+            order_id: "order-1".to_string(),
+            token_id: "1".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(2),
+            price: dec!(0.55),
+            fee: dec!(0.01),
+            timestamp: Utc::now(),
+        };
+        let gateway = StaticExecutionGateway::acknowledged("venue-order-1")
+            .with_reconciled_fills(vec![fill.clone()]);
+
+        let fills = gateway
+            .reconcile_fills(&[TrackedOrder {
+                order_id: "order-1".to_string(),
+                venue_order_id: "venue-order-1".to_string(),
+                token_id: "1".to_string(),
+            }])
+            .expect("fills");
+
+        assert_eq!(fills, vec![fill]);
     }
 }

@@ -34,6 +34,7 @@ the canonical trading ledger.
   - `rtk cargo test -p ployd handle_runtime_request_submits_live_intent_via_shared_daemon_state -- --nocapture`
   - `rtk cargo check -p ployd`
   - `rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture`
+- 2026-03-20: Follow-up reconciliation cut now deduplicates fills in `ploy-trading`, teaches `ploy-connectivity` to expose `reconcile_fills`, reconciles live fills inside `ployd` snapshot ticks, and serves `/api/trading/state` from shared daemon state instead of relying only on disk snapshots.
 
 # Trading Platform Completion Sweep (2026-03-20)
 

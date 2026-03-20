@@ -56,10 +56,14 @@ impl TradingRuntime {
         self.orders.cancel(order_id)
     }
 
-    pub fn record_fill(&mut self, fill: FillRecord) {
+    pub fn record_fill(&mut self, fill: FillRecord) -> bool {
+        if self.fills.contains(&fill.fill_id) {
+            return false;
+        }
         self.orders.apply_fill(&fill);
         self.positions.apply_fill(&fill);
         self.fills.record(fill);
+        true
     }
 
     pub fn snapshot(&self, mark_prices: &BTreeMap<String, Decimal>) -> TradingRuntimeSnapshot {
