@@ -293,6 +293,15 @@ impl StrategyFactory {
                 )?;
                 Ok(Box::new(strategy))
             }
+            "weather_market" => {
+                let strategy =
+                    super::weather_market::strategy::WeatherMarketStrategy::from_toml(
+                        strategy_id,
+                        config_content,
+                        dry_run,
+                    )?;
+                Ok(Box::new(strategy))
+            }
             other => Err(anyhow!("Unknown strategy type: {}", other).into()),
         }
     }
@@ -352,6 +361,13 @@ impl StrategyFactory {
                 name: "nba_comeback".to_string(),
                 description: "NBA comeback strategy using ESPN/game-state inputs".to_string(),
                 config_template: "nba_comeback.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "weather_market".to_string(),
+                description:
+                    "Observe-only weather contract strategy using public station and forecast data"
+                        .to_string(),
+                config_template: "weather_market_default.toml".to_string(),
             },
         ]
     }
@@ -494,6 +510,7 @@ mod tests {
         assert!(strategies.iter().any(|s| s.name == "momentum"));
         assert!(strategies.iter().any(|s| s.name == "event_edge"));
         assert!(strategies.iter().any(|s| s.name == "nba_comeback"));
+        assert!(strategies.iter().any(|s| s.name == "weather_market"));
     }
 
     #[test]
@@ -521,6 +538,36 @@ symbols = ["BTCUSDT"]
         assert!(strategy.required_feeds().iter().any(|feed| matches!(
             feed,
             DataFeed::PolymarketEvents { series_ids } if series_ids == &vec!["10684".to_string()]
+        )));
+    }
+
+    #[test]
+    fn test_factory_builds_weather_market_from_toml() {
+        let config = r#"
+[strategy]
+name = "weather_market"
+enabled = true
+
+[weather_market]
+station_id = "KJFK"
+station_name = "JFK"
+contract_date = "2026-03-20"
+latitude = 40.64
+longitude = -73.78
+station_utc_offset_hours = -4
+
+[[weather_market.buckets]]
+label = "70-72F"
+token_id = "token-a"
+min_temp = 70.0
+max_temp = 73.0
+"#;
+
+        let strategy = StrategyFactory::from_toml(config, true).expect("strategy");
+        assert_eq!(strategy.name(), "weather_market");
+        assert!(strategy.required_feeds().iter().any(|feed| matches!(
+            feed,
+            DataFeed::Tick { interval_ms } if *interval_ms == 300_000
         )));
     }
 
