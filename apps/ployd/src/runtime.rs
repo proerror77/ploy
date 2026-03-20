@@ -7,9 +7,10 @@ use ploy_connectivity::{
 };
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{
-    DeploymentApplyRequest, DesiredState, FillSnapshot, IntentPurpose, ObservedState,
-    OrderControlResponse, OrderSnapshot, PaperIntentResponse, PnlSnapshotResponse,
-    PositionSnapshotResponse, RiskSnapshotResponse, TradingIntentSnapshot, TradingStateSnapshot,
+    DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState, FillSnapshot,
+    IntentPurpose, ObservedState, OrderControlResponse, OrderSnapshot, PaperIntentResponse,
+    PnlSnapshotResponse, PositionSnapshotResponse, RiskSnapshotResponse, TradingIntentSnapshot,
+    TradingStateSnapshot,
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
 use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
@@ -108,6 +109,7 @@ impl PloyDaemon {
             deployment_id: request.deployment_id,
             bundle_id: request.bundle_id,
             runtime_mode: request.runtime_mode,
+            deployment_state: request.deployment_state,
             desired_state: request.desired_state,
             observed_state: observed_state_for_desired(request.desired_state),
         };
@@ -122,28 +124,44 @@ impl PloyDaemon {
             .expect("deployment persisted"))
     }
 
-    pub fn set_desired_state(
+    pub fn control_deployment(
         &mut self,
         deployment_id: &str,
-        desired_state: DesiredState,
+        request: DeploymentControlRequest,
     ) -> io::Result<Option<DeploymentRecord>> {
-        let Some(record) = self.control_plane.deployments.get(deployment_id).cloned() else {
+        let Some(existing) = self.control_plane.deployments.get(deployment_id).cloned() else {
             return Ok(None);
         };
 
-        self.control_plane
-            .deployments
-            .set_desired_state(deployment_id, desired_state);
-        self.control_plane
-            .deployments
-            .set_observed_state(deployment_id, observed_state_for_desired(desired_state));
+        if let Some(deployment_state) = request.deployment_state {
+            self.control_plane
+                .deployments
+                .set_deployment_state(deployment_id, deployment_state);
+        }
+        if let Some(desired_state) = request.desired_state {
+            self.control_plane
+                .deployments
+                .set_desired_state(deployment_id, desired_state);
+            self.control_plane
+                .deployments
+                .set_observed_state(deployment_id, observed_state_for_desired(desired_state));
+        }
+
+        if request.deployment_state.is_none() && request.desired_state.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("deployment `{deployment_id}` control request was empty"),
+            ));
+        }
+
         self.persist_registry()?;
         self.write_runtime_snapshots()?;
         Ok(self
             .control_plane
             .deployments
-            .get(&record.deployment_id)
-            .cloned())
+            .get(deployment_id)
+            .cloned()
+            .or(Some(existing)))
     }
 
     pub fn submit_intent(&mut self, intent: TradingIntent) -> io::Result<PaperIntentResponse> {
@@ -153,6 +171,27 @@ impl PloyDaemon {
             .get(&intent.deployment_id)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "deployment not found"))?;
+
+        if deployment.deployment_state == DeploymentState::Disabled
+            || deployment.deployment_state == DeploymentState::Archived
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "deployment is {} and cannot accept intents",
+                    deployment_state_wire(deployment.deployment_state)
+                ),
+            ));
+        }
+
+        if deployment.deployment_state == DeploymentState::Draining
+            && !intent_allowed_while_draining(intent.purpose)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "deployment is draining and only exit/reduce/hedge/cancel intents are allowed",
+            ));
+        }
 
         if deployment.desired_state != DesiredState::Running {
             return Err(io::Error::new(
@@ -329,7 +368,8 @@ impl PloyDaemon {
         let mut order_deployments = BTreeMap::new();
 
         for record in self.control_plane.deployments.records() {
-            if record.runtime_mode != "live" || record.desired_state != DesiredState::Running {
+            if record.runtime_mode != "live" || record.deployment_state == DeploymentState::Archived
+            {
                 continue;
             }
 
@@ -732,6 +772,19 @@ fn intent_purpose_from_contract(purpose: IntentPurpose) -> ploy_trading::IntentP
         IntentPurpose::Hedge => ploy_trading::IntentPurpose::Hedge,
         IntentPurpose::Cancel => ploy_trading::IntentPurpose::Cancel,
     }
+}
+
+fn deployment_state_wire(state: DeploymentState) -> &'static str {
+    match state {
+        DeploymentState::Enabled => "enabled",
+        DeploymentState::Draining => "draining",
+        DeploymentState::Disabled => "disabled",
+        DeploymentState::Archived => "archived",
+    }
+}
+
+fn intent_allowed_while_draining(purpose: ploy_trading::IntentPurpose) -> bool {
+    !matches!(purpose, ploy_trading::IntentPurpose::Entry)
 }
 
 fn observed_state_for_desired(desired_state: DesiredState) -> ObservedState {

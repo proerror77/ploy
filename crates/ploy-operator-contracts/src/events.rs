@@ -63,7 +63,8 @@ mod tests {
         TradingSnapshotEvent,
     };
     use crate::{
-        DeploymentSummary, DesiredState, ObservedState, SystemStatus, TradingStateSnapshot,
+        DeploymentState, DeploymentSummary, DesiredState, ObservedState, SystemStatus,
+        TradingStateSnapshot,
     };
     use serde_json::json;
 
@@ -91,6 +92,7 @@ mod tests {
             serde_json::to_value(OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
                 deployments: vec![DeploymentSummary {
                     deployment_id: "example.paper".to_string(),
+                    deployment_state: DeploymentState::Enabled,
                     desired_state: DesiredState::Running,
                     observed_state: ObservedState::Running,
                 }],
@@ -104,6 +106,7 @@ mod tests {
                 "data": {
                     "deployments": [{
                         "deployment_id": "example.paper",
+                        "deployment_state": "enabled",
                         "desired_state": "running",
                         "observed_state": "running",
                     }]

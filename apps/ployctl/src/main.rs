@@ -12,6 +12,10 @@ enum Command {
     DeploymentsPause(String),
     DeploymentsResume(String),
     DeploymentsStop(String),
+    DeploymentsDrain(String),
+    DeploymentsEnable(String),
+    DeploymentsDisable(String),
+    DeploymentsArchive(String),
 }
 
 impl Command {
@@ -64,7 +68,27 @@ impl Command {
             {
                 Ok(Self::DeploymentsStop(deployment_id.clone()))
             }
-            _ => Err("usage: ployctl system status | ployctl trading status | ployctl trading inspect <deployment-id> | ployctl trading cancel <deployment-id> <order-id> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id>".to_string()),
+            [_bin, deployments, drain, deployment_id]
+                if deployments == "deployments" && drain == "drain" =>
+            {
+                Ok(Self::DeploymentsDrain(deployment_id.clone()))
+            }
+            [_bin, deployments, enable, deployment_id]
+                if deployments == "deployments" && enable == "enable" =>
+            {
+                Ok(Self::DeploymentsEnable(deployment_id.clone()))
+            }
+            [_bin, deployments, disable, deployment_id]
+                if deployments == "deployments" && disable == "disable" =>
+            {
+                Ok(Self::DeploymentsDisable(deployment_id.clone()))
+            }
+            [_bin, deployments, archive, deployment_id]
+                if deployments == "deployments" && archive == "archive" =>
+            {
+                Ok(Self::DeploymentsArchive(deployment_id.clone()))
+            }
+            _ => Err("usage: ployctl system status | ployctl trading status | ployctl trading inspect <deployment-id> | ployctl trading cancel <deployment-id> <order-id> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id> | ployctl deployments drain <deployment-id> | ployctl deployments enable <deployment-id> | ployctl deployments disable <deployment-id> | ployctl deployments archive <deployment-id>".to_string()),
         }
     }
 }
@@ -114,6 +138,26 @@ fn execute(command: Command, client: &ControlPlaneClient) -> Result<String, Stri
             client,
             &deployment_id,
             ploy_operator_contracts::DesiredState::Stopped,
+        ),
+        Command::DeploymentsDrain(deployment_id) => deployments::set_lifecycle_state(
+            client,
+            &deployment_id,
+            ploy_operator_contracts::DeploymentState::Draining,
+        ),
+        Command::DeploymentsEnable(deployment_id) => deployments::set_lifecycle_state(
+            client,
+            &deployment_id,
+            ploy_operator_contracts::DeploymentState::Enabled,
+        ),
+        Command::DeploymentsDisable(deployment_id) => deployments::set_lifecycle_state(
+            client,
+            &deployment_id,
+            ploy_operator_contracts::DeploymentState::Disabled,
+        ),
+        Command::DeploymentsArchive(deployment_id) => deployments::set_lifecycle_state(
+            client,
+            &deployment_id,
+            ploy_operator_contracts::DeploymentState::Archived,
         ),
     }
 }
@@ -204,6 +248,18 @@ mod tests {
         assert_eq!(
             command,
             Command::DeploymentsPause("example.paper".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_deployment_drain_command() {
+        let command = Command::parse(
+            &["ployctl", "deployments", "drain", "example.paper"].map(str::to_string),
+        )
+        .expect("command");
+        assert_eq!(
+            command,
+            Command::DeploymentsDrain("example.paper".to_string())
         );
     }
 

@@ -71,6 +71,7 @@ export type ObservedState =
 
 export interface DeploymentSummary {
   deployment_id: string;
+  deployment_state: DeploymentState;
   desired_state: DesiredState;
   observed_state: ObservedState;
 }
@@ -101,7 +102,8 @@ export interface TradingStateSnapshot {
 }
 
 export interface UpdateDeploymentStateRequest {
-  desired_state: DesiredState;
+  desired_state?: DesiredState;
+  deployment_state?: DeploymentState;
 }
 
 export interface StrategyConfig {

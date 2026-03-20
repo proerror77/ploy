@@ -37,6 +37,8 @@ pub enum ObservedState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentSummary {
     pub deployment_id: String,
+    #[serde(default)]
+    pub deployment_state: DeploymentState,
     pub desired_state: DesiredState,
     pub observed_state: ObservedState,
 }
@@ -46,12 +48,15 @@ pub struct DeploymentApplyRequest {
     pub deployment_id: String,
     pub bundle_id: String,
     pub runtime_mode: String,
+    #[serde(default)]
+    pub deployment_state: DeploymentState,
     pub desired_state: DesiredState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentControlRequest {
-    pub desired_state: DesiredState,
+    pub desired_state: Option<DesiredState>,
+    pub deployment_state: Option<DeploymentState>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +91,7 @@ mod tests {
     fn deployment_summary_uses_stable_wire_keys() {
         let summary = DeploymentSummary {
             deployment_id: "openclaw.default".to_string(),
+            deployment_state: DeploymentState::Enabled,
             desired_state: DesiredState::Running,
             observed_state: ObservedState::Degraded,
         };
@@ -95,6 +101,7 @@ mod tests {
             value,
             json!({
                 "deployment_id": "openclaw.default",
+                "deployment_state": "enabled",
                 "desired_state": "running",
                 "observed_state": "degraded",
             })
@@ -107,6 +114,7 @@ mod tests {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
             runtime_mode: "paper".to_string(),
+            deployment_state: DeploymentState::Enabled,
             desired_state: DesiredState::Running,
         })
         .expect("to_value");
@@ -117,6 +125,7 @@ mod tests {
                 "deployment_id": "example.paper",
                 "bundle_id": "example",
                 "runtime_mode": "paper",
+                "deployment_state": "enabled",
                 "desired_state": "running",
             })
         );
@@ -125,9 +134,13 @@ mod tests {
     #[test]
     fn deployment_control_request_serializes_desired_state() {
         let value = serde_json::to_value(DeploymentControlRequest {
-            desired_state: DesiredState::Paused,
+            desired_state: Some(DesiredState::Paused),
+            deployment_state: Some(DeploymentState::Draining),
         })
         .expect("to_value");
-        assert_eq!(value, json!({ "desired_state": "paused" }));
+        assert_eq!(
+            value,
+            json!({ "desired_state": "paused", "deployment_state": "draining" })
+        );
     }
 }

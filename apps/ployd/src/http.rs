@@ -156,13 +156,17 @@ pub fn handle_api_request(
                 Err(_) => return (400, "{\"error\":\"invalid_json\"}".to_string()),
             };
             match PloyDaemon::boot(config).and_then(|mut daemon| {
-                daemon.set_desired_state(deployment_id, request.desired_state)
+                daemon.control_deployment(deployment_id, request)
             }) {
                 Ok(Some(record)) => (
                     200,
                     serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
                 ),
                 Ok(None) => (404, "{\"error\":\"deployment_not_found\"}".to_string()),
+                Err(err) if err.kind() == io::ErrorKind::InvalidInput => (
+                    400,
+                    format!("{{\"error\":\"invalid_request\",\"message\":\"{}\"}}", err),
+                ),
                 Err(_) => (500, "{\"error\":\"control_failed\"}".to_string()),
             }
         }
@@ -362,7 +366,7 @@ fn handle_runtime_request(
             };
             match state.daemon.lock() {
                 Ok(mut daemon) => match daemon
-                    .set_desired_state(deployment_id, request.desired_state)
+                    .control_deployment(deployment_id, request)
                     .and_then(|record| {
                         daemon.write_runtime_snapshots()?;
                         publish_snapshot_events(&daemon, &state.events);
@@ -377,6 +381,9 @@ fn handle_runtime_request(
                         "deployment_not_found",
                         Some(format!("deployment `{deployment_id}` was not found")),
                     ),
+                    Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+                        json_error(400, "invalid_request", Some(err.to_string()))
+                    }
                     Err(err) => json_error(500, "control_failed", Some(err.to_string())),
                 },
                 Err(_) => json_error(503, "daemon_lock_poisoned", None),
