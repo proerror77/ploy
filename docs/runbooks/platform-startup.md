@@ -44,6 +44,7 @@ ployctl system status
 ployctl trading status
 ployctl deployments list
 ployctl deployments inspect example.paper
+ployctl trading cancel example.live <order-id>
 ploytui
 curl -N http://127.0.0.1:8081/api/events/stream
 ployctl deployments pause example.paper

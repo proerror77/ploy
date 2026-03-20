@@ -95,3 +95,33 @@ fn recording_the_same_fill_twice_is_idempotent() {
     assert_eq!(snapshot.orders[0].filled_qty, dec!(5));
     assert_eq!(snapshot.positions[0].net_qty, dec!(5));
 }
+
+#[test]
+fn canceling_an_active_order_removes_it_from_risk() {
+    let mut runtime = TradingRuntime::default();
+    let intent = sample_intent();
+    runtime.submit_intent(intent, "order-1");
+    runtime.acknowledge_order("order-1", "venue-1");
+
+    let before_cancel = runtime.snapshot(&BTreeMap::new());
+    assert_eq!(before_cancel.risk.pending_intents, 1);
+    assert_eq!(before_cancel.risk.active_orders, 1);
+    assert_eq!(
+        runtime
+            .order("order-1")
+            .expect("order")
+            .venue_order_id
+            .as_deref(),
+        Some("venue-1")
+    );
+
+    runtime.cancel_order("order-1");
+
+    let after_cancel = runtime.snapshot(&BTreeMap::new());
+    assert_eq!(
+        after_cancel.orders[0].state,
+        ploy_trading::OrderState::Canceled
+    );
+    assert_eq!(after_cancel.risk.pending_intents, 0);
+    assert_eq!(after_cancel.risk.active_orders, 0);
+}

@@ -112,6 +112,10 @@ impl OrderLedger {
             .count()
     }
 
+    pub fn order(&self, order_id: &str) -> Option<&OrderRecord> {
+        self.orders.get(order_id)
+    }
+
     pub fn orders(&self) -> impl Iterator<Item = &OrderRecord> {
         self.orders.values()
     }

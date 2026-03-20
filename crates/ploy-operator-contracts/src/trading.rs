@@ -45,6 +45,16 @@ pub struct PaperIntentResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderControlResponse {
+    pub deployment_id: String,
+    pub order_id: String,
+    pub state: String,
+    pub venue_order_id: Option<String>,
+    pub rejection_reason: Option<String>,
+    pub filled_qty: Decimal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrderSnapshot {
     pub order_id: String,
     pub intent_id: String,
@@ -148,10 +158,12 @@ pub struct MarketData {
 #[cfg(test)]
 mod tests {
     use super::{
-        IntentPurpose, OrderSnapshot, PaperIntentRequest, PaperIntentResponse, PnlSnapshotResponse,
-        RiskSnapshotResponse, TradeResponse, TradingIntentSnapshot, TradingStateSnapshot,
+        IntentPurpose, OrderControlResponse, OrderSnapshot, PaperIntentRequest,
+        PaperIntentResponse, PnlSnapshotResponse, RiskSnapshotResponse, TradeResponse,
+        TradingIntentSnapshot, TradingStateSnapshot,
     };
     use chrono::Utc;
+    use rust_decimal::Decimal;
     use serde_json::json;
 
     #[test]
@@ -192,6 +204,31 @@ mod tests {
                 "pnl": 0.95,
                 "status": "COMPLETED",
                 "error_message": null,
+            })
+        );
+    }
+
+    #[test]
+    fn order_control_response_uses_stable_wire_keys() {
+        let value = serde_json::to_value(OrderControlResponse {
+            deployment_id: "example.live".to_string(),
+            order_id: "order-1".to_string(),
+            state: "canceled".to_string(),
+            venue_order_id: Some("venue-1".to_string()),
+            rejection_reason: None,
+            filled_qty: Decimal::ZERO,
+        })
+        .expect("to_value");
+
+        assert_eq!(
+            value,
+            json!({
+                "deployment_id": "example.live",
+                "order_id": "order-1",
+                "state": "canceled",
+                "venue_order_id": "venue-1",
+                "rejection_reason": null,
+                "filled_qty": "0",
             })
         );
     }

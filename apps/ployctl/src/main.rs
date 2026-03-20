@@ -5,6 +5,7 @@ enum Command {
     SystemStatus,
     TradingStatus,
     TradingInspect(String),
+    TradingCancel(String, String),
     DeploymentsList,
     DeploymentsInspect(String),
     DeploymentsApply(String),
@@ -26,6 +27,14 @@ impl Command {
                 if trading == "trading" && inspect == "inspect" =>
             {
                 Ok(Self::TradingInspect(deployment_id.clone()))
+            }
+            [_bin, trading, cancel, deployment_id, order_id]
+                if trading == "trading" && cancel == "cancel" =>
+            {
+                Ok(Self::TradingCancel(
+                    deployment_id.clone(),
+                    order_id.clone(),
+                ))
             }
             [_bin, deployments, list] if deployments == "deployments" && list == "list" => {
                 Ok(Self::DeploymentsList)
@@ -55,7 +64,7 @@ impl Command {
             {
                 Ok(Self::DeploymentsStop(deployment_id.clone()))
             }
-            _ => Err("usage: ployctl system status | ployctl trading status | ployctl trading inspect <deployment-id> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id>".to_string()),
+            _ => Err("usage: ployctl system status | ployctl trading status | ployctl trading inspect <deployment-id> | ployctl trading cancel <deployment-id> <order-id> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id>".to_string()),
         }
     }
 }
@@ -80,6 +89,9 @@ fn execute(command: Command, client: &ControlPlaneClient) -> Result<String, Stri
         Command::TradingStatus => trading::render_trading_state(client),
         Command::TradingInspect(deployment_id) => {
             trading::render_one_trading_state(client, &deployment_id)
+        }
+        Command::TradingCancel(deployment_id, order_id) => {
+            trading::cancel_order(client, &deployment_id, &order_id)
         }
         Command::DeploymentsList => deployments::render_deployments(client),
         Command::DeploymentsInspect(deployment_id) => {
@@ -144,6 +156,18 @@ mod tests {
         assert_eq!(
             command,
             Command::TradingInspect("example.paper".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_trading_cancel_command() {
+        let command = Command::parse(
+            &["ployctl", "trading", "cancel", "example.live", "order-1"].map(str::to_string),
+        )
+        .expect("command");
+        assert_eq!(
+            command,
+            Command::TradingCancel("example.live".to_string(), "order-1".to_string())
         );
     }
 

@@ -83,6 +83,7 @@ as the template for remote deployment resources.
 ```bash
 /opt/ploy/bin/ployctl deployments apply /opt/ploy/config/deployments/example.paper.json
 /opt/ploy/bin/ployctl deployments inspect example.paper
+/opt/ploy/bin/ployctl trading cancel example.live <order-id>
 /opt/ploy/bin/ployctl deployments pause example.paper
 /opt/ploy/bin/ployctl deployments resume example.paper
 /opt/ploy/bin/ployctl deployments stop example.paper
