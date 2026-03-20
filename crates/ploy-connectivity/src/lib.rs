@@ -658,41 +658,44 @@ mod tests {
 
     #[test]
     fn tracked_fill_ids_are_scoped_by_tracked_order() {
-        let trade = TradeResponse {
-            id: "trade-1".to_string(),
-            taker_order_id: "venue-order-a".to_string(),
-            market: B256::ZERO,
-            asset_id: U256::from(1_u64),
-            side: polymarket_client_sdk::clob::types::Side::Buy,
-            size: dec!(2),
-            fee_rate_bps: dec!(5),
-            price: dec!(0.55),
-            status: TradeStatusType::Matched,
-            match_time: Utc::now(),
-            last_update: Utc::now(),
-            outcome: "YES".to_string(),
-            bucket_index: 0,
-            owner: ApiKey::nil(),
-            maker_address: Address::from_str("0x0000000000000000000000000000000000000001")
-                .expect("maker address"),
-            maker_orders: vec![MakerOrder {
-                order_id: "venue-order-b".to_string(),
-                owner: ApiKey::nil(),
-                maker_address: Address::from_str(
-                    "0x0000000000000000000000000000000000000002",
-                )
-                .expect("second maker address"),
-                matched_amount: dec!(2),
-                price: dec!(0.56),
-                fee_rate_bps: dec!(4),
-                asset_id: U256::from(1_u64),
-                outcome: "YES".to_string(),
-                side: polymarket_client_sdk::clob::types::Side::Sell,
-            }],
-            transaction_hash: B256::ZERO,
-            trader_side: TraderSide::Taker,
-            error_msg: None,
-        };
+        let trade = TradeResponse::builder()
+            .id("trade-1")
+            .taker_order_id("venue-order-a")
+            .market(B256::ZERO)
+            .asset_id(U256::from(1_u64))
+            .side(polymarket_client_sdk::clob::types::Side::Buy)
+            .size(dec!(2))
+            .fee_rate_bps(dec!(5))
+            .price(dec!(0.55))
+            .status(TradeStatusType::Matched)
+            .match_time(Utc::now())
+            .last_update(Utc::now())
+            .outcome("YES")
+            .bucket_index(0)
+            .owner(ApiKey::nil())
+            .maker_address(
+                Address::from_str("0x0000000000000000000000000000000000000001")
+                    .expect("maker address"),
+            )
+            .maker_orders(vec![
+                MakerOrder::builder()
+                    .order_id("venue-order-b")
+                    .owner(ApiKey::nil())
+                    .maker_address(
+                        Address::from_str("0x0000000000000000000000000000000000000002")
+                            .expect("second maker address"),
+                    )
+                    .matched_amount(dec!(2))
+                    .price(dec!(0.56))
+                    .fee_rate_bps(dec!(4))
+                    .asset_id(U256::from(1_u64))
+                    .outcome("YES")
+                    .side(polymarket_client_sdk::clob::types::Side::Sell)
+                    .build(),
+            ])
+            .transaction_hash(B256::ZERO)
+            .trader_side(TraderSide::Taker)
+            .build();
 
         let taker_fill = tracked_trade_fill(
             &TrackedOrder {
