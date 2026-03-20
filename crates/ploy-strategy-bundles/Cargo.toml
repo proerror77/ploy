@@ -1,0 +1,10 @@
+[package]
+name = "ploy-strategy-bundles"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ploy strategy bundle runtime crate"
+
+[dependencies]

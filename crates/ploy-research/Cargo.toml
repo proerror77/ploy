@@ -1,0 +1,10 @@
+[package]
+name = "ploy-research"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ploy research and backtesting crate"
+
+[dependencies]

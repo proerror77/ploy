@@ -1,3 +1,5 @@
+// Temporary compatibility entrypoint while the dedicated `ployd` and `ployctl`
+// app crates take over runtime ownership.
 #![allow(
     async_fn_in_trait,
     dead_code,
@@ -63,6 +65,7 @@ mod main_runtime;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = ploy::workspace::crate_markers();
     let cli = Cli::parse();
     main_dispatch::run(&cli).await
 }

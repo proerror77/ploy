@@ -1,3 +1,5 @@
+// Temporary compatibility facade while the new workspace crates become the
+// canonical platform boundaries.
 #![allow(
     async_fn_in_trait,
     dead_code,
@@ -84,6 +86,38 @@ pub mod validation;
 // Reinforcement Learning module (optional, enabled with "rl" feature)
 #[cfg(feature = "rl")]
 pub mod rl;
+
+pub use ploy_connectivity as connectivity_core;
+pub use ploy_deployments as deployment_runtime_core;
+pub use ploy_operator_contracts as operator_contracts_core;
+pub use ploy_platform as platform_core;
+pub use ploy_research as research_core;
+pub use ploy_strategy_bundles as strategy_bundle_core;
+pub use ploy_trading as trading_core;
+
+pub mod workspace {
+    pub use ploy_connectivity as connectivity;
+    pub use ploy_deployments as deployments;
+    pub use ploy_operator_contracts as operator_contracts;
+    pub use ploy_platform as platform;
+    pub use ploy_research as research;
+    pub use ploy_strategy_bundles as strategy_bundles;
+    pub use ploy_trading as trading;
+
+    pub const CRATE_MARKERS: &[&str] = &[
+        ploy_platform::CRATE_MARKER,
+        ploy_trading::CRATE_MARKER,
+        ploy_connectivity::CRATE_MARKER,
+        ploy_deployments::CRATE_MARKER,
+        ploy_operator_contracts::CRATE_MARKER,
+        ploy_strategy_bundles::CRATE_MARKER,
+        ploy_research::CRATE_MARKER,
+    ];
+
+    pub fn crate_markers() -> &'static [&'static str] {
+        CRATE_MARKERS
+    }
+}
 
 pub use agent_runtime::{AgentRiskParams, AgentStatus};
 pub use ai_clients::{AdvisoryAgent, AutonomousAgent, AutonomousConfig, ClaudeAgentClient};
