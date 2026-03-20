@@ -36,6 +36,16 @@ pub struct CancellationRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ReplaceRequest {
+    pub order_id: String,
+    pub venue_order_id: String,
+    pub token_id: String,
+    pub side: TradeSide,
+    pub quantity: Decimal,
+    pub limit_price: Option<Decimal>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ExecutionOutcome {
     Acknowledged { venue_order_id: String },
     Rejected { reason: String },
@@ -44,6 +54,12 @@ pub enum ExecutionOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CancellationOutcome {
     Canceled,
+    Rejected { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReplaceOutcome {
+    Replaced { venue_order_id: String },
     Rejected { reason: String },
 }
 
@@ -62,6 +78,8 @@ pub trait LiveExecutionGateway: Send + Sync + std::fmt::Debug {
 
     fn cancel(&self, request: &CancellationRequest) -> Result<CancellationOutcome, ExecutionError>;
 
+    fn replace(&self, request: &ReplaceRequest) -> Result<ReplaceOutcome, ExecutionError>;
+
     fn reconcile_fills(
         &self,
         tracked_orders: &[TrackedOrder],
@@ -72,34 +90,42 @@ pub trait LiveExecutionGateway: Send + Sync + std::fmt::Debug {
 pub struct StaticExecutionGateway {
     result: Result<ExecutionOutcome, ExecutionError>,
     cancel_result: Result<CancellationOutcome, ExecutionError>,
+    replace_result: Result<ReplaceOutcome, ExecutionError>,
     reconcile_result: Result<Vec<FillRecord>, ExecutionError>,
 }
 
 impl StaticExecutionGateway {
     pub fn acknowledged(venue_order_id: impl Into<String>) -> Self {
+        let venue_order_id = venue_order_id.into();
         Self {
             result: Ok(ExecutionOutcome::Acknowledged {
-                venue_order_id: venue_order_id.into(),
+                venue_order_id: venue_order_id.clone(),
             }),
             cancel_result: Ok(CancellationOutcome::Canceled),
+            replace_result: Ok(ReplaceOutcome::Replaced {
+                venue_order_id: format!("{venue_order_id}-replaced"),
+            }),
             reconcile_result: Ok(Vec::new()),
         }
     }
 
     pub fn rejected(reason: impl Into<String>) -> Self {
+        let reason = reason.into();
         Self {
             result: Ok(ExecutionOutcome::Rejected {
-                reason: reason.into(),
+                reason: reason.clone(),
             }),
             cancel_result: Ok(CancellationOutcome::Canceled),
+            replace_result: Ok(ReplaceOutcome::Rejected { reason }),
             reconcile_result: Ok(Vec::new()),
         }
     }
 
     pub fn failed(error: ExecutionError) -> Self {
         Self {
-            result: Err(error),
+            result: Err(error.clone()),
             cancel_result: Ok(CancellationOutcome::Canceled),
+            replace_result: Err(error),
             reconcile_result: Ok(Vec::new()),
         }
     }
@@ -109,6 +135,11 @@ impl StaticExecutionGateway {
         result: Result<CancellationOutcome, ExecutionError>,
     ) -> Self {
         self.cancel_result = result;
+        self
+    }
+
+    pub fn with_replace_result(mut self, result: Result<ReplaceOutcome, ExecutionError>) -> Self {
+        self.replace_result = result;
         self
     }
 
@@ -143,6 +174,10 @@ impl LiveExecutionGateway for StaticExecutionGateway {
         _tracked_orders: &[TrackedOrder],
     ) -> Result<Vec<FillRecord>, ExecutionError> {
         self.reconcile_result.clone()
+    }
+
+    fn replace(&self, _request: &ReplaceRequest) -> Result<ReplaceOutcome, ExecutionError> {
+        self.replace_result.clone()
     }
 }
 
@@ -479,6 +514,31 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
             }
         })
     }
+
+    fn replace(&self, request: &ReplaceRequest) -> Result<ReplaceOutcome, ExecutionError> {
+        match self.cancel(&CancellationRequest {
+            order_id: request.order_id.clone(),
+            venue_order_id: request.venue_order_id.clone(),
+        })? {
+            CancellationOutcome::Canceled => {}
+            CancellationOutcome::Rejected { reason } => {
+                return Ok(ReplaceOutcome::Rejected { reason });
+            }
+        }
+
+        match self.submit(&ExecutionRequest {
+            order_id: request.order_id.clone(),
+            token_id: request.token_id.clone(),
+            side: request.side,
+            quantity: request.quantity,
+            limit_price: request.limit_price,
+        })? {
+            ExecutionOutcome::Acknowledged { venue_order_id } => {
+                Ok(ReplaceOutcome::Replaced { venue_order_id })
+            }
+            ExecutionOutcome::Rejected { reason } => Ok(ReplaceOutcome::Rejected { reason }),
+        }
+    }
 }
 
 fn polymarket_side(side: TradeSide) -> Side {
@@ -555,14 +615,15 @@ mod tests {
     use super::{
         tracked_trade_fill, CancellationOutcome, CancellationRequest, ExecutionError,
         ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, PolymarketExecutionConfig,
-        PolymarketExecutionGateway, StaticExecutionGateway, TrackedOrder, WalletSignatureType,
+        PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
+        TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
-    use polymarket_client_sdk::auth::ApiKey;
-    use polymarket_client_sdk::clob::types::{TradeStatusType, TraderSide};
-    use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
-    use polymarket_client_sdk::types::{Address, B256, U256};
     use ploy_trading::{FillRecord, TradeSide};
+    use polymarket_client_sdk::auth::ApiKey;
+    use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
+    use polymarket_client_sdk::clob::types::{TradeStatusType, TraderSide};
+    use polymarket_client_sdk::types::{Address, B256, U256};
     use rust_decimal_macros::dec;
     use std::str::FromStr;
 
@@ -665,6 +726,33 @@ mod tests {
     }
 
     #[test]
+    fn static_gateway_replays_replace_outcome() {
+        let gateway = StaticExecutionGateway::acknowledged("venue-order-1").with_replace_result(
+            Ok(ReplaceOutcome::Replaced {
+                venue_order_id: "venue-order-2".to_string(),
+            }),
+        );
+
+        let outcome = gateway
+            .replace(&ReplaceRequest {
+                order_id: "order-1".to_string(),
+                venue_order_id: "venue-order-1".to_string(),
+                token_id: "1".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(2),
+                limit_price: Some(dec!(0.57)),
+            })
+            .expect("replace outcome");
+
+        assert_eq!(
+            outcome,
+            ReplaceOutcome::Replaced {
+                venue_order_id: "venue-order-2".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn tracked_fill_ids_are_scoped_by_tracked_order() {
         let trade = TradeResponse::builder()
             .id("trade-1")
@@ -685,22 +773,20 @@ mod tests {
                 Address::from_str("0x0000000000000000000000000000000000000001")
                     .expect("maker address"),
             )
-            .maker_orders(vec![
-                MakerOrder::builder()
-                    .order_id("venue-order-b")
-                    .owner(ApiKey::nil())
-                    .maker_address(
-                        Address::from_str("0x0000000000000000000000000000000000000002")
-                            .expect("second maker address"),
-                    )
-                    .matched_amount(dec!(2))
-                    .price(dec!(0.56))
-                    .fee_rate_bps(dec!(4))
-                    .asset_id(U256::from(1_u64))
-                    .outcome("YES")
-                    .side(polymarket_client_sdk::clob::types::Side::Sell)
-                    .build(),
-            ])
+            .maker_orders(vec![MakerOrder::builder()
+                .order_id("venue-order-b")
+                .owner(ApiKey::nil())
+                .maker_address(
+                    Address::from_str("0x0000000000000000000000000000000000000002")
+                        .expect("second maker address"),
+                )
+                .matched_amount(dec!(2))
+                .price(dec!(0.56))
+                .fee_rate_bps(dec!(4))
+                .asset_id(U256::from(1_u64))
+                .outcome("YES")
+                .side(polymarket_client_sdk::clob::types::Side::Sell)
+                .build()])
             .transaction_hash(B256::ZERO)
             .trader_side(TraderSide::Taker)
             .build();

@@ -3595,6 +3595,7 @@ version = "0.1.0"
 dependencies = [
  "ploy-operator-contracts",
  "ploy-platform",
+ "rust_decimal",
  "serde",
  "serde_json",
 ]

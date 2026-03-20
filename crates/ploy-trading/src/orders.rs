@@ -24,6 +24,10 @@ pub struct OrderRecord {
     pub requested_qty: Decimal,
     pub limit_price: Option<Decimal>,
     pub venue_order_id: Option<String>,
+    #[serde(default)]
+    pub venue_order_history: Vec<String>,
+    #[serde(default)]
+    pub revision: u32,
     pub state: OrderState,
     pub filled_qty: Decimal,
     pub rejection_reason: Option<String>,
@@ -58,6 +62,8 @@ impl OrderLedger {
             requested_qty: intent.quantity,
             limit_price: intent.limit_price,
             venue_order_id: None,
+            venue_order_history: Vec::new(),
+            revision: 0,
             state: OrderState::Pending,
             filled_qty: Decimal::ZERO,
             rejection_reason: None,
@@ -79,6 +85,36 @@ impl OrderLedger {
         Some(record)
     }
 
+    pub fn replace(
+        &mut self,
+        order_id: &str,
+        requested_qty: Decimal,
+        limit_price: Option<Decimal>,
+        venue_order_id: impl Into<String>,
+    ) -> Option<&OrderRecord> {
+        let record = self.orders.get_mut(order_id)?;
+        let next_venue_order_id = venue_order_id.into();
+        if let Some(current_venue_order_id) =
+            record.venue_order_id.replace(next_venue_order_id.clone())
+        {
+            if current_venue_order_id != next_venue_order_id {
+                record.venue_order_history.push(current_venue_order_id);
+            }
+        }
+        record.requested_qty = requested_qty;
+        record.limit_price = limit_price;
+        record.revision += 1;
+        record.last_error = None;
+        record.state = if record.filled_qty >= record.requested_qty {
+            OrderState::Filled
+        } else if record.filled_qty > Decimal::ZERO {
+            OrderState::PartiallyFilled
+        } else {
+            OrderState::Acknowledged
+        };
+        Some(record)
+    }
+
     pub fn reject(&mut self, order_id: &str, reason: impl Into<String>) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(order_id)?;
         let reason = reason.into();
@@ -88,7 +124,11 @@ impl OrderLedger {
         Some(record)
     }
 
-    pub fn record_error(&mut self, order_id: &str, error: impl Into<String>) -> Option<&OrderRecord> {
+    pub fn record_error(
+        &mut self,
+        order_id: &str,
+        error: impl Into<String>,
+    ) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(order_id)?;
         record.last_error = Some(error.into());
         Some(record)
@@ -130,5 +170,45 @@ impl OrderLedger {
 
     pub fn orders(&self) -> impl Iterator<Item = &OrderRecord> {
         self.orders.values()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OrderLedger, OrderState};
+    use crate::{IntentPurpose, TradeSide, TradingIntent};
+    use chrono::Utc;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn replace_preserves_logical_order_and_tracks_revision_history() {
+        let mut ledger = OrderLedger::default();
+        ledger.insert_from_intent(
+            "order-1",
+            &TradingIntent {
+                intent_id: "intent-1".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "token-1".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(2),
+                limit_price: Some(dec!(0.45)),
+                purpose: IntentPurpose::Entry,
+                created_at: Utc::now(),
+            },
+        );
+        ledger.acknowledge("order-1", "venue-1");
+
+        let order = ledger
+            .replace("order-1", dec!(3), Some(dec!(0.47)), "venue-2")
+            .expect("replace");
+
+        assert_eq!(order.order_id, "order-1");
+        assert_eq!(order.venue_order_id.as_deref(), Some("venue-2"));
+        assert_eq!(order.venue_order_history, vec!["venue-1".to_string()]);
+        assert_eq!(order.revision, 1);
+        assert_eq!(order.requested_qty, dec!(3));
+        assert_eq!(order.limit_price, Some(dec!(0.47)));
+        assert_eq!(order.state, OrderState::Acknowledged);
     }
 }

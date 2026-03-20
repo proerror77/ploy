@@ -6,6 +6,12 @@ enum Command {
     TradingStatus,
     TradingInspect(String),
     TradingCancel(String, String),
+    TradingReplace(
+        String,
+        String,
+        rust_decimal::Decimal,
+        Option<rust_decimal::Decimal>,
+    ),
     DeploymentsList,
     DeploymentsInspect(String),
     DeploymentsApply(String),
@@ -38,6 +44,28 @@ impl Command {
                 Ok(Self::TradingCancel(
                     deployment_id.clone(),
                     order_id.clone(),
+                ))
+            }
+            [_bin, trading, replace, deployment_id, order_id, quantity, limit_price]
+                if trading == "trading" && replace == "replace" =>
+            {
+                let quantity = quantity
+                    .parse()
+                    .map_err(|err| format!("invalid quantity `{quantity}`: {err}"))?;
+                let limit_price = if limit_price == "-" {
+                    None
+                } else {
+                    Some(
+                        limit_price
+                            .parse()
+                            .map_err(|err| format!("invalid limit price `{limit_price}`: {err}"))?,
+                    )
+                };
+                Ok(Self::TradingReplace(
+                    deployment_id.clone(),
+                    order_id.clone(),
+                    quantity,
+                    limit_price,
                 ))
             }
             [_bin, deployments, list] if deployments == "deployments" && list == "list" => {
@@ -88,7 +116,7 @@ impl Command {
             {
                 Ok(Self::DeploymentsArchive(deployment_id.clone()))
             }
-            _ => Err("usage: ployctl system status | ployctl trading status | ployctl trading inspect <deployment-id> | ployctl trading cancel <deployment-id> <order-id> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id> | ployctl deployments drain <deployment-id> | ployctl deployments enable <deployment-id> | ployctl deployments disable <deployment-id> | ployctl deployments archive <deployment-id>".to_string()),
+            _ => Err("usage: ployctl system status | ployctl trading status | ployctl trading inspect <deployment-id> | ployctl trading cancel <deployment-id> <order-id> | ployctl trading replace <deployment-id> <order-id> <quantity> <limit-price|-> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id> | ployctl deployments drain <deployment-id> | ployctl deployments enable <deployment-id> | ployctl deployments disable <deployment-id> | ployctl deployments archive <deployment-id>".to_string()),
         }
     }
 }
@@ -116,6 +144,9 @@ fn execute(command: Command, client: &ControlPlaneClient) -> Result<String, Stri
         }
         Command::TradingCancel(deployment_id, order_id) => {
             trading::cancel_order(client, &deployment_id, &order_id)
+        }
+        Command::TradingReplace(deployment_id, order_id, quantity, limit_price) => {
+            trading::replace_order(client, &deployment_id, &order_id, quantity, limit_price)
         }
         Command::DeploymentsList => deployments::render_deployments(client),
         Command::DeploymentsInspect(deployment_id) => {
@@ -212,6 +243,32 @@ mod tests {
         assert_eq!(
             command,
             Command::TradingCancel("example.live".to_string(), "order-1".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_trading_replace_command() {
+        let command = Command::parse(
+            &[
+                "ployctl",
+                "trading",
+                "replace",
+                "example.live",
+                "order-1",
+                "2.5",
+                "0.57",
+            ]
+            .map(str::to_string),
+        )
+        .expect("command");
+        assert_eq!(
+            command,
+            Command::TradingReplace(
+                "example.live".to_string(),
+                "order-1".to_string(),
+                rust_decimal::Decimal::new(25, 1),
+                Some(rust_decimal::Decimal::new(57, 2)),
+            )
         );
     }
 

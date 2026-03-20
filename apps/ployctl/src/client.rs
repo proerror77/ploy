@@ -1,7 +1,7 @@
 use ploy_operator_contracts::{
     ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest, DeploymentState,
-    DeploymentSummary, DesiredState, OperatorEvent, OrderControlResponse, SystemStatus,
-    TradingStateSnapshot,
+    DeploymentSummary, DesiredState, OperatorEvent, OrderControlResponse, OrderReplaceRequest,
+    SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -184,6 +184,19 @@ impl ControlPlaneClient {
         )
     }
 
+    pub fn replace_order(
+        &self,
+        deployment_id: &str,
+        order_id: &str,
+        request: &OrderReplaceRequest,
+    ) -> Result<OrderControlResponse, String> {
+        self.send_json(
+            "POST",
+            &format!("/api/deployments/{deployment_id}/orders/{order_id}/replace"),
+            request,
+        )
+    }
+
     fn read_status_snapshot(&self) -> Result<SystemStatus, String> {
         match self.read_status_over_http() {
             Ok(status) => return Ok(status),
@@ -357,8 +370,8 @@ mod tests {
     use super::ControlPlaneClient;
     use ploy_operator_contracts::{
         DeploymentApplyRequest, DeploymentSnapshotEvent, DeploymentState, DeploymentSummary,
-        DesiredState, ObservedState, OperatorEvent, OrderControlResponse, SystemSnapshotEvent,
-        SystemStatus, TradingStateSnapshot,
+        DesiredState, ObservedState, OperatorEvent, OrderControlResponse, OrderReplaceRequest,
+        SystemSnapshotEvent, SystemStatus, TradingStateSnapshot,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -715,6 +728,10 @@ mod tests {
                 order_id: "order-1".to_string(),
                 state: "canceled".to_string(),
                 venue_order_id: Some("venue-1".to_string()),
+                venue_order_history: vec!["venue-0".to_string()],
+                revision: 1,
+                requested_qty: Default::default(),
+                limit_price: None,
                 rejection_reason: None,
                 last_error: None,
                 filled_qty: Default::default(),
@@ -739,5 +756,70 @@ mod tests {
             .expect("cancel response");
         assert_eq!(response.state, "canceled");
         assert_eq!(response.venue_order_id.as_deref(), Some("venue-1"));
+    }
+
+    #[test]
+    fn client_replaces_order_over_http() {
+        let runtime_root = temp_dir("http-replace");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 2048];
+            let bytes = stream.read(&mut request).expect("read request");
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(
+                request.starts_with("POST /api/deployments/example.live/orders/order-1/replace")
+            );
+            assert!(
+                request.contains("\"quantity\":\"2.5\"")
+                    || request.contains("\"quantity\":\"2.50\"")
+            );
+            assert!(request.contains("\"limit_price\":\"0.57\""));
+
+            let body = serde_json::to_string(&OrderControlResponse {
+                deployment_id: "example.live".to_string(),
+                order_id: "order-1".to_string(),
+                state: "acknowledged".to_string(),
+                venue_order_id: Some("venue-2".to_string()),
+                venue_order_history: vec!["venue-1".to_string()],
+                revision: 1,
+                requested_qty: rust_decimal::Decimal::new(250, 2),
+                limit_price: Some(rust_decimal::Decimal::new(57, 2)),
+                rejection_reason: None,
+                last_error: None,
+                filled_qty: Default::default(),
+            })
+            .expect("serialize response");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+
+        let client = ControlPlaneClient {
+            control_plane_addr: addr.to_string(),
+            runtime_root,
+        };
+
+        let response = client
+            .replace_order(
+                "example.live",
+                "order-1",
+                &OrderReplaceRequest {
+                    quantity: rust_decimal::Decimal::new(250, 2),
+                    limit_price: Some(rust_decimal::Decimal::new(57, 2)),
+                },
+            )
+            .expect("replace response");
+        assert_eq!(response.state, "acknowledged");
+        assert_eq!(response.revision, 1);
+        assert_eq!(response.venue_order_id.as_deref(), Some("venue-2"));
+        assert_eq!(response.venue_order_history, vec!["venue-1".to_string()]);
     }
 }
