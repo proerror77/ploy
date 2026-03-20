@@ -1,8 +1,10 @@
 use crate::config::PlatformConfig;
+use crate::events::EventBroker;
 use crate::runtime::{next_paper_intent_id, PloyDaemon};
 use ploy_operator_contracts::{
-    DeploymentApplyRequest, DeploymentControlRequest, IntentPurpose, PaperIntentRequest,
-    SystemStatus,
+    DeploymentApplyRequest, DeploymentControlRequest, DeploymentSnapshotEvent, IntentPurpose,
+    OperatorEvent, PaperIntentRequest, StatusUpdate, SystemSnapshotEvent, SystemStatus,
+    TradingSnapshotEvent,
 };
 use ploy_trading::{TradeSide, TradingIntent};
 use std::fs;
@@ -11,6 +13,13 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
+
+#[derive(Debug)]
+pub struct AppState {
+    pub daemon: Arc<Mutex<PloyDaemon>>,
+    pub events: Arc<EventBroker>,
+}
 
 pub fn render_status(status: &SystemStatus) -> String {
     format!(
@@ -152,8 +161,9 @@ pub fn handle_api_request(
     }
 }
 
-pub fn spawn_server(daemon: Arc<Mutex<PloyDaemon>>) -> io::Result<thread::JoinHandle<()>> {
-    let listen_addr = daemon
+pub fn spawn_server(state: Arc<AppState>) -> io::Result<thread::JoinHandle<()>> {
+    let listen_addr = state
+        .daemon
         .lock()
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "daemon lock poisoned"))?
         .config
@@ -162,12 +172,15 @@ pub fn spawn_server(daemon: Arc<Mutex<PloyDaemon>>) -> io::Result<thread::JoinHa
     let listener = TcpListener::bind(&listen_addr)?;
     Ok(thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let _ = handle_connection(stream, &daemon);
+            let state = state.clone();
+            thread::spawn(move || {
+                let _ = handle_connection(stream, &state);
+            });
         }
     }))
 }
 
-fn handle_connection(mut stream: TcpStream, daemon: &Arc<Mutex<PloyDaemon>>) -> io::Result<()> {
+fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result<()> {
     let mut request = [0_u8; 2048];
     let bytes = stream.read(&mut request)?;
     if bytes == 0 {
@@ -178,11 +191,14 @@ fn handle_connection(mut stream: TcpStream, daemon: &Arc<Mutex<PloyDaemon>>) -> 
     let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
     let method = request_line.next().unwrap_or("GET");
     let path = request_line.next().unwrap_or("/");
+    if method == "GET" && path == "/api/events/stream" {
+        return handle_event_stream(stream, state);
+    }
     let body = request
         .split("\r\n\r\n")
         .nth(1)
         .filter(|body| !body.is_empty());
-    let (status_code, body) = handle_runtime_request(method, path, body, daemon);
+    let (status_code, body) = handle_runtime_request(method, path, body, state);
     let status_text = match status_code {
         200 => "OK",
         400 => "Bad Request",
@@ -204,9 +220,9 @@ fn handle_runtime_request(
     method: &str,
     path: &str,
     body: Option<&str>,
-    daemon: &Arc<Mutex<PloyDaemon>>,
+    state: &Arc<AppState>,
 ) -> (u16, String) {
-    let runtime_root = match daemon.lock() {
+    let runtime_root = match state.daemon.lock() {
         Ok(daemon) => daemon.config.runtime_root.clone(),
         Err(_) => return (500, "{\"error\":\"daemon_lock_poisoned\"}".to_string()),
     };
@@ -218,7 +234,8 @@ fn handle_runtime_request(
         | ("GET", "/api/trading/state") => route_request(path, &runtime_root),
         ("GET", _) if path.starts_with("/api/deployments/") && !path.ends_with("/control") => {
             let deployment_id = path.trim_start_matches("/api/deployments/");
-            match daemon
+            match state
+                .daemon
                 .lock()
                 .ok()
                 .and_then(|daemon| daemon.inspect_deployment(deployment_id))
@@ -242,10 +259,11 @@ fn handle_runtime_request(
             if request.deployment_id != deployment_id {
                 return (400, "{\"error\":\"deployment_id_mismatch\"}".to_string());
             }
-            match daemon.lock() {
+            match state.daemon.lock() {
                 Ok(mut daemon) => {
                     match daemon.apply_deployment(request).and_then(|record| {
                         daemon.write_runtime_snapshots()?;
+                        publish_snapshot_events(&daemon, &state.events);
                         Ok(record)
                     }) {
                         Ok(record) => (
@@ -270,11 +288,12 @@ fn handle_runtime_request(
                 Ok(request) => request,
                 Err(_) => return (400, "{\"error\":\"invalid_json\"}".to_string()),
             };
-            match daemon.lock() {
+            match state.daemon.lock() {
                 Ok(mut daemon) => match daemon
                     .set_desired_state(deployment_id, request.desired_state)
                     .and_then(|record| {
                         daemon.write_runtime_snapshots()?;
+                        publish_snapshot_events(&daemon, &state.events);
                         Ok(record)
                     }) {
                     Ok(Some(record)) => (
@@ -304,7 +323,7 @@ fn handle_runtime_request(
                 Err(message) => return (400, message),
             };
 
-            match daemon.lock() {
+            match state.daemon.lock() {
                 Ok(mut daemon) => match daemon
                     .submit_paper_intent(TradingIntent {
                         intent_id: next_paper_intent_id(deployment_id),
@@ -319,6 +338,7 @@ fn handle_runtime_request(
                     })
                     .and_then(|response| {
                         daemon.write_runtime_snapshots()?;
+                        publish_snapshot_events(&daemon, &state.events);
                         Ok(response)
                     }) {
                     Ok(response) => (
@@ -359,9 +379,63 @@ fn intent_purpose_from_wire(purpose: IntentPurpose) -> ploy_trading::IntentPurpo
     }
 }
 
+pub fn snapshot_events(daemon: &PloyDaemon) -> Vec<OperatorEvent> {
+    let system = daemon.control_plane.system.status();
+    vec![
+        OperatorEvent::Status(StatusUpdate {
+            status: system.status.clone(),
+        }),
+        OperatorEvent::SystemSnapshot(SystemSnapshotEvent { system }),
+        OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
+            deployments: daemon.control_plane.deployments.summaries(),
+        }),
+        OperatorEvent::TradingSnapshot(TradingSnapshotEvent {
+            trading: daemon.trading_state(),
+        }),
+    ]
+}
+
+pub fn publish_snapshot_events(daemon: &PloyDaemon, broker: &EventBroker) {
+    for event in snapshot_events(daemon) {
+        broker.publish(event);
+    }
+}
+
+fn handle_event_stream(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n"
+    )?;
+
+    if let Ok(daemon) = state.daemon.lock() {
+        for event in snapshot_events(&daemon) {
+            write_sse_event(&mut stream, &event)?;
+        }
+    }
+
+    let receiver = state.events.subscribe();
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(15)) {
+            Ok(event) => write_sse_event(&mut stream, &event)?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                write!(stream, ": keep-alive\n\n")?;
+                stream.flush()?;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
+fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<()> {
+    let body = serde_json::to_string(event)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    write!(stream, "data: {body}\n\n")?;
+    stream.flush()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_api_request, route_request};
+    use super::{handle_api_request, route_request, snapshot_events};
     use ploy_operator_contracts::PaperIntentRequest;
     use std::fs;
     use std::path::PathBuf;
@@ -558,5 +632,24 @@ mod tests {
         let (status_code, body) = route_request("/api/trading/state", &runtime_root);
         assert_eq!(status_code, 200);
         assert!(body.contains("\"deployment_id\":\"example.paper\""));
+    }
+
+    #[test]
+    fn snapshot_events_include_control_plane_and_trading_payloads() {
+        let daemon = crate::runtime::PloyDaemon::boot(&crate::config::PlatformConfig::default())
+            .expect("boot daemon");
+        let events = snapshot_events(&daemon);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ploy_operator_contracts::OperatorEvent::SystemSnapshot(_)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ploy_operator_contracts::OperatorEvent::DeploymentSnapshot(_)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ploy_operator_contracts::OperatorEvent::TradingSnapshot(_)
+        )));
     }
 }

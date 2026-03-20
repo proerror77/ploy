@@ -1,11 +1,22 @@
-import type { LogEntry, Trade, Position, MarketData } from '@/types';
+import type {
+  DeploymentSummary,
+  LogEntry,
+  MarketData,
+  Position,
+  SystemStatus,
+  Trade,
+  TradingStateSnapshot,
+} from '@/types';
 
 export type WebSocketEvent =
   | { type: 'log'; data: LogEntry }
   | { type: 'trade'; data: Trade }
   | { type: 'position'; data: Position }
   | { type: 'market'; data: MarketData }
-  | { type: 'status'; data: { status: 'running' | 'stopped' | 'error' } };
+  | { type: 'status'; data: { status: 'running' | 'stopped' | 'error' } }
+  | { type: 'system_snapshot'; data: { system: SystemStatus } }
+  | { type: 'deployment_snapshot'; data: { deployments: DeploymentSummary[] } }
+  | { type: 'trading_snapshot'; data: { trading: TradingStateSnapshot[] } };
 
 type ConnectionCallback = (connected: boolean) => void;
 
@@ -14,49 +25,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function defaultWsUrl(): string {
-  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${proto}://${window.location.host}/ws`;
+  return `${window.location.origin}/api/events/stream`;
 }
 
 export class WebSocketService {
-  private ws: WebSocket | null = null;
+  private ws: EventSource | null = null;
   private listeners: Map<string, Set<(event: WebSocketEvent) => void>> = new Map();
   private connectionListeners: Set<ConnectionCallback> = new Set();
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 10;
-  private reconnectTimer: number | null = null;
   private manualDisconnect = false;
 
   connect(url: string = defaultWsUrl()) {
     if (
       this.ws &&
-      (this.ws.readyState === WebSocket.OPEN ||
-        this.ws.readyState === WebSocket.CONNECTING)
+      (this.ws.readyState === EventSource.OPEN ||
+        this.ws.readyState === EventSource.CONNECTING)
     ) {
       return;
     }
 
     this.manualDisconnect = false;
-    this.ws = new WebSocket(url);
+    this.ws = new EventSource(url, { withCredentials: true });
 
     this.ws.onopen = () => {
-      console.log('[WebSocket] Connected');
-      this.reconnectAttempts = 0;
+      console.log('[EventStream] Connected');
       this.notifyConnectionChange(true);
     };
 
-    this.ws.onclose = (ev) => {
-      console.log('[WebSocket] Disconnected:', ev.code, ev.reason);
-      this.notifyConnectionChange(false);
-      this.ws = null;
-
-      if (!this.manualDisconnect) {
-        this.scheduleReconnect(url);
-      }
-    };
-
     this.ws.onerror = (err) => {
-      console.error('[WebSocket] Error:', err);
+      console.error('[EventStream] Error:', err);
+      this.notifyConnectionChange(false);
+      if (this.manualDisconnect) {
+        this.ws?.close();
+        this.ws = null;
+      }
     };
 
     this.ws.onmessage = (ev) => {
@@ -75,7 +76,16 @@ export class WebSocketService {
       const data = parsed?.data;
       if (typeof t !== 'string') return;
 
-      if (t === 'log' || t === 'trade' || t === 'position' || t === 'market' || t === 'status') {
+      if (
+        t === 'log' ||
+        t === 'trade' ||
+        t === 'position' ||
+        t === 'market' ||
+        t === 'status' ||
+        t === 'system_snapshot' ||
+        t === 'deployment_snapshot' ||
+        t === 'trading_snapshot'
+      ) {
         this.emit({ type: t, data } as WebSocketEvent);
       }
     };
@@ -83,10 +93,6 @@ export class WebSocketService {
 
   disconnect() {
     this.manualDisconnect = true;
-    if (this.reconnectTimer) {
-      window.clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -117,7 +123,7 @@ export class WebSocketService {
   }
 
   isConnected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+    return this.ws?.readyState === EventSource.OPEN;
   }
 
   private notifyConnectionChange(connected: boolean) {
@@ -136,19 +142,6 @@ export class WebSocketService {
     }
   }
 
-  private scheduleReconnect(url: string) {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('[WebSocket] Max reconnect attempts reached');
-      return;
-    }
-
-    const backoffMs = Math.min(1000 * 2 ** this.reconnectAttempts, 10_000);
-    this.reconnectAttempts++;
-
-    this.reconnectTimer = window.setTimeout(() => {
-      this.connect(url);
-    }, backoffMs);
-  }
 }
 
 export const ws = new WebSocketService();

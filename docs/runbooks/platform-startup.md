@@ -22,6 +22,7 @@ cargo run -p ployd
 cargo run -p ployctl -- system status
 cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments list
+curl -N http://127.0.0.1:8081/api/events/stream
 ```
 
 3. Run the smoke test:
@@ -41,6 +42,7 @@ ployctl system status
 ployctl trading status
 ployctl deployments list
 ployctl deployments inspect example.paper
+curl -N http://127.0.0.1:8081/api/events/stream
 ployctl deployments pause example.paper
 ployctl deployments resume example.paper
 ployctl deployments stop example.paper

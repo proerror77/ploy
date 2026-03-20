@@ -1,4 +1,6 @@
 use crate::config::PlatformConfig;
+use crate::events::EventBroker;
+use crate::http::publish_snapshot_events;
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{
     DeploymentApplyRequest, DesiredState, FillSnapshot, IntentPurpose, ObservedState,
@@ -394,13 +396,17 @@ pub fn next_paper_intent_id(deployment_id: &str) -> String {
     format!("{deployment_id}-{unique}")
 }
 
-pub fn run_shared_forever(daemon: Arc<Mutex<PloyDaemon>>) -> io::Result<()> {
+pub fn run_shared_forever(
+    daemon: Arc<Mutex<PloyDaemon>>,
+    events: Arc<EventBroker>,
+) -> io::Result<()> {
     loop {
         let tick_interval_ms = {
             let mut daemon = daemon
                 .lock()
                 .map_err(|_| io::Error::new(io::ErrorKind::Other, "daemon lock poisoned"))?;
             daemon.write_runtime_snapshots()?;
+            publish_snapshot_events(&daemon, &events);
             daemon.config.tick_interval_ms
         };
         thread::sleep(Duration::from_millis(tick_interval_ms));

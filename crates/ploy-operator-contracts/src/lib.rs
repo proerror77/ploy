@@ -7,7 +7,10 @@ pub use deployments::{
     DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DeploymentStateSummary,
     DeploymentSummary, DesiredState, ObservedState,
 };
-pub use events::{LogEntry, OperatorEvent, StatusUpdate, WsMessage};
+pub use events::{
+    DeploymentSnapshotEvent, LogEntry, OperatorEvent, StatusUpdate, SystemSnapshotEvent,
+    TradingSnapshotEvent, WsMessage,
+};
 pub use system::{SystemControlResponse, SystemStatus};
 pub use trading::{
     FillSnapshot, IntentPurpose, MarketData, OrderSnapshot, PaperIntentRequest,

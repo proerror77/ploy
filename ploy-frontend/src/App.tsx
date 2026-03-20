@@ -27,6 +27,8 @@ function App() {
     setWsConnected,
     addLog,
     addTrade,
+    setDeployments,
+    setTradingSnapshots,
     updatePositions,
     updateMarketData,
     setSystemStatus,
@@ -59,6 +61,15 @@ function App() {
         case 'status':
           setSystemStatus(event.data.status);
           break;
+        case 'system_snapshot':
+          setSystemStatus(event.data.system.status);
+          break;
+        case 'deployment_snapshot':
+          setDeployments(event.data.deployments);
+          break;
+        case 'trading_snapshot':
+          setTradingSnapshots(event.data.trading);
+          break;
       }
     });
 
@@ -71,6 +82,8 @@ function App() {
     setWsConnected,
     addLog,
     addTrade,
+    setDeployments,
+    setTradingSnapshots,
     updatePositions,
     updateMarketData,
     setSystemStatus,

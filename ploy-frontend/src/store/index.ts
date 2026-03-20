@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { LogEntry, Trade, Position, MarketData } from '@/types';
+import type { DeploymentSummary, LogEntry, MarketData, Position, Trade, TradingStateSnapshot } from '@/types';
 
 interface AppState {
   // WebSocket connection state
@@ -26,6 +26,12 @@ interface AppState {
   // System status
   systemStatus: 'running' | 'stopped' | 'error';
   setSystemStatus: (status: 'running' | 'stopped' | 'error') => void;
+
+  deployments: DeploymentSummary[];
+  setDeployments: (deployments: DeploymentSummary[]) => void;
+
+  tradingSnapshots: TradingStateSnapshot[];
+  setTradingSnapshots: (snapshots: TradingStateSnapshot[]) => void;
 }
 
 const MAX_LOGS = 1000;
@@ -81,4 +87,10 @@ export const useStore = create<AppState>((set) => ({
   // System status
   systemStatus: 'stopped',
   setSystemStatus: (status) => set({ systemStatus: status }),
+
+  deployments: [],
+  setDeployments: (deployments) => set({ deployments }),
+
+  tradingSnapshots: [],
+  setTradingSnapshots: (tradingSnapshots) => set({ tradingSnapshots }),
 }));

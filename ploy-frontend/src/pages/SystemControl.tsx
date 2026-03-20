@@ -13,6 +13,9 @@ export function SystemControl() {
   const queryClient = useQueryClient();
   const [wsConnected, setWsConnected] = useState(ws.isConnected());
   const [realtimeStatus, setRealtimeStatus] = useState<'running' | 'stopped' | 'error' | null>(null);
+  const [realtimeSnapshot, setRealtimeSnapshot] = useState<Awaited<
+    ReturnType<typeof api.getSystemStatus>
+  > | null>(null);
 
   // Track WebSocket connection
   useEffect(() => {
@@ -30,6 +33,17 @@ export function SystemControl() {
     return unsub;
   }, []);
 
+  useEffect(() => {
+    const unsub = ws.subscribe('system_snapshot', (event: WebSocketEvent) => {
+      if (event.type === 'system_snapshot') {
+        setRealtimeSnapshot(event.data.system);
+        setRealtimeStatus(event.data.system.status);
+        queryClient.setQueryData(['system', 'status'], event.data.system);
+      }
+    });
+    return unsub;
+  }, [queryClient]);
+
   // Fallback polling at 30s (in case WebSocket disconnects)
   const { data: status, isLoading } = useQuery({
     queryKey: ['system', 'status'],
@@ -38,7 +52,8 @@ export function SystemControl() {
   });
 
   // Merge real-time status with polled data
-  const effectiveStatus = realtimeStatus ?? status?.status;
+  const effectiveStatus = realtimeStatus ?? realtimeSnapshot?.status ?? status?.status;
+  const effectiveSnapshot = realtimeSnapshot ?? status;
 
   const startMutation = useMutation({
     mutationFn: () => api.startSystem(),
@@ -110,23 +125,23 @@ export function SystemControl() {
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">Uptime</span>
-                  <span className="font-medium">
-                    {status ? formatDuration(status.uptime_seconds) : '-'}
+                    <span className="font-medium">
+                    {effectiveSnapshot ? formatDuration(effectiveSnapshot.uptime_seconds) : '-'}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">Version</span>
-                  <span className="font-medium">{status?.version ?? '-'}</span>
+                  <span className="font-medium">{effectiveSnapshot?.version ?? '-'}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">Strategy</span>
-                  <span className="font-medium">{status?.strategy ?? '-'}</span>
+                  <span className="font-medium">{effectiveSnapshot?.strategy ?? '-'}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">Last Trade</span>
                   <span className="font-medium">
-                    {status?.last_trade_time
-                      ? new Date(status.last_trade_time).toLocaleString('en-US')
+                    {effectiveSnapshot?.last_trade_time
+                      ? new Date(effectiveSnapshot.last_trade_time).toLocaleString('en-US')
                       : 'None'}
                   </span>
                 </div>
@@ -192,7 +207,7 @@ export function SystemControl() {
                 <div className="flex items-center justify-between rounded-lg border p-3">
                   <div className="flex items-center gap-2">
                     <Wifi className="h-4 w-4" />
-                    <span className="text-sm">WebSocket</span>
+                    <span className="text-sm">Event Stream</span>
                   </div>
                   <div
                     className={`h-2 w-2 rounded-full ${
@@ -207,7 +222,7 @@ export function SystemControl() {
                   </div>
                   <div
                     className={`h-2 w-2 rounded-full ${
-                      status?.database_connected ? 'bg-success' : 'bg-destructive'
+                      effectiveSnapshot?.database_connected ? 'bg-success' : 'bg-destructive'
                     }`}
                   />
                 </div>
@@ -217,7 +232,7 @@ export function SystemControl() {
                     <span className="text-sm">Errors (1h)</span>
                   </div>
                   <span className="text-sm font-medium">
-                    {status?.error_count_1h ?? 0}
+                    {effectiveSnapshot?.error_count_1h ?? 0}
                   </span>
                 </div>
               </div>
