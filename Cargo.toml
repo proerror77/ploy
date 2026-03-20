@@ -21,6 +21,7 @@ license = "MIT"
 repository = "https://github.com/proerror77/ploy"
 
 [workspace.dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 ploy-connectivity = { path = "crates/ploy-connectivity" }
 ploy-deployments = { path = "crates/ploy-deployments" }
 ploy-operator-contracts = { path = "crates/ploy-operator-contracts" }
@@ -28,6 +29,10 @@ ploy-platform = { path = "crates/ploy-platform" }
 ploy-research = { path = "crates/ploy-research" }
 ploy-strategy-bundles = { path = "crates/ploy-strategy-bundles" }
 ploy-trading = { path = "crates/ploy-trading" }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+rust_decimal_macros = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
 
 [package]
 name = "ploy"
