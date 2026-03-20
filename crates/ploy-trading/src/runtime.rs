@@ -70,6 +70,10 @@ impl TradingRuntime {
         self.orders.cancel(order_id)
     }
 
+    pub fn order(&self, order_id: &str) -> Option<&crate::orders::OrderRecord> {
+        self.orders.order(order_id)
+    }
+
     pub fn record_fill(&mut self, fill: FillRecord) -> bool {
         if self.fills.contains(&fill.fill_id) {
             return false;

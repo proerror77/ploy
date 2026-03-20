@@ -37,6 +37,7 @@ the canonical trading ledger.
 - 2026-03-20: Follow-up reconciliation cut now deduplicates fills in `ploy-trading`, teaches `ploy-connectivity` to expose `reconcile_fills`, reconciles live fills inside `ployd` snapshot ticks, and serves `/api/trading/state` from shared daemon state instead of relying only on disk snapshots.
 - 2026-03-20: Added `apps/ploytui` as a thin terminal console on the daemon control plane, reused the `ployctl` HTTP/SSE client via a shared library target, and promoted `ploytui` into the default release/install/runbook path.
 - 2026-03-20: Hardened the control-plane error contract by adding structured JSON error bodies in `ployd` and preserving them through `ployctl`, so inspect/control failures no longer collapse into generic statuses or CLI panics.
+- 2026-03-20: Added a first real order-cancel control path through `ploy-connectivity`, `ployd`, `ployctl`, and shared operator contracts so active live orders can be canceled via the control plane and reflected in the canonical trading ledger.
 
 # Trading Platform Completion Sweep (2026-03-20)
 

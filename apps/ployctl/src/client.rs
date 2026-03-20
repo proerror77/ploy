@@ -1,6 +1,6 @@
 use ploy_operator_contracts::{
     ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest, DeploymentSummary,
-    DesiredState, OperatorEvent, SystemStatus, TradingStateSnapshot,
+    DesiredState, OperatorEvent, OrderControlResponse, SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -154,6 +154,17 @@ impl ControlPlaneClient {
         )
     }
 
+    pub fn cancel_order(
+        &self,
+        deployment_id: &str,
+        order_id: &str,
+    ) -> Result<OrderControlResponse, String> {
+        self.send_empty(
+            "POST",
+            &format!("/api/deployments/{deployment_id}/orders/{order_id}/cancel"),
+        )
+    }
+
     fn read_status_snapshot(&self) -> Result<SystemStatus, String> {
         match self.read_status_over_http() {
             Ok(status) => return Ok(status),
@@ -258,6 +269,32 @@ impl ControlPlaneClient {
         }
         serde_json::from_str(body).map_err(|err| format!("parse HTTP body: {err}"))
     }
+
+    fn send_empty<T>(&self, method: &str, path: &str) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        let mut stream = TcpStream::connect(&self.control_plane_addr)
+            .map_err(|err| format!("connect {}: {err}", self.control_plane_addr))?;
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            self.control_plane_addr
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|err| format!("write request: {err}"))?;
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .map_err(|err| format!("read response: {err}"))?;
+
+        let (status_line, body) = split_http_response(&response)?;
+        if !status_line.contains("200") {
+            return Err(decode_http_error(status_line, body));
+        }
+        serde_json::from_str(body).map_err(|err| format!("parse HTTP body: {err}"))
+    }
 }
 
 fn split_http_response(response: &str) -> Result<(&str, &str), String> {
@@ -301,7 +338,8 @@ mod tests {
     use super::ControlPlaneClient;
     use ploy_operator_contracts::{
         DeploymentApplyRequest, DeploymentSnapshotEvent, DeploymentSummary, DesiredState,
-        ObservedState, OperatorEvent, SystemSnapshotEvent, SystemStatus, TradingStateSnapshot,
+        ObservedState, OperatorEvent, OrderControlResponse, SystemSnapshotEvent, SystemStatus,
+        TradingStateSnapshot,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -634,5 +672,49 @@ mod tests {
         let error = client.system_snapshot().expect_err("structured http error");
         assert!(error.contains("daemon_lock_poisoned"));
         assert!(!error.contains("stale-snapshot"));
+    }
+
+    #[test]
+    fn client_cancels_order_over_http() {
+        let runtime_root = temp_dir("http-cancel");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 1024];
+            let bytes = stream.read(&mut request).expect("read request");
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(request.starts_with("POST /api/deployments/example.live/orders/order-1/cancel"));
+
+            let body = serde_json::to_string(&OrderControlResponse {
+                deployment_id: "example.live".to_string(),
+                order_id: "order-1".to_string(),
+                state: "canceled".to_string(),
+                venue_order_id: Some("venue-1".to_string()),
+                rejection_reason: None,
+                filled_qty: Default::default(),
+            })
+            .expect("serialize response");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+
+        let client = ControlPlaneClient {
+            control_plane_addr: addr.to_string(),
+            runtime_root,
+        };
+
+        let response = client
+            .cancel_order("example.live", "order-1")
+            .expect("cancel response");
+        assert_eq!(response.state, "canceled");
+        assert_eq!(response.venue_order_id.as_deref(), Some("venue-1"));
     }
 }

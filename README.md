@@ -25,6 +25,7 @@ cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
+cargo run -p ployctl -- trading cancel example.live <order-id>
 cargo run -p ploytui
 # realtime operator stream
 curl -N http://127.0.0.1:8081/api/events/stream

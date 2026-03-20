@@ -29,9 +29,21 @@ pub struct TrackedOrder {
     pub token_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancellationRequest {
+    pub order_id: String,
+    pub venue_order_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutionOutcome {
     Acknowledged { venue_order_id: String },
+    Rejected { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CancellationOutcome {
+    Canceled,
     Rejected { reason: String },
 }
 
@@ -48,6 +60,8 @@ pub enum ExecutionError {
 pub trait LiveExecutionGateway: Send + Sync + std::fmt::Debug {
     fn submit(&self, request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError>;
 
+    fn cancel(&self, request: &CancellationRequest) -> Result<CancellationOutcome, ExecutionError>;
+
     fn reconcile_fills(
         &self,
         tracked_orders: &[TrackedOrder],
@@ -57,6 +71,7 @@ pub trait LiveExecutionGateway: Send + Sync + std::fmt::Debug {
 #[derive(Debug, Clone)]
 pub struct StaticExecutionGateway {
     result: Result<ExecutionOutcome, ExecutionError>,
+    cancel_result: Result<CancellationOutcome, ExecutionError>,
     reconciled_fills: Vec<FillRecord>,
 }
 
@@ -66,6 +81,7 @@ impl StaticExecutionGateway {
             result: Ok(ExecutionOutcome::Acknowledged {
                 venue_order_id: venue_order_id.into(),
             }),
+            cancel_result: Ok(CancellationOutcome::Canceled),
             reconciled_fills: Vec::new(),
         }
     }
@@ -75,6 +91,7 @@ impl StaticExecutionGateway {
             result: Ok(ExecutionOutcome::Rejected {
                 reason: reason.into(),
             }),
+            cancel_result: Ok(CancellationOutcome::Canceled),
             reconciled_fills: Vec::new(),
         }
     }
@@ -82,8 +99,17 @@ impl StaticExecutionGateway {
     pub fn failed(error: ExecutionError) -> Self {
         Self {
             result: Err(error),
+            cancel_result: Ok(CancellationOutcome::Canceled),
             reconciled_fills: Vec::new(),
         }
+    }
+
+    pub fn with_cancel_result(
+        mut self,
+        result: Result<CancellationOutcome, ExecutionError>,
+    ) -> Self {
+        self.cancel_result = result;
+        self
     }
 
     pub fn with_reconciled_fills(mut self, fills: Vec<FillRecord>) -> Self {
@@ -95,6 +121,13 @@ impl StaticExecutionGateway {
 impl LiveExecutionGateway for StaticExecutionGateway {
     fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
         self.result.clone()
+    }
+
+    fn cancel(
+        &self,
+        _request: &CancellationRequest,
+    ) -> Result<CancellationOutcome, ExecutionError> {
+        self.cancel_result.clone()
     }
 
     fn reconcile_fills(
@@ -369,6 +402,75 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
             Ok(fills)
         })
     }
+
+    fn cancel(&self, request: &CancellationRequest) -> Result<CancellationOutcome, ExecutionError> {
+        let private_key = self.config.private_key.as_deref().ok_or_else(|| {
+            ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
+        })?;
+        let funder = self
+            .config
+            .funder
+            .as_deref()
+            .map(Address::from_str)
+            .transpose()
+            .map_err(|err| ExecutionError::Configuration(format!("invalid POLY_FUNDER: {err}")))?;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| ExecutionError::Transport(format!("create tokio runtime: {err}")))?;
+
+        runtime.block_on(async {
+            let signer = LocalSigner::from_str(private_key)
+                .map_err(|err| {
+                    ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
+                })?
+                .with_chain_id(Some(POLYGON));
+
+            let client = Client::new(
+                &self.config.host,
+                Config::builder()
+                    .use_server_time(self.config.use_server_time)
+                    .build(),
+            )
+            .map_err(|err| ExecutionError::Transport(format!("build client: {err}")))?;
+
+            let mut auth = client.authentication_builder(&signer);
+            auth = auth.signature_type(self.config.signature_type.into_sdk());
+            if let Some(funder) = funder {
+                auth = auth.funder(funder);
+            }
+
+            let client = auth
+                .authenticate()
+                .await
+                .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))?;
+
+            let response = client
+                .cancel_order(&request.venue_order_id)
+                .await
+                .map_err(|err| ExecutionError::Transport(format!("cancel order: {err}")))?;
+
+            if response
+                .canceled
+                .iter()
+                .any(|order_id| order_id == &request.venue_order_id)
+            {
+                Ok(CancellationOutcome::Canceled)
+            } else if let Some(reason) = response.not_canceled.get(&request.venue_order_id) {
+                Ok(CancellationOutcome::Rejected {
+                    reason: reason.clone(),
+                })
+            } else {
+                Ok(CancellationOutcome::Rejected {
+                    reason: format!(
+                        "venue did not confirm cancellation for order `{}`",
+                        request.venue_order_id
+                    ),
+                })
+            }
+        })
+    }
 }
 
 fn polymarket_side(side: TradeSide) -> Side {
@@ -439,9 +541,9 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
-        PolymarketExecutionConfig, PolymarketExecutionGateway, StaticExecutionGateway,
-        TrackedOrder, WalletSignatureType,
+        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
+        ExecutionRequest, LiveExecutionGateway, PolymarketExecutionConfig,
+        PolymarketExecutionGateway, StaticExecutionGateway, TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -520,5 +622,28 @@ mod tests {
             .expect("fills");
 
         assert_eq!(fills, vec![fill]);
+    }
+
+    #[test]
+    fn static_gateway_replays_cancel_outcome() {
+        let gateway = StaticExecutionGateway::acknowledged("venue-order-1").with_cancel_result(Ok(
+            CancellationOutcome::Rejected {
+                reason: "already filled".to_string(),
+            },
+        ));
+
+        let outcome = gateway
+            .cancel(&CancellationRequest {
+                order_id: "order-1".to_string(),
+                venue_order_id: "venue-order-1".to_string(),
+            })
+            .expect("cancel outcome");
+
+        assert_eq!(
+            outcome,
+            CancellationOutcome::Rejected {
+                reason: "already filled".to_string(),
+            }
+        );
     }
 }

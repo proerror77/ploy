@@ -2,14 +2,14 @@ use crate::config::PlatformConfig;
 use crate::events::EventBroker;
 use crate::http::publish_snapshot_events;
 use ploy_connectivity::{
-    ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
-    PolymarketExecutionGateway, TrackedOrder,
+    CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome, ExecutionRequest,
+    LiveExecutionGateway, PolymarketExecutionGateway, TrackedOrder,
 };
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{
     DeploymentApplyRequest, DesiredState, FillSnapshot, IntentPurpose, ObservedState,
-    OrderSnapshot, PaperIntentResponse, PnlSnapshotResponse, PositionSnapshotResponse,
-    RiskSnapshotResponse, TradingIntentSnapshot, TradingStateSnapshot,
+    OrderControlResponse, OrderSnapshot, PaperIntentResponse, PnlSnapshotResponse,
+    PositionSnapshotResponse, RiskSnapshotResponse, TradingIntentSnapshot, TradingStateSnapshot,
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
 use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
@@ -212,6 +212,68 @@ impl PloyDaemon {
             venue_order_id: Some(venue_order_id),
             rejection_reason: None,
         })
+    }
+
+    pub fn cancel_order(
+        &mut self,
+        deployment_id: &str,
+        order_id: &str,
+    ) -> io::Result<OrderControlResponse> {
+        let deployment = self
+            .control_plane
+            .deployments
+            .get(deployment_id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "deployment not found"))?;
+        let runtime = self.trading.get_mut(deployment_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "deployment has no trading state")
+        })?;
+        let order = runtime
+            .order(order_id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
+
+        if !matches!(
+            order.state,
+            OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "order `{order_id}` is not cancelable from state `{}`",
+                    order_state_wire(order.state)
+                ),
+            ));
+        }
+
+        if deployment.runtime_mode == "live" {
+            if let Some(venue_order_id) = order.venue_order_id.clone() {
+                match self
+                    .live_execution
+                    .cancel(&CancellationRequest {
+                        order_id: order_id.to_string(),
+                        venue_order_id,
+                    })
+                    .map_err(io_error_from_execution_error)?
+                {
+                    CancellationOutcome::Canceled => {}
+                    CancellationOutcome::Rejected { reason } => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("live cancel rejected: {reason}"),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let updated = runtime
+            .cancel_order(order_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
+        Ok(build_order_control_response(
+            deployment_id.to_string(),
+            updated,
+        ))
     }
 
     fn submit_live_intent(&mut self, intent: TradingIntent) -> io::Result<PaperIntentResponse> {
@@ -594,6 +656,20 @@ fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<Trading
     }))
 }
 
+fn build_order_control_response(
+    deployment_id: String,
+    order: &ploy_trading::OrderRecord,
+) -> OrderControlResponse {
+    OrderControlResponse {
+        deployment_id,
+        order_id: order.order_id.clone(),
+        state: order_state_wire(order.state),
+        venue_order_id: order.venue_order_id.clone(),
+        rejection_reason: order.rejection_reason.clone(),
+        filled_qty: order.filled_qty,
+    }
+}
+
 fn trade_side_wire(side: TradeSide) -> String {
     match side {
         TradeSide::Buy => "buy".to_string(),
@@ -720,7 +796,7 @@ where
 mod tests {
     use super::PloyDaemon;
     use crate::config::PlatformConfig;
-    use ploy_connectivity::StaticExecutionGateway;
+    use ploy_connectivity::{CancellationOutcome, StaticExecutionGateway};
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
     use rust_decimal_macros::dec;
@@ -1099,6 +1175,66 @@ mod tests {
         assert_eq!(trading_state[0].orders.len(), 1);
         assert_eq!(trading_state[0].orders[0].state, "pending");
         assert!(trading_state[0].orders[0].rejection_reason.is_none());
+    }
+
+    #[test]
+    fn daemon_cancels_live_order_through_gateway_and_updates_ledger() {
+        let root = temp_dir("live-order-cancel");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let gateway = StaticExecutionGateway::acknowledged("venue-live-cancel-1")
+            .with_cancel_result(Ok(CancellationOutcome::Canceled));
+        let mut daemon =
+            PloyDaemon::boot_with_live_execution(&config, Box::new(gateway)).expect("boot");
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-cancel".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(2),
+                limit_price: Some(dec!(0.55)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit live intent");
+
+        let response = daemon
+            .cancel_order("example.live", "order-intent-live-cancel")
+            .expect("cancel live order");
+
+        assert_eq!(response.state, "canceled");
+        let trading_state = daemon.trading_state();
+        assert_eq!(trading_state[0].orders[0].state, "canceled");
+        assert_eq!(trading_state[0].risk.pending_intents, 0);
+        assert_eq!(trading_state[0].risk.active_orders, 0);
     }
 
     #[test]

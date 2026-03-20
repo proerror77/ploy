@@ -15,9 +15,10 @@ pub use events::{
 };
 pub use system::{SystemControlResponse, SystemStatus};
 pub use trading::{
-    FillSnapshot, IntentPurpose, MarketData, OrderSnapshot, PaperIntentRequest,
-    PaperIntentResponse, PnlSnapshotResponse, PositionResponse, PositionSnapshotResponse,
-    RiskSnapshotResponse, TradeResponse, TradingIntentSnapshot, TradingStateSnapshot,
+    FillSnapshot, IntentPurpose, MarketData, OrderControlResponse, OrderSnapshot,
+    PaperIntentRequest, PaperIntentResponse, PnlSnapshotResponse, PositionResponse,
+    PositionSnapshotResponse, RiskSnapshotResponse, TradeResponse, TradingIntentSnapshot,
+    TradingStateSnapshot,
 };
 
 pub const CRATE_MARKER: &str = "ploy-operator-contracts";
