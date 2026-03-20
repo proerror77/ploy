@@ -1,0 +1,15 @@
+[package]
+name = "ployd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ploy platform daemon workspace entry point"
+
+[dependencies]
+ploy-connectivity.workspace = true
+ploy-deployments.workspace = true
+ploy-operator-contracts.workspace = true
+ploy-platform.workspace = true
+ploy-trading.workspace = true

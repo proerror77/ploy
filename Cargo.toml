@@ -1,20 +1,64 @@
-[package]
-name = "ploy"
-version = "0.1.0"
-edition = "2021"
-description = "Polymarket two-leg arbitrage trading bot"
-authors = ["Your Name"]
-
 [workspace]
 members = [
     ".",
+    "apps/ployctl",
+    "apps/ployd",
+    "crates/ploy-connectivity",
+    "crates/ploy-deployments",
+    "crates/ploy-operator-contracts",
+    "crates/ploy-platform",
+    "crates/ploy-research",
+    "crates/ploy-strategy-bundles",
+    "crates/ploy-trading",
     "tools/sdk_auth_check",
 ]
 resolver = "2"
 
-[dependencies]
-# Async runtime
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name"]
+license = "MIT"
+repository = "https://github.com/proerror77/ploy"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "fs", "io-util", "io-std", "process"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+ploy-connectivity = { path = "crates/ploy-connectivity" }
+ploy-deployments = { path = "crates/ploy-deployments" }
+ploy-operator-contracts = { path = "crates/ploy-operator-contracts" }
+ploy-platform = { path = "crates/ploy-platform" }
+ploy-research = { path = "crates/ploy-research" }
+ploy-strategy-bundles = { path = "crates/ploy-strategy-bundles" }
+ploy-trading = { path = "crates/ploy-trading" }
+
+[package]
+name = "ploy"
+version.workspace = true
+edition.workspace = true
+description = "Legacy compatibility crate for the ploy trading platform workspace"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ploy-connectivity.workspace = true
+ploy-deployments.workspace = true
+ploy-operator-contracts.workspace = true
+ploy-platform.workspace = true
+ploy-research.workspace = true
+ploy-strategy-bundles.workspace = true
+ploy-trading.workspace = true
+
+# Async runtime
+tokio.workspace = true
 
 # WebSocket
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
@@ -28,16 +72,16 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots"], de
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "rust_decimal", "uuid", "macros", "migrate", "json"] }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 
 # Configuration
 config = { version = "0.14", default-features = false, features = ["toml"] }
 
 # Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
-tracing-appender = "0.2"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 
 # Numeric types
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
@@ -47,11 +91,11 @@ rust_decimal_macros = "1"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Error handling
-thiserror = "1"
-anyhow = "1"
+thiserror.workspace = true
+anyhow.workspace = true
 
 # Async traits
-async-trait = "0.1"
+async-trait.workspace = true
 
 # UUID
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -92,10 +136,6 @@ rpassword = "7"
 rustyline = "14"
 dirs = "6"
 
-# Unix process management (for strategy daemon control)
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.28", features = ["signal", "process"] }
-
 # Terminal UI
 crossterm = "0.28"
 ratatui = "0.29"
@@ -105,10 +145,8 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 tower-http = { version = "0.6", features = ["cors"], optional = true }
 
 # Reinforcement Learning (optional)
-# Using ndarray backend for CPU-based RL training
 burn = { version = "0.14", default-features = false, features = ["train", "autodiff", "std", "ndarray"], optional = true }
 burn-ndarray = { version = "0.14", optional = true }
-# Pin bincode to version compatible with burn (rc.3 has decode_borrowed_from_slice)
 bincode = { version = "=2.0.0-rc.3", optional = true }
 
 # DuckDB for offline Parquet analysis (optional)
@@ -117,9 +155,12 @@ duckdb = { version = "1.4", features = ["bundled"], optional = true }
 # ONNX inference (optional; prefer pure-Rust `tract` for deploy simplicity)
 tract-onnx = { version = "0.22.0", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["signal", "process"] }
+
 [features]
 default = []
-api = ["dep:tower-http"]  # Enable API module with SQLx compile-time checks (requires DATABASE_URL)
+api = ["dep:tower-http"]
 api_ws = ["api", "axum/ws"]
 claimer = ["claimer_cli", "claimer_daemon"]
 claimer_cli = ["claimer_daemon"]
