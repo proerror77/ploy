@@ -8,6 +8,7 @@ The workspace now also includes the platform-refactor spine:
 
 - `ployd`: daemon entrypoint
 - `ployctl`: operator client entrypoint
+- `ploytui`: thin terminal operator console
 - `crates/ploy-platform`: control-plane core
 - `crates/ploy-trading`: canonical trading lifecycle
 - `crates/ploy-deployments`: worker protocol and supervisor
@@ -24,6 +25,7 @@ cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
+cargo run -p ploytui
 # realtime operator stream
 curl -N http://127.0.0.1:8081/api/events/stream
 rtk cargo test --test platform_smoke -- --nocapture
@@ -40,7 +42,7 @@ Default release workflow:
 
 Compatibility note:
 
-- `ployd` and `ployctl` are the default workspace entrypoints for the trading platform spine.
+- `ployd`, `ployctl`, and `ploytui` are the default workspace entrypoints for the trading platform spine.
 - The old root runtime tree has been retired from the compiled workspace.
 - Remaining `ploy ...` examples below are historical reference only and are not runnable entrypoints in this branch.
 
@@ -403,6 +405,7 @@ Strategies run independently and can be managed as daemons (start/stop/status). 
 apps/
   ployd/         Trading platform daemon entrypoint
   ployctl/       Operator client entrypoint
+  ploytui/       Thin terminal operator console
 crates/
   ploy-platform/ Control-plane core
   ploy-trading/  Canonical trading lifecycle
@@ -425,14 +428,17 @@ cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
+cargo run -p ploytui
 curl -N http://127.0.0.1:8081/api/events/stream
 rtk cargo check -p ployd             # Fast daemon type-check loop
 rtk cargo check -p ployctl           # Fast client type-check loop
+rtk cargo check -p ploytui           # Fast terminal console type-check loop
 rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture
 cargo fmt --check                    # Check formatting
 cargo clippy -- -D warnings          # Lint
 rtk cargo build -p ployd             # Build the daemon binary
 rtk cargo build -p ployctl           # Build the operator client binary
+rtk cargo build -p ploytui           # Build the terminal console binary
 ```
 
 See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for the contributor guide.

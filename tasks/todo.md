@@ -35,6 +35,7 @@ the canonical trading ledger.
   - `rtk cargo check -p ployd`
   - `rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture`
 - 2026-03-20: Follow-up reconciliation cut now deduplicates fills in `ploy-trading`, teaches `ploy-connectivity` to expose `reconcile_fills`, reconciles live fills inside `ployd` snapshot ticks, and serves `/api/trading/state` from shared daemon state instead of relying only on disk snapshots.
+- 2026-03-20: Added `apps/ploytui` as a thin terminal console on the daemon control plane, reused the `ployctl` HTTP/SSE client via a shared library target, and promoted `ploytui` into the default release/install/runbook path.
 
 # Trading Platform Completion Sweep (2026-03-20)
 

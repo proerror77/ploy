@@ -7,6 +7,7 @@ Start the single-host trading platform runtime with:
 - one `ployd` daemon
 - one or more managed deployment workers
 - one operator client path through `ployctl`
+- one optional terminal console through `ploytui`
 
 ## Default Local Flow
 
@@ -22,6 +23,7 @@ cargo run -p ployd
 cargo run -p ployctl -- system status
 cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments list
+cargo run -p ploytui
 curl -N http://127.0.0.1:8081/api/events/stream
 ```
 
@@ -42,6 +44,7 @@ ployctl system status
 ployctl trading status
 ployctl deployments list
 ployctl deployments inspect example.paper
+ploytui
 curl -N http://127.0.0.1:8081/api/events/stream
 ployctl deployments pause example.paper
 ployctl deployments resume example.paper
@@ -49,6 +52,7 @@ ployctl deployments stop example.paper
 ```
 
 This branch now treats `ployd` as the default long-running daemon entrypoint and
-`ployctl` as an HTTP-first operator client with snapshot fallback. Deployment
-CRUD is still simplified, but the daemon/client/runtime contract is no longer a
+`ployctl` as an HTTP-first operator client with snapshot fallback. `ploytui` is
+the thin terminal console on top of the same control-plane API. Deployment CRUD
+is still simplified, but the daemon/client/runtime contract is no longer a
 placeholder.

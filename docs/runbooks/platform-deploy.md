@@ -8,15 +8,15 @@ The workspace-default deploy path is:
 - Long-running systemd unit: `deployment/ployd.service`
 - Host install helper: `scripts/install-platform-service.sh`
 
-This path deploys exactly two binaries:
+This path deploys three binaries:
 
 - `/opt/ploy/bin/ployd`
 - `/opt/ploy/bin/ployctl`
+- `/opt/ploy/bin/ploytui`
 
 `ployd` is the only default long-running process. `ployctl` is an operator
-client used for post-deploy verification and remote inspection. It prefers the
-daemon HTTP surface and falls back to runtime snapshots if the API is
-temporarily unavailable.
+client used for post-deploy verification and remote inspection. `ploytui` is
+the thin terminal console built on the same daemon HTTP surface.
 
 Deployment resources are managed separately from the daemon process. Operators
 apply a deployment manifest and then use `ployctl` to inspect or change desired
@@ -28,6 +28,7 @@ The release bundle contains:
 
 - `bin/ployd`
 - `bin/ployctl`
+- `bin/ploytui`
 - `deployment/ployd.service`
 - `scripts/install-platform-service.sh`
 - `data/state/deployments.json.sample`
@@ -36,7 +37,7 @@ The release bundle contains:
 
 After the bundle lands on the host, the deploy workflow:
 
-1. Installs `ployd` and `ployctl` into `/opt/ploy/bin`
+1. Installs `ployd`, `ployctl`, and `ploytui` into `/opt/ploy/bin`
 2. Installs `deployment/ployd.service` into `/opt/ploy/deployment`
 3. Installs `scripts/install-platform-service.sh` into `/opt/ploy/scripts`
 4. Seeds `/opt/ploy/data/state/deployments.json` if missing
@@ -47,6 +48,7 @@ After the bundle lands on the host, the deploy workflow:
    - `curl -fsS http://127.0.0.1:8081/health`
    - `/opt/ploy/bin/ployctl system status`
    - `/opt/ploy/bin/ployctl trading status`
+   - `/opt/ploy/bin/ploytui`
    - `curl -N http://127.0.0.1:8081/api/events/stream`
 
 ## Required Host Paths
@@ -68,6 +70,7 @@ curl -fsS http://127.0.0.1:8081/health
 /opt/ploy/bin/ployctl system status
 /opt/ploy/bin/ployctl trading status
 /opt/ploy/bin/ployctl deployments list
+/opt/ploy/bin/ploytui
 curl -N http://127.0.0.1:8081/api/events/stream
 ```
 

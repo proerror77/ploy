@@ -3,6 +3,7 @@ members = [
     ".",
     "apps/ployctl",
     "apps/ployd",
+    "apps/ploytui",
     "crates/ploy-connectivity",
     "crates/ploy-deployments",
     "crates/ploy-operator-contracts",

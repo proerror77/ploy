@@ -45,13 +45,15 @@ jobs:
 
       - name: Build platform binaries
         run: |
-          # Workspace app crates: apps/ployd and apps/ployctl
+          # Workspace app crates: apps/ployd, apps/ployctl, and apps/ploytui
           cargo build --release --locked \
             --target "${PLATFORM_TARGET}" \
             -p ployd \
-            -p ployctl
+            -p ployctl \
+            -p ploytui
           strip "target/${PLATFORM_TARGET}/release/ployd" || true
           strip "target/${PLATFORM_TARGET}/release/ployctl" || true
+          strip "target/${PLATFORM_TARGET}/release/ploytui" || true
 
       - name: Create platform bundle
         run: |
@@ -63,6 +65,7 @@ jobs:
             "${bundle_root}/scripts"
           install -m 755 "target/${PLATFORM_TARGET}/release/ployd" "${bundle_root}/bin/ployd"
           install -m 755 "target/${PLATFORM_TARGET}/release/ployctl" "${bundle_root}/bin/ployctl"
+          install -m 755 "target/${PLATFORM_TARGET}/release/ploytui" "${bundle_root}/bin/ploytui"
           install -m 644 deployment/ployd.service "${bundle_root}/deployment/ployd.service"
           install -m 755 scripts/install-platform-service.sh "${bundle_root}/scripts/install-platform-service.sh"
           install -m 644 data/state/deployments.json.sample "${bundle_root}/data/state/deployments.json.sample"
@@ -124,6 +127,7 @@ jobs:
             $SUDO mkdir -p "${DEPLOY_ROOT}/bin" "${DEPLOY_ROOT}/deployment" "${DEPLOY_ROOT}/scripts" "${DEPLOY_ROOT}/data/state"
             $SUDO install -m 755 "${WORKDIR}/bin/ployd" "${DEPLOY_ROOT}/bin/ployd"
             $SUDO install -m 755 "${WORKDIR}/bin/ployctl" "${DEPLOY_ROOT}/bin/ployctl"
+            $SUDO install -m 755 "${WORKDIR}/bin/ploytui" "${DEPLOY_ROOT}/bin/ploytui"
             $SUDO install -m 644 "${WORKDIR}/deployment/ployd.service" "${DEPLOY_ROOT}/deployment/ployd.service"
             $SUDO install -m 755 "${WORKDIR}/scripts/install-platform-service.sh" "${DEPLOY_ROOT}/scripts/install-platform-service.sh"
             if [ ! -f "${DEPLOY_ROOT}/data/state/deployments.json" ]; then
@@ -140,9 +144,10 @@ jobs:
             # Verify the deployed operator client path: ployctl trading status
             "${DEPLOY_ROOT}/bin/ployctl" system status
             "${DEPLOY_ROOT}/bin/ployctl" trading status
+            "${DEPLOY_ROOT}/bin/ploytui" || true
 
       - name: Deployment summary
         run: |
           echo "## Platform Release" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Bundle: \`ployd + ployctl\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Bundle: \`ployd + ployctl + ploytui\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Service: \`ployd.service\`" >> "$GITHUB_STEP_SUMMARY"

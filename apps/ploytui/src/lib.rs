@@ -1,0 +1,205 @@
+use ploy_operator_contracts::{
+    DeploymentSummary, OperatorEvent, SystemStatus, TradingStateSnapshot,
+};
+use std::fmt::Write;
+
+#[derive(Debug, Clone)]
+pub struct DashboardSnapshot {
+    pub system: SystemStatus,
+    pub deployments: Vec<DeploymentSummary>,
+    pub trading: Vec<TradingStateSnapshot>,
+    pub recent_events: Vec<OperatorEvent>,
+}
+
+pub fn render_dashboard(snapshot: &DashboardSnapshot) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "PLOY TUI");
+    let _ = writeln!(out, "========");
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "System");
+    let _ = writeln!(
+        out,
+        "status={} uptime={}s version={} errors_1h={}",
+        snapshot.system.status,
+        snapshot.system.uptime_seconds,
+        snapshot.system.version,
+        snapshot.system.error_count_1h
+    );
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "Deployments");
+    if snapshot.deployments.is_empty() {
+        let _ = writeln!(out, "  none");
+    } else {
+        for deployment in &snapshot.deployments {
+            let _ = writeln!(
+                out,
+                "  {} desired={} observed={}",
+                deployment.deployment_id,
+                state_name(&deployment.desired_state),
+                state_name(&deployment.observed_state)
+            );
+        }
+    }
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "Trading");
+    if snapshot.trading.is_empty() {
+        let _ = writeln!(out, "  none");
+    } else {
+        for trading in &snapshot.trading {
+            let _ = writeln!(
+                out,
+                "  {} mode={} intents={} orders={} fills={} positions={} net_pnl={}",
+                trading.deployment_id,
+                trading.runtime_mode,
+                trading.intents.len(),
+                trading.orders.len(),
+                trading.fills.len(),
+                trading.positions.len(),
+                trading.pnl.net_pnl
+            );
+        }
+    }
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "Recent Events");
+    if snapshot.recent_events.is_empty() {
+        let _ = writeln!(out, "  none");
+    } else {
+        for event in &snapshot.recent_events {
+            let _ = writeln!(out, "  {}", render_event_line(event));
+        }
+    }
+
+    out
+}
+
+pub fn render_event_line(event: &OperatorEvent) -> String {
+    match event {
+        OperatorEvent::SystemSnapshot(event) => format!(
+            "system_snapshot status={} uptime={}s",
+            event.system.status, event.system.uptime_seconds
+        ),
+        OperatorEvent::DeploymentSnapshot(event) => {
+            format!("deployment_snapshot count={}", event.deployments.len())
+        }
+        OperatorEvent::TradingSnapshot(event) => {
+            format!("trading_snapshot count={}", event.trading.len())
+        }
+        OperatorEvent::Status(event) => format!("status {}", event.status),
+        OperatorEvent::Log(event) => format!("log {} {}", event.level, event.message),
+        OperatorEvent::Trade(event) => format!(
+            "trade {} {} shares={} status={}",
+            event.id, event.token_id, event.shares, event.status
+        ),
+        OperatorEvent::Position(event) => format!(
+            "position {} {} shares={}",
+            event.token_id, event.side, event.shares
+        ),
+        OperatorEvent::Market(event) => format!(
+            "market {} bid={} ask={}",
+            event.token_id, event.best_bid, event.best_ask
+        ),
+    }
+}
+
+fn state_name<T: std::fmt::Debug>(value: &T) -> String {
+    format!("{value:?}").to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_dashboard, render_event_line, DashboardSnapshot};
+    use chrono::Utc;
+    use ploy_operator_contracts::{
+        DeploymentSnapshotEvent, DeploymentSummary, DesiredState, ObservedState, OperatorEvent,
+        SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent, TradingStateSnapshot,
+    };
+
+    fn sample_snapshot() -> DashboardSnapshot {
+        DashboardSnapshot {
+            system: SystemStatus {
+                status: "running".to_string(),
+                uptime_seconds: 42,
+                version: "0.1.0".to_string(),
+                strategy: "platform".to_string(),
+                last_trade_time: None,
+                websocket_connected: false,
+                database_connected: false,
+                error_count_1h: 0,
+            },
+            deployments: vec![DeploymentSummary {
+                deployment_id: "example.paper".to_string(),
+                desired_state: DesiredState::Running,
+                observed_state: ObservedState::Running,
+            }],
+            trading: vec![TradingStateSnapshot {
+                deployment_id: "example.paper".to_string(),
+                runtime_mode: "paper".to_string(),
+                ..TradingStateSnapshot::default()
+            }],
+            recent_events: vec![
+                OperatorEvent::SystemSnapshot(SystemSnapshotEvent {
+                    system: SystemStatus {
+                        status: "running".to_string(),
+                        uptime_seconds: 42,
+                        version: "0.1.0".to_string(),
+                        strategy: "platform".to_string(),
+                        last_trade_time: None,
+                        websocket_connected: false,
+                        database_connected: false,
+                        error_count_1h: 0,
+                    },
+                }),
+                OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
+                    deployments: vec![DeploymentSummary {
+                        deployment_id: "example.paper".to_string(),
+                        desired_state: DesiredState::Running,
+                        observed_state: ObservedState::Running,
+                    }],
+                }),
+                OperatorEvent::TradingSnapshot(TradingSnapshotEvent {
+                    trading: vec![TradingStateSnapshot {
+                        deployment_id: "example.paper".to_string(),
+                        runtime_mode: "paper".to_string(),
+                        ..TradingStateSnapshot::default()
+                    }],
+                }),
+            ],
+        }
+    }
+
+    #[test]
+    fn dashboard_render_includes_core_sections() {
+        let output = render_dashboard(&sample_snapshot());
+
+        assert!(output.contains("PLOY TUI"));
+        assert!(output.contains("System"));
+        assert!(output.contains("Deployments"));
+        assert!(output.contains("Trading"));
+        assert!(output.contains("Recent Events"));
+        assert!(output.contains("example.paper"));
+        assert!(output.contains("running"));
+    }
+
+    #[test]
+    fn event_render_labels_snapshot_types() {
+        let output = render_event_line(&OperatorEvent::SystemSnapshot(SystemSnapshotEvent {
+            system: SystemStatus {
+                status: "running".to_string(),
+                uptime_seconds: 1,
+                version: "0.1.0".to_string(),
+                strategy: "platform".to_string(),
+                last_trade_time: Some(Utc::now()),
+                websocket_connected: false,
+                database_connected: false,
+                error_count_1h: 0,
+            },
+        }));
+
+        assert!(output.contains("system_snapshot"));
+        assert!(output.contains("running"));
+    }
+}

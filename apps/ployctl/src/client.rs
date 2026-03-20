@@ -1,10 +1,10 @@
 use ploy_operator_contracts::{
     DeploymentApplyRequest, DeploymentControlRequest, DeploymentSummary, DesiredState,
-    SystemStatus, TradingStateSnapshot,
+    OperatorEvent, SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 
@@ -44,6 +44,71 @@ impl ControlPlaneClient {
 
     pub fn trading_state(&self) -> Result<Vec<TradingStateSnapshot>, String> {
         self.read_trading_state_snapshot()
+    }
+
+    pub fn system_snapshot(&self) -> Result<SystemStatus, String> {
+        self.read_status_snapshot()
+    }
+
+    pub fn recent_events(&self, limit: usize) -> Result<Vec<OperatorEvent>, String> {
+        let mut stream = TcpStream::connect(&self.control_plane_addr)
+            .map_err(|err| format!("connect {}: {err}", self.control_plane_addr))?;
+        let request = format!(
+            "GET /api/events/stream HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            self.control_plane_addr
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|err| format!("write request: {err}"))?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .map_err(|err| format!("set read timeout: {err}"))?;
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        reader
+            .read_line(&mut status_line)
+            .map_err(|err| format!("read HTTP status: {err}"))?;
+        if !status_line.contains("200") {
+            return Err(format!("unexpected HTTP status: {}", status_line.trim()));
+        }
+
+        loop {
+            let mut line = String::new();
+            let bytes = reader
+                .read_line(&mut line)
+                .map_err(|err| format!("read headers: {err}"))?;
+            if bytes == 0 || line == "\r\n" {
+                break;
+            }
+        }
+
+        let mut events = Vec::new();
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end();
+                    if let Some(payload) = trimmed.strip_prefix("data: ") {
+                        let event: OperatorEvent = serde_json::from_str(payload)
+                            .map_err(|err| format!("parse event payload: {err}"))?;
+                        events.push(event);
+                        if events.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(err) => return Err(format!("read event stream: {err}")),
+            }
+        }
+
+        Ok(events)
     }
 
     pub fn inspect_trading_state(&self, deployment_id: &str) -> Option<TradingStateSnapshot> {
@@ -198,8 +263,8 @@ impl Default for ControlPlaneClient {
 mod tests {
     use super::ControlPlaneClient;
     use ploy_operator_contracts::{
-        DeploymentApplyRequest, DeploymentSummary, DesiredState, ObservedState, SystemStatus,
-        TradingStateSnapshot,
+        DeploymentApplyRequest, DeploymentSnapshotEvent, DeploymentSummary, DesiredState,
+        ObservedState, OperatorEvent, SystemSnapshotEvent, SystemStatus, TradingStateSnapshot,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -390,5 +455,56 @@ mod tests {
             .set_desired_state("example.paper", DesiredState::Paused)
             .expect("pause");
         assert_eq!(paused.desired_state, DesiredState::Paused);
+    }
+
+    #[test]
+    fn client_reads_recent_events_from_sse() {
+        let runtime_root = temp_dir("http-events");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).expect("read request");
+            let event1 =
+                serde_json::to_string(&OperatorEvent::SystemSnapshot(SystemSnapshotEvent {
+                    system: SystemStatus {
+                        status: "running".to_string(),
+                        uptime_seconds: 7,
+                        version: "0.1.0".to_string(),
+                        strategy: "platform".to_string(),
+                        last_trade_time: None,
+                        websocket_connected: false,
+                        database_connected: false,
+                        error_count_1h: 0,
+                    },
+                }))
+                .expect("event1");
+            let event2 = serde_json::to_string(&OperatorEvent::DeploymentSnapshot(
+                DeploymentSnapshotEvent {
+                    deployments: vec![DeploymentSummary {
+                        deployment_id: "example.paper".to_string(),
+                        desired_state: DesiredState::Running,
+                        observed_state: ObservedState::Running,
+                    }],
+                },
+            ))
+            .expect("event2");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {event1}\n\ndata: {event2}\n\n"
+            )
+            .expect("write response");
+        });
+
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = addr.to_string();
+
+        let events = client.recent_events(2).expect("recent events");
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], OperatorEvent::SystemSnapshot(_)));
+        assert!(matches!(events[1], OperatorEvent::DeploymentSnapshot(_)));
     }
 }
