@@ -33,7 +33,7 @@
   - `src/strategy/event_models/arena_text.rs`（外部資料源：Arena leaderboard）
 - 主要入口
   - CLI：`ploy event-edge ...`（Legacy CLI，見 `src/main.rs` 的 `run_event_edge_mode`）
-  - 常駐背景 agent（跟著 `ploy platform start --politics` 起）：`[event_edge_agent]`（見 `config/default.toml`、`docs/EVENT_EDGE_AGENT.md`）
+  - 常駐背景 agent：舊單體 runtime 啟動路徑已歸檔；目前僅保留 `[event_edge_agent]` 的歷史設計參考（見 `docs/EVENT_EDGE_AGENT.md`）
   - Canonical runtime：`src/strategy/event_edge/strategy.rs`（registered strategy plugin through the managed strategy runtime）
 - 已完成
   - `p_true` 估計 → `edge/EV` → 下單（可 dry-run）

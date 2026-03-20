@@ -1,4 +1,4 @@
-name: Release to Staging (tango-2-1)
+name: Release Legacy Staging Bundle (tango-2-1)
 
 on:
   workflow_dispatch:
@@ -24,10 +24,7 @@ env:
   DEPLOY_ROOT: ${{ vars.STAGING_PLOY_ROOT || '/opt/ploy' }}
   STAGING_HOST_LABEL: tango-2-1
   STAGING_SERVICES: >-
-    ploy-sports-pm.service
-    ploy-crypto-collector.service
-    ploy-crypto-dryrun.service
-    ploy-orderbook-history.service
+    ploy-platform-watchdog.timer
     ploy-maintenance.timer
 
 jobs:
@@ -192,7 +189,7 @@ jobs:
 
             BUNDLE_TAG="${{ needs.build.outputs.bundle_tag }}"
             DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/ploy}"
-            STAGING_SERVICES="${STAGING_SERVICES:-ploy-sports-pm.service ploy-crypto-collector.service ploy-crypto-dryrun.service ploy-orderbook-history.service ploy-maintenance.timer}"
+            STAGING_SERVICES="${STAGING_SERVICES:-ploy-platform-watchdog.timer ploy-maintenance.timer}"
             BUNDLE="/tmp/ploy-staging-${BUNDLE_TAG}.tar.gz"
             WORKDIR="/tmp/ploy-staging-${BUNDLE_TAG}"
             RELEASE_DIR="${DEPLOY_ROOT}/releases/${BUNDLE_TAG}"

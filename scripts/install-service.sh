@@ -1,10 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-# Install Ploy systemd service on EC2
-# Run this on the EC2 instance after first deploy
+# Install Ploy host support services on EC2.
+# Legacy single-binary runtime units now live under deployment/archive/.
 
-echo "==> Installing systemd service..."
+echo "==> Installing host support services..."
 
 # Ensure runtime user exists
 if ! id -u ploy >/dev/null 2>&1; then
@@ -15,29 +15,7 @@ fi
 sudo mkdir -p /opt/ploy/{config,env,data,logs,deployment,run}
 sudo chown -R ploy:ploy /opt/ploy
 
-# Copy service files
-sudo install -m 0644 /opt/ploy/deployment/ploy.service /etc/systemd/system/ploy.service
-if [[ -f /opt/ploy/deployment/ploy@.service ]]; then
-  sudo install -m 0644 /opt/ploy/deployment/ploy@.service /etc/systemd/system/ploy@.service
-fi
-if [[ -f /opt/ploy/deployment/ploy-platform-live.service ]]; then
-  sudo install -m 0644 /opt/ploy/deployment/ploy-platform-live.service /etc/systemd/system/ploy-platform-live.service
-fi
-if [[ -f /opt/ploy/deployment/ploy-sports-pm.service ]]; then
-  sudo install -m 0644 /opt/ploy/deployment/ploy-sports-pm.service /etc/systemd/system/ploy-sports-pm.service
-fi
-if [[ -f /opt/ploy/deployment/ploy-crypto-dryrun.service ]]; then
-  sudo install -m 0644 /opt/ploy/deployment/ploy-crypto-dryrun.service /etc/systemd/system/ploy-crypto-dryrun.service
-fi
-if [[ -f /opt/ploy/deployment/ploy-crypto-live.service ]]; then
-  sudo install -m 0644 /opt/ploy/deployment/ploy-crypto-live.service /etc/systemd/system/ploy-crypto-live.service
-fi
-if [[ -f /opt/ploy/deployment/ploy-sports-live.service ]]; then
-  sudo install -m 0644 /opt/ploy/deployment/ploy-sports-live.service /etc/systemd/system/ploy-sports-live.service
-fi
-if [[ -f /opt/ploy/deployment/ploy-orderbook-history.service ]]; then
-  sudo install -m 0644 /opt/ploy/deployment/ploy-orderbook-history.service /etc/systemd/system/ploy-orderbook-history.service
-fi
+# Copy service files that remain active in the workspace runtime path.
 if [[ -f /opt/ploy/deployment/ploy-maintenance.service ]]; then
   sudo install -m 0644 /opt/ploy/deployment/ploy-maintenance.service /etc/systemd/system/ploy-maintenance.service
 fi
@@ -49,15 +27,6 @@ if [[ -f /opt/ploy/deployment/ploy-platform-watchdog.service ]]; then
 fi
 if [[ -f /opt/ploy/deployment/ploy-platform-watchdog.timer ]]; then
   sudo install -m 0644 /opt/ploy/deployment/ploy-platform-watchdog.timer /etc/systemd/system/ploy-platform-watchdog.timer
-fi
-if [[ -f /opt/ploy/deployment/ploy-strategy-pattern-memory-dryrun.service ]]; then
-  sudo install -m 0644 /opt/ploy/deployment/ploy-strategy-pattern-memory-dryrun.service /etc/systemd/system/ploy-strategy-pattern-memory-dryrun.service
-fi
-if [[ -f /opt/ploy/deployment/ploy-strategy-momentum-dryrun.service ]]; then
-  sudo install -m 0644 /opt/ploy/deployment/ploy-strategy-momentum-dryrun.service /etc/systemd/system/ploy-strategy-momentum-dryrun.service
-fi
-if [[ -f /opt/ploy/deployment/ploy-strategy-split-arb-dryrun.service ]]; then
-  sudo install -m 0644 /opt/ploy/deployment/ploy-strategy-split-arb-dryrun.service /etc/systemd/system/ploy-strategy-split-arb-dryrun.service
 fi
 
 # Install workload configs/env templates if missing
@@ -224,21 +193,17 @@ sudo chown ploy:ploy /opt/ploy/config/*.toml /opt/ploy/env/*.env 2>/dev/null || 
 # Reload systemd
 sudo systemctl daemon-reload
 
-# Enable service to start on boot
-sudo systemctl enable ploy
+# Enable host support timers on boot
 if [[ -f /etc/systemd/system/ploy-platform-watchdog.timer ]]; then
   sudo systemctl enable --now ploy-platform-watchdog.timer
 fi
+if [[ -f /etc/systemd/system/ploy-maintenance.timer ]]; then
+  sudo systemctl enable ploy-maintenance.timer
+fi
 
-echo "==> Service installed"
+echo "==> Host support services installed"
 echo ""
 echo "Commands:"
-echo "  sudo systemctl start ploy   # Start"
-echo "  sudo systemctl stop ploy    # Stop"
-echo "  sudo systemctl status ploy  # Status"
-echo "  sudo systemctl start ploy-sports-pm       # Start sports PM workload"
-echo "  sudo systemctl start ploy-crypto-dryrun   # Start crypto dry-run workload"
 echo "  sudo systemctl status ploy-platform-watchdog.timer  # Inspect watchdog loop"
-echo "  sudo systemctl start ploy@acc1   # Start account acc1 (multi-account)"
-echo "  sudo systemctl status ploy@acc1  # Status account acc1"
-echo "  journalctl -u ploy -f       # View logs"
+echo "  sudo systemctl start ploy-maintenance.service       # Run maintenance once"
+echo "  sudo systemctl status ploy-maintenance.timer        # Inspect maintenance schedule"

@@ -1,5 +1,12 @@
 # AWS EC2 Deployment Runbook
 
+> Note
+> This runbook documents the archived single-binary `ploy` deployment flow.
+> The trading-platform workspace defaults to `ployd` / `ployctl`; the service
+> units and helper scripts referenced below now live under
+> `deployment/archive/legacy-root-runtime/` and
+> `scripts/archive/legacy-root-runtime/`.
+
 `tango-2-1` is the EC2 staging host. Use `.github/workflows/release-staging.yml`
 for first-class staging deploys. That path ships CI-built artifacts only and
 does not revive the deprecated `deploy-tango21.yml` host-build flow.
@@ -40,7 +47,7 @@ not as the primary staging release path.
 Run from your local machine:
 
 ```bash
-scripts/aws_ec2_deploy.sh \
+scripts/archive/legacy-root-runtime/aws_ec2_deploy.sh \
   --host <EC2_PUBLIC_IP> \
   --key ~/.ssh/<your-key>.pem \
   --services ploy-sports-pm,ploy-crypto-collector,ploy-orderbook-history,ploy-maintenance.timer
@@ -49,7 +56,7 @@ scripts/aws_ec2_deploy.sh \
 Optional:
 
 ```bash
-scripts/aws_ec2_deploy.sh \
+scripts/archive/legacy-root-runtime/aws_ec2_deploy.sh \
   --host <EC2_PUBLIC_IP> \
   --user ubuntu \
   --key ~/.ssh/<your-key>.pem \
@@ -113,6 +120,7 @@ Sports PM needs `nba_team_stats` data before signals are generated.
 
 ```bash
 cd /opt/ploy
+# Historical single-binary seed path for archived sports-pm deployments.
 /opt/ploy/bin/ploy --config /opt/ploy/config/sports_pm.toml strategy nba-seed-stats --season 2025-26
 ```
 
@@ -139,7 +147,7 @@ sudo journalctl -u ploy-maintenance -n 200 --no-pager
 Recommended `authorized_keys` entry:
 
 ```text
-command="/opt/ploy/scripts/ssh_ployctl.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA...
+command="/opt/ploy/scripts/archive/legacy-root-runtime/ssh_ployctl.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA...
 ```
 
 Remote control examples:
@@ -154,7 +162,10 @@ ssh ploy@<EC2_PUBLIC_IP> "svc-restart crypto"
 ssh ploy@<EC2_PUBLIC_IP> "svc-logs crypto 200"
 ```
 
-Note: `ssh_ployctl.sh` uses `sudo systemctl`/`sudo journalctl`; grant the `ploy` user passwordless sudo for these commands.
+Note: `ssh_ployctl.sh` now lives under `scripts/archive/legacy-root-runtime/`
+and uses `sudo systemctl`/`sudo journalctl`; grant the `ploy` user passwordless
+sudo for these commands only if you still operate the archived single-binary
+stack.
 
 ## 6) Safety Checklist
 

@@ -3,14 +3,15 @@
 > Note
 > This document describes the legacy single-binary runtime flow.
 > For the trading-platform workspace, prefer the `ployd` / `ployctl` operator path and treat `ploy platform start` as compatibility-only.
+> The old helper assets now live under `deployment/archive/legacy-root-runtime/` and `scripts/archive/legacy-root-runtime/`.
 
-`EventEdgeAgent` 是一個長駐背景的「事件/資料源驅動」掃描與交易迴圈：
+`EventEdgeAgent` 是舊單體 runtime 裡的一個長駐背景「事件/資料源驅動」掃描與交易迴圈：
 
 - 從公開資料源（目前支援 Arena Text leaderboard）推估保守的 `p_true`
 - 讀取 Polymarket order book（best ask）
 - 當 `p_true - ask >= min_edge` 且 `ask <= max_entry` 時自動下單（若 `trade=true`）
 
-它不需要你盯盤，也不需要你一直手動啟動 `event-edge --watch`。在舊單體 runtime 中，只要啟動一次 `ploy platform start --politics`（或交給系統服務管理），它就會自己循環跑。
+它不需要你盯盤，也不需要你一直手動啟動 `event-edge --watch`。在舊單體 runtime 中，只要啟動一次 `ploy platform start --politics`（或交給系統服務管理），它就會自己循環跑。對目前的 trading-platform workspace，這段只保留為歷史參考。
 
 ## 1) 開啟設定
 
@@ -46,17 +47,17 @@ event_ids = []
 - `POLYMARKET_PRIVATE_KEY`（或 `PRIVATE_KEY`）
 - 若是 proxy/Magic 錢包：再加 `POLYMARKET_FUNDER`
 
-## 3) 啟動（一次就好）
+## 3) 歷史啟動方式（一次就好）
 
 ```bash
 ploy platform start --politics
 ```
 
-這是 legacy compatibility path。新的 workspace 方向應把這類政治事件策略放進 managed deployment，由 `ployd` 托管並透過 `ployctl` / API 操作。
+這是 legacy compatibility path。新的 workspace 方向應把這類政治事件策略放進 managed deployment，由 `ployd` 托管並透過 `ployctl` / API 操作；不要再把這條命令當成預設部署路徑。
 
 ## 4) 讓它自動常駐（macOS launchd）
 
-本 repo 已包含 `deployment/com.ploy.trading.plist`，它會在舊流程中於開機/登入後自動跑 `ploy platform start --politics` 並 KeepAlive。
+本 repo 仍保留舊流程的 launchd 參考檔，但已移到 `deployment/archive/legacy-root-runtime/com.ploy.trading.plist`。
 
 你只需要：
 1. 確保你的 `config/default.toml`（或 `PLOY_ENV` 對應設定）已開啟 `[event_edge_agent]`
