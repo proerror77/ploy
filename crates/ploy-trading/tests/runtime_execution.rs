@@ -68,3 +68,30 @@ fn risk_snapshot_only_counts_active_intents() {
     assert_eq!(rejected.risk.pending_intents, 0);
     assert_eq!(rejected.risk.active_orders, 0);
 }
+
+#[test]
+fn recording_the_same_fill_twice_is_idempotent() {
+    let mut runtime = TradingRuntime::default();
+    let intent = sample_intent();
+    runtime.submit_intent(intent, "order-1");
+    runtime.acknowledge_order("order-1", "venue-1");
+
+    let fill = FillRecord {
+        fill_id: "fill-1".to_string(),
+        order_id: "order-1".to_string(),
+        token_id: "yes-token".to_string(),
+        side: TradeSide::Buy,
+        quantity: dec!(5),
+        price: dec!(0.40),
+        fee: dec!(0.05),
+        timestamp: Utc::now(),
+    };
+
+    runtime.record_fill(fill.clone());
+    runtime.record_fill(fill);
+
+    let snapshot = runtime.snapshot(&BTreeMap::new());
+    assert_eq!(snapshot.fills.len(), 1);
+    assert_eq!(snapshot.orders[0].filled_qty, dec!(5));
+    assert_eq!(snapshot.positions[0].net_qty, dec!(5));
+}

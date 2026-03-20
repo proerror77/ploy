@@ -3516,6 +3516,7 @@ dependencies = [
 name = "ploy-connectivity"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ploy-trading",
  "polymarket-client-sdk",
  "rust_decimal",
