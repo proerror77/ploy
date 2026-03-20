@@ -10,7 +10,6 @@ members = [
     "crates/ploy-research",
     "crates/ploy-strategy-bundles",
     "crates/ploy-trading",
-    "tools/sdk_auth_check",
 ]
 resolver = "2"
 
@@ -22,15 +21,6 @@ license = "MIT"
 repository = "https://github.com/proerror77/ploy"
 
 [workspace.dependencies]
-anyhow = "1"
-async-trait = "0.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "fs", "io-util", "io-std", "process"] }
-tracing = "0.1"
-tracing-appender = "0.2"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 ploy-connectivity = { path = "crates/ploy-connectivity" }
 ploy-deployments = { path = "crates/ploy-deployments" }
 ploy-operator-contracts = { path = "crates/ploy-operator-contracts" }
@@ -43,145 +33,10 @@ ploy-trading = { path = "crates/ploy-trading" }
 name = "ploy"
 version.workspace = true
 edition.workspace = true
-description = "Legacy compatibility crate for the ploy trading platform workspace"
+description = "Compatibility shim for the ploy workspace layout"
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-
-[dependencies]
-ploy-connectivity.workspace = true
-ploy-deployments.workspace = true
-ploy-operator-contracts.workspace = true
-ploy-platform.workspace = true
-ploy-research.workspace = true
-ploy-strategy-bundles.workspace = true
-ploy-trading.workspace = true
-
-# Async runtime
-tokio.workspace = true
-
-# WebSocket
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
-futures-util = "0.3"
-futures = "0.3"
-
-# HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots"], default-features = false }
-
-# Database
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "rust_decimal", "uuid", "macros", "migrate", "json"] }
-
-# Serialization
-serde.workspace = true
-serde_json.workspace = true
-
-# Configuration
-config = { version = "0.14", default-features = false, features = ["toml"] }
-
-# Logging
-tracing.workspace = true
-tracing-subscriber.workspace = true
-tracing-appender.workspace = true
-
-# Numeric types
-rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
-rust_decimal_macros = "1"
-
-# Date/time
-chrono = { version = "0.4", features = ["serde"] }
-
-# Error handling
-thiserror.workspace = true
-anyhow.workspace = true
-
-# Async traits
-async-trait.workspace = true
-
-# UUID
-uuid = { version = "1", features = ["v4", "serde"] }
-
-# Official Polymarket CLOB client SDK
-polymarket-client-sdk = { version = "0.4", features = ["gamma", "data", "clob"] }
-builder-relayer-client-rust = { version = "=0.2.2", optional = true }
-builder_signing_sdk_rs = { version = "0.1.0", optional = true }
-
-# Alloy for signing (used by polymarket-client-sdk)
-alloy = { version = "1", default-features = false, features = ["signer-local", "provider-http", "contract", "sol-types", "rpc-types", "reqwest"] }
-
-# HMAC authentication
-hmac = "0.12"
-sha2 = "0.10"
-
-# Encoding
-hex = "0.4"
-base64 = "0.22"
-
-# Random number generation
-rand = "0.10"
-
-# Ordered floats for BTreeMap keys
-ordered-float = "4"
-
-# URL parsing
-url = "2"
-urlencoding = "2"
-
-# CLI
-clap = { version = "4", features = ["derive", "env"] }
-toml = "0.8"
-dashmap = "6.1.0"
-zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
-tabled = "0.18"
-rpassword = "7"
-rustyline = "14"
-dirs = "6"
-
-# Terminal UI
-crossterm = "0.28"
-ratatui = "0.29"
-
-# Health check server and API
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
-tower-http = { version = "0.6", features = ["cors"], optional = true }
-
-# Reinforcement Learning (optional)
-burn = { version = "0.14", default-features = false, features = ["train", "autodiff", "std", "ndarray"], optional = true }
-burn-ndarray = { version = "0.14", optional = true }
-bincode = { version = "=2.0.0-rc.3", optional = true }
-
-# DuckDB for offline Parquet analysis (optional)
-duckdb = { version = "1.4", features = ["bundled"], optional = true }
-
-# ONNX inference (optional; prefer pure-Rust `tract` for deploy simplicity)
-tract-onnx = { version = "0.22.0", optional = true }
-
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.28", features = ["signal", "process"] }
-
-[features]
-default = []
-api = ["dep:tower-http"]
-api_ws = ["api", "axum/ws"]
-claimer = ["claimer_cli", "claimer_daemon"]
-claimer_cli = ["claimer_daemon"]
-claimer_daemon = []
-analysis_tools = ["analysis_core"]
-analysis_core = []
-rl = ["burn", "burn-ndarray", "bincode"]
-analysis = ["analysis_parquet"]
-analysis_parquet = ["duckdb"]
-onnx = ["tract-onnx"]
-builder_relayer_sdk = ["dep:builder-relayer-client-rust", "dep:builder_signing_sdk_rs"]
-pm_bridge = ["polymarket-client-sdk/bridge"]
-pm_ctf = ["polymarket-client-sdk/ctf"]
-
-[dev-dependencies]
-tokio-test = "0.4"
-mockall = "0.12"
-tower = { version = "0.5", features = ["util"] }
-
-[patch.crates-io]
-polymarket-client-sdk = { path = "vendor/polymarket-client-sdk" }
 
 [profile.release]
 lto = "thin"
