@@ -72,7 +72,7 @@ pub trait LiveExecutionGateway: Send + Sync + std::fmt::Debug {
 pub struct StaticExecutionGateway {
     result: Result<ExecutionOutcome, ExecutionError>,
     cancel_result: Result<CancellationOutcome, ExecutionError>,
-    reconciled_fills: Vec<FillRecord>,
+    reconcile_result: Result<Vec<FillRecord>, ExecutionError>,
 }
 
 impl StaticExecutionGateway {
@@ -82,7 +82,7 @@ impl StaticExecutionGateway {
                 venue_order_id: venue_order_id.into(),
             }),
             cancel_result: Ok(CancellationOutcome::Canceled),
-            reconciled_fills: Vec::new(),
+            reconcile_result: Ok(Vec::new()),
         }
     }
 
@@ -92,7 +92,7 @@ impl StaticExecutionGateway {
                 reason: reason.into(),
             }),
             cancel_result: Ok(CancellationOutcome::Canceled),
-            reconciled_fills: Vec::new(),
+            reconcile_result: Ok(Vec::new()),
         }
     }
 
@@ -100,7 +100,7 @@ impl StaticExecutionGateway {
         Self {
             result: Err(error),
             cancel_result: Ok(CancellationOutcome::Canceled),
-            reconciled_fills: Vec::new(),
+            reconcile_result: Ok(Vec::new()),
         }
     }
 
@@ -113,7 +113,15 @@ impl StaticExecutionGateway {
     }
 
     pub fn with_reconciled_fills(mut self, fills: Vec<FillRecord>) -> Self {
-        self.reconciled_fills = fills;
+        self.reconcile_result = Ok(fills);
+        self
+    }
+
+    pub fn with_reconcile_result(
+        mut self,
+        result: Result<Vec<FillRecord>, ExecutionError>,
+    ) -> Self {
+        self.reconcile_result = result;
         self
     }
 }
@@ -134,7 +142,7 @@ impl LiveExecutionGateway for StaticExecutionGateway {
         &self,
         _tracked_orders: &[TrackedOrder],
     ) -> Result<Vec<FillRecord>, ExecutionError> {
-        Ok(self.reconciled_fills.clone())
+        self.reconcile_result.clone()
     }
 }
 

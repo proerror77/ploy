@@ -1,4 +1,5 @@
 use crate::fills::{FillLedger, FillRecord};
+use chrono::{DateTime, Utc};
 use crate::intents::TradingIntent;
 use crate::orders::OrderLedger;
 use crate::pnl::PnlSnapshot;
@@ -90,6 +91,10 @@ impl TradingRuntime {
         self.positions.apply_fill(&fill);
         self.fills.record(fill);
         true
+    }
+
+    pub fn last_fill_time(&self) -> Option<DateTime<Utc>> {
+        self.fills.all().iter().map(|fill| fill.timestamp).max()
     }
 
     pub fn snapshot(&self, mark_prices: &BTreeMap<String, Decimal>) -> TradingRuntimeSnapshot {

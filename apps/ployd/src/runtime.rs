@@ -1,6 +1,7 @@
 use crate::config::PlatformConfig;
 use crate::events::EventBroker;
 use crate::http::publish_snapshot_events;
+use chrono::{DateTime, Utc};
 use ploy_connectivity::{
     CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome, ExecutionRequest,
     LiveExecutionGateway, PolymarketExecutionGateway, TrackedOrder,
@@ -47,7 +48,7 @@ impl PloyDaemon {
         let mut control_plane = ControlPlane::default();
         control_plane
             .system
-            .set_status(format!("running@{}", config.listen_addr));
+            .set_status(format!("starting@{}", config.listen_addr));
 
         let mut daemon = Self {
             config: config.clone(),
@@ -58,17 +59,47 @@ impl PloyDaemon {
         };
         daemon.load_registry()?;
         daemon.load_trading_snapshots()?;
+        if daemon.config.trading_state_file.exists() {
+            daemon
+                .control_plane
+                .system
+                .mark_recovering(&daemon.config.listen_addr);
+        }
         daemon.tick();
+        daemon.mark_runtime_healthy();
 
         Ok(daemon)
     }
 
     pub fn write_runtime_snapshots(&mut self) -> io::Result<()> {
-        self.load_registry()?;
+        if let Err(err) = self.load_registry() {
+            self.control_plane.system.set_database_connected(false);
+            self.control_plane
+                .system
+                .mark_degraded(&self.config.listen_addr);
+            return Err(err);
+        }
+        self.control_plane.system.set_database_connected(true);
         self.tick();
-        self.reconcile_live_fills()?;
-        self.persist_registry()?;
-        fs::create_dir_all(&self.config.runtime_root)?;
+        if self.reconcile_live_fills().is_ok() {
+            self.mark_runtime_healthy();
+        } else {
+            self.mark_live_runtime_degraded();
+        }
+        if let Err(err) = self.persist_registry() {
+            self.control_plane.system.set_database_connected(false);
+            self.control_plane
+                .system
+                .mark_degraded(&self.config.listen_addr);
+            return Err(err);
+        }
+        self.control_plane.system.set_database_connected(true);
+        if let Err(err) = fs::create_dir_all(&self.config.runtime_root) {
+            self.control_plane
+                .system
+                .mark_degraded(&self.config.listen_addr);
+            return Err(err);
+        }
         write_json(
             &self.config.status_file,
             &self.control_plane.system.status(),
@@ -288,20 +319,20 @@ impl PloyDaemon {
 
         if deployment.runtime_mode == "live" {
             if let Some(venue_order_id) = order.venue_order_id.clone() {
-                match self
-                    .live_execution
-                    .cancel(&CancellationRequest {
-                        order_id: order_id.to_string(),
-                        venue_order_id,
-                    })
-                    .map_err(io_error_from_execution_error)?
-                {
-                    CancellationOutcome::Canceled => {}
-                    CancellationOutcome::Rejected { reason } => {
+                let cancel_result = self.live_execution.cancel(&CancellationRequest {
+                    order_id: order_id.to_string(),
+                    venue_order_id,
+                });
+                match cancel_result {
+                    Ok(CancellationOutcome::Canceled) => {}
+                    Ok(CancellationOutcome::Rejected { reason }) => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
                             format!("live cancel rejected: {reason}"),
                         ));
+                    }
+                    Err(err) => {
+                        return Err(io_error_from_execution_error(err));
                     }
                 }
             }
@@ -434,6 +465,68 @@ impl PloyDaemon {
         }
 
         Ok(recorded)
+    }
+
+    fn latest_trade_time(&self) -> Option<DateTime<Utc>> {
+        self.trading
+            .values()
+            .filter_map(TradingRuntime::last_fill_time)
+            .max()
+    }
+
+    fn mark_runtime_healthy(&mut self) {
+        self.control_plane
+            .system
+            .note_trade(self.latest_trade_time());
+        if self.control_plane.system.is_degraded() {
+            self.control_plane
+                .system
+                .mark_recovering(&self.config.listen_addr);
+        } else if self
+            .control_plane
+            .system
+            .status()
+            .status
+            .starts_with("recovering")
+        {
+            self.control_plane
+                .system
+                .mark_running(&self.config.listen_addr);
+        } else {
+            self.control_plane
+                .system
+                .mark_running(&self.config.listen_addr);
+        }
+
+        for record in self.control_plane.deployments.records() {
+            if record.runtime_mode == "live"
+                && record.desired_state == DesiredState::Running
+                && record.observed_state == ObservedState::Degraded
+            {
+                self.control_plane
+                    .deployments
+                    .set_observed_state(&record.deployment_id, ObservedState::Running);
+            }
+        }
+    }
+
+    fn mark_live_runtime_degraded(&mut self) {
+        self.control_plane
+            .system
+            .mark_degraded(&self.config.listen_addr);
+
+        for record in self.control_plane.deployments.records() {
+            if record.runtime_mode != "live"
+                || record.deployment_state == DeploymentState::Archived
+                || record.desired_state != DesiredState::Running
+            {
+                continue;
+            }
+
+            self.control_plane
+                .deployments
+                .set_observed_state(&record.deployment_id, ObservedState::Degraded);
+        }
     }
 
     #[cfg(test)]
@@ -837,7 +930,9 @@ pub fn run_shared_forever(
             let mut daemon = daemon
                 .lock()
                 .map_err(|_| io::Error::new(io::ErrorKind::Other, "daemon lock poisoned"))?;
-            daemon.write_runtime_snapshots()?;
+            if let Err(err) = daemon.write_runtime_snapshots() {
+                eprintln!("ployd tick degraded: {err}");
+            }
             publish_snapshot_events(&daemon, &events);
             daemon.config.tick_interval_ms
         };
@@ -862,12 +957,16 @@ where
 mod tests {
     use super::PloyDaemon;
     use crate::config::PlatformConfig;
-    use ploy_connectivity::{CancellationOutcome, StaticExecutionGateway};
+    use ploy_connectivity::{
+        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
+        ExecutionRequest, LiveExecutionGateway, StaticExecutionGateway,
+    };
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
     use rust_decimal_macros::dec;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -876,6 +975,39 @@ mod tests {
             .expect("duration")
             .as_nanos();
         std::env::temp_dir().join(format!("ployd-{label}-{unique}"))
+    }
+
+    #[derive(Debug, Default, Clone)]
+    struct FlakyReconcileGateway {
+        attempts: Arc<Mutex<usize>>,
+    }
+
+    impl LiveExecutionGateway for FlakyReconcileGateway {
+        fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
+            Ok(ExecutionOutcome::Acknowledged {
+                venue_order_id: "venue-live-health-1".to_string(),
+            })
+        }
+
+        fn cancel(
+            &self,
+            _request: &CancellationRequest,
+        ) -> Result<CancellationOutcome, ExecutionError> {
+            Ok(CancellationOutcome::Canceled)
+        }
+
+        fn reconcile_fills(
+            &self,
+            _tracked_orders: &[ploy_connectivity::TrackedOrder],
+        ) -> Result<Vec<FillRecord>, ExecutionError> {
+            let mut attempts = self.attempts.lock().expect("attempts lock");
+            *attempts += 1;
+            if *attempts == 1 {
+                Err(ExecutionError::Transport("gateway offline".to_string()))
+            } else {
+                Ok(Vec::new())
+            }
+        }
     }
 
     #[test]
@@ -887,7 +1019,7 @@ mod tests {
 
         let daemon = PloyDaemon::boot(&config).expect("boot");
         let status = daemon.control_plane.system.status();
-        assert!(status.status.contains("127.0.0.1:9090"));
+        assert_eq!(status.status, "running@127.0.0.1:9090");
     }
 
     #[test]
@@ -927,7 +1059,8 @@ mod tests {
         let status: ploy_operator_contracts::SystemStatus =
             serde_json::from_str(&fs::read_to_string(&config.status_file).expect("status file"))
                 .expect("status json");
-        assert!(status.status.contains("127.0.0.1:8081"));
+        assert!(status.status.starts_with("running@"));
+        assert!(status.database_connected);
 
         let deployments: Vec<ploy_operator_contracts::DeploymentSummary> = serde_json::from_str(
             &fs::read_to_string(&config.deployment_status_file).expect("deployment file"),
@@ -1541,5 +1674,101 @@ mod tests {
         let trading_state = daemon.trading_state();
         assert_eq!(trading_state[0].fills.len(), 1);
         assert_eq!(trading_state[0].orders[0].filled_qty, dec!(1));
+    }
+
+    #[test]
+    fn daemon_surfaces_transient_reconcile_failures_as_degraded_then_recovering() {
+        let root = temp_dir("live-health-recovery");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(FlakyReconcileGateway::default()),
+        )
+        .expect("boot");
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-health".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                limit_price: Some(dec!(0.41)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit live intent");
+
+        daemon.write_runtime_snapshots().expect("degraded snapshot");
+        assert!(
+            daemon
+                .control_plane
+                .system
+                .status()
+                .status
+                .starts_with("degraded@")
+        );
+        assert_eq!(daemon.control_plane.system.status().error_count_1h, 1);
+        assert_eq!(
+            daemon
+                .inspect_deployment("example.live")
+                .expect("deployment")
+                .observed_state,
+            ObservedState::Degraded
+        );
+
+        daemon.write_runtime_snapshots().expect("recovering snapshot");
+        assert!(
+            daemon
+                .control_plane
+                .system
+                .status()
+                .status
+                .starts_with("recovering@")
+        );
+        assert_eq!(
+            daemon
+                .inspect_deployment("example.live")
+                .expect("deployment")
+                .observed_state,
+            ObservedState::Running
+        );
+
+        daemon.write_runtime_snapshots().expect("running snapshot");
+        assert!(
+            daemon
+                .control_plane
+                .system
+                .status()
+                .status
+                .starts_with("running@")
+        );
     }
 }
