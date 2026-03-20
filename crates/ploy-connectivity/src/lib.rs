@@ -483,7 +483,7 @@ fn polymarket_side(side: TradeSide) -> Side {
 fn tracked_trade_fill(tracked_order: &TrackedOrder, trade: &TradeResponse) -> Option<FillRecord> {
     if trade.taker_order_id == tracked_order.venue_order_id {
         return Some(FillRecord {
-            fill_id: trade.id.clone(),
+            fill_id: tracked_fill_id(tracked_order, &trade.id),
             order_id: tracked_order.order_id.clone(),
             token_id: tracked_order.token_id.clone(),
             side: trade_side(trade.side.clone()),
@@ -507,7 +507,7 @@ fn tracked_maker_fill(
     maker_order: &MakerOrder,
 ) -> FillRecord {
     FillRecord {
-        fill_id: trade.id.clone(),
+        fill_id: tracked_fill_id(tracked_order, &trade.id),
         order_id: tracked_order.order_id.clone(),
         token_id: tracked_order.token_id.clone(),
         side: trade_side(maker_order.side.clone()),
@@ -520,6 +520,10 @@ fn tracked_maker_fill(
         ),
         timestamp: trade.match_time,
     }
+}
+
+fn tracked_fill_id(tracked_order: &TrackedOrder, trade_id: &str) -> String {
+    format!("{trade_id}:{}", tracked_order.order_id)
 }
 
 fn trade_side(side: Side) -> TradeSide {
@@ -541,13 +545,18 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
-        ExecutionRequest, LiveExecutionGateway, PolymarketExecutionConfig,
+        tracked_trade_fill, CancellationOutcome, CancellationRequest, ExecutionError,
+        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, PolymarketExecutionConfig,
         PolymarketExecutionGateway, StaticExecutionGateway, TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
+    use polymarket_client_sdk::auth::ApiKey;
+    use polymarket_client_sdk::clob::types::{TradeStatusType, TraderSide};
+    use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
+    use polymarket_client_sdk::types::{Address, B256, U256};
     use ploy_trading::{FillRecord, TradeSide};
     use rust_decimal_macros::dec;
+    use std::str::FromStr;
 
     #[test]
     fn static_gateway_returns_acknowledged_outcome() {
@@ -645,5 +654,67 @@ mod tests {
                 reason: "already filled".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn tracked_fill_ids_are_scoped_by_tracked_order() {
+        let trade = TradeResponse {
+            id: "trade-1".to_string(),
+            taker_order_id: "venue-order-a".to_string(),
+            market: B256::ZERO,
+            asset_id: U256::from(1_u64),
+            side: polymarket_client_sdk::clob::types::Side::Buy,
+            size: dec!(2),
+            fee_rate_bps: dec!(5),
+            price: dec!(0.55),
+            status: TradeStatusType::Matched,
+            match_time: Utc::now(),
+            last_update: Utc::now(),
+            outcome: "YES".to_string(),
+            bucket_index: 0,
+            owner: ApiKey::nil(),
+            maker_address: Address::from_str("0x0000000000000000000000000000000000000001")
+                .expect("maker address"),
+            maker_orders: vec![MakerOrder {
+                order_id: "venue-order-b".to_string(),
+                owner: ApiKey::nil(),
+                maker_address: Address::from_str(
+                    "0x0000000000000000000000000000000000000002",
+                )
+                .expect("second maker address"),
+                matched_amount: dec!(2),
+                price: dec!(0.56),
+                fee_rate_bps: dec!(4),
+                asset_id: U256::from(1_u64),
+                outcome: "YES".to_string(),
+                side: polymarket_client_sdk::clob::types::Side::Sell,
+            }],
+            transaction_hash: B256::ZERO,
+            trader_side: TraderSide::Taker,
+            error_msg: None,
+        };
+
+        let taker_fill = tracked_trade_fill(
+            &TrackedOrder {
+                order_id: "order-a".to_string(),
+                venue_order_id: "venue-order-a".to_string(),
+                token_id: "token-a".to_string(),
+            },
+            &trade,
+        )
+        .expect("taker fill");
+        let maker_fill = tracked_trade_fill(
+            &TrackedOrder {
+                order_id: "order-b".to_string(),
+                venue_order_id: "venue-order-b".to_string(),
+                token_id: "token-b".to_string(),
+            },
+            &trade,
+        )
+        .expect("maker fill");
+
+        assert_eq!(taker_fill.fill_id, "trade-1:order-a");
+        assert_eq!(maker_fill.fill_id, "trade-1:order-b");
+        assert_ne!(taker_fill.fill_id, maker_fill.fill_id);
     }
 }
