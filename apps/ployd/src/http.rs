@@ -866,6 +866,11 @@ mod tests {
         assert_eq!(submit_code, 503);
         assert!(submit_response.contains("\"error\":\"live_execution_unavailable\""));
         assert!(submit_response.contains("gateway offline"));
+
+        let trading_body =
+            fs::read_to_string(root.join("run/platform/trading-state.json")).expect("snapshot");
+        assert!(trading_body.contains("\"state\": \"rejected\""));
+        assert!(trading_body.contains("gateway offline"));
     }
 
     #[test]
