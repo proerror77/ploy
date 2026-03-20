@@ -21,6 +21,10 @@ pub struct FillLedger {
 }
 
 impl FillLedger {
+    pub fn restore(fills: Vec<FillRecord>) -> Self {
+        Self { fills }
+    }
+
     pub fn contains(&self, fill_id: &str) -> bool {
         self.fills.iter().any(|fill| fill.fill_id == fill_id)
     }

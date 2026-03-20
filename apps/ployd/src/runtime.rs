@@ -56,6 +56,7 @@ impl PloyDaemon {
             live_execution,
         };
         daemon.load_registry()?;
+        daemon.load_trading_snapshots()?;
         daemon.tick();
 
         Ok(daemon)
@@ -257,9 +258,7 @@ impl PloyDaemon {
                     rejection_reason: Some(reason),
                 })
             }
-            Err(err) => {
-                Err(io_error_from_execution_error(err))
-            }
+            Err(err) => Err(io_error_from_execution_error(err)),
         }
     }
 
@@ -366,6 +365,37 @@ impl PloyDaemon {
                         .set_observed_state(&deployment_id, status.observed_state);
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    fn load_trading_snapshots(&mut self) -> io::Result<()> {
+        if !self.config.trading_state_file.exists() {
+            return Ok(());
+        }
+
+        let raw = fs::read_to_string(&self.config.trading_state_file)?;
+        if raw.trim().is_empty() {
+            return Ok(());
+        }
+
+        let snapshots: Vec<TradingStateSnapshot> = serde_json::from_str(&raw)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+
+        for snapshot in snapshots {
+            if self
+                .control_plane
+                .deployments
+                .get(&snapshot.deployment_id)
+                .is_none()
+            {
+                continue;
+            }
+
+            let deployment_id = snapshot.deployment_id.clone();
+            self.trading
+                .insert(deployment_id, restore_trading_runtime(snapshot)?);
         }
 
         Ok(())
@@ -500,10 +530,85 @@ fn build_trading_state_snapshot(
     }
 }
 
+fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<TradingRuntime> {
+    let deployment_id = snapshot.deployment_id.clone();
+    let intents = snapshot
+        .intents
+        .into_iter()
+        .map(|intent| {
+            Ok(TradingIntent {
+                intent_id: intent.intent_id,
+                deployment_id: deployment_id.clone(),
+                market_id: intent.market_id,
+                token_id: intent.token_id,
+                side: trade_side_from_wire(&intent.side)?,
+                quantity: intent.quantity,
+                limit_price: intent.limit_price,
+                purpose: intent_purpose_from_contract(intent.purpose),
+                created_at: intent.created_at,
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let orders = snapshot
+        .orders
+        .into_iter()
+        .map(|order| {
+            Ok(ploy_trading::OrderRecord {
+                order_id: order.order_id,
+                intent_id: order.intent_id,
+                deployment_id: deployment_id.clone(),
+                token_id: order.token_id,
+                requested_qty: order.requested_qty,
+                limit_price: order.limit_price,
+                venue_order_id: order.venue_order_id,
+                state: order_state_from_wire(&order.state)?,
+                filled_qty: order.filled_qty,
+                rejection_reason: order.rejection_reason,
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let fills = snapshot
+        .fills
+        .into_iter()
+        .map(|fill| {
+            Ok(ploy_trading::FillRecord {
+                fill_id: fill.fill_id,
+                order_id: fill.order_id,
+                token_id: fill.token_id,
+                side: trade_side_from_wire(&fill.side)?,
+                quantity: fill.quantity,
+                price: fill.price,
+                fee: fill.fee,
+                timestamp: fill.timestamp,
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+
+    Ok(TradingRuntime::restore(TradingRuntimeSnapshot {
+        intents,
+        orders,
+        fills,
+        positions: Vec::new(),
+        pnl: Default::default(),
+        risk: Default::default(),
+    }))
+}
+
 fn trade_side_wire(side: TradeSide) -> String {
     match side {
         TradeSide::Buy => "buy".to_string(),
         TradeSide::Sell => "sell".to_string(),
+    }
+}
+
+fn trade_side_from_wire(side: &str) -> io::Result<TradeSide> {
+    match side {
+        "buy" => Ok(TradeSide::Buy),
+        "sell" => Ok(TradeSide::Sell),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported trade side `{other}`"),
+        )),
     }
 }
 
@@ -518,6 +623,21 @@ fn order_state_wire(state: OrderState) -> String {
     }
 }
 
+fn order_state_from_wire(state: &str) -> io::Result<OrderState> {
+    match state {
+        "pending" => Ok(OrderState::Pending),
+        "acknowledged" => Ok(OrderState::Acknowledged),
+        "partially_filled" => Ok(OrderState::PartiallyFilled),
+        "filled" => Ok(OrderState::Filled),
+        "canceled" => Ok(OrderState::Canceled),
+        "rejected" => Ok(OrderState::Rejected),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported order state `{other}`"),
+        )),
+    }
+}
+
 fn intent_purpose_wire(purpose: ploy_trading::IntentPurpose) -> IntentPurpose {
     match purpose {
         ploy_trading::IntentPurpose::Entry => IntentPurpose::Entry,
@@ -525,6 +645,16 @@ fn intent_purpose_wire(purpose: ploy_trading::IntentPurpose) -> IntentPurpose {
         ploy_trading::IntentPurpose::Reduce => IntentPurpose::Reduce,
         ploy_trading::IntentPurpose::Hedge => IntentPurpose::Hedge,
         ploy_trading::IntentPurpose::Cancel => IntentPurpose::Cancel,
+    }
+}
+
+fn intent_purpose_from_contract(purpose: IntentPurpose) -> ploy_trading::IntentPurpose {
+    match purpose {
+        IntentPurpose::Entry => ploy_trading::IntentPurpose::Entry,
+        IntentPurpose::Exit => ploy_trading::IntentPurpose::Exit,
+        IntentPurpose::Reduce => ploy_trading::IntentPurpose::Reduce,
+        IntentPurpose::Hedge => ploy_trading::IntentPurpose::Hedge,
+        IntentPurpose::Cancel => ploy_trading::IntentPurpose::Cancel,
     }
 }
 
@@ -1042,6 +1172,96 @@ mod tests {
         assert_eq!(trading_state[0].fills.len(), 1);
         assert_eq!(trading_state[0].orders[0].state, "filled");
         assert_eq!(trading_state[0].positions[0].net_qty, dec!(3));
+    }
+
+    #[test]
+    fn daemon_restores_live_orders_and_reconciles_after_restart() {
+        let root = temp_dir("live-restart-recovery");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("venue-live-restart-1")),
+        )
+        .expect("boot");
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-restart".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(4),
+                limit_price: Some(dec!(0.41)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit live intent");
+        daemon.write_runtime_snapshots().expect("write snapshots");
+
+        let mut restored = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(
+                StaticExecutionGateway::acknowledged("unused").with_reconciled_fills(vec![
+                    FillRecord {
+                        fill_id: "fill-live-restart".to_string(),
+                        order_id: "order-intent-live-restart".to_string(),
+                        token_id: "yes-token".to_string(),
+                        side: TradeSide::Buy,
+                        quantity: dec!(4),
+                        price: dec!(0.41),
+                        fee: dec!(0.04),
+                        timestamp: chrono::Utc::now(),
+                    },
+                ]),
+            ),
+        )
+        .expect("restore daemon");
+
+        let restored_state = restored.trading_state();
+        assert_eq!(restored_state[0].orders.len(), 1);
+        assert_eq!(restored_state[0].orders[0].state, "acknowledged");
+        assert_eq!(
+            restored_state[0].orders[0].venue_order_id.as_deref(),
+            Some("venue-live-restart-1")
+        );
+
+        let recorded = restored
+            .reconcile_live_fills()
+            .expect("reconcile restored fills");
+        assert_eq!(recorded, 1);
+
+        let reconciled_state = restored.trading_state();
+        assert_eq!(reconciled_state[0].fills.len(), 1);
+        assert_eq!(reconciled_state[0].orders[0].state, "filled");
+        assert_eq!(reconciled_state[0].positions.len(), 1);
+        assert_eq!(reconciled_state[0].positions[0].net_qty, dec!(4));
     }
 
     #[test]

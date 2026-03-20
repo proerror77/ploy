@@ -35,6 +35,14 @@ pub struct OrderLedger {
 }
 
 impl OrderLedger {
+    pub fn restore(records: Vec<OrderRecord>) -> Self {
+        let orders = records
+            .into_iter()
+            .map(|record| (record.order_id.clone(), record))
+            .collect();
+        Self { orders }
+    }
+
     pub fn insert_from_intent(
         &mut self,
         order_id: impl Into<String>,
