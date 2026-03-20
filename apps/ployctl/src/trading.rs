@@ -1,9 +1,8 @@
 use crate::client::ControlPlaneClient;
 
-pub fn render_trading_state(client: &ControlPlaneClient) -> String {
-    client
-        .trading_state()
-        .unwrap_or_default()
+pub fn render_trading_state(client: &ControlPlaneClient) -> Result<String, String> {
+    Ok(client
+        .trading_state()?
         .into_iter()
         .map(|state| {
             format!(
@@ -20,13 +19,13 @@ pub fn render_trading_state(client: &ControlPlaneClient) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n"))
 }
 
 pub fn render_one_trading_state(
     client: &ControlPlaneClient,
     deployment_id: &str,
-) -> Option<String> {
+) -> Result<String, String> {
     client.inspect_trading_state(deployment_id).map(|state| {
         format!(
             "{} runtime={} intents={} orders={} fills={} positions={} active_orders={} gross_exposure={} net_pnl={}",
@@ -76,9 +75,9 @@ mod tests {
         .expect("write trading state");
 
         let client = ControlPlaneClient::from_runtime_root(&runtime_root);
-        let output = render_trading_state(&client);
+        let output = render_trading_state(&client).expect("trading state");
         assert!(output.contains("example.paper"));
         assert!(output.contains("net_pnl=0"));
-        assert!(render_one_trading_state(&client, "example.paper").is_some());
+        assert!(render_one_trading_state(&client, "example.paper").is_ok());
     }
 }

@@ -1,4 +1,5 @@
 pub mod deployments;
+pub mod errors;
 pub mod events;
 pub mod system;
 pub mod trading;
@@ -7,6 +8,7 @@ pub use deployments::{
     DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DeploymentStateSummary,
     DeploymentSummary, DesiredState, ObservedState,
 };
+pub use errors::ControlPlaneErrorResponse;
 pub use events::{
     DeploymentSnapshotEvent, LogEntry, OperatorEvent, StatusUpdate, SystemSnapshotEvent,
     TradingSnapshotEvent, WsMessage,

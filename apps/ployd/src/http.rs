@@ -1,9 +1,9 @@
 use crate::events::EventBroker;
 use crate::runtime::{next_paper_intent_id, PloyDaemon};
 use ploy_operator_contracts::{
-    DeploymentApplyRequest, DeploymentControlRequest, DeploymentSnapshotEvent, IntentPurpose,
-    OperatorEvent, PaperIntentRequest, StatusUpdate, SystemSnapshotEvent, SystemStatus,
-    TradingSnapshotEvent,
+    ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
+    DeploymentSnapshotEvent, IntentPurpose, OperatorEvent, PaperIntentRequest, StatusUpdate,
+    SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
 };
 use ploy_trading::{TradeSide, TradingIntent};
 use std::io::{self, Read, Write};
@@ -32,6 +32,32 @@ pub fn render_status(status: &SystemStatus) -> String {
     )
 }
 
+fn json_error(status: u16, error: &str, message: impl Into<Option<String>>) -> (u16, String) {
+    (
+        status,
+        serde_json::to_string(&ControlPlaneErrorResponse {
+            error: error.to_string(),
+            message: message.into(),
+        })
+        .unwrap_or_else(|_| {
+            "{\"error\":\"serialization_failed\",\"message\":\"failed to serialize control-plane error\"}".to_string()
+        }),
+    )
+}
+
+fn status_text(status_code: u16) -> &'static str {
+    match status_code {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        409 => "Conflict",
+        422 => "Unprocessable Entity",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        _ => "Unknown",
+    }
+}
+
 #[cfg(test)]
 pub fn route_request(path: &str, runtime_root: &Path) -> (u16, String) {
     let target = match path {
@@ -39,13 +65,13 @@ pub fn route_request(path: &str, runtime_root: &Path) -> (u16, String) {
         "/api/deployments" => runtime_root.join("deployments.json"),
         "/api/trading/state" => runtime_root.join("trading-state.json"),
         _ => {
-            return (404, "{\"error\":\"not_found\"}".to_string());
+            return json_error(404, "not_found", None);
         }
     };
 
     match fs::read_to_string(target) {
         Ok(body) => (200, body),
-        Err(_) => (503, "{\"error\":\"snapshot_unavailable\"}".to_string()),
+        Err(_) => json_error(503, "snapshot_unavailable", None),
     }
 }
 
@@ -131,7 +157,7 @@ pub fn handle_api_request(
             };
             let side = match trade_side_from_wire(&request.side) {
                 Ok(side) => side,
-                Err(message) => return (400, message),
+                Err(error) => return json_error(400, &error.error, error.message),
             };
 
             match PloyDaemon::boot(config).and_then(|mut daemon| {
@@ -205,18 +231,11 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
         .nth(1)
         .filter(|body| !body.is_empty());
     let (status_code, body) = handle_runtime_request(method, path, body, state);
-    let status_text = match status_code {
-        200 => "OK",
-        400 => "Bad Request",
-        404 => "Not Found",
-        _ => "Service Unavailable",
-    };
-
     write!(
         stream,
         "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
         status_code,
-        status_text,
+        status_text(status_code),
         body.len(),
         body
     )
@@ -235,7 +254,7 @@ fn handle_runtime_request(
                 serde_json::to_string(&daemon.control_plane.system.status())
                     .unwrap_or_else(|_| "{}".to_string()),
             ),
-            Err(_) => (500, "{\"error\":\"daemon_lock_poisoned\"}".to_string()),
+            Err(_) => json_error(503, "daemon_lock_poisoned", None),
         },
         ("GET", "/api/deployments") => match state.daemon.lock() {
             Ok(daemon) => (
@@ -243,14 +262,14 @@ fn handle_runtime_request(
                 serde_json::to_string(&daemon.control_plane.deployments.summaries())
                     .unwrap_or_else(|_| "[]".to_string()),
             ),
-            Err(_) => (500, "{\"error\":\"daemon_lock_poisoned\"}".to_string()),
+            Err(_) => json_error(503, "daemon_lock_poisoned", None),
         },
         ("GET", "/api/trading/state") => match state.daemon.lock() {
             Ok(daemon) => (
                 200,
                 serde_json::to_string(&daemon.trading_state()).unwrap_or_else(|_| "[]".to_string()),
             ),
-            Err(_) => (500, "{\"error\":\"daemon_lock_poisoned\"}".to_string()),
+            Err(_) => json_error(503, "daemon_lock_poisoned", None),
         },
         ("GET", _) if path.starts_with("/api/deployments/") && !path.ends_with("/control") => {
             let deployment_id = path.trim_start_matches("/api/deployments/");
@@ -264,20 +283,31 @@ fn handle_runtime_request(
                     200,
                     serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
                 ),
-                None => (404, "{\"error\":\"deployment_not_found\"}".to_string()),
+                None => json_error(
+                    404,
+                    "deployment_not_found",
+                    Some(format!("deployment `{deployment_id}` was not found")),
+                ),
             }
         }
         ("PUT", _) if path.starts_with("/api/deployments/") => {
             let deployment_id = path.trim_start_matches("/api/deployments/");
             let Some(body) = body else {
-                return (400, "{\"error\":\"missing_body\"}".to_string());
+                return json_error(400, "missing_body", None);
             };
             let request: DeploymentApplyRequest = match serde_json::from_str(body) {
                 Ok(request) => request,
-                Err(_) => return (400, "{\"error\":\"invalid_json\"}".to_string()),
+                Err(err) => return json_error(400, "invalid_json", Some(err.to_string())),
             };
             if request.deployment_id != deployment_id {
-                return (400, "{\"error\":\"deployment_id_mismatch\"}".to_string());
+                return json_error(
+                    400,
+                    "deployment_id_mismatch",
+                    Some(format!(
+                        "request deployment_id `{}` did not match path `{deployment_id}`",
+                        request.deployment_id
+                    )),
+                );
             }
             match state.daemon.lock() {
                 Ok(mut daemon) => {
@@ -290,10 +320,10 @@ fn handle_runtime_request(
                             200,
                             serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
                         ),
-                        Err(_) => (500, "{\"error\":\"apply_failed\"}".to_string()),
+                        Err(err) => json_error(500, "apply_failed", Some(err.to_string())),
                     }
                 }
-                Err(_) => (500, "{\"error\":\"daemon_lock_poisoned\"}".to_string()),
+                Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
         }
         ("POST", _) if path.starts_with("/api/deployments/") && path.ends_with("/control") => {
@@ -302,11 +332,11 @@ fn handle_runtime_request(
                 .trim_end_matches("/control")
                 .trim_end_matches('/');
             let Some(body) = body else {
-                return (400, "{\"error\":\"missing_body\"}".to_string());
+                return json_error(400, "missing_body", None);
             };
             let request: DeploymentControlRequest = match serde_json::from_str(body) {
                 Ok(request) => request,
-                Err(_) => return (400, "{\"error\":\"invalid_json\"}".to_string()),
+                Err(err) => return json_error(400, "invalid_json", Some(err.to_string())),
             };
             match state.daemon.lock() {
                 Ok(mut daemon) => match daemon
@@ -320,10 +350,14 @@ fn handle_runtime_request(
                         200,
                         serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
                     ),
-                    Ok(None) => (404, "{\"error\":\"deployment_not_found\"}".to_string()),
-                    Err(_) => (500, "{\"error\":\"control_failed\"}".to_string()),
+                    Ok(None) => json_error(
+                        404,
+                        "deployment_not_found",
+                        Some(format!("deployment `{deployment_id}` was not found")),
+                    ),
+                    Err(err) => json_error(500, "control_failed", Some(err.to_string())),
                 },
-                Err(_) => (500, "{\"error\":\"daemon_lock_poisoned\"}".to_string()),
+                Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
         }
         ("POST", _) if path.starts_with("/api/deployments/") && path.ends_with("/intents") => {
@@ -332,15 +366,15 @@ fn handle_runtime_request(
                 .trim_end_matches("/intents")
                 .trim_end_matches('/');
             let Some(body) = body else {
-                return (400, "{\"error\":\"missing_body\"}".to_string());
+                return json_error(400, "missing_body", None);
             };
             let request: PaperIntentRequest = match serde_json::from_str(body) {
                 Ok(request) => request,
-                Err(_) => return (400, "{\"error\":\"invalid_json\"}".to_string()),
+                Err(err) => return json_error(400, "invalid_json", Some(err.to_string())),
             };
             let side = match trade_side_from_wire(&request.side) {
                 Ok(side) => side,
-                Err(message) => return (400, message),
+                Err(error) => return json_error(400, &error.error, error.message),
             };
 
             match state.daemon.lock() {
@@ -365,27 +399,31 @@ fn handle_runtime_request(
                         200,
                         serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
                     ),
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                        (404, "{\"error\":\"deployment_not_found\"}".to_string())
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::InvalidInput => (
-                        400,
-                        format!("{{\"error\":\"invalid_request\",\"message\":\"{}\"}}", err),
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => json_error(
+                        404,
+                        "deployment_not_found",
+                        Some(format!("deployment `{deployment_id}` was not found")),
                     ),
-                    Err(_) => (500, "{\"error\":\"submit_failed\"}".to_string()),
+                    Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+                        json_error(400, "invalid_request", Some(err.to_string()))
+                    }
+                    Err(err) => json_error(500, "submit_failed", Some(err.to_string())),
                 },
-                Err(_) => (500, "{\"error\":\"daemon_lock_poisoned\"}".to_string()),
+                Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
         }
-        _ => (404, "{\"error\":\"not_found\"}".to_string()),
+        _ => json_error(404, "not_found", None),
     }
 }
 
-fn trade_side_from_wire(side: &str) -> Result<TradeSide, String> {
+fn trade_side_from_wire(side: &str) -> Result<TradeSide, ControlPlaneErrorResponse> {
     match side {
         "buy" => Ok(TradeSide::Buy),
         "sell" => Ok(TradeSide::Sell),
-        _ => Err("{\"error\":\"invalid_side\"}".to_string()),
+        _ => Err(ControlPlaneErrorResponse {
+            error: "invalid_side".to_string(),
+            message: Some(format!("unsupported side `{side}`")),
+        }),
     }
 }
 
@@ -803,5 +841,22 @@ mod tests {
         assert_eq!(status_code, 200);
         assert!(body.contains("\"deployment_id\":\"example.live\""));
         assert!(body.contains("\"venue_order_id\":\"venue-live-http-2\""));
+    }
+
+    #[test]
+    fn handle_runtime_request_reports_structured_not_found_error() {
+        let daemon = crate::runtime::PloyDaemon::boot(&crate::config::PlatformConfig::default())
+            .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (status_code, body) =
+            handle_runtime_request("GET", "/api/deployments/missing.paper", None, &state);
+        assert_eq!(status_code, 404);
+        assert!(body.contains("\"error\":\"deployment_not_found\""));
+        assert!(body.contains("\"message\""));
+        assert!(body.contains("missing.paper"));
     }
 }

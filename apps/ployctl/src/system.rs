@@ -1,7 +1,11 @@
 use crate::client::ControlPlaneClient;
 
-pub fn render_system_status(client: &ControlPlaneClient) -> String {
-    client.system_status()
+pub fn render_system_status(client: &ControlPlaneClient) -> Result<String, String> {
+    let status = client.system_snapshot()?;
+    Ok(format!(
+        "status={} uptime={}s version={}",
+        status.status, status.uptime_seconds, status.version
+    ))
 }
 
 #[cfg(test)]
@@ -41,7 +45,7 @@ mod tests {
         .expect("write status");
 
         let client = ControlPlaneClient::from_runtime_root(&runtime_root);
-        let output = render_system_status(&client);
+        let output = render_system_status(&client).expect("system status");
         assert!(output.contains("running"));
     }
 }
