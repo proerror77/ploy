@@ -27,6 +27,20 @@ pub struct TradingRuntime {
 }
 
 impl TradingRuntime {
+    pub fn restore(snapshot: TradingRuntimeSnapshot) -> Self {
+        let mut positions = PositionLedger::default();
+        for fill in &snapshot.fills {
+            positions.apply_fill(fill);
+        }
+
+        Self {
+            intents: snapshot.intents,
+            orders: OrderLedger::restore(snapshot.orders),
+            fills: FillLedger::restore(snapshot.fills),
+            positions,
+        }
+    }
+
     pub fn submit_intent(
         &mut self,
         intent: TradingIntent,
@@ -93,5 +107,64 @@ impl TradingRuntime {
             pnl: self.positions.pnl_snapshot(mark_prices),
             risk: snapshot_from_state(&active_intents, &self.orders, &self.positions),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TradingRuntime;
+    use crate::{FillRecord, IntentPurpose, OrderRecord, OrderState, TradeSide, TradingIntent};
+    use chrono::Utc;
+    use rust_decimal_macros::dec;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn restore_rebuilds_positions_and_active_risk_from_snapshot() {
+        let snapshot = super::TradingRuntimeSnapshot {
+            intents: vec![TradingIntent {
+                intent_id: "intent-1".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "token-1".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(2),
+                limit_price: Some(dec!(0.45)),
+                purpose: IntentPurpose::Entry,
+                created_at: Utc::now(),
+            }],
+            orders: vec![OrderRecord {
+                order_id: "order-1".to_string(),
+                intent_id: "intent-1".to_string(),
+                deployment_id: "example.live".to_string(),
+                token_id: "token-1".to_string(),
+                requested_qty: dec!(2),
+                limit_price: Some(dec!(0.45)),
+                venue_order_id: Some("venue-1".to_string()),
+                state: OrderState::PartiallyFilled,
+                filled_qty: dec!(1),
+                rejection_reason: None,
+            }],
+            fills: vec![FillRecord {
+                fill_id: "fill-1".to_string(),
+                order_id: "order-1".to_string(),
+                token_id: "token-1".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                price: dec!(0.45),
+                fee: dec!(0.02),
+                timestamp: Utc::now(),
+            }],
+            positions: Vec::new(),
+            pnl: Default::default(),
+            risk: Default::default(),
+        };
+
+        let runtime = TradingRuntime::restore(snapshot);
+        let restored = runtime.snapshot(&BTreeMap::new());
+        assert_eq!(restored.orders.len(), 1);
+        assert_eq!(restored.fills.len(), 1);
+        assert_eq!(restored.positions.len(), 1);
+        assert_eq!(restored.positions[0].net_qty, dec!(1));
+        assert_eq!(restored.risk.active_orders, 1);
     }
 }
