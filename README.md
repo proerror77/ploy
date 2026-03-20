@@ -19,11 +19,19 @@ Current smoke path:
 
 ```bash
 cargo run -p ployd
-cargo run -p ployctl
+cargo run -p ployctl -- system status
+cargo run -p ployctl -- deployments list
 rtk cargo test --test platform_smoke -- --nocapture
 ```
 
-Runbook: [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md)
+Runbooks:
+
+- [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md)
+- [`docs/runbooks/platform-deploy.md`](docs/runbooks/platform-deploy.md)
+
+Default release workflow:
+
+- `.github/workflows/release-platform.yml`
 
 Compatibility note:
 
@@ -406,8 +414,9 @@ docs/            Design docs, runbooks, and migration notes
 ## Development
 
 ```bash
-cargo run -p ployd                   # Boot the platform daemon skeleton
-cargo run -p ployctl                 # Boot the operator client skeleton
+cargo run -p ployd                   # Boot the platform daemon
+cargo run -p ployctl -- system status
+cargo run -p ployctl -- deployments list
 rtk cargo check -p ployd             # Fast daemon type-check loop
 rtk cargo check -p ployctl           # Fast client type-check loop
 rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture

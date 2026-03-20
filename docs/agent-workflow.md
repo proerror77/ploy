@@ -105,7 +105,7 @@ rules.
   required.
 - On trading hosts, do not build Rust source on-host. Build in CI and deploy
   release artifacts only.
-- Preferred production workflow: `.github/workflows/release-aliyun.yml`.
+- Preferred production workflow: `.github/workflows/release-platform.yml`.
 - Live services should keep these systemd guardrails:
   - `Restart=always`
   - `RestartSec=5`

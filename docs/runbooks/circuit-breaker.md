@@ -16,7 +16,7 @@ curl -s http://localhost:8081/api/sidecar/risk | jq '.circuit_breaker'
 
 Via logs:
 ```bash
-journalctl -u ploy --no-pager | grep -i "circuit.breaker" | tail -20
+journalctl -u ployd --no-pager | grep -i "circuit.breaker" | tail -20
 ```
 
 ## Manual Reset
@@ -26,7 +26,7 @@ If the circuit breaker is stuck in Open state after the underlying issue is reso
 1. Verify the root cause is fixed (e.g., exchange API is back up).
 2. Restart the service — the breaker resets to Closed on startup:
    ```bash
-   sudo systemctl restart ploy
+   sudo systemctl restart ployd
    ```
 3. Monitor logs for the first few minutes to confirm requests succeed.
 
@@ -41,7 +41,7 @@ Circuit breaker parameters are configured in the coordinator bootstrap config:
 
 After reset, confirm:
 ```bash
-journalctl -u ploy -n 30 --no-pager | grep -i "circuit"
+journalctl -u ployd -n 30 --no-pager | grep -i "circuit"
 curl -s http://localhost:8081/api/sidecar/risk | jq '.circuit_breaker.state'
 ```
 

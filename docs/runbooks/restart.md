@@ -9,8 +9,8 @@ For emergencies, see `emergency-stop.md` instead.
 
 1. Check current state:
    ```bash
-   systemctl status ploy
-   journalctl -u ploy -n 20 --no-pager
+   systemctl status ployd
+   journalctl -u ployd -n 20 --no-pager
    ```
 
 2. Governance state is auto-persisted to the database (R-07 fix).
@@ -18,24 +18,24 @@ For emergencies, see `emergency-stop.md` instead.
 
 3. Stop the service:
    ```bash
-   sudo systemctl stop ploy
+   sudo systemctl stop ployd
    ```
 
 4. Wait for graceful shutdown (up to 30s). Verify:
    ```bash
-   systemctl is-active ploy  # should say "inactive"
+   systemctl is-active ployd  # should say "inactive"
    ```
 
 5. Start the service:
    ```bash
-   sudo systemctl start ploy
+   sudo systemctl start ployd
    ```
 
 6. Verify:
    ```bash
-   systemctl show ploy -p MemoryMax -p Restart -p OOMPolicy
-   journalctl -u ploy -n 30 --no-pager
-   curl -fsS http://localhost:8081/health
+   systemctl show ployd -p MemoryMax -p Restart -p OOMPolicy
+   journalctl -u ployd -n 30 --no-pager
+   /opt/ploy/bin/ployctl system status
    ```
 
 ## Post-restart Checks

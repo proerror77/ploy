@@ -1,5 +1,5 @@
-# DEPRECATED: Use release-aliyun.yml. Builds x86_64 without production features.
-name: Release and Deploy Production
+# LEGACY SINGLE-BINARY: Use release-platform.yml for the workspace-default deploy path.
+name: Legacy Single-Binary Release and Deploy Production
 
 on:
   push:

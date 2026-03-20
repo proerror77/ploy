@@ -1,4 +1,5 @@
-name: Release to Aliyun ECS
+# LEGACY SINGLE-BINARY: Use release-platform.yml for the workspace-default deploy path.
+name: Legacy Single-Binary Release to Aliyun ECS
 
 on:
   release:

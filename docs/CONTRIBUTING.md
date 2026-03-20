@@ -103,7 +103,9 @@ A separate **Build Check** job verifies the release profile compiles (`cargo bui
 
 ### Deployment Pipelines
 
-Deployment workflows (in `.github/workflows/deploy-*.yml`) handle building, packaging, and deploying to AWS EC2 via S3 + SSM. These are triggered on pushes to `main` or via manual dispatch. Deployment requires `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` repository secrets.
+The default platform deployment workflow is `.github/workflows/release-platform.yml`.
+Legacy single-binary workflows remain in `.github/workflows/`, but they are not
+the default release path for the workspace runtime.
 
 ## Running Tests
 

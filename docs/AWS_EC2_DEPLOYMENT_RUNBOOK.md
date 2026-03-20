@@ -6,6 +6,8 @@
 > units and helper scripts referenced below now live under
 > `deployment/archive/legacy-root-runtime/` and
 > `scripts/archive/legacy-root-runtime/`.
+> For the current workspace-default deploy path, use
+> `docs/runbooks/platform-deploy.md` and `.github/workflows/release-platform.yml`.
 
 `tango-2-1` is the EC2 staging host. Use `.github/workflows/release-staging.yml`
 for first-class staging deploys. That path ships CI-built artifacts only and

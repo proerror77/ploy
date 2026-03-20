@@ -1,4 +1,4 @@
-name: Release Legacy Staging Bundle (tango-2-1)
+name: Legacy Single-Binary Staging Bundle (tango-2-1)
 
 on:
   workflow_dispatch:

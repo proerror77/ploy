@@ -11,3 +11,4 @@ description = "Ploy control-plane client workspace entry point"
 ploy-operator-contracts.workspace = true
 ploy-platform.workspace = true
 serde.workspace = true
+serde_json.workspace = true

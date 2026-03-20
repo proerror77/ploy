@@ -1,0 +1,62 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT_DIR="/opt/ploy"
+SYSTEMD_DIR="/etc/systemd/system"
+SERVICE_SRC="${ROOT_DIR}/deployment/ployd.service"
+SERVICE_DST="${SYSTEMD_DIR}/ployd.service"
+
+echo "==> Installing ployd platform service..."
+
+if ! id -u ploy >/dev/null 2>&1; then
+  sudo useradd --system --home "${ROOT_DIR}" --shell /usr/sbin/nologin --no-create-home ploy
+fi
+
+sudo mkdir -p \
+  "${ROOT_DIR}/bin" \
+  "${ROOT_DIR}/config" \
+  "${ROOT_DIR}/data/state" \
+  "${ROOT_DIR}/deployment" \
+  "${ROOT_DIR}/logs" \
+  "${ROOT_DIR}/run/platform" \
+  "${ROOT_DIR}/scripts"
+sudo chown -R ploy:ploy "${ROOT_DIR}"
+
+sudo install -m 0644 "${SERVICE_SRC}" "${SERVICE_DST}"
+
+if [[ -f "${ROOT_DIR}/data/state/deployments.json.sample" && ! -f "${ROOT_DIR}/data/state/deployments.json" ]]; then
+  sudo cp "${ROOT_DIR}/data/state/deployments.json.sample" "${ROOT_DIR}/data/state/deployments.json"
+fi
+
+sudo touch "${ROOT_DIR}/.env"
+
+ensure_env_default() {
+  local env_file="$1"
+  local key="$2"
+  local value="$3"
+
+  if ! sudo grep -qE "^${key}=" "${env_file}"; then
+    echo "${key}=${value}" | sudo tee -a "${env_file}" >/dev/null
+  fi
+}
+
+ensure_env_default "${ROOT_DIR}/.env" "PLOY_DEPLOYMENTS_FILE" "${ROOT_DIR}/data/state/deployments.json"
+ensure_env_default "${ROOT_DIR}/.env" "PLOY_RUNTIME_ROOT" "${ROOT_DIR}/run/platform"
+ensure_env_default "${ROOT_DIR}/.env" "PLOY_SYSTEM_STATUS_FILE" "${ROOT_DIR}/run/platform/system-status.json"
+ensure_env_default "${ROOT_DIR}/.env" "PLOY_DEPLOYMENT_STATUS_FILE" "${ROOT_DIR}/run/platform/deployments.json"
+ensure_env_default "${ROOT_DIR}/.env" "PLOY_LISTEN_ADDR" "127.0.0.1:8081"
+ensure_env_default "${ROOT_DIR}/.env" "PLOY_TICK_INTERVAL_MS" "1000"
+
+sudo chmod 600 "${ROOT_DIR}/.env"
+sudo chown ploy:ploy "${ROOT_DIR}/.env" "${ROOT_DIR}/data/state/deployments.json" 2>/dev/null || true
+
+sudo systemctl daemon-reload
+sudo systemctl enable ployd
+
+echo "==> ployd service installed"
+echo ""
+echo "Commands:"
+echo "  sudo systemctl start ployd          # Start the platform daemon"
+echo "  sudo systemctl status ployd         # Check daemon status"
+echo "  sudo journalctl -u ployd -f         # Tail daemon logs"
+echo "  ${ROOT_DIR}/bin/ployctl system status"
