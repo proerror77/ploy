@@ -15,6 +15,22 @@ import { randomUUID } from "crypto";
 const PLOY_API = process.env.PLOY_API_URL || "http://localhost:8081";
 const PLOY_ADMIN_TOKEN = process.env.PLOY_API_ADMIN_TOKEN || process.env.PLOY_ADMIN_TOKEN;
 
+type SystemStatusResponse = {
+  status: string;
+  uptime_seconds: number;
+  version: string;
+  strategy: string;
+  last_trade_time: string | null;
+  websocket_connected: boolean;
+  database_connected: boolean;
+  error_count_1h: number;
+};
+
+type SystemControlResponse = {
+  success: boolean;
+  message: string;
+};
+
 async function ployFetch(path: string, options?: RequestInit) {
   const url = `${PLOY_API}${path}`;
   const headers: Record<string, string> = {
@@ -32,13 +48,13 @@ async function ployFetch(path: string, options?: RequestInit) {
   return fetch(url, { ...options, headers: { ...headers, ...options?.headers } });
 }
 
-async function callBackend(path: string, options?: RequestInit): Promise<any> {
+async function callBackend<T>(path: string, options?: RequestInit): Promise<T> {
   const resp = await ployFetch(path, options);
   if (!resp.ok) {
     const err = await resp.text();
     throw new Error(`Backend error (${resp.status}): ${err}`);
   }
-  return resp.json();
+  return (await resp.json()) as T;
 }
 
 export const ployBackendServer = createSdkMcpServer({
@@ -219,7 +235,7 @@ IMPORTANT: Always use dry_run=true unless explicitly configured for live trading
               isError: true,
             };
           }
-          const status = await resp.json();
+          const status = (await resp.json()) as SystemStatusResponse;
           return {
             content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
           };
@@ -242,7 +258,7 @@ IMPORTANT: Always use dry_run=true unless explicitly configured for live trading
       async (args) => {
         try {
           const body = args.domain ? JSON.stringify({ domain: args.domain }) : undefined;
-          const result = await callBackend(`/api/system/${args.action}`, {
+          const result = await callBackend<SystemControlResponse>(`/api/system/${args.action}`, {
             method: "POST",
             body,
           });

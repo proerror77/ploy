@@ -9,7 +9,11 @@ export interface TodayStats {
   active_positions: number;
 }
 
-export interface Trade {
+export type DeploymentState = 'enabled' | 'draining' | 'disabled' | 'archived';
+
+export type IntentPurpose = 'entry' | 'exit' | 'reduce' | 'hedge' | 'cancel';
+
+export interface TradeResponse {
   id: string;
   timestamp: string;
   token_id: string;
@@ -23,7 +27,9 @@ export interface Trade {
   error_message?: string;
 }
 
-export interface Position {
+export type Trade = TradeResponse;
+
+export interface PositionResponse {
   token_id: string;
   token_name: string;
   side: 'UP' | 'DOWN';
@@ -35,6 +41,8 @@ export interface Position {
   duration_seconds: number;
 }
 
+export type Position = PositionResponse;
+
 export interface SystemStatus {
   status: 'running' | 'stopped' | 'error';
   uptime_seconds: number;
@@ -44,6 +52,11 @@ export interface SystemStatus {
   websocket_connected: boolean;
   database_connected: boolean;
   error_count_1h: number;
+}
+
+export interface SystemControlResponse {
+  success: boolean;
+  message: string;
 }
 
 export interface StrategyConfig {
@@ -85,6 +98,24 @@ export interface MarketData {
   volume_24h: number;
   timestamp: string;
 }
+
+export interface StatusUpdate {
+  status: 'running' | 'stopped' | 'error';
+}
+
+export interface DeploymentStateSummary {
+  enabled: number;
+  draining: number;
+  disabled: number;
+  archived: number;
+}
+
+export type WsMessage =
+  | { type: 'log'; data: LogEntry }
+  | { type: 'trade'; data: TradeResponse }
+  | { type: 'position'; data: PositionResponse }
+  | { type: 'market'; data: MarketData }
+  | { type: 'status'; data: StatusUpdate };
 
 export interface PnLDataPoint {
   timestamp: string;

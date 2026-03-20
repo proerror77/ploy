@@ -1,113 +1,10 @@
 use chrono::{DateTime, Utc};
+pub use ploy_operator_contracts::{
+    DeploymentState, DeploymentStateSummary, IntentPurpose, LogEntry, MarketData, PositionResponse,
+    StatusUpdate, SystemControlResponse, SystemStatus, TradeResponse, WsMessage,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-pub use crate::plugins::DeploymentState;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorAction {
-    Pause,
-    Resume,
-    ForceClose,
-    ClaimCheck,
-    ClaimRun,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorScope {
-    Global,
-    Domain,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperatorActionRequest {
-    pub action: OperatorAction,
-    pub scope: OperatorScope,
-    #[serde(default)]
-    pub domain: Option<String>,
-    pub requested_by: String,
-    #[serde(default)]
-    pub reason: Option<String>,
-}
-
-impl OperatorActionRequest {
-    pub fn validate(&self) -> Option<String> {
-        match self.scope {
-            OperatorScope::Global => None,
-            OperatorScope::Domain => self
-                .domain
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|_| ())
-                .map_or_else(
-                    || Some("domain scope requires a domain".to_string()),
-                    |_| None,
-                ),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperatorActionResponse {
-    pub accepted: bool,
-    pub action_id: String,
-    pub action: OperatorAction,
-    pub scope: OperatorScope,
-    pub effective_targets: Vec<String>,
-    pub message: String,
-    pub requested_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperatorDomainStatus {
-    pub domain: String,
-    pub ingress_mode: String,
-    pub paused: bool,
-    pub exposure_usd: f64,
-    pub daily_pnl_usd: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperatorClaimerStatus {
-    pub enabled: bool,
-    pub pending_redeemable_count: u64,
-    pub pending_redeemable_notional_usd: f64,
-    #[serde(default)]
-    pub last_checked_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub last_run_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperatorRecentAction {
-    pub action_id: String,
-    pub action: OperatorAction,
-    pub scope: OperatorScope,
-    #[serde(default)]
-    pub domain: Option<String>,
-    pub accepted: bool,
-    pub message: String,
-    pub requested_by: String,
-    pub requested_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperatorStatusResponse {
-    pub runtime_mode: String,
-    pub account_id: String,
-    pub dry_run: bool,
-    pub system_status: String,
-    pub risk_state: String,
-    pub queue_depth: u64,
-    pub domains: Vec<OperatorDomainStatus>,
-    pub claimer: OperatorClaimerStatus,
-    pub recent_actions: Vec<OperatorRecentAction>,
-}
 
 // ============================================================================
 // Stats Types
@@ -137,21 +34,6 @@ pub struct PnLDataPoint {
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TradeResponse {
-    pub id: String,
-    pub timestamp: DateTime<Utc>,
-    pub token_id: String,
-    pub token_name: String,
-    pub side: String,
-    pub shares: i32,
-    pub entry_price: f64,
-    pub exit_price: Option<f64>,
-    pub pnl: Option<f64>,
-    pub status: String,
-    pub error_message: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradesListResponse {
     pub trades: Vec<TradeResponse>,
     pub total: i64,
@@ -170,19 +52,6 @@ pub struct TradeQuery {
 // Position Types
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PositionResponse {
-    pub token_id: String,
-    pub token_name: String,
-    pub side: String,
-    pub shares: i32,
-    pub entry_price: f64,
-    pub current_price: f64,
-    pub unrealized_pnl: f64,
-    pub entry_time: DateTime<Utc>,
-    pub duration_seconds: i64,
-}
-
 // ============================================================================
 // Health Check Types
 // ============================================================================
@@ -197,32 +66,6 @@ pub struct HealthResponse {
 // ============================================================================
 // System Types
 // ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemStatus {
-    pub status: String,
-    pub uptime_seconds: i64,
-    pub version: String,
-    pub strategy: String,
-    pub last_trade_time: Option<DateTime<Utc>>,
-    pub websocket_connected: bool,
-    pub database_connected: bool,
-    pub error_count_1h: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemControlResponse {
-    pub success: bool,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeploymentStateSummary {
-    pub enabled: usize,
-    pub draining: usize,
-    pub disabled: usize,
-    pub archived: usize,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginCapabilitySummary {
@@ -341,47 +184,6 @@ pub struct SecurityEventQuery {
 // ============================================================================
 // WebSocket Types
 // ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
-pub enum WsMessage {
-    #[serde(rename = "log")]
-    Log(LogEntry),
-    #[serde(rename = "trade")]
-    Trade(TradeResponse),
-    #[serde(rename = "position")]
-    Position(PositionResponse),
-    #[serde(rename = "market")]
-    Market(MarketData),
-    #[serde(rename = "status")]
-    Status(StatusUpdate),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogEntry {
-    pub timestamp: DateTime<Utc>,
-    pub level: String,
-    pub component: String,
-    pub message: String,
-    pub metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketData {
-    pub token_id: String,
-    pub token_name: String,
-    pub best_bid: f64,
-    pub best_ask: f64,
-    pub spread: f64,
-    pub last_price: f64,
-    pub volume_24h: f64,
-    pub timestamp: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatusUpdate {
-    pub status: String,
-}
 
 #[cfg(test)]
 mod tests {
