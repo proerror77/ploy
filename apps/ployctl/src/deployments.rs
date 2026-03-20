@@ -5,7 +5,8 @@ use std::path::Path;
 
 pub fn render_deployments(client: &ControlPlaneClient) -> String {
     client
-        .list_deployments()
+        .deployment_summaries()
+        .unwrap_or_default()
         .into_iter()
         .map(|deployment| {
             format!(
@@ -17,7 +18,10 @@ pub fn render_deployments(client: &ControlPlaneClient) -> String {
         .join("\n")
 }
 
-pub fn render_deployment(client: &ControlPlaneClient, deployment_id: &str) -> Option<String> {
+pub fn render_deployment(
+    client: &ControlPlaneClient,
+    deployment_id: &str,
+) -> Result<String, String> {
     client.inspect_deployment(deployment_id).map(|deployment| {
         format!(
             "{} desired={:?} observed={:?}",

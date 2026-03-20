@@ -1,6 +1,6 @@
 use ploy_operator_contracts::{
-    DeploymentApplyRequest, DeploymentControlRequest, DeploymentSummary, DesiredState,
-    OperatorEvent, SystemStatus, TradingStateSnapshot,
+    ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest, DeploymentSummary,
+    DesiredState, OperatorEvent, SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -36,18 +36,28 @@ impl ControlPlaneClient {
         self.read_deployment_snapshots().unwrap_or_default()
     }
 
-    pub fn inspect_deployment(&self, deployment_id: &str) -> Option<DeploymentSummary> {
-        self.list_deployments()
-            .into_iter()
-            .find(|deployment| deployment.deployment_id == deployment_id)
-    }
-
     pub fn trading_state(&self) -> Result<Vec<TradingStateSnapshot>, String> {
         self.read_trading_state_snapshot()
     }
 
     pub fn system_snapshot(&self) -> Result<SystemStatus, String> {
         self.read_status_snapshot()
+    }
+
+    pub fn deployment_summaries(&self) -> Result<Vec<DeploymentSummary>, String> {
+        self.read_deployment_snapshots()
+    }
+
+    pub fn inspect_deployment(&self, deployment_id: &str) -> Result<DeploymentSummary, String> {
+        match self.read_deployment_over_http(deployment_id) {
+            Ok(deployment) => Ok(deployment),
+            Err(err) if should_fallback_to_snapshot(&err) => self
+                .deployment_summaries()?
+                .into_iter()
+                .find(|deployment| deployment.deployment_id == deployment_id)
+                .ok_or_else(|| format!("deployment `{deployment_id}` was not found")),
+            Err(err) => Err(err),
+        }
     }
 
     pub fn recent_events(&self, limit: usize) -> Result<Vec<OperatorEvent>, String> {
@@ -111,12 +121,14 @@ impl ControlPlaneClient {
         Ok(events)
     }
 
-    pub fn inspect_trading_state(&self, deployment_id: &str) -> Option<TradingStateSnapshot> {
-        self.trading_state().ok().and_then(|states| {
-            states
-                .into_iter()
-                .find(|state| state.deployment_id == deployment_id)
-        })
+    pub fn inspect_trading_state(
+        &self,
+        deployment_id: &str,
+    ) -> Result<TradingStateSnapshot, String> {
+        self.trading_state()?
+            .into_iter()
+            .find(|state| state.deployment_id == deployment_id)
+            .ok_or_else(|| format!("trading state for `{deployment_id}` was not found"))
     }
 
     pub fn apply_deployment(
@@ -177,6 +189,10 @@ impl ControlPlaneClient {
         self.get_json("/api/deployments")
     }
 
+    fn read_deployment_over_http(&self, deployment_id: &str) -> Result<DeploymentSummary, String> {
+        self.get_json(&format!("/api/deployments/{deployment_id}"))
+    }
+
     fn read_trading_state_over_http(&self) -> Result<Vec<TradingStateSnapshot>, String> {
         self.get_json("/api/trading/state")
     }
@@ -200,18 +216,10 @@ impl ControlPlaneClient {
             .read_to_string(&mut response)
             .map_err(|err| format!("read response: {err}"))?;
 
-        let mut parts = response.splitn(2, "\r\n\r\n");
-        let status_line = parts
-            .next()
-            .and_then(|headers| headers.lines().next())
-            .ok_or_else(|| "missing HTTP status line".to_string())?;
+        let (status_line, body) = split_http_response(&response)?;
         if !status_line.contains("200") {
-            return Err(format!("unexpected HTTP status: {status_line}"));
+            return Err(decode_http_error(status_line, body));
         }
-
-        let body = parts
-            .next()
-            .ok_or_else(|| "missing HTTP body".to_string())?;
         serde_json::from_str(body).map_err(|err| format!("parse HTTP body: {err}"))
     }
 
@@ -238,19 +246,42 @@ impl ControlPlaneClient {
             .read_to_string(&mut response)
             .map_err(|err| format!("read response: {err}"))?;
 
-        let mut parts = response.splitn(2, "\r\n\r\n");
-        let status_line = parts
-            .next()
-            .and_then(|headers| headers.lines().next())
-            .ok_or_else(|| "missing HTTP status line".to_string())?;
+        let (status_line, body) = split_http_response(&response)?;
         if !status_line.contains("200") {
-            return Err(format!("unexpected HTTP status: {status_line}"));
+            return Err(decode_http_error(status_line, body));
         }
-        let body = parts
-            .next()
-            .ok_or_else(|| "missing HTTP body".to_string())?;
         serde_json::from_str(body).map_err(|err| format!("parse HTTP body: {err}"))
     }
+}
+
+fn split_http_response(response: &str) -> Result<(&str, &str), String> {
+    let mut parts = response.splitn(2, "\r\n\r\n");
+    let status_line = parts
+        .next()
+        .and_then(|headers| headers.lines().next())
+        .ok_or_else(|| "missing HTTP status line".to_string())?;
+    let body = parts
+        .next()
+        .ok_or_else(|| "missing HTTP body".to_string())?;
+    Ok((status_line, body))
+}
+
+fn decode_http_error(status_line: &str, body: &str) -> String {
+    if let Ok(error) = serde_json::from_str::<ControlPlaneErrorResponse>(body) {
+        match error.message {
+            Some(message) => format!("HTTP {} {}: {}", status_line.trim(), error.error, message),
+            None => format!("HTTP {} {}", status_line.trim(), error.error),
+        }
+    } else {
+        format!("unexpected HTTP status: {}", status_line.trim())
+    }
+}
+
+fn should_fallback_to_snapshot(error: &str) -> bool {
+    error.starts_with("connect ")
+        || error.starts_with("write request:")
+        || error.starts_with("read response:")
+        || error.starts_with("missing HTTP ")
 }
 
 impl Default for ControlPlaneClient {
@@ -365,6 +396,13 @@ mod tests {
                         "websocket_connected": false,
                         "database_connected": false,
                         "error_count_1h": 0
+                    })
+                    .to_string()
+                } else if request.starts_with("GET /api/deployments/http.paper") {
+                    serde_json::json!({
+                        "deployment_id": "http.paper",
+                        "desired_state": "running",
+                        "observed_state": "running"
                     })
                     .to_string()
                 } else {
@@ -506,5 +544,41 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], OperatorEvent::SystemSnapshot(_)));
         assert!(matches!(events[1], OperatorEvent::DeploymentSnapshot(_)));
+    }
+
+    #[test]
+    fn client_preserves_http_error_body_details() {
+        let runtime_root = temp_dir("http-error");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).expect("read request");
+            let body = serde_json::json!({
+                "error": "deployment_not_found",
+                "message": "deployment `missing.paper` was not found",
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = addr.to_string();
+
+        let error = client
+            .inspect_deployment("missing.paper")
+            .expect_err("http error");
+        assert!(error.contains("404"));
+        assert!(error.contains("deployment_not_found"));
+        assert!(error.contains("missing.paper"));
     }
 }

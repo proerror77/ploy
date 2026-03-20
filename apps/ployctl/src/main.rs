@@ -65,61 +65,62 @@ fn main() {
         Command::parse(&std::env::args().collect::<Vec<_>>()).expect("valid ployctl command");
     let client = ControlPlaneClient::default();
 
+    match execute(command, &client) {
+        Ok(output) => eprintln!("{output}"),
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn execute(command: Command, client: &ControlPlaneClient) -> Result<String, String> {
     match command {
-        Command::SystemStatus => eprintln!("{}", system::render_system_status(&client)),
-        Command::TradingStatus => {
-            eprintln!("{}", trading::render_trading_state(&client))
-        }
+        Command::SystemStatus => system::render_system_status(client),
+        Command::TradingStatus => trading::render_trading_state(client),
         Command::TradingInspect(deployment_id) => {
-            eprintln!(
-                "{}",
-                trading::render_one_trading_state(&client, &deployment_id).expect("trading state")
-            )
+            trading::render_one_trading_state(client, &deployment_id)
         }
-        Command::DeploymentsList => eprintln!("{}", deployments::render_deployments(&client)),
-        Command::DeploymentsInspect(deployment_id) => eprintln!(
-            "{}",
-            deployments::render_deployment(&client, &deployment_id)
-                .expect("deployment exists in runtime snapshot")
+        Command::DeploymentsList => Ok(deployments::render_deployments(client)),
+        Command::DeploymentsInspect(deployment_id) => {
+            deployments::render_deployment(client, &deployment_id)
+        }
+        Command::DeploymentsApply(manifest_path) => {
+            deployments::apply_deployment_file(client, std::path::Path::new(&manifest_path))
+        }
+        Command::DeploymentsPause(deployment_id) => deployments::control_deployment(
+            client,
+            &deployment_id,
+            ploy_operator_contracts::DesiredState::Paused,
         ),
-        Command::DeploymentsApply(manifest_path) => eprintln!(
-            "{}",
-            deployments::apply_deployment_file(&client, std::path::Path::new(&manifest_path))
-                .expect("apply deployment")
+        Command::DeploymentsResume(deployment_id) => deployments::control_deployment(
+            client,
+            &deployment_id,
+            ploy_operator_contracts::DesiredState::Running,
         ),
-        Command::DeploymentsPause(deployment_id) => eprintln!(
-            "{}",
-            deployments::control_deployment(
-                &client,
-                &deployment_id,
-                ploy_operator_contracts::DesiredState::Paused,
-            )
-            .expect("pause deployment")
-        ),
-        Command::DeploymentsResume(deployment_id) => eprintln!(
-            "{}",
-            deployments::control_deployment(
-                &client,
-                &deployment_id,
-                ploy_operator_contracts::DesiredState::Running,
-            )
-            .expect("resume deployment")
-        ),
-        Command::DeploymentsStop(deployment_id) => eprintln!(
-            "{}",
-            deployments::control_deployment(
-                &client,
-                &deployment_id,
-                ploy_operator_contracts::DesiredState::Stopped,
-            )
-            .expect("stop deployment")
+        Command::DeploymentsStop(deployment_id) => deployments::control_deployment(
+            client,
+            &deployment_id,
+            ploy_operator_contracts::DesiredState::Stopped,
         ),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Command;
+    use super::{execute, Command};
+    use ployctl::client::ControlPlaneClient;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("duration")
+            .as_nanos();
+        std::env::temp_dir().join(format!("ployctl-main-{label}-{unique}"))
+    }
 
     #[test]
     fn parses_system_status_command() {
@@ -180,5 +181,20 @@ mod tests {
             command,
             Command::DeploymentsPause("example.paper".to_string())
         );
+    }
+
+    #[test]
+    fn execute_returns_error_for_missing_deployment_instead_of_panicking() {
+        let runtime_root = temp_dir("missing-deployment");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+        fs::write(runtime_root.join("deployments.json"), "[]").expect("write deployments");
+        let client = ControlPlaneClient::from_runtime_root(&runtime_root);
+
+        let error = execute(
+            Command::DeploymentsInspect("missing.paper".to_string()),
+            &client,
+        )
+        .expect_err("missing deployment should error");
+        assert!(error.contains("missing.paper"));
     }
 }
