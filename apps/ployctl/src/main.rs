@@ -9,6 +9,10 @@ enum Command {
     SystemStatus,
     DeploymentsList,
     DeploymentsInspect(String),
+    DeploymentsApply(String),
+    DeploymentsPause(String),
+    DeploymentsResume(String),
+    DeploymentsStop(String),
 }
 
 impl Command {
@@ -25,14 +29,34 @@ impl Command {
             {
                 Ok(Self::DeploymentsInspect(deployment_id.clone()))
             }
-            _ => Err("usage: ployctl system status | ployctl deployments list | ployctl deployments inspect <deployment-id>".to_string()),
+            [_bin, deployments, apply, manifest_path]
+                if deployments == "deployments" && apply == "apply" =>
+            {
+                Ok(Self::DeploymentsApply(manifest_path.clone()))
+            }
+            [_bin, deployments, pause, deployment_id]
+                if deployments == "deployments" && pause == "pause" =>
+            {
+                Ok(Self::DeploymentsPause(deployment_id.clone()))
+            }
+            [_bin, deployments, resume, deployment_id]
+                if deployments == "deployments" && resume == "resume" =>
+            {
+                Ok(Self::DeploymentsResume(deployment_id.clone()))
+            }
+            [_bin, deployments, stop, deployment_id]
+                if deployments == "deployments" && stop == "stop" =>
+            {
+                Ok(Self::DeploymentsStop(deployment_id.clone()))
+            }
+            _ => Err("usage: ployctl system status | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id>".to_string()),
         }
     }
 }
 
 fn main() {
-    let command = Command::parse(&std::env::args().collect::<Vec<_>>())
-        .expect("valid ployctl command");
+    let command =
+        Command::parse(&std::env::args().collect::<Vec<_>>()).expect("valid ployctl command");
     let client = ControlPlaneClient::default();
 
     match command {
@@ -43,6 +67,38 @@ fn main() {
             deployments::render_deployment(&client, &deployment_id)
                 .expect("deployment exists in runtime snapshot")
         ),
+        Command::DeploymentsApply(manifest_path) => eprintln!(
+            "{}",
+            deployments::apply_deployment_file(&client, std::path::Path::new(&manifest_path))
+                .expect("apply deployment")
+        ),
+        Command::DeploymentsPause(deployment_id) => eprintln!(
+            "{}",
+            deployments::control_deployment(
+                &client,
+                &deployment_id,
+                ploy_operator_contracts::DesiredState::Paused,
+            )
+            .expect("pause deployment")
+        ),
+        Command::DeploymentsResume(deployment_id) => eprintln!(
+            "{}",
+            deployments::control_deployment(
+                &client,
+                &deployment_id,
+                ploy_operator_contracts::DesiredState::Running,
+            )
+            .expect("resume deployment")
+        ),
+        Command::DeploymentsStop(deployment_id) => eprintln!(
+            "{}",
+            deployments::control_deployment(
+                &client,
+                &deployment_id,
+                ploy_operator_contracts::DesiredState::Stopped,
+            )
+            .expect("stop deployment")
+        ),
     }
 }
 
@@ -52,8 +108,8 @@ mod tests {
 
     #[test]
     fn parses_system_status_command() {
-        let command = Command::parse(&["ployctl", "system", "status"].map(str::to_string))
-            .expect("command");
+        let command =
+            Command::parse(&["ployctl", "system", "status"].map(str::to_string)).expect("command");
         assert_eq!(command, Command::SystemStatus);
     }
 
@@ -63,6 +119,33 @@ mod tests {
             &["ployctl", "deployments", "inspect", "example.paper"].map(str::to_string),
         )
         .expect("command");
-        assert_eq!(command, Command::DeploymentsInspect("example.paper".to_string()));
+        assert_eq!(
+            command,
+            Command::DeploymentsInspect("example.paper".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_deployment_apply_command() {
+        let command = Command::parse(
+            &["ployctl", "deployments", "apply", "example.paper.json"].map(str::to_string),
+        )
+        .expect("command");
+        assert_eq!(
+            command,
+            Command::DeploymentsApply("example.paper.json".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_deployment_pause_command() {
+        let command = Command::parse(
+            &["ployctl", "deployments", "pause", "example.paper"].map(str::to_string),
+        )
+        .expect("command");
+        assert_eq!(
+            command,
+            Command::DeploymentsPause("example.paper".to_string())
+        );
     }
 }

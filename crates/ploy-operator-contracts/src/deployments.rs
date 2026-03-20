@@ -41,6 +41,19 @@ pub struct DeploymentSummary {
     pub observed_state: ObservedState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeploymentApplyRequest {
+    pub deployment_id: String,
+    pub bundle_id: String,
+    pub runtime_mode: String,
+    pub desired_state: DesiredState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeploymentControlRequest {
+    pub desired_state: DesiredState,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentStateSummary {
     pub enabled: usize,
@@ -51,7 +64,10 @@ pub struct DeploymentStateSummary {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeploymentState, DeploymentSummary, DesiredState, ObservedState};
+    use super::{
+        DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DeploymentSummary,
+        DesiredState, ObservedState,
+    };
     use serde_json::json;
 
     #[test]
@@ -83,5 +99,35 @@ mod tests {
                 "observed_state": "degraded",
             })
         );
+    }
+
+    #[test]
+    fn deployment_apply_request_uses_stable_wire_keys() {
+        let value = serde_json::to_value(DeploymentApplyRequest {
+            deployment_id: "example.paper".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: "paper".to_string(),
+            desired_state: DesiredState::Running,
+        })
+        .expect("to_value");
+
+        assert_eq!(
+            value,
+            json!({
+                "deployment_id": "example.paper",
+                "bundle_id": "example",
+                "runtime_mode": "paper",
+                "desired_state": "running",
+            })
+        );
+    }
+
+    #[test]
+    fn deployment_control_request_serializes_desired_state() {
+        let value = serde_json::to_value(DeploymentControlRequest {
+            desired_state: DesiredState::Paused,
+        })
+        .expect("to_value");
+        assert_eq!(value, json!({ "desired_state": "paused" }));
     }
 }

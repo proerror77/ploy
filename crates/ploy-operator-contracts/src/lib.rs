@@ -4,7 +4,8 @@ pub mod system;
 pub mod trading;
 
 pub use deployments::{
-    DeploymentState, DeploymentStateSummary, DeploymentSummary, DesiredState, ObservedState,
+    DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DeploymentStateSummary,
+    DeploymentSummary, DesiredState, ObservedState,
 };
 pub use events::{LogEntry, OperatorEvent, StatusUpdate, WsMessage};
 pub use system::{SystemControlResponse, SystemStatus};

@@ -1,5 +1,7 @@
+use ploy_operator_contracts::{
+    DeploymentApplyRequest, DeploymentControlRequest, DeploymentSummary, DesiredState, SystemStatus,
+};
 use serde::de::DeserializeOwned;
-use ploy_operator_contracts::{DeploymentSummary, SystemStatus};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -37,6 +39,29 @@ impl ControlPlaneClient {
         self.list_deployments()
             .into_iter()
             .find(|deployment| deployment.deployment_id == deployment_id)
+    }
+
+    pub fn apply_deployment(
+        &self,
+        request: &DeploymentApplyRequest,
+    ) -> Result<DeploymentSummary, String> {
+        self.send_json(
+            "PUT",
+            &format!("/api/deployments/{}", request.deployment_id),
+            request,
+        )
+    }
+
+    pub fn set_desired_state(
+        &self,
+        deployment_id: &str,
+        desired_state: DesiredState,
+    ) -> Result<DeploymentSummary, String> {
+        self.send_json(
+            "POST",
+            &format!("/api/deployments/{deployment_id}/control"),
+            &DeploymentControlRequest { desired_state },
+        )
     }
 
     fn read_status_snapshot(&self) -> Result<SystemStatus, String> {
@@ -98,6 +123,43 @@ impl ControlPlaneClient {
             .ok_or_else(|| "missing HTTP body".to_string())?;
         serde_json::from_str(body).map_err(|err| format!("parse HTTP body: {err}"))
     }
+
+    fn send_json<B, T>(&self, method: &str, path: &str, body: &B) -> Result<T, String>
+    where
+        B: serde::Serialize,
+        T: DeserializeOwned,
+    {
+        let mut stream = TcpStream::connect(&self.control_plane_addr)
+            .map_err(|err| format!("connect {}: {err}", self.control_plane_addr))?;
+        let body = serde_json::to_string(body).map_err(|err| format!("serialize body: {err}"))?;
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            self.control_plane_addr,
+            body.len(),
+            body
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|err| format!("write request: {err}"))?;
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .map_err(|err| format!("read response: {err}"))?;
+
+        let mut parts = response.splitn(2, "\r\n\r\n");
+        let status_line = parts
+            .next()
+            .and_then(|headers| headers.lines().next())
+            .ok_or_else(|| "missing HTTP status line".to_string())?;
+        if !status_line.contains("200") {
+            return Err(format!("unexpected HTTP status: {status_line}"));
+        }
+        let body = parts
+            .next()
+            .ok_or_else(|| "missing HTTP body".to_string())?;
+        serde_json::from_str(body).map_err(|err| format!("parse HTTP body: {err}"))
+    }
 }
 
 impl Default for ControlPlaneClient {
@@ -109,7 +171,9 @@ impl Default for ControlPlaneClient {
 #[cfg(test)]
 mod tests {
     use super::ControlPlaneClient;
-    use ploy_operator_contracts::{DeploymentSummary, DesiredState, ObservedState, SystemStatus};
+    use ploy_operator_contracts::{
+        DeploymentApplyRequest, DeploymentSummary, DesiredState, ObservedState, SystemStatus,
+    };
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -161,7 +225,9 @@ mod tests {
         let deployments = client.list_deployments();
         assert_eq!(deployments.len(), 1);
         assert_eq!(
-            client.inspect_deployment("example.paper").expect("deployment"),
+            client
+                .inspect_deployment("example.paper")
+                .expect("deployment"),
             deployments[0]
         );
     }
@@ -222,5 +288,62 @@ mod tests {
                 .deployment_id,
             "http.paper"
         );
+    }
+
+    #[test]
+    fn client_applies_and_controls_deployment_over_http() {
+        let runtime_root = temp_dir("http-mutate");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut request = [0_u8; 2048];
+                let bytes = stream.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..bytes]);
+                let body = if request.starts_with("PUT /api/deployments/example.paper") {
+                    serde_json::json!({
+                        "deployment_id": "example.paper",
+                        "desired_state": "running",
+                        "observed_state": "starting"
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "deployment_id": "example.paper",
+                        "desired_state": "paused",
+                        "observed_state": "paused"
+                    })
+                    .to_string()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("write response");
+            }
+        });
+
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = addr.to_string();
+
+        let applied = client
+            .apply_deployment(&DeploymentApplyRequest {
+                deployment_id: "example.paper".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: "paper".to_string(),
+                desired_state: DesiredState::Running,
+            })
+            .expect("apply");
+        assert_eq!(applied.deployment_id, "example.paper");
+
+        let paused = client
+            .set_desired_state("example.paper", DesiredState::Paused)
+            .expect("pause");
+        assert_eq!(paused.desired_state, DesiredState::Paused);
     }
 }

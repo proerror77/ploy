@@ -1,0 +1,6 @@
+{
+  "deployment_id": "example.paper",
+  "bundle_id": "example",
+  "runtime_mode": "paper",
+  "desired_state": "running"
+}

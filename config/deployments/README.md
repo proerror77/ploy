@@ -2,14 +2,14 @@
 
 `config/deployments/` is reserved for deployment manifests.
 
-Each manifest should describe one deployment resource:
+Each manifest should describe one deployment resource.
+The current minimal operator path uses JSON manifests such as
+`config/deployments/example.paper.json`.
+
+Each manifest includes:
 
 - `deployment_id`
 - `bundle_id`
-- `account_profile`
-- `market_scope`
-- `risk_profile`
-- `execution_profile`
 - `runtime_mode`
 - `desired_state`
 

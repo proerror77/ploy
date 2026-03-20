@@ -1,4 +1,4 @@
-use ploy_trading::{FillRecord, PositionLedger, PnlSnapshot};
+use ploy_trading::{FillRecord, PnlSnapshot, PositionLedger};
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 
@@ -19,7 +19,12 @@ mod tests {
     use ploy_trading::{FillRecord, TradeSide};
     use rust_decimal_macros::dec;
 
-    fn sample_fill(fill_id: &str, side: TradeSide, quantity: rust_decimal::Decimal, price: rust_decimal::Decimal) -> FillRecord {
+    fn sample_fill(
+        fill_id: &str,
+        side: TradeSide,
+        quantity: rust_decimal::Decimal,
+        price: rust_decimal::Decimal,
+    ) -> FillRecord {
         FillRecord {
             fill_id: fill_id.to_string(),
             order_id: format!("order-{fill_id}"),

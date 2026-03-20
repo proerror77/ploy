@@ -13,7 +13,8 @@ impl WorkerSupervisor {
     pub fn start(&mut self, spec: WorkerLaunchSpec) -> &WorkerStatus {
         let deployment_id = spec.deployment_id.clone();
         let runtime = DeploymentRuntime::new(spec);
-        self.workers.insert(deployment_id.clone(), runtime.boot_status());
+        self.workers
+            .insert(deployment_id.clone(), runtime.boot_status());
         self.workers.get(&deployment_id).expect("worker status")
     }
 
@@ -23,9 +24,25 @@ impl WorkerSupervisor {
         Some(status)
     }
 
+    pub fn status(&self, deployment_id: &str) -> Option<&WorkerStatus> {
+        self.workers.get(deployment_id)
+    }
+
     pub fn fail(&mut self, deployment_id: &str) -> Option<&WorkerStatus> {
         let status = self.workers.get_mut(deployment_id)?;
         status.observed_state = ObservedState::Failed;
+        Some(status)
+    }
+
+    pub fn pause(&mut self, deployment_id: &str) -> Option<&WorkerStatus> {
+        let status = self.workers.get_mut(deployment_id)?;
+        status.observed_state = ObservedState::Paused;
+        Some(status)
+    }
+
+    pub fn stop(&mut self, deployment_id: &str) -> Option<&WorkerStatus> {
+        let status = self.workers.get_mut(deployment_id)?;
+        status.observed_state = ObservedState::Stopped;
         Some(status)
     }
 

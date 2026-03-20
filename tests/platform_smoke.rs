@@ -32,11 +32,7 @@ fn platform_smoke_registers_and_starts_one_deployment() {
     assert_eq!(summary.desired_state, DesiredState::Running);
     assert_eq!(supervisor.workers().count(), 1);
     assert_eq!(
-        supervisor
-            .workers()
-            .next()
-            .expect("worker")
-            .observed_state,
+        supervisor.workers().next().expect("worker").observed_state,
         ObservedState::Running
     );
 }

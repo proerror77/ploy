@@ -35,7 +35,11 @@ pub struct OrderLedger {
 }
 
 impl OrderLedger {
-    pub fn insert_from_intent(&mut self, order_id: impl Into<String>, intent: &TradingIntent) -> &OrderRecord {
+    pub fn insert_from_intent(
+        &mut self,
+        order_id: impl Into<String>,
+        intent: &TradingIntent,
+    ) -> &OrderRecord {
         let order_id = order_id.into();
         let record = OrderRecord {
             order_id: order_id.clone(),
@@ -53,7 +57,11 @@ impl OrderLedger {
         self.orders.get(&order_id).expect("order inserted")
     }
 
-    pub fn acknowledge(&mut self, order_id: &str, venue_order_id: impl Into<String>) -> Option<&OrderRecord> {
+    pub fn acknowledge(
+        &mut self,
+        order_id: &str,
+        venue_order_id: impl Into<String>,
+    ) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(order_id)?;
         record.venue_order_id = Some(venue_order_id.into());
         record.state = OrderState::Acknowledged;
@@ -87,7 +95,12 @@ impl OrderLedger {
     pub fn active_orders(&self) -> usize {
         self.orders
             .values()
-            .filter(|record| matches!(record.state, OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled))
+            .filter(|record| {
+                matches!(
+                    record.state,
+                    OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
+                )
+            })
             .count()
     }
 
