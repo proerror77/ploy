@@ -129,9 +129,7 @@ jobs:
         run: cargo test --locked --features rl
 
       - name: Security audit
-        run: |
-          cargo install cargo-audit --locked
-          cargo audit
+        run: cargo audit
 
       - name: Show sccache stats
         if: always()
