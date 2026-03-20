@@ -20,6 +20,7 @@ cargo run -p ployd
 
 ```bash
 cargo run -p ployctl -- system status
+cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments list
 ```
 
@@ -37,6 +38,7 @@ The current operator flow is:
 ployd
 ployctl deployments apply config/deployments/example.paper.json
 ployctl system status
+ployctl trading status
 ployctl deployments list
 ployctl deployments inspect example.paper
 ployctl deployments pause example.paper

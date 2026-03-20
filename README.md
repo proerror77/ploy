@@ -20,6 +20,7 @@ Current smoke path:
 ```bash
 cargo run -p ployd
 cargo run -p ployctl -- system status
+cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
@@ -418,6 +419,7 @@ docs/            Design docs, runbooks, and migration notes
 ```bash
 cargo run -p ployd                   # Boot the platform daemon
 cargo run -p ployctl -- system status
+cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper

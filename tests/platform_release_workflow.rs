@@ -24,6 +24,7 @@ fn release_platform_workflow_builds_new_workspace_binaries() {
         "systemctl status ployd",
         "curl -fsS http://127.0.0.1:8081/health",
         "ployctl system status",
+        "ployctl trading status",
     ] {
         if !content.contains(needle) {
             offenders.push(format!(

@@ -46,6 +46,7 @@ After the bundle lands on the host, the deploy workflow:
    - `systemctl status ployd`
    - `curl -fsS http://127.0.0.1:8081/health`
    - `/opt/ploy/bin/ployctl system status`
+   - `/opt/ploy/bin/ployctl trading status`
 
 ## Required Host Paths
 
@@ -55,6 +56,7 @@ The install script ensures:
 - `/opt/ploy/data/state/deployments.json`
 - `/opt/ploy/run/platform/system-status.json`
 - `/opt/ploy/run/platform/deployments.json`
+- `/opt/ploy/run/platform/trading-state.json`
 
 ## Post-Deploy Checks
 
@@ -63,6 +65,7 @@ sudo systemctl status ployd --no-pager
 sudo journalctl -u ployd -n 200 --no-pager
 curl -fsS http://127.0.0.1:8081/health
 /opt/ploy/bin/ployctl system status
+/opt/ploy/bin/ployctl trading status
 /opt/ploy/bin/ployctl deployments list
 ```
 

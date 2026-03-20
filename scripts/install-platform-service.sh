@@ -44,6 +44,7 @@ ensure_env_default "${ROOT_DIR}/.env" "PLOY_DEPLOYMENTS_FILE" "${ROOT_DIR}/data/
 ensure_env_default "${ROOT_DIR}/.env" "PLOY_RUNTIME_ROOT" "${ROOT_DIR}/run/platform"
 ensure_env_default "${ROOT_DIR}/.env" "PLOY_SYSTEM_STATUS_FILE" "${ROOT_DIR}/run/platform/system-status.json"
 ensure_env_default "${ROOT_DIR}/.env" "PLOY_DEPLOYMENT_STATUS_FILE" "${ROOT_DIR}/run/platform/deployments.json"
+ensure_env_default "${ROOT_DIR}/.env" "PLOY_TRADING_STATE_FILE" "${ROOT_DIR}/run/platform/trading-state.json"
 ensure_env_default "${ROOT_DIR}/.env" "PLOY_LISTEN_ADDR" "127.0.0.1:8081"
 ensure_env_default "${ROOT_DIR}/.env" "PLOY_TICK_INTERVAL_MS" "1000"
 
@@ -60,3 +61,4 @@ echo "  sudo systemctl start ployd          # Start the platform daemon"
 echo "  sudo systemctl status ployd         # Check daemon status"
 echo "  sudo journalctl -u ployd -f         # Tail daemon logs"
 echo "  ${ROOT_DIR}/bin/ployctl system status"
+echo "  ${ROOT_DIR}/bin/ployctl trading status"

@@ -18,14 +18,15 @@
 - `rtk cargo check -p ployctl`
 - `cargo run -p ployd`
 - `cargo run -p ployctl -- system status`
+- `cargo run -p ployctl -- trading status`
 - `cargo run -p ployctl -- deployments list`
 - `rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture`
 
 ## 2. 策略矩陣檢查
 
 - `data/state/deployments.json` 存在且可讀
-- 每筆 deployment 至少包含：`id`、`strategy`、`domain`、`market_selector`、`timeframe`、`enabled`
-- 時間週期策略包含 `5m` 與 `15m`（依需求可調）
+- 每筆 deployment 至少包含：`deployment_id`、`bundle_id`、`runtime_mode`、`desired_state`
+- 若需要 dry-run 送單驗證，目標 deployment 必須是 `runtime_mode=paper`
 
 ## 3. 風險控管啟用檢查
 
@@ -47,4 +48,4 @@
 
 - 以上檢查無 error/stacktrace
 - `ployd` / `ployctl` 可正常啟動且 smoke test 通過
-- API 事件可見性可用（`/ws` 有 trade/position/market 任一實際推播）
+- `/api/deployments` 與 `/api/trading/state` 都能返回有效快照

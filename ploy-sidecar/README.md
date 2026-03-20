@@ -1,22 +1,25 @@
 # ploy-sidecar
 
-NBA comeback trading research agent powered by Claude Agent SDK.
+NBA comeback research sidecar and deployment-aware operator client powered by the Claude Agent SDK.
 
-Orchestrates a multi-tool research pipeline every 5 minutes and routes final trade decisions through the Ploy Rust backend.
+It orchestrates a research loop every few minutes while reading the new trading-platform control plane exposed by `ployd`.
 
 ## Architecture
 
 ```
-Claude Commander (Sonnet/Opus)
-├── espn MCP       → Live game scores, quarter, clock
-├── polymarket MCP → Market search, order book snapshot
+Claude Sidecar (Sonnet/Opus)
+├── espn MCP       → Live NBA scores, quarter, clock
+├── polymarket MCP → Market search and snapshots
 ├── WebSearch      → X.com sentiment, injuries, momentum
 └── ploy-backend MCP
-    ├── request_grok_decision  → Grok final judge (via Rust)
-    └── submit_order           → Order execution (via Rust Coordinator)
+    ├── get_system_status    → ployd health + uptime
+    ├── get_trading_state    → canonical trading snapshots
+    ├── list/get_deployment  → deployment resources
+    ├── apply/control deployment resources
+    └── submit_paper_intent  → paper-only intent ingress
 ```
 
-The sidecar does research. The Rust backend executes. Grok is the final judge.
+The sidecar does research and operator inspection. The platform control plane owns deployment lifecycle and trading state.
 
 ## Installation
 
@@ -47,15 +50,14 @@ cp .env.minimax.example .env
 | `ANTHROPIC_BASE_URL` | — | Optional Anthropic-compatible base URL (MiniMax examples: `https://api.minimaxi.com/anthropic` or `https://api.minimax.io/anthropic`) |
 | `ANTHROPIC_CUSTOM_HEADERS` | — | Optional custom headers, one per line in `Header: Value` format (example: `Authorization: Bearer <key>`) |
 | `MINIMAX_ANTHROPIC_MODEL` | `MiniMax-M2.5` | Optional MiniMax model id used for automatic alias mapping when `ANTHROPIC_BASE_URL` points to MiniMax |
-| `PLOY_API_URL` | `http://localhost:8081` | Ploy Rust backend URL |
+| `PLOY_API_URL` | `http://localhost:8081` | `ployd` control-plane URL |
 | `PLOY_API_KEY` | — | Bearer token (optional) |
-| `PLOY_SIDECAR_AUTH_TOKEN` | — | Sidecar token header (`x-ploy-sidecar-token`) for `/api/sidecar/*` |
+| `PLOY_API_ADMIN_TOKEN` | — | Admin token for deployment apply/control requests |
+| `PLOY_SIDECAR_AUTH_TOKEN` | — | Optional sidecar token header for control-plane requests |
 | `SIDECAR_MODEL` | `sonnet` | Model name or alias (`sonnet`, `opus`, `haiku`, or a full model id like `claude-opus-4-6` / `MiniMax-M2.5`) |
 | `SIDECAR_POLL_INTERVAL_SECS` | `300` | Scan interval (seconds) |
 | `SIDECAR_MAX_BUDGET_USD` | `1.00` | Max Claude cost per scan cycle |
-| `SIDECAR_DRY_RUN` | `true` | Set to `false` for live orders |
-
-Grok is configured on the **Rust backend** side via `GROK_API_KEY`.
+| `SIDECAR_DRY_RUN` | `true` | Keep the sidecar in recommendation-only mode |
 
 ## MiniMax M2.5 (Anthropic-Compatible)
 
@@ -86,11 +88,12 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL="MiniMax-M2.5"    # optional
 
 ## Usage
 
-Start the Rust backend first (required for Grok decisions and order execution):
+Start the platform daemon first:
 
 ```sh
-# Terminal 1 — Rust backend with platform mode
-GROK_API_KEY=... ploy platform --sports
+# Terminal 1 — trading-platform daemon
+cargo run -p ployd
+cargo run -p ployctl -- system status
 ```
 
 Then start the sidecar:
@@ -117,39 +120,29 @@ node dist/index.js
 
 Each scan cycle:
 
-1. **ESPN scan** — fetch today's live NBA games
-2. **Filter** — Q3 or early Q4 games with 1–15 point deficit
-3. **Market lookup** — find corresponding Polymarket market
-4. **Risk check** — reward-to-risk ≥ 4x (price ≤ $0.20), EV ≥ 5%
-5. **X.com research** — injuries, momentum, betting sentiment via WebSearch
-6. **Grok decision** — submit research brief to Grok (via Rust backend); only trade if Grok says "trade"
-7. **Order submission** — through Rust Coordinator (RiskGate → Queue → Execution)
+1. **Platform inspection** — fetch `/api/system/status`, `/api/deployments`, and `/api/trading/state`
+2. **ESPN scan** — fetch today's live NBA games
+3. **Filter** — Q3 or early Q4 games with 1–15 point deficit
+4. **Market lookup** — find corresponding Polymarket market
+5. **Risk check** — reward-to-risk ≥ 4x (price ≤ $0.20), EV ≥ 5%
+6. **X.com research** — injuries, momentum, betting sentiment via WebSearch
+7. **Recommendation** — emit research findings plus any deployment-resource action actually taken
 
-## Risk Controls
+## Control-Plane Endpoints
 
-Two layers:
-
-**TypeScript hook** (enforced before every `submit_order`):
-- Max order size: $50
-- Max entry price: $0.20 (4× reward-to-risk threshold)
-- Forces `dry_run=true` when `SIDECAR_DRY_RUN=true`
-
-**Rust Coordinator** (enforced server-side):
-- Daily loss limit
-- Max single exposure
-- Position sizing via RiskGate
-
-## Sidecar API Endpoints
-
-The Rust backend exposes these endpoints for the sidecar:
+The sidecar now aligns to the new trading-platform operator surface:
 
 ```
-POST /api/sidecar/grok/decision   Grok unified trade decision
-POST /api/sidecar/intents         Submit intent through Coordinator ingress (recommended)
-POST /api/sidecar/orders          Legacy live route (disabled by default)
-GET  /api/sidecar/positions       Current open positions
-GET  /api/sidecar/risk            Coordinator risk state
+GET  /api/system/status             Platform health snapshot
+GET  /api/trading/state             Canonical trading-state snapshots
+GET  /api/deployments               Deployment summaries
+GET  /api/deployments/:id           Deployment resource details
+PUT  /api/deployments/:id           Apply/update a deployment resource
+POST /api/deployments/:id/control   Set desired_state = running|paused|stopped
+POST /api/deployments/:id/intents   Submit a paper trading intent
 ```
+
+Legacy `/api/sidecar/*`, `/api/config`, and `enable/disable` deployment mutations are not part of the default workspace control plane on this branch.
 
 ## Output
 
@@ -172,8 +165,13 @@ Each scan produces structured JSON:
       "reasoning": "..."
     }
   ],
-  "orders_submitted": [
-    { "market_slug": "lakers-vs-nuggets-2026-02-17", "shares": 50, "price": 0.18, "dry_run": true, "status": "submitted" }
+  "operator_actions": [
+    {
+      "kind": "deployment_control",
+      "target": "example.paper",
+      "status": "not_needed",
+      "details": "paper deployment already running"
+    }
   ]
 }
 ```
@@ -191,7 +189,7 @@ ploy-sidecar/
 │   ├── schemas/
 │   │   └── output.ts         Structured output JSON schema
 │   └── hooks/
-│       └── risk-guard.ts     PreToolUse risk enforcement hook
+│       └── risk-guard.ts     Optional paper-mode deployment guard
 ├── .env.example
 └── package.json
 ```
