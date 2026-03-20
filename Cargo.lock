@@ -336,6 +336,7 @@ version = "0.1.0"
 dependencies = [
  "ploy-operator-contracts",
  "ploy-platform",
+ "serde",
 ]
 
 [[package]]
@@ -347,6 +348,7 @@ dependencies = [
  "ploy-operator-contracts",
  "ploy-platform",
  "ploy-trading",
+ "serde",
 ]
 
 [[package]]

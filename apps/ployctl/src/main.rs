@@ -1,8 +1,11 @@
-fn main() {
-    let components = [
-        ploy_platform::crate_marker(),
-        ploy_operator_contracts::crate_marker(),
-    ];
+mod client;
+mod deployments;
+mod system;
 
-    eprintln!("ployctl workspace skeleton: {}", components.join(", "));
+use client::ControlPlaneClient;
+
+fn main() {
+    let client = ControlPlaneClient;
+    eprintln!("{}", system::render_system_status(&client));
+    eprintln!("{}", deployments::render_deployments(&client));
 }

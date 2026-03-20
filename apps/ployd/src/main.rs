@@ -1,11 +1,17 @@
-fn main() {
-    let components = [
-        ploy_platform::crate_marker(),
-        ploy_trading::crate_marker(),
-        ploy_deployments::crate_marker(),
-        ploy_connectivity::crate_marker(),
-        ploy_operator_contracts::crate_marker(),
-    ];
+mod config;
+mod http;
+mod runtime;
 
-    eprintln!("ployd workspace skeleton: {}", components.join(", "));
+use config::PlatformConfig;
+use runtime::PloyDaemon;
+
+fn main() {
+    let config = PlatformConfig::default();
+    let daemon = PloyDaemon::boot(&config);
+    let status = daemon.control_plane.system.status();
+    let worker_count = daemon.supervisor.workers().count();
+
+    eprintln!("ployd booted");
+    eprintln!("{}", http::render_status(&status));
+    eprintln!("workers={worker_count}");
 }

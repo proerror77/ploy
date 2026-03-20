@@ -10,3 +10,4 @@ description = "Ploy control-plane client workspace entry point"
 [dependencies]
 ploy-operator-contracts.workspace = true
 ploy-platform.workspace = true
+serde.workspace = true
