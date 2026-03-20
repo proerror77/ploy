@@ -33,7 +33,8 @@ fn release_platform_workflow_builds_new_workspace_binaries() {
     }
 
     if content.contains("target/release/ploy") {
-        offenders.push("release-platform.yml: still references legacy target/release/ploy".to_string());
+        offenders
+            .push("release-platform.yml: still references legacy target/release/ploy".to_string());
     }
 
     assert!(

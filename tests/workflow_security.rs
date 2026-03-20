@@ -222,7 +222,9 @@ fn checked_in_platform_service_enforces_guardrails() {
 
     for needle in required {
         if !content.contains(needle) {
-            offenders.push(format!("deployment/ployd.service: missing guardrail `{needle}`"));
+            offenders.push(format!(
+                "deployment/ployd.service: missing guardrail `{needle}`"
+            ));
         }
     }
 

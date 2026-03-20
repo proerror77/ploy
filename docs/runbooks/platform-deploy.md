@@ -18,6 +18,10 @@ client used for post-deploy verification and remote inspection. It prefers the
 daemon HTTP surface and falls back to runtime snapshots if the API is
 temporarily unavailable.
 
+Deployment resources are managed separately from the daemon process. Operators
+apply a deployment manifest and then use `ployctl` to inspect or change desired
+state.
+
 ## CI Bundle Contents
 
 The release bundle contains:
@@ -60,6 +64,20 @@ sudo journalctl -u ployd -n 200 --no-pager
 curl -fsS http://127.0.0.1:8081/health
 /opt/ploy/bin/ployctl system status
 /opt/ploy/bin/ployctl deployments list
+```
+
+## Deployment Operator Flow
+
+Use a deployment manifest like
+[`config/deployments/example.paper.json`](../../config/deployments/example.paper.json)
+as the template for remote deployment resources.
+
+```bash
+/opt/ploy/bin/ployctl deployments apply /opt/ploy/config/deployments/example.paper.json
+/opt/ploy/bin/ployctl deployments inspect example.paper
+/opt/ploy/bin/ployctl deployments pause example.paper
+/opt/ploy/bin/ployctl deployments resume example.paper
+/opt/ploy/bin/ployctl deployments stop example.paper
 ```
 
 ## Legacy Workflows

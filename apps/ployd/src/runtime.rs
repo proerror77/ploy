@@ -1,6 +1,6 @@
 use crate::config::PlatformConfig;
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
-use ploy_operator_contracts::{DesiredState, ObservedState};
+use ploy_operator_contracts::{DeploymentApplyRequest, DesiredState, ObservedState};
 use ploy_platform::{ControlPlane, DeploymentRecord};
 use serde::Serialize;
 use std::fs;
@@ -19,7 +19,9 @@ pub struct PloyDaemon {
 impl PloyDaemon {
     pub fn boot(config: &PlatformConfig) -> io::Result<Self> {
         let mut control_plane = ControlPlane::default();
-        control_plane.system.set_status(format!("running@{}", config.listen_addr));
+        control_plane
+            .system
+            .set_status(format!("running@{}", config.listen_addr));
 
         let mut daemon = Self {
             config: config.clone(),
@@ -33,9 +35,14 @@ impl PloyDaemon {
     }
 
     pub fn write_runtime_snapshots(&mut self) -> io::Result<()> {
+        self.load_registry()?;
         self.tick();
+        self.persist_registry()?;
         fs::create_dir_all(&self.config.runtime_root)?;
-        write_json(&self.config.status_file, &self.control_plane.system.status())?;
+        write_json(
+            &self.config.status_file,
+            &self.control_plane.system.status(),
+        )?;
         write_json(
             &self.config.deployment_status_file,
             &self.control_plane.deployments.summaries(),
@@ -48,6 +55,56 @@ impl PloyDaemon {
             self.write_runtime_snapshots()?;
             thread::sleep(Duration::from_millis(self.config.tick_interval_ms));
         }
+    }
+
+    pub fn inspect_deployment(&self, deployment_id: &str) -> Option<DeploymentRecord> {
+        self.control_plane.deployments.get(deployment_id).cloned()
+    }
+
+    pub fn apply_deployment(
+        &mut self,
+        request: DeploymentApplyRequest,
+    ) -> io::Result<DeploymentRecord> {
+        let record = DeploymentRecord {
+            deployment_id: request.deployment_id,
+            bundle_id: request.bundle_id,
+            runtime_mode: request.runtime_mode,
+            desired_state: request.desired_state,
+            observed_state: observed_state_for_desired(request.desired_state),
+        };
+        self.control_plane.deployments.upsert(record.clone());
+        self.persist_registry()?;
+        self.write_runtime_snapshots()?;
+        Ok(self
+            .control_plane
+            .deployments
+            .get(&record.deployment_id)
+            .cloned()
+            .expect("deployment persisted"))
+    }
+
+    pub fn set_desired_state(
+        &mut self,
+        deployment_id: &str,
+        desired_state: DesiredState,
+    ) -> io::Result<Option<DeploymentRecord>> {
+        let Some(record) = self.control_plane.deployments.get(deployment_id).cloned() else {
+            return Ok(None);
+        };
+
+        self.control_plane
+            .deployments
+            .set_desired_state(deployment_id, desired_state);
+        self.control_plane
+            .deployments
+            .set_observed_state(deployment_id, observed_state_for_desired(desired_state));
+        self.persist_registry()?;
+        self.write_runtime_snapshots()?;
+        Ok(self
+            .control_plane
+            .deployments
+            .get(&record.deployment_id)
+            .cloned())
     }
 
     fn load_registry(&mut self) -> io::Result<()> {
@@ -89,26 +146,64 @@ impl PloyDaemon {
     }
 
     fn tick(&mut self) {
-        let running_ids = self
-            .control_plane
-            .deployments
-            .summaries()
-            .into_iter()
-            .filter(|summary| summary.desired_state == DesiredState::Running)
-            .map(|summary| summary.deployment_id)
-            .collect::<Vec<_>>();
+        let records = self.control_plane.deployments.records();
 
-        for deployment_id in running_ids {
-            if let Some(status) = self.supervisor.heartbeat(&deployment_id) {
-                self.control_plane
-                    .deployments
-                    .set_observed_state(&deployment_id, status.observed_state);
-            } else {
-                self.control_plane
-                    .deployments
-                    .set_observed_state(&deployment_id, ObservedState::Running);
+        for record in records {
+            match record.desired_state {
+                DesiredState::Running => {
+                    if self.supervisor.status(&record.deployment_id).is_none() {
+                        self.supervisor.start(WorkerLaunchSpec {
+                            deployment_id: record.deployment_id.clone(),
+                            bundle_id: record.bundle_id.clone(),
+                            runtime_mode: record.runtime_mode.clone(),
+                            desired_state: record.desired_state,
+                        });
+                    }
+                    if let Some(status) = self.supervisor.heartbeat(&record.deployment_id) {
+                        self.control_plane
+                            .deployments
+                            .set_observed_state(&record.deployment_id, status.observed_state);
+                    }
+                }
+                DesiredState::Paused => {
+                    if let Some(status) = self.supervisor.pause(&record.deployment_id) {
+                        self.control_plane
+                            .deployments
+                            .set_observed_state(&record.deployment_id, status.observed_state);
+                    } else {
+                        self.control_plane
+                            .deployments
+                            .set_observed_state(&record.deployment_id, ObservedState::Paused);
+                    }
+                }
+                DesiredState::Stopped => {
+                    if let Some(status) = self.supervisor.stop(&record.deployment_id) {
+                        self.control_plane
+                            .deployments
+                            .set_observed_state(&record.deployment_id, status.observed_state);
+                    } else {
+                        self.control_plane
+                            .deployments
+                            .set_observed_state(&record.deployment_id, ObservedState::Stopped);
+                    }
+                }
             }
         }
+    }
+
+    fn persist_registry(&self) -> io::Result<()> {
+        write_json(
+            &self.config.registry_file,
+            &self.control_plane.deployments.records(),
+        )
+    }
+}
+
+fn observed_state_for_desired(desired_state: DesiredState) -> ObservedState {
+    match desired_state {
+        DesiredState::Running => ObservedState::Starting,
+        DesiredState::Paused => ObservedState::Paused,
+        DesiredState::Stopped => ObservedState::Stopped,
     }
 }
 
@@ -187,10 +282,9 @@ mod tests {
         let mut daemon = PloyDaemon::boot(&config).expect("boot");
         daemon.write_runtime_snapshots().expect("write snapshots");
 
-        let status: ploy_operator_contracts::SystemStatus = serde_json::from_str(
-            &fs::read_to_string(&config.status_file).expect("status file"),
-        )
-        .expect("status json");
+        let status: ploy_operator_contracts::SystemStatus =
+            serde_json::from_str(&fs::read_to_string(&config.status_file).expect("status file"))
+                .expect("status json");
         assert!(status.status.contains("127.0.0.1:8081"));
 
         let deployments: Vec<ploy_operator_contracts::DeploymentSummary> = serde_json::from_str(

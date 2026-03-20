@@ -35,9 +35,13 @@ The current operator flow is:
 
 ```bash
 ployd
+ployctl deployments apply config/deployments/example.paper.json
 ployctl system status
 ployctl deployments list
 ployctl deployments inspect example.paper
+ployctl deployments pause example.paper
+ployctl deployments resume example.paper
+ployctl deployments stop example.paper
 ```
 
 This branch now treats `ployd` as the default long-running daemon entrypoint and

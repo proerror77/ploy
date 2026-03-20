@@ -65,7 +65,10 @@ mod tests {
     #[test]
     fn default_paths_match_workspace_contract() {
         let config = PlatformConfig::default();
-        assert_eq!(config.registry_file.to_string_lossy(), "data/state/deployments.json");
+        assert_eq!(
+            config.registry_file.to_string_lossy(),
+            "data/state/deployments.json"
+        );
         assert_eq!(config.runtime_root.to_string_lossy(), "run/platform");
         assert_eq!(
             config.status_file.to_string_lossy(),

@@ -38,7 +38,10 @@ impl SignalConfig {
                 && signal.strength_bps >= *threshold_bps =>
             {
                 Some(TradingIntent {
-                    intent_id: format!("{deployment_id}:{market_id}:{token_id}:{}", signal.strength_bps),
+                    intent_id: format!(
+                        "{deployment_id}:{market_id}:{token_id}:{}",
+                        signal.strength_bps
+                    ),
                     deployment_id: deployment_id.to_string(),
                     market_id: market_id.clone(),
                     token_id: token_id.clone(),

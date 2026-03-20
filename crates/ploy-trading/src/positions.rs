@@ -34,7 +34,8 @@ impl PositionLedger {
         let next_qty = current_qty + signed_qty;
 
         if current_qty.is_zero() || current_qty.signum() == signed_qty.signum() {
-            let total_cost = (position.avg_entry_price * current_qty.abs()) + (fill.price * fill.quantity);
+            let total_cost =
+                (position.avg_entry_price * current_qty.abs()) + (fill.price * fill.quantity);
             let total_qty = current_qty.abs() + fill.quantity;
             position.net_qty = next_qty;
             position.avg_entry_price = if total_qty.is_zero() {
@@ -70,7 +71,9 @@ impl PositionLedger {
     }
 
     pub fn positions(&self) -> impl Iterator<Item = &PositionSnapshot> {
-        self.positions.values().filter(|position| !position.net_qty.is_zero())
+        self.positions
+            .values()
+            .filter(|position| !position.net_qty.is_zero())
     }
 
     pub fn pnl_snapshot(&self, mark_prices: &BTreeMap<String, Decimal>) -> PnlSnapshot {
@@ -89,7 +92,11 @@ impl PositionLedger {
             .sum();
 
         PnlSnapshot {
-            realized_pnl: self.positions.values().map(|position| position.realized_pnl).sum(),
+            realized_pnl: self
+                .positions
+                .values()
+                .map(|position| position.realized_pnl)
+                .sum(),
             unrealized_pnl,
             total_fees: self.total_fees,
         }
@@ -106,7 +113,12 @@ mod tests {
     use rust_decimal_macros::dec;
     use std::collections::BTreeMap;
 
-    fn sample_fill(fill_id: &str, side: TradeSide, quantity: Decimal, price: Decimal) -> FillRecord {
+    fn sample_fill(
+        fill_id: &str,
+        side: TradeSide,
+        quantity: Decimal,
+        price: Decimal,
+    ) -> FillRecord {
         FillRecord {
             fill_id: fill_id.to_string(),
             order_id: format!("order-{fill_id}"),

@@ -35,13 +35,21 @@ impl DeploymentRegistry {
             .expect("deployment inserted")
     }
 
-    pub fn set_desired_state(&mut self, deployment_id: &str, desired_state: DesiredState) -> Option<&DeploymentRecord> {
+    pub fn set_desired_state(
+        &mut self,
+        deployment_id: &str,
+        desired_state: DesiredState,
+    ) -> Option<&DeploymentRecord> {
         let record = self.deployments.get_mut(deployment_id)?;
         record.desired_state = desired_state;
         Some(record)
     }
 
-    pub fn set_observed_state(&mut self, deployment_id: &str, observed_state: ObservedState) -> Option<&DeploymentRecord> {
+    pub fn set_observed_state(
+        &mut self,
+        deployment_id: &str,
+        observed_state: ObservedState,
+    ) -> Option<&DeploymentRecord> {
         let record = self.deployments.get_mut(deployment_id)?;
         record.observed_state = observed_state;
         Some(record)
@@ -52,7 +60,14 @@ impl DeploymentRegistry {
     }
 
     pub fn summaries(&self) -> Vec<DeploymentSummary> {
-        self.deployments.values().map(DeploymentRecord::summary).collect()
+        self.deployments
+            .values()
+            .map(DeploymentRecord::summary)
+            .collect()
+    }
+
+    pub fn records(&self) -> Vec<DeploymentRecord> {
+        self.deployments.values().cloned().collect()
     }
 }
 
