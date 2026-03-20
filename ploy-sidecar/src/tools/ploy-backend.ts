@@ -12,6 +12,7 @@ const PLOY_API = process.env.PLOY_API_URL || "http://localhost:8081";
 const PLOY_ADMIN_TOKEN = process.env.PLOY_API_ADMIN_TOKEN || process.env.PLOY_ADMIN_TOKEN;
 
 type DesiredState = "running" | "paused" | "stopped";
+type DeploymentState = "enabled" | "draining" | "disabled" | "archived";
 
 type SystemStatusResponse = {
   status: string;
@@ -26,6 +27,7 @@ type SystemStatusResponse = {
 
 type DeploymentSummaryResponse = {
   deployment_id: string;
+  deployment_state: DeploymentState;
   desired_state: DesiredState;
   observed_state: string;
 };
@@ -187,6 +189,10 @@ export const ployBackendServer = createSdkMcpServer({
           .enum(["running", "paused", "stopped"])
           .default("running")
           .describe("Desired lifecycle state"),
+        deployment_state: z
+          .enum(["enabled", "draining", "disabled", "archived"])
+          .default("enabled")
+          .describe("Operator lifecycle gate"),
       },
       async (args) => {
         try {
@@ -214,7 +220,10 @@ export const ployBackendServer = createSdkMcpServer({
       "Pause, resume, or stop a deployment resource through the control plane.",
       {
         id: z.string(),
-        desired_state: z.enum(["running", "paused", "stopped"]),
+        desired_state: z.enum(["running", "paused", "stopped"]).optional(),
+        deployment_state: z
+          .enum(["enabled", "draining", "disabled", "archived"])
+          .optional(),
       },
       async (args) => {
         try {
@@ -222,7 +231,10 @@ export const ployBackendServer = createSdkMcpServer({
             `/api/deployments/${encodeURIComponent(args.id)}/control`,
             {
               method: "POST",
-              body: JSON.stringify({ desired_state: args.desired_state }),
+              body: JSON.stringify({
+                desired_state: args.desired_state ?? null,
+                deployment_state: args.deployment_state ?? null,
+              }),
             }
           );
           return {

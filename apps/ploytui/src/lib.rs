@@ -35,8 +35,9 @@ pub fn render_dashboard(snapshot: &DashboardSnapshot) -> String {
         for deployment in &snapshot.deployments {
             let _ = writeln!(
                 out,
-                "  {} desired={} observed={}",
+                "  {} lifecycle={} desired={} observed={}",
                 deployment.deployment_id,
+                state_name(&deployment.deployment_state),
                 state_name(&deployment.desired_state),
                 state_name(&deployment.observed_state)
             );
@@ -114,8 +115,9 @@ mod tests {
     use super::{render_dashboard, render_event_line, DashboardSnapshot};
     use chrono::Utc;
     use ploy_operator_contracts::{
-        DeploymentSnapshotEvent, DeploymentSummary, DesiredState, ObservedState, OperatorEvent,
-        SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent, TradingStateSnapshot,
+        DeploymentSnapshotEvent, DeploymentState, DeploymentSummary, DesiredState, ObservedState,
+        OperatorEvent, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
+        TradingStateSnapshot,
     };
 
     fn sample_snapshot() -> DashboardSnapshot {
@@ -132,6 +134,7 @@ mod tests {
             },
             deployments: vec![DeploymentSummary {
                 deployment_id: "example.paper".to_string(),
+                deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
                 observed_state: ObservedState::Running,
             }],
@@ -156,6 +159,7 @@ mod tests {
                 OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
                     deployments: vec![DeploymentSummary {
                         deployment_id: "example.paper".to_string(),
+                        deployment_state: DeploymentState::Enabled,
                         desired_state: DesiredState::Running,
                         observed_state: ObservedState::Running,
                     }],

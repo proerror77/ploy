@@ -1,4 +1,4 @@
-use ploy_operator_contracts::{DeploymentSummary, DesiredState, ObservedState};
+use ploy_operator_contracts::{DeploymentState, DeploymentSummary, DesiredState, ObservedState};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -7,6 +7,8 @@ pub struct DeploymentRecord {
     pub deployment_id: String,
     pub bundle_id: String,
     pub runtime_mode: String,
+    #[serde(default)]
+    pub deployment_state: DeploymentState,
     pub desired_state: DesiredState,
     pub observed_state: ObservedState,
 }
@@ -15,6 +17,7 @@ impl DeploymentRecord {
     pub fn summary(&self) -> DeploymentSummary {
         DeploymentSummary {
             deployment_id: self.deployment_id.clone(),
+            deployment_state: self.deployment_state,
             desired_state: self.desired_state,
             observed_state: self.observed_state,
         }
@@ -42,6 +45,16 @@ impl DeploymentRegistry {
     ) -> Option<&DeploymentRecord> {
         let record = self.deployments.get_mut(deployment_id)?;
         record.desired_state = desired_state;
+        Some(record)
+    }
+
+    pub fn set_deployment_state(
+        &mut self,
+        deployment_id: &str,
+        deployment_state: DeploymentState,
+    ) -> Option<&DeploymentRecord> {
+        let record = self.deployments.get_mut(deployment_id)?;
+        record.deployment_state = deployment_state;
         Some(record)
     }
 
@@ -74,7 +87,7 @@ impl DeploymentRegistry {
 #[cfg(test)]
 mod tests {
     use super::{DeploymentRecord, DeploymentRegistry};
-    use ploy_operator_contracts::{DesiredState, ObservedState};
+    use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
 
     #[test]
     fn create_deployment() {
@@ -83,6 +96,7 @@ mod tests {
             deployment_id: "openclaw.default".to_string(),
             bundle_id: "openclaw".to_string(),
             runtime_mode: "paper".to_string(),
+            deployment_state: DeploymentState::Enabled,
             desired_state: DesiredState::Running,
             observed_state: ObservedState::Starting,
         });
@@ -99,14 +113,17 @@ mod tests {
             deployment_id: "openclaw.default".to_string(),
             bundle_id: "openclaw".to_string(),
             runtime_mode: "paper".to_string(),
+            deployment_state: DeploymentState::Enabled,
             desired_state: DesiredState::Running,
             observed_state: ObservedState::Starting,
         });
 
         registry.set_desired_state("openclaw.default", DesiredState::Paused);
+        registry.set_deployment_state("openclaw.default", DeploymentState::Draining);
         registry.set_observed_state("openclaw.default", ObservedState::Paused);
 
         let summary = registry.summaries().pop().expect("summary");
+        assert_eq!(summary.deployment_state, DeploymentState::Draining);
         assert_eq!(summary.desired_state, DesiredState::Paused);
         assert_eq!(summary.observed_state, ObservedState::Paused);
     }

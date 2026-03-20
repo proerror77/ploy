@@ -11,6 +11,7 @@ import type {
   RunningStrategy,
   RiskData,
   DesiredState,
+  DeploymentState,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -205,11 +206,15 @@ class ApiService {
 
   async updateDeploymentState(
     deploymentId: string,
-    desiredState: DesiredState
+    desiredState?: DesiredState,
+    deploymentState?: DeploymentState
   ): Promise<DeploymentSummary> {
     return this.fetch<DeploymentSummary>(`/deployments/${deploymentId}/control`, {
       method: 'POST',
-      body: JSON.stringify({ desired_state: desiredState }),
+      body: JSON.stringify({
+        desired_state: desiredState ?? null,
+        deployment_state: deploymentState ?? null,
+      }),
     });
   }
 

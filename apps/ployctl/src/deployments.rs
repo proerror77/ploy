@@ -1,5 +1,5 @@
 use crate::client::ControlPlaneClient;
-use ploy_operator_contracts::{DeploymentApplyRequest, DesiredState};
+use ploy_operator_contracts::{DeploymentApplyRequest, DeploymentState, DesiredState};
 use std::fs;
 use std::path::Path;
 
@@ -9,8 +9,11 @@ pub fn render_deployments(client: &ControlPlaneClient) -> Result<String, String>
         .into_iter()
         .map(|deployment| {
             format!(
-                "{} desired={:?} observed={:?}",
-                deployment.deployment_id, deployment.desired_state, deployment.observed_state
+                "{} lifecycle={:?} desired={:?} observed={:?}",
+                deployment.deployment_id,
+                deployment.deployment_state,
+                deployment.desired_state,
+                deployment.observed_state
             )
         })
         .collect::<Vec<_>>()
@@ -23,8 +26,11 @@ pub fn render_deployment(
 ) -> Result<String, String> {
     client.inspect_deployment(deployment_id).map(|deployment| {
         format!(
-            "{} desired={:?} observed={:?}",
-            deployment.deployment_id, deployment.desired_state, deployment.observed_state
+            "{} lifecycle={:?} desired={:?} observed={:?}",
+            deployment.deployment_id,
+            deployment.deployment_state,
+            deployment.desired_state,
+            deployment.observed_state
         )
     })
 }
@@ -43,8 +49,11 @@ pub fn apply_deployment_file(
         serde_json::from_str(&body).map_err(|err| format!("parse deployment manifest: {err}"))?;
     let deployment = client.apply_deployment(&request)?;
     Ok(format!(
-        "{} desired={:?} observed={:?}",
-        deployment.deployment_id, deployment.desired_state, deployment.observed_state
+        "{} lifecycle={:?} desired={:?} observed={:?}",
+        deployment.deployment_id,
+        deployment.deployment_state,
+        deployment.desired_state,
+        deployment.observed_state
     ))
 }
 
@@ -55,16 +64,37 @@ pub fn control_deployment(
 ) -> Result<String, String> {
     let deployment = client.set_desired_state(deployment_id, desired_state)?;
     Ok(format!(
-        "{} desired={:?} observed={:?}",
-        deployment.deployment_id, deployment.desired_state, deployment.observed_state
+        "{} lifecycle={:?} desired={:?} observed={:?}",
+        deployment.deployment_id,
+        deployment.deployment_state,
+        deployment.desired_state,
+        deployment.observed_state
+    ))
+}
+
+pub fn set_lifecycle_state(
+    client: &ControlPlaneClient,
+    deployment_id: &str,
+    deployment_state: DeploymentState,
+) -> Result<String, String> {
+    let deployment = client.set_deployment_state(deployment_id, deployment_state)?;
+    Ok(format!(
+        "{} lifecycle={:?} desired={:?} observed={:?}",
+        deployment.deployment_id,
+        deployment.deployment_state,
+        deployment.desired_state,
+        deployment.observed_state
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_deployment_file, control_deployment, render_deployment, render_deployments};
+    use super::{
+        apply_deployment_file, control_deployment, render_deployment, render_deployments,
+        set_lifecycle_state,
+    };
     use crate::client::ControlPlaneClient;
-    use ploy_operator_contracts::DesiredState;
+    use ploy_operator_contracts::{DeploymentState, DesiredState};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -89,6 +119,7 @@ mod tests {
             serde_json::json!([
                 {
                     "deployment_id": "example.paper",
+                    "deployment_state": "enabled",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -111,6 +142,7 @@ mod tests {
             serde_json::json!([
                 {
                     "deployment_id": "example.paper",
+                    "deployment_state": "enabled",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -135,6 +167,7 @@ mod tests {
                 "deployment_id": "example.paper",
                 "bundle_id": "example",
                 "runtime_mode": "paper",
+                "deployment_state": "enabled",
                 "desired_state": "running"
             })
             .to_string(),
@@ -144,7 +177,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("local addr");
         thread::spawn(move || {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 let (mut stream, _) = listener.accept().expect("accept");
                 let mut request = [0_u8; 2048];
                 let bytes = stream.read(&mut request).expect("read request");
@@ -152,13 +185,23 @@ mod tests {
                 let body = if request.starts_with("PUT /api/deployments/example.paper") {
                     serde_json::json!({
                         "deployment_id": "example.paper",
+                        "deployment_state": "enabled",
                         "desired_state": "running",
                         "observed_state": "starting"
+                    })
+                    .to_string()
+                } else if request.contains("\"deployment_state\":\"draining\"") {
+                    serde_json::json!({
+                        "deployment_id": "example.paper",
+                        "deployment_state": "draining",
+                        "desired_state": "paused",
+                        "observed_state": "paused"
                     })
                     .to_string()
                 } else {
                     serde_json::json!({
                         "deployment_id": "example.paper",
+                        "deployment_state": "enabled",
                         "desired_state": "paused",
                         "observed_state": "paused"
                     })
@@ -183,6 +226,9 @@ mod tests {
         let paused =
             control_deployment(&client, "example.paper", DesiredState::Paused).expect("pause");
         assert!(paused.contains("Paused"));
+        let draining =
+            set_lifecycle_state(&client, "example.paper", DeploymentState::Draining).expect("drain");
+        assert!(draining.contains("Draining"));
     }
 
     #[test]
@@ -194,6 +240,7 @@ mod tests {
             serde_json::json!([
                 {
                     "deployment_id": "stale.paper",
+                    "deployment_state": "enabled",
                     "desired_state": "running",
                     "observed_state": "running"
                 }

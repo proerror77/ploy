@@ -1,6 +1,7 @@
 use ploy_operator_contracts::{
-    ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest, DeploymentSummary,
-    DesiredState, OperatorEvent, OrderControlResponse, SystemStatus, TradingStateSnapshot,
+    ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest, DeploymentState,
+    DeploymentSummary, DesiredState, OperatorEvent, OrderControlResponse, SystemStatus,
+    TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -150,7 +151,25 @@ impl ControlPlaneClient {
         self.send_json(
             "POST",
             &format!("/api/deployments/{deployment_id}/control"),
-            &DeploymentControlRequest { desired_state },
+            &DeploymentControlRequest {
+                desired_state: Some(desired_state),
+                deployment_state: None,
+            },
+        )
+    }
+
+    pub fn set_deployment_state(
+        &self,
+        deployment_id: &str,
+        deployment_state: DeploymentState,
+    ) -> Result<DeploymentSummary, String> {
+        self.send_json(
+            "POST",
+            &format!("/api/deployments/{deployment_id}/control"),
+            &DeploymentControlRequest {
+                desired_state: None,
+                deployment_state: Some(deployment_state),
+            },
         )
     }
 
@@ -337,9 +356,9 @@ impl Default for ControlPlaneClient {
 mod tests {
     use super::ControlPlaneClient;
     use ploy_operator_contracts::{
-        DeploymentApplyRequest, DeploymentSnapshotEvent, DeploymentSummary, DesiredState,
-        ObservedState, OperatorEvent, OrderControlResponse, SystemSnapshotEvent, SystemStatus,
-        TradingStateSnapshot,
+        DeploymentApplyRequest, DeploymentSnapshotEvent, DeploymentState, DeploymentSummary,
+        DesiredState, ObservedState, OperatorEvent, OrderControlResponse, SystemSnapshotEvent,
+        SystemStatus, TradingStateSnapshot,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -379,6 +398,7 @@ mod tests {
             runtime_root.join("deployments.json"),
             serde_json::to_string(&vec![DeploymentSummary {
                 deployment_id: "example.paper".to_string(),
+                deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
                 observed_state: ObservedState::Running,
             }])
@@ -528,6 +548,7 @@ mod tests {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
                 runtime_mode: "paper".to_string(),
+                deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
             })
             .expect("apply");
@@ -568,6 +589,7 @@ mod tests {
                 DeploymentSnapshotEvent {
                     deployments: vec![DeploymentSummary {
                         deployment_id: "example.paper".to_string(),
+                        deployment_state: DeploymentState::Enabled,
                         desired_state: DesiredState::Running,
                         observed_state: ObservedState::Running,
                     }],

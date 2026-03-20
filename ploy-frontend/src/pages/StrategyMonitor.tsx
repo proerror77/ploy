@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { api } from '@/services/api';
 import { ws } from '@/services/websocket';
 
-import type { DeploymentSummary, DesiredState } from '@/types';
+import type { DeploymentState, DeploymentSummary, DesiredState } from '@/types';
 import { useEffect } from 'react';
 
 function getStatusVariant(entry: DeploymentSummary) {
@@ -27,7 +27,7 @@ function getStatusVariant(entry: DeploymentSummary) {
 }
 
 function getStatusLabel(entry: DeploymentSummary) {
-  return `${entry.desired_state} / ${entry.observed_state}`;
+  return `${entry.deployment_state} / ${entry.desired_state} / ${entry.observed_state}`;
 }
 
 function nextActions(desiredState: DesiredState): DesiredState[] {
@@ -64,6 +64,20 @@ function ActionIcon({ desiredState }: { desiredState: DesiredState }) {
   }
 }
 
+function nextLifecycleActions(state: DeploymentState): DeploymentState[] {
+  switch (state) {
+    case 'enabled':
+      return ['draining', 'disabled'];
+    case 'draining':
+      return ['enabled', 'disabled'];
+    case 'disabled':
+      return ['enabled', 'archived'];
+    case 'archived':
+    default:
+      return [];
+  }
+}
+
 export function StrategyMonitor() {
   const queryClient = useQueryClient();
 
@@ -85,10 +99,12 @@ export function StrategyMonitor() {
     mutationFn: ({
       deploymentId,
       desiredState,
+      deploymentState,
     }: {
       deploymentId: string;
-      desiredState: DesiredState;
-    }) => api.updateDeploymentState(deploymentId, desiredState),
+      desiredState?: DesiredState;
+      deploymentState?: DeploymentState;
+    }) => api.updateDeploymentState(deploymentId, desiredState, deploymentState),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['deployments'] });
       queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
@@ -176,6 +192,10 @@ export function StrategyMonitor() {
         <span>
           Failed observed: {deployments.filter((entry) => entry.observed_state === 'failed').length}
         </span>
+        <span>
+          Draining lifecycle:{' '}
+          {deployments.filter((entry) => entry.deployment_state === 'draining').length}
+        </span>
       </div>
 
       <div className="space-y-4">
@@ -229,12 +249,36 @@ export function StrategyMonitor() {
                           {actionLabel(desiredState)}
                         </Button>
                       ))}
+                      {nextLifecycleActions(entry.deployment_state).map((deploymentState) => (
+                        <Button
+                          key={deploymentState}
+                          variant={deploymentState === 'disabled' ? 'destructive' : 'outline'}
+                          size="sm"
+                          onClick={() =>
+                            setDeploymentState.mutate({
+                              deploymentId: entry.deployment_id,
+                              deploymentState,
+                            })
+                          }
+                          disabled={isMutating}
+                        >
+                          {deploymentState}
+                        </Button>
+                      ))}
                     </div>
                   </div>
                 </CardHeader>
 
                 <CardContent>
-                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+                    <div className="rounded-lg border bg-card p-4">
+                      <div className="text-sm text-muted-foreground">Lifecycle</div>
+                      <div className="mt-2 text-2xl font-bold">{entry.deployment_state}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        Enabled accepts all intents. Draining blocks new entries but keeps exits open.
+                      </div>
+                    </div>
+
                     <div className="rounded-lg border bg-card p-4">
                       <div className="text-sm text-muted-foreground">Desired</div>
                       <div className="mt-2 text-2xl font-bold">{entry.desired_state}</div>
