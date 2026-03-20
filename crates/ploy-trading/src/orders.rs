@@ -27,6 +27,7 @@ pub struct OrderRecord {
     pub state: OrderState,
     pub filled_qty: Decimal,
     pub rejection_reason: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -60,6 +61,7 @@ impl OrderLedger {
             state: OrderState::Pending,
             filled_qty: Decimal::ZERO,
             rejection_reason: None,
+            last_error: None,
         };
         self.orders.insert(order_id.clone(), record);
         self.orders.get(&order_id).expect("order inserted")
@@ -73,19 +75,29 @@ impl OrderLedger {
         let record = self.orders.get_mut(order_id)?;
         record.venue_order_id = Some(venue_order_id.into());
         record.state = OrderState::Acknowledged;
+        record.last_error = None;
         Some(record)
     }
 
     pub fn reject(&mut self, order_id: &str, reason: impl Into<String>) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(order_id)?;
+        let reason = reason.into();
         record.state = OrderState::Rejected;
-        record.rejection_reason = Some(reason.into());
+        record.rejection_reason = Some(reason.clone());
+        record.last_error = Some(reason);
+        Some(record)
+    }
+
+    pub fn record_error(&mut self, order_id: &str, error: impl Into<String>) -> Option<&OrderRecord> {
+        let record = self.orders.get_mut(order_id)?;
+        record.last_error = Some(error.into());
         Some(record)
     }
 
     pub fn cancel(&mut self, order_id: &str) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(order_id)?;
         record.state = OrderState::Canceled;
+        record.last_error = None;
         Some(record)
     }
 

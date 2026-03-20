@@ -716,6 +716,7 @@ mod tests {
                 state: "canceled".to_string(),
                 venue_order_id: Some("venue-1".to_string()),
                 rejection_reason: None,
+                last_error: None,
                 filled_qty: Default::default(),
             })
             .expect("serialize response");
