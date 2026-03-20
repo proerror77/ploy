@@ -1,8 +1,8 @@
 /**
  * Structured output schema for the Claude Commander agent.
  *
- * Forces Claude to return structured JSON with trading opportunities,
- * ensuring deterministic parsing by the sidecar orchestrator.
+ * Forces Claude to return structured JSON with trading opportunities and
+ * explicit operator actions, ensuring deterministic parsing by the sidecar.
  */
 
 export const tradingOutputSchema = {
@@ -68,21 +68,19 @@ export const tradingOutputSchema = {
         ],
       },
     },
-    orders_submitted: {
+    operator_actions: {
       type: "array" as const,
       items: {
         type: "object" as const,
         properties: {
-          market_slug: { type: "string" as const },
-          side: { type: "string" as const },
-          shares: { type: "number" as const },
-          price: { type: "number" as const },
-          dry_run: { type: "boolean" as const },
+          kind: { type: "string" as const },
+          target: { type: "string" as const },
           status: { type: "string" as const },
+          details: { type: "string" as const },
         },
-        required: ["market_slug", "shares", "price", "dry_run", "status"],
+        required: ["kind", "target", "status"],
       },
     },
   },
-  required: ["scan_summary", "opportunities", "orders_submitted"],
+  required: ["scan_summary", "opportunities", "operator_actions"],
 };

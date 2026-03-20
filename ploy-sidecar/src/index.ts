@@ -1,18 +1,17 @@
 /**
- * Ploy Sidecar — Claude Agent SDK Commander
+ * Ploy Sidecar — Claude Agent SDK operator client
  *
- * Orchestrates NBA comeback trading research:
+ * Orchestrates NBA comeback research while staying grounded in the
+ * trading-platform control plane:
  * 1. ESPN scan → live games with comeback potential
  * 2. Polymarket search → find corresponding markets
- * 3. Risk metrics computation → RR ≥ 4x, EV ≥ 5%, Kelly
+ * 3. Control-plane inspection → system status, deployments, trading state
  * 4. X.com sentiment research → WebSearch for injury/momentum
- * 5. Grok Final Judge → Trade or Pass
- * 6. Order submission → through Rust Coordinator
+ * 5. Operator recommendation → deployment-aware recommendation or action
  *
  * Architecture:
- *   Claude Commander (this)  →  research skills (ESPN, Polymarket, WebSearch)
- *                            →  Grok Final Judge (via Rust backend)
- *                            →  Order Executor (via Rust backend)
+ *   Claude Sidecar (this)  →  research skills (ESPN, Polymarket, WebSearch)
+ *                          →  ployd control plane (via Rust backend MCP)
  */
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -75,37 +74,41 @@ const PLOY_API = process.env.PLOY_API_URL || "http://localhost:8081";
 
 // ── System Prompt ───────────────────────────────────
 
-const SYSTEM_PROMPT = `You are the Ploy NBA Comeback Trading Commander.
+const SYSTEM_PROMPT = `You are the Ploy Trading Platform Sidecar.
 
 ## Your Mission
-Scan live NBA games for comeback trading opportunities on Polymarket.
-Buy YES shares on trailing teams when the market underprices their comeback probability.
+Run NBA comeback research loops while staying grounded in the trading platform control plane.
+You are an operator-facing research client, not a direct execution path.
+
+## Control Plane Contract
+- Deployments are resources with deployment_id, desired_state, and observed_state.
+- Trading state comes from canonical /api/trading/state snapshots.
+- Do not assume legacy /api/sidecar/*, /api/config, or enable/disable endpoints exist.
+- If you need to change the platform, use apply_deployment, set_deployment_state, or submit_paper_intent.
+- Prefer paper deployments unless the operator explicitly asks for a different runtime mode.
 
 ## Decision Framework
-1. **Scan**: Use espn.scoreboard to find live games in Q3 or late Q3/early Q4
-2. **Filter**: Only consider games where:
+1. **Inspect platform**: Use ploy-backend.get_system_status, get_trading_state, and list_deployments first
+2. **Scan**: Use espn.scoreboard to find live games in Q3 or late Q3/early Q4
+3. **Filter**: Only consider games where:
    - A team is trailing by 1-15 points
    - Quarter is 3 (ideal) or early Q4
    - At least 8 minutes of game time remaining
-3. **Market lookup**: Use polymarket.search_markets to find the corresponding market
-4. **Risk check**: Calculate reward-to-risk ratio = (1 - price) / price
+4. **Market lookup**: Use polymarket.search_markets to find the corresponding market
+5. **Risk check**: Calculate reward-to-risk ratio = (1 - price) / price
    - ONLY proceed if RR ≥ 4.0x (price ≤ $0.20)
    - Calculate EV = estimated_win_prob - price (need EV ≥ 5%)
    - Calculate Kelly fraction = EV / (1 - price), cap at 25%
-5. **X.com research**: Use WebSearch to check X.com/Twitter for:
+6. **X.com research**: Use WebSearch to check X.com/Twitter for:
    - Injury updates during the game
    - Momentum shifts (runs, key plays)
    - Betting sentiment
-6. **Grok decision**: Submit research brief to ploy-backend.request_grok_decision
-   - Grok is the FINAL JUDGE. Only trade if Grok says "trade"
-   - If Grok is unavailable and you have strong statistical backing, note it but do NOT trade
-7. **Order**: If Grok approves, use ploy-backend.submit_order with dry_run=${DRY_RUN}
+7. **Recommendation**: Produce a deployment-aware recommendation or paper-only platform action
 
-## Risk Rules (NEVER violate)
-- Maximum price: $0.20 (reward-to-risk ≥ 4x)
-- Maximum order: $50
-- Maximum 3 positions per session
-- Always default to PASS when uncertain
+## Safety Rules (NEVER violate)
+- Never claim an order was submitted unless you actually called submit_paper_intent on a paper deployment
+- Never start or create a non-paper deployment unless explicitly instructed
+- Always default to PASS or MONITOR when uncertain
 - Parse failures → PASS (never trade on garbage)
 
 ## Scoring Comeback Probability
@@ -119,7 +122,7 @@ Historical NBA comeback rates by deficit at end of Q3:
 Adjust for: team strength, home/away, rest days, key player status.
 
 ## Output Format
-Return structured JSON with scan_summary, opportunities[], and orders_submitted[].
+Return structured JSON with scan_summary, opportunities[], and operator_actions[].
 `;
 
 type RuntimeContext = {
@@ -128,30 +131,53 @@ type RuntimeContext = {
     uptime_seconds: number;
     error_count_1h: number;
   } | null;
-  risk: {
-    state: string;
-    queue_depth: number;
-    daily_pnl_usd: number;
-    position_count: number;
-    circuit_breaker_events: number;
-  } | null;
-  open_positions: Array<{
-    market_slug: string;
-    side: string;
-    shares: number;
-    status: string;
-  }>;
-  deployments: {
-    total: number;
-    enabled: number;
+  trading: {
+    tracked_deployments: number;
+    pending_intents: number;
+    active_orders: number;
+    open_positions: number;
+    gross_exposure: number;
+    net_pnl: number;
     sample: Array<{
-      id: string;
-      domain: string;
-      strategy: string;
-      enabled: boolean;
-      timeframe: string;
+      deployment_id: string;
+      runtime_mode: string;
+      pending_intents: number;
+      active_orders: number;
+      open_positions: number;
+      net_pnl: string;
     }>;
   } | null;
+  deployments: {
+    total: number;
+    running: number;
+    paused: number;
+    stopped: number;
+    sample: Array<{
+      deployment_id: string;
+      desired_state: string;
+      observed_state: string;
+    }>;
+  } | null;
+};
+
+type TradingSnapshot = {
+  deployment_id: string;
+  runtime_mode: string;
+  pnl?: {
+    net_pnl?: string;
+  };
+  risk?: {
+    pending_intents?: number;
+    active_orders?: number;
+    open_positions?: number;
+    gross_exposure?: string;
+  };
+};
+
+type DeploymentSummary = {
+  deployment_id: string;
+  desired_state: string;
+  observed_state: string;
 };
 
 async function backendFetchJson<T>(path: string): Promise<T | null> {
@@ -178,32 +204,18 @@ async function backendFetchJson<T>(path: string): Promise<T | null> {
 }
 
 async function buildRuntimeContext(): Promise<RuntimeContext> {
-  const [system, risk, positions, deployments] = await Promise.all([
+  const [system, trading, deployments] = await Promise.all([
     backendFetchJson<{
       status: string;
       uptime_seconds: number;
       error_count_1h: number;
     }>("/api/system/status"),
-    backendFetchJson<{
-      risk_state: string;
-      queue_depth: number;
-      daily_pnl_usd: number;
-      positions: unknown[];
-      circuit_breaker_events: unknown[];
-    }>("/api/sidecar/risk"),
-    backendFetchJson<
-      Array<{ market_slug: string; side: string; shares: number; status: string }>
-    >("/api/sidecar/positions"),
-    backendFetchJson<
-      Array<{
-        id: string;
-        domain: string;
-        strategy: string;
-        enabled: boolean;
-        timeframe: string;
-      }>
-    >("/api/deployments"),
+    backendFetchJson<TradingSnapshot[]>("/api/trading/state"),
+    backendFetchJson<DeploymentSummary[]>("/api/deployments"),
   ]);
+
+  const tradingSnapshots = Array.isArray(trading) ? trading : [];
+  const deploymentSnapshots = Array.isArray(deployments) ? deployments : [];
 
   return {
     system: system
@@ -213,33 +225,49 @@ async function buildRuntimeContext(): Promise<RuntimeContext> {
           error_count_1h: system.error_count_1h,
         }
       : null,
-    risk: risk
+    trading: tradingSnapshots.length
       ? {
-          state: risk.risk_state,
-          queue_depth: risk.queue_depth,
-          daily_pnl_usd: risk.daily_pnl_usd,
-          position_count: Array.isArray(risk.positions) ? risk.positions.length : 0,
-          circuit_breaker_events: Array.isArray(risk.circuit_breaker_events)
-            ? risk.circuit_breaker_events.length
-            : 0,
+          tracked_deployments: tradingSnapshots.length,
+          pending_intents: tradingSnapshots.reduce(
+            (sum, snapshot) => sum + (snapshot.risk?.pending_intents ?? 0),
+            0
+          ),
+          active_orders: tradingSnapshots.reduce(
+            (sum, snapshot) => sum + (snapshot.risk?.active_orders ?? 0),
+            0
+          ),
+          open_positions: tradingSnapshots.reduce(
+            (sum, snapshot) => sum + (snapshot.risk?.open_positions ?? 0),
+            0
+          ),
+          gross_exposure: tradingSnapshots.reduce(
+            (sum, snapshot) => sum + parseFloat(snapshot.risk?.gross_exposure ?? "0"),
+            0
+          ),
+          net_pnl: tradingSnapshots.reduce(
+            (sum, snapshot) => sum + parseFloat(snapshot.pnl?.net_pnl ?? "0"),
+            0
+          ),
+          sample: tradingSnapshots.slice(0, 12).map((snapshot) => ({
+            deployment_id: snapshot.deployment_id,
+            runtime_mode: snapshot.runtime_mode,
+            pending_intents: snapshot.risk?.pending_intents ?? 0,
+            active_orders: snapshot.risk?.active_orders ?? 0,
+            open_positions: snapshot.risk?.open_positions ?? 0,
+            net_pnl: snapshot.pnl?.net_pnl ?? "0",
+          })),
         }
       : null,
-    open_positions: (positions ?? []).slice(0, 8).map((p) => ({
-      market_slug: p.market_slug,
-      side: p.side,
-      shares: p.shares,
-      status: p.status,
-    })),
-    deployments: deployments
+    deployments: deploymentSnapshots.length
       ? {
-          total: deployments.length,
-          enabled: deployments.filter((d) => d.enabled).length,
-          sample: deployments.slice(0, 12).map((d) => ({
-            id: d.id,
-            domain: d.domain,
-            strategy: d.strategy,
-            enabled: d.enabled,
-            timeframe: d.timeframe,
+          total: deploymentSnapshots.length,
+          running: deploymentSnapshots.filter((d) => d.desired_state === "running").length,
+          paused: deploymentSnapshots.filter((d) => d.desired_state === "paused").length,
+          stopped: deploymentSnapshots.filter((d) => d.desired_state === "stopped").length,
+          sample: deploymentSnapshots.slice(0, 12).map((d) => ({
+            deployment_id: d.deployment_id,
+            desired_state: d.desired_state,
+            observed_state: d.observed_state,
           })),
         }
       : null,
@@ -268,8 +296,8 @@ Run a full NBA comeback trading scan cycle:
 3. For each opportunity, search Polymarket for the market
 4. Compute risk metrics (RR, EV, Kelly)
 5. If any pass the 4x RR filter, research X.com for sentiment
-6. Submit to Grok for final decision if warranted
-7. Execute orders if Grok approves
+6. Compare the idea against current deployment resources and trading snapshots
+7. Return operator actions or paper-intent recommendations only when they fit the control-plane contract
 
 Return your structured analysis.`,
       options: {
@@ -338,13 +366,14 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
       const output = resultOutput as {
         scan_summary?: { games_scanned?: number; comeback_candidates?: number };
         opportunities?: Array<{ action: string; trailing_team: string; deficit: number }>;
-        orders_submitted?: Array<{ market_slug: string; status: string }>;
+        operator_actions?: Array<{ kind: string; target: string; status: string }>;
       };
 
       console.log(`\n  Summary:`);
       console.log(`    Games scanned: ${output.scan_summary?.games_scanned || 0}`);
       console.log(`    Candidates: ${output.scan_summary?.comeback_candidates || 0}`);
       console.log(`    Opportunities: ${output.opportunities?.length || 0}`);
+      console.log(`    Operator actions: ${output.operator_actions?.length || 0}`);
 
       for (const opp of output.opportunities || []) {
         console.log(
@@ -352,9 +381,9 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
         );
       }
 
-      for (const order of output.orders_submitted || []) {
+      for (const action of output.operator_actions || []) {
         console.log(
-          `    ★ Order: ${order.market_slug} — ${order.status}`
+          `    ★ Action: ${action.kind} ${action.target} — ${action.status}`
         );
       }
     }
@@ -367,8 +396,8 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
 
 async function main() {
   console.log("╔════════════════════════════════════════╗");
-  console.log("║  Ploy Sidecar — Claude Commander       ║");
-  console.log("║  NBA Comeback Trading Agent             ║");
+  console.log("║  Ploy Sidecar — Operator Client        ║");
+  console.log("║  NBA Research + Deployment Console     ║");
   console.log("╚════════════════════════════════════════╝");
   console.log(`  Model: ${MODEL}`);
   console.log(`  Dry run: ${DRY_RUN}`);

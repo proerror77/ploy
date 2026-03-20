@@ -1,12 +1,15 @@
 mod client;
 mod deployments;
 mod system;
+mod trading;
 
 use client::ControlPlaneClient;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     SystemStatus,
+    TradingStatus,
+    TradingInspect(String),
     DeploymentsList,
     DeploymentsInspect(String),
     DeploymentsApply(String),
@@ -20,6 +23,14 @@ impl Command {
         match args {
             [_bin, system, status] if system == "system" && status == "status" => {
                 Ok(Self::SystemStatus)
+            }
+            [_bin, trading, status] if trading == "trading" && status == "status" => {
+                Ok(Self::TradingStatus)
+            }
+            [_bin, trading, inspect, deployment_id]
+                if trading == "trading" && inspect == "inspect" =>
+            {
+                Ok(Self::TradingInspect(deployment_id.clone()))
             }
             [_bin, deployments, list] if deployments == "deployments" && list == "list" => {
                 Ok(Self::DeploymentsList)
@@ -49,7 +60,7 @@ impl Command {
             {
                 Ok(Self::DeploymentsStop(deployment_id.clone()))
             }
-            _ => Err("usage: ployctl system status | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id>".to_string()),
+            _ => Err("usage: ployctl system status | ployctl trading status | ployctl trading inspect <deployment-id> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id>".to_string()),
         }
     }
 }
@@ -61,6 +72,15 @@ fn main() {
 
     match command {
         Command::SystemStatus => eprintln!("{}", system::render_system_status(&client)),
+        Command::TradingStatus => {
+            eprintln!("{}", trading::render_trading_state(&client))
+        }
+        Command::TradingInspect(deployment_id) => {
+            eprintln!(
+                "{}",
+                trading::render_one_trading_state(&client, &deployment_id).expect("trading state")
+            )
+        }
         Command::DeploymentsList => eprintln!("{}", deployments::render_deployments(&client)),
         Command::DeploymentsInspect(deployment_id) => eprintln!(
             "{}",
@@ -111,6 +131,24 @@ mod tests {
         let command =
             Command::parse(&["ployctl", "system", "status"].map(str::to_string)).expect("command");
         assert_eq!(command, Command::SystemStatus);
+    }
+
+    #[test]
+    fn parses_trading_status_command() {
+        let command =
+            Command::parse(&["ployctl", "trading", "status"].map(str::to_string)).expect("command");
+        assert_eq!(command, Command::TradingStatus);
+    }
+
+    #[test]
+    fn parses_trading_inspect_command() {
+        let command =
+            Command::parse(&["ployctl", "trading", "inspect", "example.paper"].map(str::to_string))
+                .expect("command");
+        assert_eq!(
+            command,
+            Command::TradingInspect("example.paper".to_string())
+        );
     }
 
     #[test]

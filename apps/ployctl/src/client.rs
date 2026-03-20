@@ -1,5 +1,6 @@
 use ploy_operator_contracts::{
-    DeploymentApplyRequest, DeploymentControlRequest, DeploymentSummary, DesiredState, SystemStatus,
+    DeploymentApplyRequest, DeploymentControlRequest, DeploymentSummary, DesiredState,
+    SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -39,6 +40,18 @@ impl ControlPlaneClient {
         self.list_deployments()
             .into_iter()
             .find(|deployment| deployment.deployment_id == deployment_id)
+    }
+
+    pub fn trading_state(&self) -> Result<Vec<TradingStateSnapshot>, String> {
+        self.read_trading_state_snapshot()
+    }
+
+    pub fn inspect_trading_state(&self, deployment_id: &str) -> Option<TradingStateSnapshot> {
+        self.trading_state().ok().and_then(|states| {
+            states
+                .into_iter()
+                .find(|state| state.deployment_id == deployment_id)
+        })
     }
 
     pub fn apply_deployment(
@@ -82,12 +95,25 @@ impl ControlPlaneClient {
         serde_json::from_str(&body).map_err(|err| format!("parse deployment snapshot: {err}"))
     }
 
+    fn read_trading_state_snapshot(&self) -> Result<Vec<TradingStateSnapshot>, String> {
+        if let Ok(snapshot) = self.read_trading_state_over_http() {
+            return Ok(snapshot);
+        }
+        let body = fs::read_to_string(self.runtime_root.join("trading-state.json"))
+            .map_err(|err| format!("read trading state snapshot: {err}"))?;
+        serde_json::from_str(&body).map_err(|err| format!("parse trading state snapshot: {err}"))
+    }
+
     fn read_status_over_http(&self) -> Result<SystemStatus, String> {
         self.get_json("/api/system/status")
     }
 
     fn read_deployments_over_http(&self) -> Result<Vec<DeploymentSummary>, String> {
         self.get_json("/api/deployments")
+    }
+
+    fn read_trading_state_over_http(&self) -> Result<Vec<TradingStateSnapshot>, String> {
+        self.get_json("/api/trading/state")
     }
 
     fn get_json<T>(&self, path: &str) -> Result<T, String>
@@ -173,6 +199,7 @@ mod tests {
     use super::ControlPlaneClient;
     use ploy_operator_contracts::{
         DeploymentApplyRequest, DeploymentSummary, DesiredState, ObservedState, SystemStatus,
+        TradingStateSnapshot,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -229,6 +256,24 @@ mod tests {
                 .inspect_deployment("example.paper")
                 .expect("deployment"),
             deployments[0]
+        );
+        fs::write(
+            runtime_root.join("trading-state.json"),
+            serde_json::to_string(&vec![TradingStateSnapshot {
+                deployment_id: "example.paper".to_string(),
+                runtime_mode: "paper".to_string(),
+                ..TradingStateSnapshot::default()
+            }])
+            .expect("trading json"),
+        )
+        .expect("write trading state");
+        assert_eq!(
+            client
+                .inspect_trading_state("example.paper")
+                .expect("trading state")
+                .risk
+                .open_positions,
+            0,
         );
     }
 

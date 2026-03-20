@@ -3,32 +3,32 @@
 你貼的 `https://github.com/openclaw/openclaw` 是一個 **Node.js Gateway + agent runtime**（不是 Rust crate）。
 crates.io 上的 `openclaw`（`openclaw = "0.1.0"`）目前只是 stub，和 GitHub 的 OpenClaw 專案不是同一個可直接嵌入的 framework。
 
-在本 repo，建議用下列方式把 OpenClaw 變成「永遠主動」的 orchestrator，而由 `ploy` 實際負責下單：
+在本 repo，建議用下列方式把 OpenClaw 變成「永遠主動」的 orchestrator，而由 `ployd` control plane 實際管理 deployment、trading state 與 paper intent ingress：
 
-## A) 最快：OpenClaw 直接呼叫 `ploy`（bash/skills）
+## A) Workspace 預設：OpenClaw 直接呼叫 `ployctl` / control-plane API
 
-1. 先把 `ploy` 編譯好並放進 PATH：
+1. 先把 `ployd` / `ployctl` 編譯好並放進 PATH：
 
 ```bash
-cargo build --release
+cargo build --release -p ployd -p ployctl
 export PATH="$(pwd)/target/release:$PATH"
 ```
 
-2. 舊單體 runtime 的 daemon wrapper 已歸檔在：
+2. 啟動平台 daemon，並先確認 control-plane 快照可讀：
 
 ```bash
-scripts/archive/legacy-root-runtime/event_edge_daemon.sh start false true
-scripts/archive/legacy-root-runtime/event_edge_daemon.sh status
+ployd
+ployctl system status
+ployctl deployments list
+ployctl trading status
 ```
 
-這是歷史參考，不是目前 workspace 預設運維面。
+3. 遠端 gateway 控制交易機器（推薦：SSH forced command allowlist）
 
-3. 遠端 gateway 控制這台機器（推薦：SSH forced command allowlist）
-
-在交易機器上（跑 legacy `ploy` 單體 runtime 的那台）：
+在交易機器上（跑 `ployd` 的那台）：
 
 - 建一個專用使用者（例如 `ploy`），並把 repo 放在固定路徑
-- 把你的 SSH public key 加到 `~ploy/.ssh/authorized_keys`，用 forced command 綁死可執行的指令（只允許 start/stop/status/logs/rpc）：
+- 把你的 SSH public key 加到 `~ploy/.ssh/authorized_keys`，用 forced command 綁死可執行的指令（只允許 `ployctl` 的 status / deployment / trading 指令，或有限制的 HTTP proxy）：
 
 ```text
 command="/ABS/PATH/TO/ploy/scripts/archive/legacy-root-runtime/ssh_ployctl.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA...
@@ -37,32 +37,38 @@ command="/ABS/PATH/TO/ploy/scripts/archive/legacy-root-runtime/ssh_ployctl.sh",n
 然後在遠端（OpenClaw gateway 所在機器）就可以安全地只呼叫 allowlist：
 
 ```bash
-ssh ploy@TRADING_HOST "status"
-ssh ploy@TRADING_HOST "start false true"
-ssh ploy@TRADING_HOST "start false true 123,456"
-ssh ploy@TRADING_HOST "logs 200"
-ssh ploy@TRADING_HOST "rpc" < request.json
-ssh ploy@TRADING_HOST "stop"
-# systemd workloads (sports / crypto dry-run)
-ssh ploy@TRADING_HOST "svc-status sports"
-ssh ploy@TRADING_HOST "svc-start sports"
-ssh ploy@TRADING_HOST "svc-logs sports 200"
-ssh ploy@TRADING_HOST "svc-status crypto"
-ssh ploy@TRADING_HOST "svc-restart crypto"
-ssh ploy@TRADING_HOST "svc-logs crypto 200"
+ssh ploy@TRADING_HOST "ployctl system status"
+ssh ploy@TRADING_HOST "ployctl deployments list"
+ssh ploy@TRADING_HOST "ployctl deployments inspect example.paper"
+ssh ploy@TRADING_HOST "ployctl trading inspect example.paper"
 ```
 
 這樣 OpenClaw 只要有 SSH 連線能力，就能「遠端永遠主動」地控這台交易機器，但不會變成任意 RCE。
 
-4. 在 OpenClaw 裡建立一個自訂 skill，內容用 bash 直接跑：
+4. 在 OpenClaw 裡建立一個自訂 skill，內容用 bash 或 HTTP 直接調 control-plane：
 
-- 掃描一次（歷史 CLI 參考）：`ploy event-edge --title "Which company has the best AI model end of February?"`
-- 舊常駐循環（歷史參考）：`ploy platform start --politics`
-- 舊 wrapper（已歸檔）：`scripts/archive/legacy-root-runtime/event_edge_daemon.sh start false true`
+- `ployctl system status`
+- `ployctl deployments list`
+- `ployctl deployments apply /opt/ploy/config/deployments/example.paper.json`
+- `ployctl deployments pause example.paper`
+- `ployctl deployments resume example.paper`
+- `ployctl trading inspect example.paper`
 
-新的 workspace 路徑應改成讓 OpenClaw 呼叫 `ployctl` / control-plane API，而不是再啟動 retired root runtime。
+目前 workspace 預設路徑是 deployment resources + trading snapshots，不再建議讓 OpenClaw 啟動 retired root runtime。
 
 （可直接用本 repo 提供的 OpenClaw skill 模板：`examples/openclaw/skill-ploy-rpc/`）
+
+### Control-plane API（給 agent 用的最小 operator surface）
+
+- `GET /api/system/status`
+- `GET /api/trading/state`
+- `GET /api/deployments`
+- `GET /api/deployments/:id`
+- `PUT /api/deployments/:id`
+- `POST /api/deployments/:id/control`
+- `POST /api/deployments/:id/intents`（paper-only）
+
+## B) Legacy archived path：OpenClaw 直接呼叫 retired `ploy` runtime
 
 ### RPC（給 agent 用的工具介面）
 
@@ -75,36 +81,32 @@ JSON
 ```
 
 注意：
-- 控制面寫入 API（`/api/system/*`、`/api/config`、`/api/deployments*`）需要 admin token：
+- 目前 workspace 預設只保證下列 control-plane surface：
+  - `GET /api/system/status`
+  - `GET /api/trading/state`
+  - `GET /api/deployments`
+  - `GET /api/deployments/:id`
+  - `PUT /api/deployments/:id`
+  - `POST /api/deployments/:id/control`
+  - `POST /api/deployments/:id/intents`（paper-only）
+- 控制面寫入 API（`/api/system/*`、`/api/deployments*`、`/api/deployments/:id/intents`）需要 admin token：
   設 `PLOY_API_ADMIN_TOKEN`，並在 header 帶 `x-ploy-admin-token`（或 `Authorization: Bearer ...`）。
   若要讓 browser session cookie 在重啟/多實例下保持穩定，另外設 `PLOY_API_AUTH_COOKIE_SECRET`；否則系統會退回到 process-local 隨機 secret，舊 cookie 會在重啟後失效。
-- `pm.submit_limit` / `pm.cancel_order` / `events.upsert` / `events.update_status` 這類「寫入」操作預設會被拒絕，必須在交易機器環境設 `PLOY_RPC_WRITE_ENABLED=true` 才會放行。
-- 寫入操作現在要求 `params.idempotency_key`（建議用 UUID）。
-- `pm.submit_limit` / `gateway.submit_intent` 會改走 Coordinator ingestion API（預設 `http://127.0.0.1:8081/api/sidecar/intents`），所以交易機器必須有平台 API 正在運行；可用 `PLOY_RPC_COORDINATOR_INTENT_URL` 覆寫。
-- 若你有設定 sidecar token，可用 `PLOY_RPC_SIDECAR_AUTH_TOKEN` 讓 RPC 自動帶 `x-ploy-sidecar-token` 呼叫 ingress。
-- live 直連 `submit_order` 預設禁用（防旁路風控）；如需暫時回退可設 `PLOY_ALLOW_DIRECT_LIVE=true`（不建議 production）。
-- `ploy strategy start ...` 的 direct live runtime 預設也會被擋下（避免繞過 Coordinator）。如需緊急回退才設 `PLOY_ALLOW_DIRECT_STRATEGY_LIVE=true`。
-- 若設定 `PLOY_SIDECAR_AUTH_TOKEN`，所有 sidecar `POST` 端點都需帶 `x-ploy-sidecar-token`（或 `Authorization: Bearer ...`）。
-- `PLOY_GATEWAY_ONLY=true` 時，sidecar auth 也會強制要求有 token 設定（沒設 token 會拒絕寫入請求）。
-- 若你要強制「只有 coordinator/gateway 能送單」，在交易機器加上 `PLOY_GATEWAY_ONLY=true`。
-  在這模式下，live order 需帶 `idempotency_key`，且 `client_order_id` 必須是 `intent:` 前綴（Coordinator 已自動帶入）。
-- 寫入審計會落地在 `data/rpc/audit/*.jsonl`（可用 `PLOY_RPC_STATE_DIR` 覆寫）。
-- sidecar `/api/sidecar/intents` 的 deployment gate 預設為啟用（可用 `PLOY_DEPLOYMENT_GATE_REQUIRED=false` 暫時關掉，不建議 production）。
-- `/api/sidecar/orders` live 提交預設不掛載路由（避免繞過 deployment 治理）；僅在 `PLOY_SIDECAR_ORDERS_LIVE_ENABLED=true` 才會暴露。
+- `POST /api/deployments/:id/intents` 目前只接受 `runtime_mode=paper` 且 `desired_state=running` 的 deployment。
+- 如果你仍在維護舊 RPC、governance、strategy-control、`/api/sidecar/*` 或 direct-live surfaces，應明確視為 legacy compatibility layer，而不是目前 branch 的預設 operator surface。
 
-### Deployment Matrix API
+### Deployment Resource API
 
-控制面新增 deployment matrix API（記憶體態，支援一次批量上傳）：
+目前 control plane 預設的 deployment resource API：
 
 - `GET /api/deployments`
-- `PUT /api/deployments`（body: `{ "deployments":[...], "replace":true|false }`）
 - `GET /api/deployments/:id`
-- `POST /api/deployments/:id/enable`
-- `POST /api/deployments/:id/disable`
-- `DELETE /api/deployments/:id`
-- deployment matrix 會落地到 `data/state/deployments.json`（可用 `PLOY_DEPLOYMENTS_FILE` 覆寫）。
+- `PUT /api/deployments/:id`（body: `deployment_id`、`bundle_id`、`runtime_mode`、`desired_state`）
+- `POST /api/deployments/:id/control`（body: `{ "desired_state": "running|paused|stopped" }`）
+- `POST /api/deployments/:id/intents`（body: paper trading intent）
+- deployment registry 會落地到 `data/state/deployments.json`（可用 `PLOY_DEPLOYMENTS_FILE` 覆寫）。
 
-### Governance Policy API
+### Legacy Governance Policy API（Archived Reference）
 
 OpenClaw 控制面可直接讀寫全域治理策略（需 admin token）：
 
@@ -121,7 +123,7 @@ OpenClaw 控制面可直接讀寫全域治理策略（需 admin token）：
 
 Domain `force_close` / `shutdown` 指令在 Coordinator handle 入口即時將該 domain 設為 `halted`，避免命令傳遞期間仍接收新 BUY intents。
 
-### Strategy Control API
+### Legacy Strategy Control API（Archived Reference）
 
 新增聚合控制面視圖（需 admin token）：
 
@@ -136,7 +138,7 @@ Ingress lifecycle contract:
 - sidecar live ingress 預設只接受 `lifecycle_stage=live` 的 deployment（避免未審核策略直接進 live queue）
 - 遷移期可暫時設 `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true` 放寬，但不建議 production
 
-### Strategy Evaluation Evidence API
+### Legacy Strategy Evaluation Evidence API（Archived Reference）
 
 新增可追溯證據層（需 admin token）：
 
@@ -154,7 +156,7 @@ Ingress lifecycle contract:
 - `latest_evaluation_model_hash`
 - `latest_evaluation_sample_size`
 
-已支援的 method（起步集合）：
+Legacy RPC methods（archived reference）：
 - `GET /api/capabilities`（machine-readable 能力清單，供 OpenClaw/AI scheduler 自動發現 runtime surface）
 - `pm.get_balance`
 - `pm.get_positions`

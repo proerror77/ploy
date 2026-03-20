@@ -1,3 +1,36 @@
+# Trading Platform Completion Sweep (2026-03-20)
+
+## Goal
+Push the workspace refactor from "control-plane skeleton" toward a usable
+trading platform by wiring the canonical trading lifecycle into `ployd`,
+keeping sidecar/operator surfaces aligned with deployment resources, and
+verifying the resulting platform path end to end.
+
+## File ownership
+
+- `apps/ployd/`, `apps/ployctl/`, `crates/ploy-trading/`, platform smoke tests
+  - owner: main session, execution lifecycle integration
+- `ploy-sidecar/` and sidecar-specific docs
+  - owner: sidecar agent session
+- frontend/operator surface review
+  - owner: agent-team review and follow-up if needed
+
+## Tasks
+
+- [ ] Add a canonical trading runtime ledger to `ploy-trading` that tracks
+  intents, orders, fills, positions, pnl, and risk as one snapshot.
+- [ ] Persist and serve that trading runtime snapshot from `ployd`.
+- [ ] Add the smallest `ployctl` inspection command needed for the new trading
+  runtime.
+- [ ] Merge sidecar/operator-surface fixes from the agent team and re-run
+  validation.
+
+## Progress notes
+
+- 2026-03-20: Main session owns `apps/ployd`, `apps/ployctl`, `crates/ploy-trading`,
+  and smoke tests. A sidecar-focused agent owns only `ploy-sidecar/` plus
+  sidecar-specific docs to avoid overlap.
+
 # Remaining Fixes Mainline Sweep (2026-03-19)
 
 ## Goal

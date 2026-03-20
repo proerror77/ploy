@@ -300,6 +300,7 @@ name = "ploy-operator-contracts"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "rust_decimal",
  "serde",
  "serde_json",
 ]
@@ -363,11 +364,14 @@ dependencies = [
 name = "ployd"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ploy-connectivity",
  "ploy-deployments",
  "ploy-operator-contracts",
  "ploy-platform",
  "ploy-trading",
+ "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_json",
 ]

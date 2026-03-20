@@ -9,7 +9,11 @@ pub use deployments::{
 };
 pub use events::{LogEntry, OperatorEvent, StatusUpdate, WsMessage};
 pub use system::{SystemControlResponse, SystemStatus};
-pub use trading::{IntentPurpose, MarketData, PositionResponse, TradeResponse};
+pub use trading::{
+    FillSnapshot, IntentPurpose, MarketData, OrderSnapshot, PaperIntentRequest,
+    PaperIntentResponse, PnlSnapshotResponse, PositionResponse, PositionSnapshotResponse,
+    RiskSnapshotResponse, TradeResponse, TradingIntentSnapshot, TradingStateSnapshot,
+};
 
 pub const CRATE_MARKER: &str = "ploy-operator-contracts";
 
