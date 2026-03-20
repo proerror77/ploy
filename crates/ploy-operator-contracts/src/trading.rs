@@ -40,6 +40,8 @@ pub struct PaperIntentResponse {
     pub intent_id: String,
     pub order_id: String,
     pub state: String,
+    pub venue_order_id: Option<String>,
+    pub rejection_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -300,6 +302,8 @@ mod tests {
             intent_id: "intent-1".to_string(),
             order_id: "order-intent-1".to_string(),
             state: "acknowledged".to_string(),
+            venue_order_id: Some("venue-order-1".to_string()),
+            rejection_reason: None,
         })
         .expect("response json");
         assert_eq!(
@@ -309,6 +313,8 @@ mod tests {
                 "intent_id": "intent-1",
                 "order_id": "order-intent-1",
                 "state": "acknowledged",
+                "venue_order_id": "venue-order-1",
+                "rejection_reason": null,
             })
         );
     }

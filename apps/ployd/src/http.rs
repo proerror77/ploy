@@ -1,4 +1,3 @@
-use crate::config::PlatformConfig;
 use crate::events::EventBroker;
 use crate::runtime::{next_paper_intent_id, PloyDaemon};
 use ploy_operator_contracts::{
@@ -14,6 +13,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+#[cfg(test)]
+use crate::config::PlatformConfig;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -44,6 +46,7 @@ pub fn route_request(path: &str, runtime_root: &Path) -> (u16, String) {
     }
 }
 
+#[cfg(test)]
 pub fn handle_api_request(
     method: &str,
     path: &str,
@@ -129,7 +132,7 @@ pub fn handle_api_request(
             };
 
             match PloyDaemon::boot(config).and_then(|mut daemon| {
-                let response = daemon.submit_paper_intent(TradingIntent {
+                let response = daemon.submit_intent(TradingIntent {
                     intent_id: next_paper_intent_id(deployment_id),
                     deployment_id: deployment_id.to_string(),
                     market_id: request.market_id,
@@ -325,7 +328,7 @@ fn handle_runtime_request(
 
             match state.daemon.lock() {
                 Ok(mut daemon) => match daemon
-                    .submit_paper_intent(TradingIntent {
+                    .submit_intent(TradingIntent {
                         intent_id: next_paper_intent_id(deployment_id),
                         deployment_id: deployment_id.to_string(),
                         market_id: request.market_id,
@@ -435,10 +438,15 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_api_request, route_request, snapshot_events};
+    use super::{
+        handle_api_request, handle_runtime_request, route_request, snapshot_events, AppState,
+    };
+    use crate::events::EventBroker;
+    use ploy_connectivity::StaticExecutionGateway;
     use ploy_operator_contracts::PaperIntentRequest;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -651,5 +659,71 @@ mod tests {
             event,
             ploy_operator_contracts::OperatorEvent::TradingSnapshot(_)
         )));
+    }
+
+    #[test]
+    fn handle_runtime_request_submits_live_intent_via_shared_daemon_state() {
+        let root = temp_dir("runtime-live-intent");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(runtime_root.clone()).expect("create runtime root");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "running"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("registry");
+
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..crate::config::PlatformConfig::default()
+        };
+
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("venue-live-http-1")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let body = serde_json::to_string(&PaperIntentRequest {
+            market_id: "market-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: "buy".to_string(),
+            quantity: rust_decimal::Decimal::ONE,
+            limit_price: Some(rust_decimal::Decimal::ONE),
+            purpose: ploy_operator_contracts::IntentPurpose::Entry,
+        })
+        .expect("request json");
+
+        let (submit_code, submit_response) = handle_runtime_request(
+            "POST",
+            "/api/deployments/example.live/intents",
+            Some(&body),
+            &state,
+        );
+        assert_eq!(submit_code, 200);
+        assert!(submit_response.contains("\"state\":\"acknowledged\""));
+
+        let trading_body =
+            fs::read_to_string(runtime_root.join("trading-state.json")).expect("trading snapshot");
+        assert!(trading_body.contains("\"deployment_id\": \"example.live\""));
+        assert!(trading_body.contains("\"venue_order_id\": \"venue-live-http-1\""));
     }
 }

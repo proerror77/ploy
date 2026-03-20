@@ -1,6 +1,9 @@
 use crate::config::PlatformConfig;
 use crate::events::EventBroker;
 use crate::http::publish_snapshot_events;
+use ploy_connectivity::{
+    ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, PolymarketExecutionGateway,
+};
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{
     DeploymentApplyRequest, DesiredState, FillSnapshot, IntentPurpose, ObservedState,
@@ -8,9 +11,7 @@ use ploy_operator_contracts::{
     RiskSnapshotResponse, TradingIntentSnapshot, TradingStateSnapshot,
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
-use ploy_trading::{
-    FillRecord, OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot,
-};
+use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -20,16 +21,27 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use ploy_trading::FillRecord;
+
 #[derive(Debug)]
 pub struct PloyDaemon {
     pub config: PlatformConfig,
     pub control_plane: ControlPlane,
     pub supervisor: WorkerSupervisor,
     pub trading: BTreeMap<String, TradingRuntime>,
+    live_execution: Box<dyn LiveExecutionGateway>,
 }
 
 impl PloyDaemon {
     pub fn boot(config: &PlatformConfig) -> io::Result<Self> {
+        Self::boot_with_live_execution(config, Box::new(PolymarketExecutionGateway::from_env()))
+    }
+
+    pub fn boot_with_live_execution(
+        config: &PlatformConfig,
+        live_execution: Box<dyn LiveExecutionGateway>,
+    ) -> io::Result<Self> {
         let mut control_plane = ControlPlane::default();
         control_plane
             .system
@@ -40,6 +52,7 @@ impl PloyDaemon {
             control_plane,
             supervisor: WorkerSupervisor::default(),
             trading: BTreeMap::new(),
+            live_execution,
         };
         daemon.load_registry()?;
         daemon.tick();
@@ -64,6 +77,7 @@ impl PloyDaemon {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn run_forever(&mut self) -> io::Result<()> {
         loop {
             self.write_runtime_snapshots()?;
@@ -137,6 +151,31 @@ impl PloyDaemon {
             .cloned())
     }
 
+    pub fn submit_intent(&mut self, intent: TradingIntent) -> io::Result<PaperIntentResponse> {
+        let deployment = self
+            .control_plane
+            .deployments
+            .get(&intent.deployment_id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "deployment not found"))?;
+
+        if deployment.desired_state != DesiredState::Running {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "deployment must be running before it can accept intents",
+            ));
+        }
+
+        match deployment.runtime_mode.as_str() {
+            "paper" => self.submit_paper_intent(intent),
+            "live" => Ok(self.submit_live_intent(intent)),
+            runtime_mode => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported runtime mode: {runtime_mode}"),
+            )),
+        }
+    }
+
     pub fn submit_paper_intent(
         &mut self,
         intent: TradingIntent,
@@ -169,15 +208,80 @@ impl PloyDaemon {
         let deployment_id = intent.deployment_id.clone();
         let intent_id = intent.intent_id.clone();
         runtime.submit_intent(intent, order_id.clone());
-        runtime.acknowledge_order(&order_id, venue_order_id);
+        runtime.acknowledge_order(&order_id, venue_order_id.clone());
         Ok(PaperIntentResponse {
             deployment_id,
             intent_id,
             order_id,
             state: "acknowledged".to_string(),
+            venue_order_id: Some(venue_order_id),
+            rejection_reason: None,
         })
     }
 
+    fn submit_live_intent(&mut self, intent: TradingIntent) -> PaperIntentResponse {
+        let order_id = format!("order-{}", intent.intent_id);
+        self.trading
+            .entry(intent.deployment_id.clone())
+            .or_default()
+            .submit_intent(intent.clone(), order_id.clone());
+
+        let outcome = self.live_execution.submit(&ExecutionRequest {
+            order_id: order_id.clone(),
+            token_id: intent.token_id.clone(),
+            side: intent.side,
+            quantity: intent.quantity,
+            limit_price: intent.limit_price,
+        });
+
+        match outcome {
+            Ok(ExecutionOutcome::Acknowledged { venue_order_id }) => {
+                self.trading
+                    .entry(intent.deployment_id.clone())
+                    .or_default()
+                    .acknowledge_order(&order_id, venue_order_id.clone());
+                PaperIntentResponse {
+                    deployment_id: intent.deployment_id,
+                    intent_id: intent.intent_id,
+                    order_id,
+                    state: "acknowledged".to_string(),
+                    venue_order_id: Some(venue_order_id),
+                    rejection_reason: None,
+                }
+            }
+            Ok(ExecutionOutcome::Rejected { reason }) => {
+                self.trading
+                    .entry(intent.deployment_id.clone())
+                    .or_default()
+                    .reject_order(&order_id, reason.clone());
+                PaperIntentResponse {
+                    deployment_id: intent.deployment_id,
+                    intent_id: intent.intent_id,
+                    order_id,
+                    state: "rejected".to_string(),
+                    venue_order_id: None,
+                    rejection_reason: Some(reason),
+                }
+            }
+            Err(err) => {
+                let reason = err.to_string();
+                self.trading
+                    .entry(intent.deployment_id.clone())
+                    .or_default()
+                    .reject_order(&order_id, reason.clone());
+                PaperIntentResponse {
+                    deployment_id: intent.deployment_id,
+                    intent_id: intent.intent_id,
+                    order_id,
+                    state: "rejected".to_string(),
+                    venue_order_id: None,
+                    rejection_reason: Some(reason),
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub fn record_fill(&mut self, deployment_id: &str, fill: FillRecord) {
         if let Some(runtime) = self.trading.get_mut(deployment_id) {
             runtime.record_fill(fill);
@@ -430,6 +534,7 @@ where
 mod tests {
     use super::PloyDaemon;
     use crate::config::PlatformConfig;
+    use ploy_connectivity::StaticExecutionGateway;
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
     use rust_decimal_macros::dec;
@@ -625,5 +730,129 @@ mod tests {
             })
             .expect_err("paused deployment should reject intents");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn daemon_routes_live_intent_into_acknowledged_order_snapshot() {
+        let root = temp_dir("live-intent-ack");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("venue-live-1")),
+        )
+        .expect("boot");
+        let response = daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-1".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(3),
+                limit_price: Some(dec!(0.44)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit live intent");
+
+        assert_eq!(response.state, "acknowledged");
+
+        let trading_state = daemon.trading_state();
+        assert_eq!(trading_state.len(), 1);
+        assert_eq!(trading_state[0].deployment_id, "example.live");
+        assert_eq!(trading_state[0].orders.len(), 1);
+        assert_eq!(trading_state[0].orders[0].state, "acknowledged");
+        assert_eq!(
+            trading_state[0].orders[0].venue_order_id.as_deref(),
+            Some("venue-live-1")
+        );
+    }
+
+    #[test]
+    fn daemon_records_live_rejection_in_canonical_ledger() {
+        let root = temp_dir("live-intent-reject");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::rejected("market closed")),
+        )
+        .expect("boot");
+        let response = daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-2".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Sell,
+                quantity: dec!(2),
+                limit_price: Some(dec!(0.55)),
+                purpose: IntentPurpose::Reduce,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit live intent");
+
+        assert_eq!(response.state, "rejected");
+
+        let trading_state = daemon.trading_state();
+        assert_eq!(trading_state[0].orders.len(), 1);
+        assert_eq!(trading_state[0].orders[0].state, "rejected");
+        assert_eq!(
+            trading_state[0].orders[0].rejection_reason.as_deref(),
+            Some("market closed")
+        );
     }
 }
