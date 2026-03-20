@@ -81,7 +81,7 @@ fn execute(command: Command, client: &ControlPlaneClient) -> Result<String, Stri
         Command::TradingInspect(deployment_id) => {
             trading::render_one_trading_state(client, &deployment_id)
         }
-        Command::DeploymentsList => Ok(deployments::render_deployments(client)),
+        Command::DeploymentsList => deployments::render_deployments(client),
         Command::DeploymentsInspect(deployment_id) => {
             deployments::render_deployment(client, &deployment_id)
         }
