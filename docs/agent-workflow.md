@@ -98,8 +98,11 @@ rules.
 ## Runtime And Deployment Constraints
 
 - Default to dry-run for local validation.
-- The canonical live path is `ploy platform start`; do not introduce or rely on
-  direct live order paths unless explicitly required.
+- The workspace-default platform path is `ployd` + `ployctl`.
+- Treat remaining `ploy ...` runtime commands as compatibility surfaces; do not
+  introduce new deployment guidance that depends on them.
+- Do not introduce or rely on direct live order paths unless explicitly
+  required.
 - On trading hosts, do not build Rust source on-host. Build in CI and deploy
   release artifacts only.
 - Preferred production workflow: `.github/workflows/release-aliyun.yml`.

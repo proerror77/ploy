@@ -25,6 +25,11 @@ rtk cargo test --test platform_smoke -- --nocapture
 
 Runbook: [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md)
 
+Compatibility note:
+
+- `ployd` and `ployctl` are the default workspace entrypoints for the trading platform spine.
+- Remaining `ploy ...` examples below document the legacy single-binary surface and should be treated as historical compatibility paths, not the target deployment model.
+
 ## Features
 
 - **Two runtime domains** -- Crypto (BTC/ETH/SOL UP/DOWN), Sports (NBA/NFL live odds)
@@ -407,14 +412,15 @@ examples/        Example integrations (OpenClaw RPC)
 ## Development
 
 ```bash
-cargo check --bin ploy               # Fast local type-check loop
-cargo build --bin ploy               # Build only the main binary
-cargo build --bin ploy --features builder_relayer_sdk  # Enable builder relayer SDK when needed
-cargo test                           # Run test suite
+cargo run -p ployd                   # Boot the platform daemon skeleton
+cargo run -p ployctl                 # Boot the operator client skeleton
+rtk cargo check -p ployd             # Fast daemon type-check loop
+rtk cargo check -p ployctl           # Fast client type-check loop
+rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture
 cargo fmt --check                    # Check formatting
 cargo clippy -- -D warnings          # Lint
-cargo build --features rl,onnx       # Build with all optional features
-cargo check -p sdk_auth_check            # Optional SDK auth tool
+rtk cargo build -p ployd             # Build the daemon binary
+rtk cargo build -p ployctl           # Build the operator client binary
 ```
 
 See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for the contributor guide.

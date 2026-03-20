@@ -15,9 +15,11 @@
 ## 1. 工具與快照檢查
 
 - `cargo fmt --check`
-- `cargo check -q`
-- `cargo run --bin ploy -- platform --help`
-- `cargo run --bin ploy -- platform start --dry-run --crypto --sports`
+- `rtk cargo check -p ployd`
+- `rtk cargo check -p ployctl`
+- `cargo run -p ployd`
+- `cargo run -p ployctl`
+- `rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture`
 
 ## 2. 策略矩陣檢查
 
@@ -44,5 +46,5 @@
 ## 5. 通過條件
 
 - 以上檢查無 error/stacktrace
-- `ploy platform start --dry-run --crypto --sports` 能在 timeout 時穩定結束（通常 `timeout` 會回傳 124）
+- `ployd` / `ployctl` 可正常啟動且 smoke test 通過
 - API 事件可見性可用（`/ws` 有 trade/position/market 任一實際推播）
