@@ -2,8 +2,8 @@ use crate::events::EventBroker;
 use crate::runtime::{next_paper_intent_id, PloyDaemon};
 use ploy_operator_contracts::{
     ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
-    DeploymentSnapshotEvent, IntentPurpose, OperatorEvent, PaperIntentRequest, StatusUpdate,
-    SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
+    DeploymentSnapshotEvent, IntentPurpose, OperatorEvent, OrderReplaceRequest, PaperIntentRequest,
+    StatusUpdate, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
 };
 use ploy_trading::{TradeSide, TradingIntent};
 use std::io::{self, Read, Write};
@@ -155,9 +155,9 @@ pub fn handle_api_request(
                 Ok(request) => request,
                 Err(_) => return (400, "{\"error\":\"invalid_json\"}".to_string()),
             };
-            match PloyDaemon::boot(config).and_then(|mut daemon| {
-                daemon.control_deployment(deployment_id, request)
-            }) {
+            match PloyDaemon::boot(config)
+                .and_then(|mut daemon| daemon.control_deployment(deployment_id, request))
+            {
                 Ok(Some(record)) => (
                     200,
                     serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
@@ -365,27 +365,29 @@ fn handle_runtime_request(
                 Err(err) => return json_error(400, "invalid_json", Some(err.to_string())),
             };
             match state.daemon.lock() {
-                Ok(mut daemon) => match daemon
-                    .control_deployment(deployment_id, request)
-                    .and_then(|record| {
-                        daemon.write_runtime_snapshots()?;
-                        publish_snapshot_events(&daemon, &state.events);
-                        Ok(record)
-                    }) {
-                    Ok(Some(record)) => (
-                        200,
-                        serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
-                    ),
-                    Ok(None) => json_error(
-                        404,
-                        "deployment_not_found",
-                        Some(format!("deployment `{deployment_id}` was not found")),
-                    ),
-                    Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
-                        json_error(400, "invalid_request", Some(err.to_string()))
+                Ok(mut daemon) => {
+                    match daemon
+                        .control_deployment(deployment_id, request)
+                        .and_then(|record| {
+                            daemon.write_runtime_snapshots()?;
+                            publish_snapshot_events(&daemon, &state.events);
+                            Ok(record)
+                        }) {
+                        Ok(Some(record)) => (
+                            200,
+                            serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
+                        ),
+                        Ok(None) => json_error(
+                            404,
+                            "deployment_not_found",
+                            Some(format!("deployment `{deployment_id}` was not found")),
+                        ),
+                        Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+                            json_error(400, "invalid_request", Some(err.to_string()))
+                        }
+                        Err(err) => json_error(500, "control_failed", Some(err.to_string())),
                     }
-                    Err(err) => json_error(500, "control_failed", Some(err.to_string())),
-                },
+                }
                 Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
         }
@@ -405,6 +407,44 @@ fn handle_runtime_request(
                 Ok(mut daemon) => {
                     match daemon
                         .cancel_order(deployment_id, order_id)
+                        .and_then(|response| {
+                            daemon.write_runtime_snapshots()?;
+                            publish_snapshot_events(&daemon, &state.events);
+                            Ok(response)
+                        }) {
+                        Ok(response) => (
+                            200,
+                            serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+                        ),
+                        Err(err) => submit_intent_error_response(err, deployment_id),
+                    }
+                }
+                Err(_) => json_error(503, "daemon_lock_poisoned", None),
+            }
+        }
+        ("POST", _) if path.starts_with("/api/deployments/") && path.ends_with("/replace") => {
+            let suffix = path.trim_start_matches("/api/deployments/");
+            let Some((deployment_id, order_suffix)) = suffix.split_once("/orders/") else {
+                return json_error(404, "not_found", None);
+            };
+            let order_id = order_suffix
+                .trim_end_matches("/replace")
+                .trim_end_matches('/');
+            if order_id.is_empty() {
+                return json_error(404, "not_found", None);
+            }
+            let Some(body) = body else {
+                return json_error(400, "missing_body", None);
+            };
+            let request: OrderReplaceRequest = match serde_json::from_str(body) {
+                Ok(request) => request,
+                Err(err) => return json_error(400, "invalid_json", Some(err.to_string())),
+            };
+
+            match state.daemon.lock() {
+                Ok(mut daemon) => {
+                    match daemon
+                        .replace_order(deployment_id, order_id, request)
                         .and_then(|response| {
                             daemon.write_runtime_snapshots()?;
                             publish_snapshot_events(&daemon, &state.events);
@@ -554,8 +594,8 @@ mod tests {
         handle_api_request, handle_runtime_request, route_request, snapshot_events, AppState,
     };
     use crate::events::EventBroker;
-    use ploy_connectivity::{CancellationOutcome, StaticExecutionGateway};
-    use ploy_operator_contracts::PaperIntentRequest;
+    use ploy_connectivity::{CancellationOutcome, ReplaceOutcome, StaticExecutionGateway};
+    use ploy_operator_contracts::{OrderReplaceRequest, PaperIntentRequest};
     use ploy_trading::{IntentPurpose as TradingIntentPurpose, TradeSide, TradingIntent};
     use std::fs;
     use std::path::PathBuf;
@@ -988,6 +1028,95 @@ mod tests {
             fs::read_to_string(runtime_root.join("trading-state.json")).expect("trading snapshot");
         assert!(trading_body.contains("\"state\": \"canceled\""));
         assert!(trading_body.contains("\"venue_order_id\": \"venue-live-http-cancel-1\""));
+    }
+
+    #[test]
+    fn handle_runtime_request_replaces_live_order_and_persists_revision_history() {
+        let root = temp_dir("runtime-live-replace");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(runtime_root.clone()).expect("create runtime root");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "running"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("registry");
+
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..crate::config::PlatformConfig::default()
+        };
+
+        let gateway = StaticExecutionGateway::acknowledged("venue-live-http-replace-1")
+            .with_replace_result(Ok(ReplaceOutcome::Replaced {
+                venue_order_id: "venue-live-http-replace-2".to_string(),
+            }));
+        let daemon =
+            crate::runtime::PloyDaemon::boot_with_live_execution(&config, Box::new(gateway))
+                .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let submit_body = serde_json::to_string(&PaperIntentRequest {
+            market_id: "market-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: "buy".to_string(),
+            quantity: rust_decimal::Decimal::ONE,
+            limit_price: Some(rust_decimal::Decimal::new(55, 2)),
+            purpose: ploy_operator_contracts::IntentPurpose::Entry,
+        })
+        .expect("request json");
+
+        let (submit_code, submit_response) = handle_runtime_request(
+            "POST",
+            "/api/deployments/example.live/intents",
+            Some(&submit_body),
+            &state,
+        );
+        assert_eq!(submit_code, 200);
+
+        let order_id = submit_response
+            .split("\"order_id\":\"")
+            .nth(1)
+            .and_then(|suffix| suffix.split('"').next())
+            .expect("order id");
+
+        let replace_body = serde_json::to_string(&OrderReplaceRequest {
+            quantity: rust_decimal::Decimal::new(250, 2),
+            limit_price: Some(rust_decimal::Decimal::new(57, 2)),
+        })
+        .expect("replace body");
+        let (replace_code, replace_response) = handle_runtime_request(
+            "POST",
+            &format!("/api/deployments/example.live/orders/{order_id}/replace"),
+            Some(&replace_body),
+            &state,
+        );
+        assert_eq!(replace_code, 200);
+        assert!(replace_response.contains("\"revision\":1"));
+        assert!(replace_response.contains("\"venue_order_id\":\"venue-live-http-replace-2\""));
+
+        let trading_body =
+            fs::read_to_string(runtime_root.join("trading-state.json")).expect("trading snapshot");
+        assert!(trading_body.contains("\"venue_order_history\": ["));
+        assert!(trading_body.contains("venue-live-http-replace-1"));
+        assert!(trading_body.contains("\"revision\": 1"));
     }
 
     #[test]

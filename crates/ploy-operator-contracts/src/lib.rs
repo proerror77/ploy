@@ -15,8 +15,8 @@ pub use events::{
 };
 pub use system::{SystemControlResponse, SystemStatus};
 pub use trading::{
-    FillSnapshot, IntentPurpose, MarketData, OrderControlResponse, OrderSnapshot,
-    PaperIntentRequest, PaperIntentResponse, PnlSnapshotResponse, PositionResponse,
+    FillSnapshot, IntentPurpose, MarketData, OrderControlResponse, OrderReplaceRequest,
+    OrderSnapshot, PaperIntentRequest, PaperIntentResponse, PnlSnapshotResponse, PositionResponse,
     PositionSnapshotResponse, RiskSnapshotResponse, TradeResponse, TradingIntentSnapshot,
     TradingStateSnapshot,
 };

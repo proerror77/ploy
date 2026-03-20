@@ -1,10 +1,10 @@
 use crate::fills::{FillLedger, FillRecord};
-use chrono::{DateTime, Utc};
 use crate::intents::TradingIntent;
 use crate::orders::OrderLedger;
 use crate::pnl::PnlSnapshot;
 use crate::positions::{PositionLedger, PositionSnapshot};
 use crate::risk::{snapshot_from_state, RiskSnapshot};
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -59,6 +59,17 @@ impl TradingRuntime {
         self.orders.acknowledge(order_id, venue_order_id)
     }
 
+    pub fn replace_order(
+        &mut self,
+        order_id: &str,
+        requested_qty: Decimal,
+        limit_price: Option<Decimal>,
+        venue_order_id: impl Into<String>,
+    ) -> Option<&crate::orders::OrderRecord> {
+        self.orders
+            .replace(order_id, requested_qty, limit_price, venue_order_id)
+    }
+
     pub fn reject_order(
         &mut self,
         order_id: &str,
@@ -81,6 +92,12 @@ impl TradingRuntime {
 
     pub fn order(&self, order_id: &str) -> Option<&crate::orders::OrderRecord> {
         self.orders.order(order_id)
+    }
+
+    pub fn intent(&self, intent_id: &str) -> Option<&TradingIntent> {
+        self.intents
+            .iter()
+            .find(|intent| intent.intent_id == intent_id)
     }
 
     pub fn record_fill(&mut self, fill: FillRecord) -> bool {
@@ -157,6 +174,8 @@ mod tests {
                 requested_qty: dec!(2),
                 limit_price: Some(dec!(0.45)),
                 venue_order_id: Some("venue-1".to_string()),
+                venue_order_history: vec!["venue-0".to_string()],
+                revision: 1,
                 state: OrderState::PartiallyFilled,
                 filled_qty: dec!(1),
                 rejection_reason: None,

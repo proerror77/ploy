@@ -4,14 +4,14 @@ use crate::http::publish_snapshot_events;
 use chrono::{DateTime, Utc};
 use ploy_connectivity::{
     CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome, ExecutionRequest,
-    LiveExecutionGateway, PolymarketExecutionGateway, TrackedOrder,
+    LiveExecutionGateway, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, TrackedOrder,
 };
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{
     DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState, FillSnapshot,
-    IntentPurpose, ObservedState, OrderControlResponse, OrderSnapshot, PaperIntentResponse,
-    PnlSnapshotResponse, PositionSnapshotResponse, RiskSnapshotResponse, TradingIntentSnapshot,
-    TradingStateSnapshot,
+    IntentPurpose, ObservedState, OrderControlResponse, OrderReplaceRequest, OrderSnapshot,
+    PaperIntentResponse, PnlSnapshotResponse, PositionSnapshotResponse, RiskSnapshotResponse,
+    TradingIntentSnapshot, TradingStateSnapshot,
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
 use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
@@ -345,6 +345,128 @@ impl PloyDaemon {
             deployment_id.to_string(),
             updated,
         ))
+    }
+
+    pub fn replace_order(
+        &mut self,
+        deployment_id: &str,
+        order_id: &str,
+        request: OrderReplaceRequest,
+    ) -> io::Result<OrderControlResponse> {
+        let deployment = self
+            .control_plane
+            .deployments
+            .get(deployment_id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "deployment not found"))?;
+        let runtime = self.trading.get(deployment_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "deployment has no trading state")
+        })?;
+        let order = runtime
+            .order(order_id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
+
+        if !matches!(
+            order.state,
+            OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "order `{order_id}` is not replaceable from state `{}`",
+                    order_state_wire(order.state)
+                ),
+            ));
+        }
+
+        if request.quantity < order.filled_qty {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "replacement quantity {} cannot be below filled quantity {}",
+                    request.quantity, order.filled_qty
+                ),
+            ));
+        }
+
+        if deployment.runtime_mode == "live" {
+            let venue_order_id = order.venue_order_id.clone().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("order `{order_id}` has no live venue order to replace"),
+                )
+            })?;
+            let side = runtime
+                .intent(&order.intent_id)
+                .map(|intent| intent.side)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!(
+                            "intent `{}` for order `{order_id}` was not found",
+                            order.intent_id
+                        ),
+                    )
+                })?;
+
+            match self.live_execution.replace(&ReplaceRequest {
+                order_id: order_id.to_string(),
+                venue_order_id,
+                token_id: order.token_id.clone(),
+                side,
+                quantity: request.quantity,
+                limit_price: request.limit_price,
+            }) {
+                Ok(ReplaceOutcome::Replaced { venue_order_id }) => {
+                    let runtime = self.trading.get_mut(deployment_id).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::NotFound, "deployment has no trading state")
+                    })?;
+                    let updated = runtime
+                        .replace_order(
+                            order_id,
+                            request.quantity,
+                            request.limit_price,
+                            venue_order_id,
+                        )
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::NotFound, "order not found")
+                        })?;
+                    Ok(build_order_control_response(
+                        deployment_id.to_string(),
+                        updated,
+                    ))
+                }
+                Ok(ReplaceOutcome::Rejected { reason }) => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("live replace rejected: {reason}"),
+                )),
+                Err(err) => {
+                    if let Some(runtime) = self.trading.get_mut(deployment_id) {
+                        let _ = runtime.record_order_error(order_id, err.to_string());
+                    }
+                    Err(io_error_from_execution_error(err))
+                }
+            }
+        } else {
+            let next_revision = order.revision + 1;
+            let venue_order_id = format!("paper-{order_id}-r{next_revision}");
+            let runtime = self.trading.get_mut(deployment_id).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "deployment has no trading state")
+            })?;
+            let updated = runtime
+                .replace_order(
+                    order_id,
+                    request.quantity,
+                    request.limit_price,
+                    venue_order_id,
+                )
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
+            Ok(build_order_control_response(
+                deployment_id.to_string(),
+                updated,
+            ))
+        }
     }
 
     fn submit_live_intent(&mut self, intent: TradingIntent) -> io::Result<PaperIntentResponse> {
@@ -691,6 +813,8 @@ fn build_trading_state_snapshot(
                 requested_qty: order.requested_qty,
                 limit_price: order.limit_price,
                 venue_order_id: order.venue_order_id,
+                venue_order_history: order.venue_order_history,
+                revision: order.revision,
                 state: order_state_wire(order.state),
                 filled_qty: order.filled_qty,
                 rejection_reason: order.rejection_reason,
@@ -767,6 +891,8 @@ fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<Trading
                 requested_qty: order.requested_qty,
                 limit_price: order.limit_price,
                 venue_order_id: order.venue_order_id,
+                venue_order_history: order.venue_order_history,
+                revision: order.revision,
                 state: order_state_from_wire(&order.state)?,
                 filled_qty: order.filled_qty,
                 rejection_reason: order.rejection_reason,
@@ -810,6 +936,10 @@ fn build_order_control_response(
         order_id: order.order_id.clone(),
         state: order_state_wire(order.state),
         venue_order_id: order.venue_order_id.clone(),
+        venue_order_history: order.venue_order_history.clone(),
+        revision: order.revision,
+        requested_qty: order.requested_qty,
+        limit_price: order.limit_price,
         rejection_reason: order.rejection_reason.clone(),
         last_error: order.last_error.clone(),
         filled_qty: order.filled_qty,
@@ -959,12 +1089,14 @@ mod tests {
     use crate::config::PlatformConfig;
     use ploy_connectivity::{
         CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
-        ExecutionRequest, LiveExecutionGateway, StaticExecutionGateway,
+        ExecutionRequest, LiveExecutionGateway, ReplaceOutcome, ReplaceRequest,
+        StaticExecutionGateway,
     };
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
     use rust_decimal_macros::dec;
     use std::fs;
+    use std::io::ErrorKind;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -994,6 +1126,12 @@ mod tests {
             _request: &CancellationRequest,
         ) -> Result<CancellationOutcome, ExecutionError> {
             Ok(CancellationOutcome::Canceled)
+        }
+
+        fn replace(&self, _request: &ReplaceRequest) -> Result<ReplaceOutcome, ExecutionError> {
+            Ok(ReplaceOutcome::Replaced {
+                venue_order_id: "venue-live-health-2".to_string(),
+            })
         }
 
         fn reconcile_fills(
@@ -1442,6 +1580,179 @@ mod tests {
     }
 
     #[test]
+    fn daemon_replaces_live_order_through_gateway_and_preserves_logical_order() {
+        let root = temp_dir("live-order-replace");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let gateway = StaticExecutionGateway::acknowledged("venue-live-replace-1")
+            .with_replace_result(Ok(ReplaceOutcome::Replaced {
+                venue_order_id: "venue-live-replace-2".to_string(),
+            }));
+        let mut daemon =
+            PloyDaemon::boot_with_live_execution(&config, Box::new(gateway)).expect("boot");
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-replace".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(2),
+                limit_price: Some(dec!(0.55)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit live intent");
+
+        let response = daemon
+            .replace_order(
+                "example.live",
+                "order-intent-live-replace",
+                ploy_operator_contracts::OrderReplaceRequest {
+                    quantity: dec!(3),
+                    limit_price: Some(dec!(0.57)),
+                },
+            )
+            .expect("replace live order");
+
+        assert_eq!(response.state, "acknowledged");
+        assert_eq!(response.order_id, "order-intent-live-replace");
+        assert_eq!(response.revision, 1);
+        assert_eq!(
+            response.venue_order_id.as_deref(),
+            Some("venue-live-replace-2")
+        );
+        assert_eq!(
+            response.venue_order_history,
+            vec!["venue-live-replace-1".to_string()]
+        );
+        assert_eq!(response.requested_qty, dec!(3));
+        assert_eq!(response.limit_price, Some(dec!(0.57)));
+
+        let trading_state = daemon.trading_state();
+        assert_eq!(
+            trading_state[0].orders[0].order_id,
+            "order-intent-live-replace"
+        );
+        assert_eq!(trading_state[0].orders[0].revision, 1);
+        assert_eq!(
+            trading_state[0].orders[0].venue_order_history,
+            vec!["venue-live-replace-1".to_string()]
+        );
+        assert_eq!(
+            trading_state[0].orders[0].venue_order_id.as_deref(),
+            Some("venue-live-replace-2")
+        );
+    }
+
+    #[test]
+    fn daemon_rejects_replace_when_requested_qty_is_below_filled_qty() {
+        let root = temp_dir("live-order-replace-invalid");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let fill = FillRecord {
+            fill_id: "fill-live-replace-1".to_string(),
+            order_id: "order-intent-live-replace-invalid".to_string(),
+            token_id: "yes-token".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(2),
+            price: dec!(0.55),
+            fee: dec!(0.01),
+            timestamp: chrono::Utc::now(),
+        };
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(
+                StaticExecutionGateway::acknowledged("venue-live-replace-invalid-1")
+                    .with_reconciled_fills(vec![fill]),
+            ),
+        )
+        .expect("boot");
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-replace-invalid".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(3),
+                limit_price: Some(dec!(0.55)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit live intent");
+        daemon.reconcile_live_fills().expect("reconcile fills");
+
+        let error = daemon
+            .replace_order(
+                "example.live",
+                "order-intent-live-replace-invalid",
+                ploy_operator_contracts::OrderReplaceRequest {
+                    quantity: dec!(1),
+                    limit_price: Some(dec!(0.57)),
+                },
+            )
+            .expect_err("replace should fail");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error
+            .to_string()
+            .contains("cannot be below filled quantity"));
+    }
+
+    #[test]
     fn daemon_reconciles_live_fill_into_canonical_ledger() {
         let root = temp_dir("live-fill-reconcile");
         let runtime_root = root.join("run/platform");
@@ -1727,14 +2038,12 @@ mod tests {
             .expect("submit live intent");
 
         daemon.write_runtime_snapshots().expect("degraded snapshot");
-        assert!(
-            daemon
-                .control_plane
-                .system
-                .status()
-                .status
-                .starts_with("degraded@")
-        );
+        assert!(daemon
+            .control_plane
+            .system
+            .status()
+            .status
+            .starts_with("degraded@"));
         assert_eq!(daemon.control_plane.system.status().error_count_1h, 1);
         assert_eq!(
             daemon
@@ -1744,15 +2053,15 @@ mod tests {
             ObservedState::Degraded
         );
 
-        daemon.write_runtime_snapshots().expect("recovering snapshot");
-        assert!(
-            daemon
-                .control_plane
-                .system
-                .status()
-                .status
-                .starts_with("recovering@")
-        );
+        daemon
+            .write_runtime_snapshots()
+            .expect("recovering snapshot");
+        assert!(daemon
+            .control_plane
+            .system
+            .status()
+            .status
+            .starts_with("recovering@"));
         assert_eq!(
             daemon
                 .inspect_deployment("example.live")
@@ -1762,13 +2071,11 @@ mod tests {
         );
 
         daemon.write_runtime_snapshots().expect("running snapshot");
-        assert!(
-            daemon
-                .control_plane
-                .system
-                .status()
-                .status
-                .starts_with("running@")
-        );
+        assert!(daemon
+            .control_plane
+            .system
+            .status()
+            .status
+            .starts_with("running@"));
     }
 }

@@ -10,5 +10,6 @@ description = "Ploy control-plane client workspace entry point"
 [dependencies]
 ploy-operator-contracts.workspace = true
 ploy-platform.workspace = true
+rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true

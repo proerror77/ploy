@@ -46,11 +46,23 @@ pub struct PaperIntentResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderReplaceRequest {
+    pub quantity: Decimal,
+    pub limit_price: Option<Decimal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrderControlResponse {
     pub deployment_id: String,
     pub order_id: String,
     pub state: String,
     pub venue_order_id: Option<String>,
+    #[serde(default)]
+    pub venue_order_history: Vec<String>,
+    #[serde(default)]
+    pub revision: u32,
+    pub requested_qty: Decimal,
+    pub limit_price: Option<Decimal>,
     pub rejection_reason: Option<String>,
     pub last_error: Option<String>,
     pub filled_qty: Decimal,
@@ -64,6 +76,10 @@ pub struct OrderSnapshot {
     pub requested_qty: Decimal,
     pub limit_price: Option<Decimal>,
     pub venue_order_id: Option<String>,
+    #[serde(default)]
+    pub venue_order_history: Vec<String>,
+    #[serde(default)]
+    pub revision: u32,
     pub state: String,
     pub filled_qty: Decimal,
     pub rejection_reason: Option<String>,
@@ -161,9 +177,9 @@ pub struct MarketData {
 #[cfg(test)]
 mod tests {
     use super::{
-        IntentPurpose, OrderControlResponse, OrderSnapshot, PaperIntentRequest,
-        PaperIntentResponse, PnlSnapshotResponse, RiskSnapshotResponse, TradeResponse,
-        TradingIntentSnapshot, TradingStateSnapshot,
+        IntentPurpose, OrderControlResponse, OrderReplaceRequest, OrderSnapshot,
+        PaperIntentRequest, PaperIntentResponse, PnlSnapshotResponse, RiskSnapshotResponse,
+        TradeResponse, TradingIntentSnapshot, TradingStateSnapshot,
     };
     use chrono::Utc;
     use rust_decimal::Decimal;
@@ -218,6 +234,10 @@ mod tests {
             order_id: "order-1".to_string(),
             state: "canceled".to_string(),
             venue_order_id: Some("venue-1".to_string()),
+            venue_order_history: vec!["venue-0".to_string()],
+            revision: 1,
+            requested_qty: Decimal::new(250, 2),
+            limit_price: Some(Decimal::new(42, 2)),
             rejection_reason: None,
             last_error: None,
             filled_qty: Decimal::ZERO,
@@ -231,9 +251,30 @@ mod tests {
                 "order_id": "order-1",
                 "state": "canceled",
                 "venue_order_id": "venue-1",
+                "venue_order_history": ["venue-0"],
+                "revision": 1,
+                "requested_qty": "2.50",
+                "limit_price": "0.42",
                 "rejection_reason": null,
                 "last_error": null,
                 "filled_qty": "0",
+            })
+        );
+    }
+
+    #[test]
+    fn order_replace_request_uses_stable_wire_keys() {
+        let value = serde_json::to_value(OrderReplaceRequest {
+            quantity: Decimal::new(250, 2),
+            limit_price: Some(Decimal::new(42, 2)),
+        })
+        .expect("to_value");
+
+        assert_eq!(
+            value,
+            json!({
+                "quantity": "2.50",
+                "limit_price": "0.42",
             })
         );
     }
@@ -261,6 +302,8 @@ mod tests {
                 requested_qty: rust_decimal::Decimal::ONE,
                 limit_price: None,
                 venue_order_id: Some("venue-1".to_string()),
+                venue_order_history: vec!["venue-0".to_string()],
+                revision: 1,
                 state: "filled".to_string(),
                 filled_qty: rust_decimal::Decimal::ONE,
                 rejection_reason: None,
@@ -295,6 +338,8 @@ mod tests {
                     "requested_qty": "1",
                     "limit_price": null,
                     "venue_order_id": "venue-1",
+                    "venue_order_history": ["venue-0"],
+                    "revision": 1,
                     "state": "filled",
                     "filled_qty": "1",
                     "rejection_reason": null,
