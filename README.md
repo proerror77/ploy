@@ -28,7 +28,8 @@ Runbook: [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md
 Compatibility note:
 
 - `ployd` and `ployctl` are the default workspace entrypoints for the trading platform spine.
-- Remaining `ploy ...` examples below document the legacy single-binary surface and should be treated as historical compatibility paths, not the target deployment model.
+- The old root runtime tree has been retired from the compiled workspace.
+- Remaining `ploy ...` examples below are historical reference only and are not runnable entrypoints in this branch.
 
 ## Features
 
@@ -392,21 +393,20 @@ Ploy is organized around a multi-domain platform where each prediction market ca
 Strategies run independently and can be managed as daemons (start/stop/status). The event registry continuously discovers new markets, scores them for edge, and promotes them through a funnel from discovery to active trading. Persistence is handled by PostgreSQL with an event store for auditability, a checkpoint system for crash recovery, and a dead-letter queue for failed operations.
 
 ```
-src/
-  adapters/      Polymarket CLOB, WebSocket, Binance WS
-  agents/        Domain trading agents (crypto, sports)
-  ai_clients/    Claude/Grok client integrations
-  coordinator/   Multi-agent coordinator + order queue
-  domain/        Core types (Market, Order, Quote)
-  persistence/   Event store, checkpoints, DLQ
-  signing/       Wallet, order signing, nonce manager
-  strategy/      Trading strategies + risk + registry
-  coordination/  Circuit breaker, emergency stop, shutdown
-  tui/           Terminal dashboard (ratatui)
-config/          TOML configuration files
-migrations/      PostgreSQL schema migrations
-docs/            Extended documentation
-examples/        Example integrations (OpenClaw RPC)
+apps/
+  ployd/         Trading platform daemon entrypoint
+  ployctl/       Operator client entrypoint
+crates/
+  ploy-platform/ Control-plane core
+  ploy-trading/  Canonical trading lifecycle
+  ploy-deployments/ Deployment worker protocol + supervisor
+  ploy-operator-contracts/ Shared API and event contracts
+  ploy-strategy-bundles/ Signal-to-intent runtime
+  ploy-research/ Replay and backtest consumers
+ploy-frontend/   Web operator console
+ploy-sidecar/    Agent-facing sidecar client
+config/          Platform and deployment configuration
+docs/            Design docs, runbooks, and migration notes
 ```
 
 ## Development
