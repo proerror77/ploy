@@ -66,6 +66,14 @@ impl TradingRuntime {
         self.orders.reject(order_id, reason)
     }
 
+    pub fn record_order_error(
+        &mut self,
+        order_id: &str,
+        error: impl Into<String>,
+    ) -> Option<&crate::orders::OrderRecord> {
+        self.orders.record_error(order_id, error)
+    }
+
     pub fn cancel_order(&mut self, order_id: &str) -> Option<&crate::orders::OrderRecord> {
         self.orders.cancel(order_id)
     }
@@ -147,6 +155,7 @@ mod tests {
                 state: OrderState::PartiallyFilled,
                 filled_qty: dec!(1),
                 rejection_reason: None,
+                last_error: None,
             }],
             fills: vec![FillRecord {
                 fill_id: "fill-1".to_string(),

@@ -42,6 +42,7 @@ pub struct PaperIntentResponse {
     pub state: String,
     pub venue_order_id: Option<String>,
     pub rejection_reason: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,6 +52,7 @@ pub struct OrderControlResponse {
     pub state: String,
     pub venue_order_id: Option<String>,
     pub rejection_reason: Option<String>,
+    pub last_error: Option<String>,
     pub filled_qty: Decimal,
 }
 
@@ -65,6 +67,7 @@ pub struct OrderSnapshot {
     pub state: String,
     pub filled_qty: Decimal,
     pub rejection_reason: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -216,6 +219,7 @@ mod tests {
             state: "canceled".to_string(),
             venue_order_id: Some("venue-1".to_string()),
             rejection_reason: None,
+            last_error: None,
             filled_qty: Decimal::ZERO,
         })
         .expect("to_value");
@@ -228,6 +232,7 @@ mod tests {
                 "state": "canceled",
                 "venue_order_id": "venue-1",
                 "rejection_reason": null,
+                "last_error": null,
                 "filled_qty": "0",
             })
         );
@@ -259,6 +264,7 @@ mod tests {
                 state: "filled".to_string(),
                 filled_qty: rust_decimal::Decimal::ONE,
                 rejection_reason: None,
+                last_error: None,
             }],
             fills: vec![],
             positions: vec![],
@@ -292,6 +298,7 @@ mod tests {
                     "state": "filled",
                     "filled_qty": "1",
                     "rejection_reason": null,
+                    "last_error": null,
                 }],
                 "fills": [],
                 "positions": [],
@@ -341,6 +348,7 @@ mod tests {
             state: "acknowledged".to_string(),
             venue_order_id: Some("venue-order-1".to_string()),
             rejection_reason: None,
+            last_error: None,
         })
         .expect("response json");
         assert_eq!(
@@ -352,6 +360,7 @@ mod tests {
                 "state": "acknowledged",
                 "venue_order_id": "venue-order-1",
                 "rejection_reason": null,
+                "last_error": null,
             })
         );
     }

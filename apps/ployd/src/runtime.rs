@@ -250,6 +250,7 @@ impl PloyDaemon {
             state: "acknowledged".to_string(),
             venue_order_id: Some(venue_order_id),
             rejection_reason: None,
+            last_error: None,
         })
     }
 
@@ -343,6 +344,7 @@ impl PloyDaemon {
                     state: "acknowledged".to_string(),
                     venue_order_id: Some(venue_order_id),
                     rejection_reason: None,
+                    last_error: None,
                 })
             }
             Ok(ExecutionOutcome::Rejected { reason }) => {
@@ -356,10 +358,18 @@ impl PloyDaemon {
                     order_id,
                     state: "rejected".to_string(),
                     venue_order_id: None,
-                    rejection_reason: Some(reason),
+                    rejection_reason: Some(reason.clone()),
+                    last_error: Some(reason),
                 })
             }
-            Err(err) => Err(io_error_from_execution_error(err)),
+            Err(err) => {
+                let reason = err.to_string();
+                self.trading
+                    .entry(intent.deployment_id.clone())
+                    .or_default()
+                    .record_order_error(&order_id, reason);
+                Err(io_error_from_execution_error(err))
+            }
         }
     }
 
@@ -591,6 +601,7 @@ fn build_trading_state_snapshot(
                 state: order_state_wire(order.state),
                 filled_qty: order.filled_qty,
                 rejection_reason: order.rejection_reason,
+                last_error: order.last_error,
             })
             .collect(),
         fills: snapshot
@@ -666,6 +677,7 @@ fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<Trading
                 state: order_state_from_wire(&order.state)?,
                 filled_qty: order.filled_qty,
                 rejection_reason: order.rejection_reason,
+                last_error: order.last_error,
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -706,6 +718,7 @@ fn build_order_control_response(
         state: order_state_wire(order.state),
         venue_order_id: order.venue_order_id.clone(),
         rejection_reason: order.rejection_reason.clone(),
+        last_error: order.last_error.clone(),
         filled_qty: order.filled_qty,
     }
 }
@@ -1228,6 +1241,11 @@ mod tests {
         assert_eq!(trading_state[0].orders.len(), 1);
         assert_eq!(trading_state[0].orders[0].state, "pending");
         assert!(trading_state[0].orders[0].rejection_reason.is_none());
+        assert!(trading_state[0].orders[0]
+            .last_error
+            .as_deref()
+            .expect("last_error")
+            .contains("gateway offline"));
     }
 
     #[test]
