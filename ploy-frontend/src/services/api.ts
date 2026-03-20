@@ -5,13 +5,12 @@ import type {
   SystemStatus,
   SystemControlResponse,
   StrategyConfig,
-  StrategiesControlResponse,
-  StrategyControlMutationResponse,
+  DeploymentSummary,
   SecurityEvent,
   PnLDataPoint,
   RunningStrategy,
   RiskData,
-  UpdateStrategyControlRequest,
+  DesiredState,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -200,17 +199,17 @@ class ApiService {
     return this.fetch<RunningStrategy[]>('/strategies/running');
   }
 
-  async getStrategiesControl(): Promise<StrategiesControlResponse> {
-    return this.fetch<StrategiesControlResponse>('/strategies/control');
+  async getDeployments(): Promise<DeploymentSummary[]> {
+    return this.fetch<DeploymentSummary[]>('/deployments');
   }
 
-  async updateStrategyControl(
+  async updateDeploymentState(
     deploymentId: string,
-    patch: UpdateStrategyControlRequest
-  ): Promise<StrategyControlMutationResponse> {
-    return this.fetch<StrategyControlMutationResponse>(`/strategies/control/${deploymentId}`, {
-      method: 'PUT',
-      body: JSON.stringify(patch),
+    desiredState: DesiredState
+  ): Promise<DeploymentSummary> {
+    return this.fetch<DeploymentSummary>(`/deployments/${deploymentId}/control`, {
+      method: 'POST',
+      body: JSON.stringify({ desired_state: desiredState }),
     });
   }
 

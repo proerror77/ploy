@@ -84,6 +84,7 @@ function App() {
             <Route index element={<Dashboard />} />
             <Route path="trades" element={<TradeHistory />} />
             <Route path="monitor" element={<LiveMonitor />} />
+            <Route path="deployments" element={<StrategyMonitor />} />
             <Route path="monitor-strategy" element={<StrategyMonitor />} />
             <Route path="nba-swing" element={<NBASwingMonitor />} />
             <Route path="risk" element={<RiskDashboard />} />
