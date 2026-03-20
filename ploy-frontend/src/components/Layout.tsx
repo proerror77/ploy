@@ -15,12 +15,20 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 
+function getErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return fallback;
+}
+
 const navigation = [
   { name: '仪表盘', href: '/', icon: LayoutDashboard },
   { name: '交易历史', href: '/trades', icon: History },
   { name: '实时日志', href: '/monitor', icon: Activity },
-  { name: '策略监控', href: '/monitor-strategy', icon: Target },
-  { name: 'NBA Swing', href: '/nba-swing', icon: TrendingUp },
+  { name: '部署控制', href: '/monitor-strategy', icon: Target },
+  { name: 'NBA Legacy', href: '/nba-swing', icon: TrendingUp },
   { name: 'Risk Monitor', href: '/risk', icon: ShieldAlert },
   { name: '系统控制', href: '/control', icon: Power },
   { name: '安全审计', href: '/security', icon: Shield },
@@ -68,8 +76,8 @@ export function Layout() {
       setAdminToken('');
       setAuthStatus('authed');
       await refreshAfterAuthChange();
-    } catch (error: any) {
-      setAuthError(error?.message ?? '登录失败');
+    } catch (error: unknown) {
+      setAuthError(getErrorMessage(error, '登录失败'));
     } finally {
       setAuthBusy(false);
     }
@@ -82,8 +90,8 @@ export function Layout() {
       await api.logout();
       setAuthStatus('guest');
       await refreshAfterAuthChange();
-    } catch (error: any) {
-      setAuthError(error?.message ?? '退出失败');
+    } catch (error: unknown) {
+      setAuthError(getErrorMessage(error, '退出失败'));
     } finally {
       setAuthBusy(false);
     }
