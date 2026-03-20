@@ -59,68 +59,24 @@ export interface SystemControlResponse {
   message: string;
 }
 
-export interface StrategyControlEntry {
+export type DesiredState = 'running' | 'paused' | 'stopped';
+
+export type ObservedState =
+  | 'starting'
+  | 'running'
+  | 'degraded'
+  | 'paused'
+  | 'stopped'
+  | 'failed';
+
+export interface DeploymentSummary {
   deployment_id: string;
-  strategy: string;
-  strategy_version: string;
-  domain: string;
-  enabled: boolean;
-  timeframe: string;
-  lifecycle_stage: string;
-  product_type: string;
-  market_selector_mode: string;
-  allocator_profile: string;
-  risk_profile: string;
-  priority: number;
-  cooldown_secs: number;
-  last_evaluated_at: string | null;
-  last_evaluation_score: number | null;
-  latest_evaluation_id: string | null;
-  latest_evaluation_stage: string | null;
-  latest_evaluation_dataset_hash: string | null;
-  latest_evaluation_model_hash: string | null;
-  latest_evaluation_sample_size: number | null;
-  domain_ingress_mode: string;
-  running_agents: string[];
+  desired_state: DesiredState;
+  observed_state: ObservedState;
 }
 
-export interface StrategiesControlResponse {
-  account_id: string | null;
-  ingress_mode: string | null;
-  items: StrategyControlEntry[];
-  updated_at: string;
-}
-
-export interface UpdateStrategyControlRequest {
-  enabled?: boolean;
-  priority?: number;
-  cooldown_secs?: number;
-  allocator_profile?: string;
-  risk_profile?: string;
-  strategy_version?: string;
-  lifecycle_stage?: string;
-  product_type?: string;
-  last_evaluation_score?: number;
-}
-
-export interface StrategyControlMutationResponse {
-  success: boolean;
-  deployment_id: string;
-  strategy_version: string;
-  enabled: boolean;
-  priority: number;
-  cooldown_secs: number;
-  lifecycle_stage: string;
-  product_type: string;
-  last_evaluated_at: string | null;
-  last_evaluation_score: number | null;
-  latest_evaluation_id: string | null;
-  latest_evaluation_stage: string | null;
-  latest_evaluation_dataset_hash: string | null;
-  latest_evaluation_model_hash: string | null;
-  latest_evaluation_sample_size: number | null;
-  allocator_profile: string;
-  risk_profile: string;
+export interface UpdateDeploymentStateRequest {
+  desired_state: DesiredState;
 }
 
 export interface StrategyConfig {

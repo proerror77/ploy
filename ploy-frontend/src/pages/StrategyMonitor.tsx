@@ -1,78 +1,111 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, Loader2, Pause, Play, Target } from 'lucide-react';
+import { Activity, Loader2, Pause, Play, Square } from 'lucide-react';
 
+import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
-import { Badge } from '@/components/ui/Badge';
 import { api } from '@/services/api';
 
-import type { StrategyControlEntry } from '@/types';
+import type { DeploymentSummary, DesiredState } from '@/types';
 
-function getStatusVariant(entry: StrategyControlEntry) {
-  if (!entry.enabled) return 'secondary' as const;
-  if (entry.running_agents.length > 0) return 'success' as const;
-  return 'warning' as const;
-}
-
-function getStatusLabel(entry: StrategyControlEntry) {
-  if (!entry.enabled) return 'disabled';
-  if (entry.running_agents.length > 0) return 'running';
-  return 'enabled';
-}
-
-function getDomainColor(domain: string) {
-  switch (domain) {
-    case 'crypto':
-      return 'bg-blue-500/10 text-blue-700 border-blue-200';
-    case 'sports':
-      return 'bg-green-500/10 text-green-700 border-green-200';
-    case 'politics':
-      return 'bg-amber-500/10 text-amber-700 border-amber-200';
-    case 'economics':
-      return 'bg-slate-500/10 text-slate-700 border-slate-200';
+function getStatusVariant(entry: DeploymentSummary) {
+  switch (entry.observed_state) {
+    case 'running':
+      return 'success' as const;
+    case 'failed':
+      return 'destructive' as const;
+    case 'starting':
+    case 'degraded':
+      return 'warning' as const;
+    case 'paused':
+    case 'stopped':
     default:
-      return 'bg-muted text-muted-foreground border-border';
+      return 'secondary' as const;
   }
 }
 
-function formatEvaluationScore(score: number | null) {
-  if (score === null) return 'Pending';
-  return `${(score * 100).toFixed(0)}%`;
+function getStatusLabel(entry: DeploymentSummary) {
+  return `${entry.desired_state} / ${entry.observed_state}`;
+}
+
+function nextActions(desiredState: DesiredState): DesiredState[] {
+  switch (desiredState) {
+    case 'running':
+      return ['paused', 'stopped'];
+    case 'paused':
+      return ['running', 'stopped'];
+    case 'stopped':
+    default:
+      return ['running'];
+  }
+}
+
+function actionLabel(desiredState: DesiredState) {
+  switch (desiredState) {
+    case 'running':
+      return 'Resume';
+    case 'paused':
+      return 'Pause';
+    case 'stopped':
+      return 'Stop';
+  }
+}
+
+function ActionIcon({ desiredState }: { desiredState: DesiredState }) {
+  switch (desiredState) {
+    case 'running':
+      return <Play className="mr-2 h-4 w-4" />;
+    case 'paused':
+      return <Pause className="mr-2 h-4 w-4" />;
+    case 'stopped':
+      return <Square className="mr-2 h-4 w-4" />;
+  }
 }
 
 export function StrategyMonitor() {
   const queryClient = useQueryClient();
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['strategies', 'control'],
-    queryFn: () => api.getStrategiesControl(),
+  const { data: deployments = [], isLoading, error } = useQuery({
+    queryKey: ['deployments'],
+    queryFn: () => api.getDeployments(),
     refetchInterval: 10000,
   });
 
-  const pauseAllMutation = useMutation({
-    mutationFn: () => api.pauseSystem(),
+  const setDeploymentState = useMutation({
+    mutationFn: ({
+      deploymentId,
+      desiredState,
+    }: {
+      deploymentId: string;
+      desiredState: DesiredState;
+    }) => api.updateDeploymentState(deploymentId, desiredState),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['strategies', 'control'] });
-      queryClient.invalidateQueries({ queryKey: ['strategies', 'running'] });
+      queryClient.invalidateQueries({ queryKey: ['deployments'] });
       queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
+    },
+  });
+
+  const pauseAllMutation = useMutation({
+    mutationFn: async () => {
+      const active = deployments.filter((entry) => entry.desired_state === 'running');
+      await Promise.all(
+        active.map((entry) => api.updateDeploymentState(entry.deployment_id, 'paused'))
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['deployments'] });
     },
   });
 
   const resumeAllMutation = useMutation({
-    mutationFn: () => api.resumeSystem(),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['strategies', 'control'] });
-      queryClient.invalidateQueries({ queryKey: ['strategies', 'running'] });
-      queryClient.invalidateQueries({ queryKey: ['system', 'status'] });
+    mutationFn: async () => {
+      const paused = deployments.filter((entry) => entry.desired_state !== 'running');
+      await Promise.all(
+        paused.map((entry) => api.updateDeploymentState(entry.deployment_id, 'running'))
+      );
     },
-  });
-
-  const updateStrategyMutation = useMutation({
-    mutationFn: ({ deploymentId, enabled }: { deploymentId: string; enabled: boolean }) =>
-      api.updateStrategyControl(deploymentId, { enabled }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['strategies', 'control'] });
-      queryClient.invalidateQueries({ queryKey: ['strategies', 'running'] });
+      queryClient.invalidateQueries({ queryKey: ['deployments'] });
     },
   });
 
@@ -88,14 +121,12 @@ export function StrategyMonitor() {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="text-center">
-          <p className="text-destructive">Failed to load deployment control state</p>
+          <p className="text-destructive">Failed to load deployment resources</p>
           <p className="mt-1 text-sm text-muted-foreground">{String(error)}</p>
         </div>
       </div>
     );
   }
-
-  const items = data?.items ?? [];
 
   return (
     <div className="p-8">
@@ -103,7 +134,7 @@ export function StrategyMonitor() {
         <div>
           <h1 className="text-3xl font-bold">Deployment Control</h1>
           <p className="text-muted-foreground">
-            Manage strategy deployments through the control plane instead of local UI state
+            Manage deployment resources through the new control-plane API
           </p>
         </div>
         <div className="flex gap-2">
@@ -111,15 +142,15 @@ export function StrategyMonitor() {
             variant="outline"
             size="sm"
             onClick={() => pauseAllMutation.mutate()}
-            disabled={pauseAllMutation.isPending}
+            disabled={pauseAllMutation.isPending || deployments.length === 0}
           >
             <Pause className="mr-2 h-4 w-4" />
-            Pause All
+            Pause Running
           </Button>
           <Button
             size="sm"
             onClick={() => resumeAllMutation.mutate()}
-            disabled={resumeAllMutation.isPending}
+            disabled={resumeAllMutation.isPending || deployments.length === 0}
           >
             <Play className="mr-2 h-4 w-4" />
             Resume All
@@ -127,16 +158,18 @@ export function StrategyMonitor() {
         </div>
       </div>
 
-      {data && (
-        <div className="mb-6 flex flex-wrap gap-3 text-sm text-muted-foreground">
-          <span>Account: {data.account_id ?? 'unscoped'}</span>
-          <span>Ingress: {data.ingress_mode ?? 'n/a'}</span>
-          <span>Updated: {new Date(data.updated_at).toLocaleString()}</span>
-        </div>
-      )}
+      <div className="mb-6 flex flex-wrap gap-3 text-sm text-muted-foreground">
+        <span>Deployments: {deployments.length}</span>
+        <span>
+          Running desired: {deployments.filter((entry) => entry.desired_state === 'running').length}
+        </span>
+        <span>
+          Failed observed: {deployments.filter((entry) => entry.observed_state === 'failed').length}
+        </span>
+      </div>
 
       <div className="space-y-4">
-        {items.length === 0 ? (
+        {deployments.length === 0 ? (
           <Card>
             <CardContent className="py-12 text-center">
               <Activity className="mx-auto mb-4 h-12 w-12 text-muted-foreground/50" />
@@ -147,10 +180,10 @@ export function StrategyMonitor() {
             </CardContent>
           </Card>
         ) : (
-          items.map((entry) => {
+          deployments.map((entry) => {
             const isMutating =
-              updateStrategyMutation.isPending &&
-              updateStrategyMutation.variables?.deploymentId === entry.deployment_id;
+              setDeploymentState.isPending &&
+              setDeploymentState.variables?.deploymentId === entry.deployment_id;
 
             return (
               <Card key={entry.deployment_id} className="border-l-4 border-l-primary">
@@ -159,91 +192,63 @@ export function StrategyMonitor() {
                     <div className="space-y-2">
                       <div className="flex items-center gap-3">
                         <Activity className="h-6 w-6 text-primary" />
-                        <CardTitle>{entry.strategy}</CardTitle>
+                        <CardTitle>{entry.deployment_id}</CardTitle>
                         <Badge variant={getStatusVariant(entry)}>{getStatusLabel(entry)}</Badge>
                       </div>
-                      <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                        <span className="font-mono">{entry.deployment_id}</span>
-                        <span
-                          className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium ${getDomainColor(entry.domain)}`}
-                        >
-                          {entry.domain}
-                        </span>
-                        <span>Version {entry.strategy_version}</span>
-                        <span>{entry.timeframe}</span>
-                        <span>{entry.lifecycle_stage}</span>
-                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        Desired state drives the worker supervisor. Observed state reflects the last
+                        runtime heartbeat from `ployd`.
+                      </p>
                     </div>
 
-                    {entry.enabled ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          updateStrategyMutation.mutate({
-                            deploymentId: entry.deployment_id,
-                            enabled: false,
-                          })
-                        }
-                        disabled={isMutating}
-                      >
-                        <Pause className="mr-2 h-4 w-4" />
-                        Disable
-                      </Button>
-                    ) : (
-                      <Button
-                        size="sm"
-                        onClick={() =>
-                          updateStrategyMutation.mutate({
-                            deploymentId: entry.deployment_id,
-                            enabled: true,
-                          })
-                        }
-                        disabled={isMutating}
-                      >
-                        <Play className="mr-2 h-4 w-4" />
-                        Enable
-                      </Button>
-                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {nextActions(entry.desired_state).map((desiredState) => (
+                        <Button
+                          key={desiredState}
+                          variant={desiredState === 'stopped' ? 'destructive' : 'outline'}
+                          size="sm"
+                          onClick={() =>
+                            setDeploymentState.mutate({
+                              deploymentId: entry.deployment_id,
+                              desiredState,
+                            })
+                          }
+                          disabled={isMutating}
+                        >
+                          <ActionIcon desiredState={desiredState} />
+                          {actionLabel(desiredState)}
+                        </Button>
+                      ))}
+                    </div>
                   </div>
                 </CardHeader>
 
                 <CardContent>
-                  <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                     <div className="rounded-lg border bg-card p-4">
-                      <div className="text-sm text-muted-foreground">Evaluation</div>
-                      <div className="mt-2 text-2xl font-bold">
-                        {formatEvaluationScore(entry.last_evaluation_score)}
-                      </div>
+                      <div className="text-sm text-muted-foreground">Desired</div>
+                      <div className="mt-2 text-2xl font-bold">{entry.desired_state}</div>
                       <div className="mt-1 text-xs text-muted-foreground">
-                        {entry.latest_evaluation_stage ?? 'No stage recorded'}
+                        Operator-managed target state
                       </div>
                     </div>
 
                     <div className="rounded-lg border bg-card p-4">
-                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <Target className="h-4 w-4" />
-                        Profiles
-                      </div>
-                      <div className="mt-2 font-medium">{entry.allocator_profile}</div>
+                      <div className="text-sm text-muted-foreground">Observed</div>
+                      <div className="mt-2 text-2xl font-bold">{entry.observed_state}</div>
                       <div className="mt-1 text-xs text-muted-foreground">
-                        Risk: {entry.risk_profile}
+                        Runtime health reported by the deployment worker
                       </div>
                     </div>
 
                     <div className="rounded-lg border bg-card p-4">
-                      <div className="text-sm text-muted-foreground">Priority / Cooldown</div>
-                      <div className="mt-2 text-2xl font-bold">{entry.priority}</div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        {entry.cooldown_secs}s cooldown
+                      <div className="text-sm text-muted-foreground">Operator Notes</div>
+                      <div className="mt-2 text-sm font-medium">
+                        Use `stop` to fully quiesce a deployment.
                       </div>
-                    </div>
-
-                    <div className="rounded-lg border bg-card p-4">
-                      <div className="text-sm text-muted-foreground">Runtime</div>
-                      <div className="mt-2 font-medium">{entry.domain_ingress_mode}</div>
                       <div className="mt-1 text-xs text-muted-foreground">
-                        Agents: {entry.running_agents.length > 0 ? entry.running_agents.join(', ') : 'none'}
+                        `pause` keeps the deployment registered but removes it from active runtime
+                        work.
                       </div>
                     </div>
                   </div>
