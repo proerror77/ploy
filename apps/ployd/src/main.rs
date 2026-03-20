@@ -7,6 +7,8 @@ use runtime::PloyDaemon;
 
 fn main() {
     let config = PlatformConfig::from_env();
+    let _server = http::spawn_server(config.listen_addr.clone(), config.runtime_root.clone())
+        .expect("start ployd http server");
     let mut daemon = PloyDaemon::boot(&config).expect("boot ployd");
     let status = daemon.control_plane.system.status();
     let worker_count = daemon.supervisor.workers().count();

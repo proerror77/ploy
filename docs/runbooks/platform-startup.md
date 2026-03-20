@@ -16,7 +16,7 @@ Start the single-host trading platform runtime with:
 cargo run -p ployd
 ```
 
-2. In a second shell, check the operator client against the runtime snapshot:
+2. In a second shell, check the operator client against the control-plane surface:
 
 ```bash
 cargo run -p ployctl -- system status
@@ -41,5 +41,6 @@ ployctl deployments inspect example.paper
 ```
 
 This branch now treats `ployd` as the default long-running daemon entrypoint and
-`ployctl` as the snapshot-backed operator client. Deployment CRUD is still
-simplified, but the daemon/client/runtime contract is no longer a placeholder.
+`ployctl` as an HTTP-first operator client with snapshot fallback. Deployment
+CRUD is still simplified, but the daemon/client/runtime contract is no longer a
+placeholder.

@@ -1,15 +1,20 @@
+use serde::de::DeserializeOwned;
 use ploy_operator_contracts::{DeploymentSummary, SystemStatus};
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub struct ControlPlaneClient {
+    pub control_plane_addr: String,
     pub runtime_root: PathBuf,
 }
 
 impl ControlPlaneClient {
     pub fn from_runtime_root(runtime_root: impl Into<PathBuf>) -> Self {
         Self {
+            control_plane_addr: "127.0.0.1:8081".to_string(),
             runtime_root: runtime_root.into(),
         }
     }
@@ -35,15 +40,63 @@ impl ControlPlaneClient {
     }
 
     fn read_status_snapshot(&self) -> Result<SystemStatus, String> {
+        if let Ok(status) = self.read_status_over_http() {
+            return Ok(status);
+        }
         let body = fs::read_to_string(self.runtime_root.join("system-status.json"))
             .map_err(|err| format!("read status snapshot: {err}"))?;
         serde_json::from_str(&body).map_err(|err| format!("parse status snapshot: {err}"))
     }
 
     fn read_deployment_snapshots(&self) -> Result<Vec<DeploymentSummary>, String> {
+        if let Ok(deployments) = self.read_deployments_over_http() {
+            return Ok(deployments);
+        }
         let body = fs::read_to_string(self.runtime_root.join("deployments.json"))
             .map_err(|err| format!("read deployment snapshot: {err}"))?;
         serde_json::from_str(&body).map_err(|err| format!("parse deployment snapshot: {err}"))
+    }
+
+    fn read_status_over_http(&self) -> Result<SystemStatus, String> {
+        self.get_json("/api/system/status")
+    }
+
+    fn read_deployments_over_http(&self) -> Result<Vec<DeploymentSummary>, String> {
+        self.get_json("/api/deployments")
+    }
+
+    fn get_json<T>(&self, path: &str) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        let mut stream = TcpStream::connect(&self.control_plane_addr)
+            .map_err(|err| format!("connect {}: {err}", self.control_plane_addr))?;
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            self.control_plane_addr
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|err| format!("write request: {err}"))?;
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .map_err(|err| format!("read response: {err}"))?;
+
+        let mut parts = response.splitn(2, "\r\n\r\n");
+        let status_line = parts
+            .next()
+            .and_then(|headers| headers.lines().next())
+            .ok_or_else(|| "missing HTTP status line".to_string())?;
+        if !status_line.contains("200") {
+            return Err(format!("unexpected HTTP status: {status_line}"));
+        }
+
+        let body = parts
+            .next()
+            .ok_or_else(|| "missing HTTP body".to_string())?;
+        serde_json::from_str(body).map_err(|err| format!("parse HTTP body: {err}"))
     }
 }
 
@@ -58,7 +111,10 @@ mod tests {
     use super::ControlPlaneClient;
     use ploy_operator_contracts::{DeploymentSummary, DesiredState, ObservedState, SystemStatus};
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -107,6 +163,64 @@ mod tests {
         assert_eq!(
             client.inspect_deployment("example.paper").expect("deployment"),
             deployments[0]
+        );
+    }
+
+    #[test]
+    fn client_prefers_http_control_plane_when_available() {
+        let runtime_root = temp_dir("http-runtime");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut request = [0_u8; 1024];
+                let bytes = stream.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..bytes]);
+                let body = if request.starts_with("GET /api/system/status") {
+                    serde_json::json!({
+                        "status": "running-via-http",
+                        "uptime_seconds": 99,
+                        "version": "0.1.0",
+                        "strategy": "platform",
+                        "last_trade_time": null,
+                        "websocket_connected": false,
+                        "database_connected": false,
+                        "error_count_1h": 0
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!([
+                        {
+                            "deployment_id": "http.paper",
+                            "desired_state": "running",
+                            "observed_state": "running"
+                        }
+                    ])
+                    .to_string()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("write response");
+            }
+        });
+
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = addr.to_string();
+
+        assert!(client.system_status().contains("running-via-http"));
+        assert_eq!(
+            client
+                .inspect_deployment("http.paper")
+                .expect("deployment over http")
+                .deployment_id,
+            "http.paper"
         );
     }
 }
