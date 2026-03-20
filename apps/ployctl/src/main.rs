@@ -1,9 +1,4 @@
-mod client;
-mod deployments;
-mod system;
-mod trading;
-
-use client::ControlPlaneClient;
+use ployctl::{client::ControlPlaneClient, deployments, system, trading};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {

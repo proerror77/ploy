@@ -17,8 +17,10 @@ fn release_platform_workflow_builds_new_workspace_binaries() {
         "cargo build --release --locked",
         "apps/ployd",
         "apps/ployctl",
+        "apps/ploytui",
         "bin/ployd",
         "bin/ployctl",
+        "bin/ploytui",
         "deployment/ployd.service",
         "scripts/install-platform-service.sh",
         "systemctl status ployd",
@@ -26,6 +28,7 @@ fn release_platform_workflow_builds_new_workspace_binaries() {
         "api/events/stream",
         "ployctl system status",
         "ployctl trading status",
+        "ploytui",
     ] {
         if !content.contains(needle) {
             offenders.push(format!(

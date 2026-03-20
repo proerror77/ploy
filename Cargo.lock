@@ -3616,6 +3616,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ploytui"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ploy-operator-contracts",
+ "ployctl",
+]
+
+[[package]]
 name = "polymarket-client-sdk"
 version = "0.4.2"
 dependencies = [
