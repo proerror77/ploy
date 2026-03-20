@@ -135,6 +135,7 @@ jobs:
             sleep 2
             $SUDO systemctl status ployd --no-pager
             curl -fsS http://127.0.0.1:8081/health
+            curl -N --max-time 2 http://127.0.0.1:8081/api/events/stream || true
             # Verify the deployed operator client path: ployctl system status
             # Verify the deployed operator client path: ployctl trading status
             "${DEPLOY_ROOT}/bin/ployctl" system status

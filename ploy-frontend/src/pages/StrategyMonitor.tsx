@@ -5,8 +5,10 @@ import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { api } from '@/services/api';
+import { ws } from '@/services/websocket';
 
 import type { DeploymentSummary, DesiredState } from '@/types';
+import { useEffect } from 'react';
 
 function getStatusVariant(entry: DeploymentSummary) {
   switch (entry.observed_state) {
@@ -68,8 +70,16 @@ export function StrategyMonitor() {
   const { data: deployments = [], isLoading, error } = useQuery({
     queryKey: ['deployments'],
     queryFn: () => api.getDeployments(),
-    refetchInterval: 10000,
   });
+
+  useEffect(() => {
+    const unsubscribe = ws.subscribe('deployment_snapshot', (event) => {
+      if (event.type === 'deployment_snapshot') {
+        queryClient.setQueryData(['deployments'], event.data.deployments);
+      }
+    });
+    return unsubscribe;
+  }, [queryClient]);
 
   const setDeploymentState = useMutation({
     mutationFn: ({

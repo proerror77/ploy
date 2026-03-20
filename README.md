@@ -24,6 +24,8 @@ cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
+# realtime operator stream
+curl -N http://127.0.0.1:8081/api/events/stream
 rtk cargo test --test platform_smoke -- --nocapture
 ```
 
@@ -423,6 +425,7 @@ cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
+curl -N http://127.0.0.1:8081/api/events/stream
 rtk cargo check -p ployd             # Fast daemon type-check loop
 rtk cargo check -p ployctl           # Fast client type-check loop
 rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture

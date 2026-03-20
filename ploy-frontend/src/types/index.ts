@@ -75,6 +75,31 @@ export interface DeploymentSummary {
   observed_state: ObservedState;
 }
 
+export interface TradingPnlSnapshot {
+  realized_pnl: string;
+  unrealized_pnl: string;
+  total_fees: string;
+  net_pnl: string;
+}
+
+export interface TradingRiskSnapshot {
+  pending_intents: number;
+  active_orders: number;
+  open_positions: number;
+  gross_exposure: string;
+}
+
+export interface TradingStateSnapshot {
+  deployment_id: string;
+  runtime_mode: string;
+  intents: unknown[];
+  orders: unknown[];
+  fills: unknown[];
+  positions: unknown[];
+  pnl: TradingPnlSnapshot;
+  risk: TradingRiskSnapshot;
+}
+
 export interface UpdateDeploymentStateRequest {
   desired_state: DesiredState;
 }
@@ -135,7 +160,10 @@ export type WsMessage =
   | { type: 'trade'; data: TradeResponse }
   | { type: 'position'; data: PositionResponse }
   | { type: 'market'; data: MarketData }
-  | { type: 'status'; data: StatusUpdate };
+  | { type: 'status'; data: StatusUpdate }
+  | { type: 'system_snapshot'; data: { system: SystemStatus } }
+  | { type: 'deployment_snapshot'; data: { deployments: DeploymentSummary[] } }
+  | { type: 'trading_snapshot'; data: { trading: TradingStateSnapshot[] } };
 
 export interface PnLDataPoint {
   timestamp: string;

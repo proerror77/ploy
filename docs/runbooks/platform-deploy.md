@@ -47,6 +47,7 @@ After the bundle lands on the host, the deploy workflow:
    - `curl -fsS http://127.0.0.1:8081/health`
    - `/opt/ploy/bin/ployctl system status`
    - `/opt/ploy/bin/ployctl trading status`
+   - `curl -N http://127.0.0.1:8081/api/events/stream`
 
 ## Required Host Paths
 
@@ -67,6 +68,7 @@ curl -fsS http://127.0.0.1:8081/health
 /opt/ploy/bin/ployctl system status
 /opt/ploy/bin/ployctl trading status
 /opt/ploy/bin/ployctl deployments list
+curl -N http://127.0.0.1:8081/api/events/stream
 ```
 
 ## Deployment Operator Flow

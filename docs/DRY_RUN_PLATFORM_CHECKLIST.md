@@ -20,6 +20,7 @@
 - `cargo run -p ployctl -- system status`
 - `cargo run -p ployctl -- trading status`
 - `cargo run -p ployctl -- deployments list`
+- `curl -N http://127.0.0.1:8081/api/events/stream`
 - `rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture`
 
 ## 2. 策略矩陣檢查
@@ -49,3 +50,4 @@
 - 以上檢查無 error/stacktrace
 - `ployd` / `ployctl` 可正常啟動且 smoke test 通過
 - `/api/deployments` 與 `/api/trading/state` 都能返回有效快照
+- `/api/events/stream` 可持續輸出 `system_snapshot` / `deployment_snapshot` / `trading_snapshot`
