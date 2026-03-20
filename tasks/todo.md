@@ -1,3 +1,32 @@
+# Live Execution Facade Cut (2026-03-20)
+
+## Goal
+Wire the first real Polymarket live-execution seam into the new trading
+platform so `ployd` can accept a live deployment intent, submit it through a
+single connectivity facade, and write the resulting order ack or rejection into
+the canonical trading ledger.
+
+## File ownership
+
+- `crates/ploy-connectivity/`
+  - owner: Polymarket execution facade, execution request/result types, env-backed live client
+- `apps/ployd/src/runtime.rs`, `apps/ployd/src/http.rs`
+  - owner: runtime dispatch, live intent gating, control-plane ingress
+- `crates/ploy-operator-contracts/`
+  - owner: intent submission wire contract if the existing paper-only naming must be generalized
+
+## Tasks
+
+- [x] Add failing tests for live deployment intent submission in `ployd` runtime and HTTP ingress.
+- [x] Add the smallest `ploy-connectivity` Polymarket execution facade needed for submit + ack/reject.
+- [x] Route `/api/deployments/:id/intents` through paper or live execution based on deployment runtime mode.
+- [x] Re-run focused Rust validation for `ploy-connectivity`, `ployd`, and platform smoke coverage.
+
+## Progress notes
+
+- 2026-03-20: This cut is intentionally limited to live submit + ack/reject into the canonical ledger. Full cancel/reconcile and richer venue sync remain follow-up work once the main live path is proven.
+- 2026-03-20: `ploy-connectivity` now wraps the vendored Polymarket SDK behind a live execution gateway, and `ployd` routes `paper` and `live` deployments through the same `/api/deployments/:id/intents` ingress while preserving canonical ledger updates.
+
 # Trading Platform Completion Sweep (2026-03-20)
 
 ## Goal

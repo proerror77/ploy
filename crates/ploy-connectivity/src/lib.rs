@@ -1,5 +1,329 @@
+use ploy_trading::TradeSide;
+use polymarket_client_sdk::auth::{LocalSigner, Signer};
+use polymarket_client_sdk::clob::types::{OrderType, Side, SignatureType};
+use polymarket_client_sdk::clob::{Client, Config};
+use polymarket_client_sdk::types::{Address, U256};
+use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
+use rust_decimal::Decimal;
+use std::str::FromStr;
+use thiserror::Error;
+
 pub const CRATE_MARKER: &str = "ploy-connectivity";
+const DEFAULT_POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionRequest {
+    pub order_id: String,
+    pub token_id: String,
+    pub side: TradeSide,
+    pub quantity: Decimal,
+    pub limit_price: Option<Decimal>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecutionOutcome {
+    Acknowledged { venue_order_id: String },
+    Rejected { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ExecutionError {
+    #[error("live execution misconfigured: {0}")]
+    Configuration(String),
+    #[error("live execution validation failed: {0}")]
+    Validation(String),
+    #[error("live execution transport failed: {0}")]
+    Transport(String),
+}
+
+pub trait LiveExecutionGateway: Send + Sync + std::fmt::Debug {
+    fn submit(&self, request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticExecutionGateway {
+    result: Result<ExecutionOutcome, ExecutionError>,
+}
+
+impl StaticExecutionGateway {
+    pub fn acknowledged(venue_order_id: impl Into<String>) -> Self {
+        Self {
+            result: Ok(ExecutionOutcome::Acknowledged {
+                venue_order_id: venue_order_id.into(),
+            }),
+        }
+    }
+
+    pub fn rejected(reason: impl Into<String>) -> Self {
+        Self {
+            result: Ok(ExecutionOutcome::Rejected {
+                reason: reason.into(),
+            }),
+        }
+    }
+
+    pub fn failed(error: ExecutionError) -> Self {
+        Self { result: Err(error) }
+    }
+}
+
+impl LiveExecutionGateway for StaticExecutionGateway {
+    fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
+        self.result.clone()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletSignatureType {
+    Eoa,
+    Proxy,
+    GnosisSafe,
+}
+
+impl WalletSignatureType {
+    fn into_sdk(self) -> SignatureType {
+        match self {
+            Self::Eoa => SignatureType::Eoa,
+            Self::Proxy => SignatureType::Proxy,
+            Self::GnosisSafe => SignatureType::GnosisSafe,
+        }
+    }
+}
+
+impl Default for WalletSignatureType {
+    fn default() -> Self {
+        Self::Eoa
+    }
+}
+
+impl FromStr for WalletSignatureType {
+    type Err = ExecutionError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "eoa" => Ok(Self::Eoa),
+            "proxy" => Ok(Self::Proxy),
+            "gnosis_safe" => Ok(Self::GnosisSafe),
+            other => Err(ExecutionError::Configuration(format!(
+                "unsupported POLY_SIGNATURE_TYPE `{other}`"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolymarketExecutionConfig {
+    pub host: String,
+    pub private_key: Option<String>,
+    pub use_server_time: bool,
+    pub funder: Option<String>,
+    pub signature_type: WalletSignatureType,
+}
+
+impl Default for PolymarketExecutionConfig {
+    fn default() -> Self {
+        Self {
+            host: DEFAULT_POLY_CLOB_HOST.to_string(),
+            private_key: std::env::var(PRIVATE_KEY_VAR).ok(),
+            use_server_time: true,
+            funder: std::env::var("POLY_FUNDER").ok(),
+            signature_type: std::env::var("POLY_SIGNATURE_TYPE")
+                .ok()
+                .map(|value| WalletSignatureType::from_str(&value))
+                .transpose()
+                .unwrap_or(None)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl PolymarketExecutionConfig {
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        if let Ok(value) = std::env::var("POLY_CLOB_HOST") {
+            config.host = value;
+        }
+        if let Ok(value) = std::env::var("POLY_USE_SERVER_TIME") {
+            config.use_server_time = matches!(value.as_str(), "1" | "true" | "TRUE" | "yes");
+        }
+
+        config
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PolymarketExecutionGateway {
+    config: PolymarketExecutionConfig,
+}
+
+impl PolymarketExecutionGateway {
+    pub fn from_env() -> Self {
+        Self {
+            config: PolymarketExecutionConfig::from_env(),
+        }
+    }
+
+    pub fn new(config: PolymarketExecutionConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl LiveExecutionGateway for PolymarketExecutionGateway {
+    fn submit(&self, request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
+        let limit_price = request.limit_price.ok_or_else(|| {
+            ExecutionError::Validation(
+                "live Polymarket execution currently requires a limit price".to_string(),
+            )
+        })?;
+        let private_key = self.config.private_key.as_deref().ok_or_else(|| {
+            ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
+        })?;
+        let token_id = U256::from_str(&request.token_id).map_err(|err| {
+            ExecutionError::Validation(format!("invalid token_id `{}`: {err}", request.token_id))
+        })?;
+        let funder = self
+            .config
+            .funder
+            .as_deref()
+            .map(Address::from_str)
+            .transpose()
+            .map_err(|err| ExecutionError::Configuration(format!("invalid POLY_FUNDER: {err}")))?;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| ExecutionError::Transport(format!("create tokio runtime: {err}")))?;
+
+        runtime.block_on(async {
+            let signer = LocalSigner::from_str(private_key)
+                .map_err(|err| {
+                    ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
+                })?
+                .with_chain_id(Some(POLYGON));
+
+            let client = Client::new(
+                &self.config.host,
+                Config::builder()
+                    .use_server_time(self.config.use_server_time)
+                    .build(),
+            )
+            .map_err(|err| ExecutionError::Transport(format!("build client: {err}")))?;
+
+            let mut auth = client.authentication_builder(&signer);
+            auth = auth.signature_type(self.config.signature_type.into_sdk());
+            if let Some(funder) = funder {
+                auth = auth.funder(funder);
+            }
+
+            let client = auth
+                .authenticate()
+                .await
+                .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))?;
+
+            let order = client
+                .limit_order()
+                .token_id(token_id)
+                .order_type(OrderType::GTC)
+                .price(limit_price)
+                .size(request.quantity)
+                .side(polymarket_side(request.side))
+                .build()
+                .await
+                .map_err(|err| ExecutionError::Validation(format!("build limit order: {err}")))?;
+
+            let signed_order = client
+                .sign(&signer, order)
+                .await
+                .map_err(|err| ExecutionError::Transport(format!("sign order: {err}")))?;
+
+            let response = client
+                .post_order(signed_order)
+                .await
+                .map_err(|err| ExecutionError::Transport(format!("submit order: {err}")))?;
+
+            if response.success {
+                Ok(ExecutionOutcome::Acknowledged {
+                    venue_order_id: response.order_id,
+                })
+            } else {
+                Ok(ExecutionOutcome::Rejected {
+                    reason: response.error_msg.unwrap_or_else(|| {
+                        format!("venue rejected order with status {}", response.status)
+                    }),
+                })
+            }
+        })
+    }
+}
+
+fn polymarket_side(side: TradeSide) -> Side {
+    match side {
+        TradeSide::Buy => Side::Buy,
+        TradeSide::Sell => Side::Sell,
+    }
+}
 
 pub fn crate_marker() -> &'static str {
     CRATE_MARKER
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
+        PolymarketExecutionConfig, PolymarketExecutionGateway, StaticExecutionGateway,
+        WalletSignatureType,
+    };
+    use ploy_trading::TradeSide;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn static_gateway_returns_acknowledged_outcome() {
+        let gateway = StaticExecutionGateway::acknowledged("venue-order-1");
+        let outcome = gateway
+            .submit(&ExecutionRequest {
+                order_id: "order-1".to_string(),
+                token_id: "1".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                limit_price: Some(dec!(0.55)),
+            })
+            .expect("ack outcome");
+
+        assert_eq!(
+            outcome,
+            ExecutionOutcome::Acknowledged {
+                venue_order_id: "venue-order-1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn polymarket_gateway_rejects_missing_limit_price_before_network() {
+        let gateway = PolymarketExecutionGateway::new(PolymarketExecutionConfig {
+            host: "https://clob.polymarket.com".to_string(),
+            private_key: None,
+            use_server_time: true,
+            funder: None,
+            signature_type: WalletSignatureType::Eoa,
+        });
+
+        let error = gateway
+            .submit(&ExecutionRequest {
+                order_id: "order-1".to_string(),
+                token_id: "1".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                limit_price: None,
+            })
+            .expect_err("limit price should be required");
+
+        assert_eq!(
+            error,
+            ExecutionError::Validation(
+                "live Polymarket execution currently requires a limit price".to_string()
+            )
+        );
+    }
 }
