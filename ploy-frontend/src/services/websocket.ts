@@ -5,29 +5,13 @@ export type WebSocketEvent =
   | { type: 'trade'; data: Trade }
   | { type: 'position'; data: Position }
   | { type: 'market'; data: MarketData }
-  | { type: 'status'; data: { status: 'running' | 'stopped' | 'error' } }
-  | { type: 'nba_update'; data: NBAUpdateData };
-
-export interface NBAUpdateData {
-  state: string;
-  game: {
-    gameId: string;
-    homeTeam: string;
-    awayTeam: string;
-    homeScore: number;
-    awayScore: number;
-    quarter: number;
-    timeRemaining: number;
-    possession: string;
-  } | null;
-  prediction: {
-    winProb: number;
-    confidence: number;
-  } | null;
-  marketPrice: number | null;
-}
+  | { type: 'status'; data: { status: 'running' | 'stopped' | 'error' } };
 
 type ConnectionCallback = (connected: boolean) => void;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
 
 function defaultWsUrl(): string {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -78,25 +62,20 @@ export class WebSocketService {
     this.ws.onmessage = (ev) => {
       if (typeof ev.data !== 'string') return;
 
-      let parsed: any;
+      let parsed: unknown;
       try {
         parsed = JSON.parse(ev.data);
       } catch {
         return;
       }
 
+      if (!isRecord(parsed)) return;
+
       const t = parsed?.type;
       const data = parsed?.data;
       if (typeof t !== 'string') return;
 
-      if (
-        t === 'log' ||
-        t === 'trade' ||
-        t === 'position' ||
-        t === 'market' ||
-        t === 'status' ||
-        t === 'nba_update'
-      ) {
+      if (t === 'log' || t === 'trade' || t === 'position' || t === 'market' || t === 'status') {
         this.emit({ type: t, data } as WebSocketEvent);
       }
     };
@@ -173,4 +152,3 @@ export class WebSocketService {
 }
 
 export const ws = new WebSocketService();
-

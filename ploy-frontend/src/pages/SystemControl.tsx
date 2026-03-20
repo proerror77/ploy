@@ -172,8 +172,9 @@ export function SystemControl() {
                   </Button>
                 </div>
                 <div className="rounded-lg bg-muted p-4 text-sm text-muted-foreground">
-                  <p>Warning: Stopping the system will close all active positions</p>
-                  <p>Warning: Restart may take 30-60 seconds</p>
+                  <p>Stop pauses coordinator-managed activity. It does not force-close positions.</p>
+                  <p>Use emergency halt from the domain-specific control surface when positions must be unwound immediately.</p>
+                  <p>Restart performs a pause/resume cycle and may take 30-60 seconds.</p>
                 </div>
               </div>
             </CardContent>

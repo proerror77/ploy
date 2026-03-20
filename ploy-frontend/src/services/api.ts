@@ -3,11 +3,15 @@ import type {
   Trade,
   Position,
   SystemStatus,
+  SystemControlResponse,
   StrategyConfig,
+  StrategiesControlResponse,
+  StrategyControlMutationResponse,
   SecurityEvent,
   PnLDataPoint,
   RunningStrategy,
   RiskData,
+  UpdateStrategyControlRequest,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -161,20 +165,20 @@ class ApiService {
     return this.fetch<SystemStatus>('/system/status');
   }
 
-  async startSystem(): Promise<{ success: boolean; message: string }> {
-    return this.fetch<{ success: boolean; message: string }>('/system/start', {
+  async startSystem(): Promise<SystemControlResponse> {
+    return this.fetch<SystemControlResponse>('/system/start', {
       method: 'POST',
     });
   }
 
-  async stopSystem(): Promise<{ success: boolean; message: string }> {
-    return this.fetch<{ success: boolean; message: string }>('/system/stop', {
+  async stopSystem(): Promise<SystemControlResponse> {
+    return this.fetch<SystemControlResponse>('/system/stop', {
       method: 'POST',
     });
   }
 
-  async restartSystem(): Promise<{ success: boolean; message: string }> {
-    return this.fetch<{ success: boolean; message: string }>('/system/restart', {
+  async restartSystem(): Promise<SystemControlResponse> {
+    return this.fetch<SystemControlResponse>('/system/restart', {
       method: 'POST',
     });
   }
@@ -196,22 +200,36 @@ class ApiService {
     return this.fetch<RunningStrategy[]>('/strategies/running');
   }
 
-  async pauseSystem(domain?: string): Promise<{ success: boolean; message: string }> {
-    return this.fetch<{ success: boolean; message: string }>('/system/pause', {
+  async getStrategiesControl(): Promise<StrategiesControlResponse> {
+    return this.fetch<StrategiesControlResponse>('/strategies/control');
+  }
+
+  async updateStrategyControl(
+    deploymentId: string,
+    patch: UpdateStrategyControlRequest
+  ): Promise<StrategyControlMutationResponse> {
+    return this.fetch<StrategyControlMutationResponse>(`/strategies/control/${deploymentId}`, {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  async pauseSystem(domain?: string): Promise<SystemControlResponse> {
+    return this.fetch<SystemControlResponse>('/system/pause', {
       method: 'POST',
       body: domain ? JSON.stringify({ domain }) : undefined,
     });
   }
 
-  async resumeSystem(domain?: string): Promise<{ success: boolean; message: string }> {
-    return this.fetch<{ success: boolean; message: string }>('/system/resume', {
+  async resumeSystem(domain?: string): Promise<SystemControlResponse> {
+    return this.fetch<SystemControlResponse>('/system/resume', {
       method: 'POST',
       body: domain ? JSON.stringify({ domain }) : undefined,
     });
   }
 
-  async haltSystem(domain?: string): Promise<{ success: boolean; message: string }> {
-    return this.fetch<{ success: boolean; message: string }>('/system/halt', {
+  async haltSystem(domain?: string): Promise<SystemControlResponse> {
+    return this.fetch<SystemControlResponse>('/system/halt', {
       method: 'POST',
       body: domain ? JSON.stringify({ domain }) : undefined,
     });
