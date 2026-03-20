@@ -1,5 +1,5 @@
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
-use ploy_operator_contracts::{DesiredState, ObservedState};
+use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
 use ploy_platform::{ControlPlane, DeploymentRecord};
 
 #[test]
@@ -9,6 +9,7 @@ fn platform_smoke_registers_and_starts_one_deployment() {
         deployment_id: "example.paper".to_string(),
         bundle_id: "openclaw".to_string(),
         runtime_mode: "paper".to_string(),
+        deployment_state: DeploymentState::Enabled,
         desired_state: DesiredState::Running,
         observed_state: ObservedState::Starting,
     });

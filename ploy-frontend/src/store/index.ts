@@ -24,8 +24,8 @@ interface AppState {
   updateMarketData: (data: MarketData) => void;
 
   // System status
-  systemStatus: 'running' | 'stopped' | 'error';
-  setSystemStatus: (status: 'running' | 'stopped' | 'error') => void;
+  systemStatus: string;
+  setSystemStatus: (status: string) => void;
 
   deployments: DeploymentSummary[];
   setDeployments: (deployments: DeploymentSummary[]) => void;

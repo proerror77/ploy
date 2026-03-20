@@ -15,9 +15,9 @@ fn main() {
     let events = Arc::new(EventBroker::default());
     {
         let mut daemon = daemon.lock().expect("daemon lock");
-        daemon
-            .write_runtime_snapshots()
-            .expect("write initial snapshots");
+        if let Err(err) = daemon.write_runtime_snapshots() {
+            eprintln!("ployd boot degraded: {err}");
+        }
         publish_snapshot_events(&daemon, &events);
     }
     let state = Arc::new(AppState {

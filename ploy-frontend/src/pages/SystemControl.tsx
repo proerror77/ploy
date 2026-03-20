@@ -12,7 +12,7 @@ import { Play, Square, RotateCw, Activity, Database, Wifi, WifiOff } from 'lucid
 export function SystemControl() {
   const queryClient = useQueryClient();
   const [wsConnected, setWsConnected] = useState(ws.isConnected());
-  const [realtimeStatus, setRealtimeStatus] = useState<'running' | 'stopped' | 'error' | null>(null);
+  const [realtimeStatus, setRealtimeStatus] = useState<string | null>(null);
   const [realtimeSnapshot, setRealtimeSnapshot] = useState<Awaited<
     ReturnType<typeof api.getSystemStatus>
   > | null>(null);
@@ -78,12 +78,15 @@ export function SystemControl() {
 
   const getStatusBadge = () => {
     if (!effectiveStatus) return null;
-    const variants = {
-      running: 'success' as const,
-      stopped: 'secondary' as const,
-      error: 'destructive' as const,
-    };
-    return <Badge variant={variants[effectiveStatus]}>{effectiveStatus}</Badge>;
+    const variant =
+      effectiveStatus === 'running'
+        ? 'success'
+        : effectiveStatus === 'stopped'
+          ? 'secondary'
+          : effectiveStatus === 'starting' || effectiveStatus === 'recovering'
+            ? 'outline'
+            : 'destructive';
+    return <Badge variant={variant}>{effectiveStatus}</Badge>;
   };
 
   if (isLoading) {
@@ -160,7 +163,9 @@ export function SystemControl() {
                   <Button
                     onClick={() => startMutation.mutate()}
                     disabled={
-                      effectiveStatus === 'running' || startMutation.isPending
+                      effectiveStatus === 'running' ||
+                      effectiveStatus === 'recovering' ||
+                      startMutation.isPending
                     }
                     className="w-full"
                   >
