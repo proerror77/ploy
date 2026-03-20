@@ -16,12 +16,14 @@ explicitly supported by RTK.
 
 ## Tool Mapping
 
-- `src/coordinator/`: coordinator-managed order ingress, risk, queueing, and
-  runtime control.
-- `src/strategy/`: trading strategies, runtime specs, and backtests.
-- `src/persistence/`: event store, checkpoints, and schema helpers.
-- `src/adapters/`: Polymarket, Binance, Postgres, and other external clients.
-- `src/api/` and `src/tui/`: API surface and terminal dashboard.
+- `apps/ployd/`: daemon entrypoint for the trading-platform workspace.
+- `apps/ployctl/`: operator client entrypoint.
+- `crates/ploy-platform/`: control-plane core.
+- `crates/ploy-trading/`: canonical intent -> order -> fill -> position lifecycle.
+- `crates/ploy-deployments/`: worker protocol and supervisor.
+- `crates/ploy-operator-contracts/`: shared API/event contracts.
+- `crates/ploy-strategy-bundles/`: signal-to-intent strategy runtime.
+- `crates/ploy-research/`: replay/backtest consumers of trading models.
 - `config/` and `migrations/`: runtime TOML and PostgreSQL schema changes.
 - `ploy-frontend/` and `ploy-sidecar/`: TypeScript frontend and sidecar
   projects.
@@ -39,9 +41,8 @@ explicitly supported by RTK.
 - If `curl` cannot fetch meaningful page content (JS-rendered pages, anti-bot/Cloudflare, login walls), switch to the `agent-browser` skill workflow (`open` -> `snapshot -i` -> `get text body`) before trying mirrors.
 - Parallel: use `multi_tool_use.parallel` for parallel shell reads/searches
 
-- Default safe local smoke path: `cargo run --bin ploy -- platform start
-  --crypto --dry-run`
-- Demo dashboard: `cargo run --bin ploy -- dashboard --demo`
+- Default safe local smoke path: `cargo run -p ployd`
+- Default operator client path: `cargo run -p ployctl`
 - Frontend dev: `cd ploy-frontend && npm run dev`
 - Sidecar dev: `cd ploy-sidecar && npm run dev`
 - Full runtime setup, credentials, and command coverage live in
@@ -72,8 +73,9 @@ Prefer **atomic commits** for landed repo changes:
 
 - Default to dry-run and safe local validation. Do not enable live trading
   paths without explicit user intent and the required credentials.
-- Prefer coordinator-managed live ingress via `ploy platform start`; avoid
-  direct live order paths unless explicitly required.
+- Prefer the workspace control-plane path via `ployd` / `ployctl`; treat
+  remaining `ploy ...` references as archived compatibility docs only.
+- Avoid direct live order paths unless explicitly required.
 - Do not build Rust on live trading hosts. Ship CI-built artifacts instead.
 - Use separate worktrees when parallel agents or live sessions may touch the
   same files.
