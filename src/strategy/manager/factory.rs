@@ -94,6 +94,15 @@ impl StrategyFactory {
                     )?;
                 Ok(Box::new(strategy))
             }
+            "weather_market" => {
+                let strategy =
+                    super::super::weather_market::strategy::WeatherMarketStrategy::from_toml(
+                        strategy_id,
+                        config_content,
+                        dry_run,
+                    )?;
+                Ok(Box::new(strategy))
+            }
             other => Err(anyhow!("Unknown strategy type: {}", other).into()),
         }
     }
@@ -147,6 +156,13 @@ impl StrategyFactory {
                 description: "NBA comeback strategy using ESPN/game-state inputs".to_string(),
                 config_template: "nba_comeback.toml".to_string(),
             },
+            StrategyInfo {
+                name: "weather_market".to_string(),
+                description:
+                    "Observe-only weather contract strategy using public station and forecast data"
+                        .to_string(),
+                config_template: "weather_market_default.toml".to_string(),
+            },
         ]
     }
 }
@@ -173,5 +189,6 @@ mod tests {
         assert!(strategies.iter().any(|s| s.name == "momentum"));
         assert!(strategies.iter().any(|s| s.name == "event_edge"));
         assert!(strategies.iter().any(|s| s.name == "nba_comeback"));
+        assert!(strategies.iter().any(|s| s.name == "weather_market"));
     }
 }
