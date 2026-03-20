@@ -48,6 +48,7 @@ fn json_error(status: u16, error: &str, message: impl Into<Option<String>>) -> (
 fn status_text(status_code: u16) -> &'static str {
     match status_code {
         200 => "OK",
+        401 => "Unauthorized",
         400 => "Bad Request",
         404 => "Not Found",
         409 => "Conflict",
@@ -251,14 +252,41 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
     let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
     let method = request_line.next().unwrap_or("GET");
     let path = request_line.next().unwrap_or("/");
+    let configured_token = match configured_admin_token(state) {
+        Ok(token) => token,
+        Err(response) => return write_json_response(stream, response),
+    };
+    let authenticated = request_authenticated(&request, configured_token.as_deref());
     if method == "GET" && path == "/api/events/stream" {
+        if request_requires_auth(path) && !authenticated {
+            return write_json_response(
+                stream,
+                json_error(
+                    401,
+                    "unauthorized",
+                    Some("control-plane admin token is required".to_string()),
+                ),
+            );
+        }
         return handle_event_stream(stream, state);
     }
     let body = request
         .split("\r\n\r\n")
         .nth(1)
         .filter(|body| !body.is_empty());
-    let (status_code, body) = handle_runtime_request(method, path, body, state);
+    let response = handle_authenticated_runtime_request(
+        method,
+        path,
+        body,
+        authenticated,
+        configured_token.as_deref(),
+        state,
+    );
+    write_json_response(stream, response)
+}
+
+fn write_json_response(mut stream: TcpStream, response: (u16, String)) -> io::Result<()> {
+    let (status_code, body) = response;
     write!(
         stream,
         "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
@@ -267,6 +295,105 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
         body.len(),
         body
     )
+}
+
+fn configured_admin_token(state: &Arc<AppState>) -> Result<Option<String>, (u16, String)> {
+    state
+        .daemon
+        .lock()
+        .map(|daemon| daemon.config.admin_token.clone())
+        .map_err(|_| json_error(503, "daemon_lock_poisoned", None))
+}
+
+fn request_requires_auth(path: &str) -> bool {
+    !matches!(
+        path,
+        "/health" | "/auth/session" | "/auth/login" | "/auth/logout"
+    )
+}
+
+fn extract_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .find_map(|line| {
+            let (header_name, value) = line.split_once(':')?;
+            if header_name.eq_ignore_ascii_case(name) {
+                Some(value.trim())
+            } else {
+                None
+            }
+        })
+}
+
+fn request_authenticated(request: &str, expected_token: Option<&str>) -> bool {
+    let Some(expected_token) = expected_token else {
+        return true;
+    };
+
+    if let Some(header) = extract_header(request, "Authorization") {
+        if let Some(token) = header.strip_prefix("Bearer ") {
+            if token.trim() == expected_token {
+                return true;
+            }
+        }
+    }
+
+    extract_header(request, "x-ploy-admin-token")
+        .map(|token| token == expected_token)
+        .unwrap_or(false)
+}
+
+fn handle_authenticated_runtime_request(
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    authenticated: bool,
+    configured_token: Option<&str>,
+    state: &Arc<AppState>,
+) -> (u16, String) {
+    match (method, path) {
+        ("GET", "/auth/session") => (
+            200,
+            serde_json::json!({
+                "authenticated": authenticated,
+                "auth_required": configured_token.is_some(),
+            })
+            .to_string(),
+        ),
+        ("POST", "/auth/login") => {
+            let Some(body) = body else {
+                return json_error(400, "missing_body", None);
+            };
+            let provided = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("admin_token")
+                        .and_then(|token| token.as_str())
+                        .map(str::to_string)
+                });
+            match configured_token {
+                None => (200, serde_json::json!({ "success": true }).to_string()),
+                Some(expected) if provided.as_deref() == Some(expected) => {
+                    (200, serde_json::json!({ "success": true }).to_string())
+                }
+                Some(_) => json_error(
+                    401,
+                    "invalid_credentials",
+                    Some("admin token did not match configured control-plane token".to_string()),
+                ),
+            }
+        }
+        ("POST", "/auth/logout") => (200, serde_json::json!({ "success": true }).to_string()),
+        _ if request_requires_auth(path) && !authenticated => json_error(
+            401,
+            "unauthorized",
+            Some("control-plane admin token is required".to_string()),
+        ),
+        _ => handle_runtime_request(method, path, body, state),
+    }
 }
 
 fn handle_runtime_request(
@@ -591,7 +718,8 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_api_request, handle_runtime_request, route_request, snapshot_events, AppState,
+        handle_api_request, handle_authenticated_runtime_request, handle_runtime_request,
+        route_request, snapshot_events, AppState,
     };
     use crate::events::EventBroker;
     use ploy_connectivity::{CancellationOutcome, ReplaceOutcome, StaticExecutionGateway};
@@ -649,6 +777,94 @@ mod tests {
         let (deployments_code, deployments_body) = route_request("/api/deployments", &runtime_root);
         assert_eq!(deployments_code, 200);
         assert!(deployments_body.contains("\"deployment_id\":\"example.paper\""));
+    }
+
+    #[test]
+    fn auth_session_reports_auth_requirement_when_admin_token_is_configured() {
+        let config = crate::config::PlatformConfig {
+            admin_token: Some("secret-token".to_string()),
+            ..crate::config::PlatformConfig::default()
+        };
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (code, body) = handle_authenticated_runtime_request(
+            "GET",
+            "/auth/session",
+            None,
+            false,
+            Some("secret-token"),
+            &state,
+        );
+
+        assert_eq!(code, 200);
+        assert!(body.contains("\"auth_required\":true"));
+        assert!(body.contains("\"authenticated\":false"));
+    }
+
+    #[test]
+    fn unauthorized_requests_are_rejected_when_admin_token_is_configured() {
+        let config = crate::config::PlatformConfig {
+            admin_token: Some("secret-token".to_string()),
+            ..crate::config::PlatformConfig::default()
+        };
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (code, body) = handle_authenticated_runtime_request(
+            "POST",
+            "/api/deployments/example.paper/control",
+            Some("{\"desired_state\":\"paused\",\"deployment_state\":null}"),
+            false,
+            Some("secret-token"),
+            &state,
+        );
+
+        assert_eq!(code, 401);
+        assert!(body.contains("\"error\":\"unauthorized\""));
+    }
+
+    #[test]
+    fn auth_login_accepts_matching_admin_token() {
+        let config = crate::config::PlatformConfig {
+            admin_token: Some("secret-token".to_string()),
+            ..crate::config::PlatformConfig::default()
+        };
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (code, body) = handle_authenticated_runtime_request(
+            "POST",
+            "/auth/login",
+            Some("{\"admin_token\":\"secret-token\"}"),
+            false,
+            Some("secret-token"),
+            &state,
+        );
+
+        assert_eq!(code, 200);
+        assert!(body.contains("\"success\":true"));
     }
 
     #[test]

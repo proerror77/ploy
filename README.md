@@ -32,6 +32,11 @@ curl -N http://127.0.0.1:8081/api/events/stream
 rtk cargo test --test platform_smoke -- --nocapture
 ```
 
+Optional admin auth:
+
+- Set `PLOY_ADMIN_TOKEN` or `PLOY_API_ADMIN_TOKEN` before booting `ployd` to require a bearer token on the control-plane API.
+- `ployctl` will automatically reuse `PLOY_ADMIN_TOKEN`, `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` for authenticated requests.
+
 Runbooks:
 
 - [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md)

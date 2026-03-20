@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformConfig {
     pub listen_addr: String,
+    pub admin_token: Option<String>,
     pub registry_file: PathBuf,
     pub runtime_root: PathBuf,
     pub status_file: PathBuf,
@@ -17,6 +18,7 @@ impl Default for PlatformConfig {
         let runtime_root = PathBuf::from("run/platform");
         Self {
             listen_addr: "127.0.0.1:8081".to_string(),
+            admin_token: None,
             registry_file: PathBuf::from("data/state/deployments.json"),
             status_file: runtime_root.join("system-status.json"),
             deployment_status_file: runtime_root.join("deployments.json"),
@@ -33,6 +35,15 @@ impl PlatformConfig {
 
         if let Ok(value) = std::env::var("PLOY_LISTEN_ADDR") {
             config.listen_addr = value;
+        }
+        if let Ok(value) = std::env::var("PLOY_ADMIN_TOKEN") {
+            if !value.trim().is_empty() {
+                config.admin_token = Some(value);
+            }
+        } else if let Ok(value) = std::env::var("PLOY_API_ADMIN_TOKEN") {
+            if !value.trim().is_empty() {
+                config.admin_token = Some(value);
+            }
         }
         if let Ok(value) = std::env::var("PLOY_DEPLOYMENTS_FILE") {
             config.registry_file = PathBuf::from(value);
@@ -72,6 +83,7 @@ mod tests {
     #[test]
     fn default_paths_match_workspace_contract() {
         let config = PlatformConfig::default();
+        assert_eq!(config.admin_token, None);
         assert_eq!(
             config.registry_file.to_string_lossy(),
             "data/state/deployments.json"

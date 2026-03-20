@@ -180,6 +180,7 @@ mod tests {
 
         let client = ControlPlaneClient {
             control_plane_addr: addr.to_string(),
+            admin_token: None,
             runtime_root,
         };
         let output = cancel_order(&client, "example.live", "order-1").expect("cancel output");
@@ -223,6 +224,7 @@ mod tests {
 
         let client = ControlPlaneClient {
             control_plane_addr: addr.to_string(),
+            admin_token: None,
             runtime_root,
         };
         let output = replace_order(

@@ -61,6 +61,13 @@ The install script ensures:
 - `/opt/ploy/run/platform/deployments.json`
 - `/opt/ploy/run/platform/trading-state.json`
 
+Optional hardening:
+
+- Set `PLOY_ADMIN_TOKEN=...` in `/opt/ploy/.env` to require `Authorization: Bearer ...`
+  or `x-ploy-admin-token` on the control-plane API.
+- `/opt/ploy/bin/ployctl` will automatically pick up `PLOY_ADMIN_TOKEN`,
+  `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` from the host environment.
+
 ## Post-Deploy Checks
 
 ```bash
