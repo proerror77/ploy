@@ -17,6 +17,9 @@ Start the single-host trading platform runtime with:
 cargo run -p ployd
 ```
 
+If you want the control plane protected, export `PLOY_ADMIN_TOKEN` first. `ployctl`,
+the frontend, and the sidecar will use the same bearer token surface.
+
 2. In a second shell, check the operator client against the control-plane surface:
 
 ```bash
