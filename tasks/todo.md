@@ -26,6 +26,14 @@ the canonical trading ledger.
 
 - 2026-03-20: This cut is intentionally limited to live submit + ack/reject into the canonical ledger. Full cancel/reconcile and richer venue sync remain follow-up work once the main live path is proven.
 - 2026-03-20: `ploy-connectivity` now wraps the vendored Polymarket SDK behind a live execution gateway, and `ployd` routes `paper` and `live` deployments through the same `/api/deployments/:id/intents` ingress while preserving canonical ledger updates.
+- 2026-03-20: Focused validation passed:
+  - `rtk cargo test -p ploy-connectivity static_gateway_returns_acknowledged_outcome -- --nocapture`
+  - `rtk cargo test -p ploy-connectivity polymarket_gateway_rejects_missing_limit_price_before_network -- --nocapture`
+  - `rtk cargo test -p ployd daemon_routes_live_intent_into_acknowledged_order_snapshot -- --nocapture`
+  - `rtk cargo test -p ployd daemon_records_live_rejection_in_canonical_ledger -- --nocapture`
+  - `rtk cargo test -p ployd handle_runtime_request_submits_live_intent_via_shared_daemon_state -- --nocapture`
+  - `rtk cargo check -p ployd`
+  - `rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture`
 
 # Trading Platform Completion Sweep (2026-03-20)
 
