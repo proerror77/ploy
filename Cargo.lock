@@ -297,6 +297,13 @@ dependencies = [
 [[package]]
 name = "ploy-platform"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ploy-operator-contracts",
+ "ploy-trading",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "ploy-research"
