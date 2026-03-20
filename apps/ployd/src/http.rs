@@ -58,6 +58,31 @@ fn status_text(status_code: u16) -> &'static str {
     }
 }
 
+fn submit_intent_error_response(err: io::Error, deployment_id: &str) -> (u16, String) {
+    match err.kind() {
+        io::ErrorKind::NotFound => json_error(
+            404,
+            "deployment_not_found",
+            Some(format!("deployment `{deployment_id}` was not found")),
+        ),
+        io::ErrorKind::InvalidInput => {
+            json_error(400, "invalid_request", Some(err.to_string()))
+        }
+        io::ErrorKind::InvalidData => {
+            json_error(503, "live_execution_misconfigured", Some(err.to_string()))
+        }
+        io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::ConnectionRefused
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::TimedOut
+        | io::ErrorKind::NotConnected
+        | io::ErrorKind::BrokenPipe => {
+            json_error(503, "live_execution_unavailable", Some(err.to_string()))
+        }
+        _ => json_error(500, "submit_failed", Some(err.to_string())),
+    }
+}
+
 #[cfg(test)]
 pub fn route_request(path: &str, runtime_root: &Path) -> (u16, String) {
     let target = match path {
@@ -160,33 +185,34 @@ pub fn handle_api_request(
                 Err(error) => return json_error(400, &error.error, error.message),
             };
 
-            match PloyDaemon::boot(config).and_then(|mut daemon| {
-                let response = daemon.submit_intent(TradingIntent {
-                    intent_id: next_paper_intent_id(deployment_id),
-                    deployment_id: deployment_id.to_string(),
-                    market_id: request.market_id,
-                    token_id: request.token_id,
-                    side,
+            match PloyDaemon::boot(config) {
+                Ok(mut daemon) => {
+                    let response = daemon.submit_intent(TradingIntent {
+                        intent_id: next_paper_intent_id(deployment_id),
+                        deployment_id: deployment_id.to_string(),
+                        market_id: request.market_id,
+                        token_id: request.token_id,
+                        side,
                     quantity: request.quantity,
                     limit_price: request.limit_price,
                     purpose: intent_purpose_from_wire(request.purpose),
-                    created_at: chrono::Utc::now(),
-                })?;
-                daemon.write_runtime_snapshots()?;
-                Ok(response)
-            }) {
-                Ok(response) => (
-                    200,
-                    serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
-                ),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                    (404, "{\"error\":\"deployment_not_found\"}".to_string())
+                        created_at: chrono::Utc::now(),
+                    });
+                    match daemon.write_runtime_snapshots() {
+                        Ok(()) => {}
+                        Err(err) => {
+                            return json_error(500, "snapshot_write_failed", Some(err.to_string()));
+                        }
+                    }
+                    match response {
+                        Ok(response) => (
+                            200,
+                            serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+                        ),
+                        Err(err) => submit_intent_error_response(err, deployment_id),
+                    }
                 }
-                Err(err) if err.kind() == io::ErrorKind::InvalidInput => (
-                    400,
-                    format!("{{\"error\":\"invalid_request\",\"message\":\"{}\"}}", err),
-                ),
-                Err(_) => (500, "{\"error\":\"submit_failed\"}".to_string()),
+                Err(err) => submit_intent_error_response(err, deployment_id),
             }
         }
         _ => (404, "{\"error\":\"not_found\"}".to_string()),
@@ -376,8 +402,8 @@ fn handle_runtime_request(
             };
 
             match state.daemon.lock() {
-                Ok(mut daemon) => match daemon
-                    .submit_intent(TradingIntent {
+                Ok(mut daemon) => {
+                    let response = daemon.submit_intent(TradingIntent {
                         intent_id: next_paper_intent_id(deployment_id),
                         deployment_id: deployment_id.to_string(),
                         market_id: request.market_id,
@@ -387,26 +413,23 @@ fn handle_runtime_request(
                         limit_price: request.limit_price,
                         purpose: intent_purpose_from_wire(request.purpose),
                         created_at: chrono::Utc::now(),
-                    })
-                    .and_then(|response| {
-                        daemon.write_runtime_snapshots()?;
-                        publish_snapshot_events(&daemon, &state.events);
-                        Ok(response)
-                    }) {
-                    Ok(response) => (
-                        200,
-                        serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
-                    ),
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => json_error(
-                        404,
-                        "deployment_not_found",
-                        Some(format!("deployment `{deployment_id}` was not found")),
-                    ),
-                    Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
-                        json_error(400, "invalid_request", Some(err.to_string()))
+                    });
+                    match daemon.write_runtime_snapshots() {
+                        Ok(()) => {
+                            publish_snapshot_events(&daemon, &state.events);
+                        }
+                        Err(err) => {
+                            return json_error(500, "snapshot_write_failed", Some(err.to_string()));
+                        }
                     }
-                    Err(err) => json_error(500, "submit_failed", Some(err.to_string())),
-                },
+                    match response {
+                        Ok(response) => (
+                            200,
+                            serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+                        ),
+                        Err(err) => submit_intent_error_response(err, deployment_id),
+                    }
+                }
                 Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
         }
@@ -779,6 +802,70 @@ mod tests {
             fs::read_to_string(runtime_root.join("trading-state.json")).expect("trading snapshot");
         assert!(trading_body.contains("\"deployment_id\": \"example.live\""));
         assert!(trading_body.contains("\"venue_order_id\": \"venue-live-http-1\""));
+    }
+
+    #[test]
+    fn handle_runtime_request_surfaces_live_gateway_transport_failure_as_503() {
+        let root = temp_dir("runtime-live-intent-transport-error");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(runtime_root.clone()).expect("create runtime root");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "running"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("registry");
+
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root,
+            status_file: root.join("run/platform/system-status.json"),
+            deployment_status_file: root.join("run/platform/deployments.json"),
+            trading_state_file: root.join("run/platform/trading-state.json"),
+            ..crate::config::PlatformConfig::default()
+        };
+
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::failed(
+                ploy_connectivity::ExecutionError::Transport("gateway offline".to_string()),
+            )),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let body = serde_json::to_string(&PaperIntentRequest {
+            market_id: "market-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: "buy".to_string(),
+            quantity: rust_decimal::Decimal::ONE,
+            limit_price: Some(rust_decimal::Decimal::ONE),
+            purpose: ploy_operator_contracts::IntentPurpose::Entry,
+        })
+        .expect("request json");
+
+        let (submit_code, submit_response) = handle_runtime_request(
+            "POST",
+            "/api/deployments/example.live/intents",
+            Some(&body),
+            &state,
+        );
+        assert_eq!(submit_code, 503);
+        assert!(submit_response.contains("\"error\":\"live_execution_unavailable\""));
+        assert!(submit_response.contains("gateway offline"));
     }
 
     #[test]

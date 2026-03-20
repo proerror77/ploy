@@ -2,8 +2,8 @@ use crate::config::PlatformConfig;
 use crate::events::EventBroker;
 use crate::http::publish_snapshot_events;
 use ploy_connectivity::{
-    ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, PolymarketExecutionGateway,
-    TrackedOrder,
+    ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
+    PolymarketExecutionGateway, TrackedOrder,
 };
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{
@@ -162,7 +162,7 @@ impl PloyDaemon {
 
         match deployment.runtime_mode.as_str() {
             "paper" => self.submit_paper_intent(intent),
-            "live" => Ok(self.submit_live_intent(intent)),
+            "live" => self.submit_live_intent(intent),
             runtime_mode => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported runtime mode: {runtime_mode}"),
@@ -213,7 +213,7 @@ impl PloyDaemon {
         })
     }
 
-    fn submit_live_intent(&mut self, intent: TradingIntent) -> PaperIntentResponse {
+    fn submit_live_intent(&mut self, intent: TradingIntent) -> io::Result<PaperIntentResponse> {
         let order_id = format!("order-{}", intent.intent_id);
         self.trading
             .entry(intent.deployment_id.clone())
@@ -234,28 +234,28 @@ impl PloyDaemon {
                     .entry(intent.deployment_id.clone())
                     .or_default()
                     .acknowledge_order(&order_id, venue_order_id.clone());
-                PaperIntentResponse {
+                Ok(PaperIntentResponse {
                     deployment_id: intent.deployment_id,
                     intent_id: intent.intent_id,
                     order_id,
                     state: "acknowledged".to_string(),
                     venue_order_id: Some(venue_order_id),
                     rejection_reason: None,
-                }
+                })
             }
             Ok(ExecutionOutcome::Rejected { reason }) => {
                 self.trading
                     .entry(intent.deployment_id.clone())
                     .or_default()
                     .reject_order(&order_id, reason.clone());
-                PaperIntentResponse {
+                Ok(PaperIntentResponse {
                     deployment_id: intent.deployment_id,
                     intent_id: intent.intent_id,
                     order_id,
                     state: "rejected".to_string(),
                     venue_order_id: None,
                     rejection_reason: Some(reason),
-                }
+                })
             }
             Err(err) => {
                 let reason = err.to_string();
@@ -263,14 +263,7 @@ impl PloyDaemon {
                     .entry(intent.deployment_id.clone())
                     .or_default()
                     .reject_order(&order_id, reason.clone());
-                PaperIntentResponse {
-                    deployment_id: intent.deployment_id,
-                    intent_id: intent.intent_id,
-                    order_id,
-                    state: "rejected".to_string(),
-                    venue_order_id: None,
-                    rejection_reason: Some(reason),
-                }
+                Err(io_error_from_execution_error(err))
             }
         }
     }
@@ -545,6 +538,18 @@ fn observed_state_for_desired(desired_state: DesiredState) -> ObservedState {
         DesiredState::Running => ObservedState::Starting,
         DesiredState::Paused => ObservedState::Paused,
         DesiredState::Stopped => ObservedState::Stopped,
+    }
+}
+
+fn io_error_from_execution_error(err: ExecutionError) -> io::Error {
+    match err {
+        ExecutionError::Validation(message) => io::Error::new(io::ErrorKind::InvalidInput, message),
+        ExecutionError::Configuration(message) => {
+            io::Error::new(io::ErrorKind::InvalidData, message)
+        }
+        ExecutionError::Transport(message) => {
+            io::Error::new(io::ErrorKind::ConnectionAborted, message)
+        }
     }
 }
 
@@ -910,6 +915,69 @@ mod tests {
             trading_state[0].orders[0].rejection_reason.as_deref(),
             Some("market closed")
         );
+    }
+
+    #[test]
+    fn daemon_surfaces_live_gateway_transport_failure_as_error() {
+        let root = temp_dir("live-intent-transport-error");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::failed(
+                ploy_connectivity::ExecutionError::Transport("gateway offline".to_string()),
+            )),
+        )
+        .expect("boot");
+        let err = daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-transport".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(3),
+                limit_price: Some(dec!(0.44)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect_err("transport failure should surface");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionAborted);
+        let trading_state = daemon.trading_state();
+        assert_eq!(trading_state[0].orders.len(), 1);
+        assert_eq!(trading_state[0].orders[0].state, "rejected");
+        assert!(trading_state[0].orders[0]
+            .rejection_reason
+            .as_deref()
+            .expect("rejection reason")
+            .contains("gateway offline"));
     }
 
     #[test]
