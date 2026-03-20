@@ -14,7 +14,9 @@ This path deploys exactly two binaries:
 - `/opt/ploy/bin/ployctl`
 
 `ployd` is the only default long-running process. `ployctl` is an operator
-client used for post-deploy verification and remote inspection.
+client used for post-deploy verification and remote inspection. It prefers the
+daemon HTTP surface and falls back to runtime snapshots if the API is
+temporarily unavailable.
 
 ## CI Bundle Contents
 
@@ -38,6 +40,7 @@ After the bundle lands on the host, the deploy workflow:
 6. Restarts `ployd`
 7. Verifies:
    - `systemctl status ployd`
+   - `curl -fsS http://127.0.0.1:8081/health`
    - `/opt/ploy/bin/ployctl system status`
 
 ## Required Host Paths
@@ -54,6 +57,7 @@ The install script ensures:
 ```bash
 sudo systemctl status ployd --no-pager
 sudo journalctl -u ployd -n 200 --no-pager
+curl -fsS http://127.0.0.1:8081/health
 /opt/ploy/bin/ployctl system status
 /opt/ploy/bin/ployctl deployments list
 ```
