@@ -1,9 +1,11 @@
+pub mod audit;
 pub mod deployments;
 pub mod errors;
 pub mod events;
 pub mod system;
 pub mod trading;
 
+pub use audit::AuditLogEntry;
 pub use deployments::{
     DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DeploymentStateSummary,
     DeploymentSummary, DesiredState, ObservedState,
