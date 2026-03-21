@@ -284,3 +284,71 @@ impl DashboardStats {
         }
     }
 }
+
+/// Operator summary display data for the control-plane terminal.
+#[derive(Debug, Clone)]
+pub struct DisplayOperatorSummary {
+    pub runtime_mode: String,
+    pub account_id: String,
+    pub dry_run: bool,
+    pub system_status: String,
+    pub risk_state: String,
+    pub queue_depth: u64,
+}
+
+impl Default for DisplayOperatorSummary {
+    fn default() -> Self {
+        Self {
+            runtime_mode: "unknown".to_string(),
+            account_id: "default".to_string(),
+            dry_run: true,
+            system_status: "unknown".to_string(),
+            risk_state: "unknown".to_string(),
+            queue_depth: 0,
+        }
+    }
+}
+
+/// Per-domain operator snapshot shown in the operator terminal.
+#[derive(Debug, Clone)]
+pub struct DisplayOperatorDomain {
+    pub domain: String,
+    pub ingress_mode: String,
+    pub paused: bool,
+    pub exposure: Decimal,
+    pub daily_pnl: Decimal,
+}
+
+/// Claimer summary shown in the operator terminal.
+#[derive(Debug, Clone)]
+pub struct DisplayOperatorClaimer {
+    pub enabled: bool,
+    pub pending_redeemable_count: u64,
+    pub pending_redeemable_notional_usd: Decimal,
+    pub last_checked_label: Option<String>,
+    pub last_run_label: Option<String>,
+    pub last_error: Option<String>,
+}
+
+impl Default for DisplayOperatorClaimer {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pending_redeemable_count: 0,
+            pending_redeemable_notional_usd: Decimal::ZERO,
+            last_checked_label: None,
+            last_run_label: None,
+            last_error: None,
+        }
+    }
+}
+
+/// Recent operator action shown in the operator activity lane.
+#[derive(Debug, Clone)]
+pub struct DisplayOperatorAction {
+    pub action_id: String,
+    pub label: String,
+    pub accepted: bool,
+    pub message: String,
+    pub requested_by: String,
+}

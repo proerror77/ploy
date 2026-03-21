@@ -69,8 +69,8 @@ async fn load_daily_metrics_halted(
             .unwrap_or(false)
         }
         DailyMetricsScope::Global => {
-            sqlx::query_scalar!(
-                "SELECT COALESCE(halted, FALSE) AS \"halted!\" FROM daily_metrics WHERE date = CURRENT_DATE"
+            sqlx::query_scalar::<_, bool>(
+                "SELECT COALESCE(halted, FALSE) FROM daily_metrics WHERE date = CURRENT_DATE",
             )
             .fetch_optional(pool)
             .await
@@ -99,8 +99,8 @@ async fn load_daily_metrics_total_pnl(
             .unwrap_or(Decimal::ZERO)
         }
         DailyMetricsScope::Global => {
-            sqlx::query_scalar!(
-                "SELECT COALESCE(total_pnl, 0)::numeric AS \"total_pnl!: Decimal\" FROM daily_metrics WHERE date = CURRENT_DATE"
+            sqlx::query_scalar::<_, Decimal>(
+                "SELECT COALESCE(total_pnl, 0) FROM daily_metrics WHERE date = CURRENT_DATE",
             )
             .fetch_optional(pool)
             .await
@@ -132,21 +132,22 @@ async fn load_daily_metrics_halt_event(
             .ok()
             .flatten()
         }
-        DailyMetricsScope::Global => sqlx::query!(
-            r#"
+        DailyMetricsScope::Global => {
+            sqlx::query_as::<_, (bool, Option<String>, chrono::DateTime<Utc>)>(
+                r#"
                 SELECT
-                    COALESCE(halted, FALSE) AS "halted!",
+                    COALESCE(halted, FALSE) AS halted,
                     halt_reason,
                     updated_at
                 FROM daily_metrics
                 WHERE date = CURRENT_DATE
                 "#,
-        )
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .map(|row| (row.halted, row.halt_reason, row.updated_at)),
+            )
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+        }
     }
 }
 

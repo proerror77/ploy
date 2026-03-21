@@ -47,9 +47,12 @@ impl AccountService {
         let mut normalized_rows = Vec::new();
         for row in registry_rows {
             if let Some(row) = row.normalized() {
-                if !normalized_rows.iter().any(|existing: &AccountRegistryEntry| {
-                    existing.account_id.eq_ignore_ascii_case(&row.account_id)
-                }) {
+                if !normalized_rows
+                    .iter()
+                    .any(|existing: &AccountRegistryEntry| {
+                        existing.account_id.eq_ignore_ascii_case(&row.account_id)
+                    })
+                {
                     normalized_rows.push(row);
                 }
             }
@@ -153,10 +156,11 @@ mod tests {
     use rust_decimal::Decimal;
 
     use crate::config::AccountConfig;
-    use crate::platform::{
-        DeploymentExecutionMode, Domain, MarketSelector, StrategyDeployment,
-        StrategyLifecycleStage, StrategyProductType, Timeframe,
+    use crate::control_plane::{
+        DeploymentExecutionMode, MarketSelector, StrategyDeployment, StrategyLifecycleStage,
+        StrategyProductType, Timeframe,
     };
+    use crate::domain::Domain;
 
     use super::super::budget::AccountBudgetSnapshot;
     use super::super::registry::AccountRegistryEntry;
@@ -180,7 +184,6 @@ mod tests {
             },
             timeframe: Timeframe::M5,
             enabled,
-            state: crate::plugins::DeploymentState::Enabled,
             allocator_profile: "default".to_string(),
             risk_profile: "default".to_string(),
             priority: 0,
@@ -228,11 +231,7 @@ mod tests {
 
     #[test]
     fn account_service_exposes_account_scoped_claimer_handle() {
-        let service = AccountService::new(
-            Vec::new(),
-            Vec::new(),
-            AccountBudgetSnapshot::default(),
-        );
+        let service = AccountService::new(Vec::new(), Vec::new(), AccountBudgetSnapshot::default());
 
         let handle = service.claimer_handle();
 
@@ -251,7 +250,12 @@ mod tests {
                 label: Some("Main".to_string()),
             }],
             vec![
-                sample_deployment("deploy.crypto.momentum.1", true, vec!["tango"], Domain::Crypto),
+                sample_deployment(
+                    "deploy.crypto.momentum.1",
+                    true,
+                    vec!["tango"],
+                    Domain::Crypto,
+                ),
                 sample_deployment(
                     "deploy.crypto.split_arb.1",
                     false,

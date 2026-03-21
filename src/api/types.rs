@@ -2,7 +2,112 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub use crate::platform::{DeploymentState, IntentPurpose};
+pub use crate::plugins::DeploymentState;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorAction {
+    Pause,
+    Resume,
+    ForceClose,
+    ClaimCheck,
+    ClaimRun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorScope {
+    Global,
+    Domain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorActionRequest {
+    pub action: OperatorAction,
+    pub scope: OperatorScope,
+    #[serde(default)]
+    pub domain: Option<String>,
+    pub requested_by: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl OperatorActionRequest {
+    pub fn validate(&self) -> Option<String> {
+        match self.scope {
+            OperatorScope::Global => None,
+            OperatorScope::Domain => self
+                .domain
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|_| ())
+                .map_or_else(
+                    || Some("domain scope requires a domain".to_string()),
+                    |_| None,
+                ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorActionResponse {
+    pub accepted: bool,
+    pub action_id: String,
+    pub action: OperatorAction,
+    pub scope: OperatorScope,
+    pub effective_targets: Vec<String>,
+    pub message: String,
+    pub requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorDomainStatus {
+    pub domain: String,
+    pub ingress_mode: String,
+    pub paused: bool,
+    pub exposure_usd: f64,
+    pub daily_pnl_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorClaimerStatus {
+    pub enabled: bool,
+    pub pending_redeemable_count: u64,
+    pub pending_redeemable_notional_usd: f64,
+    #[serde(default)]
+    pub last_checked_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_run_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorRecentAction {
+    pub action_id: String,
+    pub action: OperatorAction,
+    pub scope: OperatorScope,
+    #[serde(default)]
+    pub domain: Option<String>,
+    pub accepted: bool,
+    pub message: String,
+    pub requested_by: String,
+    pub requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorStatusResponse {
+    pub runtime_mode: String,
+    pub account_id: String,
+    pub dry_run: bool,
+    pub system_status: String,
+    pub risk_state: String,
+    pub queue_depth: u64,
+    pub domains: Vec<OperatorDomainStatus>,
+    pub claimer: OperatorClaimerStatus,
+    pub recent_actions: Vec<OperatorRecentAction>,
+}
 
 // ============================================================================
 // Stats Types
@@ -280,7 +385,12 @@ pub struct StatusUpdate {
 
 #[cfg(test)]
 mod tests {
-    use super::StrategyConfig;
+    use super::{
+        OperatorAction, OperatorActionRequest, OperatorActionResponse, OperatorClaimerStatus,
+        OperatorDomainStatus, OperatorRecentAction, OperatorScope, OperatorStatusResponse,
+        StrategyConfig,
+    };
+    use chrono::Utc;
     use serde_json::json;
 
     #[test]
@@ -297,5 +407,98 @@ mod tests {
 
         let parsed = serde_json::from_value::<StrategyConfig>(payload);
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn operator_action_request_serializes_pause_domain() {
+        let req = OperatorActionRequest {
+            action: OperatorAction::Pause,
+            scope: OperatorScope::Domain,
+            domain: Some("crypto".to_string()),
+            requested_by: "test".to_string(),
+            reason: Some("ops".to_string()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"action\":\"pause\""));
+        assert!(json.contains("\"scope\":\"domain\""));
+        assert!(json.contains("\"domain\":\"crypto\""));
+    }
+
+    #[test]
+    fn operator_action_response_serializes_claim_run_receipt() {
+        let resp = OperatorActionResponse {
+            accepted: true,
+            action_id: "act-123".to_string(),
+            action: OperatorAction::ClaimRun,
+            scope: OperatorScope::Global,
+            effective_targets: vec!["global".to_string()],
+            message: "claim started".to_string(),
+            requested_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(resp).unwrap();
+        assert_eq!(json["accepted"], true);
+        assert_eq!(json["action"], "claim_run");
+        assert_eq!(json["scope"], "global");
+    }
+
+    #[test]
+    fn operator_status_response_serializes_operator_snapshot() {
+        let status = OperatorStatusResponse {
+            runtime_mode: "platform".to_string(),
+            account_id: "default".to_string(),
+            dry_run: true,
+            system_status: "running".to_string(),
+            risk_state: "normal".to_string(),
+            queue_depth: 2,
+            domains: vec![OperatorDomainStatus {
+                domain: "crypto".to_string(),
+                ingress_mode: "enabled".to_string(),
+                paused: false,
+                exposure_usd: 12.5,
+                daily_pnl_usd: 1.25,
+            }],
+            claimer: OperatorClaimerStatus {
+                enabled: false,
+                pending_redeemable_count: 0,
+                pending_redeemable_notional_usd: 0.0,
+                last_checked_at: None,
+                last_run_at: None,
+                last_error: None,
+            },
+            recent_actions: vec![OperatorRecentAction {
+                action_id: "act-1".to_string(),
+                action: OperatorAction::Pause,
+                scope: OperatorScope::Global,
+                domain: None,
+                accepted: true,
+                message: "paused".to_string(),
+                requested_by: "test".to_string(),
+                requested_at: Utc::now(),
+            }],
+        };
+
+        let json = serde_json::to_value(status).unwrap();
+        assert_eq!(json["runtime_mode"], "platform");
+        assert_eq!(json["domains"][0]["domain"], "crypto");
+        assert_eq!(json["claimer"]["enabled"], false);
+        assert_eq!(json["recent_actions"][0]["action"], "pause");
+    }
+
+    #[test]
+    fn operator_domain_scope_requires_domain() {
+        let req = OperatorActionRequest {
+            action: OperatorAction::Pause,
+            scope: OperatorScope::Domain,
+            domain: None,
+            requested_by: "test".to_string(),
+            reason: None,
+        };
+
+        assert_eq!(
+            req.validate().as_deref(),
+            Some("domain scope requires a domain")
+        );
     }
 }

@@ -6,7 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "api")]
+use chrono::DateTime;
 use chrono::Utc;
+#[cfg(feature = "api")]
+use reqwest::header::{HeaderMap, HeaderValue};
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -15,10 +19,18 @@ use crate::adapters::{PolymarketClient, PriceCache, QuoteCache};
 use crate::data_plane::{DataPlaneConfig, DataPlaneFreshness, PlatformDataPlane};
 use crate::domain::Side;
 use crate::error::Result;
-use crate::tui::app::TuiApp;
-use crate::tui::data::{DisplayAgent, DisplayRiskState, DisplayTransaction};
+use crate::tui::app::{ActiveTab, PendingAction, TuiApp};
+use crate::tui::data::{
+    DisplayAgent, DisplayOperatorAction, DisplayOperatorClaimer, DisplayOperatorDomain,
+    DisplayOperatorSummary, DisplayRiskState, DisplayTransaction,
+};
 use crate::tui::event::{AppEvent, KeyAction};
 use crate::tui::{init_terminal, restore_terminal, ui};
+
+#[cfg(feature = "api")]
+use crate::api::types::{
+    OperatorAction, OperatorActionRequest, OperatorActionResponse, OperatorStatusResponse,
+};
 
 /// Dashboard configuration
 #[derive(Debug, Clone)]
@@ -31,6 +43,10 @@ pub struct DashboardConfig {
     pub token_ids: Vec<String>,
     /// Dry run mode indicator
     pub dry_run: bool,
+    /// Operator API base URL
+    pub api_base_url: String,
+    /// Operator/admin auth token
+    pub admin_token: Option<String>,
 }
 
 impl Default for DashboardConfig {
@@ -40,8 +56,26 @@ impl Default for DashboardConfig {
             symbols: vec!["BTCUSDT".to_string()],
             token_ids: Vec::new(),
             dry_run: true,
+            api_base_url: default_api_base_url(),
+            admin_token: default_admin_token(),
         }
     }
+}
+
+fn default_api_base_url() -> String {
+    let port = std::env::var("PLOY_API_PORT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u16>().ok())
+        .unwrap_or(8081);
+    format!("http://127.0.0.1:{port}")
+}
+
+fn default_admin_token() -> Option<String> {
+    std::env::var("PLOY_API_ADMIN_TOKEN")
+        .or_else(|_| std::env::var("PLOY_ADMIN_TOKEN"))
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
 }
 
 /// Dashboard runner that manages data sources and TUI
@@ -49,6 +83,10 @@ pub struct DashboardRunner {
     config: DashboardConfig,
     app: TuiApp,
     running: Arc<AtomicBool>,
+    #[cfg(feature = "api")]
+    http: reqwest::Client,
+    #[cfg(feature = "api")]
+    last_operator_refresh: Option<std::time::Instant>,
 }
 
 impl DashboardRunner {
@@ -61,6 +99,119 @@ impl DashboardRunner {
             config,
             app,
             running: Arc::new(AtomicBool::new(true)),
+            #[cfg(feature = "api")]
+            http: reqwest::Client::new(),
+            #[cfg(feature = "api")]
+            last_operator_refresh: None,
+        }
+    }
+
+    #[cfg(feature = "api")]
+    fn operator_api_headers(&self) -> Option<HeaderMap> {
+        let token = self.config.admin_token.as_deref()?;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ploy-admin-token", HeaderValue::from_str(token).ok()?);
+        Some(headers)
+    }
+
+    #[cfg(feature = "api")]
+    fn operator_refresh_due(&self) -> bool {
+        match self.last_operator_refresh {
+            Some(last) => last.elapsed() >= Duration::from_secs(5),
+            None => true,
+        }
+    }
+
+    #[cfg(feature = "api")]
+    async fn refresh_operator_status(&mut self) {
+        let Some(headers) = self.operator_api_headers() else {
+            return;
+        };
+        match self
+            .http
+            .get(format!("{}/api/operator/status", self.config.api_base_url))
+            .headers(headers)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<OperatorStatusResponse>().await {
+                    Ok(status) => {
+                        apply_operator_status(&mut self.app, status);
+                        self.last_operator_refresh = Some(std::time::Instant::now());
+                    }
+                    Err(error) => {
+                        self.app
+                            .set_last_error(format!("operator status decode: {}", error));
+                    }
+                }
+            }
+            Ok(resp) => {
+                self.app
+                    .set_last_error(format!("operator status request failed: {}", resp.status()));
+            }
+            Err(error) => {
+                self.app
+                    .set_last_error(format!("operator status request error: {}", error));
+            }
+        }
+    }
+
+    #[cfg(feature = "api")]
+    async fn submit_operator_action(&mut self, action: OperatorAction, domain: Option<String>) {
+        let Some(headers) = self.operator_api_headers() else {
+            self.app
+                .set_last_error("operator API admin token is not configured".to_string());
+            return;
+        };
+        let scope = if domain.is_some() {
+            crate::api::types::OperatorScope::Domain
+        } else {
+            crate::api::types::OperatorScope::Global
+        };
+        let label = operator_action_label(action, domain.as_deref(), scope);
+        let request = OperatorActionRequest {
+            action,
+            scope,
+            domain: domain.clone(),
+            requested_by: "tui".to_string(),
+            reason: None,
+        };
+
+        match self
+            .http
+            .post(format!("{}/api/operator/actions", self.config.api_base_url))
+            .headers(headers)
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<OperatorActionResponse>().await {
+                    Ok(response) => {
+                        self.app.push_operator_action(DisplayOperatorAction {
+                            action_id: response.action_id,
+                            label,
+                            accepted: response.accepted,
+                            message: response.message,
+                            requested_by: "tui".to_string(),
+                        });
+                        self.refresh_operator_status().await;
+                    }
+                    Err(error) => {
+                        self.app
+                            .set_last_error(format!("operator action decode: {}", error));
+                    }
+                }
+            }
+            Ok(resp) => {
+                self.app
+                    .set_last_error(format!("operator action failed: {}", resp.status()));
+            }
+            Err(error) => {
+                self.app
+                    .set_last_error(format!("operator action request error: {}", error));
+            }
         }
     }
 
@@ -104,6 +255,8 @@ impl DashboardRunner {
 
         // Initial state
         self.app.set_strategy_state("connecting");
+        #[cfg(feature = "api")]
+        self.refresh_operator_status().await;
 
         // Main event loop
         loop {
@@ -151,14 +304,49 @@ impl DashboardRunner {
                                 match key.code {
                                     KeyCode::Char('y') | KeyCode::Enter => {
                                         if let Some(action) = self.app.confirm_modal() {
+                                            #[cfg(feature = "api")]
+                                            {
+                                                let selected_domain = if self.app.active_tab == ActiveTab::Operator {
+                                                    self.app
+                                                        .selected_operator_domain()
+                                                        .map(ToString::to_string)
+                                                } else {
+                                                    None
+                                                };
+                                                match action {
+                                                    PendingAction::PauseAgents => {
+                                                        self.submit_operator_action(
+                                                            OperatorAction::Pause,
+                                                            selected_domain,
+                                                        )
+                                                        .await;
+                                                    }
+                                                    PendingAction::ResumeAgents => {
+                                                        self.submit_operator_action(
+                                                            OperatorAction::Resume,
+                                                            selected_domain,
+                                                        )
+                                                        .await;
+                                                    }
+                                                    PendingAction::ForceClose => {
+                                                        self.submit_operator_action(
+                                                            OperatorAction::ForceClose,
+                                                            selected_domain,
+                                                        )
+                                                        .await;
+                                                    }
+                                                }
+                                            }
+
+                                            #[cfg(not(feature = "api"))]
                                             match action {
-                                                crate::tui::app::PendingAction::PauseAgents => {
+                                                PendingAction::PauseAgents => {
                                                     self.app.set_strategy_state("paused");
                                                 }
-                                                crate::tui::app::PendingAction::ResumeAgents => {
+                                                PendingAction::ResumeAgents => {
                                                     self.app.set_strategy_state("running");
                                                 }
-                                                crate::tui::app::PendingAction::ForceClose => {
+                                                PendingAction::ForceClose => {
                                                     self.app.set_strategy_state("halted");
                                                 }
                                             }
@@ -185,21 +373,42 @@ impl DashboardRunner {
                                 KeyAction::NextMarket => self.app.next_market(),
                                 KeyAction::PrevMarket => self.app.prev_market(),
                                 KeyAction::ToggleTab => self.app.toggle_tab(),
-                                KeyAction::PauseAgents => self.app.show_modal(
-                                    "Pause ALL agents? [y/N]".to_string(),
-                                    crate::tui::app::PendingAction::PauseAgents,
-                                ),
-                                KeyAction::ResumeAgents => self.app.show_modal(
-                                    "Resume ALL agents? [y/N]".to_string(),
-                                    crate::tui::app::PendingAction::ResumeAgents,
-                                ),
-                                KeyAction::EmergencyClose => self.app.show_modal(
-                                    "EMERGENCY CLOSE ALL POSITIONS? [y/N]".to_string(),
-                                    crate::tui::app::PendingAction::ForceClose,
-                                ),
+                                KeyAction::PauseAgents => {
+                                    let target = operator_modal_target(&self.app);
+                                    self.app.show_modal(
+                                        format!("Pause {target}? [y/N]"),
+                                        PendingAction::PauseAgents,
+                                    );
+                                }
+                                KeyAction::ResumeAgents => {
+                                    let target = operator_modal_target(&self.app);
+                                    self.app.show_modal(
+                                        format!("Resume {target}? [y/N]"),
+                                        PendingAction::ResumeAgents,
+                                    );
+                                }
+                                KeyAction::EmergencyClose => {
+                                    let target = operator_modal_target(&self.app);
+                                    self.app.show_modal(
+                                        format!("Force close {target}? [y/N]"),
+                                        PendingAction::ForceClose,
+                                    );
+                                }
                                 KeyAction::EnterFilter => {
                                     self.app.filter_mode = true;
                                     self.app.filter_input.clear();
+                                }
+                                KeyAction::ClaimCheck => {
+                                    #[cfg(feature = "api")]
+                                    self.submit_operator_action(OperatorAction::ClaimCheck, None).await;
+                                }
+                                KeyAction::ClaimRun => {
+                                    #[cfg(feature = "api")]
+                                    self.submit_operator_action(OperatorAction::ClaimRun, None).await;
+                                }
+                                KeyAction::RefreshOperator => {
+                                    #[cfg(feature = "api")]
+                                    self.refresh_operator_status().await;
                                 }
                                 KeyAction::Confirm | KeyAction::Dismiss => {}
                                 KeyAction::None => {}
@@ -212,6 +421,11 @@ impl DashboardRunner {
                 Some(event) = event_rx.recv() => {
                     self.handle_event(event);
                 }
+            }
+
+            #[cfg(feature = "api")]
+            if self.app.active_tab == ActiveTab::Operator && self.operator_refresh_due() {
+                self.refresh_operator_status().await;
             }
 
             if !self.app.is_running() {
@@ -440,6 +654,95 @@ impl DashboardRunner {
     }
 }
 
+fn operator_modal_target(app: &TuiApp) -> String {
+    if app.active_tab == ActiveTab::Operator {
+        if let Some(domain) = app.selected_operator_domain() {
+            return format!("{domain} domain");
+        }
+    }
+    "all domains".to_string()
+}
+
+#[cfg(feature = "api")]
+fn decimal_from_f64(value: f64) -> Decimal {
+    value
+        .to_string()
+        .parse::<Decimal>()
+        .unwrap_or(Decimal::ZERO)
+}
+
+#[cfg(feature = "api")]
+fn format_operator_timestamp(value: Option<DateTime<Utc>>) -> Option<String> {
+    value.map(|ts| ts.format("%H:%M:%S").to_string())
+}
+
+#[cfg(feature = "api")]
+fn operator_action_label(
+    action: OperatorAction,
+    domain: Option<&str>,
+    scope: crate::api::types::OperatorScope,
+) -> String {
+    let action_label = match action {
+        OperatorAction::Pause => "pause",
+        OperatorAction::Resume => "resume",
+        OperatorAction::ForceClose => "force_close",
+        OperatorAction::ClaimCheck => "claim_check",
+        OperatorAction::ClaimRun => "claim_run",
+    };
+    match (scope, domain) {
+        (crate::api::types::OperatorScope::Domain, Some(domain)) => {
+            format!("{action_label}:{domain}")
+        }
+        _ => action_label.to_string(),
+    }
+}
+
+#[cfg(feature = "api")]
+fn apply_operator_status(app: &mut TuiApp, status: OperatorStatusResponse) {
+    app.update_operator_summary(DisplayOperatorSummary {
+        runtime_mode: status.runtime_mode,
+        account_id: status.account_id,
+        dry_run: status.dry_run,
+        system_status: status.system_status,
+        risk_state: status.risk_state,
+        queue_depth: status.queue_depth,
+    });
+    app.update_operator_domains(
+        status
+            .domains
+            .into_iter()
+            .map(|domain| DisplayOperatorDomain {
+                domain: domain.domain,
+                ingress_mode: domain.ingress_mode,
+                paused: domain.paused,
+                exposure: decimal_from_f64(domain.exposure_usd),
+                daily_pnl: decimal_from_f64(domain.daily_pnl_usd),
+            })
+            .collect(),
+    );
+    app.update_operator_claimer(DisplayOperatorClaimer {
+        enabled: status.claimer.enabled,
+        pending_redeemable_count: status.claimer.pending_redeemable_count,
+        pending_redeemable_notional_usd: decimal_from_f64(
+            status.claimer.pending_redeemable_notional_usd,
+        ),
+        last_checked_label: format_operator_timestamp(status.claimer.last_checked_at),
+        last_run_label: format_operator_timestamp(status.claimer.last_run_at),
+        last_error: status.claimer.last_error,
+    });
+    app.operator_actions = status
+        .recent_actions
+        .into_iter()
+        .map(|action| DisplayOperatorAction {
+            action_id: action.action_id,
+            label: operator_action_label(action.action, action.domain.as_deref(), action.scope),
+            accepted: action.accepted,
+            message: action.message,
+            requested_by: action.requested_by,
+        })
+        .collect();
+}
+
 /// Map common series slugs to their numeric IDs
 fn resolve_series_id(series: &str) -> &str {
     match series.to_lowercase().as_str() {
@@ -506,6 +809,8 @@ pub async fn run_dashboard_auto(series: Option<&str>, dry_run: bool) -> Result<(
         symbols: vec![binance_symbol.to_string()],
         token_ids,
         dry_run,
+        api_base_url: default_api_base_url(),
+        admin_token: default_admin_token(),
     };
 
     let mut runner = DashboardRunner::new(config);
@@ -528,4 +833,210 @@ pub async fn run_dashboard_auto(series: Option<&str>, dry_run: bool) -> Result<(
     runner.app.set_markets(market_names);
 
     runner.run().await
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "api")]
+    use axum::{
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        routing::{get, post},
+        Json, Router,
+    };
+    #[cfg(feature = "api")]
+    use chrono::Utc;
+    #[cfg(feature = "api")]
+    use std::sync::Arc;
+    #[cfg(feature = "api")]
+    use tokio::{net::TcpListener, sync::Mutex};
+
+    #[cfg(feature = "api")]
+    use super::{apply_operator_status, DashboardConfig, DashboardRunner};
+    #[cfg(feature = "api")]
+    use crate::api::types::{
+        OperatorAction, OperatorActionRequest, OperatorActionResponse, OperatorClaimerStatus,
+        OperatorDomainStatus, OperatorRecentAction, OperatorScope, OperatorStatusResponse,
+    };
+    use crate::tui::app::TuiApp;
+
+    #[cfg(feature = "api")]
+    #[derive(Clone)]
+    struct TestOperatorApiState {
+        status: Arc<Mutex<OperatorStatusResponse>>,
+        actions: Arc<Mutex<Vec<OperatorActionRequest>>>,
+    }
+
+    #[cfg(feature = "api")]
+    fn sample_operator_status() -> OperatorStatusResponse {
+        OperatorStatusResponse {
+            runtime_mode: "platform".to_string(),
+            account_id: "acct-1".to_string(),
+            dry_run: true,
+            system_status: "running".to_string(),
+            risk_state: "normal".to_string(),
+            queue_depth: 3,
+            domains: vec![OperatorDomainStatus {
+                domain: "crypto".to_string(),
+                ingress_mode: "running".to_string(),
+                paused: false,
+                exposure_usd: 12.5,
+                daily_pnl_usd: 1.25,
+            }],
+            claimer: OperatorClaimerStatus {
+                enabled: true,
+                pending_redeemable_count: 2,
+                pending_redeemable_notional_usd: 4.5,
+                last_checked_at: Some(Utc::now()),
+                last_run_at: None,
+                last_error: None,
+            },
+            recent_actions: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "api")]
+    async fn spawn_operator_test_server() -> (String, Arc<Mutex<Vec<OperatorActionRequest>>>) {
+        async fn status_handler(
+            State(state): State<TestOperatorApiState>,
+            headers: HeaderMap,
+        ) -> Result<Json<OperatorStatusResponse>, StatusCode> {
+            let token = headers
+                .get("x-ploy-admin-token")
+                .and_then(|value| value.to_str().ok());
+            if token != Some("test-token") {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            Ok(Json(state.status.lock().await.clone()))
+        }
+
+        async fn action_handler(
+            State(state): State<TestOperatorApiState>,
+            headers: HeaderMap,
+            Json(request): Json<OperatorActionRequest>,
+        ) -> Result<Json<OperatorActionResponse>, StatusCode> {
+            let token = headers
+                .get("x-ploy-admin-token")
+                .and_then(|value| value.to_str().ok());
+            if token != Some("test-token") {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+
+            state.actions.lock().await.push(request.clone());
+            let action_id = format!("act-{}", state.actions.lock().await.len());
+            let recent = OperatorRecentAction {
+                action_id: action_id.clone(),
+                action: request.action,
+                scope: request.scope,
+                domain: request.domain.clone(),
+                accepted: true,
+                message: "ok".to_string(),
+                requested_by: request.requested_by.clone(),
+                requested_at: Utc::now(),
+            };
+            state.status.lock().await.recent_actions = vec![recent];
+
+            Ok(Json(OperatorActionResponse {
+                accepted: true,
+                action_id,
+                action: request.action,
+                scope: request.scope,
+                effective_targets: request
+                    .domain
+                    .clone()
+                    .map(|value| vec![value])
+                    .unwrap_or_else(|| vec!["global".to_string()]),
+                message: "ok".to_string(),
+                requested_at: Utc::now(),
+            }))
+        }
+
+        let state = TestOperatorApiState {
+            status: Arc::new(Mutex::new(sample_operator_status())),
+            actions: Arc::new(Mutex::new(Vec::new())),
+        };
+        let actions = state.actions.clone();
+        let app = Router::new()
+            .route("/api/operator/status", get(status_handler))
+            .route("/api/operator/actions", post(action_handler))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test operator api");
+        let address = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve operator api");
+        });
+        (format!("http://{}", address), actions)
+    }
+
+    #[cfg(feature = "api")]
+    #[test]
+    fn apply_operator_status_populates_operator_panels() {
+        let mut app = TuiApp::new();
+        apply_operator_status(
+            &mut app,
+            OperatorStatusResponse {
+                recent_actions: vec![OperatorRecentAction {
+                    action_id: "act-1".to_string(),
+                    action: OperatorAction::Pause,
+                    scope: OperatorScope::Global,
+                    domain: None,
+                    accepted: true,
+                    message: "paused".to_string(),
+                    requested_by: "ops".to_string(),
+                    requested_at: Utc::now(),
+                }],
+                ..sample_operator_status()
+            },
+        );
+
+        assert_eq!(app.operator_summary.account_id, "acct-1");
+        assert_eq!(app.operator_domains.len(), 1);
+        assert_eq!(app.operator_domains[0].domain, "crypto");
+        assert!(app.operator_claimer.enabled);
+        assert_eq!(app.operator_actions.len(), 1);
+        assert_eq!(app.operator_actions[0].action_id, "act-1");
+    }
+
+    #[cfg(feature = "api")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn operator_refresh_pulls_status_from_api() {
+        let (base_url, _actions) = spawn_operator_test_server().await;
+        let mut runner = DashboardRunner::new(DashboardConfig {
+            api_base_url: base_url,
+            admin_token: Some("test-token".to_string()),
+            ..DashboardConfig::default()
+        });
+
+        runner.refresh_operator_status().await;
+
+        assert_eq!(runner.app.operator_summary.account_id, "acct-1");
+        assert_eq!(runner.app.operator_domains.len(), 1);
+        assert_eq!(runner.app.operator_domains[0].domain, "crypto");
+    }
+
+    #[cfg(feature = "api")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn operator_action_posts_to_api_and_refreshes_status() {
+        let (base_url, actions) = spawn_operator_test_server().await;
+        let mut runner = DashboardRunner::new(DashboardConfig {
+            api_base_url: base_url,
+            admin_token: Some("test-token".to_string()),
+            ..DashboardConfig::default()
+        });
+
+        runner
+            .submit_operator_action(OperatorAction::Pause, Some("crypto".to_string()))
+            .await;
+
+        let captured = actions.lock().await.clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].action, OperatorAction::Pause);
+        assert_eq!(captured[0].domain.as_deref(), Some("crypto"));
+        assert_eq!(runner.app.operator_actions.len(), 1);
+        assert_eq!(runner.app.operator_actions[0].label, "pause:crypto");
+    }
 }

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use crate::domain::Domain;
 use crate::error::{PloyError, Result};
-use crate::platform::Domain;
 
 use super::definition::{PluginDefinition, PluginKind};
 

@@ -56,7 +56,7 @@ pub(in crate::api::handlers::sidecar) async fn table_has_account_scope(
     pool: &sqlx::PgPool,
     table_name: &str,
 ) -> bool {
-    sqlx::query_scalar!(
+    sqlx::query_scalar::<_, i64>(
         r#"
         SELECT 1::BIGINT
         FROM information_schema.columns
@@ -65,8 +65,8 @@ pub(in crate::api::handlers::sidecar) async fn table_has_account_scope(
           AND column_name = 'account_id'
         LIMIT 1
         "#,
-        table_name,
     )
+    .bind(table_name)
     .fetch_optional(pool)
     .await
     .ok()

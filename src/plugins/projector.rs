@@ -1,14 +1,12 @@
-use crate::config::{
-    CryptoTradingConfig, EventEdgeAgentConfig, NbaComebackConfig, PoliticsTradingConfig,
-    SportsTradingConfig,
-};
-use crate::coordinator::runtime_specs::{
+use crate::config::{EventEdgeAgentConfig, NbaComebackConfig};
+use crate::domain::Domain;
+use crate::error::{PloyError, Result};
+use crate::strategy::runtime_specs::runtime_configs::{
     build_event_edge_runtime_config, build_momentum_runtime_config,
     build_nba_comeback_runtime_config, build_pattern_memory_runtime_config,
     build_split_arb_runtime_config,
 };
-use crate::error::{PloyError, Result};
-use crate::platform::Domain;
+use crate::strategy::CryptoTradingConfig;
 
 use super::{
     ComposableCryptoSpec, PluginDefinition, PluginDeployment, PluginKind, PluginSpec,
@@ -230,7 +228,7 @@ pub(crate) fn project_momentum_runtime_spec(
     definition: &PluginDefinition,
     spec: &PluginSpec,
     deployment: &PluginDeployment,
-    symbols: &[String],
+    _symbols: &[String],
     crypto_cfg: &CryptoTradingConfig,
 ) -> Result<ProjectedRuntimeSpec> {
     validate_plugin_identity(
@@ -244,7 +242,7 @@ pub(crate) fn project_momentum_runtime_spec(
     let strategy_config_toml = build_composable_crypto_runtime_config(
         definition,
         inner,
-        build_momentum_runtime_config(symbols, crypto_cfg),
+        build_momentum_runtime_config(crypto_cfg)?,
     )?;
 
     Ok(ProjectedRuntimeSpec {
@@ -282,8 +280,8 @@ pub(crate) fn project_event_edge_runtime_spec(
     definition: &PluginDefinition,
     spec: &PluginSpec,
     deployment: &PluginDeployment,
-    rest_url: &str,
-    politics_cfg: &PoliticsTradingConfig,
+    _rest_url: &str,
+    politics_agent_id: &str,
     ee_cfg: &EventEdgeAgentConfig,
 ) -> Result<ProjectedRuntimeSpec> {
     validate_plugin_identity(
@@ -297,11 +295,11 @@ pub(crate) fn project_event_edge_runtime_spec(
 
     Ok(ProjectedRuntimeSpec {
         strategy_label: "event_edge".to_string(),
-        agent_id: politics_cfg.agent_id.clone(),
+        agent_id: politics_agent_id.to_string(),
         domain: Domain::Politics,
         strategy_config_toml: stamp_strategy_plugin_id(
             definition,
-            build_event_edge_runtime_config(rest_url, ee_cfg),
+            build_event_edge_runtime_config(ee_cfg)?,
         )?,
     })
 }
@@ -311,7 +309,7 @@ pub(crate) fn project_nba_comeback_runtime_spec(
     spec: &PluginSpec,
     deployment: &PluginDeployment,
     database_url: &str,
-    sports_cfg: &SportsTradingConfig,
+    sports_agent_id: &str,
     nba_cfg: &NbaComebackConfig,
 ) -> Result<ProjectedRuntimeSpec> {
     validate_plugin_identity(
@@ -325,11 +323,11 @@ pub(crate) fn project_nba_comeback_runtime_spec(
 
     Ok(ProjectedRuntimeSpec {
         strategy_label: "nba_comeback".to_string(),
-        agent_id: sports_cfg.agent_id.clone(),
+        agent_id: sports_agent_id.to_string(),
         domain: Domain::Sports,
         strategy_config_toml: stamp_strategy_plugin_id(
             definition,
-            build_nba_comeback_runtime_config(database_url, nba_cfg),
+            build_nba_comeback_runtime_config(nba_cfg, database_url),
         )?,
     })
 }

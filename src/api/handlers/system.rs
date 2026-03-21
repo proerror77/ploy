@@ -1,4 +1,5 @@
 use axum::{extract::State, http::HeaderMap, http::StatusCode, Json};
+use rust_decimal::prelude::ToPrimitive;
 use serde::Deserialize;
 use sqlx::{postgres::Postgres, QueryBuilder, Row};
 use std::collections::{BTreeSet, HashMap};
@@ -9,7 +10,10 @@ use crate::api::{
     state::{AppState, SystemRunStatus},
     types::*,
 };
+use crate::control_plane::StrategyDeployment;
+use crate::coordinator::{DomainIngressSnapshot, GovernanceAgentSnapshot};
 use crate::domain::Domain;
+use crate::plugins::PluginRegistry;
 
 #[derive(Debug, Deserialize)]
 pub struct DomainControlRequest {
@@ -49,7 +53,7 @@ fn domain_label(domain: Domain) -> String {
 }
 
 fn summarize_deployment_states<'a>(
-    deployments: impl IntoIterator<Item = &'a crate::platform::StrategyDeployment>,
+    deployments: impl IntoIterator<Item = &'a StrategyDeployment>,
 ) -> DeploymentStateSummary {
     let mut summary = DeploymentStateSummary {
         enabled: 0,
@@ -59,7 +63,7 @@ fn summarize_deployment_states<'a>(
     };
 
     for deployment in deployments {
-        match deployment.effective_state() {
+        match deployment_state(deployment) {
             DeploymentState::Enabled => summary.enabled += 1,
             DeploymentState::Draining => summary.draining += 1,
             DeploymentState::Disabled => summary.disabled += 1,
@@ -68,6 +72,14 @@ fn summarize_deployment_states<'a>(
     }
 
     summary
+}
+
+fn deployment_state(deployment: &StrategyDeployment) -> DeploymentState {
+    if deployment.enabled {
+        DeploymentState::Enabled
+    } else {
+        DeploymentState::Disabled
+    }
 }
 
 fn summarize_available_plugins(registry: &PluginRegistry) -> Vec<PluginCapabilitySummary> {
@@ -92,13 +104,87 @@ fn summarize_account_budget(budget: &AccountBudgetSnapshot) -> AccountBudgetSumm
     }
 }
 
+fn build_operator_domain_statuses(
+    ingress_modes: &[DomainIngressSnapshot],
+    agents: &[GovernanceAgentSnapshot],
+) -> Vec<OperatorDomainStatus> {
+    let mut rows = HashMap::<String, OperatorDomainStatus>::new();
+
+    for snapshot in ingress_modes {
+        rows.insert(
+            snapshot.domain.clone(),
+            OperatorDomainStatus {
+                domain: snapshot.domain.clone(),
+                ingress_mode: snapshot.mode.clone(),
+                paused: !snapshot.mode.eq_ignore_ascii_case("running"),
+                exposure_usd: 0.0,
+                daily_pnl_usd: 0.0,
+            },
+        );
+    }
+
+    for agent in agents {
+        let entry = rows
+            .entry(agent.domain.clone())
+            .or_insert_with(|| OperatorDomainStatus {
+                domain: agent.domain.clone(),
+                ingress_mode: "unknown".to_string(),
+                paused: false,
+                exposure_usd: 0.0,
+                daily_pnl_usd: 0.0,
+            });
+        entry.exposure_usd += agent.exposure.to_f64().unwrap_or(0.0);
+        entry.daily_pnl_usd += agent.daily_pnl.to_f64().unwrap_or(0.0);
+    }
+
+    let mut domains = rows.into_values().collect::<Vec<_>>();
+    domains.sort_by(|a, b| a.domain.cmp(&b.domain));
+    domains
+}
+
+fn build_operator_claimer_status() -> OperatorClaimerStatus {
+    OperatorClaimerStatus {
+        enabled: cfg!(feature = "claimer_daemon"),
+        pending_redeemable_count: 0,
+        pending_redeemable_notional_usd: 0.0,
+        last_checked_at: None,
+        last_run_at: None,
+        last_error: None,
+    }
+}
+
+fn parse_operator_domain(raw: Option<&str>) -> std::result::Result<Domain, (StatusCode, String)> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "domain scope requires a domain".to_string(),
+        ));
+    };
+    Domain::parse_optional(Some(raw), Domain::Crypto).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "invalid domain '{}', expected crypto|sports|politics|economics|custom:<id>",
+                raw
+            ),
+        )
+    })
+}
+
+fn operator_targets(scope: OperatorScope, domain: Option<Domain>) -> Vec<String> {
+    match scope {
+        OperatorScope::Global => vec!["global".to_string()],
+        OperatorScope::Domain => domain.map(domain_label).into_iter().collect::<Vec<_>>(),
+    }
+}
+
 fn build_platform_capabilities_response(
     account_id: &str,
     runtime_mode: &str,
     dry_run: bool,
     coordinator_running: bool,
     mut active_domains: BTreeSet<String>,
-    deployments: &[crate::platform::StrategyDeployment],
+    deployments: &[StrategyDeployment],
     registry: &PluginRegistry,
 ) -> PlatformCapabilities {
     let mut by_domain: HashMap<String, usize> = HashMap::new();
@@ -107,11 +193,7 @@ fn build_platform_capabilities_response(
     let mut scoped_enabled = 0usize;
 
     for deployment in deployments {
-        let effective_state = deployment.effective_state();
-        let runtime_active = matches!(
-            effective_state,
-            DeploymentState::Enabled | DeploymentState::Draining
-        );
+        let runtime_active = matches!(deployment_state(deployment), DeploymentState::Enabled);
         let in_scope =
             deployment.matches_account(account_id) && deployment.matches_execution_mode(dry_run);
 
@@ -178,7 +260,7 @@ fn build_accounts_overview(
     runtime_account: &str,
     dry_run: bool,
     registry_rows: Vec<AccountRegistryEntry>,
-    deployments: Vec<crate::platform::StrategyDeployment>,
+    deployments: Vec<StrategyDeployment>,
     budget: AccountBudgetSnapshot,
 ) -> AccountsOverview {
     let service = AccountService::new(registry_rows, deployments.clone(), budget.clone());
@@ -346,6 +428,181 @@ pub async fn get_system_accounts(
         deployments.values().cloned().collect(),
         budget,
     )))
+}
+
+/// GET /api/operator/status
+pub async fn get_operator_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> std::result::Result<Json<OperatorStatusResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
+
+    let system_status = state.system_status.read().await.status.as_str().to_string();
+    let recent_actions = state.operator_recent_actions().await;
+
+    if let Some(coordinator) = state.coordinator.as_ref() {
+        let governance = coordinator.governance_status().await;
+        return Ok(Json(OperatorStatusResponse {
+            runtime_mode: state.runtime_mode.clone(),
+            account_id: state.account_id.clone(),
+            dry_run: state.dry_run,
+            system_status,
+            risk_state: format!("{:?}", governance.risk_state).to_ascii_lowercase(),
+            queue_depth: governance.queue.current_size as u64,
+            domains: build_operator_domain_statuses(
+                &governance.domain_ingress_modes,
+                &governance.agents,
+            ),
+            claimer: build_operator_claimer_status(),
+            recent_actions,
+        }));
+    }
+
+    let mut domains = state
+        .allowed_domains_labels()
+        .into_iter()
+        .map(|domain| OperatorDomainStatus {
+            domain,
+            ingress_mode: system_status.clone(),
+            paused: !system_status.eq_ignore_ascii_case("running"),
+            exposure_usd: 0.0,
+            daily_pnl_usd: 0.0,
+        })
+        .collect::<Vec<_>>();
+    domains.sort_by(|a, b| a.domain.cmp(&b.domain));
+
+    Ok(Json(OperatorStatusResponse {
+        runtime_mode: state.runtime_mode.clone(),
+        account_id: state.account_id.clone(),
+        dry_run: state.dry_run,
+        system_status,
+        risk_state: "unknown".to_string(),
+        queue_depth: 0,
+        domains,
+        claimer: build_operator_claimer_status(),
+        recent_actions,
+    }))
+}
+
+/// POST /api/operator/actions
+pub async fn post_operator_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<OperatorActionRequest>,
+) -> std::result::Result<Json<OperatorActionResponse>, (StatusCode, String)> {
+    ensure_admin_authorized(&headers)?;
+    if let Some(error) = request.validate() {
+        return Err((StatusCode::BAD_REQUEST, error));
+    }
+
+    let domain = match request.scope {
+        OperatorScope::Global => None,
+        OperatorScope::Domain => Some(parse_operator_domain(request.domain.as_deref())?),
+    };
+
+    let requested_at = chrono::Utc::now();
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let effective_targets = operator_targets(request.scope, domain);
+
+    let (accepted, message) = match request.action {
+        OperatorAction::Pause => {
+            let coordinator = state.coordinator.as_ref().ok_or_else(|| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "coordinator unavailable in this runtime".to_string(),
+                )
+            })?;
+            if let Some(domain) = domain {
+                coordinator
+                    .pause_domain(domain)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                (true, format!("paused {}", domain_label(domain)))
+            } else {
+                coordinator
+                    .pause_all()
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                (true, "paused all domains".to_string())
+            }
+        }
+        OperatorAction::Resume => {
+            let coordinator = state.coordinator.as_ref().ok_or_else(|| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "coordinator unavailable in this runtime".to_string(),
+                )
+            })?;
+            if let Some(domain) = domain {
+                coordinator
+                    .resume_domain(domain)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                (true, format!("resumed {}", domain_label(domain)))
+            } else {
+                coordinator
+                    .resume_all()
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                (true, "resumed all domains".to_string())
+            }
+        }
+        OperatorAction::ForceClose => {
+            let coordinator = state.coordinator.as_ref().ok_or_else(|| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "coordinator unavailable in this runtime".to_string(),
+                )
+            })?;
+            if let Some(domain) = domain {
+                coordinator
+                    .force_close_domain(domain)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                (true, format!("force-closed {}", domain_label(domain)))
+            } else {
+                coordinator
+                    .force_close_all()
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                (true, "force-closed all domains".to_string())
+            }
+        }
+        OperatorAction::ClaimCheck => (true, "claimer status refreshed".to_string()),
+        OperatorAction::ClaimRun => {
+            crate::account::ensure_account_claimer_daemon()
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            if cfg!(feature = "claimer_daemon") {
+                (true, "claimer daemon ensured".to_string())
+            } else {
+                (false, "claimer feature disabled in this build".to_string())
+            }
+        }
+    };
+
+    state
+        .record_operator_action(OperatorRecentAction {
+            action_id: action_id.clone(),
+            action: request.action,
+            scope: request.scope,
+            domain: domain.map(domain_label),
+            accepted,
+            message: message.clone(),
+            requested_by: request.requested_by.clone(),
+            requested_at,
+        })
+        .await;
+
+    Ok(Json(OperatorActionResponse {
+        accepted,
+        action_id,
+        action: request.action,
+        scope: request.scope,
+        effective_targets,
+        message,
+        requested_at,
+    }))
 }
 
 /// POST /api/system/start
@@ -743,21 +1000,123 @@ pub async fn get_security_events(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+
+    use axum::http::{HeaderMap, HeaderValue};
+    use axum::{extract::State, Json};
+    use chrono::Utc;
     use rust_decimal::Decimal;
+    use sqlx::postgres::PgPoolOptions;
 
     use crate::account::{AccountBudgetSnapshot, AccountRegistryEntry};
-    use crate::platform::{
-        DeploymentExecutionMode, Domain, MarketSelector, StrategyDeployment,
-        StrategyLifecycleStage, StrategyProductType, Timeframe,
+    use crate::adapters::{PolymarketClient, PostgresStore};
+    use crate::api::state::{AppState, StrategyConfigState};
+    use crate::api::types::{OperatorAction, OperatorActionRequest, OperatorScope};
+    use crate::config::ExecutionConfig;
+    use crate::control_plane::{
+        DeploymentExecutionMode, MarketSelector, StrategyDeployment, StrategyLifecycleStage,
+        StrategyProductType, Timeframe,
     };
-    use crate::plugins::{DeploymentState, PluginRegistry};
+    use crate::coordinator::{Coordinator, CoordinatorConfig, CoordinatorHandle};
+    use crate::coordinator::{DomainIngressSnapshot, GovernanceAgentSnapshot};
+    use crate::domain::Domain;
+    use crate::plugins::PluginRegistry;
+    use crate::strategy::executor::OrderExecutor;
 
-    use super::{build_accounts_overview, build_platform_capabilities_response};
+    use super::{
+        build_accounts_overview, build_operator_domain_statuses,
+        build_platform_capabilities_response, get_operator_status, post_operator_action,
+    };
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct TestEnvGuard {
+        _guard: MutexGuard<'static, ()>,
+        saved: Vec<(String, Option<String>)>,
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(&key, value) },
+                    None => unsafe { std::env::remove_var(&key) },
+                }
+            }
+        }
+    }
+
+    fn test_env(vars: &[(&str, Option<&str>)]) -> TestEnvGuard {
+        let guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock");
+        let saved = vars
+            .iter()
+            .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+        for (key, value) in vars {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        TestEnvGuard {
+            _guard: guard,
+            saved,
+        }
+    }
+
+    fn test_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-ploy-admin-token",
+            HeaderValue::from_str(token).expect("token header"),
+        );
+        headers
+    }
+
+    fn sample_strategy_config() -> StrategyConfigState {
+        StrategyConfigState {
+            symbols: vec!["BTCUSDT".to_string()],
+            min_move: 0.1,
+            max_entry: 0.95,
+            shares: 10,
+            predictive: false,
+            exit_edge_floor: None,
+            exit_price_band: None,
+            time_decay_exit_secs: None,
+            liquidity_exit_spread_bps: None,
+        }
+    }
+
+    fn test_store() -> Arc<PostgresStore> {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/unused")
+            .expect("lazy postgres pool");
+        Arc::new(PostgresStore::from_pool(pool))
+    }
+
+    fn make_test_handle() -> (CoordinatorHandle, Coordinator) {
+        let client = PolymarketClient::new("https://clob.polymarket.com", true)
+            .expect("build dry-run polymarket client");
+        let executor = Arc::new(OrderExecutor::new(client, ExecutionConfig::default()));
+        let allowed_domains = HashSet::from([Domain::Crypto, Domain::Sports]);
+        let coordinator = Coordinator::new(
+            CoordinatorConfig::default(),
+            executor,
+            "acct-test".to_string(),
+            allowed_domains,
+        );
+        let handle = coordinator.handle();
+        (handle, coordinator)
+    }
 
     fn sample_deployment(
         id: &str,
         enabled: bool,
-        state: DeploymentState,
         domain: Domain,
         account_ids: Vec<&str>,
     ) -> StrategyDeployment {
@@ -773,7 +1132,6 @@ mod tests {
             },
             timeframe: Timeframe::M5,
             enabled,
-            state,
             allocator_profile: "default".to_string(),
             risk_profile: "default".to_string(),
             priority: 0,
@@ -794,24 +1152,16 @@ mod tests {
             sample_deployment(
                 "deploy.crypto.momentum.1",
                 true,
-                DeploymentState::Enabled,
                 Domain::Crypto,
                 vec!["tango"],
             ),
             sample_deployment(
                 "deploy.crypto.momentum.2",
                 true,
-                DeploymentState::Draining,
                 Domain::Crypto,
                 vec!["tango"],
             ),
-            sample_deployment(
-                "deploy.sports.nba.1",
-                false,
-                DeploymentState::Disabled,
-                Domain::Sports,
-                vec!["other"],
-            ),
+            sample_deployment("deploy.sports.nba.1", false, Domain::Sports, vec!["other"]),
         ];
 
         let capabilities = build_platform_capabilities_response(
@@ -824,10 +1174,11 @@ mod tests {
             &registry,
         );
 
-        assert_eq!(capabilities.deployment_states.enabled, 1);
-        assert_eq!(capabilities.deployment_states.draining, 1);
+        assert_eq!(capabilities.deployment_states.enabled, 2);
+        assert_eq!(capabilities.deployment_states.draining, 0);
         assert_eq!(capabilities.deployment_states.disabled, 1);
-        assert_eq!(capabilities.scoped_deployment_states.draining, 1);
+        assert_eq!(capabilities.scoped_deployment_states.enabled, 2);
+        assert_eq!(capabilities.scoped_deployment_states.draining, 0);
         assert_eq!(capabilities.scoped_deployment_states.disabled, 0);
         assert!(capabilities
             .available_plugins
@@ -853,24 +1204,16 @@ mod tests {
                 },
             ],
             vec![
-                sample_deployment(
-                    "deploy.crypto.enabled",
-                    true,
-                    DeploymentState::Enabled,
-                    Domain::Crypto,
-                    vec!["tango"],
-                ),
+                sample_deployment("deploy.crypto.enabled", true, Domain::Crypto, vec!["tango"]),
                 sample_deployment(
                     "deploy.crypto.draining",
                     true,
-                    DeploymentState::Draining,
                     Domain::Crypto,
                     vec!["tango"],
                 ),
                 sample_deployment(
                     "deploy.crypto.disabled",
                     false,
-                    DeploymentState::Disabled,
                     Domain::Crypto,
                     vec!["tango"],
                 ),
@@ -890,8 +1233,8 @@ mod tests {
             .find(|account| account.account_id == "tango")
             .expect("runtime account row");
         assert!(runtime.runtime_active);
-        assert_eq!(runtime.deployment_states.enabled, 1);
-        assert_eq!(runtime.deployment_states.draining, 1);
+        assert_eq!(runtime.deployment_states.enabled, 2);
+        assert_eq!(runtime.deployment_states.draining, 0);
         assert_eq!(runtime.deployment_states.disabled, 1);
     }
 
@@ -908,7 +1251,6 @@ mod tests {
             vec![sample_deployment(
                 "deploy.crypto.draining",
                 true,
-                DeploymentState::Draining,
                 Domain::Crypto,
                 vec!["tango"],
             )],
@@ -921,7 +1263,122 @@ mod tests {
             .find(|account| account.account_id == "tango")
             .expect("runtime account row");
         assert_eq!(runtime.deployment_enabled, 1);
-        assert_eq!(runtime.deployment_states.draining, 1);
+        assert_eq!(runtime.deployment_states.enabled, 1);
+        assert_eq!(runtime.deployment_states.draining, 0);
         assert_eq!(runtime.deployment_states.disabled, 0);
+    }
+
+    #[test]
+    fn operator_domain_statuses_follow_governance_modes_and_aggregate_agent_metrics() {
+        let domains = build_operator_domain_statuses(
+            &[
+                DomainIngressSnapshot {
+                    domain: "crypto".to_string(),
+                    mode: "running".to_string(),
+                },
+                DomainIngressSnapshot {
+                    domain: "sports".to_string(),
+                    mode: "paused".to_string(),
+                },
+            ],
+            &[
+                GovernanceAgentSnapshot {
+                    agent_id: "crypto-1".to_string(),
+                    name: "crypto-1".to_string(),
+                    domain: "crypto".to_string(),
+                    status: "running".to_string(),
+                    exposure: Decimal::new(125, 1),
+                    daily_pnl: Decimal::new(25, 1),
+                    last_heartbeat: Utc::now(),
+                    error_message: None,
+                },
+                GovernanceAgentSnapshot {
+                    agent_id: "sports-1".to_string(),
+                    name: "sports-1".to_string(),
+                    domain: "sports".to_string(),
+                    status: "paused".to_string(),
+                    exposure: Decimal::new(50, 1),
+                    daily_pnl: Decimal::new(-5, 1),
+                    last_heartbeat: Utc::now(),
+                    error_message: None,
+                },
+            ],
+        );
+
+        assert_eq!(domains.len(), 2);
+        assert_eq!(domains[0].domain, "crypto");
+        assert_eq!(domains[0].ingress_mode, "running");
+        assert!(!domains[0].paused);
+        assert_eq!(domains[0].exposure_usd, 12.5);
+        assert_eq!(domains[0].daily_pnl_usd, 2.5);
+        assert_eq!(domains[1].domain, "sports");
+        assert_eq!(domains[1].ingress_mode, "paused");
+        assert!(domains[1].paused);
+        assert_eq!(domains[1].exposure_usd, 5.0);
+        assert_eq!(domains[1].daily_pnl_usd, -0.5);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn operator_status_returns_runtime_snapshot_without_coordinator() {
+        let _env = test_env(&[
+            ("PLOY_API_ADMIN_TOKEN", Some("test-token")),
+            ("PLOY_ADMIN_TOKEN", None),
+            ("PLOY_API_ADMIN_AUTH_REQUIRED", Some("true")),
+        ]);
+        let state = AppState::new(test_store(), sample_strategy_config());
+
+        let response = get_operator_status(State(state), test_headers("test-token"))
+            .await
+            .expect("operator status");
+        let payload = response.0;
+
+        assert_eq!(payload.runtime_mode, "standalone");
+        assert_eq!(payload.account_id, "default");
+        assert_eq!(payload.risk_state, "unknown");
+        assert!(!payload.domains.is_empty());
+        assert_eq!(payload.claimer.pending_redeemable_count, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pause_all_operator_action_returns_accepted_receipt() {
+        let _env = test_env(&[
+            ("PLOY_API_ADMIN_TOKEN", Some("test-token")),
+            ("PLOY_ADMIN_TOKEN", None),
+            ("PLOY_API_ADMIN_AUTH_REQUIRED", Some("true")),
+        ]);
+        let (handle, _coordinator) = make_test_handle();
+        let state = AppState::with_platform_services(
+            test_store(),
+            sample_strategy_config(),
+            Some(handle.clone()),
+            None,
+            "acct-test".to_string(),
+            false,
+        );
+
+        let response = post_operator_action(
+            State(state.clone()),
+            test_headers("test-token"),
+            Json(OperatorActionRequest {
+                action: OperatorAction::Pause,
+                scope: OperatorScope::Global,
+                domain: None,
+                requested_by: "test".to_string(),
+                reason: Some("smoke".to_string()),
+            }),
+        )
+        .await
+        .expect("pause action");
+        let payload = response.0;
+
+        assert!(payload.accepted);
+        assert_eq!(payload.action, OperatorAction::Pause);
+        assert_eq!(payload.scope, OperatorScope::Global);
+        assert_eq!(payload.effective_targets, vec!["global".to_string()]);
+
+        let actions = state.operator_recent_actions().await;
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, OperatorAction::Pause);
+        assert_eq!(actions[0].requested_by, "test");
     }
 }

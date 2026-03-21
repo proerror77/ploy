@@ -8,12 +8,15 @@ use rust_decimal_macros::dec;
 
 use crate::domain::Side;
 use crate::tui::data::{
-    DashboardStats, DisplayAgent, DisplayPosition, DisplayRiskState, DisplayTransaction,
-    MarketState,
+    DashboardStats, DisplayAgent, DisplayOperatorAction, DisplayOperatorClaimer,
+    DisplayOperatorDomain, DisplayOperatorSummary, DisplayPosition, DisplayRiskState,
+    DisplayTransaction, MarketState,
 };
 
 /// Maximum number of transactions to keep in history
 const MAX_TRANSACTIONS: usize = 100;
+/// Maximum number of operator actions to keep in history
+const MAX_OPERATOR_ACTIONS: usize = 10;
 
 /// Active view tab in the TUI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +25,8 @@ pub enum ActiveTab {
     Portfolio,
     /// Agent monitor view showing coordinator agents
     AgentMonitor,
+    /// Operator control and runtime view
+    Operator,
 }
 
 /// Pending action to confirm via modal
@@ -77,6 +82,16 @@ pub struct TuiApp {
     pub filter_mode: bool,
     /// Current filter input text
     pub filter_input: String,
+    /// Operator summary snapshot
+    pub operator_summary: DisplayOperatorSummary,
+    /// Per-domain operator status snapshots
+    pub operator_domains: Vec<DisplayOperatorDomain>,
+    /// Currently selected operator domain index
+    pub selected_operator_domain_idx: usize,
+    /// Claimer/operator recovery snapshot
+    pub operator_claimer: DisplayOperatorClaimer,
+    /// Recent operator actions
+    pub operator_actions: Vec<DisplayOperatorAction>,
 }
 
 impl Default for TuiApp {
@@ -106,6 +121,11 @@ impl TuiApp {
             modal: None,
             filter_mode: false,
             filter_input: String::new(),
+            operator_summary: DisplayOperatorSummary::default(),
+            operator_domains: Vec::new(),
+            selected_operator_domain_idx: 0,
+            operator_claimer: DisplayOperatorClaimer::default(),
+            operator_actions: Vec::new(),
         }
     }
 
@@ -289,7 +309,8 @@ impl TuiApp {
     pub fn toggle_tab(&mut self) {
         self.active_tab = match self.active_tab {
             ActiveTab::Portfolio => ActiveTab::AgentMonitor,
-            ActiveTab::AgentMonitor => ActiveTab::Portfolio,
+            ActiveTab::AgentMonitor => ActiveTab::Operator,
+            ActiveTab::Operator => ActiveTab::Portfolio,
         };
     }
 
@@ -330,6 +351,60 @@ impl TuiApp {
     /// Update risk state from coordinator
     pub fn update_risk_state(&mut self, risk: DisplayRiskState) {
         self.risk_state = risk;
+    }
+
+    /// Update the operator summary snapshot.
+    pub fn update_operator_summary(&mut self, summary: DisplayOperatorSummary) {
+        self.operator_summary = summary;
+    }
+
+    /// Replace the per-domain operator snapshots.
+    pub fn update_operator_domains(&mut self, domains: Vec<DisplayOperatorDomain>) {
+        self.operator_domains = domains;
+        if self.operator_domains.is_empty() {
+            self.selected_operator_domain_idx = 0;
+        } else if self.selected_operator_domain_idx >= self.operator_domains.len() {
+            self.selected_operator_domain_idx = 0;
+        }
+    }
+
+    /// Get the currently selected operator domain label.
+    pub fn selected_operator_domain(&self) -> Option<&str> {
+        self.operator_domains
+            .get(self.selected_operator_domain_idx)
+            .map(|domain| domain.domain.as_str())
+    }
+
+    /// Advance the selected operator domain.
+    pub fn next_operator_domain(&mut self) {
+        if !self.operator_domains.is_empty() {
+            self.selected_operator_domain_idx =
+                (self.selected_operator_domain_idx + 1) % self.operator_domains.len();
+        }
+    }
+
+    /// Move to the previous operator domain.
+    pub fn prev_operator_domain(&mut self) {
+        if !self.operator_domains.is_empty() {
+            if self.selected_operator_domain_idx == 0 {
+                self.selected_operator_domain_idx = self.operator_domains.len() - 1;
+            } else {
+                self.selected_operator_domain_idx -= 1;
+            }
+        }
+    }
+
+    /// Update the claimer/operator recovery snapshot.
+    pub fn update_operator_claimer(&mut self, claimer: DisplayOperatorClaimer) {
+        self.operator_claimer = claimer;
+    }
+
+    /// Push a recent operator action, keeping bounded history.
+    pub fn push_operator_action(&mut self, action: DisplayOperatorAction) {
+        self.operator_actions.insert(0, action);
+        if self.operator_actions.len() > MAX_OPERATOR_ACTIONS {
+            self.operator_actions.truncate(MAX_OPERATOR_ACTIONS);
+        }
     }
 
     /// Create demo data for testing
@@ -441,5 +516,112 @@ impl TuiApp {
         };
 
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal_macros::dec;
+
+    use super::TuiApp;
+    use crate::tui::data::{
+        DisplayOperatorAction, DisplayOperatorClaimer, DisplayOperatorDomain,
+        DisplayOperatorSummary,
+    };
+
+    #[test]
+    fn operator_snapshot_updates_selected_domain_list() {
+        let mut app = TuiApp::new();
+        app.update_operator_summary(DisplayOperatorSummary {
+            runtime_mode: "platform".to_string(),
+            account_id: "default".to_string(),
+            dry_run: true,
+            system_status: "running".to_string(),
+            risk_state: "normal".to_string(),
+            queue_depth: 2,
+        });
+        app.update_operator_domains(vec![
+            DisplayOperatorDomain {
+                domain: "crypto".to_string(),
+                ingress_mode: "enabled".to_string(),
+                paused: false,
+                exposure: dec!(10),
+                daily_pnl: dec!(1),
+            },
+            DisplayOperatorDomain {
+                domain: "sports".to_string(),
+                ingress_mode: "paused".to_string(),
+                paused: true,
+                exposure: dec!(5),
+                daily_pnl: dec!(-2),
+            },
+        ]);
+
+        assert_eq!(app.operator_domains.len(), 2);
+        assert_eq!(app.selected_operator_domain(), Some("crypto"));
+    }
+
+    #[test]
+    fn operator_domain_selection_wraps_in_both_directions() {
+        let mut app = TuiApp::new();
+        app.update_operator_domains(vec![
+            DisplayOperatorDomain {
+                domain: "crypto".to_string(),
+                ingress_mode: "enabled".to_string(),
+                paused: false,
+                exposure: dec!(10),
+                daily_pnl: dec!(1),
+            },
+            DisplayOperatorDomain {
+                domain: "sports".to_string(),
+                ingress_mode: "paused".to_string(),
+                paused: true,
+                exposure: dec!(5),
+                daily_pnl: dec!(-2),
+            },
+        ]);
+
+        app.next_operator_domain();
+        assert_eq!(app.selected_operator_domain(), Some("sports"));
+
+        app.next_operator_domain();
+        assert_eq!(app.selected_operator_domain(), Some("crypto"));
+
+        app.prev_operator_domain();
+        assert_eq!(app.selected_operator_domain(), Some("sports"));
+    }
+
+    #[test]
+    fn operator_recent_actions_are_bounded() {
+        let mut app = TuiApp::new();
+        for idx in 0..15 {
+            app.push_operator_action(DisplayOperatorAction {
+                action_id: format!("act-{idx}"),
+                label: format!("action-{idx}"),
+                accepted: idx % 2 == 0,
+                message: "done".to_string(),
+                requested_by: "test".to_string(),
+            });
+        }
+
+        assert_eq!(app.operator_actions.len(), 10);
+        assert_eq!(app.operator_actions[0].action_id, "act-14");
+        assert_eq!(app.operator_actions[9].action_id, "act-5");
+    }
+
+    #[test]
+    fn operator_claimer_snapshot_replaces_previous_state() {
+        let mut app = TuiApp::new();
+        app.update_operator_claimer(DisplayOperatorClaimer {
+            enabled: true,
+            pending_redeemable_count: 3,
+            pending_redeemable_notional_usd: dec!(12.5),
+            last_checked_label: Some("12:00:00".to_string()),
+            last_run_label: None,
+            last_error: None,
+        });
+
+        assert!(app.operator_claimer.enabled);
+        assert_eq!(app.operator_claimer.pending_redeemable_count, 3);
     }
 }

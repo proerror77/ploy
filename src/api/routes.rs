@@ -85,6 +85,11 @@ pub fn create_router(state: AppState) -> Router {
             get(handlers::get_platform_capabilities),
         )
         .route("/api/system/accounts", get(handlers::get_system_accounts))
+        .route("/api/operator/status", get(handlers::get_operator_status))
+        .route(
+            "/api/operator/actions",
+            post(handlers::post_operator_action),
+        )
         .route("/api/system/start", post(handlers::start_system))
         .route("/api/system/stop", post(handlers::stop_system))
         .route("/api/system/restart", post(handlers::restart_system))

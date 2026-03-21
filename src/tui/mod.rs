@@ -14,7 +14,11 @@ pub mod widgets;
 mod tests;
 
 pub use app::TuiApp;
-pub use data::{DashboardStats, DisplayAgent, DisplayPosition, DisplayTransaction, MarketState};
+pub use data::{
+    DashboardStats, DisplayAgent, DisplayOperatorAction, DisplayOperatorClaimer,
+    DisplayOperatorDomain, DisplayOperatorSummary, DisplayPosition, DisplayTransaction,
+    MarketState,
+};
 pub use event::{AppEvent, EventHandler, KeyAction};
 pub use runner::{run_dashboard_auto, DashboardConfig, DashboardRunner};
 pub use theme::Theme;
@@ -173,6 +177,7 @@ pub async fn run_tui(mut app: TuiApp) -> io::Result<()> {
                         app.filter_mode = true;
                         app.filter_input.clear();
                     }
+                    KeyAction::ClaimCheck | KeyAction::ClaimRun | KeyAction::RefreshOperator => {}
                     KeyAction::Confirm | KeyAction::Dismiss => {}
                     KeyAction::None => {}
                 }

@@ -101,6 +101,22 @@ fn capability_endpoints(governance_available: bool) -> Vec<CapabilityEndpoint> {
             description: "Global/domain runtime control commands".to_string(),
             auth: "x-ploy-admin-token".to_string(),
         },
+        CapabilityEndpoint {
+            path: "/api/operator/status".to_string(),
+            method: "GET".to_string(),
+            description:
+                "Operator terminal snapshot for runtime, domain controls, claimer, and recent actions"
+                    .to_string(),
+            auth: "x-ploy-admin-token".to_string(),
+        },
+        CapabilityEndpoint {
+            path: "/api/operator/actions".to_string(),
+            method: "POST".to_string(),
+            description:
+                "Coordinator-backed operator actions: pause, resume, force-close, claim check, claim run"
+                    .to_string(),
+            auth: "x-ploy-admin-token".to_string(),
+        },
     ];
 
     if governance_available {
@@ -168,10 +184,19 @@ mod tests {
         assert!(with_governance
             .iter()
             .any(|ep| ep.path.contains("/api/governance/status")));
+        assert!(with_governance
+            .iter()
+            .any(|ep| ep.path == "/api/operator/status"));
+        assert!(with_governance
+            .iter()
+            .any(|ep| ep.path == "/api/operator/actions"));
 
         let without_governance = capability_endpoints(false);
         assert!(!without_governance
             .iter()
             .any(|ep| ep.path.contains("/api/governance/status")));
+        assert!(without_governance
+            .iter()
+            .any(|ep| ep.path == "/api/operator/status"));
     }
 }

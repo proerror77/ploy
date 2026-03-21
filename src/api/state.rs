@@ -1,6 +1,8 @@
 use crate::adapters::PostgresStore;
 use crate::ai_clients::grok::GrokClient;
-use crate::api::types::{MarketData, PositionResponse, TradeResponse, WsMessage};
+use crate::api::types::{
+    MarketData, OperatorRecentAction, PositionResponse, TradeResponse, WsMessage,
+};
 use crate::control_plane::deployment_files::{deployment_file_candidates, deployments_state_path};
 use crate::control_plane::{StrategyDeployment, StrategyEvaluationEvidence};
 use crate::coordinator::CoordinatorHandle;
@@ -15,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tokio::time::Duration;
+
+const MAX_OPERATOR_ACTIONS: usize = 10;
 
 /// Shared application state for API handlers
 #[derive(Clone)]
@@ -59,6 +63,8 @@ pub struct AppState {
     pub strategy_evaluations: Arc<RwLock<Vec<StrategyEvaluationEvidence>>>,
     /// Persistence path for strategy evaluation evidence.
     pub strategy_evaluations_path: Arc<PathBuf>,
+    /// Recent operator actions for the control surface.
+    pub operator_actions: Arc<RwLock<Vec<OperatorRecentAction>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +212,15 @@ impl AppState {
         HashMap::new()
     }
 
+    pub async fn record_operator_action(&self, action: OperatorRecentAction) {
+        let mut actions = self.operator_actions.write().await;
+        push_recent_operator_action(&mut actions, action);
+    }
+
+    pub async fn operator_recent_actions(&self) -> Vec<OperatorRecentAction> {
+        self.operator_actions.read().await.clone()
+    }
+
     fn load_strategy_evaluations(path: &Path) -> Vec<StrategyEvaluationEvidence> {
         let raw = std::env::var("PLOY_STRATEGY_EVALUATIONS_JSON").unwrap_or_default();
         if !raw.trim().is_empty() {
@@ -303,6 +318,7 @@ impl AppState {
             allowed_domains,
             strategy_evaluations,
             strategy_evaluations_path,
+            operator_actions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -357,6 +373,7 @@ impl AppState {
             allowed_domains,
             strategy_evaluations,
             strategy_evaluations_path,
+            operator_actions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -587,9 +604,20 @@ impl AppState {
     }
 }
 
+fn push_recent_operator_action(
+    actions: &mut Vec<OperatorRecentAction>,
+    action: OperatorRecentAction,
+) {
+    actions.insert(0, action);
+    if actions.len() > MAX_OPERATOR_ACTIONS {
+        actions.truncate(MAX_OPERATOR_ACTIONS);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::{OperatorAction, OperatorRecentAction, OperatorScope};
 
     #[test]
     fn test_has_realtime_listeners_reflects_broadcast_subscribers() {
@@ -601,5 +629,29 @@ mod tests {
 
         drop(rx);
         assert!(!AppState::has_realtime_listeners(&ws_tx));
+    }
+
+    #[test]
+    fn operator_recent_actions_keep_newest_first_and_trim_history() {
+        let mut actions = Vec::new();
+        for idx in 0..15 {
+            push_recent_operator_action(
+                &mut actions,
+                OperatorRecentAction {
+                    action_id: format!("act-{idx}"),
+                    action: OperatorAction::Pause,
+                    scope: OperatorScope::Global,
+                    domain: None,
+                    accepted: true,
+                    message: "ok".to_string(),
+                    requested_by: "test".to_string(),
+                    requested_at: Utc::now(),
+                },
+            );
+        }
+
+        assert_eq!(actions.len(), 10);
+        assert_eq!(actions[0].action_id, "act-14");
+        assert_eq!(actions[9].action_id, "act-5");
     }
 }

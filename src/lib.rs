@@ -51,6 +51,7 @@
     clippy::wrong_self_convention
 )]
 
+pub mod account;
 pub mod adapters;
 pub mod agent_runtime;
 pub mod agents;
@@ -71,6 +72,7 @@ pub mod error;
 pub mod exchange;
 pub mod ml;
 pub mod persistence;
+pub mod plugins;
 pub mod safety;
 pub mod services;
 pub mod signing;

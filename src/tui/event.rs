@@ -157,6 +157,12 @@ pub enum KeyAction {
     EmergencyClose,
     /// Enter search/filter mode
     EnterFilter,
+    /// Trigger claimer check without redeeming
+    ClaimCheck,
+    /// Trigger claimer run
+    ClaimRun,
+    /// Refresh operator snapshot
+    RefreshOperator,
     /// Confirm (y or Enter in modal)
     Confirm,
     /// Dismiss/cancel (n or Esc in modal)
@@ -170,6 +176,11 @@ impl From<KeyEvent> for KeyAction {
         match key.code {
             KeyCode::Char('q') => KeyAction::Quit,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyAction::Quit,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                KeyAction::ClaimRun
+            }
+            KeyCode::Char('c') => KeyAction::ClaimCheck,
+            KeyCode::Char('g') => KeyAction::RefreshOperator,
             KeyCode::Up | KeyCode::Char('k') => KeyAction::ScrollUp,
             KeyCode::Down | KeyCode::Char('j') => KeyAction::ScrollDown,
             KeyCode::Char('?') | KeyCode::Char('h') => KeyAction::Help,
@@ -186,5 +197,23 @@ impl From<KeyEvent> for KeyAction {
             KeyCode::Esc => KeyAction::Dismiss,
             _ => KeyAction::None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::KeyAction;
+
+    #[test]
+    fn operator_control_keybindings_map_to_expected_actions() {
+        let claim_check = KeyAction::from(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let refresh = KeyAction::from(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        let claim_run = KeyAction::from(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SHIFT));
+
+        assert_eq!(claim_check, KeyAction::ClaimCheck);
+        assert_eq!(refresh, KeyAction::RefreshOperator);
+        assert_eq!(claim_run, KeyAction::ClaimRun);
     }
 }

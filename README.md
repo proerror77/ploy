@@ -39,6 +39,7 @@ For targeted deployment control patch, use `PUT /api/strategies/control/:id`.
 `strategies/control` now includes `strategy_version`, `lifecycle_stage` (`backtest|paper|shadow|live`), `product_type` (`binary_option` default), and evaluation snapshots.
 Live sidecar ingress enforces `lifecycle_stage=live` by default (temporary migration override: `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true`).
 Traceable strategy evidence ledger is available via `GET/POST /api/strategy-evaluations` and `GET /api/strategy-evaluations/:deployment_id/latest`.
+Operator terminal control is exposed via `GET /api/operator/status` and `POST /api/operator/actions` (admin token). The first version is intentionally limited to coordinator-backed ops actions: `pause`, `resume`, `force_close`, `claim_check`, and `claim_run`.
 
 Governance agents live under `crate::agents`; canonical live strategy runtime ownership lives under `crate::strategy`, `crate::coordinator`, and `crate::plugins`.
 
@@ -96,6 +97,9 @@ sqlx migrate run
 | `PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD` | No | Hard sports domain daily loss stop |
 | `PLOY_RISK__MAX_DRAWDOWN_USD` | No | Hard drawdown stop (runtime cumulative realized curve) |
 | `PLOY_ACCOUNT_ID` | No | Runtime account scope identifier (default `default`) |
+| `PLOY_API_PORT` | No | API listen port for `ploy serve` and dashboard operator polling (default `8081`) |
+| `PLOY_API_ADMIN_TOKEN` | No | Admin token for protected API routes, including operator terminal actions |
+| `PLOY_ADMIN_TOKEN` | No | Dashboard-side fallback token name for operator polling/actions if `PLOY_API_ADMIN_TOKEN` is unset |
 | `PLOY_DRY_RUN__ENABLED` | No | Force runtime dry-run mode (`true`/`false`) |
 | `PLOY_DEPLOYMENTS_REQUIRE_EVIDENCE` | No | Require strategy evidence before enabling deployments (`true`/`false`) |
 | `PLOY_DEPLOYMENTS_REQUIRED_STAGES` | No | Required evidence stages CSV (default `backtest,paper`) |
@@ -153,6 +157,7 @@ export PLOY_ALLOW_DIRECT_LIVE=true
 ```bash
 ploy run                                       # Legacy bot loop (dry-run unless PLOY_ALLOW_DIRECT_LIVE=true)
 ploy test                                      # Test Polymarket API connectivity
+ploy serve --port 8081                         # API server for dashboards / control-plane clients
 ploy dashboard --demo                          # TUI dashboard with sample data
 ploy dashboard                                 # TUI dashboard with live data
 ploy search "bitcoin"                          # Search Polymarket for markets
@@ -285,6 +290,29 @@ ploy platform start --crypto --sports              # Start all domain agents
 ploy platform start --crypto --dry-run             # Crypto agent only, dry-run
 ploy platform start --sports --pause sports        # Start paused
 ```
+
+### Operator Terminal
+
+The dashboard now includes an `Operator` tab backed by the admin API. It is meant for runtime operations only and does not introduce a direct live order path.
+
+Start the control plane and dashboard together:
+
+```bash
+export PLOY_API_ADMIN_TOKEN=change-me
+ploy serve --port 8081
+ploy dashboard
+```
+
+Behavior:
+
+- `ploy dashboard` polls `http://127.0.0.1:${PLOY_API_PORT:-8081}` for `GET /api/operator/status`
+- the dashboard sends operator actions with `x-ploy-admin-token`
+- if `PLOY_API_ADMIN_TOKEN` is unset in the dashboard shell, it falls back to `PLOY_ADMIN_TOKEN`
+- the first version supports only global/domain ops actions: `pause`, `resume`, `force_close`, `claim_check`, and `claim_run`
+- all operator actions still flow through the existing coordinator/control plane
+
+If the admin token is missing, the Operator tab remains visible but action requests fail closed.
+See [docs/runbooks/operator-terminal.md](docs/runbooks/operator-terminal.md) for the minimal operator flow.
 
 Deployment matrix entries support runtime scope controls:
 
