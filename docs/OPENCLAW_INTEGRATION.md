@@ -123,38 +123,35 @@ OpenClaw 控制面可直接讀寫全域治理策略（需 admin token）：
 
 Domain `force_close` / `shutdown` 指令在 Coordinator handle 入口即時將該 domain 設為 `halted`，避免命令傳遞期間仍接收新 BUY intents。
 
-### Legacy Strategy Control API（Archived Reference）
+### Default Control-Plane API
 
-新增聚合控制面視圖（需 admin token）：
+目前 branch 的 OpenClaw / agent operator surface 應只走新的 `ployd`
+control plane（需 admin token）：
 
-- `GET /api/strategies/control`
-  - 回傳 deployment matrix + domain ingress mode + running agents 的單一視圖
-  - 供 OpenClaw/AI scheduler 做策略調度與運行態比對
-- `PUT /api/strategies/control/:id`
-  - 單 deployment patch（`enabled`/`priority`/`cooldown_secs`/`allocator_profile`/`risk_profile`）
-  - 已支援策略治理欄位：`strategy_version`、`lifecycle_stage`（`backtest|paper|shadow|live`）、`product_type`（預設 `binary_option`）、`last_evaluation_score`
+- `GET /api/system/status`
+  - 平台整體狀態、uptime、error count、degraded/recovering 狀態
+- `GET /api/deployments`
+  - deployment 清單與 `desired_state` / `observed_state` / `deployment_state`
+- `GET /api/deployments/:id`
+  - 單 deployment 詳情
+- `POST /api/deployments/:id/control`
+  - pause / resume / stop 與 `enabled|draining|disabled|archived` lifecycle 切換
+- `GET /api/trading/state`
+  - canonical trading ledger snapshot
+- `POST /api/deployments/:id/intents`
+  - paper/live intent ingress
+- `POST /api/deployments/:id/orders/:order_id/cancel`
+  - live order cancel
+- `POST /api/deployments/:id/orders/:order_id/replace`
+  - live order amend / replace
+- `GET /api/events/stream`
+  - system / deployment / trading SSE snapshot stream
 
-Ingress lifecycle contract:
-- sidecar live ingress 預設只接受 `lifecycle_stage=live` 的 deployment（避免未審核策略直接進 live queue）
-- 遷移期可暫時設 `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true` 放寬，但不建議 production
+### Archived Strategy Control / Evidence APIs
 
-### Legacy Strategy Evaluation Evidence API（Archived Reference）
-
-新增可追溯證據層（需 admin token）：
-
-- `GET /api/strategy-evaluations`
-  - filter: `deployment_id` / `strategy` / `strategy_version` / `stage` / `lifecycle_stage` / `limit`
-- `POST /api/strategy-evaluations`
-  - 寫入 backtest/paper/live 證據（包含 `dataset_hash` / `model_hash` / `config_hash` / metrics）
-- `GET /api/strategy-evaluations/:deployment_id/latest`
-  - 讀取最新證據（可帶 `stage` / `strategy_version`）
-
-`GET /api/strategies/control` 現在會回傳每個 deployment 的 latest evidence 摘要：
-- `latest_evaluation_id`
-- `latest_evaluation_stage`
-- `latest_evaluation_dataset_hash`
-- `latest_evaluation_model_hash`
-- `latest_evaluation_sample_size`
+`/api/strategies/control`、`/api/strategy-evaluations`、舊 `/api/sidecar/*`
+與 `ploy rpc` 都只應視為 archived reference，不是目前 branch 的預設
+operator path。
 
 Legacy RPC methods（archived reference）：
 - `GET /api/capabilities`（machine-readable 能力清單，供 OpenClaw/AI scheduler 自動發現 runtime surface）

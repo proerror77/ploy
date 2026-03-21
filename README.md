@@ -82,15 +82,20 @@ Collector / backfill command routing is documented in [docs/COLLECTOR_RUNBOOK.md
 
 New live strategies should implement the canonical `Strategy` contract.
 `TradingAgent` / `DomainAgent` are retired and only remain in historical design docs.
-For machine-readable control-plane discovery, query `GET /api/capabilities`.
-For plugin/runtime lifecycle visibility, query `GET /api/system/capabilities`; it now reports deployment state counts (`enabled|draining|disabled|archived`) plus builtin plugin summaries.
-For account-scoped lifecycle visibility, query `GET /api/system/accounts`; it now reports per-account deployment state counts and the runtime budget snapshot.
-For deployment/runtime control projection, query `GET /api/strategies/control` (admin token).
-For targeted deployment control patch, use `PUT /api/strategies/control/:id`.
-`strategies/control` now includes `strategy_version`, `lifecycle_stage` (`backtest|paper|shadow|live`), `product_type` (`binary_option` default), and evaluation snapshots.
-Live sidecar ingress enforces `lifecycle_stage=live` by default (temporary migration override: `PLOY_ALLOW_NON_LIVE_DEPLOYMENT_INGRESS=true`).
-Traceable strategy evidence ledger is available via `GET/POST /api/strategy-evaluations` and `GET /api/strategy-evaluations/:deployment_id/latest`.
-Operator terminal control is exposed via `GET /api/operator/status` and `POST /api/operator/actions` (admin token). The first version is intentionally limited to coordinator-backed ops actions: `pause`, `resume`, `force_close`, `claim_check`, and `claim_run`.
+The default workspace control plane is:
+- `GET /api/system/status`
+- `GET /api/deployments`
+- `GET /api/deployments/:id`
+- `POST /api/deployments/:id/control`
+- `GET /api/trading/state`
+- `POST /api/deployments/:id/intents`
+- `POST /api/deployments/:id/orders/:order_id/cancel`
+- `POST /api/deployments/:id/orders/:order_id/replace`
+- `GET /api/events/stream`
+
+The older `strategies/control`, `strategy-evaluations`, `/api/sidecar/*`, and
+`ploy rpc` surfaces are historical reference only in this branch and are no
+longer part of the default operator path.
 
 Governance agents live under `crate::agents`; canonical live strategy runtime ownership lives under `crate::strategy`, `crate::coordinator`, and `crate::plugins`.
 
@@ -295,7 +300,6 @@ ploy agent --mode advisory                     # Get trading recommendations
 ploy agent --mode autonomous --enable-trading  # (blocked by default; prefer platform mode)
 ploy agent --chat                              # Interactive conversation
 ploy agent --mode sports --sports-url <url>    # Sports-specific analysis
-ploy rpc                                       # JSON-RPC 2.0 server over stdin/stdout
 ```
 
 ### Domain: Crypto
@@ -375,10 +379,9 @@ Deployment matrix entries support runtime scope controls:
 - `account_ids`: optional allow-list. Empty means all accounts.
 - `execution_mode`: `any` | `dry_run_only` | `live_only`.
 
-Strategy evidence is stored in `strategy_evaluations` and supports `BACKTEST` / `PAPER` / `LIVE` stages with auditable payloads (`evidence_ref`, `evidence_hash`, `evidence_payload`).  
-Sidecar/API can write and query evidence via:
-- `POST /api/sidecar/strategy-evaluations`
-- `GET /api/sidecar/strategy-evaluations`
+The older `ploy rpc` and sidecar evidence endpoints are archived compatibility
+references only. They are not part of the default workspace operator surface on
+this branch.
 
 ### RL Commands (requires `--features rl`)
 
