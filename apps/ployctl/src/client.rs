@@ -426,6 +426,9 @@ mod tests {
                 websocket_connected: false,
                 database_connected: false,
                 error_count_1h: 0,
+                live_reconcile_failures: 0,
+                next_live_reconcile_at: None,
+                last_live_reconcile_error: None,
             })
             .expect("status json"),
         )
@@ -634,6 +637,9 @@ mod tests {
                         websocket_connected: false,
                         database_connected: false,
                         error_count_1h: 0,
+                        live_reconcile_failures: 0,
+                        next_live_reconcile_at: None,
+                        last_live_reconcile_error: None,
                     },
                 }))
                 .expect("event1");

@@ -1,3 +1,39 @@
+# Live Reconcile Backoff Hardening (2026-03-21)
+
+## Goal
+Harden the live venue reconciliation loop so transient venue outages stop
+thrashing the daemon, and expose the resulting degraded/backoff state through
+the operator surfaces.
+
+## File ownership
+
+- `apps/ployd/src/runtime.rs`, `apps/ployd/src/config.rs`
+  - owner: outage-aware reconcile backoff, daemon health propagation, env wiring
+- `crates/ploy-platform/src/system.rs`, `crates/ploy-operator-contracts/src/system.rs`
+  - owner: system status contract and platform state tracking
+- `apps/ployctl/`, `apps/ploytui/`, runbooks
+  - owner: operator-visible status rendering and deployment guidance
+
+## Tasks
+
+- [x] Add configurable live reconcile backoff with failure tracking in `ployd`.
+- [x] Surface reconcile failure count, next retry time, and last error through
+  the platform/system status contract.
+- [x] Teach CLI/TUI/docs to show the degraded/backoff fields.
+- [x] Re-run focused Rust validation and platform smoke coverage.
+
+## Progress notes
+
+- 2026-03-21: `ployd` now backs off live reconciliation after venue failures
+  using configurable base/max delays, keeps the daemon alive during outage
+  windows, and marks the control plane degraded instead of retry-spinning.
+- 2026-03-21: `SystemStatus` now exposes `live_reconcile_failures`,
+  `next_live_reconcile_at`, and `last_live_reconcile_error`, and `ployctl
+  system status` renders them directly for operators.
+- 2026-03-21: Focused validation passed:
+  - `rtk cargo test -p ploy-platform -p ploy-operator-contracts -p ployd -p ployctl -p ploytui`
+  - `rtk cargo test --test platform_smoke`
+
 # Live Execution Facade Cut (2026-03-20)
 
 ## Goal

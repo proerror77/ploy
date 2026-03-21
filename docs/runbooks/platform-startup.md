@@ -24,7 +24,10 @@ flow uses `/auth/login`, which sets an `HttpOnly` same-site signed session
 cookie so `/api/events/stream` stays authenticated. Set
 `PLOY_API_AUTH_COOKIE_SECRET` too if you want those browser sessions to survive
 daemon restarts. Set `PLOY_REQUEST_RATE_LIMIT_PER_MINUTE` if you need a tighter
-or looser daemon-side HTTP throttle; `0` disables it.
+or looser daemon-side HTTP throttle; `0` disables it. Set
+`PLOY_LIVE_RECONCILE_BACKOFF_BASE_MS` and
+`PLOY_LIVE_RECONCILE_BACKOFF_MAX_MS` if you need to tune live venue reconcile
+retry backoff during exchange/API outages.
 
 2. In a second shell, check the operator client against the control-plane surface:
 
@@ -69,4 +72,6 @@ the thin terminal console on top of the same control-plane API. Deployment CRUD
 is still simplified, but the daemon/client/runtime contract is no longer a
 placeholder. `ployd` also keeps an append-only `run/platform/audit-log.jsonl`
 for authenticated control-plane actions, and `ployctl system audit` reads the
-latest entries back over `/api/audit/logs`.
+latest entries back over `/api/audit/logs`. `ployctl system status` now also
+shows `live_reconcile_failures`, `next_live_reconcile_at`, and
+`last_live_reconcile_error`, which are the primary live-venue outage signals.

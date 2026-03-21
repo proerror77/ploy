@@ -3,8 +3,25 @@ use crate::client::ControlPlaneClient;
 pub fn render_system_status(client: &ControlPlaneClient) -> Result<String, String> {
     let status = client.system_snapshot()?;
     Ok(format!(
-        "status={} uptime={}s version={}",
-        status.status, status.uptime_seconds, status.version
+        "status={} uptime={}s version={} db_connected={} ws_connected={} errors_1h={} last_trade_time={} live_reconcile_failures={} next_live_reconcile_at={} last_live_reconcile_error={}",
+        status.status,
+        status.uptime_seconds,
+        status.version,
+        status.database_connected,
+        status.websocket_connected,
+        status.error_count_1h,
+        status
+            .last_trade_time
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string()),
+        status.live_reconcile_failures,
+        status
+            .next_live_reconcile_at
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string()),
+        status
+            .last_live_reconcile_error
+            .unwrap_or_else(|| "-".to_string()),
     ))
 }
 
@@ -64,7 +81,10 @@ mod tests {
                 "last_trade_time": null,
                 "websocket_connected": false,
                 "database_connected": false,
-                "error_count_1h": 0
+                "error_count_1h": 0,
+                "live_reconcile_failures": 0,
+                "next_live_reconcile_at": null,
+                "last_live_reconcile_error": null
             })
             .to_string(),
         )
@@ -73,6 +93,7 @@ mod tests {
         let client = ControlPlaneClient::from_runtime_root(&runtime_root);
         let output = render_system_status(&client).expect("system status");
         assert!(output.contains("running"));
+        assert!(output.contains("live_reconcile_failures=0"));
     }
 
     #[test]

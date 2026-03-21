@@ -74,6 +74,9 @@ Optional hardening:
   instances.
 - Set `PLOY_REQUEST_RATE_LIMIT_PER_MINUTE=...` in `/opt/ploy/.env` if you want
   to tune daemon-side HTTP throttling. Set `0` to disable it.
+- Set `PLOY_LIVE_RECONCILE_BACKOFF_BASE_MS=...` and
+  `PLOY_LIVE_RECONCILE_BACKOFF_MAX_MS=...` in `/opt/ploy/.env` if you want to
+  tune live venue reconcile retry backoff under exchange/API outages.
 - `/opt/ploy/bin/ployctl` will automatically pick up `PLOY_ADMIN_TOKEN`,
   `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` from the host environment.
 - Browser operator sessions should authenticate through `/auth/login`; `ployd`
@@ -94,6 +97,10 @@ curl -fsS http://127.0.0.1:8081/health
 /opt/ploy/bin/ploytui
 curl -N http://127.0.0.1:8081/api/events/stream
 ```
+
+When `system status` shows non-zero `live_reconcile_failures`, a future
+`next_live_reconcile_at`, or a non-empty `last_live_reconcile_error`, treat the
+daemon as live-venue degraded even if the process is still up.
 
 ## Deployment Operator Flow
 

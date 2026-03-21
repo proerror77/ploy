@@ -132,6 +132,9 @@ mod tests {
                 websocket_connected: false,
                 database_connected: false,
                 error_count_1h: 0,
+                live_reconcile_failures: 0,
+                next_live_reconcile_at: None,
+                last_live_reconcile_error: None,
             },
         }))
         .expect("to_value");
@@ -150,6 +153,9 @@ mod tests {
                         "websocket_connected": false,
                         "database_connected": false,
                         "error_count_1h": 0,
+                        "live_reconcile_failures": 0,
+                        "next_live_reconcile_at": null,
+                        "last_live_reconcile_error": null,
                     }
                 }
             })

@@ -39,9 +39,11 @@ Optional admin auth:
 - Set `PLOY_SIDECAR_AUTH_TOKEN` if you want a read-only agent/sidecar credential for system status, deployment snapshots, trading snapshots, and the SSE event stream.
 - Set `PLOY_API_AUTH_COOKIE_SECRET` as well if you want browser auth cookies to stay valid across daemon restarts or multiple instances.
 - Set `PLOY_REQUEST_RATE_LIMIT_PER_MINUTE` if you need to tighten or relax the daemon HTTP request throttle. `0` disables the limiter.
+- Set `PLOY_LIVE_RECONCILE_BACKOFF_BASE_MS` and `PLOY_LIVE_RECONCILE_BACKOFF_MAX_MS` if you want to tune venue outage retry backoff for live fill reconciliation.
 - `ployctl` will automatically reuse `PLOY_ADMIN_TOKEN`, `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` for authenticated requests.
 - Browser operator surfaces authenticate through `/auth/login`, which now sets an `HttpOnly` same-site signed session cookie so the frontend event stream can stay authenticated without storing the raw admin token in browser storage.
 - `ployd` appends authenticated control-plane activity to `run/platform/audit-log.jsonl`, and `ployctl system audit` reads that stream back through the daemon API.
+- `ployctl system status` now surfaces live reconcile failure count, next retry time, and the last reconcile error so venue outages are visible without digging through logs.
 
 Runbooks:
 
