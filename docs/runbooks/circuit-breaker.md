@@ -9,14 +9,14 @@
 
 ## Inspect Current State
 
-Via API:
-```bash
-curl -s http://localhost:8081/api/sidecar/risk | jq '.circuit_breaker'
-```
+The current workspace control plane no longer exposes the legacy
+`/api/sidecar/risk` view. Use the default operator surfaces instead:
 
-Via logs:
 ```bash
-journalctl -u ployd --no-pager | grep -i "circuit.breaker" | tail -20
+ployctl system status
+ployctl trading status
+curl -s http://localhost:8081/api/system/status | jq
+journalctl -u ployd --no-pager | grep -i "circuit\\|degraded\\|recovering" | tail -20
 ```
 
 ## Manual Reset
@@ -32,17 +32,22 @@ If the circuit breaker is stuck in Open state after the underlying issue is reso
 
 ## Tuning
 
-Circuit breaker parameters are configured in the coordinator bootstrap config:
-- `failure_threshold`: Number of consecutive failures before opening.
-- `cooldown_secs`: Seconds to wait in Open before transitioning to HalfOpen.
-- `half_open_max_requests`: Requests allowed in HalfOpen before deciding.
+The legacy coordinator bootstrap knobs are archived with the retired single-binary
+runtime. In the current workspace, treat repeated venue failures as a platform
+health issue first:
+
+- watch for `degraded` / `recovering` in `ployctl system status`
+- inspect the affected deployment in `ployctl trading inspect <deployment-id>`
+- review `journalctl -u ployd` before changing any runtime thresholds
 
 ## Validation
 
 After reset, confirm:
 ```bash
 journalctl -u ployd -n 30 --no-pager | grep -i "circuit"
-curl -s http://localhost:8081/api/sidecar/risk | jq '.circuit_breaker.state'
+ployctl system status
+ployctl trading status
 ```
 
-Expected: state is `"Closed"` and requests are flowing normally.
+Expected: the platform is back to `running` or `recovering`, and new requests
+are flowing through the canonical control plane again.
