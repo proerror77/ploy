@@ -26,6 +26,8 @@ pub struct AppState {
     pub events: Arc<EventBroker>,
 }
 
+const ADMIN_SESSION_COOKIE_NAME: &str = "ploy_admin_session";
+
 pub fn render_status(status: &SystemStatus) -> String {
     format!(
         "status={} uptime={}s version={}",
@@ -292,17 +294,40 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
             .map(|token| token.as_str()),
         state,
     );
-    write_json_response(stream, response)
+    let headers = response_headers(
+        method,
+        path,
+        response.0,
+        configured_token
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .map(|token| token.as_str()),
+    );
+    write_json_response_with_headers(stream, response, &headers)
 }
 
-fn write_json_response(mut stream: TcpStream, response: (u16, String)) -> io::Result<()> {
+fn write_json_response(stream: TcpStream, response: (u16, String)) -> io::Result<()> {
+    write_json_response_with_headers(stream, response, &[])
+}
+
+fn write_json_response_with_headers(
+    mut stream: TcpStream,
+    response: (u16, String),
+    headers: &[(String, String)],
+) -> io::Result<()> {
     let (status_code, body) = response;
+    let extra_headers = headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect::<String>();
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n{}\
+         \r\n{}",
         status_code,
         status_text(status_code),
         body.len(),
+        extra_headers,
         body
     )
 }
@@ -337,6 +362,18 @@ fn extract_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
         })
 }
 
+fn extract_cookie<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    let header = extract_header(request, "Cookie")?;
+    header.split(';').find_map(|entry| {
+        let (cookie_name, value) = entry.trim().split_once('=')?;
+        if cookie_name == name {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
 fn request_authenticated(request: &str, expected_token: Option<&str>) -> bool {
     let Some(expected_token) = expected_token else {
         return true;
@@ -350,9 +387,46 @@ fn request_authenticated(request: &str, expected_token: Option<&str>) -> bool {
         }
     }
 
-    extract_header(request, "x-ploy-admin-token")
+    if extract_header(request, "x-ploy-admin-token")
         .map(|token| token == expected_token)
         .unwrap_or(false)
+    {
+        return true;
+    }
+
+    extract_cookie(request, ADMIN_SESSION_COOKIE_NAME)
+        .map(|token| token == expected_token)
+        .unwrap_or(false)
+}
+
+fn response_headers(
+    method: &str,
+    path: &str,
+    status_code: u16,
+    configured_token: Option<&str>,
+) -> Vec<(String, String)> {
+    if status_code != 200 {
+        return Vec::new();
+    }
+
+    match (method, path, configured_token) {
+        ("POST", "/auth/login", Some(token)) => {
+            vec![("Set-Cookie".to_string(), admin_session_cookie(token))]
+        }
+        ("POST", "/auth/logout", _) => vec![(
+            "Set-Cookie".to_string(),
+            clear_admin_session_cookie().to_string(),
+        )],
+        _ => Vec::new(),
+    }
+}
+
+fn admin_session_cookie(token: &str) -> String {
+    format!("{ADMIN_SESSION_COOKIE_NAME}={token}; HttpOnly; Path=/; SameSite=Strict")
+}
+
+fn clear_admin_session_cookie() -> &'static str {
+    "ploy_admin_session=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0"
 }
 
 fn handle_authenticated_runtime_request(
@@ -729,7 +803,8 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 mod tests {
     use super::{
         handle_api_request, handle_authenticated_runtime_request, handle_runtime_request,
-        route_request, snapshot_events, AppState,
+        request_authenticated, response_headers, route_request, snapshot_events, AppState,
+        ADMIN_SESSION_COOKIE_NAME,
     };
     use crate::events::EventBroker;
     use ploy_connectivity::{CancellationOutcome, ReplaceOutcome, StaticExecutionGateway};
@@ -875,6 +950,30 @@ mod tests {
 
         assert_eq!(code, 200);
         assert!(body.contains("\"success\":true"));
+    }
+
+    #[test]
+    fn request_authenticated_accepts_admin_session_cookie() {
+        let request = format!(
+            "GET /api/events/stream HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nCookie: {ADMIN_SESSION_COOKIE_NAME}=secret-token; theme=dark\r\n\r\n"
+        );
+        assert!(request_authenticated(&request, Some("secret-token")));
+    }
+
+    #[test]
+    fn auth_responses_emit_session_cookie_headers() {
+        let login_headers = response_headers("POST", "/auth/login", 200, Some("secret-token"));
+        assert!(login_headers
+            .iter()
+            .any(|(name, value)| name == "Set-Cookie"
+                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=secret-token"))));
+
+        let logout_headers = response_headers("POST", "/auth/logout", 200, Some("secret-token"));
+        assert!(logout_headers
+            .iter()
+            .any(|(name, value)| name == "Set-Cookie"
+                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
+                && value.contains("Max-Age=0")));
     }
 
     #[test]

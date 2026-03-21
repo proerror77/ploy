@@ -103,14 +103,12 @@ class ApiService {
   }
 
   async login(adminToken: string): Promise<{ success: boolean }> {
-    const result = await this.fetch<{ success: boolean }>('/auth/login', {
+    return this.fetch<{ success: boolean }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({
         admin_token: adminToken,
       }),
     });
-    this.setAdminToken(adminToken);
-    return result;
   }
 
   async logout(): Promise<{ success: boolean }> {
