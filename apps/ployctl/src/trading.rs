@@ -7,7 +7,7 @@ pub fn render_trading_state(client: &ControlPlaneClient) -> Result<String, Strin
         .into_iter()
         .map(|state| {
             format!(
-                "{} runtime={} intents={} orders={} fills={} positions={} active_orders={} gross_exposure={} net_pnl={}",
+                "{} runtime={} intents={} orders={} fills={} positions={} active_orders={} gross_exposure={} reserved_exposure={} total_exposure={} net_pnl={}",
                 state.deployment_id,
                 state.runtime_mode,
                 state.intents.len(),
@@ -16,6 +16,8 @@ pub fn render_trading_state(client: &ControlPlaneClient) -> Result<String, Strin
                 state.positions.len(),
                 state.risk.active_orders,
                 state.risk.gross_exposure,
+                state.risk.reserved_order_exposure,
+                state.risk.total_gross_exposure,
                 state.pnl.net_pnl,
             )
         })
@@ -29,7 +31,7 @@ pub fn render_one_trading_state(
 ) -> Result<String, String> {
     client.inspect_trading_state(deployment_id).map(|state| {
         format!(
-            "{} runtime={} intents={} orders={} fills={} positions={} active_orders={} gross_exposure={} net_pnl={}",
+            "{} runtime={} intents={} orders={} fills={} positions={} active_orders={} gross_exposure={} reserved_exposure={} total_exposure={} net_pnl={}",
             state.deployment_id,
             state.runtime_mode,
             state.intents.len(),
@@ -38,6 +40,8 @@ pub fn render_one_trading_state(
             state.positions.len(),
             state.risk.active_orders,
             state.risk.gross_exposure,
+            state.risk.reserved_order_exposure,
+            state.risk.total_gross_exposure,
             state.pnl.net_pnl,
         )
     })

@@ -53,6 +53,7 @@ repository.workspace = true
 ploy-deployments.workspace = true
 ploy-operator-contracts.workspace = true
 ploy-platform.workspace = true
+rust_decimal.workspace = true
 
 [profile.release]
 lto = "thin"

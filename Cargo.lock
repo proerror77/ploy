@@ -3510,6 +3510,7 @@ dependencies = [
  "ploy-deployments",
  "ploy-operator-contracts",
  "ploy-platform",
+ "rust_decimal",
 ]
 
 [[package]]
@@ -3552,6 +3553,7 @@ dependencies = [
  "chrono",
  "ploy-operator-contracts",
  "ploy-trading",
+ "rust_decimal",
  "serde",
  "thiserror 1.0.69",
 ]
