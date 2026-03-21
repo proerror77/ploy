@@ -9,9 +9,10 @@
 > For the current workspace-default deploy path, use
 > `docs/runbooks/platform-deploy.md` and `.github/workflows/release-platform.yml`.
 
-`tango-2-1` is the EC2 staging host. Use `.github/workflows/release-staging.yml`
-for first-class staging deploys. That path ships CI-built artifacts only and
-does not revive the deprecated `deploy-tango21.yml` host-build flow.
+`tango-2-1` is the historical EC2 staging host. The old staging workflow now
+lives under `.github/archive/workflows/legacy-root-runtime/release-staging.yml`
+and remains archived for reference only. It does not revive the deprecated
+`deploy-tango21.yml` host-build flow.
 
 This runbook deploys always-on workloads on one EC2 host:
 - `ploy-sports-pm.service` (Sports PM / NBA comeback)
@@ -24,7 +25,7 @@ This runbook deploys always-on workloads on one EC2 host:
 
 `tango-2-1` is the staging host for these dry-run workloads.
 
-- First-class workflow: `.github/workflows/release-staging.yml`
+- Historical workflow: `.github/archive/workflows/legacy-root-runtime/release-staging.yml`
 - Deployment scope: `ploy-sports-pm`, `ploy-crypto-collector`, `ploy-crypto-dryrun`, `ploy-orderbook-history`, `ploy-maintenance.timer`
 - Artifact policy: deploy CI-built `ploy` + `sqlx` binaries only; do not build Rust source on-host
 - Migration policy: run tracked `sqlx migrate run` against `/opt/ploy/migrations`
@@ -33,7 +34,7 @@ This runbook deploys always-on workloads on one EC2 host:
 
 Preferred staging path for `tango-2-1`:
 
-- trigger `.github/workflows/release-staging.yml`
+- inspect `.github/archive/workflows/legacy-root-runtime/release-staging.yml`
 - GitHub Actions builds the x86_64 bundle, ships `ploy`, `sqlx`, tracked
   migrations, and deployment assets
 - workflow scope is limited to staging workloads:
