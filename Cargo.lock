@@ -3606,16 +3606,19 @@ name = "ployd"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hmac",
  "ploy-connectivity",
  "ploy-deployments",
  "ploy-operator-contracts",
  "ploy-platform",
  "ploy-trading",
+ "rand 0.8.5",
  "rust_decimal",
  "rust_decimal_macros",
  "secrecy 0.8.0",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

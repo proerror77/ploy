@@ -65,12 +65,15 @@ Optional hardening:
 
 - Set `PLOY_ADMIN_TOKEN=...` in `/opt/ploy/.env` to require `Authorization: Bearer ...`
   or `x-ploy-admin-token` on the control-plane API.
+- Set `PLOY_API_AUTH_COOKIE_SECRET=...` in `/opt/ploy/.env` if browser operator
+  sessions need to stay valid across daemon restarts or multiple `ployd`
+  instances.
 - `/opt/ploy/bin/ployctl` will automatically pick up `PLOY_ADMIN_TOKEN`,
   `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` from the host environment.
 - Browser operator sessions should authenticate through `/auth/login`; `ployd`
-  will issue an `HttpOnly` same-site session cookie so the frontend and SSE
-  event stream remain authenticated without persisting the raw admin token in
-  browser storage.
+  will issue an `HttpOnly` same-site signed session cookie so the frontend and
+  SSE event stream remain authenticated without persisting the raw admin token
+  in browser storage.
 
 ## Post-Deploy Checks
 

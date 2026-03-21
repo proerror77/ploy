@@ -9,14 +9,17 @@ description = "Ploy platform daemon workspace entry point"
 
 [dependencies]
 chrono.workspace = true
+hmac.workspace = true
 ploy-connectivity.workspace = true
 ploy-deployments.workspace = true
 ploy-operator-contracts.workspace = true
 ploy-platform.workspace = true
 ploy-trading.workspace = true
+rand.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
