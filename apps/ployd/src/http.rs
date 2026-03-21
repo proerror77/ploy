@@ -1335,7 +1335,9 @@ mod tests {
                         "pending_intents": 0,
                         "active_orders": 0,
                         "open_positions": 0,
-                        "gross_exposure": "0"
+                        "gross_exposure": "0",
+                        "reserved_order_exposure": "0",
+                        "total_gross_exposure": "0"
                     }
                 }
             ])

@@ -15,6 +15,7 @@ use ploy_operator_contracts::{
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
 use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
+use rust_decimal::Decimal;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -140,6 +141,8 @@ impl PloyDaemon {
             deployment_id: request.deployment_id,
             bundle_id: request.bundle_id,
             runtime_mode: request.runtime_mode,
+            account_id: request.account_id,
+            max_gross_exposure: request.max_gross_exposure,
             deployment_state: request.deployment_state,
             desired_state: request.desired_state,
             observed_state: observed_state_for_desired(request.desired_state),
@@ -230,6 +233,8 @@ impl PloyDaemon {
                 "deployment must be running before it can accept intents",
             ));
         }
+
+        self.enforce_exposure_limit(&deployment, &intent)?;
 
         match deployment.runtime_mode.as_str() {
             "paper" => self.submit_paper_intent(intent),
@@ -389,6 +394,8 @@ impl PloyDaemon {
                 ),
             ));
         }
+
+        self.enforce_order_replacement_exposure(&deployment, &order, &request)?;
 
         if deployment.runtime_mode == "live" {
             let venue_order_id = order.venue_order_id.clone().ok_or_else(|| {
@@ -658,6 +665,98 @@ impl PloyDaemon {
         }
     }
 
+    fn enforce_exposure_limit(
+        &self,
+        deployment: &DeploymentRecord,
+        intent: &TradingIntent,
+    ) -> io::Result<()> {
+        let Some(max_gross_exposure) = deployment.max_gross_exposure else {
+            return Ok(());
+        };
+        if !intent_counts_toward_exposure(intent.purpose) {
+            return Ok(());
+        }
+
+        let current_total_exposure = self.account_total_exposure(&deployment.account_id);
+        let requested_exposure = intent.quantity * intent.limit_price.unwrap_or(Decimal::ONE);
+
+        if current_total_exposure + requested_exposure > max_gross_exposure {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "deployment `{}` would exceed max_gross_exposure {} on account `{}` (current_total={} requested={})",
+                    deployment.deployment_id,
+                    max_gross_exposure,
+                    deployment.account_id,
+                    current_total_exposure,
+                    requested_exposure
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn enforce_order_replacement_exposure(
+        &self,
+        deployment: &DeploymentRecord,
+        order: &ploy_trading::OrderRecord,
+        request: &OrderReplaceRequest,
+    ) -> io::Result<()> {
+        let Some(max_gross_exposure) = deployment.max_gross_exposure else {
+            return Ok(());
+        };
+        let Some(runtime) = self.trading.get(&deployment.deployment_id) else {
+            return Ok(());
+        };
+        let Some(intent) = runtime.intent(&order.intent_id) else {
+            return Ok(());
+        };
+        if !intent_counts_toward_exposure(intent.purpose) {
+            return Ok(());
+        }
+
+        let current_total_exposure = self.account_total_exposure(&deployment.account_id);
+        let current_reservation = (order.requested_qty - order.filled_qty).max(Decimal::ZERO)
+            * order.limit_price.unwrap_or(Decimal::ONE);
+        let replacement_reservation = (request.quantity - order.filled_qty).max(Decimal::ZERO)
+            * request
+                .limit_price
+                .unwrap_or(order.limit_price.unwrap_or(Decimal::ONE));
+        let next_total_exposure =
+            current_total_exposure - current_reservation + replacement_reservation;
+
+        if next_total_exposure > max_gross_exposure {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "replacement would exceed max_gross_exposure {} on account `{}` (current_total={} next_total={})",
+                    max_gross_exposure,
+                    deployment.account_id,
+                    current_total_exposure,
+                    next_total_exposure
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn account_total_exposure(&self, account_id: &str) -> Decimal {
+        self.control_plane
+            .deployments
+            .records()
+            .into_iter()
+            .filter(|deployment| deployment.account_id == account_id)
+            .map(|deployment| {
+                self.trading
+                    .get(&deployment.deployment_id)
+                    .map(|runtime| runtime.snapshot(&BTreeMap::new()).risk.total_gross_exposure)
+                    .unwrap_or_default()
+            })
+            .sum()
+    }
+
     fn load_registry(&mut self) -> io::Result<()> {
         if !self.config.registry_file.exists() {
             return Ok(());
@@ -856,6 +955,8 @@ fn build_trading_state_snapshot(
             active_orders: snapshot.risk.active_orders,
             open_positions: snapshot.risk.open_positions,
             gross_exposure: snapshot.risk.gross_exposure,
+            reserved_order_exposure: snapshot.risk.reserved_order_exposure,
+            total_gross_exposure: snapshot.risk.total_gross_exposure,
         },
     }
 }
@@ -1019,6 +1120,13 @@ fn deployment_state_wire(state: DeploymentState) -> &'static str {
     }
 }
 
+fn intent_counts_toward_exposure(purpose: ploy_trading::IntentPurpose) -> bool {
+    matches!(
+        purpose,
+        ploy_trading::IntentPurpose::Entry | ploy_trading::IntentPurpose::Hedge
+    )
+}
+
 fn intent_allowed_while_draining(purpose: ploy_trading::IntentPurpose) -> bool {
     !matches!(purpose, ploy_trading::IntentPurpose::Entry)
 }
@@ -1092,7 +1200,9 @@ mod tests {
         ExecutionRequest, LiveExecutionGateway, ReplaceOutcome, ReplaceRequest,
         StaticExecutionGateway,
     };
-    use ploy_operator_contracts::{DesiredState, ObservedState};
+    use ploy_operator_contracts::{
+        DeploymentApplyRequest, DeploymentState, DesiredState, ObservedState,
+    };
     use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
     use rust_decimal_macros::dec;
     use std::fs;
@@ -1750,6 +1860,126 @@ mod tests {
         assert!(error
             .to_string()
             .contains("cannot be below filled quantity"));
+    }
+
+    #[test]
+    fn daemon_enforces_account_exposure_limits_across_deployments() {
+        let root = temp_dir("account-exposure-limit");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        for deployment_id in ["acct-a.paper", "acct-b.paper"] {
+            daemon
+                .apply_deployment(DeploymentApplyRequest {
+                    deployment_id: deployment_id.to_string(),
+                    bundle_id: "example".to_string(),
+                    runtime_mode: "paper".to_string(),
+                    account_id: "acct-shared".to_string(),
+                    max_gross_exposure: Some(dec!(5)),
+                    deployment_state: DeploymentState::Enabled,
+                    desired_state: DesiredState::Running,
+                })
+                .expect("apply deployment");
+        }
+
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-account-a".to_string(),
+                deployment_id: "acct-a.paper".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(4),
+                limit_price: Some(dec!(1)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit first intent");
+
+        let error = daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-account-b".to_string(),
+                deployment_id: "acct-b.paper".to_string(),
+                market_id: "market-2".to_string(),
+                token_id: "no-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(2),
+                limit_price: Some(dec!(1)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect_err("second intent should exceed shared account exposure");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("acct-shared"));
+        assert!(error.to_string().contains("max_gross_exposure"));
+    }
+
+    #[test]
+    fn daemon_rejects_replacement_when_it_would_exceed_account_exposure_limit() {
+        let root = temp_dir("account-exposure-replace");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        daemon
+            .apply_deployment(DeploymentApplyRequest {
+                deployment_id: "example.paper".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: "paper".to_string(),
+                account_id: "acct-paper".to_string(),
+                max_gross_exposure: Some(dec!(1.5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            })
+            .expect("apply deployment");
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-paper-replace".to_string(),
+                deployment_id: "example.paper".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(2),
+                limit_price: Some(dec!(0.5)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit intent");
+
+        let error = daemon
+            .replace_order(
+                "example.paper",
+                "order-intent-paper-replace",
+                ploy_operator_contracts::OrderReplaceRequest {
+                    quantity: dec!(4),
+                    limit_price: Some(dec!(0.5)),
+                },
+            )
+            .expect_err("replacement should exceed exposure limit");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("acct-paper"));
+        assert!(error.to_string().contains("next_total=2.0"));
     }
 
     #[test]

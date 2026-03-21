@@ -430,6 +430,8 @@ mod tests {
             runtime_root.join("deployments.json"),
             serde_json::to_string(&vec![DeploymentSummary {
                 deployment_id: "example.paper".to_string(),
+                account_id: "acct-paper".to_string(),
+                max_gross_exposure: Some(rust_decimal::Decimal::new(500, 2)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
                 observed_state: ObservedState::Running,
@@ -497,6 +499,9 @@ mod tests {
                 } else if request.starts_with("GET /api/deployments/http.paper") {
                     serde_json::json!({
                         "deployment_id": "http.paper",
+                        "account_id": "acct-http",
+                        "max_gross_exposure": "5.00",
+                        "deployment_state": "enabled",
                         "desired_state": "running",
                         "observed_state": "running"
                     })
@@ -505,6 +510,9 @@ mod tests {
                     serde_json::json!([
                         {
                             "deployment_id": "http.paper",
+                            "account_id": "acct-http",
+                            "max_gross_exposure": "5.00",
+                            "deployment_state": "enabled",
                             "desired_state": "running",
                             "observed_state": "running"
                         }
@@ -550,6 +558,9 @@ mod tests {
                 let body = if request.starts_with("PUT /api/deployments/example.paper") {
                     serde_json::json!({
                         "deployment_id": "example.paper",
+                        "account_id": "acct-paper",
+                        "max_gross_exposure": "5.00",
+                        "deployment_state": "enabled",
                         "desired_state": "running",
                         "observed_state": "starting"
                     })
@@ -557,6 +568,9 @@ mod tests {
                 } else {
                     serde_json::json!({
                         "deployment_id": "example.paper",
+                        "account_id": "acct-paper",
+                        "max_gross_exposure": "5.00",
+                        "deployment_state": "enabled",
                         "desired_state": "paused",
                         "observed_state": "paused"
                     })
@@ -580,6 +594,8 @@ mod tests {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
                 runtime_mode: "paper".to_string(),
+                account_id: "acct-paper".to_string(),
+                max_gross_exposure: Some(rust_decimal::Decimal::new(500, 2)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
             })
@@ -621,6 +637,8 @@ mod tests {
                 DeploymentSnapshotEvent {
                     deployments: vec![DeploymentSummary {
                         deployment_id: "example.paper".to_string(),
+                        account_id: "acct-paper".to_string(),
+                        max_gross_exposure: Some(rust_decimal::Decimal::new(500, 2)),
                         deployment_state: DeploymentState::Enabled,
                         desired_state: DesiredState::Running,
                         observed_state: ObservedState::Running,

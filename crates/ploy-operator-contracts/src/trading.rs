@@ -120,6 +120,8 @@ pub struct RiskSnapshotResponse {
     pub active_orders: usize,
     pub open_positions: usize,
     pub gross_exposure: Decimal,
+    pub reserved_order_exposure: Decimal,
+    pub total_gross_exposure: Decimal,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -358,6 +360,8 @@ mod tests {
                     "active_orders": 0,
                     "open_positions": 0,
                     "gross_exposure": "0",
+                    "reserved_order_exposure": "0",
+                    "total_gross_exposure": "0",
                 },
             })
         );

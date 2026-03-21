@@ -11,5 +11,6 @@ description = "Ploy platform control-plane crate"
 chrono.workspace = true
 ploy-operator-contracts.workspace = true
 ploy-trading.workspace = true
+rust_decimal.workspace = true
 serde.workspace = true
 thiserror.workspace = true

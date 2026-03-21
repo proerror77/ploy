@@ -9,8 +9,13 @@ pub fn render_deployments(client: &ControlPlaneClient) -> Result<String, String>
         .into_iter()
         .map(|deployment| {
             format!(
-                "{} lifecycle={:?} desired={:?} observed={:?}",
+                "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
                 deployment.deployment_id,
+                deployment.account_id,
+                deployment
+                    .max_gross_exposure
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
                 deployment.deployment_state,
                 deployment.desired_state,
                 deployment.observed_state
@@ -26,8 +31,13 @@ pub fn render_deployment(
 ) -> Result<String, String> {
     client.inspect_deployment(deployment_id).map(|deployment| {
         format!(
-            "{} lifecycle={:?} desired={:?} observed={:?}",
+            "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
             deployment.deployment_id,
+            deployment.account_id,
+            deployment
+                .max_gross_exposure
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
             deployment.deployment_state,
             deployment.desired_state,
             deployment.observed_state
@@ -49,8 +59,13 @@ pub fn apply_deployment_file(
         serde_json::from_str(&body).map_err(|err| format!("parse deployment manifest: {err}"))?;
     let deployment = client.apply_deployment(&request)?;
     Ok(format!(
-        "{} lifecycle={:?} desired={:?} observed={:?}",
+        "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
         deployment.deployment_id,
+        deployment.account_id,
+        deployment
+            .max_gross_exposure
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
         deployment.deployment_state,
         deployment.desired_state,
         deployment.observed_state
@@ -64,8 +79,13 @@ pub fn control_deployment(
 ) -> Result<String, String> {
     let deployment = client.set_desired_state(deployment_id, desired_state)?;
     Ok(format!(
-        "{} lifecycle={:?} desired={:?} observed={:?}",
+        "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
         deployment.deployment_id,
+        deployment.account_id,
+        deployment
+            .max_gross_exposure
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
         deployment.deployment_state,
         deployment.desired_state,
         deployment.observed_state
@@ -79,8 +99,13 @@ pub fn set_lifecycle_state(
 ) -> Result<String, String> {
     let deployment = client.set_deployment_state(deployment_id, deployment_state)?;
     Ok(format!(
-        "{} lifecycle={:?} desired={:?} observed={:?}",
+        "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
         deployment.deployment_id,
+        deployment.account_id,
+        deployment
+            .max_gross_exposure
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
         deployment.deployment_state,
         deployment.desired_state,
         deployment.observed_state
@@ -226,8 +251,8 @@ mod tests {
         let paused =
             control_deployment(&client, "example.paper", DesiredState::Paused).expect("pause");
         assert!(paused.contains("Paused"));
-        let draining =
-            set_lifecycle_state(&client, "example.paper", DeploymentState::Draining).expect("drain");
+        let draining = set_lifecycle_state(&client, "example.paper", DeploymentState::Draining)
+            .expect("drain");
         assert!(draining.contains("Draining"));
     }
 

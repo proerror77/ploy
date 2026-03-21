@@ -66,6 +66,7 @@ mod tests {
         DeploymentState, DeploymentSummary, DesiredState, ObservedState, SystemStatus,
         TradingStateSnapshot,
     };
+    use rust_decimal::Decimal;
     use serde_json::json;
 
     #[test]
@@ -92,6 +93,8 @@ mod tests {
             serde_json::to_value(OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
                 deployments: vec![DeploymentSummary {
                     deployment_id: "example.paper".to_string(),
+                    account_id: "acct-paper".to_string(),
+                    max_gross_exposure: Some(Decimal::new(500, 2)),
                     deployment_state: DeploymentState::Enabled,
                     desired_state: DesiredState::Running,
                     observed_state: ObservedState::Running,
@@ -106,6 +109,8 @@ mod tests {
                 "data": {
                     "deployments": [{
                         "deployment_id": "example.paper",
+                        "account_id": "acct-paper",
+                        "max_gross_exposure": "5.00",
                         "deployment_state": "enabled",
                         "desired_state": "running",
                         "observed_state": "running",
@@ -185,6 +190,8 @@ mod tests {
                             "active_orders": 0,
                             "open_positions": 0,
                             "gross_exposure": "0",
+                            "reserved_order_exposure": "0",
+                            "total_gross_exposure": "0",
                         },
                     }]
                 }
