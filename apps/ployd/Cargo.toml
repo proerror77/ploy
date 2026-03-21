@@ -14,6 +14,7 @@ ploy-deployments.workspace = true
 ploy-operator-contracts.workspace = true
 ploy-platform.workspace = true
 ploy-trading.workspace = true
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

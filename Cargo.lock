@@ -3521,6 +3521,7 @@ dependencies = [
  "polymarket-client-sdk",
  "rust_decimal",
  "rust_decimal_macros",
+ "secrecy 0.8.0",
  "thiserror 1.0.69",
  "tokio",
 ]
@@ -3612,6 +3613,7 @@ dependencies = [
  "ploy-trading",
  "rust_decimal",
  "rust_decimal_macros",
+ "secrecy 0.8.0",
  "serde",
  "serde_json",
 ]
@@ -3651,7 +3653,7 @@ dependencies = [
  "reqwest",
  "rust_decimal",
  "rust_decimal_macros",
- "secrecy",
+ "secrecy 0.10.3",
  "serde",
  "serde_html_form",
  "serde_ignored",
@@ -4452,6 +4454,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4387882333d3aa8cb20530a17c69a3752e97837832f34f6dccc760e715001d9"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "secrecy"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bd1c54ea06cfd2f6b63219704de0b9b4f72dcc2b8fdef820be6cd799780e91e"
+dependencies = [
+ "serde",
+ "zeroize",
 ]
 
 [[package]]

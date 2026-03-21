@@ -7,6 +7,7 @@ use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::types::{Address, U256};
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
 use rust_decimal::Decimal;
+use secrecy::{ExposeSecret, SecretString};
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -219,10 +220,10 @@ impl FromStr for WalletSignatureType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PolymarketExecutionConfig {
     pub host: String,
-    pub private_key: Option<String>,
+    pub private_key: Option<SecretString>,
     pub use_server_time: bool,
     pub funder: Option<String>,
     pub signature_type: WalletSignatureType,
@@ -232,7 +233,7 @@ impl Default for PolymarketExecutionConfig {
     fn default() -> Self {
         Self {
             host: DEFAULT_POLY_CLOB_HOST.to_string(),
-            private_key: std::env::var(PRIVATE_KEY_VAR).ok(),
+            private_key: std::env::var(PRIVATE_KEY_VAR).ok().map(SecretString::from),
             use_server_time: true,
             funder: std::env::var("POLY_FUNDER").ok(),
             signature_type: std::env::var("POLY_SIGNATURE_TYPE")
@@ -284,9 +285,14 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                 "live Polymarket execution currently requires a limit price".to_string(),
             )
         })?;
-        let private_key = self.config.private_key.as_deref().ok_or_else(|| {
-            ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
-        })?;
+        let private_key = self
+            .config
+            .private_key
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .ok_or_else(|| {
+                ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
+            })?;
         let token_id = U256::from_str(&request.token_id).map_err(|err| {
             ExecutionError::Validation(format!("invalid token_id `{}`: {err}", request.token_id))
         })?;
@@ -372,9 +378,14 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
             return Ok(Vec::new());
         }
 
-        let private_key = self.config.private_key.as_deref().ok_or_else(|| {
-            ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
-        })?;
+        let private_key = self
+            .config
+            .private_key
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .ok_or_else(|| {
+                ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
+            })?;
         let funder = self
             .config
             .funder
@@ -447,9 +458,14 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
     }
 
     fn cancel(&self, request: &CancellationRequest) -> Result<CancellationOutcome, ExecutionError> {
-        let private_key = self.config.private_key.as_deref().ok_or_else(|| {
-            ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
-        })?;
+        let private_key = self
+            .config
+            .private_key
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .ok_or_else(|| {
+                ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
+            })?;
         let funder = self
             .config
             .funder

@@ -1,10 +1,10 @@
-use serde::{Deserialize, Serialize};
+use secrecy::SecretString;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PlatformConfig {
     pub listen_addr: String,
-    pub admin_token: Option<String>,
+    pub admin_token: Option<SecretString>,
     pub registry_file: PathBuf,
     pub runtime_root: PathBuf,
     pub status_file: PathBuf,
@@ -38,11 +38,11 @@ impl PlatformConfig {
         }
         if let Ok(value) = std::env::var("PLOY_ADMIN_TOKEN") {
             if !value.trim().is_empty() {
-                config.admin_token = Some(value);
+                config.admin_token = Some(SecretString::from(value));
             }
         } else if let Ok(value) = std::env::var("PLOY_API_ADMIN_TOKEN") {
             if !value.trim().is_empty() {
-                config.admin_token = Some(value);
+                config.admin_token = Some(SecretString::from(value));
             }
         }
         if let Ok(value) = std::env::var("PLOY_DEPLOYMENTS_FILE") {
@@ -83,7 +83,7 @@ mod tests {
     #[test]
     fn default_paths_match_workspace_contract() {
         let config = PlatformConfig::default();
-        assert_eq!(config.admin_token, None);
+        assert!(config.admin_token.is_none());
         assert_eq!(
             config.registry_file.to_string_lossy(),
             "data/state/deployments.json"
