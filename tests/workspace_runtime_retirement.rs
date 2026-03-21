@@ -43,9 +43,18 @@ const RETIRED_SOURCE_PATHS: &[&str] = &[
 ];
 
 const RETIRED_TEST_TARGETS: &[&str] = &[
+    "examples/api_server.rs",
+    "examples/backtest_gamma_scalping.rs",
+    "examples/staggered_grid_backtest.rs",
+    "examples/test_grok_agent.rs",
+    "examples/test_winprob.rs",
+    "tests/architecture_gateway_only.rs",
     "tests/engine_store_pg.rs",
     "tests/legacy_live_gate.rs",
+    "tests/native_async_traits.rs",
+    "tests/staging_workflow.rs",
     "tests/strategy_evaluations_and_deployment_gate.rs",
+    "tests/workflow_migrations.rs",
 ];
 
 #[test]

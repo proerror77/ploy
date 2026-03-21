@@ -6381,3 +6381,47 @@ limiting, with an admin-visible read path through the control plane.
 - 2026-03-21: Focused validation passed:
   - `rtk cargo test -p ploy-operator-contracts -p ployd -p ployctl`
   - `rtk cargo test --test platform_smoke`
+# Workspace CI And Root Shim Retirement Sweep (2026-03-21)
+
+## Goal
+Align the default CI test workflow with the new workspace platform runtime,
+fix any missing app-crate dependencies surfaced by that path, and retire stale
+root examples/tests that still target the removed single-binary `src/`
+architecture.
+
+## File ownership
+
+- `.github/workflows/test.yml`
+  - owner: new workspace build/test commands and root integration coverage
+- `apps/ployd/Cargo.toml`
+  - owner: missing runtime dependency needed by workspace builds
+- `examples/`, `tests/`
+  - owner: retire or rewrite stale root-shim examples/tests that still assume
+    the legacy root runtime
+
+## Tasks
+
+- [x] Replace the retired root `--features rl` CI path with explicit workspace
+  package build/test commands.
+- [x] Fix any missing app-crate dependency surfaced by the new build path.
+- [x] Remove or rewrite stale root examples/tests that still target the retired
+  `src/` architecture.
+- [x] Re-run focused validation matching the updated CI surface.
+
+## Progress notes
+
+- 2026-03-21: `.github/workflows/test.yml` now builds/tests the new workspace
+  package surface directly instead of the retired root `ploy --features rl`
+  path, while still running the root shim integration tests that guard the new
+  platform release path.
+- 2026-03-21: `apps/ployd` now declares `rust_decimal` as a runtime dependency,
+  which was required once CI stopped leaning on `dev-dependencies` through the
+  old test-only compile path.
+- 2026-03-21: Retired stale root examples and integration tests that still
+  assumed the deleted single-binary `src/` runtime; `workflow_security.rs` now
+  guards `release-platform.yml` and `ployd.service` instead of archived legacy
+  workflows.
+- 2026-03-21: Validation passed:
+  - `rtk cargo build --locked -p ployd -p ployctl -p ploytui -p ploy-connectivity -p ploy-deployments -p ploy-operator-contracts -p ploy-platform -p ploy-research -p ploy-strategy-bundles -p ploy-trading`
+  - `rtk cargo test --locked -p ployd -p ployctl -p ploytui -p ploy-connectivity -p ploy-deployments -p ploy-operator-contracts -p ploy-platform -p ploy-research -p ploy-strategy-bundles -p ploy-trading`
+  - `rtk cargo test --locked -p ploy --test platform_release_workflow --test platform_smoke --test workflow_security --test workspace_runtime_retirement`
