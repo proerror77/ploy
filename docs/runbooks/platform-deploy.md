@@ -67,6 +67,10 @@ Optional hardening:
   or `x-ploy-admin-token` on the control-plane API.
 - `/opt/ploy/bin/ployctl` will automatically pick up `PLOY_ADMIN_TOKEN`,
   `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` from the host environment.
+- Browser operator sessions should authenticate through `/auth/login`; `ployd`
+  will issue an `HttpOnly` same-site session cookie so the frontend and SSE
+  event stream remain authenticated without persisting the raw admin token in
+  browser storage.
 
 ## Post-Deploy Checks
 

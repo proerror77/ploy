@@ -6280,3 +6280,36 @@ Keep shrinking adapter and live-strategy root owners by moving focused parsing/c
   - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib adapters::kalshi_rest::tests::submit_order_body_keeps_compat_fields_and_internal_trace_price -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib strategy::nba_comeback::grok_decision::tests::test_parse_trade_decision -- --exact --nocapture`
   - `CARGO_TARGET_DIR=/tmp/ploy-wave14-final rtk cargo test --lib strategy::nba_comeback::grok_decision::tests::test_prompt_contains_all_sections -- --exact --nocapture`
+
+
+# Final Platform Hardening Sweep (2026-03-21)
+
+## Goal
+Close the remaining new-platform production-hardening gaps in the
+`trading-platform-refactor` workspace, focusing only on the active `ployd` /
+`ployctl` / `ploytui` control plane and retiring any leftover legacy default
+entrypoints.
+
+## File ownership
+
+- `apps/ployd/`, `apps/ployctl/`, `apps/ploytui/`, `crates/ploy-platform/`, `crates/ploy-trading/`, `crates/ploy-connectivity/`
+  - owner: main session, platform hardening and daemon/runtime fixes
+- `.github/`, `docs/`
+  - owner: main session, archive/retirement and runbook alignment
+
+## Tasks
+
+- [x] Review the active platform hot path for remaining reliability and security gaps.
+- [x] Implement the smallest high-value hardening fixes that keep the new control plane simple.
+- [x] Re-run focused validation for the touched platform crates and smoke paths.
+- [ ] Commit each logical change atomically and keep legacy paths archived only.
+
+## Progress notes
+
+- 2026-03-21: Started a final hardening sweep after moving the repo default release path entirely onto `release-platform.yml` and archiving the legacy single-binary workflows.
+- 2026-03-21: Added cookie-backed browser auth for the control-plane frontend path so `/auth/login` issues an `HttpOnly` same-site session cookie, `/auth/logout` clears it, and `/api/events/stream` can stay authenticated without relying on browser-stored bearer headers.
+- 2026-03-21: Focused validation passed:
+  - `rtk cargo test -p ployd`
+  - `rtk cargo test --test platform_smoke`
+  - `cd ploy-frontend && npm run build`
+  - `cd ploy-frontend && npm run lint`

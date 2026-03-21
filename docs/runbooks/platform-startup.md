@@ -17,8 +17,10 @@ Start the single-host trading platform runtime with:
 cargo run -p ployd
 ```
 
-If you want the control plane protected, export `PLOY_ADMIN_TOKEN` first. `ployctl`,
-the frontend, and the sidecar will use the same bearer token surface.
+If you want the control plane protected, export `PLOY_ADMIN_TOKEN` first. `ployctl`
+and the sidecar will use the bearer token surface directly. The frontend login
+flow uses `/auth/login`, which sets an `HttpOnly` same-site session cookie so
+`/api/events/stream` stays authenticated.
 
 2. In a second shell, check the operator client against the control-plane surface:
 
