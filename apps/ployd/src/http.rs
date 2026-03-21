@@ -6,6 +6,7 @@ use ploy_operator_contracts::{
     StatusUpdate, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
 };
 use ploy_trading::{TradeSide, TradingIntent};
+use secrecy::{ExposeSecret, SecretString};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -256,7 +257,13 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
         Ok(token) => token,
         Err(response) => return write_json_response(stream, response),
     };
-    let authenticated = request_authenticated(&request, configured_token.as_deref());
+    let authenticated = request_authenticated(
+        &request,
+        configured_token
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .map(|token| token.as_str()),
+    );
     if method == "GET" && path == "/api/events/stream" {
         if request_requires_auth(path) && !authenticated {
             return write_json_response(
@@ -279,7 +286,10 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
         path,
         body,
         authenticated,
-        configured_token.as_deref(),
+        configured_token
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .map(|token| token.as_str()),
         state,
     );
     write_json_response(stream, response)
@@ -297,7 +307,7 @@ fn write_json_response(mut stream: TcpStream, response: (u16, String)) -> io::Re
     )
 }
 
-fn configured_admin_token(state: &Arc<AppState>) -> Result<Option<String>, (u16, String)> {
+fn configured_admin_token(state: &Arc<AppState>) -> Result<Option<SecretString>, (u16, String)> {
     state
         .daemon
         .lock()
@@ -782,7 +792,7 @@ mod tests {
     #[test]
     fn auth_session_reports_auth_requirement_when_admin_token_is_configured() {
         let config = crate::config::PlatformConfig {
-            admin_token: Some("secret-token".to_string()),
+            admin_token: Some("secret-token".to_string().into()),
             ..crate::config::PlatformConfig::default()
         };
         let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
@@ -812,7 +822,7 @@ mod tests {
     #[test]
     fn unauthorized_requests_are_rejected_when_admin_token_is_configured() {
         let config = crate::config::PlatformConfig {
-            admin_token: Some("secret-token".to_string()),
+            admin_token: Some("secret-token".to_string().into()),
             ..crate::config::PlatformConfig::default()
         };
         let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
@@ -841,7 +851,7 @@ mod tests {
     #[test]
     fn auth_login_accepts_matching_admin_token() {
         let config = crate::config::PlatformConfig {
-            admin_token: Some("secret-token".to_string()),
+            admin_token: Some("secret-token".to_string().into()),
             ..crate::config::PlatformConfig::default()
         };
         let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
