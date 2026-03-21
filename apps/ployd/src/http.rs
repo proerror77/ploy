@@ -1219,7 +1219,10 @@ mod tests {
                 "last_trade_time": null,
                 "websocket_connected": false,
                 "database_connected": false,
-                "error_count_1h": 0
+                "error_count_1h": 0,
+                "live_reconcile_failures": 0,
+                "next_live_reconcile_at": null,
+                "last_live_reconcile_error": null
             })
             .to_string(),
         )

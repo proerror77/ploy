@@ -28,6 +28,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use ploy_trading::FillRecord;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileStatus {
+    Applied(usize),
+    Noop,
+    BackoffActive,
+}
+
 #[derive(Debug)]
 pub struct PloyDaemon {
     pub config: PlatformConfig,
@@ -35,6 +42,9 @@ pub struct PloyDaemon {
     pub supervisor: WorkerSupervisor,
     pub trading: BTreeMap<String, TradingRuntime>,
     live_execution: Box<dyn LiveExecutionGateway>,
+    live_reconcile_failures: u32,
+    next_live_reconcile_at: Option<DateTime<Utc>>,
+    last_live_reconcile_error: Option<String>,
 }
 
 impl PloyDaemon {
@@ -57,6 +67,9 @@ impl PloyDaemon {
             supervisor: WorkerSupervisor::default(),
             trading: BTreeMap::new(),
             live_execution,
+            live_reconcile_failures: 0,
+            next_live_reconcile_at: None,
+            last_live_reconcile_error: None,
         };
         daemon.load_registry()?;
         daemon.load_trading_snapshots()?;
@@ -82,10 +95,10 @@ impl PloyDaemon {
         }
         self.control_plane.system.set_database_connected(true);
         self.tick();
-        if self.reconcile_live_fills().is_ok() {
-            self.mark_runtime_healthy();
-        } else {
-            self.mark_live_runtime_degraded();
+        match self.reconcile_live_fills() {
+            Ok(ReconcileStatus::Applied(_) | ReconcileStatus::Noop) => self.mark_runtime_healthy(),
+            Ok(ReconcileStatus::BackoffActive) => {}
+            Err(err) => self.mark_live_runtime_degraded(err),
         }
         if let Err(err) = self.persist_registry() {
             self.control_plane.system.set_database_connected(false);
@@ -533,7 +546,13 @@ impl PloyDaemon {
         }
     }
 
-    pub fn reconcile_live_fills(&mut self) -> io::Result<usize> {
+    pub fn reconcile_live_fills(&mut self) -> io::Result<ReconcileStatus> {
+        if let Some(next_attempt_at) = self.next_live_reconcile_at {
+            if Utc::now() < next_attempt_at {
+                return Ok(ReconcileStatus::BackoffActive);
+            }
+        }
+
         let mut tracked_orders = Vec::new();
         let mut order_deployments = BTreeMap::new();
 
@@ -572,7 +591,11 @@ impl PloyDaemon {
         }
 
         if tracked_orders.is_empty() {
-            return Ok(0);
+            self.live_reconcile_failures = 0;
+            self.next_live_reconcile_at = None;
+            self.last_live_reconcile_error = None;
+            self.control_plane.system.note_live_reconcile_healthy();
+            return Ok(ReconcileStatus::Noop);
         }
 
         let fills = self
@@ -593,7 +616,12 @@ impl PloyDaemon {
             }
         }
 
-        Ok(recorded)
+        self.live_reconcile_failures = 0;
+        self.next_live_reconcile_at = None;
+        self.last_live_reconcile_error = None;
+        self.control_plane.system.note_live_reconcile_healthy();
+
+        Ok(ReconcileStatus::Applied(recorded))
     }
 
     fn latest_trade_time(&self) -> Option<DateTime<Utc>> {
@@ -604,6 +632,7 @@ impl PloyDaemon {
     }
 
     fn mark_runtime_healthy(&mut self) {
+        self.control_plane.system.note_live_reconcile_healthy();
         self.control_plane
             .system
             .note_trade(self.latest_trade_time());
@@ -639,10 +668,11 @@ impl PloyDaemon {
         }
     }
 
-    fn mark_live_runtime_degraded(&mut self) {
+    fn mark_live_runtime_degraded(&mut self, err: io::Error) {
         self.control_plane
             .system
             .mark_degraded(&self.config.listen_addr);
+        self.record_live_reconcile_failure(&err);
 
         for record in self.control_plane.deployments.records() {
             if record.runtime_mode != "live"
@@ -656,6 +686,27 @@ impl PloyDaemon {
                 .deployments
                 .set_observed_state(&record.deployment_id, ObservedState::Degraded);
         }
+    }
+
+    fn record_live_reconcile_failure(&mut self, err: &io::Error) {
+        let failures = self.live_reconcile_failures.saturating_add(1);
+        self.live_reconcile_failures = failures;
+        let next_attempt_at = self.next_live_reconcile_at(failures);
+        let reason = err.to_string();
+        self.next_live_reconcile_at = Some(next_attempt_at);
+        self.last_live_reconcile_error = Some(reason.clone());
+        self.control_plane
+            .system
+            .note_live_reconcile_failure(failures, next_attempt_at, reason);
+    }
+
+    fn next_live_reconcile_at(&self, failures: u32) -> DateTime<Utc> {
+        let backoff_ms = live_reconcile_backoff_ms(
+            failures,
+            self.config.live_reconcile_backoff_base_ms,
+            self.config.live_reconcile_backoff_max_ms,
+        );
+        Utc::now() + chrono::Duration::milliseconds(backoff_ms as i64)
     }
 
     #[cfg(test)]
@@ -1139,6 +1190,15 @@ fn observed_state_for_desired(desired_state: DesiredState) -> ObservedState {
     }
 }
 
+fn live_reconcile_backoff_ms(failures: u32, base_ms: u64, max_ms: u64) -> u64 {
+    if failures == 0 {
+        return 0;
+    }
+    let exponent = failures.saturating_sub(1).min(10);
+    let scaled = base_ms.saturating_mul(2_u64.saturating_pow(exponent));
+    scaled.min(max_ms.max(base_ms))
+}
+
 fn io_error_from_execution_error(err: ExecutionError) -> io::Error {
     match err {
         ExecutionError::Validation(message) => io::Error::new(io::ErrorKind::InvalidInput, message),
@@ -1193,7 +1253,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::PloyDaemon;
+    use super::{live_reconcile_backoff_ms, PloyDaemon, ReconcileStatus};
     use crate::config::PlatformConfig;
     use ploy_connectivity::{
         CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
@@ -1843,7 +1903,10 @@ mod tests {
                 created_at: chrono::Utc::now(),
             })
             .expect("submit live intent");
-        daemon.reconcile_live_fills().expect("reconcile fills");
+        assert!(matches!(
+            daemon.reconcile_live_fills().expect("reconcile fills"),
+            ReconcileStatus::Applied(1)
+        ));
 
         let error = daemon
             .replace_order(
@@ -2047,7 +2110,7 @@ mod tests {
             .expect("submit live intent");
 
         let reconciled = daemon.reconcile_live_fills().expect("reconcile fills");
-        assert_eq!(reconciled, 1);
+        assert_eq!(reconciled, ReconcileStatus::Applied(1));
 
         let trading_state = daemon.trading_state();
         assert_eq!(trading_state[0].fills.len(), 1);
@@ -2136,7 +2199,7 @@ mod tests {
         let recorded = restored
             .reconcile_live_fills()
             .expect("reconcile restored fills");
-        assert_eq!(recorded, 1);
+        assert_eq!(recorded, ReconcileStatus::Applied(1));
 
         let reconciled_state = restored.trading_state();
         assert_eq!(reconciled_state[0].fills.len(), 1);
@@ -2209,8 +2272,14 @@ mod tests {
             })
             .expect("submit live intent");
 
-        assert_eq!(daemon.reconcile_live_fills().expect("reconcile fills"), 1);
-        assert_eq!(daemon.reconcile_live_fills().expect("reconcile fills"), 0);
+        assert_eq!(
+            daemon.reconcile_live_fills().expect("reconcile fills"),
+            ReconcileStatus::Applied(1)
+        );
+        assert_eq!(
+            daemon.reconcile_live_fills().expect("reconcile fills"),
+            ReconcileStatus::Noop
+        );
 
         let trading_state = daemon.trading_state();
         assert_eq!(trading_state[0].fills.len(), 1);
@@ -2245,6 +2314,8 @@ mod tests {
             deployment_status_file: runtime_root.join("deployments.json"),
             trading_state_file: runtime_root.join("trading-state.json"),
             tick_interval_ms: 5,
+            live_reconcile_backoff_base_ms: 0,
+            live_reconcile_backoff_max_ms: 0,
             ..PlatformConfig::default()
         };
 
@@ -2307,5 +2378,75 @@ mod tests {
             .status()
             .status
             .starts_with("running@"));
+    }
+
+    #[test]
+    fn live_reconcile_backoff_doubles_until_maximum() {
+        assert_eq!(live_reconcile_backoff_ms(1, 1_000, 30_000), 1_000);
+        assert_eq!(live_reconcile_backoff_ms(2, 1_000, 30_000), 2_000);
+        assert_eq!(live_reconcile_backoff_ms(3, 1_000, 30_000), 4_000);
+        assert_eq!(live_reconcile_backoff_ms(10, 1_000, 30_000), 30_000);
+    }
+
+    #[test]
+    fn daemon_skips_live_reconcile_while_backoff_is_active() {
+        let root = temp_dir("live-health-backoff");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            live_reconcile_backoff_base_ms: 60_000,
+            live_reconcile_backoff_max_ms: 60_000,
+            ..PlatformConfig::default()
+        };
+
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(FlakyReconcileGateway::default()),
+        )
+        .expect("boot");
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-backoff".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                limit_price: Some(dec!(0.41)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit live intent");
+
+        daemon.write_runtime_snapshots().expect("degraded snapshot");
+        let status = daemon.control_plane.system.status();
+        assert_eq!(status.live_reconcile_failures, 1);
+        assert!(status.next_live_reconcile_at.is_some());
+        assert_eq!(
+            daemon.reconcile_live_fills().expect("backoff reconcile"),
+            ReconcileStatus::BackoffActive
+        );
     }
 }

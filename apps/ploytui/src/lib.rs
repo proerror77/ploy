@@ -131,6 +131,9 @@ mod tests {
                 websocket_connected: false,
                 database_connected: false,
                 error_count_1h: 0,
+                live_reconcile_failures: 0,
+                next_live_reconcile_at: None,
+                last_live_reconcile_error: None,
             },
             deployments: vec![DeploymentSummary {
                 deployment_id: "example.paper".to_string(),
@@ -156,6 +159,9 @@ mod tests {
                         websocket_connected: false,
                         database_connected: false,
                         error_count_1h: 0,
+                        live_reconcile_failures: 0,
+                        next_live_reconcile_at: None,
+                        last_live_reconcile_error: None,
                     },
                 }),
                 OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
@@ -204,6 +210,9 @@ mod tests {
                 websocket_connected: false,
                 database_connected: false,
                 error_count_1h: 0,
+                live_reconcile_failures: 0,
+                next_live_reconcile_at: None,
+                last_live_reconcile_error: None,
             },
         }));
 

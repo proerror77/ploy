@@ -29,6 +29,9 @@ pub struct SystemService {
     websocket_connected: bool,
     database_connected: bool,
     error_timestamps: Vec<DateTime<Utc>>,
+    live_reconcile_failures: u32,
+    next_live_reconcile_at: Option<DateTime<Utc>>,
+    last_live_reconcile_error: Option<String>,
 }
 
 impl Default for SystemService {
@@ -41,6 +44,9 @@ impl Default for SystemService {
             websocket_connected: false,
             database_connected: false,
             error_timestamps: Vec::new(),
+            live_reconcile_failures: 0,
+            next_live_reconcile_at: None,
+            last_live_reconcile_error: None,
         }
     }
 }
@@ -100,6 +106,23 @@ impl SystemService {
         }
     }
 
+    pub fn note_live_reconcile_failure(
+        &mut self,
+        failures: u32,
+        next_live_reconcile_at: DateTime<Utc>,
+        error: String,
+    ) {
+        self.live_reconcile_failures = failures;
+        self.next_live_reconcile_at = Some(next_live_reconcile_at);
+        self.last_live_reconcile_error = Some(error);
+    }
+
+    pub fn note_live_reconcile_healthy(&mut self) {
+        self.live_reconcile_failures = 0;
+        self.next_live_reconcile_at = None;
+        self.last_live_reconcile_error = None;
+    }
+
     pub fn status(&self) -> SystemStatus {
         let cutoff = Utc::now() - Duration::hours(1);
         SystemStatus {
@@ -118,6 +141,9 @@ impl SystemService {
                 .iter()
                 .filter(|timestamp| **timestamp >= cutoff)
                 .count() as i64,
+            live_reconcile_failures: self.live_reconcile_failures,
+            next_live_reconcile_at: self.next_live_reconcile_at,
+            last_live_reconcile_error: self.last_live_reconcile_error.clone(),
         }
     }
 
@@ -143,17 +169,30 @@ mod tests {
         assert_eq!(service.status().status, "running@127.0.0.1:8081");
 
         service.mark_degraded("127.0.0.1:8081");
+        service.note_live_reconcile_failure(
+            2,
+            Utc::now() + Duration::seconds(5),
+            "gateway offline".to_string(),
+        );
         let degraded = service.status();
         assert_eq!(degraded.status, "degraded@127.0.0.1:8081");
         assert_eq!(degraded.error_count_1h, 1);
+        assert_eq!(degraded.live_reconcile_failures, 2);
+        assert!(degraded.next_live_reconcile_at.is_some());
+        assert_eq!(
+            degraded.last_live_reconcile_error.as_deref(),
+            Some("gateway offline")
+        );
         assert!(service.is_degraded());
 
         service.mark_recovering("127.0.0.1:8081");
         assert_eq!(service.status().status, "recovering@127.0.0.1:8081");
 
+        service.note_live_reconcile_healthy();
         service.mark_running("127.0.0.1:8081");
         assert_eq!(service.status().status, "running@127.0.0.1:8081");
         assert_eq!(service.status().error_count_1h, 1);
+        assert_eq!(service.status().live_reconcile_failures, 0);
     }
 
     #[test]
@@ -171,6 +210,7 @@ mod tests {
         assert_eq!(status.last_trade_time, Some(later));
         assert!(status.database_connected);
         assert!(status.websocket_connected);
+        assert_eq!(status.live_reconcile_failures, 0);
     }
 
     #[test]

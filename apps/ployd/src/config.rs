@@ -15,6 +15,8 @@ pub struct PlatformConfig {
     pub audit_log_file: PathBuf,
     pub tick_interval_ms: u64,
     pub request_rate_limit_per_minute: u32,
+    pub live_reconcile_backoff_base_ms: u64,
+    pub live_reconcile_backoff_max_ms: u64,
 }
 
 impl Default for PlatformConfig {
@@ -33,6 +35,8 @@ impl Default for PlatformConfig {
             runtime_root,
             tick_interval_ms: 1_000,
             request_rate_limit_per_minute: 240,
+            live_reconcile_backoff_base_ms: 1_000,
+            live_reconcile_backoff_max_ms: 30_000,
         }
     }
 }
@@ -99,6 +103,16 @@ impl PlatformConfig {
                 config.request_rate_limit_per_minute = parsed;
             }
         }
+        if let Ok(value) = std::env::var("PLOY_LIVE_RECONCILE_BACKOFF_BASE_MS") {
+            if let Ok(parsed) = value.parse() {
+                config.live_reconcile_backoff_base_ms = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("PLOY_LIVE_RECONCILE_BACKOFF_MAX_MS") {
+            if let Ok(parsed) = value.parse() {
+                config.live_reconcile_backoff_max_ms = parsed;
+            }
+        }
 
         config
     }
@@ -157,5 +171,7 @@ mod tests {
         );
         assert_eq!(config.tick_interval_ms, 1_000);
         assert_eq!(config.request_rate_limit_per_minute, 240);
+        assert_eq!(config.live_reconcile_backoff_base_ms, 1_000);
+        assert_eq!(config.live_reconcile_backoff_max_ms, 30_000);
     }
 }
