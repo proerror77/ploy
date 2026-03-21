@@ -65,6 +65,8 @@ Optional hardening:
 
 - Set `PLOY_ADMIN_TOKEN=...` in `/opt/ploy/.env` to require `Authorization: Bearer ...`
   or `x-ploy-admin-token` on the control-plane API.
+- Set `PLOY_SIDECAR_AUTH_TOKEN=...` in `/opt/ploy/.env` if agent/sidecar clients
+  only need read-only access to platform snapshots and `/api/events/stream`.
 - Set `PLOY_API_AUTH_COOKIE_SECRET=...` in `/opt/ploy/.env` if browser operator
   sessions need to stay valid across daemon restarts or multiple `ployd`
   instances.

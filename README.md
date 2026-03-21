@@ -35,6 +35,7 @@ rtk cargo test --test platform_smoke -- --nocapture
 Optional admin auth:
 
 - Set `PLOY_ADMIN_TOKEN` or `PLOY_API_ADMIN_TOKEN` before booting `ployd` to require a bearer token on the control-plane API.
+- Set `PLOY_SIDECAR_AUTH_TOKEN` if you want a read-only agent/sidecar credential for system status, deployment snapshots, trading snapshots, and the SSE event stream.
 - Set `PLOY_API_AUTH_COOKIE_SECRET` as well if you want browser auth cookies to stay valid across daemon restarts or multiple instances.
 - `ployctl` will automatically reuse `PLOY_ADMIN_TOKEN`, `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` for authenticated requests.
 - Browser operator surfaces authenticate through `/auth/login`, which now sets an `HttpOnly` same-site signed session cookie so the frontend event stream can stay authenticated without storing the raw admin token in browser storage.
