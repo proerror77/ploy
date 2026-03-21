@@ -21,6 +21,7 @@ Current smoke path:
 ```bash
 cargo run -p ployd
 cargo run -p ployctl -- system status
+cargo run -p ployctl -- system audit
 cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
@@ -37,8 +38,10 @@ Optional admin auth:
 - Set `PLOY_ADMIN_TOKEN` or `PLOY_API_ADMIN_TOKEN` before booting `ployd` to require a bearer token on the control-plane API.
 - Set `PLOY_SIDECAR_AUTH_TOKEN` if you want a read-only agent/sidecar credential for system status, deployment snapshots, trading snapshots, and the SSE event stream.
 - Set `PLOY_API_AUTH_COOKIE_SECRET` as well if you want browser auth cookies to stay valid across daemon restarts or multiple instances.
+- Set `PLOY_REQUEST_RATE_LIMIT_PER_MINUTE` if you need to tighten or relax the daemon HTTP request throttle. `0` disables the limiter.
 - `ployctl` will automatically reuse `PLOY_ADMIN_TOKEN`, `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` for authenticated requests.
 - Browser operator surfaces authenticate through `/auth/login`, which now sets an `HttpOnly` same-site signed session cookie so the frontend event stream can stay authenticated without storing the raw admin token in browser storage.
+- `ployd` appends authenticated control-plane activity to `run/platform/audit-log.jsonl`, and `ployctl system audit` reads that stream back through the daemon API.
 
 Runbooks:
 
@@ -86,6 +89,7 @@ New live strategies should implement the canonical `Strategy` contract.
 `TradingAgent` / `DomainAgent` are retired and only remain in historical design docs.
 The default workspace control plane is:
 - `GET /api/system/status`
+- `GET /api/audit/logs`
 - `GET /api/deployments`
 - `GET /api/deployments/:id`
 - `POST /api/deployments/:id/control`

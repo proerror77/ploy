@@ -3596,6 +3596,7 @@ dependencies = [
 name = "ployctl"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ploy-operator-contracts",
  "ploy-platform",
  "rust_decimal",

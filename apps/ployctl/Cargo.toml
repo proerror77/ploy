@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Ploy control-plane client workspace entry point"
 
 [dependencies]
+chrono.workspace = true
 ploy-operator-contracts.workspace = true
 ploy-platform.workspace = true
 rust_decimal.workspace = true

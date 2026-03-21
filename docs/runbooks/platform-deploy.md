@@ -47,6 +47,7 @@ After the bundle lands on the host, the deploy workflow:
    - `systemctl status ployd`
    - `curl -fsS http://127.0.0.1:8081/health`
    - `/opt/ploy/bin/ployctl system status`
+   - `/opt/ploy/bin/ployctl system audit`
    - `/opt/ploy/bin/ployctl trading status`
    - `/opt/ploy/bin/ploytui`
    - `curl -N http://127.0.0.1:8081/api/events/stream`
@@ -60,6 +61,7 @@ The install script ensures:
 - `/opt/ploy/run/platform/system-status.json`
 - `/opt/ploy/run/platform/deployments.json`
 - `/opt/ploy/run/platform/trading-state.json`
+- `/opt/ploy/run/platform/audit-log.jsonl`
 
 Optional hardening:
 
@@ -70,6 +72,8 @@ Optional hardening:
 - Set `PLOY_API_AUTH_COOKIE_SECRET=...` in `/opt/ploy/.env` if browser operator
   sessions need to stay valid across daemon restarts or multiple `ployd`
   instances.
+- Set `PLOY_REQUEST_RATE_LIMIT_PER_MINUTE=...` in `/opt/ploy/.env` if you want
+  to tune daemon-side HTTP throttling. Set `0` to disable it.
 - `/opt/ploy/bin/ployctl` will automatically pick up `PLOY_ADMIN_TOKEN`,
   `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` from the host environment.
 - Browser operator sessions should authenticate through `/auth/login`; `ployd`
@@ -84,6 +88,7 @@ sudo systemctl status ployd --no-pager
 sudo journalctl -u ployd -n 200 --no-pager
 curl -fsS http://127.0.0.1:8081/health
 /opt/ploy/bin/ployctl system status
+/opt/ploy/bin/ployctl system audit
 /opt/ploy/bin/ployctl trading status
 /opt/ploy/bin/ployctl deployments list
 /opt/ploy/bin/ploytui

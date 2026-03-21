@@ -1,24 +1,26 @@
 use crate::events::EventBroker;
 use crate::runtime::{next_paper_intent_id, PloyDaemon};
+use chrono::Utc;
 use hmac::{Hmac, Mac};
 use ploy_operator_contracts::{
-    ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
+    AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
     DeploymentSnapshotEvent, IntentPurpose, OperatorEvent, OrderReplaceRequest, PaperIntentRequest,
     StatusUpdate, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
 };
 use ploy_trading::{TradeSide, TradingIntent};
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
+use std::collections::{BTreeMap, VecDeque};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use crate::config::PlatformConfig;
-#[cfg(test)]
-use std::fs;
 #[cfg(test)]
 use std::path::Path;
 
@@ -29,7 +31,9 @@ pub struct AppState {
 }
 
 const ADMIN_SESSION_COOKIE_NAME: &str = "ploy_admin_session";
+const AUDIT_LOG_TAIL_LIMIT: usize = 200;
 type HmacSha256 = Hmac<Sha256>;
+static REQUEST_RATE_LIMITER: OnceLock<Mutex<RateLimiter>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthLevel {
@@ -43,6 +47,31 @@ enum RequiredAccess {
     Public,
     ReadOnly,
     Admin,
+}
+
+#[derive(Debug, Default)]
+struct RateLimiter {
+    requests: BTreeMap<String, VecDeque<Instant>>,
+}
+
+impl RateLimiter {
+    fn allow(&mut self, key: &str, limit_per_minute: u32) -> bool {
+        if limit_per_minute == 0 {
+            return true;
+        }
+
+        let now = Instant::now();
+        let cutoff = now - Duration::from_secs(60);
+        let bucket = self.requests.entry(key.to_string()).or_default();
+        while matches!(bucket.front(), Some(timestamp) if *timestamp < cutoff) {
+            bucket.pop_front();
+        }
+        if bucket.len() >= limit_per_minute as usize {
+            return false;
+        }
+        bucket.push_back(now);
+        true
+    }
 }
 
 pub fn render_status(status: &SystemStatus) -> String {
@@ -69,6 +98,7 @@ fn status_text(status_code: u16) -> &'static str {
     match status_code {
         200 => "OK",
         401 => "Unauthorized",
+        429 => "Too Many Requests",
         400 => "Bad Request",
         404 => "Not Found",
         409 => "Conflict",
@@ -272,6 +302,7 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
     let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
     let method = request_line.next().unwrap_or("GET");
     let path = request_line.next().unwrap_or("/");
+    let client_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
     let (configured_token, sidecar_token, cookie_secret) = match configured_auth(state) {
         Ok(auth) => auth,
         Err(response) => return write_json_response(stream, response),
@@ -289,6 +320,22 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
         cookie_secret.expose_secret(),
     );
     let required_access = required_access(method, path);
+    if let Some(response) =
+        rate_limit_response(method, path, client_addr.as_deref(), auth_level, state)
+    {
+        audit_request(
+            state,
+            method,
+            path,
+            client_addr.as_deref(),
+            auth_level,
+            required_access,
+            response.0,
+            "rate_limited",
+            response_message(&response.1),
+        );
+        return write_json_response(stream, response);
+    }
     if method == "GET" && path == "/api/events/stream" {
         if !access_allowed(
             auth_level,
@@ -296,15 +343,35 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
             configured_token.is_some(),
             sidecar_token.is_some(),
         ) {
-            return write_json_response(
-                stream,
-                auth_error_response(
-                    required_access,
-                    configured_token.is_some(),
-                    sidecar_token.is_some(),
-                ),
+            let response = auth_error_response(
+                required_access,
+                configured_token.is_some(),
+                sidecar_token.is_some(),
             );
+            audit_request(
+                state,
+                method,
+                path,
+                client_addr.as_deref(),
+                auth_level,
+                required_access,
+                response.0,
+                "denied",
+                response_message(&response.1),
+            );
+            return write_json_response(stream, response);
         }
+        audit_request(
+            state,
+            method,
+            path,
+            client_addr.as_deref(),
+            auth_level,
+            required_access,
+            200,
+            "allowed",
+            None,
+        );
         return handle_event_stream(stream, state);
     }
     let body = request
@@ -329,6 +396,21 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
             .map(ExposeSecret::expose_secret)
             .map(|token| token.as_str()),
         cookie_secret.expose_secret(),
+    );
+    audit_request(
+        state,
+        method,
+        path,
+        client_addr.as_deref(),
+        auth_level,
+        required_access,
+        response.0,
+        if response.0 < 400 {
+            "allowed"
+        } else {
+            "denied"
+        },
+        response_message(&response.1),
     );
     write_json_response_with_headers(stream, response, &headers)
 }
@@ -375,6 +457,57 @@ fn configured_auth(
         .map_err(|_| json_error(503, "daemon_lock_poisoned", None))
 }
 
+fn request_rate_limiter() -> &'static Mutex<RateLimiter> {
+    REQUEST_RATE_LIMITER.get_or_init(|| Mutex::new(RateLimiter::default()))
+}
+
+fn request_rate_limit_per_minute(state: &Arc<AppState>) -> Result<u32, (u16, String)> {
+    state
+        .daemon
+        .lock()
+        .map(|daemon| daemon.config.request_rate_limit_per_minute)
+        .map_err(|_| json_error(503, "daemon_lock_poisoned", None))
+}
+
+fn rate_limit_response(
+    method: &str,
+    path: &str,
+    client_addr: Option<&str>,
+    auth_level: AuthLevel,
+    state: &Arc<AppState>,
+) -> Option<(u16, String)> {
+    if path == "/health" {
+        return None;
+    }
+    let limit = match request_rate_limit_per_minute(state) {
+        Ok(limit) => limit,
+        Err(response) => return Some(response),
+    };
+    let key = format!(
+        "{}|{}|{}|{}",
+        client_addr.unwrap_or("unknown"),
+        auth_level_name(auth_level),
+        method,
+        path
+    );
+    let allowed = request_rate_limiter()
+        .lock()
+        .map(|mut limiter| limiter.allow(&key, limit))
+        .unwrap_or(true);
+    if allowed {
+        None
+    } else {
+        Some(json_error(
+            429,
+            "rate_limited",
+            Some(format!(
+                "request rate limit exceeded for client `{}`",
+                client_addr.unwrap_or("unknown")
+            )),
+        ))
+    }
+}
+
 fn required_access(method: &str, path: &str) -> RequiredAccess {
     match (method, path) {
         ("GET", "/health")
@@ -385,11 +518,100 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
         | ("GET", "/api/deployments")
         | ("GET", "/api/trading/state")
         | ("GET", "/api/events/stream") => RequiredAccess::ReadOnly,
+        ("GET", "/api/audit/logs") => RequiredAccess::Admin,
         ("GET", _) if path.starts_with("/api/deployments/") && !path.ends_with("/control") => {
             RequiredAccess::ReadOnly
         }
         _ => RequiredAccess::Admin,
     }
+}
+
+fn auth_level_name(auth_level: AuthLevel) -> &'static str {
+    match auth_level {
+        AuthLevel::None => "none",
+        AuthLevel::Sidecar => "sidecar",
+        AuthLevel::Admin => "admin",
+    }
+}
+
+fn required_access_name(required_access: RequiredAccess) -> &'static str {
+    match required_access {
+        RequiredAccess::Public => "public",
+        RequiredAccess::ReadOnly => "read_only",
+        RequiredAccess::Admin => "admin",
+    }
+}
+
+fn response_message(body: &str) -> Option<String> {
+    serde_json::from_str::<ControlPlaneErrorResponse>(body)
+        .ok()
+        .and_then(|error| error.message.or(Some(error.error)))
+}
+
+fn audit_log_path(state: &Arc<AppState>) -> Result<PathBuf, (u16, String)> {
+    state
+        .daemon
+        .lock()
+        .map(|daemon| daemon.config.audit_log_file.clone())
+        .map_err(|_| json_error(503, "daemon_lock_poisoned", None))
+}
+
+fn audit_request(
+    state: &Arc<AppState>,
+    method: &str,
+    path: &str,
+    client_addr: Option<&str>,
+    auth_level: AuthLevel,
+    required_access: RequiredAccess,
+    status_code: u16,
+    outcome: &str,
+    message: Option<String>,
+) {
+    if path == "/health" {
+        return;
+    }
+
+    let Ok(audit_log_file) = audit_log_path(state) else {
+        return;
+    };
+    let entry = AuditLogEntry {
+        timestamp: Utc::now(),
+        method: method.to_string(),
+        path: path.to_string(),
+        client_addr: client_addr.map(str::to_string),
+        auth_level: auth_level_name(auth_level).to_string(),
+        required_access: required_access_name(required_access).to_string(),
+        status_code,
+        outcome: outcome.to_string(),
+        message,
+    };
+    let _ = append_audit_entry(&audit_log_file, &entry);
+}
+
+fn append_audit_entry(path: &PathBuf, entry: &AuditLogEntry) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let body = serde_json::to_string(entry)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    writeln!(file, "{body}")
+}
+
+fn read_recent_audit_entries(path: &PathBuf, limit: usize) -> io::Result<Vec<AuditLogEntry>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let body = fs::read_to_string(path)?;
+    let mut entries = body
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<AuditLogEntry>(line).ok())
+        .collect::<Vec<_>>();
+    if entries.len() > limit {
+        entries = entries.split_off(entries.len() - limit);
+    }
+    Ok(entries)
 }
 
 fn extract_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
@@ -654,6 +876,18 @@ fn handle_runtime_request(
                 serde_json::to_string(&daemon.trading_state()).unwrap_or_else(|_| "[]".to_string()),
             ),
             Err(_) => json_error(503, "daemon_lock_poisoned", None),
+        },
+        ("GET", "/api/audit/logs") => match audit_log_path(state)
+            .map_err(|response| response)
+            .and_then(|path| {
+                read_recent_audit_entries(&path, AUDIT_LOG_TAIL_LIMIT)
+                    .map_err(|err| json_error(500, "audit_log_unavailable", Some(err.to_string())))
+            }) {
+            Ok(entries) => (
+                200,
+                serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string()),
+            ),
+            Err(response) => response,
         },
         ("GET", _) if path.starts_with("/api/deployments/") && !path.ends_with("/control") => {
             let deployment_id = path.trim_start_matches("/api/deployments/");
@@ -947,12 +1181,15 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_session_cookie, handle_api_request, handle_authenticated_runtime_request,
-        handle_runtime_request, request_auth_level, response_headers, route_request,
-        snapshot_events, AppState, AuthLevel, ADMIN_SESSION_COOKIE_NAME,
+        admin_session_cookie, append_audit_entry, handle_api_request,
+        handle_authenticated_runtime_request, handle_runtime_request, request_auth_level,
+        response_headers, route_request, snapshot_events, AppState, AuthLevel, RateLimiter,
+        ADMIN_SESSION_COOKIE_NAME,
     };
     use crate::events::EventBroker;
+    use chrono::Utc;
     use ploy_connectivity::{CancellationOutcome, ReplaceOutcome, StaticExecutionGateway};
+    use ploy_operator_contracts::AuditLogEntry;
     use ploy_operator_contracts::{OrderReplaceRequest, PaperIntentRequest};
     use ploy_trading::{IntentPurpose as TradingIntentPurpose, TradeSide, TradingIntent};
     use std::fs;
@@ -1007,6 +1244,58 @@ mod tests {
         let (deployments_code, deployments_body) = route_request("/api/deployments", &runtime_root);
         assert_eq!(deployments_code, 200);
         assert!(deployments_body.contains("\"deployment_id\":\"example.paper\""));
+    }
+
+    #[test]
+    fn rate_limiter_denies_requests_after_limit_within_window() {
+        let mut limiter = RateLimiter::default();
+        assert!(limiter.allow("127.0.0.1|admin|GET|/api/deployments", 1));
+        assert!(!limiter.allow("127.0.0.1|admin|GET|/api/deployments", 1));
+    }
+
+    #[test]
+    fn handle_runtime_request_reads_recent_audit_entries() {
+        let root = temp_dir("audit-read");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        let audit_log_file = runtime_root.join("audit-log.jsonl");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root,
+            status_file: root.join("run/platform/system-status.json"),
+            deployment_status_file: root.join("run/platform/deployments.json"),
+            trading_state_file: root.join("run/platform/trading-state.json"),
+            audit_log_file: audit_log_file.clone(),
+            ..crate::config::PlatformConfig::default()
+        };
+        append_audit_entry(
+            &audit_log_file,
+            &AuditLogEntry {
+                timestamp: Utc::now(),
+                method: "POST".to_string(),
+                path: "/api/deployments/example.paper/control".to_string(),
+                client_addr: Some("127.0.0.1:9000".to_string()),
+                auth_level: "admin".to_string(),
+                required_access: "admin".to_string(),
+                status_code: 200,
+                outcome: "allowed".to_string(),
+                message: Some("deployment paused".to_string()),
+            },
+        )
+        .expect("append audit");
+
+        let daemon = crate::runtime::PloyDaemon::boot(&config).expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (status_code, body) = handle_runtime_request("GET", "/api/audit/logs", None, &state);
+        assert_eq!(status_code, 200);
+        assert!(body.contains("/api/deployments/example.paper/control"));
+        assert!(body.contains("deployment paused"));
     }
 
     #[test]

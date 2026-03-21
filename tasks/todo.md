@@ -6313,3 +6313,35 @@ entrypoints.
   - `rtk cargo test --test platform_smoke`
   - `cd ploy-frontend && npm run build`
   - `cd ploy-frontend && npm run lint`
+# Control Plane Audit And Rate Limit Cut (2026-03-21)
+
+## Goal
+Add a minimum viable control-plane guardrail layer to `ployd`: append-only audit
+logging for authenticated operator actions and lightweight HTTP request rate
+limiting, with an admin-visible read path through the control plane.
+
+## File ownership
+
+- `apps/ployd/src/http.rs`, `apps/ployd/src/config.rs`, `apps/ployd/src/main.rs`
+  - owner: request throttling, audit append/read flow, runtime wiring
+- `crates/ploy-operator-contracts/`
+  - owner: audit log wire contract
+- `apps/ployctl/src/client.rs`, `apps/ployctl/src/main.rs`, `apps/ployctl/src/system.rs`
+  - owner: admin audit-read CLI surface
+- `docs/runbooks/`
+  - owner: startup/deploy notes if config/env or operator flow changes
+
+## Tasks
+
+- [x] Add a stable audit-log wire contract and persist audit entries from `ployd` HTTP handling.
+- [x] Add a lightweight per-client HTTP rate limiter with structured `429` responses.
+- [x] Expose an admin read path for recent audit entries and wire it into `ployctl`.
+- [x] Re-run focused validation for `ployd`, `ployctl`, and platform smoke coverage.
+
+## Progress notes
+
+- 2026-03-21: Added `AuditLogEntry` to `ploy-operator-contracts`, append-only JSONL audit logging in `ployd`, an admin `GET /api/audit/logs` read path, and `ployctl system audit` for operator inspection.
+- 2026-03-21: Added daemon-side per-client HTTP request limiting with structured `429 rate_limited` responses. The limiter is configurable through `PLOY_REQUEST_RATE_LIMIT_PER_MINUTE`; `0` disables it.
+- 2026-03-21: Focused validation passed:
+  - `rtk cargo test -p ploy-operator-contracts -p ployd -p ployctl`
+  - `rtk cargo test --test platform_smoke`
