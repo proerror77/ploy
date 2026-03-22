@@ -1,3 +1,49 @@
+# Auto-Claim Platform Cut (2026-03-22)
+
+## Goal
+Add default-on account-level Polymarket auto-claim to the new platform path so
+`ployd` continuously discovers redeemable live positions, redeems them through
+the connectivity seam, and exposes claim health through the control plane.
+
+## File ownership
+
+- `crates/ploy-connectivity/`
+  - owner: redeem discovery/execution seam and SDK-backed claim gateway
+- `crates/ploy-platform/`, `crates/ploy-operator-contracts/`
+  - owner: account claim state, system claim metrics, and shared wire contracts
+- `apps/ployd/`
+  - owner: account claim loop, persistence, health propagation, and HTTP routes
+- `apps/ployctl/`, `apps/ploytui/`, `ploy-frontend/`
+  - owner: operator claim surfaces once backend is stable
+- `src/account/`, `src/main_modes/`, legacy docs
+  - owner: retire old claimer entrypoints after the new path is live
+
+## Tasks
+
+- [x] Finish the `ployd` account auto-claim loop and claim snapshot persistence.
+- [x] Add account-claim control-plane endpoints plus `ployctl claims ...`.
+- [x] Surface claim status in TUI/frontend and system health.
+- [x] Retire legacy claimer entrypoints and archived docs that still point at them.
+- [x] Re-run focused Rust and operator-surface validation, then land atomic commits.
+
+## Progress notes
+
+- 2026-03-22: Added claim wire contracts, account claim registry/state in
+  `ploy-platform`, and the first SDK-backed redeem seam in `ploy-connectivity`.
+- 2026-03-22: `PlatformConfig` and `PloyDaemon` now have in-progress account
+  claim state file/backoff wiring, but the backend surface and legacy retirement
+  are still being finished in this worktree.
+- 2026-03-22: Finished the relay-first redeem backend in `ploy-connectivity`,
+  including builder-auth fail-closed behavior, SAFE auto-deploy through
+  `SAFE-CREATE`, and official SAFE / PROXY / SAFE-CREATE signing vectors.
+- 2026-03-22: Landed account-claim control-plane surfaces across `ployd`,
+  `ployctl`, `ploytui`, and the frontend type/API shim, then retired the last
+  legacy claimer install script and added a workflow guard to keep it retired.
+- 2026-03-22: Focused validation passed:
+  - `rtk cargo test -p ploy-connectivity`
+  - `rtk cargo test -p ploy-operator-contracts -p ploy-platform -p ployd -p ployctl -p ploytui`
+  - `rtk cargo test --test platform_smoke --test platform_release_workflow --test workflow_security --test workspace_runtime_retirement`
+
 # Live Reconcile Backoff Hardening (2026-03-21)
 
 ## Goal

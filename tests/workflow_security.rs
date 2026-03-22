@@ -44,15 +44,12 @@ fn release_platform_workflow_pins_host_fingerprints() {
 
     if content.matches("fingerprint:").count() != 2 {
         offenders.push(
-            "release-platform.yml: expected fingerprint pinning on both appleboy steps"
-                .to_string(),
+            "release-platform.yml: expected fingerprint pinning on both appleboy steps".to_string(),
         );
     }
 
     if !content.contains("EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT") {
-        offenders.push(
-            "release-platform.yml: missing EC2 fingerprint secret wiring".to_string(),
-        );
+        offenders.push("release-platform.yml: missing EC2 fingerprint secret wiring".to_string());
     }
 
     assert!(
@@ -95,6 +92,28 @@ fn checked_in_platform_service_enforces_guardrails() {
     assert!(
         offenders.is_empty(),
         "checked-in ployd.service guardrail check failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn legacy_claimer_install_paths_stay_retired() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let retired = [
+        "scripts/install_claimer_service_ssm.sh",
+        "scripts/archive/legacy-root-runtime/install_claimer_service_ssm.sh",
+    ];
+
+    let mut offenders = Vec::new();
+    for relative_path in retired {
+        if repo_root.join(relative_path).exists() {
+            offenders.push(relative_path.to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "legacy claimer install paths still present:\n{}",
         offenders.join("\n")
     );
 }
