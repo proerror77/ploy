@@ -28,6 +28,8 @@ fn build_snapshot(client: &ControlPlaneClient) -> DashboardSnapshot {
                 last_live_reconcile_error: None,
             }
         }),
+        metrics: client.system_metrics().unwrap_or_default(),
+        alerts: client.system_alerts().unwrap_or_default(),
         deployments: client.list_deployments(),
         trading: client.trading_state().unwrap_or_default(),
         claims: client.claim_statuses().unwrap_or_default(),

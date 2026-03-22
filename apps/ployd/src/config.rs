@@ -13,6 +13,8 @@ pub struct PlatformConfig {
     pub deployment_status_file: PathBuf,
     pub trading_state_file: PathBuf,
     pub claim_state_file: PathBuf,
+    pub metrics_state_file: PathBuf,
+    pub alerts_state_file: PathBuf,
     pub audit_log_file: PathBuf,
     pub tick_interval_ms: u64,
     pub claim_tick_interval_ms: u64,
@@ -36,6 +38,8 @@ impl Default for PlatformConfig {
             deployment_status_file: runtime_root.join("deployments.json"),
             trading_state_file: runtime_root.join("trading-state.json"),
             claim_state_file: runtime_root.join("account-claims.json"),
+            metrics_state_file: runtime_root.join("system-metrics.json"),
+            alerts_state_file: runtime_root.join("system-alerts.json"),
             audit_log_file: runtime_root.join("audit-log.jsonl"),
             runtime_root,
             tick_interval_ms: 1_000,
@@ -63,6 +67,12 @@ impl PlatformConfig {
         }
         if self.claim_state_file == defaults.claim_state_file {
             self.claim_state_file = self.runtime_root.join("account-claims.json");
+        }
+        if self.metrics_state_file == defaults.metrics_state_file {
+            self.metrics_state_file = self.runtime_root.join("system-metrics.json");
+        }
+        if self.alerts_state_file == defaults.alerts_state_file {
+            self.alerts_state_file = self.runtime_root.join("system-alerts.json");
         }
         if self.audit_log_file == defaults.audit_log_file {
             self.audit_log_file = self.runtime_root.join("audit-log.jsonl");
@@ -120,6 +130,16 @@ impl PlatformConfig {
             config.claim_state_file = PathBuf::from(value);
         } else {
             config.claim_state_file = config.runtime_root.join("account-claims.json");
+        }
+        if let Ok(value) = std::env::var("PLOY_SYSTEM_METRICS_FILE") {
+            config.metrics_state_file = PathBuf::from(value);
+        } else {
+            config.metrics_state_file = config.runtime_root.join("system-metrics.json");
+        }
+        if let Ok(value) = std::env::var("PLOY_SYSTEM_ALERTS_FILE") {
+            config.alerts_state_file = PathBuf::from(value);
+        } else {
+            config.alerts_state_file = config.runtime_root.join("system-alerts.json");
         }
         if let Ok(value) = std::env::var("PLOY_AUDIT_LOG_FILE") {
             config.audit_log_file = PathBuf::from(value);
@@ -216,6 +236,14 @@ mod tests {
         assert_eq!(
             config.claim_state_file.to_string_lossy(),
             "run/platform/account-claims.json"
+        );
+        assert_eq!(
+            config.metrics_state_file.to_string_lossy(),
+            "run/platform/system-metrics.json"
+        );
+        assert_eq!(
+            config.alerts_state_file.to_string_lossy(),
+            "run/platform/system-alerts.json"
         );
         assert_eq!(
             config.audit_log_file.to_string_lossy(),

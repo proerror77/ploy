@@ -11,14 +11,16 @@ use ploy_connectivity::{
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{
     AccountClaimActionResponse, AccountClaimActionState, AccountClaimDetailResponse,
-    AccountClaimStatus, ClaimExecutionOutcome, ClaimExecutionRecord, ClaimLoopState,
-    ClaimPositionState, DeploymentApplyRequest, DeploymentControlRequest, DeploymentState,
-    DesiredState, FillSnapshot, IntentPurpose, ObservedState, OrderControlResponse,
-    OrderReplaceRequest, OrderSnapshot, PaperIntentResponse, PnlSnapshotResponse,
-    PositionSnapshotResponse, RedeemablePositionSnapshot, RiskSnapshotResponse,
-    TradingIntentSnapshot, TradingStateSnapshot,
+    AccountClaimStatus, AlertRecord, AlertSeverity, ClaimExecutionOutcome, ClaimExecutionRecord,
+    ClaimLoopState, ClaimPositionState, DeploymentApplyRequest, DeploymentControlRequest,
+    DeploymentState, DesiredState, FillSnapshot, IntentPurpose, ObservedState,
+    OrderControlResponse, OrderReplaceRequest, OrderSnapshot, PaperIntentResponse,
+    PnlSnapshotResponse, PositionSnapshotResponse, RedeemablePositionSnapshot,
+    RiskSnapshotResponse, SystemMetrics, TradingIntentSnapshot, TradingStateSnapshot,
 };
-use ploy_platform::{AccountClaimDetail, AccountClaimSnapshot, ControlPlane, DeploymentRecord};
+use ploy_platform::{
+    AccountClaimDetail, AccountClaimSnapshot, AlertSignal, ControlPlane, DeploymentRecord,
+};
 use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -106,6 +108,7 @@ impl PloyDaemon {
         }
         daemon.tick();
         daemon.mark_runtime_healthy();
+        daemon.refresh_observability();
 
         Ok(daemon)
     }
@@ -153,6 +156,8 @@ impl PloyDaemon {
         )?;
         write_json(&self.config.trading_state_file, &self.trading_state())?;
         write_json(&self.config.claim_state_file, &self.claim_details())?;
+        write_json(&self.config.metrics_state_file, &self.system_metrics())?;
+        write_json(&self.config.alerts_state_file, &self.active_alerts())?;
         Ok(())
     }
 
@@ -178,6 +183,87 @@ impl PloyDaemon {
 
     pub fn claim_statuses(&self) -> Vec<AccountClaimStatus> {
         self.control_plane.accounts.statuses()
+    }
+
+    pub fn active_alerts(&self) -> Vec<AlertRecord> {
+        self.control_plane.alerts.active()
+    }
+
+    pub fn system_metrics(&self) -> SystemMetrics {
+        let alerts = self.active_alerts();
+        let deployments = self.control_plane.deployments.records();
+        let claims = self.control_plane.accounts.statuses();
+        let trading: Vec<_> = deployments
+            .iter()
+            .map(|record| {
+                self.trading
+                    .get(&record.deployment_id)
+                    .map(|runtime| runtime.snapshot(&BTreeMap::new()))
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        SystemMetrics {
+            deployments_total: deployments.len(),
+            deployments_running: deployments
+                .iter()
+                .filter(|record| record.observed_state == ObservedState::Running)
+                .count(),
+            deployments_degraded: deployments
+                .iter()
+                .filter(|record| record.observed_state == ObservedState::Degraded)
+                .count(),
+            deployments_failed: deployments
+                .iter()
+                .filter(|record| record.observed_state == ObservedState::Failed)
+                .count(),
+            live_deployments: deployments
+                .iter()
+                .filter(|record| record.runtime_mode == "live")
+                .count(),
+            paper_deployments: deployments
+                .iter()
+                .filter(|record| record.runtime_mode == "paper")
+                .count(),
+            claim_accounts_total: claims.len(),
+            claim_accounts_degraded: claims
+                .iter()
+                .filter(|status| status.loop_state == ClaimLoopState::Degraded)
+                .count(),
+            pending_intents: trading
+                .iter()
+                .map(|snapshot| snapshot.risk.pending_intents)
+                .sum(),
+            active_orders: trading
+                .iter()
+                .map(|snapshot| snapshot.risk.active_orders)
+                .sum(),
+            open_positions: trading
+                .iter()
+                .map(|snapshot| snapshot.risk.open_positions)
+                .sum(),
+            gross_exposure: trading
+                .iter()
+                .map(|snapshot| snapshot.risk.gross_exposure)
+                .sum(),
+            reserved_order_exposure: trading
+                .iter()
+                .map(|snapshot| snapshot.risk.reserved_order_exposure)
+                .sum(),
+            total_gross_exposure: trading
+                .iter()
+                .map(|snapshot| snapshot.risk.total_gross_exposure)
+                .sum(),
+            active_alert_count: alerts.len(),
+            warning_alert_count: alerts
+                .iter()
+                .filter(|alert| alert.severity == AlertSeverity::Warning)
+                .count(),
+            critical_alert_count: alerts
+                .iter()
+                .filter(|alert| alert.severity == AlertSeverity::Critical)
+                .count(),
+        }
     }
 
     pub fn claim_details(&self) -> Vec<AccountClaimDetailResponse> {
@@ -225,6 +311,7 @@ impl PloyDaemon {
         }
         self.control_plane.accounts.set_enabled(account_id, enabled);
         self.refresh_claim_metrics();
+        self.refresh_observability();
         Ok(AccountClaimActionResponse {
             account_id: account_id.to_string(),
             state: AccountClaimActionState::Accepted,
@@ -763,6 +850,7 @@ impl PloyDaemon {
                     .set_observed_state(&record.deployment_id, ObservedState::Running);
             }
         }
+        self.refresh_observability();
     }
 
     fn mark_live_runtime_degraded(&mut self, err: io::Error) {
@@ -783,6 +871,7 @@ impl PloyDaemon {
                 .deployments
                 .set_observed_state(&record.deployment_id, ObservedState::Degraded);
         }
+        self.refresh_observability();
     }
 
     fn mark_claim_runtime_degraded(&mut self, err: io::Error) {
@@ -815,6 +904,7 @@ impl PloyDaemon {
                 degraded_accounts.into_iter().collect::<Vec<_>>().join(",")
             ),
         );
+        self.refresh_observability();
     }
 
     fn record_live_reconcile_failure(&mut self, err: &io::Error) {
@@ -1125,6 +1215,7 @@ impl PloyDaemon {
             .accounts
             .set_redeemable_positions(account_id, remaining);
         self.refresh_claim_metrics();
+        self.refresh_observability();
 
         let message = if execute_claims {
             format!("claim run completed: detected={detected_count} claimed={claimed_count}")
@@ -1192,6 +1283,7 @@ impl PloyDaemon {
         }
 
         self.refresh_claim_metrics();
+        self.refresh_observability();
         Ok(())
     }
 
@@ -1344,6 +1436,117 @@ impl PloyDaemon {
             pending_redeemable_count,
             pending_redeemable_notional,
         );
+    }
+
+    fn refresh_observability(&mut self) {
+        self.control_plane
+            .alerts
+            .reconcile(self.derive_active_alerts());
+    }
+
+    fn derive_active_alerts(&self) -> Vec<AlertSignal> {
+        let mut alerts = Vec::new();
+        let system = self.control_plane.system.status();
+
+        if system.status.starts_with("degraded") {
+            alerts.push(AlertSignal {
+                alert_id: "system_degraded".to_string(),
+                severity: AlertSeverity::Critical,
+                kind: "system_degraded".to_string(),
+                source: "ployd".to_string(),
+                resource_type: "system".to_string(),
+                resource_id: None,
+                message: format!("platform runtime is degraded ({})", system.status),
+            });
+        } else if system.status.starts_with("recovering") {
+            alerts.push(AlertSignal {
+                alert_id: "system_recovering".to_string(),
+                severity: AlertSeverity::Warning,
+                kind: "system_recovering".to_string(),
+                source: "ployd".to_string(),
+                resource_type: "system".to_string(),
+                resource_id: None,
+                message: format!("platform runtime is recovering ({})", system.status),
+            });
+        }
+
+        if system.live_reconcile_failures > 0 {
+            alerts.push(AlertSignal {
+                alert_id: "live_reconcile_degraded".to_string(),
+                severity: AlertSeverity::Critical,
+                kind: "live_reconcile_degraded".to_string(),
+                source: "ployd".to_string(),
+                resource_type: "system".to_string(),
+                resource_id: None,
+                message: format!(
+                    "live reconcile failures={} next_retry_at={}",
+                    system.live_reconcile_failures,
+                    system
+                        .next_live_reconcile_at
+                        .map(|value| value.to_rfc3339())
+                        .unwrap_or_else(|| "-".to_string())
+                ),
+            });
+        }
+
+        if system.degraded_claim_accounts > 0 {
+            alerts.push(AlertSignal {
+                alert_id: "claim_loop_degraded".to_string(),
+                severity: AlertSeverity::Warning,
+                kind: "claim_loop_degraded".to_string(),
+                source: "ployd".to_string(),
+                resource_type: "claims".to_string(),
+                resource_id: None,
+                message: format!("degraded claim accounts={}", system.degraded_claim_accounts),
+            });
+        }
+
+        if system.pending_redeemable_count > 0 {
+            alerts.push(AlertSignal {
+                alert_id: "pending_redeemables_present".to_string(),
+                severity: AlertSeverity::Info,
+                kind: "pending_redeemables_present".to_string(),
+                source: "ployd".to_string(),
+                resource_type: "claims".to_string(),
+                resource_id: None,
+                message: format!(
+                    "pending redeemables count={} notional={}",
+                    system.pending_redeemable_count, system.pending_redeemable_notional
+                ),
+            });
+        }
+
+        for record in self.control_plane.deployments.records() {
+            match record.observed_state {
+                ObservedState::Degraded => alerts.push(AlertSignal {
+                    alert_id: format!("deployment_degraded:{}", record.deployment_id),
+                    severity: AlertSeverity::Warning,
+                    kind: "deployment_degraded".to_string(),
+                    source: "ployd".to_string(),
+                    resource_type: "deployment".to_string(),
+                    resource_id: Some(record.deployment_id.clone()),
+                    message: format!(
+                        "deployment {} is degraded (mode={} account={})",
+                        record.deployment_id, record.runtime_mode, record.account_id
+                    ),
+                }),
+                ObservedState::Failed => alerts.push(AlertSignal {
+                    alert_id: format!("deployment_failed:{}", record.deployment_id),
+                    severity: AlertSeverity::Critical,
+                    kind: "deployment_failed".to_string(),
+                    source: "ployd".to_string(),
+                    resource_type: "deployment".to_string(),
+                    resource_id: Some(record.deployment_id.clone()),
+                    message: format!(
+                        "deployment {} failed (mode={} account={})",
+                        record.deployment_id, record.runtime_mode, record.account_id
+                    ),
+                }),
+                _ => {}
+            }
+        }
+
+        alerts
     }
 }
 

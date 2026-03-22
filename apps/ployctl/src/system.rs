@@ -32,6 +32,50 @@ pub fn render_system_status(client: &ControlPlaneClient) -> Result<String, Strin
     ))
 }
 
+pub fn render_system_metrics(client: &ControlPlaneClient) -> Result<String, String> {
+    let metrics = client.system_metrics()?;
+    Ok(format!(
+        "deployments_total={} deployments_running={} deployments_degraded={} deployments_failed={} live_deployments={} paper_deployments={} claim_accounts_total={} claim_accounts_degraded={} pending_intents={} active_orders={} open_positions={} gross_exposure={} reserved_order_exposure={} total_gross_exposure={} active_alert_count={} warning_alert_count={} critical_alert_count={}",
+        metrics.deployments_total,
+        metrics.deployments_running,
+        metrics.deployments_degraded,
+        metrics.deployments_failed,
+        metrics.live_deployments,
+        metrics.paper_deployments,
+        metrics.claim_accounts_total,
+        metrics.claim_accounts_degraded,
+        metrics.pending_intents,
+        metrics.active_orders,
+        metrics.open_positions,
+        metrics.gross_exposure,
+        metrics.reserved_order_exposure,
+        metrics.total_gross_exposure,
+        metrics.active_alert_count,
+        metrics.warning_alert_count,
+        metrics.critical_alert_count,
+    ))
+}
+
+pub fn render_system_alerts(client: &ControlPlaneClient) -> Result<String, String> {
+    Ok(client
+        .system_alerts()?
+        .into_iter()
+        .map(|alert| {
+            format!(
+                "{} severity={} kind={} source={} resource={}:{} {}",
+                alert.alert_id,
+                format!("{:?}", alert.severity).to_lowercase(),
+                alert.kind,
+                alert.source,
+                alert.resource_type,
+                alert.resource_id.unwrap_or_else(|| "-".to_string()),
+                alert.message,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 pub fn render_audit_log(client: &ControlPlaneClient) -> Result<String, String> {
     Ok(client
         .audit_logs()?
@@ -56,7 +100,9 @@ pub fn render_audit_log(client: &ControlPlaneClient) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_audit_log, render_system_status};
+    use super::{
+        render_audit_log, render_system_alerts, render_system_metrics, render_system_status,
+    };
     use crate::client::ControlPlaneClient;
     use chrono::Utc;
     use std::fs;
@@ -149,5 +195,69 @@ mod tests {
         assert!(output.contains("/api/deployments/example.paper/control"));
         assert!(output.contains("deployment paused"));
         assert!(output.contains("auth=admin"));
+    }
+
+    #[test]
+    fn renders_metrics_from_snapshot() {
+        let runtime_root = temp_dir("metrics");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+        fs::write(
+            runtime_root.join("system-metrics.json"),
+            serde_json::json!({
+                "deployments_total": 2,
+                "deployments_running": 1,
+                "deployments_degraded": 1,
+                "deployments_failed": 0,
+                "live_deployments": 1,
+                "paper_deployments": 1,
+                "claim_accounts_total": 1,
+                "claim_accounts_degraded": 1,
+                "pending_intents": 2,
+                "active_orders": 3,
+                "open_positions": 1,
+                "gross_exposure": "10.5",
+                "reserved_order_exposure": "2.0",
+                "total_gross_exposure": "12.5",
+                "active_alert_count": 2,
+                "warning_alert_count": 1,
+                "critical_alert_count": 1
+            })
+            .to_string(),
+        )
+        .expect("write metrics");
+
+        let client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        let output = render_system_metrics(&client).expect("system metrics");
+        assert!(output.contains("deployments_degraded=1"));
+        assert!(output.contains("critical_alert_count=1"));
+    }
+
+    #[test]
+    fn renders_alerts_from_snapshot() {
+        let runtime_root = temp_dir("alerts");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+        fs::write(
+            runtime_root.join("system-alerts.json"),
+            serde_json::json!([
+                {
+                    "alert_id": "system_degraded",
+                    "severity": "critical",
+                    "kind": "system_degraded",
+                    "source": "ployd",
+                    "resource_type": "system",
+                    "resource_id": null,
+                    "message": "platform runtime is degraded",
+                    "first_seen_at": Utc::now(),
+                    "last_seen_at": Utc::now()
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write alerts");
+
+        let client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        let output = render_system_alerts(&client).expect("system alerts");
+        assert!(output.contains("system_degraded"));
+        assert!(output.contains("severity=critical"));
     }
 }

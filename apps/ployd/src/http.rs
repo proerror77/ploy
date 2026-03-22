@@ -3,9 +3,10 @@ use crate::runtime::{next_paper_intent_id, PloyDaemon};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use ploy_operator_contracts::{
-    AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
-    DeploymentSnapshotEvent, IntentPurpose, OperatorEvent, OrderReplaceRequest, PaperIntentRequest,
-    StatusUpdate, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
+    AlertSnapshotEvent, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
+    DeploymentControlRequest, DeploymentSnapshotEvent, IntentPurpose, MetricsSnapshotEvent,
+    OperatorEvent, OrderReplaceRequest, PaperIntentRequest, StatusUpdate, SystemSnapshotEvent,
+    SystemStatus, TradingSnapshotEvent,
 };
 use ploy_trading::{TradeSide, TradingIntent};
 use secrecy::{ExposeSecret, SecretString};
@@ -171,6 +172,8 @@ fn account_claim_action_account_id<'a>(path: &'a str, suffix: &str) -> Option<&'
 pub fn route_request(path: &str, runtime_root: &Path) -> (u16, String) {
     let target = match path {
         "/health" | "/api/system/status" => runtime_root.join("system-status.json"),
+        "/api/system/metrics" => runtime_root.join("system-metrics.json"),
+        "/api/system/alerts" => runtime_root.join("system-alerts.json"),
         "/api/deployments" => runtime_root.join("deployments.json"),
         "/api/trading/state" => runtime_root.join("trading-state.json"),
         _ => {
@@ -194,6 +197,8 @@ pub fn handle_api_request(
     match (method, path) {
         ("GET", "/health")
         | ("GET", "/api/system/status")
+        | ("GET", "/api/system/metrics")
+        | ("GET", "/api/system/alerts")
         | ("GET", "/api/deployments")
         | ("GET", "/api/trading/state") => route_request(path, &config.runtime_root),
         ("GET", "/api/accounts/claims") => match PloyDaemon::boot(config) {
@@ -578,6 +583,8 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
         | ("POST", "/auth/login")
         | ("POST", "/auth/logout") => RequiredAccess::Public,
         ("GET", "/api/system/status")
+        | ("GET", "/api/system/metrics")
+        | ("GET", "/api/system/alerts")
         | ("GET", "/api/deployments")
         | ("GET", "/api/trading/state")
         | ("GET", "/api/accounts/claims")
@@ -926,6 +933,21 @@ fn handle_runtime_request(
                 200,
                 serde_json::to_string(&daemon.control_plane.system.status())
                     .unwrap_or_else(|_| "{}".to_string()),
+            ),
+            Err(_) => json_error(503, "daemon_lock_poisoned", None),
+        },
+        ("GET", "/api/system/metrics") => match state.daemon.lock() {
+            Ok(daemon) => (
+                200,
+                serde_json::to_string(&daemon.system_metrics())
+                    .unwrap_or_else(|_| "{}".to_string()),
+            ),
+            Err(_) => json_error(503, "daemon_lock_poisoned", None),
+        },
+        ("GET", "/api/system/alerts") => match state.daemon.lock() {
+            Ok(daemon) => (
+                200,
+                serde_json::to_string(&daemon.active_alerts()).unwrap_or_else(|_| "[]".to_string()),
             ),
             Err(_) => json_error(503, "daemon_lock_poisoned", None),
         },
@@ -1315,6 +1337,12 @@ pub fn snapshot_events(daemon: &PloyDaemon) -> Vec<OperatorEvent> {
             status: system.status.clone(),
         }),
         OperatorEvent::SystemSnapshot(SystemSnapshotEvent { system }),
+        OperatorEvent::MetricsSnapshot(MetricsSnapshotEvent {
+            metrics: daemon.system_metrics(),
+        }),
+        OperatorEvent::AlertSnapshot(AlertSnapshotEvent {
+            alerts: daemon.active_alerts(),
+        }),
         OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
             deployments: daemon.control_plane.deployments.summaries(),
         }),
@@ -1423,10 +1451,60 @@ mod tests {
             .to_string(),
         )
         .expect("write deployments");
+        fs::write(
+            runtime_root.join("system-metrics.json"),
+            serde_json::json!({
+                "deployments_total": 1,
+                "deployments_running": 1,
+                "deployments_degraded": 0,
+                "deployments_failed": 0,
+                "live_deployments": 0,
+                "paper_deployments": 1,
+                "claim_accounts_total": 0,
+                "claim_accounts_degraded": 0,
+                "pending_intents": 0,
+                "active_orders": 0,
+                "open_positions": 0,
+                "gross_exposure": "0",
+                "reserved_order_exposure": "0",
+                "total_gross_exposure": "0",
+                "active_alert_count": 0,
+                "warning_alert_count": 0,
+                "critical_alert_count": 0
+            })
+            .to_string(),
+        )
+        .expect("write metrics");
+        fs::write(
+            runtime_root.join("system-alerts.json"),
+            serde_json::json!([
+                {
+                    "alert_id": "system_degraded",
+                    "severity": "critical",
+                    "kind": "system_degraded",
+                    "source": "ployd",
+                    "resource_type": "system",
+                    "resource_id": null,
+                    "message": "platform runtime is degraded",
+                    "first_seen_at": Utc::now(),
+                    "last_seen_at": Utc::now()
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write alerts");
 
         let (status_code, status_body) = route_request("/api/system/status", &runtime_root);
         assert_eq!(status_code, 200);
         assert!(status_body.contains("\"status\":\"running\""));
+
+        let (metrics_code, metrics_body) = route_request("/api/system/metrics", &runtime_root);
+        assert_eq!(metrics_code, 200);
+        assert!(metrics_body.contains("\"deployments_total\":1"));
+
+        let (alerts_code, alerts_body) = route_request("/api/system/alerts", &runtime_root);
+        assert_eq!(alerts_code, 200);
+        assert!(alerts_body.contains("\"alert_id\":\"system_degraded\""));
 
         let (deployments_code, deployments_body) = route_request("/api/deployments", &runtime_root);
         assert_eq!(deployments_code, 200);
@@ -1834,6 +1912,14 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             ploy_operator_contracts::OperatorEvent::SystemSnapshot(_)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ploy_operator_contracts::OperatorEvent::MetricsSnapshot(_)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ploy_operator_contracts::OperatorEvent::AlertSnapshot(_)
         )));
         assert!(events.iter().any(|event| matches!(
             event,

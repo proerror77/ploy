@@ -1,11 +1,14 @@
 use ploy_operator_contracts::{
-    AccountClaimStatus, DeploymentSummary, OperatorEvent, SystemStatus, TradingStateSnapshot,
+    AccountClaimStatus, AlertRecord, DeploymentSummary, OperatorEvent, SystemMetrics, SystemStatus,
+    TradingStateSnapshot,
 };
 use std::fmt::Write;
 
 #[derive(Debug, Clone)]
 pub struct DashboardSnapshot {
     pub system: SystemStatus,
+    pub metrics: SystemMetrics,
+    pub alerts: Vec<AlertRecord>,
     pub deployments: Vec<DeploymentSummary>,
     pub trading: Vec<TradingStateSnapshot>,
     pub claims: Vec<AccountClaimStatus>,
@@ -27,6 +30,46 @@ pub fn render_dashboard(snapshot: &DashboardSnapshot) -> String {
         snapshot.system.version,
         snapshot.system.error_count_1h
     );
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "Metrics");
+    let _ = writeln!(
+        out,
+        "deployments running/degraded/failed={}/{}/{} live/paper={}/{} claims total/degraded={}/{} orders={} positions={} gross={} reserved={} total={} alerts active/warn/critical={}/{}/{}",
+        snapshot.metrics.deployments_running,
+        snapshot.metrics.deployments_degraded,
+        snapshot.metrics.deployments_failed,
+        snapshot.metrics.live_deployments,
+        snapshot.metrics.paper_deployments,
+        snapshot.metrics.claim_accounts_total,
+        snapshot.metrics.claim_accounts_degraded,
+        snapshot.metrics.active_orders,
+        snapshot.metrics.open_positions,
+        snapshot.metrics.gross_exposure,
+        snapshot.metrics.reserved_order_exposure,
+        snapshot.metrics.total_gross_exposure,
+        snapshot.metrics.active_alert_count,
+        snapshot.metrics.warning_alert_count,
+        snapshot.metrics.critical_alert_count,
+    );
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "Active Alerts");
+    if snapshot.alerts.is_empty() {
+        let _ = writeln!(out, "  none");
+    } else {
+        for alert in &snapshot.alerts {
+            let _ = writeln!(
+                out,
+                "  {} severity={} resource={}:{} {}",
+                alert.alert_id,
+                format!("{:?}", alert.severity).to_lowercase(),
+                alert.resource_type,
+                alert.resource_id.clone().unwrap_or_else(|| "-".to_string()),
+                alert.message,
+            );
+        }
+    }
     let _ = writeln!(out);
 
     let _ = writeln!(out, "Deployments");
@@ -106,6 +149,15 @@ pub fn render_event_line(event: &OperatorEvent) -> String {
         OperatorEvent::DeploymentSnapshot(event) => {
             format!("deployment_snapshot count={}", event.deployments.len())
         }
+        OperatorEvent::MetricsSnapshot(event) => format!(
+            "metrics_snapshot active_alerts={} active_orders={} open_positions={}",
+            event.metrics.active_alert_count,
+            event.metrics.active_orders,
+            event.metrics.open_positions
+        ),
+        OperatorEvent::AlertSnapshot(event) => {
+            format!("alert_snapshot count={}", event.alerts.len())
+        }
         OperatorEvent::TradingSnapshot(event) => {
             format!("trading_snapshot count={}", event.trading.len())
         }
@@ -135,9 +187,9 @@ mod tests {
     use super::{render_dashboard, render_event_line, DashboardSnapshot};
     use chrono::Utc;
     use ploy_operator_contracts::{
-        ClaimLoopState, DeploymentSnapshotEvent, DeploymentState, DeploymentSummary, DesiredState,
-        ObservedState, OperatorEvent, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
-        TradingStateSnapshot,
+        AlertSeverity, ClaimLoopState, DeploymentSnapshotEvent, DeploymentState, DeploymentSummary,
+        DesiredState, MetricsSnapshotEvent, ObservedState, OperatorEvent, SystemMetrics,
+        SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent, TradingStateSnapshot,
     };
     use rust_decimal::Decimal;
 
@@ -160,6 +212,36 @@ mod tests {
                 next_live_reconcile_at: None,
                 last_live_reconcile_error: None,
             },
+            metrics: SystemMetrics {
+                deployments_total: 1,
+                deployments_running: 1,
+                deployments_degraded: 0,
+                deployments_failed: 0,
+                live_deployments: 0,
+                paper_deployments: 1,
+                claim_accounts_total: 1,
+                claim_accounts_degraded: 0,
+                pending_intents: 0,
+                active_orders: 0,
+                open_positions: 0,
+                gross_exposure: Decimal::ZERO,
+                reserved_order_exposure: Decimal::ZERO,
+                total_gross_exposure: Decimal::ZERO,
+                active_alert_count: 1,
+                warning_alert_count: 1,
+                critical_alert_count: 0,
+            },
+            alerts: vec![ploy_operator_contracts::AlertRecord {
+                alert_id: "claim_loop_degraded".to_string(),
+                severity: AlertSeverity::Warning,
+                kind: "claim_loop_degraded".to_string(),
+                source: "ployd".to_string(),
+                resource_type: "claims".to_string(),
+                resource_id: None,
+                message: "degraded claim accounts=1".to_string(),
+                first_seen_at: Utc::now(),
+                last_seen_at: Utc::now(),
+            }],
             deployments: vec![DeploymentSummary {
                 deployment_id: "example.paper".to_string(),
                 runtime_mode: "paper".to_string(),
@@ -207,6 +289,27 @@ mod tests {
                         last_live_reconcile_error: None,
                     },
                 }),
+                OperatorEvent::MetricsSnapshot(MetricsSnapshotEvent {
+                    metrics: SystemMetrics {
+                        deployments_total: 1,
+                        deployments_running: 1,
+                        deployments_degraded: 0,
+                        deployments_failed: 0,
+                        live_deployments: 0,
+                        paper_deployments: 1,
+                        claim_accounts_total: 1,
+                        claim_accounts_degraded: 0,
+                        pending_intents: 0,
+                        active_orders: 0,
+                        open_positions: 0,
+                        gross_exposure: Decimal::ZERO,
+                        reserved_order_exposure: Decimal::ZERO,
+                        total_gross_exposure: Decimal::ZERO,
+                        active_alert_count: 1,
+                        warning_alert_count: 1,
+                        critical_alert_count: 0,
+                    },
+                }),
                 OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
                     deployments: vec![DeploymentSummary {
                         deployment_id: "example.paper".to_string(),
@@ -238,11 +341,14 @@ mod tests {
         assert!(output.contains("Deployments"));
         assert!(output.contains("Trading"));
         assert!(output.contains("Claims"));
+        assert!(output.contains("Metrics"));
+        assert!(output.contains("Active Alerts"));
         assert!(output.contains("Recent Events"));
         assert!(output.contains("example.paper"));
         assert!(output.contains("mode=paper"));
         assert!(output.contains("acct-live"));
         assert!(output.contains("running"));
+        assert!(output.contains("claim_loop_degraded"));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use ploy_operator_contracts::{
-    AccountClaimActionResponse, AccountClaimDetailResponse, AccountClaimStatus, AuditLogEntry,
-    ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest, DeploymentState,
-    DeploymentSummary, DesiredState, OperatorEvent, OrderControlResponse, OrderReplaceRequest,
-    SystemStatus, TradingStateSnapshot,
+    AccountClaimActionResponse, AccountClaimDetailResponse, AccountClaimStatus, AlertRecord,
+    AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
+    DeploymentState, DeploymentSummary, DesiredState, OperatorEvent, OrderControlResponse,
+    OrderReplaceRequest, SystemMetrics, SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -50,6 +50,14 @@ impl ControlPlaneClient {
 
     pub fn system_snapshot(&self) -> Result<SystemStatus, String> {
         self.read_status_snapshot()
+    }
+
+    pub fn system_metrics(&self) -> Result<SystemMetrics, String> {
+        self.read_metrics_snapshot()
+    }
+
+    pub fn system_alerts(&self) -> Result<Vec<AlertRecord>, String> {
+        self.read_alerts_snapshot()
     }
 
     pub fn audit_logs(&self) -> Result<Vec<AuditLogEntry>, String> {
@@ -288,12 +296,42 @@ impl ControlPlaneClient {
         serde_json::from_str(&body).map_err(|err| format!("parse claim state snapshot: {err}"))
     }
 
+    fn read_metrics_snapshot(&self) -> Result<SystemMetrics, String> {
+        match self.read_metrics_over_http() {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(err) if !should_fallback_to_snapshot(&err) => return Err(err),
+            Err(_) => {}
+        }
+        let body = fs::read_to_string(self.runtime_root.join("system-metrics.json"))
+            .map_err(|err| format!("read metrics snapshot: {err}"))?;
+        serde_json::from_str(&body).map_err(|err| format!("parse metrics snapshot: {err}"))
+    }
+
+    fn read_alerts_snapshot(&self) -> Result<Vec<AlertRecord>, String> {
+        match self.read_alerts_over_http() {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(err) if !should_fallback_to_snapshot(&err) => return Err(err),
+            Err(_) => {}
+        }
+        let body = fs::read_to_string(self.runtime_root.join("system-alerts.json"))
+            .map_err(|err| format!("read alerts snapshot: {err}"))?;
+        serde_json::from_str(&body).map_err(|err| format!("parse alerts snapshot: {err}"))
+    }
+
     fn read_status_over_http(&self) -> Result<SystemStatus, String> {
         self.get_json("/api/system/status")
     }
 
     fn read_deployments_over_http(&self) -> Result<Vec<DeploymentSummary>, String> {
         self.get_json("/api/deployments")
+    }
+
+    fn read_metrics_over_http(&self) -> Result<SystemMetrics, String> {
+        self.get_json("/api/system/metrics")
+    }
+
+    fn read_alerts_over_http(&self) -> Result<Vec<AlertRecord>, String> {
+        self.get_json("/api/system/alerts")
     }
 
     fn read_deployment_over_http(&self, deployment_id: &str) -> Result<DeploymentSummary, String> {

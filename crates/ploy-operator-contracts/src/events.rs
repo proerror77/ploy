@@ -1,4 +1,6 @@
+use crate::alerts::AlertRecord;
 use crate::deployments::DeploymentSummary;
+use crate::metrics::SystemMetrics;
 use crate::system::SystemStatus;
 use crate::trading::{MarketData, PositionResponse, TradeResponse, TradingStateSnapshot};
 use chrono::{DateTime, Utc};
@@ -34,6 +36,16 @@ pub struct TradingSnapshotEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AlertSnapshotEvent {
+    pub alerts: Vec<AlertRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetricsSnapshotEvent {
+    pub metrics: SystemMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum OperatorEvent {
     #[serde(rename = "log")]
@@ -52,6 +64,10 @@ pub enum OperatorEvent {
     DeploymentSnapshot(DeploymentSnapshotEvent),
     #[serde(rename = "trading_snapshot")]
     TradingSnapshot(TradingSnapshotEvent),
+    #[serde(rename = "alert_snapshot")]
+    AlertSnapshot(AlertSnapshotEvent),
+    #[serde(rename = "metrics_snapshot")]
+    MetricsSnapshot(MetricsSnapshotEvent),
 }
 
 pub type WsMessage = OperatorEvent;
@@ -59,13 +75,14 @@ pub type WsMessage = OperatorEvent;
 #[cfg(test)]
 mod tests {
     use super::{
-        DeploymentSnapshotEvent, OperatorEvent, StatusUpdate, SystemSnapshotEvent,
-        TradingSnapshotEvent,
+        AlertSnapshotEvent, DeploymentSnapshotEvent, MetricsSnapshotEvent, OperatorEvent,
+        StatusUpdate, SystemSnapshotEvent, TradingSnapshotEvent,
     };
     use crate::{
-        DeploymentState, DeploymentSummary, DesiredState, ObservedState, SystemStatus,
-        TradingStateSnapshot,
+        AlertRecord, AlertSeverity, DeploymentState, DeploymentSummary, DesiredState,
+        ObservedState, SystemMetrics, SystemStatus, TradingStateSnapshot,
     };
+    use chrono::Utc;
     use rust_decimal::Decimal;
     use serde_json::json;
 
@@ -210,6 +227,99 @@ mod tests {
                             "total_gross_exposure": "0",
                         },
                     }]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn alert_snapshot_event_uses_stable_wire_shape() {
+        let now = Utc::now();
+        let value = serde_json::to_value(OperatorEvent::AlertSnapshot(AlertSnapshotEvent {
+            alerts: vec![AlertRecord {
+                alert_id: "live_reconcile_degraded".to_string(),
+                severity: AlertSeverity::Critical,
+                kind: "live_reconcile_degraded".to_string(),
+                source: "ployd".to_string(),
+                resource_type: "system".to_string(),
+                resource_id: None,
+                message: "live reconcile is backing off".to_string(),
+                first_seen_at: now,
+                last_seen_at: now,
+            }],
+        }))
+        .expect("to_value");
+
+        assert_eq!(
+            value,
+            json!({
+                "type": "alert_snapshot",
+                "data": {
+                    "alerts": [{
+                        "alert_id": "live_reconcile_degraded",
+                        "severity": "critical",
+                        "kind": "live_reconcile_degraded",
+                        "source": "ployd",
+                        "resource_type": "system",
+                        "resource_id": null,
+                        "message": "live reconcile is backing off",
+                        "first_seen_at": now,
+                        "last_seen_at": now,
+                    }]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn metrics_snapshot_event_uses_stable_wire_shape() {
+        let value = serde_json::to_value(OperatorEvent::MetricsSnapshot(MetricsSnapshotEvent {
+            metrics: SystemMetrics {
+                deployments_total: 1,
+                deployments_running: 1,
+                deployments_degraded: 0,
+                deployments_failed: 0,
+                live_deployments: 1,
+                paper_deployments: 0,
+                claim_accounts_total: 1,
+                claim_accounts_degraded: 0,
+                pending_intents: 0,
+                active_orders: 1,
+                open_positions: 1,
+                gross_exposure: Decimal::new(500, 2),
+                reserved_order_exposure: Decimal::new(50, 2),
+                total_gross_exposure: Decimal::new(550, 2),
+                active_alert_count: 1,
+                warning_alert_count: 0,
+                critical_alert_count: 1,
+            },
+        }))
+        .expect("to_value");
+
+        assert_eq!(
+            value,
+            json!({
+                "type": "metrics_snapshot",
+                "data": {
+                    "metrics": {
+                        "deployments_total": 1,
+                        "deployments_running": 1,
+                        "deployments_degraded": 0,
+                        "deployments_failed": 0,
+                        "live_deployments": 1,
+                        "paper_deployments": 0,
+                        "claim_accounts_total": 1,
+                        "claim_accounts_degraded": 0,
+                        "pending_intents": 0,
+                        "active_orders": 1,
+                        "open_positions": 1,
+                        "gross_exposure": "5.00",
+                        "reserved_order_exposure": "0.50",
+                        "total_gross_exposure": "5.50",
+                        "active_alert_count": 1,
+                        "warning_alert_count": 0,
+                        "critical_alert_count": 1,
+                    }
                 }
             })
         );
