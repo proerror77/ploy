@@ -29,6 +29,8 @@ The release bundle contains:
 - `bin/ployd`
 - `bin/ployctl`
 - `bin/ploytui`
+- `config/deployments/example.paper.json`
+- `config/deployments/example.live.json`
 - `deployment/ployd.service`
 - `scripts/install-platform-service.sh`
 - `data/state/deployments.json.sample`
@@ -38,67 +40,92 @@ The release bundle contains:
 After the bundle lands on the host, the deploy workflow:
 
 1. Installs `ployd`, `ployctl`, and `ploytui` into `/opt/ploy/bin`
-2. Installs `deployment/ployd.service` into `/opt/ploy/deployment`
-3. Installs `scripts/install-platform-service.sh` into `/opt/ploy/scripts`
-4. Seeds `/opt/ploy/data/state/deployments.json` if missing
-5. Runs `install-platform-service.sh`
-6. Restarts `ployd`
-7. Verifies:
+2. Installs `config/deployments/example.paper.json` and `example.live.json`
+   into `/opt/ploy/config/deployments`
+3. Installs `deployment/ployd.service` into `/opt/ploy/deployment`
+4. Installs `scripts/install-platform-service.sh` into `/opt/ploy/scripts`
+5. Seeds `/opt/ploy/data/state/deployments.json` if missing
+6. Runs `install-platform-service.sh`
+7. Restarts `ployd`
+8. Verifies:
    - `systemctl status ployd`
+   - `systemctl show ployd -p MemoryMax -p Restart -p OOMPolicy`
    - `curl -fsS http://127.0.0.1:8081/health`
    - `/opt/ploy/bin/ployctl system status`
    - `/opt/ploy/bin/ployctl system audit`
+   - `/opt/ploy/bin/ployctl claims list`
    - `/opt/ploy/bin/ployctl trading status`
    - `/opt/ploy/bin/ploytui`
    - `curl -N http://127.0.0.1:8081/api/events/stream`
 
 ## Required Host Paths
 
-The install script ensures:
+The install script ensures directories and seed files, not daemon-generated
+runtime snapshots.
+
+Install-time guarantees:
 
 - `/opt/ploy/.env`
+- `/opt/ploy/config/deployments/`
+- `/opt/ploy/config/deployments/example.paper.json`
+- `/opt/ploy/config/deployments/example.live.json`
 - `/opt/ploy/data/state/deployments.json`
+- `/opt/ploy/run/platform/`
+
+Daemon-generated after boot:
+
 - `/opt/ploy/run/platform/system-status.json`
 - `/opt/ploy/run/platform/deployments.json`
 - `/opt/ploy/run/platform/trading-state.json`
 - `/opt/ploy/run/platform/account-claims.json`
 - `/opt/ploy/run/platform/audit-log.jsonl`
 
+## Required Live Host `.env`
+
+For a minimal live host, set at least:
+
+```bash
+PLOY_ADMIN_TOKEN=change-me
+PLOY_API_AUTH_COOKIE_SECRET=replace-me-with-randomness
+
+POLYMARKET_PRIVATE_KEY=0x...
+POLYMARKET_API_KEY=...
+POLYMARKET_API_SECRET=...
+POLYMARKET_PASSPHRASE=...
+POLY_SIGNATURE_TYPE=proxy
+POLY_FUNDER=0x...
+
+POLY_RELAYER_URL=https://relayer-v2.polymarket.com
+POLY_BUILDER_API_KEY=...
+POLY_BUILDER_SECRET=...
+POLY_BUILDER_PASSPHRASE=...
+POLYGON_RPC_URL=https://polygon.drpc.org
+```
+
+If you use a SAFE-backed wallet, set `POLY_SIGNATURE_TYPE=gnosis_safe`.
+
 Optional hardening:
 
-- Set `PLOY_ADMIN_TOKEN=...` in `/opt/ploy/.env` to require `Authorization: Bearer ...`
-  or `x-ploy-admin-token` on the control-plane API.
-- Set `PLOY_SIDECAR_AUTH_TOKEN=...` in `/opt/ploy/.env` if agent/sidecar clients
-  only need read-only access to platform snapshots and `/api/events/stream`.
-- Set `PLOY_API_AUTH_COOKIE_SECRET=...` in `/opt/ploy/.env` if browser operator
-  sessions need to stay valid across daemon restarts or multiple `ployd`
-  instances.
-- Set `PLOY_REQUEST_RATE_LIMIT_PER_MINUTE=...` in `/opt/ploy/.env` if you want
-  to tune daemon-side HTTP throttling. Set `0` to disable it.
-- Set `PLOY_CLAIM_TICK_INTERVAL_MS=...`, `PLOY_CLAIM_BACKOFF_BASE_MS=...`, and
-  `PLOY_CLAIM_BACKOFF_MAX_MS=...` in `/opt/ploy/.env` if you want to tune
-  account-level auto-claim scanning and retry behavior.
-- Set `POLYMARKET_PRIVATE_KEY=...`, `POLY_RELAYER_URL=...`,
-  `POLY_BUILDER_API_KEY=...`, `POLY_BUILDER_SECRET=...`, and
-  `POLY_BUILDER_PASSPHRASE=...` in `/opt/ploy/.env` for live relay-first
-  redeem support.
-- Set `POLY_SIGNATURE_TYPE=proxy` or `gnosis_safe`; relay-backed auto-claim
-  does not support plain EOA wallets. `gnosis_safe` accounts will auto-submit
-  `SAFE-CREATE` through the relayer before the first redeem when needed.
-- Set `PLOY_LIVE_RECONCILE_BACKOFF_BASE_MS=...` and
-  `PLOY_LIVE_RECONCILE_BACKOFF_MAX_MS=...` in `/opt/ploy/.env` if you want to
-  tune live venue reconcile retry backoff under exchange/API outages.
-- `/opt/ploy/bin/ployctl` will automatically pick up `PLOY_ADMIN_TOKEN`,
-  `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` from the host environment.
-- Browser operator sessions should authenticate through `/auth/login`; `ployd`
-  will issue an `HttpOnly` same-site signed session cookie so the frontend and
-  SSE event stream remain authenticated without persisting the raw admin token
-  in browser storage.
+- `PLOY_SIDECAR_AUTH_TOKEN=...`
+- `PLOY_REQUEST_RATE_LIMIT_PER_MINUTE=...`
+- `PLOY_CLAIM_TICK_INTERVAL_MS=...`
+- `PLOY_CLAIM_BACKOFF_BASE_MS=...`
+- `PLOY_CLAIM_BACKOFF_MAX_MS=...`
+- `PLOY_LIVE_RECONCILE_BACKOFF_BASE_MS=...`
+- `PLOY_LIVE_RECONCILE_BACKOFF_MAX_MS=...`
+
+`/opt/ploy/bin/ployctl` automatically reuses `PLOY_ADMIN_TOKEN`,
+`PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` from the host environment.
+
+Browser operator sessions authenticate through `/auth/login`; `ployd` issues an
+`HttpOnly` same-site signed session cookie so the frontend and SSE event stream
+remain authenticated without storing the raw admin token in browser storage.
 
 ## Post-Deploy Checks
 
 ```bash
 sudo systemctl status ployd --no-pager
+sudo systemctl show ployd -p MemoryMax -p Restart -p OOMPolicy
 sudo journalctl -u ployd -n 200 --no-pager
 curl -fsS http://127.0.0.1:8081/health
 /opt/ploy/bin/ployctl system status
@@ -116,21 +143,26 @@ daemon as live-venue degraded even if the process is still up.
 
 ## Deployment Operator Flow
 
-Use a deployment manifest like
-[`config/deployments/example.paper.json`](../../config/deployments/example.paper.json)
-as the template for remote deployment resources.
+Use
+[`config/deployments/example.live.json`](../../config/deployments/example.live.json)
+as the template for a minimal live deployment resource.
 
 ```bash
-/opt/ploy/bin/ployctl deployments apply /opt/ploy/config/deployments/example.paper.json
-/opt/ploy/bin/ployctl deployments inspect example.paper
+/opt/ploy/bin/ployctl deployments apply /opt/ploy/config/deployments/example.live.json
+/opt/ploy/bin/ployctl deployments inspect example.live
 /opt/ploy/bin/ployctl claims list
 /opt/ploy/bin/ployctl claims inspect acct-live
 /opt/ploy/bin/ployctl claims run acct-live
+/opt/ploy/bin/ployctl trading inspect example.live
 /opt/ploy/bin/ployctl trading cancel example.live <order-id>
-/opt/ploy/bin/ployctl deployments pause example.paper
-/opt/ploy/bin/ployctl deployments resume example.paper
-/opt/ploy/bin/ployctl deployments stop example.paper
+/opt/ploy/bin/ployctl deployments drain example.live
+/opt/ploy/bin/ployctl deployments pause example.live
+/opt/ploy/bin/ployctl deployments resume example.live
+/opt/ploy/bin/ployctl deployments stop example.live
 ```
+
+For a smaller local smoke path, keep using
+[`config/deployments/example.paper.json`](../../config/deployments/example.paper.json).
 
 ## Legacy Workflows
 

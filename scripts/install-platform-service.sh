@@ -15,6 +15,7 @@ fi
 sudo mkdir -p \
   "${ROOT_DIR}/bin" \
   "${ROOT_DIR}/config" \
+  "${ROOT_DIR}/config/deployments" \
   "${ROOT_DIR}/data/state" \
   "${ROOT_DIR}/deployment" \
   "${ROOT_DIR}/logs" \

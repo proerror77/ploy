@@ -26,7 +26,7 @@ cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
-cargo run -p ployctl -- trading cancel example.live <order-id>
+cargo run -p ployctl -- claims list
 cargo run -p ploytui
 # realtime operator stream
 curl -N http://127.0.0.1:8081/api/events/stream
@@ -49,6 +49,8 @@ Runbooks:
 
 - [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md)
 - [`docs/runbooks/platform-deploy.md`](docs/runbooks/platform-deploy.md)
+- [`docs/runbooks/live-deployment-checklist.md`](docs/runbooks/live-deployment-checklist.md)
+- [`docs/runbooks/research-backtest-routing.md`](docs/runbooks/research-backtest-routing.md)
 
 Default release workflow:
 
@@ -58,7 +60,7 @@ Compatibility note:
 
 - `ployd`, `ployctl`, and `ploytui` are the default workspace entrypoints for the trading platform spine.
 - The old root runtime tree has been retired from the compiled workspace.
-- Remaining `ploy ...` examples below are historical reference only and are not runnable entrypoints in this branch.
+- Offline `ploy ...` command families remain for research, backfill, and compatibility workflows only.
 
 ## Features
 
@@ -76,19 +78,20 @@ Compatibility note:
 
 Production runtime now uses a 4-plane model:
 
-- **Strategy Plane**: canonical `Strategy` implementations decide direction, timing, sizing, and state transitions.
-- **Capital Governance Plane**: OpenClaw-style governance agents manage budget, pause/resume, throttle, and deployment-scoped policy.
-- **Execution Plane**: the coordinator is the only live order ingress (`StrategyIntent -> Governance/Risk Gate -> Queue -> Executor`), plus audit trail and recovery.
-- **Control Plane**: deployment/config projection, lifecycle control, health, observability, and rollout/shutdown wiring.
+- **Strategy Plane**: `crates/ploy-strategy-bundles` turns market signals into intents.
+- **Capital Governance Plane**: deployment- and account-level controls live in `crates/ploy-platform`.
+- **Execution Plane**: `crates/ploy-trading` and `crates/ploy-connectivity` own the canonical order/fill/position lifecycle.
+- **Control Plane**: `apps/ployd` exposes deployment lifecycle, health, audit, and operator APIs.
 
 Key rule: OpenClaw does not sit in the synchronous per-order decision path for HFT. It governs boundaries; strategies decide entries/exits inside those boundaries.
 
-Live strategies now start only through the canonical managed `Strategy` runtime.
+Live and paper strategies now start only through managed deployment resources.
 
 Collector / backfill command routing is documented in [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md).
 
-New live strategies should implement the canonical `Strategy` contract.
-`TradingAgent` / `DomainAgent` are retired and only remain in historical design docs.
+New live strategies should land as deployment-backed bundle runtime logic rather
+than as direct single-binary live entrypoints.
+
 The default workspace control plane is:
 - `GET /api/system/status`
 - `GET /api/audit/logs`
@@ -104,8 +107,6 @@ The default workspace control plane is:
 The older `strategies/control`, `strategy-evaluations`, `/api/sidecar/*`, and
 `ploy rpc` surfaces are historical reference only in this branch and are no
 longer part of the default operator path.
-
-Governance agents live under `crate::agents`; canonical live strategy runtime ownership lives under `crate::strategy`, `crate::coordinator`, and `crate::plugins`.
 
 ## Prerequisites
 
@@ -140,275 +141,105 @@ sqlx migrate run
 
 ### Environment Variables
 
+The table below covers the current workspace platform path only.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `POLYMARKET_PRIVATE_KEY` | Yes | Ethereum private key for order signing |
-| `POLYMARKET_API_KEY` | Yes | Polymarket CLOB API key |
-| `POLYMARKET_API_SECRET` | Yes | Polymarket CLOB API secret |
-| `POLYMARKET_PASSPHRASE` | Yes | Polymarket CLOB passphrase |
-| `POLYMARKET_FUNDER` | No | Proxy/Magic wallet address |
-| `DATABASE_URL` | Yes | PostgreSQL connection string (overrides config) |
-| `ANTHROPIC_API_KEY` | No | Required for `agent` and AI-powered commands |
-| `ANTHROPIC_BASE_URL` | No | Optional Anthropic-compatible base URL (examples: MiniMax `https://api.minimaxi.com/anthropic` or `https://api.minimax.io/anthropic`) |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | No | Optional alias override (example: map `opus` → `MiniMax-M2.5`) |
-| `ANTHROPIC_CUSTOM_HEADERS` | No | Optional custom headers in newline-separated `Header: Value` format (example: `Authorization: Bearer <key>`) |
-| `GROK_API_KEY` | No | Required for Grok-based sports analysis |
-| `PLOY_RISK__CRYPTO_ALLOCATION_PCT` | No | Domain capital split (0..1), used to derive crypto exposure cap |
-| `PLOY_RISK__SPORTS_ALLOCATION_PCT` | No | Domain capital split (0..1), used to derive sports exposure cap |
-| `PLOY_RISK__CRYPTO_MAX_EXPOSURE_USD` | No | Hard crypto domain exposure cap (overrides pct-derived cap) |
-| `PLOY_RISK__SPORTS_MAX_EXPOSURE_USD` | No | Hard sports domain exposure cap (overrides pct-derived cap) |
-| `PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD` | No | Hard crypto domain daily loss stop |
-| `PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD` | No | Hard sports domain daily loss stop |
-| `PLOY_RISK__MAX_DRAWDOWN_USD` | No | Hard drawdown stop (runtime cumulative realized curve) |
-| `PLOY_ACCOUNT_ID` | No | Runtime account scope identifier (default `default`) |
 | `PLOY_LISTEN_ADDR` | No | Control-plane listen address for `ployd` (default `127.0.0.1:8081`) |
-| `PLOY_API_ADMIN_TOKEN` | No | Admin token for protected control-plane routes and operator actions |
-| `PLOY_ADMIN_TOKEN` | No | CLI/browser fallback token name for control-plane auth if `PLOY_API_ADMIN_TOKEN` is unset |
+| `PLOY_API_ADMIN_TOKEN` | Recommended | Admin token for protected control-plane routes and operator actions |
+| `PLOY_ADMIN_TOKEN` | Recommended | CLI/browser fallback token name if `PLOY_API_ADMIN_TOKEN` is unset |
 | `PLOY_SIDECAR_AUTH_TOKEN` | No | Read-only token for sidecar and event consumers |
+| `PLOY_API_AUTH_COOKIE_SECRET` | Recommended | Keeps browser auth cookies valid across daemon restarts |
+| `PLOY_REQUEST_RATE_LIMIT_PER_MINUTE` | No | Daemon-side HTTP rate limit (`0` disables it) |
 | `PLOY_ACCOUNT_CLAIM_STATE_FILE` | No | Override account auto-claim snapshot path |
 | `PLOY_CLAIM_TICK_INTERVAL_MS` | No | Account auto-claim loop interval in milliseconds |
 | `PLOY_CLAIM_BACKOFF_BASE_MS` | No | Base backoff for claim retries in milliseconds |
 | `PLOY_CLAIM_BACKOFF_MAX_MS` | No | Max backoff for claim retries in milliseconds |
-| `POLY_RELAYER_URL` | No | Polymarket relayer base URL for relay-first auto-redeem (default `https://relayer-v2.polymarket.com`) |
-| `POLY_BUILDER_API_KEY` | Required for live auto-redeem | Builder API key for relayer submit auth |
-| `POLY_BUILDER_SECRET` | Required for live auto-redeem | Builder secret used to sign relayer submit headers |
-| `POLY_BUILDER_PASSPHRASE` | Required for live auto-redeem | Builder passphrase for relayer submit auth |
-| `PLOY_DRY_RUN__ENABLED` | No | Force runtime dry-run mode (`true`/`false`) |
-| `PLOY_DEPLOYMENTS_REQUIRE_EVIDENCE` | No | Require strategy evidence before enabling deployments (`true`/`false`) |
-| `PLOY_DEPLOYMENTS_REQUIRED_STAGES` | No | Required evidence stages CSV (default `backtest,paper`) |
-| `PLOY_DEPLOYMENTS_MAX_EVIDENCE_AGE_HOURS` | No | Max evidence staleness window in hours (default `168`) |
-| `PLOY_ALLOW_DIRECT_LIVE` | No | Allow direct (non-Coordinator) live order paths. Not recommended. |
-| `PLOY_ALLOW_DIRECT_STRATEGY_LIVE` | No | Archived compatibility flag for the retired single-binary runtime; not part of the workspace default path. |
+| `PLOY_LIVE_RECONCILE_BACKOFF_BASE_MS` | No | Base backoff for live fill reconciliation |
+| `PLOY_LIVE_RECONCILE_BACKOFF_MAX_MS` | No | Max backoff for live fill reconciliation |
+| `POLYMARKET_PRIVATE_KEY` | Yes for live | Wallet private key for live order signing and auto-claim |
+| `POLYMARKET_API_KEY` | Yes for live | Polymarket CLOB API key |
+| `POLYMARKET_API_SECRET` | Yes for live | Polymarket CLOB API secret |
+| `POLYMARKET_PASSPHRASE` | Yes for live | Polymarket CLOB passphrase |
+| `POLY_SIGNATURE_TYPE` | Yes for live | `proxy` or `gnosis_safe` for the current live claim path |
+| `POLY_FUNDER` | Required for proxy live wallets | Proxy/Magic wallet funder address |
+| `POLY_RELAYER_URL` | Yes for live auto-claim | Polymarket relayer base URL |
+| `POLY_BUILDER_API_KEY` | Yes for live auto-claim | Builder API key for relayer submit auth |
+| `POLY_BUILDER_SECRET` | Yes for live auto-claim | Builder secret used to sign relayer submit headers |
+| `POLY_BUILDER_PASSPHRASE` | Yes for live auto-claim | Builder passphrase for relayer submit auth |
+| `POLYGON_RPC_URL` | Yes for live auto-claim | Polygon RPC used to resolve relayed tx receipts |
 
-### Config File
+For offline research/backtest paths, see
+[`docs/runbooks/research-backtest-routing.md`](docs/runbooks/research-backtest-routing.md).
+Archived single-binary runtime flags are intentionally omitted here.
 
-The default configuration lives in `config/default.toml`. Override the path with `--config` / `-c`.
+### Config Directories
 
-| Section | Key examples |
-|---------|-------------|
-| `[market]` | `ws_url`, `rest_url`, `market_slug` |
-| `[strategy]` | `shares`, `window_min`, `move_pct`, `sum_target`, `fee_buffer`, `slippage_buffer`, `profit_buffer` |
-| `[execution]` | `order_timeout_ms`, `max_retries`, `max_spread_bps`, `poll_interval_ms` |
-| `[risk]` | `max_single_exposure_usd`, `min_remaining_seconds`, `max_consecutive_failures`, `daily_loss_limit_usd`, `leg2_force_close_seconds` |
-| `[database]` | `url`, `max_connections` |
-| `[dry_run]` | `enabled` (defaults to `true`) |
-| `[logging]` | `level`, `json` |
-| `[event_edge_agent]` | `enabled`, `trade`, `interval_secs`, `min_edge`, `max_entry`, `shares`, `cooldown_secs`, `max_daily_spend_usd`, `titles` |
-| `[nba_comeback]` | `enabled`, `min_edge`, `max_entry_price`, `shares`, `min_deficit`, `max_deficit`, `target_quarter`, `espn_poll_interval_secs` |
-
-See the inline comments in `config/default.toml` for a full explanation of every field.
+- `config/deployments/`: current paper/live deployment manifests for `ployd`
+- `config/platform/`: daemon-level host configuration notes
+- `config/strategies/`: research/backtest and compatibility strategy profiles
 
 ## Usage
 
-### Live Trading (Recommended)
+### Current Platform Path
 
-Ploy uses a **Coordinator-only** live execution plane. For live orders, use the platform entry point:
-
-Historical reference only: the old `ploy platform start ...` path has been retired from this branch. Use the `ployd` / `ployctl` workspace runbook instead.
-
-Legacy commands that can place orders (example: `ploy run`, `ploy momentum`, `ploy split-arb`, `ploy crypto split-arb`, `ploy sports split-arb`, `ploy event-edge --trade`, `ploy agent --enable-trading`) are **blocked for live execution by default**.
-
-If you need an explicit override (not recommended), set:
+Use the workspace platform for any paper/live deployment runtime:
 
 ```bash
-export PLOY_ALLOW_DIRECT_LIVE=true
-```
-
-### Global Flags
-
-```
---dry-run  / -d    Override dry-run mode (no real orders)
---market   / -m    Override market slug from config
---config   / -c    Config file path (default: config/default.toml)
-```
-
-### Core Commands
-
-```bash
-cargo run -p ployd                                               # start the control-plane daemon
-cargo run -p ployctl -- system status                            # inspect platform health
-cargo run -p ployctl -- deployments list                         # list deployments
-cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
-cargo run -p ployctl -- trading inspect <deployment-id>          # inspect canonical trading ledger
-cargo run -p ployctl -- claims list                              # list account auto-claim status
-cargo run -p ployctl -- claims inspect <account-id>              # inspect redeemable positions/history
-cargo run -p ployctl -- claims run <account-id>                  # trigger a one-shot claim run
-cargo run -p ployctl -- claims pause <account-id>                # override default-on auto-claim
-cargo run -p ployctl -- claims resume <account-id>               # resume default-on auto-claim
-cargo run -p ploytui -- --watch                                  # terminal operator console
-```
-
-### Collector And Backfill
-
-Use the right command for the right data job:
-
-- `ploy collect` for continuous live/raw synchronized capture
-- `ploy collect --check-only` for a lightweight freshness / duplicate report
-- `ploy orderbook-history` for historical PM L2 snapshots by token ID
-- `ploy deribit-iv-backfill` for historical Deribit IV bars
-- `ploy strategy backfill-*` for offline replay / settlement / kline prep
-
-See [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md) for examples and workflow guidance.
-
-### Strategies
-
-```bash
-ploy trade --series 10423 --shares 50 --dry-run          # Two-leg arbitrage on a price series
-ploy momentum --symbols BTCUSDT --shares 100 --dry-run   # Binance BTCUSDT is the underlying signal feed; execution is PM YES/NO tokens
-ploy momentum --predictive --min-time 300 --dry-run      # Predictive mode: early entry with TP/SL
-ploy split-arb --max-entry 35 --shares 100 --dry-run     # Split arbitrage (time-separated hedge)
-ploy market-make --token <token_id>            # Market making opportunity analysis
-ploy scan --series 10423 --watch               # Continuous arbitrage scan
-ploy analyze --event <event_id>                # Analyze multi-outcome market
-ploy paper --symbols BTCUSDT,ETHUSDT           # Paper mode using Binance underlyings (signals only, no PM orders)
-```
-
-The workspace platform now supports default-on account-level auto-claim for live
-Polymarket accounts:
-
-```bash
-export POLYMARKET_PRIVATE_KEY=0x...                 # required for live redeem support
-export POLY_SIGNATURE_TYPE=proxy                    # or gnosis_safe
-export POLY_RELAYER_URL=https://relayer-v2.polymarket.com
-export POLY_BUILDER_API_KEY=...
-export POLY_BUILDER_SECRET=...
-export POLY_BUILDER_PASSPHRASE=...
-export POLYGON_RPC_URL=https://polygon-rpc.com      # used to resolve relayed tx receipts
-export PLOY_CLAIM_TICK_INTERVAL_MS=30000       # optional
-export PLOY_CLAIM_BACKOFF_BASE_MS=5000         # optional
-export PLOY_CLAIM_BACKOFF_MAX_MS=120000        # optional
-```
-
-`proxy` wallets redeem directly through the relayer. `gnosis_safe` wallets use
-the same relayer-backed redeem path and auto-submit `SAFE-CREATE` on the first
-claim if the SAFE has not been deployed yet.
-
-The operator surface for this lives on `ployd` / `ployctl claims ...`, not on
-the retired single-binary claimer path.
-
-Example: split 100u capital into crypto/sports 50/50 and hard-stop each domain at 45u daily loss:
-
-```bash
-export PLOY_RISK__CRYPTO_ALLOCATION_PCT=0.5
-export PLOY_RISK__SPORTS_ALLOCATION_PCT=0.5
-export PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD=45
-export PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD=45
-```
-
-### Event-Edge Scanner
-
-```bash
-ploy event-edge --title "Which company has the best AI model?"   # One-shot mispricing scan
-ploy event-edge --title "..." --watch --interval-secs 30         # Continuous monitoring
-ploy event-edge --event <id> --watch --trade --min-edge 0.08     # Auto-trade when +EV
-```
-
-### AI Agent
-
-```bash
-ploy agent --mode advisory                     # Get trading recommendations
-ploy agent --mode autonomous --enable-trading  # (blocked by default; prefer platform mode)
-ploy agent --chat                              # Interactive conversation
-ploy agent --mode sports --sports-url <url>    # Sports-specific analysis
-```
-
-### Domain: Crypto
-
-```bash
-ploy crypto split-arb --coins SOL,ETH,BTC --dry-run      # Split-arb on crypto UP/DOWN markets
-ploy crypto monitor --coins SOL,ETH             # Monitor crypto markets
-```
-
-### Domain: Sports
-
-```bash
-ploy sports split-arb --leagues NBA --dry-run              # Split-arb on sports markets
-ploy sports monitor --leagues NBA                # Monitor sports markets
-ploy sports draftkings --sport nba --min-edge 5  # DraftKings odds comparison
-ploy sports analyze --team1 LAL --team2 BOS      # Analyze a specific matchup
-ploy sports polymarket --league nba --live       # Browse Polymarket sports markets
-ploy sports chain --team1 LAL --team2 BOS        # Full decision chain (Grok -> Claude -> DK -> PM)
-ploy sports live-scan --sport nba --min-edge 3   # Continuous live edge scanner
-```
-
-### Strategy Management
-
-```bash
-ploy strategy list                              # List all strategies and status
-ploy strategy start momentum --dry-run          # Start a strategy
-ploy strategy stop momentum                     # Stop a running strategy
-ploy strategy status                            # Show status of all strategies
-ploy strategy logs momentum --follow            # Tail strategy logs
-ploy strategy reload momentum                   # Hot-reload strategy config
-ploy strategy nba-seed-stats --season 2025-26   # Seed NBA comeback stats into DB
-ploy strategy nba-comeback --dry-run            # Run NBA comeback agent standalone
-ploy strategy accuracy --lookback-hours 12      # Report prediction accuracy
-```
-
-### Archived Single-Binary Platform CLI
-
-The old `ploy platform start ...` commands are no longer runnable in this branch.
-Use [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md) for the workspace daemon/client flow.
-
-### Operator Terminal
-
-The default operator path is the workspace control plane:
-
-```bash
-export PLOY_ADMIN_TOKEN=change-me
 cargo run -p ployd
 cargo run -p ployctl -- system status
+cargo run -p ployctl -- system audit
+cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
+cargo run -p ployctl -- deployments inspect example.paper
+cargo run -p ployctl -- deployments apply config/deployments/example.live.json
+cargo run -p ployctl -- deployments inspect example.live
+cargo run -p ployctl -- trading inspect example.live
 cargo run -p ployctl -- claims list
+cargo run -p ployctl -- claims inspect acct-live
+cargo run -p ployctl -- claims run acct-live
 cargo run -p ploytui -- --watch
 ```
 
-`ployctl claims inspect <account-id>` and `ployctl claims run <account-id>` are
-the manual inspection / one-shot override paths for auto-claim.
-See [docs/runbooks/operator-terminal.md](docs/runbooks/operator-terminal.md) and
-[docs/runbooks/platform-startup.md](docs/runbooks/platform-startup.md) for the
-current operator flow.
+For a host-oriented version of the same flow, use:
 
-Deployment matrix entries support runtime scope controls:
+- [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md)
+- [`docs/runbooks/live-deployment-checklist.md`](docs/runbooks/live-deployment-checklist.md)
+- [`docs/runbooks/platform-deploy.md`](docs/runbooks/platform-deploy.md)
 
-```json
-{
-  "id": "crypto-momentum-5m",
-  "strategy": "momentum",
-  "domain": "Crypto",
-  "enabled": true,
-  "account_ids": ["acct-main", "acct-paper"],
-  "execution_mode": "any"
-}
-```
+The workspace platform supports default-on account-level auto-claim for live
+Polymarket accounts. `proxy` wallets redeem directly through the relayer.
+`gnosis_safe` wallets use the same relayer-backed redeem path and auto-submit
+`SAFE-CREATE` on the first claim if the SAFE has not been deployed yet.
 
-- `account_ids`: optional allow-list. Empty means all accounts.
-- `execution_mode`: `any` | `dry_run_only` | `live_only`.
+The operator surface for this lives on `ployd` / `ployctl claims ...`, not on a
+retired single-binary claimer path.
 
-The older `ploy rpc` and sidecar evidence endpoints are archived compatibility
-references only. They are not part of the default workspace operator surface on
-this branch.
+### Research And Backtest Path
 
-### RL Commands (requires `--features rl`)
+Use the offline command family when you want datasets, replay tables, or
+backtest prep:
 
-```bash
-ploy rl train --episodes 1000 --series 10423        # Train RL model
-ploy rl run --model ./models/best --series 10423     # Live trading with RL
-ploy rl eval --model ./models/best --data test.csv   # Evaluate model
-ploy rl info --model ./models/best                   # Inspect model stats
-ploy rl export --model ./models/best -o model.onnx   # Export for deployment
-ploy rl backtest --episodes 100                      # Backtest on sample data
-ploy rl lead-lag --episodes 1000 --symbol BTCUSDT    # Train lead-lag RL
-ploy rl lead-lag-live --symbol BTCUSDT --market btc-price-series-15m  # Live lead-lag
-ploy rl agent --symbol BTCUSDT --market btc-price-series-15m \
-    --up-token <id> --down-token <id>                # Full RL agent integration
-```
+- `ploy collect`
+- `ploy collect --check-only`
+- `ploy orderbook-history`
+- `ploy deribit-iv-backfill`
+- `ploy strategy backfill-*`
+- `crates/ploy-research`
+- `config/strategies/*.toml`
 
-### Data Collection
+See:
 
-```bash
-ploy collect --symbols BTCUSDT --duration 60         # Collect data for lag analysis
-ploy orderbook-history --asset-ids <ids>             # Backfill L2 orderbook history
-```
+- [`docs/runbooks/research-backtest-routing.md`](docs/runbooks/research-backtest-routing.md)
+- [`docs/COLLECTOR_RUNBOOK.md`](docs/COLLECTOR_RUNBOOK.md)
+
+Do not try to run backtests inside `ployd`, and do not point
+`ployctl deployments apply` at files under `config/strategies/`.
+
+### Archived Compatibility Surfaces
+
+The old single-binary `ploy platform start ...`, `ploy rpc`, and direct
+strategy live-entry paths are compatibility references only in this branch.
+They are not the default operator path.
 
 ## Architecture
 

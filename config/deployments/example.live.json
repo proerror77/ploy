@@ -1,0 +1,8 @@
+{
+  "deployment_id": "example.live",
+  "bundle_id": "example",
+  "account_id": "acct-live",
+  "max_gross_exposure": "25.00",
+  "runtime_mode": "live",
+  "desired_state": "running"
+}

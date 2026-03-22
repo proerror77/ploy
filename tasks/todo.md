@@ -1,3 +1,47 @@
+# Live Deploy Checklist And Research Boundary Cut (2026-03-22)
+
+## Goal
+Turn the current workspace branch into a clearer operator product by shipping a
+canonical minimal live deployment checklist and tightening the repo-level
+boundary between live/operator paths and research/backtest paths.
+
+## File ownership
+
+- `README.md`, `docs/runbooks/`
+  - owner: default operator narrative and routing clarity
+- `config/deployments/`, `config/platform/`, `config/strategies/`
+  - owner: config boundary docs and checked-in manifest examples
+- `.github/workflows/release-platform.yml`, `scripts/install-platform-service.sh`
+  - owner: host bundle layout and deploy/install parity
+- `crates/ploy-operator-contracts/`, `crates/ploy-platform/`, `apps/ployctl/`, `apps/ploytui/`
+  - owner: deployment summary runtime-mode visibility
+
+## Tasks
+
+- [ ] Add a canonical `example.live.json` deployment manifest and make the host deploy path provision deployment examples under `/opt/ploy/config/deployments/`.
+- [ ] Add a dedicated minimal live deployment checklist and rewrite the startup/deploy runbooks around explicit paper-smoke vs live-operator flows.
+- [ ] Tighten README/config/docs so `ployd` runtime guidance is separate from research/backtest routing and archived single-binary commands.
+- [ ] Surface `runtime_mode` in deployment summaries and operator output.
+- [ ] Re-run focused Rust and workflow validation, then land atomic commits.
+
+## Progress notes
+
+- 2026-03-22: Design locked in `docs/plans/2026-03-22-live-deploy-and-boundaries-design.md`.
+- 2026-03-22: Added `config/deployments/example.live.json`, shipped a dedicated
+  `live-deployment-checklist.md`, rewrote the startup/deploy runbooks around
+  explicit paper-smoke vs live flows, and tightened README/config routing so
+  `ployd` is the only default operator path while offline research/backtest
+  commands live behind a separate runbook.
+- 2026-03-22: `DeploymentSummary` now carries `runtime_mode`, and `ployctl` /
+  `ploytui` render it directly so operators no longer have to infer paper vs
+  live from deployment ids.
+- 2026-03-22: Focused validation passed:
+  - `rtk cargo test -p ploy-operator-contracts -p ploy-platform -p ployctl -p ploytui`
+  - `rtk cargo test --test platform_release_workflow --test workflow_security --test platform_smoke`
+  - `cd ploy-frontend && npm run build`
+  - `cd ploy-frontend && npm run lint`
+  - `bash -n scripts/install-platform-service.sh`
+
 # Auto-Claim Platform Cut (2026-03-22)
 
 ## Goal
