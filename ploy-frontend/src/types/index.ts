@@ -78,6 +78,9 @@ export type ObservedState =
 
 export interface DeploymentSummary {
   deployment_id: string;
+  runtime_mode: string;
+  account_id: string;
+  max_gross_exposure?: string | null;
   deployment_state: DeploymentState;
   desired_state: DesiredState;
   observed_state: ObservedState;

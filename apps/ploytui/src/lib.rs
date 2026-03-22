@@ -36,8 +36,9 @@ pub fn render_dashboard(snapshot: &DashboardSnapshot) -> String {
         for deployment in &snapshot.deployments {
             let _ = writeln!(
                 out,
-                "  {} lifecycle={} desired={} observed={}",
+                "  {} mode={} lifecycle={} desired={} observed={}",
                 deployment.deployment_id,
+                deployment.runtime_mode,
                 state_name(&deployment.deployment_state),
                 state_name(&deployment.desired_state),
                 state_name(&deployment.observed_state)
@@ -161,6 +162,7 @@ mod tests {
             },
             deployments: vec![DeploymentSummary {
                 deployment_id: "example.paper".to_string(),
+                runtime_mode: "paper".to_string(),
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: None,
                 deployment_state: DeploymentState::Enabled,
@@ -208,6 +210,7 @@ mod tests {
                 OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
                     deployments: vec![DeploymentSummary {
                         deployment_id: "example.paper".to_string(),
+                        runtime_mode: "paper".to_string(),
                         account_id: "acct-paper".to_string(),
                         max_gross_exposure: None,
                         deployment_state: DeploymentState::Enabled,
@@ -237,6 +240,7 @@ mod tests {
         assert!(output.contains("Claims"));
         assert!(output.contains("Recent Events"));
         assert!(output.contains("example.paper"));
+        assert!(output.contains("mode=paper"));
         assert!(output.contains("acct-live"));
         assert!(output.contains("running"));
     }

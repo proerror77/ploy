@@ -499,6 +499,7 @@ mod tests {
             runtime_root.join("deployments.json"),
             serde_json::to_string(&vec![DeploymentSummary {
                 deployment_id: "example.paper".to_string(),
+                runtime_mode: "paper".to_string(),
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: Some(rust_decimal::Decimal::new(500, 2)),
                 deployment_state: DeploymentState::Enabled,
@@ -575,6 +576,7 @@ mod tests {
                 } else if request.starts_with("GET /api/deployments/http.paper") {
                     serde_json::json!({
                         "deployment_id": "http.paper",
+                        "runtime_mode": "paper",
                         "account_id": "acct-http",
                         "max_gross_exposure": "5.00",
                         "deployment_state": "enabled",
@@ -586,6 +588,7 @@ mod tests {
                     serde_json::json!([
                         {
                             "deployment_id": "http.paper",
+                            "runtime_mode": "paper",
                             "account_id": "acct-http",
                             "max_gross_exposure": "5.00",
                             "deployment_state": "enabled",
@@ -634,6 +637,7 @@ mod tests {
                 let body = if request.starts_with("PUT /api/deployments/example.paper") {
                     serde_json::json!({
                         "deployment_id": "example.paper",
+                        "runtime_mode": "paper",
                         "account_id": "acct-paper",
                         "max_gross_exposure": "5.00",
                         "deployment_state": "enabled",
@@ -644,6 +648,7 @@ mod tests {
                 } else {
                     serde_json::json!({
                         "deployment_id": "example.paper",
+                        "runtime_mode": "paper",
                         "account_id": "acct-paper",
                         "max_gross_exposure": "5.00",
                         "deployment_state": "enabled",
@@ -720,6 +725,7 @@ mod tests {
                 DeploymentSnapshotEvent {
                     deployments: vec![DeploymentSummary {
                         deployment_id: "example.paper".to_string(),
+                        runtime_mode: "paper".to_string(),
                         account_id: "acct-paper".to_string(),
                         max_gross_exposure: Some(rust_decimal::Decimal::new(500, 2)),
                         deployment_state: DeploymentState::Enabled,

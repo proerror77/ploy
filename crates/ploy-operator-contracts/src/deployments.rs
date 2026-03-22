@@ -5,6 +5,10 @@ fn default_account_id() -> String {
     "default".to_string()
 }
 
+fn default_runtime_mode() -> String {
+    "unknown".to_string()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentState {
@@ -42,6 +46,8 @@ pub enum ObservedState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentSummary {
     pub deployment_id: String,
+    #[serde(default = "default_runtime_mode")]
+    pub runtime_mode: String,
     #[serde(default = "default_account_id")]
     pub account_id: String,
     #[serde(default)]
@@ -105,6 +111,7 @@ mod tests {
     fn deployment_summary_uses_stable_wire_keys() {
         let summary = DeploymentSummary {
             deployment_id: "openclaw.default".to_string(),
+            runtime_mode: "live".to_string(),
             account_id: "acct-main".to_string(),
             max_gross_exposure: Some(Decimal::new(250, 2)),
             deployment_state: DeploymentState::Enabled,
@@ -117,6 +124,7 @@ mod tests {
             value,
             json!({
                 "deployment_id": "openclaw.default",
+                "runtime_mode": "live",
                 "account_id": "acct-main",
                 "max_gross_exposure": "2.50",
                 "deployment_state": "enabled",
@@ -151,6 +159,18 @@ mod tests {
                 "desired_state": "running",
             })
         );
+    }
+
+    #[test]
+    fn deployment_summary_defaults_runtime_mode_for_older_snapshots() {
+        let value = serde_json::from_value::<DeploymentSummary>(json!({
+            "deployment_id": "legacy.paper",
+            "desired_state": "running",
+            "observed_state": "running"
+        }))
+        .expect("parse summary");
+
+        assert_eq!(value.runtime_mode, "unknown");
     }
 
     #[test]

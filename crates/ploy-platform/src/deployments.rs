@@ -26,6 +26,7 @@ impl DeploymentRecord {
     pub fn summary(&self) -> DeploymentSummary {
         DeploymentSummary {
             deployment_id: self.deployment_id.clone(),
+            runtime_mode: self.runtime_mode.clone(),
             account_id: self.account_id.clone(),
             max_gross_exposure: self.max_gross_exposure,
             deployment_state: self.deployment_state,
@@ -142,6 +143,7 @@ mod tests {
 
         let summary = registry.summaries().pop().expect("summary");
         assert_eq!(summary.account_id, "acct-main");
+        assert_eq!(summary.runtime_mode, "paper");
         assert_eq!(summary.max_gross_exposure, Some(Decimal::new(500, 2)));
         assert_eq!(summary.deployment_state, DeploymentState::Draining);
         assert_eq!(summary.desired_state, DesiredState::Paused);

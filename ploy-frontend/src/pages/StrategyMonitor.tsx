@@ -27,7 +27,7 @@ function getStatusVariant(entry: DeploymentSummary) {
 }
 
 function getStatusLabel(entry: DeploymentSummary) {
-  return `${entry.deployment_state} / ${entry.desired_state} / ${entry.observed_state}`;
+  return `${entry.runtime_mode} / ${entry.deployment_state} / ${entry.desired_state} / ${entry.observed_state}`;
 }
 
 function nextActions(desiredState: DesiredState): DesiredState[] {
@@ -228,6 +228,9 @@ export function StrategyMonitor() {
                       <p className="text-sm text-muted-foreground">
                         Desired state drives the worker supervisor. Observed state reflects the last
                         runtime heartbeat from `ployd`.
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        account={entry.account_id} max_gross_exposure={entry.max_gross_exposure ?? '-'}
                       </p>
                     </div>
 

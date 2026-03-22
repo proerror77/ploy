@@ -9,8 +9,9 @@ pub fn render_deployments(client: &ControlPlaneClient) -> Result<String, String>
         .into_iter()
         .map(|deployment| {
             format!(
-                "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
+                "{} mode={} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
                 deployment.deployment_id,
+                deployment.runtime_mode,
                 deployment.account_id,
                 deployment
                     .max_gross_exposure
@@ -31,8 +32,9 @@ pub fn render_deployment(
 ) -> Result<String, String> {
     client.inspect_deployment(deployment_id).map(|deployment| {
         format!(
-            "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
+            "{} mode={} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
             deployment.deployment_id,
+            deployment.runtime_mode,
             deployment.account_id,
             deployment
                 .max_gross_exposure
@@ -59,8 +61,9 @@ pub fn apply_deployment_file(
         serde_json::from_str(&body).map_err(|err| format!("parse deployment manifest: {err}"))?;
     let deployment = client.apply_deployment(&request)?;
     Ok(format!(
-        "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
+        "{} mode={} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
         deployment.deployment_id,
+        deployment.runtime_mode,
         deployment.account_id,
         deployment
             .max_gross_exposure
@@ -79,8 +82,9 @@ pub fn control_deployment(
 ) -> Result<String, String> {
     let deployment = client.set_desired_state(deployment_id, desired_state)?;
     Ok(format!(
-        "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
+        "{} mode={} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
         deployment.deployment_id,
+        deployment.runtime_mode,
         deployment.account_id,
         deployment
             .max_gross_exposure
@@ -99,8 +103,9 @@ pub fn set_lifecycle_state(
 ) -> Result<String, String> {
     let deployment = client.set_deployment_state(deployment_id, deployment_state)?;
     Ok(format!(
-        "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
+        "{} mode={} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
         deployment.deployment_id,
+        deployment.runtime_mode,
         deployment.account_id,
         deployment
             .max_gross_exposure
@@ -144,6 +149,7 @@ mod tests {
             serde_json::json!([
                 {
                     "deployment_id": "example.paper",
+                    "runtime_mode": "paper",
                     "deployment_state": "enabled",
                     "desired_state": "running",
                     "observed_state": "running"
@@ -156,6 +162,7 @@ mod tests {
         let output = render_deployments(&ControlPlaneClient::from_runtime_root(&runtime_root))
             .expect("list deployments");
         assert!(output.contains("example.paper"));
+        assert!(output.contains("mode=paper"));
     }
 
     #[test]
@@ -167,6 +174,7 @@ mod tests {
             serde_json::json!([
                 {
                     "deployment_id": "example.paper",
+                    "runtime_mode": "paper",
                     "deployment_state": "enabled",
                     "desired_state": "running",
                     "observed_state": "running"
@@ -179,6 +187,7 @@ mod tests {
         let client = ControlPlaneClient::from_runtime_root(&runtime_root);
         let output = render_deployment(&client, "example.paper").expect("deployment");
         assert!(output.contains("example.paper"));
+        assert!(output.contains("mode=paper"));
     }
 
     #[test]
@@ -210,6 +219,7 @@ mod tests {
                 let body = if request.starts_with("PUT /api/deployments/example.paper") {
                     serde_json::json!({
                         "deployment_id": "example.paper",
+                        "runtime_mode": "paper",
                         "deployment_state": "enabled",
                         "desired_state": "running",
                         "observed_state": "starting"
@@ -218,6 +228,7 @@ mod tests {
                 } else if request.contains("\"deployment_state\":\"draining\"") {
                     serde_json::json!({
                         "deployment_id": "example.paper",
+                        "runtime_mode": "paper",
                         "deployment_state": "draining",
                         "desired_state": "paused",
                         "observed_state": "paused"
@@ -226,6 +237,7 @@ mod tests {
                 } else {
                     serde_json::json!({
                         "deployment_id": "example.paper",
+                        "runtime_mode": "paper",
                         "deployment_state": "enabled",
                         "desired_state": "paused",
                         "observed_state": "paused"
@@ -247,6 +259,7 @@ mod tests {
 
         let applied = apply_deployment_file(&client, &manifest).expect("apply command");
         assert!(applied.contains("example.paper"));
+        assert!(applied.contains("mode=paper"));
 
         let paused =
             control_deployment(&client, "example.paper", DesiredState::Paused).expect("pause");
