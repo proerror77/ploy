@@ -1,7 +1,8 @@
 use ploy_operator_contracts::{
-    AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
-    DeploymentState, DeploymentSummary, DesiredState, OperatorEvent, OrderControlResponse,
-    OrderReplaceRequest, SystemStatus, TradingStateSnapshot,
+    AccountClaimActionResponse, AccountClaimDetailResponse, AccountClaimStatus, AuditLogEntry,
+    ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest, DeploymentState,
+    DeploymentSummary, DesiredState, OperatorEvent, OrderControlResponse, OrderReplaceRequest,
+    SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -53,6 +54,46 @@ impl ControlPlaneClient {
 
     pub fn audit_logs(&self) -> Result<Vec<AuditLogEntry>, String> {
         self.get_json("/api/audit/logs")
+    }
+
+    pub fn claim_statuses(&self) -> Result<Vec<AccountClaimStatus>, String> {
+        match self.read_claim_status_over_http() {
+            Ok(snapshot) => Ok(snapshot),
+            Err(err) if !should_fallback_to_snapshot(&err) => Err(err),
+            Err(_) => Ok(self
+                .read_claim_detail_snapshot()?
+                .into_iter()
+                .map(|detail| detail.status)
+                .collect()),
+        }
+    }
+
+    pub fn inspect_claims(&self, account_id: &str) -> Result<AccountClaimDetailResponse, String> {
+        match self.read_claim_detail_over_http(account_id) {
+            Ok(detail) => Ok(detail),
+            Err(err) if should_fallback_to_snapshot(&err) => self
+                .read_claim_detail_snapshot()?
+                .into_iter()
+                .find(|detail| detail.status.account_id == account_id)
+                .ok_or_else(|| format!("account `{account_id}` was not found")),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn run_claims(&self, account_id: &str) -> Result<AccountClaimActionResponse, String> {
+        self.send_empty("POST", &format!("/api/accounts/{account_id}/claims/run"))
+    }
+
+    pub fn rescan_claims(&self, account_id: &str) -> Result<AccountClaimActionResponse, String> {
+        self.send_empty("POST", &format!("/api/accounts/{account_id}/claims/rescan"))
+    }
+
+    pub fn pause_claims(&self, account_id: &str) -> Result<AccountClaimActionResponse, String> {
+        self.send_empty("POST", &format!("/api/accounts/{account_id}/claims/pause"))
+    }
+
+    pub fn resume_claims(&self, account_id: &str) -> Result<AccountClaimActionResponse, String> {
+        self.send_empty("POST", &format!("/api/accounts/{account_id}/claims/resume"))
     }
 
     pub fn deployment_summaries(&self) -> Result<Vec<DeploymentSummary>, String> {
@@ -241,6 +282,12 @@ impl ControlPlaneClient {
         serde_json::from_str(&body).map_err(|err| format!("parse trading state snapshot: {err}"))
     }
 
+    fn read_claim_detail_snapshot(&self) -> Result<Vec<AccountClaimDetailResponse>, String> {
+        let body = fs::read_to_string(self.runtime_root.join("account-claims.json"))
+            .map_err(|err| format!("read claim state snapshot: {err}"))?;
+        serde_json::from_str(&body).map_err(|err| format!("parse claim state snapshot: {err}"))
+    }
+
     fn read_status_over_http(&self) -> Result<SystemStatus, String> {
         self.get_json("/api/system/status")
     }
@@ -255,6 +302,17 @@ impl ControlPlaneClient {
 
     fn read_trading_state_over_http(&self) -> Result<Vec<TradingStateSnapshot>, String> {
         self.get_json("/api/trading/state")
+    }
+
+    fn read_claim_status_over_http(&self) -> Result<Vec<AccountClaimStatus>, String> {
+        self.get_json("/api/accounts/claims")
+    }
+
+    fn read_claim_detail_over_http(
+        &self,
+        account_id: &str,
+    ) -> Result<AccountClaimDetailResponse, String> {
+        self.get_json(&format!("/api/accounts/{account_id}/claims"))
     }
 
     fn get_json<T>(&self, path: &str) -> Result<T, String>
@@ -423,9 +481,13 @@ mod tests {
                 version: "0.1.0".to_string(),
                 strategy: "platform".to_string(),
                 last_trade_time: None,
+                last_claim_time: None,
                 websocket_connected: false,
                 database_connected: false,
                 error_count_1h: 0,
+                degraded_claim_accounts: 0,
+                pending_redeemable_count: 0,
+                pending_redeemable_notional: rust_decimal::Decimal::ZERO,
                 live_reconcile_failures: 0,
                 next_live_reconcile_at: None,
                 last_live_reconcile_error: None,
@@ -498,9 +560,16 @@ mod tests {
                         "version": "0.1.0",
                         "strategy": "platform",
                         "last_trade_time": null,
+                        "last_claim_time": null,
                         "websocket_connected": false,
                         "database_connected": false,
-                        "error_count_1h": 0
+                        "error_count_1h": 0,
+                        "degraded_claim_accounts": 0,
+                        "pending_redeemable_count": 0,
+                        "pending_redeemable_notional": "0",
+                        "live_reconcile_failures": 0,
+                        "next_live_reconcile_at": null,
+                        "last_live_reconcile_error": null
                     })
                     .to_string()
                 } else if request.starts_with("GET /api/deployments/http.paper") {
@@ -634,9 +703,13 @@ mod tests {
                         version: "0.1.0".to_string(),
                         strategy: "platform".to_string(),
                         last_trade_time: None,
+                        last_claim_time: None,
                         websocket_connected: false,
                         database_connected: false,
                         error_count_1h: 0,
+                        degraded_claim_accounts: 0,
+                        pending_redeemable_count: 0,
+                        pending_redeemable_notional: rust_decimal::Decimal::ZERO,
                         live_reconcile_failures: 0,
                         next_live_reconcile_at: None,
                         last_live_reconcile_error: None,
@@ -720,9 +793,16 @@ mod tests {
                 "version": "0.1.0",
                 "strategy": "platform",
                 "last_trade_time": null,
+                "last_claim_time": null,
                 "websocket_connected": false,
                 "database_connected": false,
-                "error_count_1h": 0
+                "error_count_1h": 0,
+                "degraded_claim_accounts": 0,
+                "pending_redeemable_count": 0,
+                "pending_redeemable_notional": "0",
+                "live_reconcile_failures": 0,
+                "next_live_reconcile_at": null,
+                "last_live_reconcile_error": null
             })
             .to_string(),
         )
@@ -893,9 +973,16 @@ mod tests {
                 "version": "0.1.0",
                 "strategy": "platform",
                 "last_trade_time": null,
+                "last_claim_time": null,
                 "websocket_connected": false,
                 "database_connected": false,
-                "error_count_1h": 0
+                "error_count_1h": 0,
+                "degraded_claim_accounts": 0,
+                "pending_redeemable_count": 0,
+                "pending_redeemable_notional": "0",
+                "live_reconcile_failures": 0,
+                "next_live_reconcile_at": null,
+                "last_live_reconcile_error": null
             })
             .to_string();
             write!(

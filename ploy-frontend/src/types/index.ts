@@ -49,9 +49,16 @@ export interface SystemStatus {
   version: string;
   strategy: string;
   last_trade_time: string | null;
+  last_claim_time: string | null;
   websocket_connected: boolean;
   database_connected: boolean;
   error_count_1h: number;
+  degraded_claim_accounts: number;
+  pending_redeemable_count: number;
+  pending_redeemable_notional: string;
+  live_reconcile_failures: number;
+  next_live_reconcile_at: string | null;
+  last_live_reconcile_error: string | null;
 }
 
 export interface SystemControlResponse {
@@ -74,6 +81,20 @@ export interface DeploymentSummary {
   deployment_state: DeploymentState;
   desired_state: DesiredState;
   observed_state: ObservedState;
+}
+
+export interface AccountClaimStatus {
+  account_id: string;
+  enabled: boolean;
+  runtime_mode: string;
+  loop_state: 'running' | 'degraded' | 'recovering' | 'paused';
+  last_scan_at: string | null;
+  last_claim_at: string | null;
+  last_error: string | null;
+  consecutive_failures: number;
+  next_retry_at: string | null;
+  pending_redeemable_count: number;
+  pending_redeemable_notional: string;
 }
 
 export interface TradingPnlSnapshot {

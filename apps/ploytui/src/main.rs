@@ -16,9 +16,13 @@ fn build_snapshot(client: &ControlPlaneClient) -> DashboardSnapshot {
                 version: "unknown".to_string(),
                 strategy: "platform".to_string(),
                 last_trade_time: None,
+                last_claim_time: None,
                 websocket_connected: false,
                 database_connected: false,
                 error_count_1h: 0,
+                degraded_claim_accounts: 0,
+                pending_redeemable_count: 0,
+                pending_redeemable_notional: rust_decimal::Decimal::ZERO,
                 live_reconcile_failures: 0,
                 next_live_reconcile_at: None,
                 last_live_reconcile_error: None,
@@ -26,6 +30,7 @@ fn build_snapshot(client: &ControlPlaneClient) -> DashboardSnapshot {
         }),
         deployments: client.list_deployments(),
         trading: client.trading_state().unwrap_or_default(),
+        claims: client.claim_statuses().unwrap_or_default(),
         recent_events: client.recent_events(6).unwrap_or_default(),
     }
 }

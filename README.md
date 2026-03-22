@@ -161,9 +161,18 @@ sqlx migrate run
 | `PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD` | No | Hard sports domain daily loss stop |
 | `PLOY_RISK__MAX_DRAWDOWN_USD` | No | Hard drawdown stop (runtime cumulative realized curve) |
 | `PLOY_ACCOUNT_ID` | No | Runtime account scope identifier (default `default`) |
-| `PLOY_API_PORT` | No | API listen port for `ploy serve` and dashboard operator polling (default `8081`) |
-| `PLOY_API_ADMIN_TOKEN` | No | Admin token for protected API routes, including operator terminal actions |
-| `PLOY_ADMIN_TOKEN` | No | Dashboard-side fallback token name for operator polling/actions if `PLOY_API_ADMIN_TOKEN` is unset |
+| `PLOY_LISTEN_ADDR` | No | Control-plane listen address for `ployd` (default `127.0.0.1:8081`) |
+| `PLOY_API_ADMIN_TOKEN` | No | Admin token for protected control-plane routes and operator actions |
+| `PLOY_ADMIN_TOKEN` | No | CLI/browser fallback token name for control-plane auth if `PLOY_API_ADMIN_TOKEN` is unset |
+| `PLOY_SIDECAR_AUTH_TOKEN` | No | Read-only token for sidecar and event consumers |
+| `PLOY_ACCOUNT_CLAIM_STATE_FILE` | No | Override account auto-claim snapshot path |
+| `PLOY_CLAIM_TICK_INTERVAL_MS` | No | Account auto-claim loop interval in milliseconds |
+| `PLOY_CLAIM_BACKOFF_BASE_MS` | No | Base backoff for claim retries in milliseconds |
+| `PLOY_CLAIM_BACKOFF_MAX_MS` | No | Max backoff for claim retries in milliseconds |
+| `POLY_RELAYER_URL` | No | Polymarket relayer base URL for relay-first auto-redeem (default `https://relayer-v2.polymarket.com`) |
+| `POLY_BUILDER_API_KEY` | Required for live auto-redeem | Builder API key for relayer submit auth |
+| `POLY_BUILDER_SECRET` | Required for live auto-redeem | Builder secret used to sign relayer submit headers |
+| `POLY_BUILDER_PASSPHRASE` | Required for live auto-redeem | Builder passphrase for relayer submit auth |
 | `PLOY_DRY_RUN__ENABLED` | No | Force runtime dry-run mode (`true`/`false`) |
 | `PLOY_DEPLOYMENTS_REQUIRE_EVIDENCE` | No | Require strategy evidence before enabling deployments (`true`/`false`) |
 | `PLOY_DEPLOYMENTS_REQUIRED_STAGES` | No | Required evidence stages CSV (default `backtest,paper`) |
@@ -216,19 +225,17 @@ export PLOY_ALLOW_DIRECT_LIVE=true
 ### Core Commands
 
 ```bash
-ploy run                                       # Legacy bot loop (dry-run unless PLOY_ALLOW_DIRECT_LIVE=true)
-ploy test                                      # Test Polymarket API connectivity
-ploy serve --port 8081                         # API server for dashboards / control-plane clients
-ploy dashboard --demo                          # TUI dashboard with sample data
-ploy dashboard                                 # TUI dashboard with live data
-ploy search "bitcoin"                          # Search Polymarket for markets
-ploy book <token_id>                           # Show order book for a token
-ploy current <series_id>                       # Show active market for a series
-ploy watch --series 10423                      # Watch live market data in terminal
-ploy account --positions                       # Show account balance and positions
-ploy claim --check-only                        # Check claimable resolved positions
-ploy history --limit 50                        # View recent trading history
-ploy ev --price 95 --probability 97            # Calculate expected value for near-settlement bets
+cargo run -p ployd                                               # start the control-plane daemon
+cargo run -p ployctl -- system status                            # inspect platform health
+cargo run -p ployctl -- deployments list                         # list deployments
+cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
+cargo run -p ployctl -- trading inspect <deployment-id>          # inspect canonical trading ledger
+cargo run -p ployctl -- claims list                              # list account auto-claim status
+cargo run -p ployctl -- claims inspect <account-id>              # inspect redeemable positions/history
+cargo run -p ployctl -- claims run <account-id>                  # trigger a one-shot claim run
+cargo run -p ployctl -- claims pause <account-id>                # override default-on auto-claim
+cargo run -p ployctl -- claims resume <account-id>               # resume default-on auto-claim
+cargo run -p ploytui -- --watch                                  # terminal operator console
 ```
 
 ### Collector And Backfill
@@ -256,33 +263,28 @@ ploy analyze --event <event_id>                # Analyze multi-outcome market
 ploy paper --symbols BTCUSDT,ETHUSDT           # Paper mode using Binance underlyings (signals only, no PM orders)
 ```
 
-Live momentum mode now supports automatic post-settlement claims (redeem winning positions) when keys are configured:
+The workspace platform now supports default-on account-level auto-claim for live
+Polymarket accounts:
 
 ```bash
-export PLOY_AUTO_CLAIM=true                    # default true in live momentum mode
-export CLAIMER_CHECK_INTERVAL_SECS=60          # optional
-export CLAIMER_MIN_CLAIM_SIZE=1                # optional (USDC)
-export CLAIMER_IGNORE_CONDITION_IDS=0xabc,0xdef # optional ignore list (prefix match)
-export POLYGON_RPC_URL=https://polygon-rpc.com # optional RPC override
+export POLYMARKET_PRIVATE_KEY=0x...                 # required for live redeem support
+export POLY_SIGNATURE_TYPE=proxy                    # or gnosis_safe
+export POLY_RELAYER_URL=https://relayer-v2.polymarket.com
+export POLY_BUILDER_API_KEY=...
+export POLY_BUILDER_SECRET=...
+export POLY_BUILDER_PASSPHRASE=...
+export POLYGON_RPC_URL=https://polygon-rpc.com      # used to resolve relayed tx receipts
+export PLOY_CLAIM_TICK_INTERVAL_MS=30000       # optional
+export PLOY_CLAIM_BACKOFF_BASE_MS=5000         # optional
+export PLOY_CLAIM_BACKOFF_MAX_MS=120000        # optional
 ```
 
-Recommended for gasless redeem via Polymarket Builder Relayer:
+`proxy` wallets redeem directly through the relayer. `gnosis_safe` wallets use
+the same relayer-backed redeem path and auto-submit `SAFE-CREATE` on the first
+claim if the SAFE has not been deployed yet.
 
-```bash
-# Official Rust relayer client path is enabled by default
-cargo run -- momentum --live
-
-export CLAIMER_RELAYER_ENABLED=true
-export POLY_BUILDER_API_KEY=xxx
-export POLY_BUILDER_SECRET=base64_secret
-export POLY_BUILDER_PASSPHRASE=xxx
-
-# Keep false in production to avoid falling back to direct on-chain redeem.
-# If true, fallback path requires native MATIC gas.
-export CLAIMER_RELAYER_FALLBACK_ONCHAIN=false
-```
-
-If relayer credentials are incomplete, claimer will warn and require native MATIC for direct on-chain fallback.
+The operator surface for this lives on `ployd` / `ployctl claims ...`, not on
+the retired single-binary claimer path.
 
 Example: split 100u capital into crypto/sports 50/50 and hard-stop each domain at 45u daily loss:
 
@@ -350,26 +352,21 @@ Use [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md) for
 
 ### Operator Terminal
 
-The dashboard now includes an `Operator` tab backed by the admin API. It is meant for runtime operations only and does not introduce a direct live order path.
-
-Start the control plane and dashboard together:
+The default operator path is the workspace control plane:
 
 ```bash
-export PLOY_API_ADMIN_TOKEN=change-me
-ploy serve --port 8081
-ploy dashboard
+export PLOY_ADMIN_TOKEN=change-me
+cargo run -p ployd
+cargo run -p ployctl -- system status
+cargo run -p ployctl -- claims list
+cargo run -p ploytui -- --watch
 ```
 
-Behavior:
-
-- `ploy dashboard` polls `http://127.0.0.1:${PLOY_API_PORT:-8081}` for `GET /api/operator/status`
-- the dashboard sends operator actions with `x-ploy-admin-token`
-- if `PLOY_API_ADMIN_TOKEN` is unset in the dashboard shell, it falls back to `PLOY_ADMIN_TOKEN`
-- the first version supports only global/domain ops actions: `pause`, `resume`, `force_close`, `claim_check`, and `claim_run`
-- all operator actions still flow through the existing coordinator/control plane
-
-If the admin token is missing, the Operator tab remains visible but action requests fail closed.
-See [docs/runbooks/operator-terminal.md](docs/runbooks/operator-terminal.md) for the minimal operator flow.
+`ployctl claims inspect <account-id>` and `ployctl claims run <account-id>` are
+the manual inspection / one-shot override paths for auto-claim.
+See [docs/runbooks/operator-terminal.md](docs/runbooks/operator-terminal.md) and
+[docs/runbooks/platform-startup.md](docs/runbooks/platform-startup.md) for the
+current operator flow.
 
 Deployment matrix entries support runtime scope controls:
 

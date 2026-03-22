@@ -6,6 +6,7 @@ import type {
   SystemControlResponse,
   StrategyConfig,
   DeploymentSummary,
+  AccountClaimStatus,
   SecurityEvent,
   PnLDataPoint,
   RunningStrategy,
@@ -200,6 +201,10 @@ class ApiService {
 
   async getDeployments(): Promise<DeploymentSummary[]> {
     return this.fetch<DeploymentSummary[]>('/deployments');
+  }
+
+  async getClaimStatuses(): Promise<AccountClaimStatus[]> {
+    return this.fetch<AccountClaimStatus[]>('/accounts/claims');
   }
 
   async updateDeploymentState(

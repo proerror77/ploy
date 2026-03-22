@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod claims;
 pub mod deployments;
 pub mod errors;
 pub mod events;
@@ -6,6 +7,11 @@ pub mod system;
 pub mod trading;
 
 pub use audit::AuditLogEntry;
+pub use claims::{
+    AccountClaimActionResponse, AccountClaimActionState, AccountClaimDetailResponse,
+    AccountClaimStatus, ClaimExecutionOutcome, ClaimExecutionRecord, ClaimLoopState,
+    ClaimPositionState, RedeemablePositionSnapshot,
+};
 pub use deployments::{
     DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DeploymentStateSummary,
     DeploymentSummary, DesiredState, ObservedState,

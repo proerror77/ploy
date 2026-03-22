@@ -61,6 +61,7 @@ The install script ensures:
 - `/opt/ploy/run/platform/system-status.json`
 - `/opt/ploy/run/platform/deployments.json`
 - `/opt/ploy/run/platform/trading-state.json`
+- `/opt/ploy/run/platform/account-claims.json`
 - `/opt/ploy/run/platform/audit-log.jsonl`
 
 Optional hardening:
@@ -74,6 +75,16 @@ Optional hardening:
   instances.
 - Set `PLOY_REQUEST_RATE_LIMIT_PER_MINUTE=...` in `/opt/ploy/.env` if you want
   to tune daemon-side HTTP throttling. Set `0` to disable it.
+- Set `PLOY_CLAIM_TICK_INTERVAL_MS=...`, `PLOY_CLAIM_BACKOFF_BASE_MS=...`, and
+  `PLOY_CLAIM_BACKOFF_MAX_MS=...` in `/opt/ploy/.env` if you want to tune
+  account-level auto-claim scanning and retry behavior.
+- Set `POLYMARKET_PRIVATE_KEY=...`, `POLY_RELAYER_URL=...`,
+  `POLY_BUILDER_API_KEY=...`, `POLY_BUILDER_SECRET=...`, and
+  `POLY_BUILDER_PASSPHRASE=...` in `/opt/ploy/.env` for live relay-first
+  redeem support.
+- Set `POLY_SIGNATURE_TYPE=proxy` or `gnosis_safe`; relay-backed auto-claim
+  does not support plain EOA wallets. `gnosis_safe` accounts will auto-submit
+  `SAFE-CREATE` through the relayer before the first redeem when needed.
 - Set `PLOY_LIVE_RECONCILE_BACKOFF_BASE_MS=...` and
   `PLOY_LIVE_RECONCILE_BACKOFF_MAX_MS=...` in `/opt/ploy/.env` if you want to
   tune live venue reconcile retry backoff under exchange/API outages.
@@ -92,6 +103,7 @@ sudo journalctl -u ployd -n 200 --no-pager
 curl -fsS http://127.0.0.1:8081/health
 /opt/ploy/bin/ployctl system status
 /opt/ploy/bin/ployctl system audit
+/opt/ploy/bin/ployctl claims list
 /opt/ploy/bin/ployctl trading status
 /opt/ploy/bin/ployctl deployments list
 /opt/ploy/bin/ploytui
@@ -111,6 +123,9 @@ as the template for remote deployment resources.
 ```bash
 /opt/ploy/bin/ployctl deployments apply /opt/ploy/config/deployments/example.paper.json
 /opt/ploy/bin/ployctl deployments inspect example.paper
+/opt/ploy/bin/ployctl claims list
+/opt/ploy/bin/ployctl claims inspect acct-live
+/opt/ploy/bin/ployctl claims run acct-live
 /opt/ploy/bin/ployctl trading cancel example.live <order-id>
 /opt/ploy/bin/ployctl deployments pause example.paper
 /opt/ploy/bin/ployctl deployments resume example.paper

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,6 +12,14 @@ pub struct SystemStatus {
     pub websocket_connected: bool,
     pub database_connected: bool,
     pub error_count_1h: i64,
+    #[serde(default)]
+    pub last_claim_time: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub degraded_claim_accounts: usize,
+    #[serde(default)]
+    pub pending_redeemable_count: usize,
+    #[serde(default)]
+    pub pending_redeemable_notional: Decimal,
     #[serde(default)]
     pub live_reconcile_failures: u32,
     #[serde(default)]

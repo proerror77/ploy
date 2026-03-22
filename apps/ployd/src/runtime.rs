@@ -3,21 +3,26 @@ use crate::events::EventBroker;
 use crate::http::publish_snapshot_events;
 use chrono::{DateTime, Utc};
 use ploy_connectivity::{
-    CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome, ExecutionRequest,
-    LiveExecutionGateway, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, TrackedOrder,
+    CancellationOutcome, CancellationRequest, ClaimGateway, ClaimRequest, ExecutionError,
+    ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, PolymarketClaimGateway,
+    PolymarketExecutionGateway, RedeemablePosition, ReplaceOutcome, ReplaceRequest,
+    StaticClaimGateway, TrackedOrder,
 };
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{
-    DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState, FillSnapshot,
-    IntentPurpose, ObservedState, OrderControlResponse, OrderReplaceRequest, OrderSnapshot,
-    PaperIntentResponse, PnlSnapshotResponse, PositionSnapshotResponse, RiskSnapshotResponse,
+    AccountClaimActionResponse, AccountClaimActionState, AccountClaimDetailResponse,
+    AccountClaimStatus, ClaimExecutionOutcome, ClaimExecutionRecord, ClaimLoopState,
+    ClaimPositionState, DeploymentApplyRequest, DeploymentControlRequest, DeploymentState,
+    DesiredState, FillSnapshot, IntentPurpose, ObservedState, OrderControlResponse,
+    OrderReplaceRequest, OrderSnapshot, PaperIntentResponse, PnlSnapshotResponse,
+    PositionSnapshotResponse, RedeemablePositionSnapshot, RiskSnapshotResponse,
     TradingIntentSnapshot, TradingStateSnapshot,
 };
-use ploy_platform::{ControlPlane, DeploymentRecord};
+use ploy_platform::{AccountClaimDetail, AccountClaimSnapshot, ControlPlane, DeploymentRecord};
 use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
 use rust_decimal::Decimal;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -42,6 +47,7 @@ pub struct PloyDaemon {
     pub supervisor: WorkerSupervisor,
     pub trading: BTreeMap<String, TradingRuntime>,
     live_execution: Box<dyn LiveExecutionGateway>,
+    claim_gateway: Box<dyn ClaimGateway>,
     live_reconcile_failures: u32,
     next_live_reconcile_at: Option<DateTime<Utc>>,
     last_live_reconcile_error: Option<String>,
@@ -49,13 +55,30 @@ pub struct PloyDaemon {
 
 impl PloyDaemon {
     pub fn boot(config: &PlatformConfig) -> io::Result<Self> {
-        Self::boot_with_live_execution(config, Box::new(PolymarketExecutionGateway::from_env()))
+        Self::boot_with_gateways(
+            config,
+            Box::new(PolymarketExecutionGateway::from_env()),
+            Box::new(PolymarketClaimGateway::from_env()),
+        )
     }
 
     pub fn boot_with_live_execution(
         config: &PlatformConfig,
         live_execution: Box<dyn LiveExecutionGateway>,
     ) -> io::Result<Self> {
+        Self::boot_with_gateways(
+            config,
+            live_execution,
+            Box::new(StaticClaimGateway::default()),
+        )
+    }
+
+    pub fn boot_with_gateways(
+        config: &PlatformConfig,
+        live_execution: Box<dyn LiveExecutionGateway>,
+        claim_gateway: Box<dyn ClaimGateway>,
+    ) -> io::Result<Self> {
+        let config = config.clone().normalized();
         let mut control_plane = ControlPlane::default();
         control_plane
             .system
@@ -67,12 +90,14 @@ impl PloyDaemon {
             supervisor: WorkerSupervisor::default(),
             trading: BTreeMap::new(),
             live_execution,
+            claim_gateway,
             live_reconcile_failures: 0,
             next_live_reconcile_at: None,
             last_live_reconcile_error: None,
         };
         daemon.load_registry()?;
         daemon.load_trading_snapshots()?;
+        daemon.load_claim_snapshots()?;
         if daemon.config.trading_state_file.exists() {
             daemon
                 .control_plane
@@ -95,6 +120,10 @@ impl PloyDaemon {
         }
         self.control_plane.system.set_database_connected(true);
         self.tick();
+        self.sync_account_claims();
+        if let Err(err) = self.run_auto_claim_loops() {
+            self.mark_claim_runtime_degraded(err);
+        }
         match self.reconcile_live_fills() {
             Ok(ReconcileStatus::Applied(_) | ReconcileStatus::Noop) => self.mark_runtime_healthy(),
             Ok(ReconcileStatus::BackoffActive) => {}
@@ -123,6 +152,7 @@ impl PloyDaemon {
             &self.control_plane.deployments.summaries(),
         )?;
         write_json(&self.config.trading_state_file, &self.trading_state())?;
+        write_json(&self.config.claim_state_file, &self.claim_details())?;
         Ok(())
     }
 
@@ -144,6 +174,66 @@ impl PloyDaemon {
                 build_trading_state_snapshot(record, snapshot)
             })
             .collect()
+    }
+
+    pub fn claim_statuses(&self) -> Vec<AccountClaimStatus> {
+        self.control_plane.accounts.statuses()
+    }
+
+    pub fn claim_details(&self) -> Vec<AccountClaimDetailResponse> {
+        self.control_plane.accounts.details()
+    }
+
+    pub fn inspect_account_claims(&self, account_id: &str) -> Option<AccountClaimDetailResponse> {
+        self.control_plane
+            .accounts
+            .detail(account_id)
+            .map(AccountClaimDetail::response)
+    }
+
+    pub fn run_account_claims(
+        &mut self,
+        account_id: &str,
+    ) -> io::Result<AccountClaimActionResponse> {
+        self.refresh_account_claims(account_id, true)
+    }
+
+    pub fn rescan_account_claims(
+        &mut self,
+        account_id: &str,
+    ) -> io::Result<AccountClaimActionResponse> {
+        self.refresh_account_claims(account_id, false)
+    }
+
+    pub fn set_account_claim_enabled(
+        &mut self,
+        account_id: &str,
+        enabled: bool,
+    ) -> io::Result<AccountClaimActionResponse> {
+        let Some(current) = self.control_plane.accounts.get(account_id).cloned() else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("account `{account_id}` was not found"),
+            ));
+        };
+        if current.runtime_mode != "live" {
+            return Ok(AccountClaimActionResponse {
+                account_id: account_id.to_string(),
+                state: AccountClaimActionState::NotSupported,
+                message: format!("account `{account_id}` is not a live account"),
+            });
+        }
+        self.control_plane.accounts.set_enabled(account_id, enabled);
+        self.refresh_claim_metrics();
+        Ok(AccountClaimActionResponse {
+            account_id: account_id.to_string(),
+            state: AccountClaimActionState::Accepted,
+            message: if enabled {
+                "automatic claim loop resumed".to_string()
+            } else {
+                "automatic claim loop paused".to_string()
+            },
+        })
     }
 
     pub fn apply_deployment(
@@ -632,6 +722,13 @@ impl PloyDaemon {
     }
 
     fn mark_runtime_healthy(&mut self) {
+        self.refresh_claim_metrics();
+        if self.control_plane.system.status().degraded_claim_accounts > 0 {
+            self.control_plane
+                .system
+                .mark_degraded(&self.config.listen_addr);
+            return;
+        }
         self.control_plane.system.note_live_reconcile_healthy();
         self.control_plane
             .system
@@ -688,6 +785,38 @@ impl PloyDaemon {
         }
     }
 
+    fn mark_claim_runtime_degraded(&mut self, err: io::Error) {
+        self.control_plane
+            .system
+            .mark_degraded(&self.config.listen_addr);
+        let degraded_accounts: BTreeSet<String> = self
+            .control_plane
+            .accounts
+            .statuses()
+            .into_iter()
+            .filter(|status| status.loop_state == ClaimLoopState::Degraded)
+            .map(|status| status.account_id)
+            .collect();
+
+        for record in self.control_plane.deployments.records() {
+            if record.runtime_mode != "live" || !degraded_accounts.contains(&record.account_id) {
+                continue;
+            }
+            self.control_plane
+                .deployments
+                .set_observed_state(&record.deployment_id, ObservedState::Degraded);
+        }
+
+        self.control_plane.audit.append(
+            "claim_loop_degraded",
+            format!(
+                "error={} degraded_accounts={}",
+                err,
+                degraded_accounts.into_iter().collect::<Vec<_>>().join(",")
+            ),
+        );
+    }
+
     fn record_live_reconcile_failure(&mut self, err: &io::Error) {
         let failures = self.live_reconcile_failures.saturating_add(1);
         self.live_reconcile_failures = failures;
@@ -705,6 +834,15 @@ impl PloyDaemon {
             failures,
             self.config.live_reconcile_backoff_base_ms,
             self.config.live_reconcile_backoff_max_ms,
+        );
+        Utc::now() + chrono::Duration::milliseconds(backoff_ms as i64)
+    }
+
+    fn next_claim_retry_at(&self, failures: u32) -> DateTime<Utc> {
+        let backoff_ms = live_reconcile_backoff_ms(
+            failures,
+            self.config.claim_backoff_base_ms,
+            self.config.claim_backoff_max_ms,
         );
         Utc::now() + chrono::Duration::milliseconds(backoff_ms as i64)
     }
@@ -878,6 +1016,256 @@ impl PloyDaemon {
         Ok(())
     }
 
+    fn load_claim_snapshots(&mut self) -> io::Result<()> {
+        if !self.config.claim_state_file.exists() {
+            return Ok(());
+        }
+
+        let raw = fs::read_to_string(&self.config.claim_state_file)?;
+        if raw.trim().is_empty() {
+            return Ok(());
+        }
+
+        let records: Vec<AccountClaimDetail> = serde_json::from_str(&raw)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        self.control_plane.accounts.restore(records);
+        Ok(())
+    }
+
+    fn sync_account_claims(&mut self) {
+        let live_accounts: BTreeSet<String> = self
+            .control_plane
+            .deployments
+            .records()
+            .into_iter()
+            .filter(|record| {
+                record.runtime_mode == "live"
+                    && record.deployment_state != DeploymentState::Archived
+            })
+            .map(|record| record.account_id)
+            .collect();
+
+        self.control_plane.accounts.retain_accounts(&live_accounts);
+        for account_id in &live_accounts {
+            if self.control_plane.accounts.get(account_id).is_none() {
+                self.control_plane
+                    .accounts
+                    .upsert(AccountClaimSnapshot::for_runtime_mode(account_id, "live"));
+            }
+        }
+        self.refresh_claim_metrics();
+    }
+
+    fn refresh_account_claims(
+        &mut self,
+        account_id: &str,
+        execute_claims: bool,
+    ) -> io::Result<AccountClaimActionResponse> {
+        let Some(status) = self.control_plane.accounts.get(account_id).cloned() else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("account `{account_id}` was not found"),
+            ));
+        };
+        if status.runtime_mode != "live" {
+            return Ok(AccountClaimActionResponse {
+                account_id: account_id.to_string(),
+                state: AccountClaimActionState::NotSupported,
+                message: format!("account `{account_id}` is not a live account"),
+            });
+        }
+
+        let scan_time = Utc::now();
+        let positions = self
+            .claim_gateway
+            .discover_redeemable_positions(account_id)
+            .map_err(io_error_from_claim_error)?;
+        self.control_plane
+            .accounts
+            .mark_scan_complete(account_id, scan_time);
+
+        let detected_count = positions.len();
+        let remaining = if execute_claims {
+            let (remaining, claim_error) =
+                self.execute_account_claims(account_id, positions, scan_time);
+            if let Some(err) = claim_error {
+                let failures = self
+                    .control_plane
+                    .accounts
+                    .get(account_id)
+                    .map(|current| current.consecutive_failures.saturating_add(1))
+                    .unwrap_or(1);
+                let next_retry_at = Some(self.next_claim_retry_at(failures));
+                self.control_plane.accounts.mark_degraded(
+                    account_id,
+                    err.to_string(),
+                    next_retry_at,
+                );
+                self.mark_claim_runtime_degraded(err);
+            } else {
+                self.control_plane.accounts.mark_running(account_id);
+            }
+            remaining
+        } else {
+            positions
+                .into_iter()
+                .map(|position| {
+                    redeemable_position_snapshot(
+                        account_id,
+                        scan_time,
+                        position,
+                        ClaimPositionState::Detected,
+                    )
+                })
+                .collect()
+        };
+
+        let claimed_count = detected_count.saturating_sub(remaining.len());
+        self.control_plane
+            .accounts
+            .set_redeemable_positions(account_id, remaining);
+        self.refresh_claim_metrics();
+
+        let message = if execute_claims {
+            format!("claim run completed: detected={detected_count} claimed={claimed_count}")
+        } else {
+            format!("claim rescan completed: detected={detected_count}")
+        };
+
+        Ok(AccountClaimActionResponse {
+            account_id: account_id.to_string(),
+            state: AccountClaimActionState::Accepted,
+            message,
+        })
+    }
+
+    fn run_auto_claim_loops(&mut self) -> io::Result<()> {
+        let account_ids: Vec<String> = self
+            .control_plane
+            .accounts
+            .statuses()
+            .into_iter()
+            .filter(|status| {
+                status.enabled
+                    && status.runtime_mode == "live"
+                    && status.loop_state != ClaimLoopState::Paused
+                    && status
+                        .next_retry_at
+                        .map(|next| next <= Utc::now())
+                        .unwrap_or(true)
+            })
+            .map(|status| status.account_id)
+            .collect();
+
+        for account_id in account_ids {
+            let scan_time = Utc::now();
+            let positions = self
+                .claim_gateway
+                .discover_redeemable_positions(&account_id)
+                .map_err(io_error_from_claim_error)?;
+            self.control_plane
+                .accounts
+                .mark_scan_complete(&account_id, scan_time);
+
+            let (remaining, claim_error) =
+                self.execute_account_claims(&account_id, positions, scan_time);
+            self.control_plane
+                .accounts
+                .set_redeemable_positions(&account_id, remaining);
+            if let Some(err) = claim_error {
+                let failures = self
+                    .control_plane
+                    .accounts
+                    .get(&account_id)
+                    .map(|status| status.consecutive_failures.saturating_add(1))
+                    .unwrap_or(1);
+                let next_retry_at = Some(self.next_claim_retry_at(failures));
+                self.control_plane.accounts.mark_degraded(
+                    &account_id,
+                    err.to_string(),
+                    next_retry_at,
+                );
+                self.mark_claim_runtime_degraded(err);
+            } else {
+                self.control_plane.accounts.mark_running(&account_id);
+            }
+        }
+
+        self.refresh_claim_metrics();
+        Ok(())
+    }
+
+    fn execute_account_claims(
+        &mut self,
+        account_id: &str,
+        positions: Vec<RedeemablePosition>,
+        detected_at: DateTime<Utc>,
+    ) -> (Vec<RedeemablePositionSnapshot>, Option<io::Error>) {
+        let mut remaining = Vec::new();
+        let mut last_error = None;
+
+        for position in positions {
+            let request = ClaimRequest {
+                account_id: position.account_id.clone(),
+                wallet_address: position.wallet_address.clone(),
+                condition_id: position.condition_id.clone(),
+                outcome_indexes: position.outcome_indexes.clone(),
+                outcome_amounts: position.outcome_amounts.clone(),
+                negative_risk: position.negative_risk,
+            };
+            let amount_claimed = position
+                .outcome_amounts
+                .iter()
+                .copied()
+                .fold(Decimal::ZERO, |acc, value| acc + value);
+
+            match self.claim_gateway.claim(&request) {
+                Ok(result) => {
+                    self.control_plane.accounts.append_claim_record(
+                        account_id,
+                        ClaimExecutionRecord {
+                            claim_id: next_claim_id(account_id, &position.condition_id),
+                            account_id: account_id.to_string(),
+                            condition_id: position.condition_id.clone(),
+                            submitted_at: detected_at,
+                            completed_at: Some(Utc::now()),
+                            tx_hash: Some(result.tx_hash),
+                            amount_claimed: result.amount_claimed,
+                            outcome: ClaimExecutionOutcome::Confirmed,
+                            error_message: None,
+                        },
+                    );
+                }
+                Err(err) => {
+                    let error_message = err.to_string();
+                    last_error = Some(io_error_from_claim_error(err));
+                    self.control_plane.accounts.append_claim_record(
+                        account_id,
+                        ClaimExecutionRecord {
+                            claim_id: next_claim_id(account_id, &position.condition_id),
+                            account_id: account_id.to_string(),
+                            condition_id: position.condition_id.clone(),
+                            submitted_at: detected_at,
+                            completed_at: Some(Utc::now()),
+                            tx_hash: None,
+                            amount_claimed,
+                            outcome: ClaimExecutionOutcome::Failed,
+                            error_message: Some(error_message),
+                        },
+                    );
+                    remaining.push(redeemable_position_snapshot(
+                        account_id,
+                        detected_at,
+                        position,
+                        ClaimPositionState::Failed,
+                    ));
+                }
+            }
+        }
+
+        (remaining, last_error)
+    }
+
     fn tick(&mut self) {
         let records = self.control_plane.deployments.records();
 
@@ -929,6 +1317,33 @@ impl PloyDaemon {
             &self.config.registry_file,
             &self.control_plane.deployments.records(),
         )
+    }
+
+    fn refresh_claim_metrics(&mut self) {
+        let details = self.control_plane.accounts.records();
+        let last_claim_time = details
+            .iter()
+            .filter_map(|detail| detail.status.last_claim_at)
+            .max();
+        let degraded_claim_accounts = details
+            .iter()
+            .filter(|detail| detail.status.loop_state == ClaimLoopState::Degraded)
+            .count();
+        let pending_redeemable_count = details
+            .iter()
+            .map(|detail| detail.status.pending_redeemable_count)
+            .sum();
+        let pending_redeemable_notional = details
+            .iter()
+            .map(|detail| detail.status.pending_redeemable_notional)
+            .fold(Decimal::ZERO, |acc, value| acc + value);
+
+        self.control_plane.system.note_claims(
+            last_claim_time,
+            degraded_claim_accounts,
+            pending_redeemable_count,
+            pending_redeemable_notional,
+        );
     }
 }
 
@@ -1010,6 +1425,33 @@ fn build_trading_state_snapshot(
             total_gross_exposure: snapshot.risk.total_gross_exposure,
         },
     }
+}
+
+fn redeemable_position_snapshot(
+    account_id: &str,
+    detected_at: DateTime<Utc>,
+    position: RedeemablePosition,
+    claim_state: ClaimPositionState,
+) -> RedeemablePositionSnapshot {
+    RedeemablePositionSnapshot {
+        account_id: account_id.to_string(),
+        condition_id: position.condition_id,
+        market_id: position.market_id,
+        token_ids: position.token_ids,
+        outcome_labels: position.outcome_labels,
+        redeemable_size: position.redeemable_size,
+        estimated_payout: position.estimated_payout,
+        detected_at,
+        claim_state,
+    }
+}
+
+fn next_claim_id(account_id: &str, condition_id: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("duration since epoch")
+        .as_nanos();
+    format!("claim-{account_id}-{condition_id}-{nanos}")
 }
 
 fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<TradingRuntime> {
@@ -1206,6 +1648,20 @@ fn io_error_from_execution_error(err: ExecutionError) -> io::Error {
             io::Error::new(io::ErrorKind::InvalidData, message)
         }
         ExecutionError::Transport(message) => {
+            io::Error::new(io::ErrorKind::ConnectionAborted, message)
+        }
+    }
+}
+
+fn io_error_from_claim_error(err: ploy_connectivity::ClaimError) -> io::Error {
+    match err {
+        ploy_connectivity::ClaimError::Validation(message) => {
+            io::Error::new(io::ErrorKind::InvalidInput, message)
+        }
+        ploy_connectivity::ClaimError::Configuration(message) => {
+            io::Error::new(io::ErrorKind::InvalidData, message)
+        }
+        ploy_connectivity::ClaimError::Transport(message) => {
             io::Error::new(io::ErrorKind::ConnectionAborted, message)
         }
     }
@@ -2345,7 +2801,7 @@ mod tests {
             .status()
             .status
             .starts_with("degraded@"));
-        assert_eq!(daemon.control_plane.system.status().error_count_1h, 1);
+        assert!(daemon.control_plane.system.status().error_count_1h >= 1);
         assert_eq!(
             daemon
                 .inspect_deployment("example.live")

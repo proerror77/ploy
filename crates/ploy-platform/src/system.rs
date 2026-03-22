@@ -1,5 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use ploy_operator_contracts::{SystemControlResponse, SystemStatus};
+use rust_decimal::Decimal;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimePhase {
@@ -26,9 +27,13 @@ pub struct SystemService {
     phase: RuntimePhase,
     listen_addr: Option<String>,
     last_trade_time: Option<DateTime<Utc>>,
+    last_claim_time: Option<DateTime<Utc>>,
     websocket_connected: bool,
     database_connected: bool,
     error_timestamps: Vec<DateTime<Utc>>,
+    degraded_claim_accounts: usize,
+    pending_redeemable_count: usize,
+    pending_redeemable_notional: Decimal,
     live_reconcile_failures: u32,
     next_live_reconcile_at: Option<DateTime<Utc>>,
     last_live_reconcile_error: Option<String>,
@@ -41,9 +46,13 @@ impl Default for SystemService {
             phase: RuntimePhase::Starting,
             listen_addr: None,
             last_trade_time: None,
+            last_claim_time: None,
             websocket_connected: false,
             database_connected: false,
             error_timestamps: Vec::new(),
+            degraded_claim_accounts: 0,
+            pending_redeemable_count: 0,
+            pending_redeemable_notional: Decimal::ZERO,
             live_reconcile_failures: 0,
             next_live_reconcile_at: None,
             last_live_reconcile_error: None,
@@ -106,6 +115,25 @@ impl SystemService {
         }
     }
 
+    pub fn note_claims(
+        &mut self,
+        last_claim_time: Option<DateTime<Utc>>,
+        degraded_claim_accounts: usize,
+        pending_redeemable_count: usize,
+        pending_redeemable_notional: Decimal,
+    ) {
+        if let Some(last_claim_time) = last_claim_time {
+            self.last_claim_time = Some(
+                self.last_claim_time
+                    .map(|current| current.max(last_claim_time))
+                    .unwrap_or(last_claim_time),
+            );
+        }
+        self.degraded_claim_accounts = degraded_claim_accounts;
+        self.pending_redeemable_count = pending_redeemable_count;
+        self.pending_redeemable_notional = pending_redeemable_notional;
+    }
+
     pub fn note_live_reconcile_failure(
         &mut self,
         failures: u32,
@@ -134,6 +162,7 @@ impl SystemService {
             version: env!("CARGO_PKG_VERSION").to_string(),
             strategy: "platform".to_string(),
             last_trade_time: self.last_trade_time,
+            last_claim_time: self.last_claim_time,
             websocket_connected: self.websocket_connected,
             database_connected: self.database_connected,
             error_count_1h: self
@@ -141,6 +170,9 @@ impl SystemService {
                 .iter()
                 .filter(|timestamp| **timestamp >= cutoff)
                 .count() as i64,
+            degraded_claim_accounts: self.degraded_claim_accounts,
+            pending_redeemable_count: self.pending_redeemable_count,
+            pending_redeemable_notional: self.pending_redeemable_notional,
             live_reconcile_failures: self.live_reconcile_failures,
             next_live_reconcile_at: self.next_live_reconcile_at,
             last_live_reconcile_error: self.last_live_reconcile_error.clone(),
@@ -159,6 +191,7 @@ impl SystemService {
 mod tests {
     use super::SystemService;
     use chrono::{Duration, Utc};
+    use rust_decimal::Decimal;
 
     #[test]
     fn system_service_transitions_through_degraded_and_recovering() {
@@ -203,13 +236,18 @@ mod tests {
 
         service.note_trade(Some(earlier));
         service.note_trade(Some(later));
+        service.note_claims(Some(later), 1, 2, Decimal::new(250, 2));
         service.set_database_connected(true);
         service.set_websocket_connected(true);
 
         let status = service.status();
         assert_eq!(status.last_trade_time, Some(later));
+        assert_eq!(status.last_claim_time, Some(later));
         assert!(status.database_connected);
         assert!(status.websocket_connected);
+        assert_eq!(status.degraded_claim_accounts, 1);
+        assert_eq!(status.pending_redeemable_count, 2);
+        assert_eq!(status.pending_redeemable_notional, Decimal::new(250, 2));
         assert_eq!(status.live_reconcile_failures, 0);
     }
 

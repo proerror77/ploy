@@ -3,7 +3,7 @@ use crate::client::ControlPlaneClient;
 pub fn render_system_status(client: &ControlPlaneClient) -> Result<String, String> {
     let status = client.system_snapshot()?;
     Ok(format!(
-        "status={} uptime={}s version={} db_connected={} ws_connected={} errors_1h={} last_trade_time={} live_reconcile_failures={} next_live_reconcile_at={} last_live_reconcile_error={}",
+        "status={} uptime={}s version={} db_connected={} ws_connected={} errors_1h={} last_trade_time={} last_claim_time={} degraded_claim_accounts={} pending_redeemable_count={} pending_redeemable_notional={} live_reconcile_failures={} next_live_reconcile_at={} last_live_reconcile_error={}",
         status.status,
         status.uptime_seconds,
         status.version,
@@ -14,6 +14,13 @@ pub fn render_system_status(client: &ControlPlaneClient) -> Result<String, Strin
             .last_trade_time
             .map(|value| value.to_rfc3339())
             .unwrap_or_else(|| "-".to_string()),
+        status
+            .last_claim_time
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string()),
+        status.degraded_claim_accounts,
+        status.pending_redeemable_count,
+        status.pending_redeemable_notional,
         status.live_reconcile_failures,
         status
             .next_live_reconcile_at
@@ -79,9 +86,13 @@ mod tests {
                 "version": "0.1.0",
                 "strategy": "platform",
                 "last_trade_time": null,
+                "last_claim_time": null,
                 "websocket_connected": false,
                 "database_connected": false,
                 "error_count_1h": 0,
+                "degraded_claim_accounts": 0,
+                "pending_redeemable_count": 0,
+                "pending_redeemable_notional": "0",
                 "live_reconcile_failures": 0,
                 "next_live_reconcile_at": null,
                 "last_live_reconcile_error": null
@@ -94,6 +105,7 @@ mod tests {
         let output = render_system_status(&client).expect("system status");
         assert!(output.contains("running"));
         assert!(output.contains("live_reconcile_failures=0"));
+        assert!(output.contains("degraded_claim_accounts=0"));
     }
 
     #[test]

@@ -25,6 +25,14 @@ cookie so `/api/events/stream` stays authenticated. Set
 `PLOY_API_AUTH_COOKIE_SECRET` too if you want those browser sessions to survive
 daemon restarts. Set `PLOY_REQUEST_RATE_LIMIT_PER_MINUTE` if you need a tighter
 or looser daemon-side HTTP throttle; `0` disables it. Set
+`PLOY_CLAIM_TICK_INTERVAL_MS`, `PLOY_CLAIM_BACKOFF_BASE_MS`, and
+`PLOY_CLAIM_BACKOFF_MAX_MS` if you need to tune account-level auto-claim
+scanning and retry behavior. Set `POLYMARKET_PRIVATE_KEY`,
+`POLY_RELAYER_URL`, `POLY_BUILDER_API_KEY`, `POLY_BUILDER_SECRET`, and
+`POLY_BUILDER_PASSPHRASE` for live relay-first redeem support, and set
+`POLY_SIGNATURE_TYPE=proxy` or `gnosis_safe` because relay-backed auto-claim
+does not support plain EOA wallets. `gnosis_safe` wallets will auto-deploy
+through the relayer on first claim if needed. Set
 `PLOY_LIVE_RECONCILE_BACKOFF_BASE_MS` and
 `PLOY_LIVE_RECONCILE_BACKOFF_MAX_MS` if you need to tune live venue reconcile
 retry backoff during exchange/API outages.
@@ -34,6 +42,7 @@ retry backoff during exchange/API outages.
 ```bash
 cargo run -p ployctl -- system status
 cargo run -p ployctl -- system audit
+cargo run -p ployctl -- claims list
 cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments list
 cargo run -p ploytui
@@ -55,6 +64,9 @@ ployd
 ployctl deployments apply config/deployments/example.paper.json
 ployctl system status
 ployctl system audit
+ployctl claims list
+ployctl claims inspect acct-live
+ployctl claims run acct-live
 ployctl trading status
 ployctl deployments list
 ployctl deployments inspect example.paper
@@ -75,3 +87,7 @@ for authenticated control-plane actions, and `ployctl system audit` reads the
 latest entries back over `/api/audit/logs`. `ployctl system status` now also
 shows `live_reconcile_failures`, `next_live_reconcile_at`, and
 `last_live_reconcile_error`, which are the primary live-venue outage signals.
+Account-level auto-claim is default-on for live accounts, and `ployctl claims`
+is the manual inspection / override surface. Auto-claim now submits redeem
+transactions through the Polymarket relayer, then resolves final receipts via
+Polygon RPC.
