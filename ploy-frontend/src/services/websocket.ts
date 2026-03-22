@@ -1,8 +1,10 @@
 import type {
+  AlertRecord,
   DeploymentSummary,
   LogEntry,
   MarketData,
   Position,
+  SystemMetrics,
   SystemStatus,
   Trade,
   TradingStateSnapshot,
@@ -16,7 +18,9 @@ export type WebSocketEvent =
   | { type: 'status'; data: { status: 'running' | 'stopped' | 'error' } }
   | { type: 'system_snapshot'; data: { system: SystemStatus } }
   | { type: 'deployment_snapshot'; data: { deployments: DeploymentSummary[] } }
-  | { type: 'trading_snapshot'; data: { trading: TradingStateSnapshot[] } };
+  | { type: 'trading_snapshot'; data: { trading: TradingStateSnapshot[] } }
+  | { type: 'alert_snapshot'; data: { alerts: AlertRecord[] } }
+  | { type: 'metrics_snapshot'; data: { metrics: SystemMetrics } };
 
 type ConnectionCallback = (connected: boolean) => void;
 
@@ -84,7 +88,9 @@ export class WebSocketService {
         t === 'status' ||
         t === 'system_snapshot' ||
         t === 'deployment_snapshot' ||
-        t === 'trading_snapshot'
+        t === 'trading_snapshot' ||
+        t === 'alert_snapshot' ||
+        t === 'metrics_snapshot'
       ) {
         this.emit({ type: t, data } as WebSocketEvent);
       }
@@ -141,7 +147,6 @@ export class WebSocketService {
       wildcardListeners.forEach((callback) => callback(event));
     }
   }
-
 }
 
 export const ws = new WebSocketService();

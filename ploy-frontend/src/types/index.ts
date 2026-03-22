@@ -61,6 +61,40 @@ export interface SystemStatus {
   last_live_reconcile_error: string | null;
 }
 
+export type AlertSeverity = 'info' | 'warning' | 'critical';
+
+export interface AlertRecord {
+  alert_id: string;
+  severity: AlertSeverity;
+  kind: string;
+  source: string;
+  resource_type: string;
+  resource_id: string | null;
+  message: string;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+export interface SystemMetrics {
+  deployments_total: number;
+  deployments_running: number;
+  deployments_degraded: number;
+  deployments_failed: number;
+  live_deployments: number;
+  paper_deployments: number;
+  claim_accounts_total: number;
+  claim_accounts_degraded: number;
+  pending_intents: number;
+  active_orders: number;
+  open_positions: number;
+  gross_exposure: string;
+  reserved_order_exposure: string;
+  total_gross_exposure: string;
+  active_alert_count: number;
+  warning_alert_count: number;
+  critical_alert_count: number;
+}
+
 export interface SystemControlResponse {
   success: boolean;
   message: string;
@@ -189,7 +223,9 @@ export type WsMessage =
   | { type: 'status'; data: StatusUpdate }
   | { type: 'system_snapshot'; data: { system: SystemStatus } }
   | { type: 'deployment_snapshot'; data: { deployments: DeploymentSummary[] } }
-  | { type: 'trading_snapshot'; data: { trading: TradingStateSnapshot[] } };
+  | { type: 'trading_snapshot'; data: { trading: TradingStateSnapshot[] } }
+  | { type: 'alert_snapshot'; data: { alerts: AlertRecord[] } }
+  | { type: 'metrics_snapshot'; data: { metrics: SystemMetrics } };
 
 export interface PnLDataPoint {
   timestamp: string;

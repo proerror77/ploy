@@ -1,8 +1,10 @@
 import type {
+  AlertRecord,
   TodayStats,
   Trade,
   Position,
   SystemStatus,
+  SystemMetrics,
   SystemControlResponse,
   StrategyConfig,
   DeploymentSummary,
@@ -162,6 +164,14 @@ class ApiService {
   // System endpoints
   async getSystemStatus(): Promise<SystemStatus> {
     return this.fetch<SystemStatus>('/system/status');
+  }
+
+  async getSystemMetrics(): Promise<SystemMetrics> {
+    return this.fetch<SystemMetrics>('/system/metrics');
+  }
+
+  async getSystemAlerts(): Promise<AlertRecord[]> {
+    return this.fetch<AlertRecord[]>('/system/alerts');
   }
 
   async startSystem(): Promise<SystemControlResponse> {
