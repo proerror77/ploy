@@ -86,7 +86,6 @@ For a minimal live host, set at least:
 
 ```bash
 PLOY_ADMIN_TOKEN=change-me
-PLOY_API_AUTH_COOKIE_SECRET=replace-me-with-randomness
 
 POLYMARKET_PRIVATE_KEY=0x...
 POLYMARKET_API_KEY=...
@@ -104,6 +103,12 @@ POLYGON_RPC_URL=https://polygon.drpc.org
 
 If you use a SAFE-backed wallet, set `POLY_SIGNATURE_TYPE=gnosis_safe`.
 
+Recommended for stable browser sessions across daemon restarts:
+
+```bash
+PLOY_API_AUTH_COOKIE_SECRET=replace-me-with-randomness
+```
+
 Optional hardening:
 
 - `PLOY_SIDECAR_AUTH_TOKEN=...`
@@ -115,7 +120,8 @@ Optional hardening:
 - `PLOY_LIVE_RECONCILE_BACKOFF_MAX_MS=...`
 
 `/opt/ploy/bin/ployctl` automatically reuses `PLOY_ADMIN_TOKEN`,
-`PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` from the host environment.
+`PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` from the caller environment. On a
+hardened host, source `/opt/ploy/.env` before running operator checks.
 
 Browser operator sessions authenticate through `/auth/login`; `ployd` issues an
 `HttpOnly` same-site signed session cookie so the frontend and SSE event stream
@@ -128,6 +134,7 @@ sudo systemctl status ployd --no-pager
 sudo systemctl show ployd -p MemoryMax -p Restart -p OOMPolicy
 sudo journalctl -u ployd -n 200 --no-pager
 curl -fsS http://127.0.0.1:8081/health
+set -a; . /opt/ploy/.env; set +a
 /opt/ploy/bin/ployctl system status
 /opt/ploy/bin/ployctl system audit
 /opt/ploy/bin/ployctl claims list
@@ -148,6 +155,7 @@ Use
 as the template for a minimal live deployment resource.
 
 ```bash
+set -a; . /opt/ploy/.env; set +a
 /opt/ploy/bin/ployctl deployments apply /opt/ploy/config/deployments/example.live.json
 /opt/ploy/bin/ployctl deployments inspect example.live
 /opt/ploy/bin/ployctl claims list

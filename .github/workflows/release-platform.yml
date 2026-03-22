@@ -146,6 +146,11 @@ jobs:
             $SUDO systemctl show ployd -p MemoryMax -p Restart -p OOMPolicy
             curl -fsS http://127.0.0.1:8081/health
             curl -N --max-time 2 http://127.0.0.1:8081/api/events/stream || true
+            if [ -f "${DEPLOY_ROOT}/.env" ]; then
+              set -a
+              . "${DEPLOY_ROOT}/.env"
+              set +a
+            fi
             # Verify the deployed operator client path: ployctl system status
             # Verify the deployed operator client path: ployctl trading status
             "${DEPLOY_ROOT}/bin/ployctl" system status

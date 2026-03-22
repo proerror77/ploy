@@ -19,22 +19,23 @@ This is the only default operator path for the current workspace platform.
 
 Use this path when you want offline datasets, replay, or backtest preparation:
 
-- `ploy collect`
-- `ploy collect --check-only`
-- `ploy orderbook-history`
-- `ploy deribit-iv-backfill`
-- `ploy strategy backfill-*`
 - `crates/ploy-research`
 - `config/strategies/*.toml`
+- archived or compatibility-focused research workflows documented outside the
+  default `ployd` runtime path
 
-These are offline or compatibility-oriented workflows. They do not run inside
-`ployd`.
+The current workspace root `ploy` binary is only a compatibility shim. Do not
+treat historical `ploy collect`, `ploy orderbook-history`, or `ploy strategy
+backfill-*` examples as live runnable entrypoints on this branch.
+
+These research assets do not run inside `ployd`.
 
 ## Rule Of Thumb
 
 - Want a 24x7 daemon or a deployment resource: use `ployd`
-- Want historical data, replay tables, or backtest prep: use the offline
-  `ploy ...` command family
+- Want historical data, replay tables, or backtest prep: use
+  `crates/ploy-research`, `config/strategies/*.toml`, and archived research
+  workflows instead of the `ployd` runtime
 
 ## What Not To Do
 

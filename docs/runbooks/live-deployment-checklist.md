@@ -23,7 +23,6 @@ At minimum, set these in `/opt/ploy/.env`:
 
 ```bash
 PLOY_ADMIN_TOKEN=change-me
-PLOY_API_AUTH_COOKIE_SECRET=replace-me-with-32-bytes-of-randomness
 
 POLYMARKET_PRIVATE_KEY=0x...
 POLYMARKET_API_KEY=...
@@ -37,6 +36,12 @@ POLY_BUILDER_API_KEY=...
 POLY_BUILDER_SECRET=...
 POLY_BUILDER_PASSPHRASE=...
 POLYGON_RPC_URL=https://polygon.drpc.org
+```
+
+Recommended for browser sessions that should survive daemon restarts:
+
+```bash
+PLOY_API_AUTH_COOKIE_SECRET=replace-me-with-32-bytes-of-randomness
 ```
 
 If you run a SAFE-backed wallet instead of a proxy wallet:
@@ -63,6 +68,7 @@ sudo systemctl restart ployd
 sudo systemctl status ployd --no-pager
 sudo systemctl show ployd -p MemoryMax -p Restart -p OOMPolicy
 curl -fsS http://127.0.0.1:8081/health
+set -a; . /opt/ploy/.env; set +a
 ```
 
 Expected:
@@ -75,6 +81,7 @@ Expected:
 ## 4. Verify Control Plane Before Applying Live Deployment
 
 ```bash
+set -a; . /opt/ploy/.env; set +a
 /opt/ploy/bin/ployctl system status
 /opt/ploy/bin/ployctl system audit
 /opt/ploy/bin/ployctl claims list
@@ -109,6 +116,7 @@ Expected:
 Use these as the minimum operator loop:
 
 ```bash
+set -a; . /opt/ploy/.env; set +a
 /opt/ploy/bin/ployctl system status
 /opt/ploy/bin/ployctl system audit
 /opt/ploy/bin/ployctl claims list

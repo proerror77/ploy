@@ -60,7 +60,8 @@ Compatibility note:
 
 - `ployd`, `ployctl`, and `ploytui` are the default workspace entrypoints for the trading platform spine.
 - The old root runtime tree has been retired from the compiled workspace.
-- Offline `ploy ...` command families remain for research, backfill, and compatibility workflows only.
+- The root `ploy` binary in this workspace is only a compatibility shim.
+- Historical `ploy ...` research and backfill commands remain archive/reference material until a dedicated research CLI returns.
 
 ## Features
 
@@ -216,16 +217,18 @@ retired single-binary claimer path.
 
 ### Research And Backtest Path
 
-Use the offline command family when you want datasets, replay tables, or
-backtest prep:
+Use the research/backtest side of the repo when you want datasets, replay
+tables, or backtest prep:
 
-- `ploy collect`
-- `ploy collect --check-only`
-- `ploy orderbook-history`
-- `ploy deribit-iv-backfill`
-- `ploy strategy backfill-*`
 - `crates/ploy-research`
 - `config/strategies/*.toml`
+- archived collector/backfill workflows kept outside the default `ployd`
+  runtime path
+
+The current workspace root `ploy` binary is only a compatibility shim. Treat
+historical `ploy collect`, `ploy orderbook-history`, and `ploy strategy
+backfill-*` examples as archive/reference material, not as live entrypoints on
+this branch.
 
 See:
 
