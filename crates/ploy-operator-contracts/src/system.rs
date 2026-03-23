@@ -1,6 +1,59 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeartbeatState {
+    Healthy,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatStatus {
+    pub source_id: String,
+    pub source_kind: String,
+    pub state: HeartbeatState,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub stale_after_seconds: i64,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertSeverity {
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertKind {
+    SourceStale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveAlert {
+    pub alert_id: String,
+    pub kind: AlertKind,
+    pub severity: AlertSeverity,
+    pub source_id: String,
+    pub message: String,
+    pub triggered_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformMetrics {
+    pub total_deployments: usize,
+    pub live_deployments: usize,
+    pub degraded_deployments: usize,
+    pub active_alerts: usize,
+    pub stale_sources: usize,
+    pub live_reconcile_failures: u32,
+    pub last_trade_time: Option<DateTime<Utc>>,
+    pub last_live_reconcile_success_at: Option<DateTime<Utc>>,
+    pub heartbeats: Vec<HeartbeatStatus>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemStatus {
     pub status: String,
@@ -17,6 +70,12 @@ pub struct SystemStatus {
     pub next_live_reconcile_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_live_reconcile_error: Option<String>,
+    #[serde(default)]
+    pub active_alert_count: usize,
+    #[serde(default)]
+    pub stale_source_count: usize,
+    #[serde(default)]
+    pub last_live_reconcile_success_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

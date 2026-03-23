@@ -22,6 +22,9 @@ fn build_snapshot(client: &ControlPlaneClient) -> DashboardSnapshot {
                 live_reconcile_failures: 0,
                 next_live_reconcile_at: None,
                 last_live_reconcile_error: None,
+                active_alert_count: 0,
+                stale_source_count: 0,
+                last_live_reconcile_success_at: None,
             }
         }),
         deployments: client.list_deployments(),

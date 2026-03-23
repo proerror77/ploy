@@ -17,6 +17,9 @@ pub struct PlatformConfig {
     pub request_rate_limit_per_minute: u32,
     pub live_reconcile_backoff_base_ms: u64,
     pub live_reconcile_backoff_max_ms: u64,
+    pub worker_heartbeat_stale_after_ms: u64,
+    pub live_reconcile_stale_after_ms: u64,
+    pub venue_stale_after_ms: u64,
 }
 
 impl Default for PlatformConfig {
@@ -37,6 +40,9 @@ impl Default for PlatformConfig {
             request_rate_limit_per_minute: 240,
             live_reconcile_backoff_base_ms: 1_000,
             live_reconcile_backoff_max_ms: 30_000,
+            worker_heartbeat_stale_after_ms: 15_000,
+            live_reconcile_stale_after_ms: 15_000,
+            venue_stale_after_ms: 15_000,
         }
     }
 }
@@ -113,6 +119,21 @@ impl PlatformConfig {
                 config.live_reconcile_backoff_max_ms = parsed;
             }
         }
+        if let Ok(value) = std::env::var("PLOY_WORKER_HEARTBEAT_STALE_AFTER_MS") {
+            if let Ok(parsed) = value.parse() {
+                config.worker_heartbeat_stale_after_ms = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("PLOY_LIVE_RECONCILE_STALE_AFTER_MS") {
+            if let Ok(parsed) = value.parse() {
+                config.live_reconcile_stale_after_ms = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("PLOY_VENUE_STALE_AFTER_MS") {
+            if let Ok(parsed) = value.parse() {
+                config.venue_stale_after_ms = parsed;
+            }
+        }
 
         config
     }
@@ -173,5 +194,8 @@ mod tests {
         assert_eq!(config.request_rate_limit_per_minute, 240);
         assert_eq!(config.live_reconcile_backoff_base_ms, 1_000);
         assert_eq!(config.live_reconcile_backoff_max_ms, 30_000);
+        assert_eq!(config.worker_heartbeat_stale_after_ms, 15_000);
+        assert_eq!(config.live_reconcile_stale_after_ms, 15_000);
+        assert_eq!(config.venue_stale_after_ms, 15_000);
     }
 }
