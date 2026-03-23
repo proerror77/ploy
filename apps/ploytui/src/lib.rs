@@ -1,11 +1,14 @@
 use ploy_operator_contracts::{
-    DeploymentSummary, OperatorEvent, SystemStatus, TradingStateSnapshot,
+    ActiveAlert, DeploymentSummary, OperatorEvent, PlatformMetrics, SystemStatus,
+    TradingStateSnapshot,
 };
 use std::fmt::Write;
 
 #[derive(Debug, Clone)]
 pub struct DashboardSnapshot {
     pub system: SystemStatus,
+    pub metrics: PlatformMetrics,
+    pub alerts: Vec<ActiveAlert>,
     pub deployments: Vec<DeploymentSummary>,
     pub trading: Vec<TradingStateSnapshot>,
     pub recent_events: Vec<OperatorEvent>,
@@ -20,12 +23,65 @@ pub fn render_dashboard(snapshot: &DashboardSnapshot) -> String {
     let _ = writeln!(out, "System");
     let _ = writeln!(
         out,
-        "status={} uptime={}s version={} errors_1h={}",
+        "status={} uptime={}s version={} errors_1h={} active_alerts={} stale_sources={}",
         snapshot.system.status,
         snapshot.system.uptime_seconds,
         snapshot.system.version,
-        snapshot.system.error_count_1h
+        snapshot.system.error_count_1h,
+        snapshot.system.active_alert_count,
+        snapshot.system.stale_source_count,
     );
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "Metrics");
+    let _ = writeln!(
+        out,
+        "deployments_total={} live={} degraded={} live_reconcile_failures={} last_live_reconcile_success_at={}",
+        snapshot.metrics.total_deployments,
+        snapshot.metrics.live_deployments,
+        snapshot.metrics.degraded_deployments,
+        snapshot.metrics.live_reconcile_failures,
+        snapshot
+            .metrics
+            .last_live_reconcile_success_at
+            .map(|value| value.to_rfc3339())
+            .unwrap_or_else(|| "-".to_string())
+    );
+    if snapshot.metrics.heartbeats.is_empty() {
+        let _ = writeln!(out, "  heartbeats=none");
+    } else {
+        for heartbeat in &snapshot.metrics.heartbeats {
+            let _ = writeln!(
+                out,
+                "  {} {} state={} last_seen={} message={}",
+                heartbeat.source_kind,
+                heartbeat.source_id,
+                format!("{:?}", heartbeat.state).to_lowercase(),
+                heartbeat
+                    .last_seen_at
+                    .map(|value| value.to_rfc3339())
+                    .unwrap_or_else(|| "-".to_string()),
+                heartbeat.message.clone().unwrap_or_else(|| "-".to_string())
+            );
+        }
+    }
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "Active Alerts");
+    if snapshot.alerts.is_empty() {
+        let _ = writeln!(out, "  none");
+    } else {
+        for alert in &snapshot.alerts {
+            let _ = writeln!(
+                out,
+                "  {} {} {} {}",
+                alert.triggered_at.to_rfc3339(),
+                format!("{:?}", alert.severity).to_lowercase(),
+                alert.source_id,
+                alert.message
+            );
+        }
+    }
     let _ = writeln!(out);
 
     let _ = writeln!(out, "Deployments");
@@ -122,8 +178,9 @@ mod tests {
     use super::{render_dashboard, render_event_line, DashboardSnapshot};
     use chrono::Utc;
     use ploy_operator_contracts::{
-        DeploymentSnapshotEvent, DeploymentState, DeploymentSummary, DesiredState, ObservedState,
-        OperatorEvent, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
+        ActiveAlert, AlertKind, AlertSeverity, DeploymentSnapshotEvent, DeploymentState,
+        DeploymentSummary, DesiredState, HeartbeatState, HeartbeatStatus, ObservedState,
+        OperatorEvent, PlatformMetrics, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
         TradingStateSnapshot,
     };
 
@@ -145,6 +202,32 @@ mod tests {
                 stale_source_count: 0,
                 last_live_reconcile_success_at: None,
             },
+            metrics: PlatformMetrics {
+                total_deployments: 1,
+                live_deployments: 0,
+                degraded_deployments: 0,
+                active_alerts: 1,
+                stale_sources: 1,
+                live_reconcile_failures: 0,
+                last_trade_time: None,
+                last_live_reconcile_success_at: None,
+                heartbeats: vec![HeartbeatStatus {
+                    source_id: "worker:example.paper".to_string(),
+                    source_kind: "worker".to_string(),
+                    state: HeartbeatState::Healthy,
+                    last_seen_at: Some(Utc::now()),
+                    stale_after_seconds: 15,
+                    message: None,
+                }],
+            },
+            alerts: vec![ActiveAlert {
+                alert_id: "source-stale:live_reconcile".to_string(),
+                kind: AlertKind::SourceStale,
+                severity: AlertSeverity::Critical,
+                source_id: "live_reconcile".to_string(),
+                message: "live reconcile loop exceeded stale threshold".to_string(),
+                triggered_at: Utc::now(),
+            }],
             deployments: vec![DeploymentSummary {
                 deployment_id: "example.paper".to_string(),
                 account_id: "acct-paper".to_string(),
@@ -206,6 +289,8 @@ mod tests {
         assert!(output.contains("System"));
         assert!(output.contains("Deployments"));
         assert!(output.contains("Trading"));
+        assert!(output.contains("Metrics"));
+        assert!(output.contains("Active Alerts"));
         assert!(output.contains("Recent Events"));
         assert!(output.contains("example.paper"));
         assert!(output.contains("running"));

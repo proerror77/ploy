@@ -52,6 +52,47 @@ export interface SystemStatus {
   websocket_connected: boolean;
   database_connected: boolean;
   error_count_1h: number;
+  live_reconcile_failures: number;
+  next_live_reconcile_at: string | null;
+  last_live_reconcile_error: string | null;
+  active_alert_count: number;
+  stale_source_count: number;
+  last_live_reconcile_success_at: string | null;
+}
+
+export type HeartbeatState = 'healthy' | 'stale';
+
+export interface HeartbeatStatus {
+  source_id: string;
+  source_kind: string;
+  state: HeartbeatState;
+  last_seen_at: string | null;
+  stale_after_seconds: number;
+  message: string | null;
+}
+
+export type AlertSeverity = 'warning' | 'critical';
+export type AlertKind = 'source_stale';
+
+export interface ActiveAlert {
+  alert_id: string;
+  kind: AlertKind;
+  severity: AlertSeverity;
+  source_id: string;
+  message: string;
+  triggered_at: string;
+}
+
+export interface PlatformMetrics {
+  total_deployments: number;
+  live_deployments: number;
+  degraded_deployments: number;
+  active_alerts: number;
+  stale_sources: number;
+  live_reconcile_failures: number;
+  last_trade_time: string | null;
+  last_live_reconcile_success_at: string | null;
+  heartbeats: HeartbeatStatus[];
 }
 
 export interface SystemControlResponse {
@@ -165,7 +206,9 @@ export type WsMessage =
   | { type: 'status'; data: StatusUpdate }
   | { type: 'system_snapshot'; data: { system: SystemStatus } }
   | { type: 'deployment_snapshot'; data: { deployments: DeploymentSummary[] } }
-  | { type: 'trading_snapshot'; data: { trading: TradingStateSnapshot[] } };
+  | { type: 'trading_snapshot'; data: { trading: TradingStateSnapshot[] } }
+  | { type: 'metrics_snapshot'; data: { metrics: PlatformMetrics } }
+  | { type: 'alert_snapshot'; data: { alerts: ActiveAlert[] } };
 
 export interface PnLDataPoint {
   timestamp: string;

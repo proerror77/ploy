@@ -12,6 +12,8 @@ import type {
   RiskData,
   DesiredState,
   DeploymentState,
+  PlatformMetrics,
+  ActiveAlert,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -161,6 +163,14 @@ class ApiService {
   // System endpoints
   async getSystemStatus(): Promise<SystemStatus> {
     return this.fetch<SystemStatus>('/system/status');
+  }
+
+  async getSystemMetrics(): Promise<PlatformMetrics> {
+    return this.fetch<PlatformMetrics>('/system/metrics');
+  }
+
+  async getSystemAlerts(): Promise<ActiveAlert[]> {
+    return this.fetch<ActiveAlert[]>('/system/alerts');
   }
 
   async startSystem(): Promise<SystemControlResponse> {
