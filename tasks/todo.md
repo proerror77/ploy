@@ -27,7 +27,7 @@ Finish the remaining production-hardening work on the workspace control-plane ru
 - [x] Add platform metrics/alerts contracts and daemon health state.
 - [x] Add stale-source heartbeat tracking and degraded/recovering projection.
 - [x] Expose metrics/alerts through HTTP, SSE, CLI, TUI, and frontend.
-- [ ] Refine auth scopes from public/read-only/admin to capability bands.
+- [x] Refine auth scopes from public/read-only/admin to capability bands.
 - [x] Re-run focused Rust and frontend verification.
 
 ## Progress notes
@@ -41,6 +41,10 @@ Finish the remaining production-hardening work on the workspace control-plane ru
   - `rtk cargo test --test platform_smoke`
   - `cd ploy-frontend && npm run build`
   - `cd ploy-frontend && npm run lint`
+- 2026-03-23: Refined auth scopes to `public`, `read_only`, `operator`, and `admin`; added `PLOY_OPERATOR_TOKEN` / `PLOY_API_OPERATOR_TOKEN`, taught `ployctl` to prefer admin then operator then sidecar credentials, and kept browser login/session issuance on admin only.
+- 2026-03-23: Focused verification passed for auth scope refinement:
+  - `rtk cargo test -p ployd -p ployctl -p ploytui`
+  - `rtk cargo test --test platform_smoke`
 
 # Live Reconcile Backoff Hardening (2026-03-21)
 

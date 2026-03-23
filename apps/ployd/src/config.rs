@@ -5,6 +5,7 @@ use std::path::PathBuf;
 pub struct PlatformConfig {
     pub listen_addr: String,
     pub admin_token: Option<SecretString>,
+    pub operator_token: Option<SecretString>,
     pub sidecar_token: Option<SecretString>,
     pub auth_cookie_secret: SecretString,
     pub registry_file: PathBuf,
@@ -28,6 +29,7 @@ impl Default for PlatformConfig {
         Self {
             listen_addr: "127.0.0.1:8081".to_string(),
             admin_token: None,
+            operator_token: None,
             sidecar_token: None,
             auth_cookie_secret: generate_cookie_secret(),
             registry_file: PathBuf::from("data/state/deployments.json"),
@@ -61,6 +63,15 @@ impl PlatformConfig {
         } else if let Ok(value) = std::env::var("PLOY_API_ADMIN_TOKEN") {
             if !value.trim().is_empty() {
                 config.admin_token = Some(SecretString::from(value));
+            }
+        }
+        if let Ok(value) = std::env::var("PLOY_OPERATOR_TOKEN") {
+            if !value.trim().is_empty() {
+                config.operator_token = Some(SecretString::from(value));
+            }
+        } else if let Ok(value) = std::env::var("PLOY_API_OPERATOR_TOKEN") {
+            if !value.trim().is_empty() {
+                config.operator_token = Some(SecretString::from(value));
             }
         }
         if let Ok(value) = std::env::var("PLOY_SIDECAR_AUTH_TOKEN") {
@@ -167,6 +178,7 @@ mod tests {
     fn default_paths_match_workspace_contract() {
         let config = PlatformConfig::default();
         assert!(config.admin_token.is_none());
+        assert!(config.operator_token.is_none());
         assert!(config.sidecar_token.is_none());
         assert!(!config.auth_cookie_secret.expose_secret().is_empty());
         assert_eq!(

@@ -18,8 +18,10 @@ cargo run -p ployd
 ```
 
 If you want the control plane protected, export `PLOY_ADMIN_TOKEN` first.
-Optionally set `PLOY_SIDECAR_AUTH_TOKEN` for read-only sidecar/agent access.
-`ployctl` uses the admin bearer token surface directly. The frontend login
+Optionally set `PLOY_OPERATOR_TOKEN` for write-capable operator automation, or
+`PLOY_SIDECAR_AUTH_TOKEN` for read-only sidecar/agent access. `ployctl`
+automatically prefers admin credentials, then operator credentials, then the
+sidecar token. The frontend login
 flow uses `/auth/login`, which sets an `HttpOnly` same-site signed session
 cookie so `/api/events/stream` stays authenticated. Set
 `PLOY_API_AUTH_COOKIE_SECRET` too if you want those browser sessions to survive
