@@ -1,5 +1,5 @@
 use crate::deployments::DeploymentSummary;
-use crate::system::SystemStatus;
+use crate::system::{ActiveAlert, PlatformMetrics, SystemStatus};
 use crate::trading::{MarketData, PositionResponse, TradeResponse, TradingStateSnapshot};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,16 @@ pub struct TradingSnapshotEvent {
     pub trading: Vec<TradingStateSnapshot>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetricsSnapshotEvent {
+    pub metrics: PlatformMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertSnapshotEvent {
+    pub alerts: Vec<ActiveAlert>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum OperatorEvent {
@@ -52,6 +62,10 @@ pub enum OperatorEvent {
     DeploymentSnapshot(DeploymentSnapshotEvent),
     #[serde(rename = "trading_snapshot")]
     TradingSnapshot(TradingSnapshotEvent),
+    #[serde(rename = "metrics_snapshot")]
+    MetricsSnapshot(MetricsSnapshotEvent),
+    #[serde(rename = "alert_snapshot")]
+    AlertSnapshot(AlertSnapshotEvent),
 }
 
 pub type WsMessage = OperatorEvent;
@@ -59,13 +73,15 @@ pub type WsMessage = OperatorEvent;
 #[cfg(test)]
 mod tests {
     use super::{
-        DeploymentSnapshotEvent, OperatorEvent, StatusUpdate, SystemSnapshotEvent,
-        TradingSnapshotEvent,
+        AlertSnapshotEvent, DeploymentSnapshotEvent, MetricsSnapshotEvent, OperatorEvent,
+        StatusUpdate, SystemSnapshotEvent, TradingSnapshotEvent,
     };
     use crate::{
-        DeploymentState, DeploymentSummary, DesiredState, ObservedState, SystemStatus,
+        ActiveAlert, AlertKind, AlertSeverity, DeploymentState, DeploymentSummary, DesiredState,
+        HeartbeatState, HeartbeatStatus, ObservedState, PlatformMetrics, SystemStatus,
         TradingStateSnapshot,
     };
+    use chrono::Utc;
     use rust_decimal::Decimal;
     use serde_json::json;
 
@@ -135,6 +151,9 @@ mod tests {
                 live_reconcile_failures: 0,
                 next_live_reconcile_at: None,
                 last_live_reconcile_error: None,
+                active_alert_count: 0,
+                stale_source_count: 0,
+                last_live_reconcile_success_at: None,
             },
         }))
         .expect("to_value");
@@ -156,6 +175,9 @@ mod tests {
                         "live_reconcile_failures": 0,
                         "next_live_reconcile_at": null,
                         "last_live_reconcile_error": null,
+                        "active_alert_count": 0,
+                        "stale_source_count": 0,
+                        "last_live_reconcile_success_at": null,
                     }
                 }
             })
@@ -203,5 +225,53 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn metrics_snapshot_event_uses_stable_wire_shape() {
+        let value = serde_json::to_value(OperatorEvent::MetricsSnapshot(MetricsSnapshotEvent {
+            metrics: PlatformMetrics {
+                total_deployments: 2,
+                live_deployments: 1,
+                degraded_deployments: 1,
+                active_alerts: 1,
+                stale_sources: 1,
+                live_reconcile_failures: 2,
+                last_trade_time: None,
+                last_live_reconcile_success_at: None,
+                heartbeats: vec![HeartbeatStatus {
+                    source_id: "venue:polymarket".to_string(),
+                    source_kind: "venue".to_string(),
+                    state: HeartbeatState::Stale,
+                    last_seen_at: Some(Utc::now()),
+                    stale_after_seconds: 15,
+                    message: Some("gateway offline".to_string()),
+                }],
+            },
+        }))
+        .expect("to_value");
+
+        assert_eq!(value["type"], json!("metrics_snapshot"));
+        assert_eq!(value["data"]["metrics"]["total_deployments"], json!(2));
+        assert_eq!(value["data"]["metrics"]["heartbeats"][0]["state"], json!("stale"));
+    }
+
+    #[test]
+    fn alert_snapshot_event_uses_stable_wire_shape() {
+        let value = serde_json::to_value(OperatorEvent::AlertSnapshot(AlertSnapshotEvent {
+            alerts: vec![ActiveAlert {
+                alert_id: "venue:polymarket:stale".to_string(),
+                kind: AlertKind::SourceStale,
+                severity: AlertSeverity::Critical,
+                source_id: "venue:polymarket".to_string(),
+                message: "gateway offline".to_string(),
+                triggered_at: Utc::now(),
+            }],
+        }))
+        .expect("to_value");
+
+        assert_eq!(value["type"], json!("alert_snapshot"));
+        assert_eq!(value["data"]["alerts"][0]["kind"], json!("source_stale"));
+        assert_eq!(value["data"]["alerts"][0]["severity"], json!("critical"));
     }
 }

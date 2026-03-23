@@ -1,5 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
-use ploy_operator_contracts::{SystemControlResponse, SystemStatus};
+use ploy_operator_contracts::{
+    ActiveAlert, AlertKind, AlertSeverity, HeartbeatState, HeartbeatStatus, PlatformMetrics,
+    SystemControlResponse, SystemStatus,
+};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimePhase {
@@ -32,6 +36,18 @@ pub struct SystemService {
     live_reconcile_failures: u32,
     next_live_reconcile_at: Option<DateTime<Utc>>,
     last_live_reconcile_error: Option<String>,
+    last_live_reconcile_success_at: Option<DateTime<Utc>>,
+    sources: BTreeMap<String, SourceStatus>,
+}
+
+#[derive(Debug, Clone)]
+struct SourceStatus {
+    source_kind: String,
+    last_seen_at: Option<DateTime<Utc>>,
+    stale_after: Duration,
+    forced_stale: bool,
+    message: Option<String>,
+    triggered_at: Option<DateTime<Utc>>,
 }
 
 impl Default for SystemService {
@@ -47,6 +63,8 @@ impl Default for SystemService {
             live_reconcile_failures: 0,
             next_live_reconcile_at: None,
             last_live_reconcile_error: None,
+            last_live_reconcile_success_at: None,
+            sources: BTreeMap::new(),
         }
     }
 }
@@ -80,7 +98,9 @@ impl SystemService {
 
     pub fn mark_degraded(&mut self, listen_addr: &str) {
         self.listen_addr = Some(listen_addr.to_string());
-        self.error_timestamps.push(Utc::now());
+        if self.phase != RuntimePhase::Degraded {
+            self.error_timestamps.push(Utc::now());
+        }
         self.phase = RuntimePhase::Degraded;
     }
 
@@ -121,6 +141,160 @@ impl SystemService {
         self.live_reconcile_failures = 0;
         self.next_live_reconcile_at = None;
         self.last_live_reconcile_error = None;
+        self.last_live_reconcile_success_at = Some(Utc::now());
+    }
+
+    pub fn note_source_heartbeat(
+        &mut self,
+        source_id: impl Into<String>,
+        source_kind: impl Into<String>,
+        stale_after: Duration,
+    ) {
+        let now = Utc::now();
+        let source_kind = source_kind.into();
+        let entry = self
+            .sources
+            .entry(source_id.into())
+            .or_insert_with(|| SourceStatus {
+                source_kind: source_kind.clone(),
+                last_seen_at: None,
+                stale_after,
+                forced_stale: false,
+                message: None,
+                triggered_at: None,
+            });
+        entry.source_kind = source_kind;
+        entry.last_seen_at = Some(now);
+        entry.stale_after = stale_after;
+        entry.forced_stale = false;
+        entry.message = None;
+        entry.triggered_at = None;
+    }
+
+    pub fn note_source_failure(
+        &mut self,
+        source_id: impl Into<String>,
+        source_kind: impl Into<String>,
+        stale_after: Duration,
+        message: String,
+    ) {
+        let now = Utc::now();
+        let source_kind = source_kind.into();
+        let entry = self
+            .sources
+            .entry(source_id.into())
+            .or_insert_with(|| SourceStatus {
+                source_kind: source_kind.clone(),
+                last_seen_at: None,
+                stale_after,
+                forced_stale: false,
+                message: None,
+                triggered_at: None,
+            });
+        entry.source_kind = source_kind;
+        entry.last_seen_at = Some(now);
+        entry.stale_after = stale_after;
+        entry.forced_stale = true;
+        entry.message = Some(message);
+        if entry.triggered_at.is_none() {
+            entry.triggered_at = Some(now);
+        }
+    }
+
+    pub fn clear_source(&mut self, source_id: &str) {
+        self.sources.remove(source_id);
+    }
+
+    pub fn refresh_source_health(&mut self) -> usize {
+        let now = Utc::now();
+        let mut stale_count = 0;
+        for source in self.sources.values_mut() {
+            let is_stale = source.forced_stale
+                || source
+                    .last_seen_at
+                    .map(|last_seen_at| now - last_seen_at > source.stale_after)
+                    .unwrap_or(true);
+            if is_stale {
+                stale_count += 1;
+                if source.triggered_at.is_none() {
+                    source.triggered_at = Some(now);
+                }
+            } else {
+                source.triggered_at = None;
+            }
+        }
+        stale_count
+    }
+
+    pub fn stale_source_count(&self) -> usize {
+        self.sources
+            .values()
+            .filter(|source| source.triggered_at.is_some())
+            .count()
+    }
+
+    pub fn heartbeat_statuses(&self) -> Vec<HeartbeatStatus> {
+        self.sources
+            .iter()
+            .map(|(source_id, source)| HeartbeatStatus {
+                source_id: source_id.clone(),
+                source_kind: source.source_kind.clone(),
+                state: if source.triggered_at.is_some() {
+                    HeartbeatState::Stale
+                } else {
+                    HeartbeatState::Healthy
+                },
+                last_seen_at: source.last_seen_at,
+                stale_after_seconds: source.stale_after.num_seconds(),
+                message: source.message.clone(),
+            })
+            .collect()
+    }
+
+    pub fn active_alerts(&self) -> Vec<ActiveAlert> {
+        self.sources
+            .iter()
+            .filter_map(|(source_id, source)| {
+                let triggered_at = source.triggered_at?;
+                Some(ActiveAlert {
+                    alert_id: format!("{source_id}:stale"),
+                    kind: AlertKind::SourceStale,
+                    severity: alert_severity(&source.source_kind),
+                    source_id: source_id.clone(),
+                    message: source
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| format!("{} source is stale", source.source_kind)),
+                    triggered_at,
+                })
+            })
+            .collect()
+    }
+
+    pub fn source_is_stale(&self, source_id: &str) -> bool {
+        self.sources
+            .get(source_id)
+            .map(|source| source.triggered_at.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn metrics(
+        &self,
+        total_deployments: usize,
+        live_deployments: usize,
+        degraded_deployments: usize,
+    ) -> PlatformMetrics {
+        PlatformMetrics {
+            total_deployments,
+            live_deployments,
+            degraded_deployments,
+            active_alerts: self.active_alerts().len(),
+            stale_sources: self.stale_source_count(),
+            live_reconcile_failures: self.live_reconcile_failures,
+            last_trade_time: self.last_trade_time,
+            last_live_reconcile_success_at: self.last_live_reconcile_success_at,
+            heartbeats: self.heartbeat_statuses(),
+        }
     }
 
     pub fn status(&self) -> SystemStatus {
@@ -144,6 +318,9 @@ impl SystemService {
             live_reconcile_failures: self.live_reconcile_failures,
             next_live_reconcile_at: self.next_live_reconcile_at,
             last_live_reconcile_error: self.last_live_reconcile_error.clone(),
+            active_alert_count: self.active_alerts().len(),
+            stale_source_count: self.stale_source_count(),
+            last_live_reconcile_success_at: self.last_live_reconcile_success_at,
         }
     }
 
@@ -152,6 +329,13 @@ impl SystemService {
             success: true,
             message: format!("system {action} accepted"),
         }
+    }
+}
+
+fn alert_severity(source_kind: &str) -> AlertSeverity {
+    match source_kind {
+        "worker" | "live_reconcile" | "venue" => AlertSeverity::Critical,
+        _ => AlertSeverity::Warning,
     }
 }
 
@@ -221,5 +405,33 @@ mod tests {
 
         service.set_status("running");
         assert_eq!(service.status().status, "running");
+    }
+
+    #[test]
+    fn system_service_surfaces_stale_sources_in_metrics_and_alerts() {
+        let mut service = SystemService::default();
+        service.mark_running("127.0.0.1:8081");
+        service.note_source_failure(
+            "venue:polymarket",
+            "venue",
+            Duration::seconds(15),
+            "gateway offline".to_string(),
+        );
+        service.refresh_source_health();
+
+        let status = service.status();
+        assert_eq!(status.active_alert_count, 1);
+        assert_eq!(status.stale_source_count, 1);
+
+        let metrics = service.metrics(2, 1, 1);
+        assert_eq!(metrics.total_deployments, 2);
+        assert_eq!(metrics.stale_sources, 1);
+        assert_eq!(metrics.active_alerts, 1);
+        assert_eq!(metrics.heartbeats.len(), 1);
+        assert_eq!(metrics.heartbeats[0].source_id, "venue:polymarket");
+
+        let alerts = service.active_alerts();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].source_id, "venue:polymarket");
     }
 }

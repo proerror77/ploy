@@ -1,17 +1,17 @@
 use crate::config::PlatformConfig;
 use crate::events::EventBroker;
 use crate::http::publish_snapshot_events;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ploy_connectivity::{
     CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome, ExecutionRequest,
     LiveExecutionGateway, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, TrackedOrder,
 };
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{
-    DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState, FillSnapshot,
-    IntentPurpose, ObservedState, OrderControlResponse, OrderReplaceRequest, OrderSnapshot,
-    PaperIntentResponse, PnlSnapshotResponse, PositionSnapshotResponse, RiskSnapshotResponse,
-    TradingIntentSnapshot, TradingStateSnapshot,
+    ActiveAlert, DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState,
+    FillSnapshot, IntentPurpose, ObservedState, OrderControlResponse, OrderReplaceRequest,
+    OrderSnapshot, PaperIntentResponse, PlatformMetrics, PnlSnapshotResponse,
+    PositionSnapshotResponse, RiskSnapshotResponse, TradingIntentSnapshot, TradingStateSnapshot,
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
 use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
@@ -100,6 +100,7 @@ impl PloyDaemon {
             Ok(ReconcileStatus::BackoffActive) => {}
             Err(err) => self.mark_live_runtime_degraded(err),
         }
+        self.refresh_source_health();
         if let Err(err) = self.persist_registry() {
             self.control_plane.system.set_database_connected(false);
             self.control_plane
@@ -128,6 +129,23 @@ impl PloyDaemon {
 
     pub fn inspect_deployment(&self, deployment_id: &str) -> Option<DeploymentRecord> {
         self.control_plane.deployments.get(deployment_id).cloned()
+    }
+
+    pub fn platform_metrics(&self) -> PlatformMetrics {
+        let records = self.control_plane.deployments.records();
+        let total_deployments = records.len();
+        let live_deployments = records.iter().filter(|record| record.runtime_mode == "live").count();
+        let degraded_deployments = records
+            .iter()
+            .filter(|record| record.observed_state == ObservedState::Degraded)
+            .count();
+        self.control_plane
+            .system
+            .metrics(total_deployments, live_deployments, degraded_deployments)
+    }
+
+    pub fn active_alerts(&self) -> Vec<ActiveAlert> {
+        self.control_plane.system.active_alerts()
     }
 
     pub fn trading_state(&self) -> Vec<TradingStateSnapshot> {
@@ -633,6 +651,16 @@ impl PloyDaemon {
 
     fn mark_runtime_healthy(&mut self) {
         self.control_plane.system.note_live_reconcile_healthy();
+        self.control_plane.system.note_source_heartbeat(
+            "live_reconcile",
+            "live_reconcile",
+            ChronoDuration::milliseconds(self.config.live_reconcile_stale_after_ms as i64),
+        );
+        self.control_plane.system.note_source_heartbeat(
+            "venue:polymarket",
+            "venue",
+            ChronoDuration::milliseconds(self.config.venue_stale_after_ms as i64),
+        );
         self.control_plane
             .system
             .note_trade(self.latest_trade_time());
@@ -672,6 +700,18 @@ impl PloyDaemon {
         self.control_plane
             .system
             .mark_degraded(&self.config.listen_addr);
+        self.control_plane.system.note_source_failure(
+            "live_reconcile",
+            "live_reconcile",
+            ChronoDuration::milliseconds(self.config.live_reconcile_stale_after_ms as i64),
+            err.to_string(),
+        );
+        self.control_plane.system.note_source_failure(
+            "venue:polymarket",
+            "venue",
+            ChronoDuration::milliseconds(self.config.venue_stale_after_ms as i64),
+            err.to_string(),
+        );
         self.record_live_reconcile_failure(&err);
 
         for record in self.control_plane.deployments.records() {
@@ -896,9 +936,17 @@ impl PloyDaemon {
                         self.control_plane
                             .deployments
                             .set_observed_state(&record.deployment_id, status.observed_state);
+                        self.control_plane.system.note_source_heartbeat(
+                            format!("worker:{}", record.deployment_id),
+                            "worker",
+                            ChronoDuration::milliseconds(self.config.worker_heartbeat_stale_after_ms as i64),
+                        );
                     }
                 }
                 DesiredState::Paused => {
+                    self.control_plane
+                        .system
+                        .clear_source(&format!("worker:{}", record.deployment_id));
                     if let Some(status) = self.supervisor.pause(&record.deployment_id) {
                         self.control_plane
                             .deployments
@@ -910,6 +958,9 @@ impl PloyDaemon {
                     }
                 }
                 DesiredState::Stopped => {
+                    self.control_plane
+                        .system
+                        .clear_source(&format!("worker:{}", record.deployment_id));
                     if let Some(status) = self.supervisor.stop(&record.deployment_id) {
                         self.control_plane
                             .deployments
@@ -920,6 +971,53 @@ impl PloyDaemon {
                             .set_observed_state(&record.deployment_id, ObservedState::Stopped);
                     }
                 }
+            }
+        }
+    }
+
+    fn refresh_source_health(&mut self) {
+        let stale_sources = self.control_plane.system.refresh_source_health();
+        let records = self.control_plane.deployments.records();
+
+        for record in records {
+            if record.desired_state != DesiredState::Running {
+                continue;
+            }
+            let worker_stale = self
+                .control_plane
+                .system
+                .source_is_stale(&format!("worker:{}", record.deployment_id));
+            let live_source_stale = record.runtime_mode == "live"
+                && (self.control_plane.system.source_is_stale("live_reconcile")
+                    || self.control_plane.system.source_is_stale("venue:polymarket"));
+
+            if worker_stale || live_source_stale {
+                self.control_plane
+                    .deployments
+                    .set_observed_state(&record.deployment_id, ObservedState::Degraded);
+            }
+        }
+
+        if stale_sources > 0 {
+            self.control_plane
+                .system
+                .mark_degraded(&self.config.listen_addr);
+            return;
+        }
+
+        if self.control_plane.system.is_degraded() {
+            self.control_plane
+                .system
+                .mark_recovering(&self.config.listen_addr);
+        }
+
+        for record in self.control_plane.deployments.records() {
+            if record.desired_state == DesiredState::Running
+                && record.observed_state == ObservedState::Degraded
+            {
+                self.control_plane
+                    .deployments
+                    .set_observed_state(&record.deployment_id, ObservedState::Running);
             }
         }
     }
@@ -2448,5 +2546,79 @@ mod tests {
             daemon.reconcile_live_fills().expect("backoff reconcile"),
             ReconcileStatus::BackoffActive
         );
+    }
+
+    #[test]
+    fn daemon_surfaces_live_source_failures_in_metrics_and_alerts() {
+        let root = temp_dir("live-source-alerts");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "starting"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            live_reconcile_backoff_base_ms: 0,
+            live_reconcile_backoff_max_ms: 0,
+            ..PlatformConfig::default()
+        };
+
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(FlakyReconcileGateway::default()),
+        )
+        .expect("boot");
+        daemon
+            .submit_intent(TradingIntent {
+                intent_id: "intent-live-metrics".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                limit_price: Some(dec!(0.41)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit live intent");
+
+        daemon.write_runtime_snapshots().expect("degraded snapshot");
+
+        let metrics = daemon.platform_metrics();
+        assert_eq!(metrics.stale_sources, 2);
+        assert_eq!(metrics.active_alerts, 2);
+        assert_eq!(metrics.live_reconcile_failures, 1);
+        assert!(metrics
+            .heartbeats
+            .iter()
+            .any(|status| status.source_id == "live_reconcile"));
+        assert!(metrics
+            .heartbeats
+            .iter()
+            .any(|status| status.source_id == "venue:polymarket"));
+
+        let alerts = daemon.active_alerts();
+        assert_eq!(alerts.len(), 2);
+        assert!(alerts.iter().any(|alert| alert.source_id == "live_reconcile"));
+        assert!(alerts.iter().any(|alert| alert.source_id == "venue:polymarket"));
+        assert!(daemon.control_plane.system.status().status.starts_with("degraded@"));
     }
 }

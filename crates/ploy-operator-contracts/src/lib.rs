@@ -12,10 +12,13 @@ pub use deployments::{
 };
 pub use errors::ControlPlaneErrorResponse;
 pub use events::{
-    DeploymentSnapshotEvent, LogEntry, OperatorEvent, StatusUpdate, SystemSnapshotEvent,
-    TradingSnapshotEvent, WsMessage,
+    AlertSnapshotEvent, DeploymentSnapshotEvent, LogEntry, MetricsSnapshotEvent, OperatorEvent,
+    StatusUpdate, SystemSnapshotEvent, TradingSnapshotEvent, WsMessage,
 };
-pub use system::{SystemControlResponse, SystemStatus};
+pub use system::{
+    ActiveAlert, AlertKind, AlertSeverity, HeartbeatState, HeartbeatStatus, PlatformMetrics,
+    SystemControlResponse, SystemStatus,
+};
 pub use trading::{
     FillSnapshot, IntentPurpose, MarketData, OrderControlResponse, OrderReplaceRequest,
     OrderSnapshot, PaperIntentRequest, PaperIntentResponse, PnlSnapshotResponse, PositionResponse,

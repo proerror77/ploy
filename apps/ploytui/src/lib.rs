@@ -89,6 +89,13 @@ pub fn render_event_line(event: &OperatorEvent) -> String {
         OperatorEvent::TradingSnapshot(event) => {
             format!("trading_snapshot count={}", event.trading.len())
         }
+        OperatorEvent::MetricsSnapshot(event) => format!(
+            "metrics_snapshot alerts={} stale_sources={}",
+            event.metrics.active_alerts, event.metrics.stale_sources
+        ),
+        OperatorEvent::AlertSnapshot(event) => {
+            format!("alert_snapshot count={}", event.alerts.len())
+        }
         OperatorEvent::Status(event) => format!("status {}", event.status),
         OperatorEvent::Log(event) => format!("log {} {}", event.level, event.message),
         OperatorEvent::Trade(event) => format!(
@@ -134,6 +141,9 @@ mod tests {
                 live_reconcile_failures: 0,
                 next_live_reconcile_at: None,
                 last_live_reconcile_error: None,
+                active_alert_count: 0,
+                stale_source_count: 0,
+                last_live_reconcile_success_at: None,
             },
             deployments: vec![DeploymentSummary {
                 deployment_id: "example.paper".to_string(),
@@ -162,6 +172,9 @@ mod tests {
                         live_reconcile_failures: 0,
                         next_live_reconcile_at: None,
                         last_live_reconcile_error: None,
+                        active_alert_count: 0,
+                        stale_source_count: 0,
+                        last_live_reconcile_success_at: None,
                     },
                 }),
                 OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
@@ -213,6 +226,9 @@ mod tests {
                 live_reconcile_failures: 0,
                 next_live_reconcile_at: None,
                 last_live_reconcile_error: None,
+                active_alert_count: 0,
+                stale_source_count: 0,
+                last_live_reconcile_success_at: None,
             },
         }));
 

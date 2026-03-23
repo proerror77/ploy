@@ -429,6 +429,9 @@ mod tests {
                 live_reconcile_failures: 0,
                 next_live_reconcile_at: None,
                 last_live_reconcile_error: None,
+                active_alert_count: 0,
+                stale_source_count: 0,
+                last_live_reconcile_success_at: None,
             })
             .expect("status json"),
         )
@@ -640,6 +643,9 @@ mod tests {
                         live_reconcile_failures: 0,
                         next_live_reconcile_at: None,
                         last_live_reconcile_error: None,
+                        active_alert_count: 0,
+                        stale_source_count: 0,
+                        last_live_reconcile_success_at: None,
                     },
                 }))
                 .expect("event1");
