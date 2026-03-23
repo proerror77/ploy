@@ -24,16 +24,23 @@ Finish the remaining production-hardening work on the workspace control-plane ru
 
 ## Tasks
 
-- [ ] Add platform metrics/alerts contracts and daemon health state.
-- [ ] Add stale-source heartbeat tracking and degraded/recovering projection.
-- [ ] Expose metrics/alerts through HTTP, SSE, CLI, TUI, and frontend.
+- [x] Add platform metrics/alerts contracts and daemon health state.
+- [x] Add stale-source heartbeat tracking and degraded/recovering projection.
+- [x] Expose metrics/alerts through HTTP, SSE, CLI, TUI, and frontend.
 - [ ] Refine auth scopes from public/read-only/admin to capability bands.
-- [ ] Re-run focused Rust and frontend verification.
+- [x] Re-run focused Rust and frontend verification.
 
 ## Progress notes
 
 - 2026-03-23: Confirmed `origin/main` is already the workspace/control-plane runtime; the old monolith review findings do not apply directly to this branch.
 - 2026-03-23: Hardening scope is limited to metrics/alerts, stale-source degradation, and auth scopes. External alert delivery remains out of scope.
+- 2026-03-23: Added platform metrics/alerts contracts and stale-source health tracking to `ployd`; system status now carries alert/stale-source summary, and operator events include `metrics_snapshot` plus `alert_snapshot`.
+- 2026-03-23: Exposed `/api/system/metrics` and `/api/system/alerts`, added `ployctl system metrics|alerts`, expanded `ploytui` to render metrics/alerts, and updated frontend `SystemControl` plus SSE parsing to surface heartbeat health and active alerts.
+- 2026-03-23: Focused verification passed:
+  - `rtk cargo test -p ploy-operator-contracts -p ploy-platform -p ployd -p ployctl -p ploytui`
+  - `rtk cargo test --test platform_smoke`
+  - `cd ploy-frontend && npm run build`
+  - `cd ploy-frontend && npm run lint`
 
 # Live Reconcile Backoff Hardening (2026-03-21)
 

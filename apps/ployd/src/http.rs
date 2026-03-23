@@ -3,9 +3,10 @@ use crate::runtime::{next_paper_intent_id, PloyDaemon};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use ploy_operator_contracts::{
-    AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
-    DeploymentSnapshotEvent, IntentPurpose, OperatorEvent, OrderReplaceRequest, PaperIntentRequest,
-    StatusUpdate, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
+    AlertSnapshotEvent, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
+    DeploymentControlRequest, DeploymentSnapshotEvent, IntentPurpose, MetricsSnapshotEvent,
+    OperatorEvent, OrderReplaceRequest, PaperIntentRequest, StatusUpdate, SystemSnapshotEvent,
+    SystemStatus, TradingSnapshotEvent,
 };
 use ploy_trading::{TradeSide, TradingIntent};
 use secrecy::{ExposeSecret, SecretString};
@@ -515,6 +516,8 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
         | ("POST", "/auth/login")
         | ("POST", "/auth/logout") => RequiredAccess::Public,
         ("GET", "/api/system/status")
+        | ("GET", "/api/system/metrics")
+        | ("GET", "/api/system/alerts")
         | ("GET", "/api/deployments")
         | ("GET", "/api/trading/state")
         | ("GET", "/api/events/stream") => RequiredAccess::ReadOnly,
@@ -862,6 +865,21 @@ fn handle_runtime_request(
             ),
             Err(_) => json_error(503, "daemon_lock_poisoned", None),
         },
+        ("GET", "/api/system/metrics") => match state.daemon.lock() {
+            Ok(daemon) => (
+                200,
+                serde_json::to_string(&daemon.platform_metrics())
+                    .unwrap_or_else(|_| "{}".to_string()),
+            ),
+            Err(_) => json_error(503, "daemon_lock_poisoned", None),
+        },
+        ("GET", "/api/system/alerts") => match state.daemon.lock() {
+            Ok(daemon) => (
+                200,
+                serde_json::to_string(&daemon.active_alerts()).unwrap_or_else(|_| "[]".to_string()),
+            ),
+            Err(_) => json_error(503, "daemon_lock_poisoned", None),
+        },
         ("GET", "/api/deployments") => match state.daemon.lock() {
             Ok(daemon) => (
                 200,
@@ -1137,6 +1155,12 @@ pub fn snapshot_events(daemon: &PloyDaemon) -> Vec<OperatorEvent> {
         OperatorEvent::TradingSnapshot(TradingSnapshotEvent {
             trading: daemon.trading_state(),
         }),
+        OperatorEvent::MetricsSnapshot(MetricsSnapshotEvent {
+            metrics: daemon.platform_metrics(),
+        }),
+        OperatorEvent::AlertSnapshot(AlertSnapshotEvent {
+            alerts: daemon.active_alerts(),
+        }),
     ]
 }
 
@@ -1187,7 +1211,7 @@ mod tests {
         ADMIN_SESSION_COOKIE_NAME,
     };
     use crate::events::EventBroker;
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use ploy_connectivity::{CancellationOutcome, ReplaceOutcome, StaticExecutionGateway};
     use ploy_operator_contracts::AuditLogEntry;
     use ploy_operator_contracts::{OrderReplaceRequest, PaperIntentRequest};
@@ -1643,6 +1667,86 @@ mod tests {
     }
 
     #[test]
+    fn handle_runtime_request_serves_metrics_and_alert_snapshots() {
+        let root = temp_dir("metrics-alerts");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(runtime_root.clone()).expect("create runtime root");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {
+                    "deployment_id": "example.live",
+                    "bundle_id": "example",
+                    "runtime_mode": "live",
+                    "desired_state": "running",
+                    "observed_state": "running"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("registry");
+
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..crate::config::PlatformConfig::default()
+        };
+
+        let mut daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        daemon.control_plane.system.note_source_failure(
+            "live_reconcile",
+            "live_reconcile",
+            Duration::seconds(15),
+            "live reconcile loop exceeded stale threshold".to_string(),
+        );
+        daemon.control_plane.system.note_source_failure(
+            "venue:polymarket",
+            "venue",
+            Duration::seconds(15),
+            "venue heartbeat exceeded stale threshold".to_string(),
+        );
+        daemon.control_plane.system.refresh_source_health();
+
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (metrics_code, metrics_body) =
+            handle_runtime_request("GET", "/api/system/metrics", None, &state);
+        assert_eq!(metrics_code, 200);
+        let metrics: ploy_operator_contracts::PlatformMetrics =
+            serde_json::from_str(&metrics_body).expect("metrics json");
+        assert!(metrics.active_alerts >= 1);
+        assert!(metrics.stale_sources >= 1);
+
+        let (alerts_code, alerts_body) =
+            handle_runtime_request("GET", "/api/system/alerts", None, &state);
+        assert_eq!(alerts_code, 200);
+        let alerts: Vec<ploy_operator_contracts::ActiveAlert> =
+            serde_json::from_str(&alerts_body).expect("alerts json");
+        assert!(
+            alerts
+                .iter()
+                .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale)
+        );
+        assert!(
+            alerts
+                .iter()
+                .any(|alert| alert.source_id.contains("live_reconcile"))
+        );
+    }
+
+    #[test]
     fn snapshot_events_include_control_plane_and_trading_payloads() {
         let daemon = crate::runtime::PloyDaemon::boot(&crate::config::PlatformConfig::default())
             .expect("boot daemon");
@@ -1658,6 +1762,14 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             ploy_operator_contracts::OperatorEvent::TradingSnapshot(_)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ploy_operator_contracts::OperatorEvent::MetricsSnapshot(_)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ploy_operator_contracts::OperatorEvent::AlertSnapshot(_)
         )));
     }
 

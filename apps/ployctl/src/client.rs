@@ -1,7 +1,8 @@
 use ploy_operator_contracts::{
-    AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
-    DeploymentState, DeploymentSummary, DesiredState, OperatorEvent, OrderControlResponse,
-    OrderReplaceRequest, SystemStatus, TradingStateSnapshot,
+    ActiveAlert, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
+    DeploymentControlRequest, DeploymentState, DeploymentSummary, DesiredState, OperatorEvent,
+    OrderControlResponse, OrderReplaceRequest, PlatformMetrics, SystemStatus,
+    TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -53,6 +54,14 @@ impl ControlPlaneClient {
 
     pub fn audit_logs(&self) -> Result<Vec<AuditLogEntry>, String> {
         self.get_json("/api/audit/logs")
+    }
+
+    pub fn system_metrics(&self) -> Result<PlatformMetrics, String> {
+        self.get_json("/api/system/metrics")
+    }
+
+    pub fn system_alerts(&self) -> Result<Vec<ActiveAlert>, String> {
+        self.get_json("/api/system/alerts")
     }
 
     pub fn deployment_summaries(&self) -> Result<Vec<DeploymentSummary>, String> {
