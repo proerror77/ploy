@@ -40,6 +40,7 @@ static REQUEST_RATE_LIMITER: OnceLock<Mutex<RateLimiter>> = OnceLock::new();
 enum AuthLevel {
     None,
     Sidecar,
+    Operator,
     Admin,
 }
 
@@ -47,6 +48,7 @@ enum AuthLevel {
 enum RequiredAccess {
     Public,
     ReadOnly,
+    Operator,
     Admin,
 }
 
@@ -304,13 +306,17 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
     let method = request_line.next().unwrap_or("GET");
     let path = request_line.next().unwrap_or("/");
     let client_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
-    let (configured_token, sidecar_token, cookie_secret) = match configured_auth(state) {
+    let (configured_token, operator_token, sidecar_token, cookie_secret) = match configured_auth(state) {
         Ok(auth) => auth,
         Err(response) => return write_json_response(stream, response),
     };
     let auth_level = request_auth_level(
         &request,
         configured_token
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .map(|token| token.as_str()),
+        operator_token
             .as_ref()
             .map(ExposeSecret::expose_secret)
             .map(|token| token.as_str()),
@@ -342,11 +348,13 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
             auth_level,
             required_access,
             configured_token.is_some(),
+            operator_token.is_some(),
             sidecar_token.is_some(),
         ) {
             let response = auth_error_response(
                 required_access,
                 configured_token.is_some(),
+                operator_token.is_some(),
                 sidecar_token.is_some(),
             );
             audit_request(
@@ -385,6 +393,7 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
         body,
         auth_level,
         configured_token.is_some(),
+        operator_token.is_some(),
         sidecar_token.is_some(),
         state,
     );
@@ -444,13 +453,22 @@ fn write_json_response_with_headers(
 
 fn configured_auth(
     state: &Arc<AppState>,
-) -> Result<(Option<SecretString>, Option<SecretString>, SecretString), (u16, String)> {
+) -> Result<
+    (
+        Option<SecretString>,
+        Option<SecretString>,
+        Option<SecretString>,
+        SecretString,
+    ),
+    (u16, String),
+> {
     state
         .daemon
         .lock()
         .map(|daemon| {
             (
                 daemon.config.admin_token.clone(),
+                daemon.config.operator_token.clone(),
                 daemon.config.sidecar_token.clone(),
                 daemon.config.auth_cookie_secret.clone(),
             )
@@ -525,7 +543,7 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
         ("GET", _) if path.starts_with("/api/deployments/") && !path.ends_with("/control") => {
             RequiredAccess::ReadOnly
         }
-        _ => RequiredAccess::Admin,
+        _ => RequiredAccess::Operator,
     }
 }
 
@@ -533,6 +551,7 @@ fn auth_level_name(auth_level: AuthLevel) -> &'static str {
     match auth_level {
         AuthLevel::None => "none",
         AuthLevel::Sidecar => "sidecar",
+        AuthLevel::Operator => "operator",
         AuthLevel::Admin => "admin",
     }
 }
@@ -541,6 +560,7 @@ fn required_access_name(required_access: RequiredAccess) -> &'static str {
     match required_access {
         RequiredAccess::Public => "public",
         RequiredAccess::ReadOnly => "read_only",
+        RequiredAccess::Operator => "operator",
         RequiredAccess::Admin => "admin",
     }
 }
@@ -647,6 +667,7 @@ fn extract_cookie<'a>(request: &'a str, name: &str) -> Option<&'a str> {
 fn request_auth_level(
     request: &str,
     admin_token: Option<&str>,
+    operator_token: Option<&str>,
     sidecar_token: Option<&str>,
     cookie_secret: &str,
 ) -> AuthLevel {
@@ -674,6 +695,15 @@ fn request_auth_level(
         }
     }
 
+    if let Some(expected_token) = operator_token {
+        if extract_header(request, "x-ploy-operator-token")
+            .map(|token| token == expected_token)
+            .unwrap_or(false)
+        {
+            return AuthLevel::Operator;
+        }
+    }
+
     if let Some(expected_token) = sidecar_token {
         if extract_header(request, "x-ploy-sidecar-token")
             .map(|token| token == expected_token)
@@ -690,15 +720,20 @@ fn access_allowed(
     auth_level: AuthLevel,
     required_access: RequiredAccess,
     admin_configured: bool,
+    operator_configured: bool,
     sidecar_configured: bool,
 ) -> bool {
-    if !admin_configured && !sidecar_configured {
+    if !admin_configured && !operator_configured && !sidecar_configured {
         return true;
     }
 
     match required_access {
         RequiredAccess::Public => true,
-        RequiredAccess::ReadOnly => matches!(auth_level, AuthLevel::Admin | AuthLevel::Sidecar),
+        RequiredAccess::ReadOnly => matches!(
+            auth_level,
+            AuthLevel::Admin | AuthLevel::Operator | AuthLevel::Sidecar
+        ),
+        RequiredAccess::Operator => matches!(auth_level, AuthLevel::Admin | AuthLevel::Operator),
         RequiredAccess::Admin => auth_level == AuthLevel::Admin,
     }
 }
@@ -706,14 +741,21 @@ fn access_allowed(
 fn auth_error_response(
     required_access: RequiredAccess,
     admin_configured: bool,
+    operator_configured: bool,
     sidecar_configured: bool,
 ) -> (u16, String) {
     let message = match required_access {
         RequiredAccess::Public => return (200, "{}".to_string()),
-        RequiredAccess::ReadOnly if sidecar_configured && !admin_configured => {
-            "control-plane sidecar or admin token is required".to_string()
+        RequiredAccess::ReadOnly if sidecar_configured && !operator_configured && !admin_configured => {
+            "control-plane sidecar, operator, or admin token is required".to_string()
         }
-        RequiredAccess::ReadOnly => "control-plane admin or sidecar token is required".to_string(),
+        RequiredAccess::ReadOnly => {
+            "control-plane admin, operator, or sidecar token is required".to_string()
+        }
+        RequiredAccess::Operator if admin_configured || operator_configured => {
+            "control-plane operator or admin token is required".to_string()
+        }
+        RequiredAccess::Operator => "control-plane operator token is required".to_string(),
         RequiredAccess::Admin => "control-plane admin token is required".to_string(),
     };
     json_error(401, "unauthorized", Some(message))
@@ -784,6 +826,7 @@ fn handle_authenticated_runtime_request(
     body: Option<&str>,
     auth_level: AuthLevel,
     admin_configured: bool,
+    operator_configured: bool,
     sidecar_configured: bool,
     state: &Arc<AppState>,
 ) -> (u16, String) {
@@ -793,7 +836,8 @@ fn handle_authenticated_runtime_request(
             200,
             serde_json::json!({
                 "authenticated": auth_level == AuthLevel::Admin,
-                "auth_required": admin_configured || sidecar_configured,
+                "auth_required": admin_configured || operator_configured || sidecar_configured,
+                "operator_authenticated": auth_level == AuthLevel::Operator,
                 "sidecar_authenticated": auth_level == AuthLevel::Sidecar,
             })
             .to_string(),
@@ -841,10 +885,16 @@ fn handle_authenticated_runtime_request(
             auth_level,
             required_access,
             admin_configured,
+            operator_configured,
             sidecar_configured,
         ) =>
         {
-            auth_error_response(required_access, admin_configured, sidecar_configured)
+            auth_error_response(
+                required_access,
+                admin_configured,
+                operator_configured,
+                sidecar_configured,
+            )
         }
         _ => handle_runtime_request(method, path, body, state),
     }
@@ -1348,6 +1398,7 @@ mod tests {
             AuthLevel::None,
             true,
             false,
+            false,
             &state,
         );
 
@@ -1379,6 +1430,7 @@ mod tests {
             AuthLevel::None,
             true,
             false,
+            false,
             &state,
         );
 
@@ -1409,6 +1461,7 @@ mod tests {
             AuthLevel::None,
             true,
             false,
+            false,
             &state,
         );
 
@@ -1423,7 +1476,7 @@ mod tests {
             "GET /api/events/stream HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nCookie: {cookie}; theme=dark\r\n\r\n"
         );
         assert_eq!(
-            request_auth_level(&request, Some("secret-token"), None, "cookie-secret"),
+            request_auth_level(&request, Some("secret-token"), None, None, "cookie-secret"),
             AuthLevel::Admin
         );
     }
@@ -1462,7 +1515,7 @@ mod tests {
         let cookie = admin_session_cookie("secret-token", "cookie-secret");
         let request = format!("GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n");
         assert_eq!(
-            request_auth_level(&request, Some("other-token"), None, "cookie-secret"),
+            request_auth_level(&request, Some("other-token"), None, None, "cookie-secret"),
             AuthLevel::None
         );
     }
@@ -1475,6 +1528,7 @@ mod tests {
             request_auth_level(
                 request,
                 Some("admin-secret"),
+                None,
                 Some("sidecar-secret"),
                 "cookie-secret"
             ),
@@ -1502,6 +1556,7 @@ mod tests {
             None,
             AuthLevel::Sidecar,
             true,
+            false,
             true,
             &state,
         );
@@ -1513,11 +1568,70 @@ mod tests {
             Some("{\"desired_state\":\"paused\",\"deployment_state\":null}"),
             AuthLevel::Sidecar,
             true,
+            false,
             true,
             &state,
         );
         assert_eq!(write_code, 401);
         assert!(write_body.contains("\"error\":\"unauthorized\""));
+    }
+
+    #[test]
+    fn operator_token_grants_write_access_but_not_admin_access() {
+        let request =
+            "POST /api/deployments/example.paper/control HTTP/1.1\r\nx-ploy-operator-token: operator-secret\r\n\r\n";
+        assert_eq!(
+            request_auth_level(
+                request,
+                Some("admin-secret"),
+                Some("operator-secret"),
+                Some("sidecar-secret"),
+                "cookie-secret"
+            ),
+            AuthLevel::Operator
+        );
+
+        let config = crate::config::PlatformConfig {
+            admin_token: Some("admin-secret".to_string().into()),
+            operator_token: Some("operator-secret".to_string().into()),
+            sidecar_token: Some("sidecar-secret".to_string().into()),
+            ..crate::config::PlatformConfig::default()
+        };
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (write_code, write_body) = handle_authenticated_runtime_request(
+            "POST",
+            "/api/deployments/example.paper/control",
+            Some("{\"desired_state\":\"paused\",\"deployment_state\":null}"),
+            AuthLevel::Operator,
+            true,
+            true,
+            true,
+            &state,
+        );
+        assert_eq!(write_code, 404);
+        assert!(write_body.contains("deployment_not_found"));
+
+        let (audit_code, audit_body) = handle_authenticated_runtime_request(
+            "GET",
+            "/api/audit/logs",
+            None,
+            AuthLevel::Operator,
+            true,
+            true,
+            true,
+            &state,
+        );
+        assert_eq!(audit_code, 401);
+        assert!(audit_body.contains("\"error\":\"unauthorized\""));
     }
 
     #[test]

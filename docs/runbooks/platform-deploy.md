@@ -67,6 +67,9 @@ Optional hardening:
 
 - Set `PLOY_ADMIN_TOKEN=...` in `/opt/ploy/.env` to require `Authorization: Bearer ...`
   or `x-ploy-admin-token` on the control-plane API.
+- Set `PLOY_OPERATOR_TOKEN=...` in `/opt/ploy/.env` if automation or `ployctl`
+  should be allowed to mutate deployments and trading controls without gaining
+  full admin access.
 - Set `PLOY_SIDECAR_AUTH_TOKEN=...` in `/opt/ploy/.env` if agent/sidecar clients
   only need read-only access to platform snapshots and `/api/events/stream`.
 - Set `PLOY_API_AUTH_COOKIE_SECRET=...` in `/opt/ploy/.env` if browser operator
@@ -78,11 +81,17 @@ Optional hardening:
   `PLOY_LIVE_RECONCILE_BACKOFF_MAX_MS=...` in `/opt/ploy/.env` if you want to
   tune live venue reconcile retry backoff under exchange/API outages.
 - `/opt/ploy/bin/ployctl` will automatically pick up `PLOY_ADMIN_TOKEN`,
-  `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` from the host environment.
+  `PLOY_API_ADMIN_TOKEN`, `PLOY_API_KEY`, `PLOY_OPERATOR_TOKEN`,
+  `PLOY_API_OPERATOR_TOKEN`, or `PLOY_SIDECAR_AUTH_TOKEN` from the host
+  environment.
 - Browser operator sessions should authenticate through `/auth/login`; `ployd`
   will issue an `HttpOnly` same-site signed session cookie so the frontend and
   SSE event stream remain authenticated without persisting the raw admin token
   in browser storage.
+- Access bands are `public`, `read_only`, `operator`, and `admin`. `sidecar`
+  tokens stop at `read_only`; `operator` tokens can drive deployment controls
+  and trading mutations; only `admin` can read audit logs or mint browser
+  sessions through `/auth/login`.
 
 ## Post-Deploy Checks
 

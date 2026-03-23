@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 pub struct ControlPlaneClient {
     pub control_plane_addr: String,
     pub admin_token: Option<String>,
+    pub operator_token: Option<String>,
+    pub sidecar_token: Option<String>,
     pub runtime_root: PathBuf,
 }
 
@@ -25,6 +27,13 @@ impl ControlPlaneClient {
                 .ok()
                 .or_else(|| std::env::var("PLOY_API_ADMIN_TOKEN").ok())
                 .or_else(|| std::env::var("PLOY_API_KEY").ok())
+                .filter(|token| !token.trim().is_empty()),
+            operator_token: std::env::var("PLOY_OPERATOR_TOKEN")
+                .ok()
+                .or_else(|| std::env::var("PLOY_API_OPERATOR_TOKEN").ok())
+                .filter(|token| !token.trim().is_empty()),
+            sidecar_token: std::env::var("PLOY_SIDECAR_AUTH_TOKEN")
+                .ok()
                 .filter(|token| !token.trim().is_empty()),
             runtime_root: runtime_root.into(),
         }
@@ -352,11 +361,14 @@ impl ControlPlaneClient {
     }
 
     fn authorization_headers(&self) -> String {
-        match &self.admin_token {
-            Some(token) => {
-                format!("Authorization: Bearer {token}\r\nx-ploy-admin-token: {token}\r\n")
-            }
-            None => String::new(),
+        if let Some(token) = &self.admin_token {
+            format!("Authorization: Bearer {token}\r\nx-ploy-admin-token: {token}\r\n")
+        } else if let Some(token) = &self.operator_token {
+            format!("x-ploy-operator-token: {token}\r\n")
+        } else if let Some(token) = &self.sidecar_token {
+            format!("x-ploy-sidecar-token: {token}\r\n")
+        } else {
+            String::new()
         }
     }
 }
@@ -811,6 +823,8 @@ mod tests {
         let client = ControlPlaneClient {
             control_plane_addr: addr.to_string(),
             admin_token: None,
+            operator_token: None,
+            sidecar_token: None,
             runtime_root,
         };
 
@@ -868,6 +882,8 @@ mod tests {
         let client = ControlPlaneClient {
             control_plane_addr: addr.to_string(),
             admin_token: None,
+            operator_token: None,
+            sidecar_token: None,
             runtime_root,
         };
 
@@ -925,10 +941,59 @@ mod tests {
         let client = ControlPlaneClient {
             control_plane_addr: addr.to_string(),
             admin_token: Some("secret-token".to_string()),
+            operator_token: None,
+            sidecar_token: None,
             runtime_root,
         };
 
         let status = client.system_snapshot().expect("status");
         assert_eq!(status.status, "running");
+    }
+
+    #[test]
+    fn client_sends_operator_header_when_configured() {
+        let runtime_root = temp_dir("http-operator-auth");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 2048];
+            let bytes = stream.read(&mut request).expect("read request");
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(!request.contains("Authorization: Bearer"));
+            assert!(request.contains("x-ploy-operator-token: operator-token"));
+
+            let body = serde_json::json!({
+                "deployment_id": "example.paper",
+                "account_id": "acct-paper",
+                "max_gross_exposure": null,
+                "deployment_state": "enabled",
+                "desired_state": "paused",
+                "observed_state": "paused"
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+
+        let client = ControlPlaneClient {
+            control_plane_addr: addr.to_string(),
+            admin_token: None,
+            operator_token: Some("operator-token".to_string()),
+            sidecar_token: None,
+            runtime_root,
+        };
+
+        let deployment = client
+            .set_desired_state("example.paper", DesiredState::Paused)
+            .expect("deployment");
+        assert_eq!(deployment.desired_state, DesiredState::Paused);
     }
 }
