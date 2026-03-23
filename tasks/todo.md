@@ -1,3 +1,40 @@
+# Platform Hardening (2026-03-23)
+
+## Goal
+Finish the remaining production-hardening work on the workspace control-plane runtime: internal metrics/alerts, stale-source auto-degrade, and finer auth scopes.
+
+## File ownership
+
+- `apps/ployd/src/runtime.rs`, `apps/ployd/src/config.rs`
+  - owner: heartbeat tracking, stale-source degradation, metrics/alert state
+- `apps/ployd/src/http.rs`
+  - owner: metrics/alerts endpoints, SSE, auth scope mapping
+- `crates/ploy-platform/src/system.rs`
+  - owner: system health projection
+- `crates/ploy-operator-contracts/src/system.rs`, `crates/ploy-operator-contracts/src/events.rs`
+  - owner: wire contracts for metrics/alerts/stale-source state
+- `apps/ployctl/src/system.rs`, `apps/ployctl/src/main.rs`, `apps/ployctl/src/client.rs`
+  - owner: CLI operator surfaces
+- `apps/ploytui/src/lib.rs`
+  - owner: terminal operator rendering
+- `ploy-frontend/src/services/websocket.ts`, `ploy-frontend/src/pages/SystemControl.tsx`, `ploy-frontend/src/types/index.ts`
+  - owner: frontend operator rendering
+- `README.md`, `docs/runbooks/platform-startup.md`, `docs/runbooks/platform-deploy.md`
+  - owner: operator guidance
+
+## Tasks
+
+- [ ] Add platform metrics/alerts contracts and daemon health state.
+- [ ] Add stale-source heartbeat tracking and degraded/recovering projection.
+- [ ] Expose metrics/alerts through HTTP, SSE, CLI, TUI, and frontend.
+- [ ] Refine auth scopes from public/read-only/admin to capability bands.
+- [ ] Re-run focused Rust and frontend verification.
+
+## Progress notes
+
+- 2026-03-23: Confirmed `origin/main` is already the workspace/control-plane runtime; the old monolith review findings do not apply directly to this branch.
+- 2026-03-23: Hardening scope is limited to metrics/alerts, stale-source degradation, and auth scopes. External alert delivery remains out of scope.
+
 # Live Reconcile Backoff Hardening (2026-03-21)
 
 ## Goal
