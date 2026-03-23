@@ -103,6 +103,15 @@ impl StrategyFactory {
                     )?;
                 Ok(Box::new(strategy))
             }
+            "pm_5m_directional" => {
+                let strategy =
+                    super::super::pm_5m_directional::Pm5mDirectionalStrategy::from_toml(
+                        strategy_id,
+                        config_content,
+                        dry_run,
+                    )?;
+                Ok(Box::new(strategy))
+            }
             other => Err(anyhow!("Unknown strategy type: {}", other).into()),
         }
     }
@@ -162,6 +171,13 @@ impl StrategyFactory {
                     "Observe-only weather contract strategy using public station and forecast data"
                         .to_string(),
                 config_template: "weather_market_default.toml".to_string(),
+            },
+            StrategyInfo {
+                name: "pm_5m_directional".to_string(),
+                description:
+                    "Polymarket 5m directional engine using Binance direction and Polymarket cost gates"
+                        .to_string(),
+                config_template: "pm_5m_directional_default.toml".to_string(),
             },
         ]
     }
