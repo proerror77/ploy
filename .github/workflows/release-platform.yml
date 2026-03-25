@@ -60,14 +60,18 @@ jobs:
           bundle_root="dist/platform-bundle"
           mkdir -p \
             "${bundle_root}/bin" \
+            "${bundle_root}/config/deployments" \
             "${bundle_root}/data/state" \
             "${bundle_root}/deployment" \
-            "${bundle_root}/scripts"
+            "${bundle_root}/scripts" \
+            "${bundle_root}/scripts/drills"
           install -m 755 "target/${PLATFORM_TARGET}/release/ployd" "${bundle_root}/bin/ployd"
           install -m 755 "target/${PLATFORM_TARGET}/release/ployctl" "${bundle_root}/bin/ployctl"
           install -m 755 "target/${PLATFORM_TARGET}/release/ploytui" "${bundle_root}/bin/ploytui"
           install -m 644 deployment/ployd.service "${bundle_root}/deployment/ployd.service"
           install -m 755 scripts/install-platform-service.sh "${bundle_root}/scripts/install-platform-service.sh"
+          install -m 755 scripts/drills/live_dry_run.sh "${bundle_root}/scripts/drills/live_dry_run.sh"
+          install -m 644 config/deployments/example.live.dry-run.json "${bundle_root}/config/deployments/example.live.dry-run.json.sample"
           install -m 644 data/state/deployments.json.sample "${bundle_root}/data/state/deployments.json.sample"
           tar czf dist/ploy-platform.tar.gz -C "${bundle_root}" .
 
@@ -124,12 +128,14 @@ jobs:
               SUDO="sudo"
             fi
 
-            $SUDO mkdir -p "${DEPLOY_ROOT}/bin" "${DEPLOY_ROOT}/deployment" "${DEPLOY_ROOT}/scripts" "${DEPLOY_ROOT}/data/state"
+            $SUDO mkdir -p "${DEPLOY_ROOT}/bin" "${DEPLOY_ROOT}/config/deployments" "${DEPLOY_ROOT}/deployment" "${DEPLOY_ROOT}/scripts" "${DEPLOY_ROOT}/scripts/drills" "${DEPLOY_ROOT}/data/state"
             $SUDO install -m 755 "${WORKDIR}/bin/ployd" "${DEPLOY_ROOT}/bin/ployd"
             $SUDO install -m 755 "${WORKDIR}/bin/ployctl" "${DEPLOY_ROOT}/bin/ployctl"
             $SUDO install -m 755 "${WORKDIR}/bin/ploytui" "${DEPLOY_ROOT}/bin/ploytui"
             $SUDO install -m 644 "${WORKDIR}/deployment/ployd.service" "${DEPLOY_ROOT}/deployment/ployd.service"
             $SUDO install -m 755 "${WORKDIR}/scripts/install-platform-service.sh" "${DEPLOY_ROOT}/scripts/install-platform-service.sh"
+            $SUDO install -m 755 "${WORKDIR}/scripts/drills/live_dry_run.sh" "${DEPLOY_ROOT}/scripts/drills/live_dry_run.sh"
+            $SUDO install -m 644 "${WORKDIR}/config/deployments/example.live.dry-run.json.sample" "${DEPLOY_ROOT}/config/deployments/example.live.dry-run.json.sample"
             if [ ! -f "${DEPLOY_ROOT}/data/state/deployments.json" ]; then
               $SUDO install -m 644 "${WORKDIR}/data/state/deployments.json.sample" "${DEPLOY_ROOT}/data/state/deployments.json"
             fi
@@ -141,8 +147,12 @@ jobs:
             curl -fsS http://127.0.0.1:8081/health
             curl -N --max-time 2 http://127.0.0.1:8081/api/events/stream || true
             # Verify the deployed operator client path: ployctl system status
+            # Verify the deployed operator client path: ployctl system metrics
+            # Verify the deployed operator client path: ployctl system alerts
             # Verify the deployed operator client path: ployctl trading status
             "${DEPLOY_ROOT}/bin/ployctl" system status
+            "${DEPLOY_ROOT}/bin/ployctl" system metrics
+            "${DEPLOY_ROOT}/bin/ployctl" system alerts
             "${DEPLOY_ROOT}/bin/ployctl" trading status
             "${DEPLOY_ROOT}/bin/ploytui" || true
 
@@ -151,3 +161,4 @@ jobs:
           echo "## Platform Release" >> "$GITHUB_STEP_SUMMARY"
           echo "- Bundle: \`ployd + ployctl + ploytui\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Service: \`ployd.service\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Drill: \`/opt/ploy/scripts/drills/live_dry_run.sh\`" >> "$GITHUB_STEP_SUMMARY"

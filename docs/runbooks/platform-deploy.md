@@ -22,6 +22,12 @@ Deployment resources are managed separately from the daemon process. Operators
 apply a deployment manifest and then use `ployctl` to inspect or change desired
 state.
 
+This runbook covers deploy/install only. Remote host acceptance now has its own
+path:
+
+- [`live-deployment-checklist.md`](./live-deployment-checklist.md)
+- [`live-dry-run-drill.md`](./live-dry-run-drill.md)
+
 ## CI Bundle Contents
 
 The release bundle contains:
@@ -47,6 +53,8 @@ After the bundle lands on the host, the deploy workflow:
    - `systemctl status ployd`
    - `curl -fsS http://127.0.0.1:8081/health`
    - `/opt/ploy/bin/ployctl system status`
+   - `/opt/ploy/bin/ployctl system metrics`
+   - `/opt/ploy/bin/ployctl system alerts`
    - `/opt/ploy/bin/ployctl system audit`
    - `/opt/ploy/bin/ployctl trading status`
    - `/opt/ploy/bin/ploytui`
@@ -93,6 +101,18 @@ Optional hardening:
   and trading mutations; only `admin` can read audit logs or mint browser
   sessions through `/auth/login`.
 
+## Remote Acceptance
+
+After deployment succeeds, do not enable real live trading immediately.
+
+Run:
+
+1. [`live-deployment-checklist.md`](./live-deployment-checklist.md)
+2. [`live-dry-run-drill.md`](./live-dry-run-drill.md)
+
+The dry-run drill uses a paper deployment on the live host so you can verify
+control-plane and worker behavior without touching real funds.
+
 ## Post-Deploy Checks
 
 ```bash
@@ -100,6 +120,8 @@ sudo systemctl status ployd --no-pager
 sudo journalctl -u ployd -n 200 --no-pager
 curl -fsS http://127.0.0.1:8081/health
 /opt/ploy/bin/ployctl system status
+/opt/ploy/bin/ployctl system metrics
+/opt/ploy/bin/ployctl system alerts
 /opt/ploy/bin/ployctl system audit
 /opt/ploy/bin/ployctl trading status
 /opt/ploy/bin/ployctl deployments list
@@ -116,6 +138,10 @@ daemon as live-venue degraded even if the process is still up.
 Use a deployment manifest like
 [`config/deployments/example.paper.json`](../../config/deployments/example.paper.json)
 as the template for remote deployment resources.
+
+For remote live-host readiness checks, use the paper-mode drill manifest
+[`config/deployments/example.live.dry-run.json`](../../config/deployments/example.live.dry-run.json)
+and the drill script from [`live-dry-run-drill.md`](./live-dry-run-drill.md).
 
 ```bash
 /opt/ploy/bin/ployctl deployments apply /opt/ploy/config/deployments/example.paper.json

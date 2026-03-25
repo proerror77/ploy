@@ -1,3 +1,47 @@
+# Live Dry-Run Deployment Drill (2026-03-25)
+
+## Goal
+Add a repeatable remote-host dry-run acceptance path for the workspace control-plane runtime: an operator-facing live deployment checklist plus a `ployctl`-driven drill script that proves host readiness without touching real funds.
+
+## File ownership
+
+- `docs/plans/2026-03-24-live-dry-run-drill-design.md`
+  - owner: approved design for the dry-run acceptance flow
+- `docs/plans/2026-03-25-live-dry-run-drill-implementation-plan.md`
+  - owner: bite-sized implementation plan for this task
+- `docs/runbooks/live-deployment-checklist.md`
+  - owner: operator go/no-go checklist for remote live host readiness
+- `docs/runbooks/live-dry-run-drill.md`
+  - owner: script walkthrough and boundaries
+- `scripts/drills/live_dry_run.sh`
+  - owner: repeatable remote-host dry-run acceptance script
+- `config/deployments/example.live.dry-run.json`
+  - owner: paper-mode manifest used by the dry-run drill
+- `README.md`, `docs/runbooks/platform-deploy.md`, `docs/runbooks/platform-startup.md`, `config/deployments/README.md`
+  - owner: route users to the new deploy/acceptance/drill docs and clarify paper-vs-live boundaries
+
+## Tasks
+
+- [x] Write the approved design doc and implementation plan for the live dry-run drill.
+- [x] Add the remote live deployment checklist and dry-run drill runbook.
+- [x] Add a repeatable `ployctl`-driven drill script plus a paper-mode manifest for live-host readiness checks.
+- [x] Update README/runbooks/config docs to point operators at the new acceptance path.
+- [x] Run shell/doc-focused validation and record the results.
+
+## Progress notes
+
+- 2026-03-25: Created clean worktree `session-live-dry-run` from `origin/main` (`acd313f5`) to avoid unrelated dirty changes on the root `main` checkout.
+- 2026-03-25: Confirmed current `origin/main` already has platform metrics/alerts/auth-scope hardening, but does not yet ship a dedicated remote-host dry-run checklist or drill script.
+- 2026-03-25: Saved the approved design to `docs/plans/2026-03-24-live-dry-run-drill-design.md` and the implementation plan to `docs/plans/2026-03-25-live-dry-run-drill-implementation-plan.md`.
+- 2026-03-25: Added `docs/runbooks/live-deployment-checklist.md`, `docs/runbooks/live-dry-run-drill.md`, `scripts/drills/live_dry_run.sh`, and `config/deployments/example.live.dry-run.json`.
+- 2026-03-25: Routed `README.md`, `platform-deploy.md`, `platform-startup.md`, `config/deployments/README.md`, `release-platform.yml`, and `install-platform-service.sh` to the new remote-host acceptance path so the drill script is bundled and installed on deploy hosts.
+- 2026-03-25: Validation passed:
+  - `bash -n scripts/drills/live_dry_run.sh`
+  - `bash -n scripts/install-platform-service.sh`
+  - `python3 -m json.tool config/deployments/example.live.dry-run.json >/dev/null`
+  - `scripts/drills/live_dry_run.sh --help`
+  - `rtk cargo test --test platform_smoke`
+
 # Platform Hardening (2026-03-23)
 
 ## Goal

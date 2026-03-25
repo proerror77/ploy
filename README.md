@@ -51,10 +51,19 @@ Runbooks:
 
 - [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md)
 - [`docs/runbooks/platform-deploy.md`](docs/runbooks/platform-deploy.md)
+- [`docs/runbooks/live-deployment-checklist.md`](docs/runbooks/live-deployment-checklist.md)
+- [`docs/runbooks/live-dry-run-drill.md`](docs/runbooks/live-dry-run-drill.md)
 
 Default release workflow:
 
 - `.github/workflows/release-platform.yml`
+
+Remote live-host acceptance path:
+
+- deploy with [`docs/runbooks/platform-deploy.md`](docs/runbooks/platform-deploy.md)
+- validate the host with [`docs/runbooks/live-deployment-checklist.md`](docs/runbooks/live-deployment-checklist.md)
+- run the dry-run acceptance drill from [`docs/runbooks/live-dry-run-drill.md`](docs/runbooks/live-dry-run-drill.md)
+- only then move to manual live go/no-go review
 
 Compatibility note:
 
