@@ -29,6 +29,23 @@ use crate::strategy::backtest_recorder::{
 use crate::strategy::execution_sim::ExecutionSimulator;
 use crate::strategy::fee_model::FeeModel;
 use crate::strategy::momentum::Direction;
+use crate::strategy::pm_5m_bayesian::BayesianPrior;
+use crate::strategy::volatility::normal_cdf;
+
+const PROB_FLOOR: f64 = 1e-6;
+
+// ─────────────────────────────────────────────────────────────
+// L2 state for microstructure signals
+// ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct BacktestL2State {
+    obi: f64,
+    spread_bps: f64,
+    bid_volume_5: f64,
+    ask_volume_5: f64,
+    timestamp: DateTime<Utc>,
+}
 
 // ─────────────────────────────────────────────────────────────
 // Config
@@ -68,6 +85,39 @@ pub struct DirectionalBacktestConfig {
     pub max_time_remaining_secs: u64,
     /// Use price_to_beat in fair value calculation
     pub use_price_to_beat: bool,
+    // ── Log-normal probability model (pm_5m_directional parity) ──
+    /// EWMA lambda for volatility estimation (0.94 = RiskMetrics standard)
+    pub ewma_lambda: f64,
+    /// Annualized vol floor
+    pub vol_floor: f64,
+    /// Minimum probability to enter
+    pub p_entry: f64,
+    /// Minimum edge (effective_p - cost)
+    pub min_edge: f64,
+    /// Minimum |z| to enter
+    pub min_abs_z: f64,
+    // ── L2 microstructure signals ──
+    /// Enable L2-based microstructure adjustment. When false, falls back to old sigmoid model.
+    pub use_l2_signals: bool,
+    /// OBI weight in logit adjustment
+    pub obi_weight: f64,
+    /// Flow pressure weight in logit adjustment
+    pub flow_weight: f64,
+    /// Microgap proxy weight in logit adjustment
+    pub microgap_weight: f64,
+    /// Minimum OBI for direction confirmation
+    pub min_obi: f64,
+    // ── No-trade zone ──
+    pub no_trade_price_min: f64,
+    pub no_trade_price_max: f64,
+    pub no_trade_override_z: f64,
+    pub no_trade_override_flow: f64,
+    // ── PM liquidity filters ──
+    pub max_pm_spread: Decimal,
+    pub min_pm_ask_size: Decimal,
+    // ── Bayesian gate ──
+    pub use_bayesian: bool,
+    pub bayesian_credible_z: f64,
 }
 
 impl Default for DirectionalBacktestConfig {
@@ -88,6 +138,24 @@ impl Default for DirectionalBacktestConfig {
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
             use_price_to_beat: true,
+            ewma_lambda: 0.94,
+            vol_floor: 0.0012,
+            p_entry: 0.62,
+            min_edge: 0.03,
+            min_abs_z: 0.35,
+            use_l2_signals: true,
+            obi_weight: 0.75,
+            flow_weight: 1.10,
+            microgap_weight: 0.40,
+            min_obi: 0.05,
+            no_trade_price_min: 0.45,
+            no_trade_price_max: 0.55,
+            no_trade_override_z: 0.90,
+            no_trade_override_flow: 0.45,
+            max_pm_spread: dec!(0.025),
+            min_pm_ask_size: dec!(25),
+            use_bayesian: false,
+            bayesian_credible_z: 1.645,
         }
     }
 }
@@ -173,6 +241,14 @@ pub struct DirectionalBacktestEngine {
     // Market state
     spot_prices: HashMap<String, SpotPrice>,
     pm_asks_by_event: HashMap<String, (Option<Decimal>, Option<Decimal>)>,
+    // L2 microstructure state
+    l2_by_symbol: HashMap<String, BacktestL2State>,
+    prev_obi_by_symbol: HashMap<String, f64>,
+    // EWMA vol tracking
+    ewma_var: HashMap<String, f64>,
+    ewma_last_price: HashMap<String, f64>,
+    // Bayesian prior
+    bayesian: BayesianPrior,
     // Active events: symbol -> concurrent windows (5m + 15m can overlap)
     active_events: HashMap<String, Vec<ActiveWindowInfo>>,
     // Positions & trades
@@ -201,6 +277,11 @@ impl DirectionalBacktestEngine {
             recorder,
             spot_prices: HashMap::new(),
             pm_asks_by_event: HashMap::new(),
+            l2_by_symbol: HashMap::new(),
+            prev_obi_by_symbol: HashMap::new(),
+            ewma_var: HashMap::new(),
+            ewma_last_price: HashMap::new(),
+            bayesian: BayesianPrior::new(),
             active_events: HashMap::new(),
             positions: Vec::new(),
             closed_trades: Vec::new(),
@@ -247,6 +328,28 @@ impl DirectionalBacktestEngine {
             // Prune expired events (end_time has passed without settlement)
             for events in self.active_events.values_mut() {
                 events.retain(|e| e.end_time > update.timestamp);
+            }
+
+            // Settle positions whose event window has expired but no settlement record arrived.
+            // Use spot price vs price_to_beat to determine outcome.
+            let mut expired_closes: Vec<(usize, Decimal)> = Vec::new();
+            for (i, pos) in self.positions.iter().enumerate() {
+                if pos.event_end_time <= update.timestamp {
+                    let spot = self.spot_prices.get(&pos.symbol).map(|s| s.price);
+                    let won = match (spot, pos.s0) {
+                        (Some(s), s0) if s0 > Decimal::ZERO => match pos.direction {
+                            Direction::Up => s > s0,
+                            Direction::Down => s <= s0,
+                        },
+                        _ => false,
+                    };
+                    let exit_price = if won { Decimal::ONE } else { Decimal::ZERO };
+                    expired_closes.push((i, exit_price));
+                }
+            }
+            expired_closes.sort_by(|a, b| b.0.cmp(&a.0));
+            for (idx, exit_price) in expired_closes {
+                self.close_position(idx, exit_price, "settlement", update.timestamp);
             }
 
             match &update.update_type {
@@ -303,8 +406,29 @@ impl DirectionalBacktestEngine {
                 UpdateType::LobSnapshot { .. } => {
                     // LOB depth not used by directional backtest
                 }
-                UpdateType::BinanceL2 { .. } => {
-                    // Binance L2 features are ignored by the directional backtest.
+                UpdateType::BinanceL2 {
+                    obi_5,
+                    obi_10: _,
+                    bid_volume_5,
+                    ask_volume_5,
+                    spread_bps,
+                } => {
+                    let obi = obi_5.to_f64().unwrap_or(0.0);
+                    // Store previous OBI for flow proxy before overwriting
+                    if let Some(prev) = self.l2_by_symbol.get(&update.symbol) {
+                        self.prev_obi_by_symbol
+                            .insert(update.symbol.clone(), prev.obi);
+                    }
+                    self.l2_by_symbol.insert(
+                        update.symbol.clone(),
+                        BacktestL2State {
+                            obi,
+                            spread_bps: spread_bps.to_f64().unwrap_or(0.0),
+                            bid_volume_5: bid_volume_5.to_f64().unwrap_or(0.0),
+                            ask_volume_5: ask_volume_5.to_f64().unwrap_or(0.0),
+                            timestamp: update.timestamp,
+                        },
+                    );
                 }
             }
         }
@@ -328,6 +452,11 @@ impl DirectionalBacktestEngine {
             .entry(symbol.to_string())
             .and_modify(|sp| sp.update(price, quantity, ts))
             .or_insert_with(|| SpotPrice::new(price, quantity, ts));
+
+        // Update EWMA vol tracker
+        if let Some(price_f) = price.to_f64() {
+            self.update_ewma_vol(symbol, price_f);
+        }
     }
 
     fn handle_pm_quote(
@@ -399,7 +528,66 @@ impl DirectionalBacktestEngine {
         self.record_equity(ts);
     }
 
-    // ─── Entry logic (momentum + fair value + edge) ─────────
+    // ─── EWMA volatility ────────────────────────────────────
+
+    /// Update EWMA variance with a new price observation.
+    fn update_ewma_vol(&mut self, symbol: &str, price_f: f64) {
+        let lambda = self.config.ewma_lambda;
+        if let Some(prev) = self.ewma_last_price.get(symbol).copied() {
+            if prev > 0.0 {
+                let log_ret = (price_f / prev).ln();
+                let var = self.ewma_var.entry(symbol.to_string()).or_insert(0.0);
+                *var = lambda * *var + (1.0 - lambda) * log_ret * log_ret;
+            }
+        }
+        self.ewma_last_price.insert(symbol.to_string(), price_f);
+    }
+
+    /// Current annualized sigma from EWMA variance.
+    fn ewma_sigma_annualized(&self, symbol: &str) -> f64 {
+        const SECS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0;
+        let var = self.ewma_var.get(symbol).copied().unwrap_or(0.0);
+        (var * SECS_PER_YEAR).sqrt().max(self.config.vol_floor)
+    }
+
+    // ─── Log-normal probability ─────────────────────────────
+
+    /// Compute base probability using log-normal model (same as pm_5m_directional).
+    /// Returns (p_base, sigma_annual, z).
+    fn compute_probability(
+        &self,
+        spot: &SpotPrice,
+        s0: Decimal,
+        end_time: DateTime<Utc>,
+        now: DateTime<Utc>,
+        sigma_annual: f64,
+    ) -> Option<(f64, f64, f64)> {
+        let spot_f = spot.price.to_f64()?;
+        let beat_f = s0.to_f64()?;
+        if spot_f <= 0.0 || beat_f <= 0.0 {
+            return None;
+        }
+
+        let remaining_secs = (end_time - now).num_seconds().max(0) as f64;
+        let tau_years = remaining_secs / (365.25 * 24.0 * 3600.0);
+        let d_t = (spot_f / beat_f).ln();
+        let z = d_t / (sigma_annual * tau_years.sqrt()).max(PROB_FLOOR);
+        let p_base = normal_cdf(z).clamp(PROB_FLOOR, 1.0 - PROB_FLOOR);
+        Some((p_base, sigma_annual, z))
+    }
+
+    // ─── L2 microstructure helpers ──────────────────────────
+
+    fn microgap_proxy(l2: &BacktestL2State) -> f64 {
+        (l2.obi * (l2.spread_bps / 5.0).clamp(0.0, 1.0)).clamp(-1.0, 1.0)
+    }
+
+    fn flow_pressure(&self, symbol: &str, l2: &BacktestL2State) -> f64 {
+        let prev_obi = self.prev_obi_by_symbol.get(symbol).copied().unwrap_or(0.0);
+        (l2.obi - prev_obi).clamp(-1.0, 1.0)
+    }
+
+    // ─── Entry logic (log-normal + microstructure) ──────────
 
     fn try_directional_entry(&mut self, symbol: &str, ts: DateTime<Utc>) {
         // 1. Need: active events with S0, spot price history, PM asks
@@ -429,14 +617,9 @@ impl DirectionalBacktestEngine {
             }
         };
 
-        // Shared preconditions: spot price with momentum, PM quotes
-        let (spot_price, momentum) = match self.spot_prices.get(symbol) {
-            Some(s) => {
-                // Use weighted momentum (10s/30s/60s) like live engine,
-                // fall back to 30s single-timeframe
-                let mom = s.weighted_momentum().or_else(|| s.momentum(30));
-                (s.price, mom)
-            }
+        // Shared preconditions: spot price, PM quotes
+        let spot = match self.spot_prices.get(symbol) {
+            Some(s) => s.clone(),
             None => {
                 self.recorder.record_filtered(
                     &BacktestSignal {
@@ -461,6 +644,8 @@ impl DirectionalBacktestEngine {
             }
         };
 
+        let sigma_annual = self.ewma_sigma_annualized(symbol);
+
         // Try entry on each active event window independently
         for window in windows {
             let (up_ask, down_ask) = self
@@ -468,23 +653,25 @@ impl DirectionalBacktestEngine {
                 .get(&window.event_slug)
                 .copied()
                 .unwrap_or((None, None));
-            self.try_entry_for_window(symbol, ts, &window, spot_price, momentum, up_ask, down_ask);
+            self.try_entry_for_window(symbol, ts, &window, &spot, sigma_annual, up_ask, down_ask);
         }
     }
 
-    /// Attempt entry on a specific event window using momentum-based fair value.
-    /// Mirrors the live MomentumDetector.check() → estimate_fair_value() → edge logic.
+    /// Attempt entry on a specific event window using log-normal probability model.
+    /// When `use_l2_signals` is true, applies microstructure adjustment in logit space
+    /// (matching pm_5m_directional live strategy). Falls back to old sigmoid model when false.
     fn try_entry_for_window(
         &mut self,
         symbol: &str,
         ts: DateTime<Utc>,
         window: &ActiveWindowInfo,
-        st: Decimal,
-        momentum: Option<Decimal>,
+        spot: &SpotPrice,
+        sigma_annual: f64,
         up_ask: Option<Decimal>,
         down_ask: Option<Decimal>,
     ) {
-        // 2. Time remaining — must be within [min, max] window
+        let st = spot.price;
+        // 1. Time remaining — must be within [min, max] window
         let time_remaining = (window.end_time - ts).num_seconds() as f64;
         if time_remaining <= 0.0 || time_remaining < self.config.min_time_remaining_secs as f64 {
             return;
@@ -493,66 +680,119 @@ impl DirectionalBacktestEngine {
             return;
         }
 
-        // 3. Momentum — need sufficient history
-        let momentum = match momentum {
-            Some(m) => m,
-            None => return, // insufficient price history
+        // 2. Backward-compat: if L2 signals disabled, use old sigmoid model
+        if !self.config.use_l2_signals {
+            let momentum = spot.weighted_momentum().or_else(|| spot.momentum(30));
+            self.try_entry_for_window_legacy(symbol, ts, window, st, momentum, up_ask, down_ask);
+            return;
+        }
+
+        // 3. Compute log-normal base probability
+        let (p_base, sigma, z) =
+            match self.compute_probability(spot, window.s0, window.end_time, ts, sigma_annual) {
+                Some(v) => v,
+                None => return,
+            };
+
+        // 4. Logit-space microstructure adjustment (if L2 data available)
+        let (p_hat, pressure, microgap) = if let Some(l2) = self.l2_by_symbol.get(symbol).cloned()
+        {
+            let logit_base = (p_base / (1.0 - p_base)).ln();
+            let mg = Self::microgap_proxy(&l2);
+            let pr = self.flow_pressure(symbol, &l2);
+            let adjusted_logit = logit_base
+                + self.config.obi_weight * l2.obi
+                + self.config.flow_weight * pr
+                + self.config.microgap_weight * mg;
+            let p = (1.0 / (1.0 + (-adjusted_logit).exp())).clamp(PROB_FLOOR, 1.0 - PROB_FLOOR);
+            (p, pr, mg)
+        } else {
+            (p_base, 0.0, 0.0)
         };
 
-        // 4. Minimum momentum threshold
-        if momentum.abs() < self.config.min_momentum {
+        // 5. Side selection
+        let (direction, effective_p) = if p_hat >= 0.5 {
+            (Direction::Up, p_hat)
+        } else {
+            (Direction::Down, 1.0 - p_hat)
+        };
+
+        // 6. Probability gate
+        if effective_p < self.config.p_entry || z.abs() < self.config.min_abs_z {
             self.recorder.record_filtered(
                 &BacktestSignal {
                     signal_type: SignalType::Filtered,
                     symbol: symbol.to_string(),
-                    direction: String::new(),
+                    direction: format!("{}", direction),
                     timestamp: ts,
-                    p_hat: None,
+                    p_hat: Some(effective_p),
                     ev_net: None,
-                    sigma: None,
+                    sigma: Some(sigma),
                     market_price: None,
                     spot_price: Some(st),
                     s0: Some(window.s0),
                     time_remaining_secs: Some(time_remaining),
-                    filter_reason: Some("momentum_below_threshold".to_string()),
+                    filter_reason: Some("weak_probability".to_string()),
                     exit_reason: None,
                     exit_price: None,
                 },
-                "momentum_below_threshold",
+                "weak_probability",
             );
             return;
         }
 
-        // 5. Direction from momentum sign + select PM price
-        let (direction, market_ask) = if momentum > Decimal::ZERO {
-            match up_ask {
-                Some(ask) => (Direction::Up, ask),
-                None => return,
+        // 7. Direction confirmation (if L2 available)
+        if self.l2_by_symbol.contains_key(symbol) {
+            let l2 = self.l2_by_symbol.get(symbol).unwrap();
+            let confirmed = match direction {
+                Direction::Up => {
+                    l2.obi > self.config.min_obi
+                        && pressure > self.config.min_obi
+                        && microgap > 0.0
+                }
+                Direction::Down => {
+                    l2.obi < -self.config.min_obi
+                        && pressure < -self.config.min_obi
+                        && microgap < 0.0
+                }
+            };
+            if !confirmed {
+                self.recorder.record_filtered(
+                    &BacktestSignal {
+                        signal_type: SignalType::Filtered,
+                        symbol: symbol.to_string(),
+                        direction: format!("{}", direction),
+                        timestamp: ts,
+                        p_hat: Some(effective_p),
+                        ev_net: None,
+                        sigma: Some(sigma),
+                        market_price: None,
+                        spot_price: Some(st),
+                        s0: Some(window.s0),
+                        time_remaining_secs: Some(time_remaining),
+                        filter_reason: Some("direction_confirmation_failed".to_string()),
+                        exit_reason: None,
+                        exit_price: None,
+                    },
+                    "direction_confirmation_failed",
+                );
+                return;
             }
-        } else {
-            match down_ask {
-                Some(ask) => (Direction::Down, ask),
-                None => return,
-            }
-        };
-
-        // 6. Fair value estimation (sigmoid mapping, same as live engine)
-        let mut fair_value = Self::estimate_fair_value(momentum);
-
-        // 6b. Adjust for price_to_beat if enabled
-        if self.config.use_price_to_beat {
-            let time_remaining_secs = time_remaining as i64;
-            fair_value = Self::adjust_fair_value_for_price_to_beat(
-                fair_value,
-                momentum,
-                st,
-                window.s0,
-                time_remaining_secs,
-                window.end_time,
-            );
         }
 
-        // 7. Price bounds check
+        // 8. Select market ask for the chosen direction
+        let market_ask = match direction {
+            Direction::Up => match up_ask {
+                Some(ask) => ask,
+                None => return,
+            },
+            Direction::Down => match down_ask {
+                Some(ask) => ask,
+                None => return,
+            },
+        };
+
+        // 9. Price bounds check
         if market_ask > self.config.max_entry_price || market_ask < self.config.min_entry_price {
             self.recorder.record_filtered(
                 &BacktestSignal {
@@ -560,9 +800,9 @@ impl DirectionalBacktestEngine {
                     symbol: symbol.to_string(),
                     direction: format!("{}", direction),
                     timestamp: ts,
-                    p_hat: Some(fair_value.to_f64().unwrap_or(0.5)),
+                    p_hat: Some(effective_p),
                     ev_net: None,
-                    sigma: None,
+                    sigma: Some(sigma),
                     market_price: Some(market_ask),
                     spot_price: Some(st),
                     s0: Some(window.s0),
@@ -576,31 +816,55 @@ impl DirectionalBacktestEngine {
             return;
         }
 
-        // 8. Edge = fair_value - pm_ask - fees
+        // 10. No-trade zone
+        let ask_f = market_ask.to_f64().unwrap_or(0.5);
+        if ask_f >= self.config.no_trade_price_min && ask_f <= self.config.no_trade_price_max {
+            if !(z.abs() >= self.config.no_trade_override_z
+                && pressure.abs() >= self.config.no_trade_override_flow)
+            {
+                self.recorder.record_filtered(
+                    &BacktestSignal {
+                        signal_type: SignalType::Filtered,
+                        symbol: symbol.to_string(),
+                        direction: format!("{}", direction),
+                        timestamp: ts,
+                        p_hat: Some(effective_p),
+                        ev_net: None,
+                        sigma: Some(sigma),
+                        market_price: Some(market_ask),
+                        spot_price: Some(st),
+                        s0: Some(window.s0),
+                        time_remaining_secs: Some(time_remaining),
+                        filter_reason: Some("no_trade_zone".to_string()),
+                        exit_reason: None,
+                        exit_price: None,
+                    },
+                    "no_trade_zone",
+                );
+                return;
+            }
+        }
+
+        // 11. Edge = effective_p - (ask + fees)
         let best_bid = (market_ask - dec!(0.02)).max(dec!(0.01));
         let depth_ratio = Decimal::from(self.config.shares_per_trade) / dec!(10000);
         let cost = self
             .fee_model
             .all_in_cost(market_ask, best_bid, market_ask, depth_ratio);
-        let fee_per_share_usd = market_ask * cost.taker_fee;
-        let spread_plus_slip = cost.spread_cost + cost.depth_slippage;
+        let fee_cost = cost.total.to_f64().unwrap_or(0.01);
+        let effective_cost = ask_f + fee_cost;
+        let edge = effective_p - effective_cost;
 
-        let fair_value_f = fair_value.to_f64().unwrap_or(0.5);
-        let market_ask_f = market_ask.to_f64().unwrap_or(0.5);
-        let total_cost_f =
-            fee_per_share_usd.to_f64().unwrap_or(0.01) + spread_plus_slip.to_f64().unwrap_or(0.01);
-        let edge = fair_value_f - market_ask_f - total_cost_f;
-
-        if edge < self.config.entry_threshold {
+        if edge < self.config.min_edge {
             self.recorder.record_filtered(
                 &BacktestSignal {
                     signal_type: SignalType::Filtered,
                     symbol: symbol.to_string(),
                     direction: format!("{}", direction),
                     timestamp: ts,
-                    p_hat: Some(fair_value_f),
+                    p_hat: Some(effective_p),
                     ev_net: Some(edge),
-                    sigma: None,
+                    sigma: Some(sigma),
                     market_price: Some(market_ask),
                     spot_price: Some(st),
                     s0: Some(window.s0),
@@ -614,86 +878,65 @@ impl DirectionalBacktestEngine {
             return;
         }
 
-        // 9. Cooldown check
-        if let Some(last) = self.last_entry_time.get(symbol) {
-            let elapsed = (ts - *last).num_seconds();
-            if elapsed < self.config.cooldown_secs as i64 {
-                self.recorder.record_filtered(
-                    &BacktestSignal {
-                        signal_type: SignalType::Filtered,
-                        symbol: symbol.to_string(),
-                        direction: format!("{}", direction),
-                        timestamp: ts,
-                        p_hat: Some(fair_value_f),
-                        ev_net: Some(edge),
-                        sigma: None,
-                        market_price: Some(market_ask),
-                        spot_price: Some(st),
-                        s0: Some(window.s0),
-                        time_remaining_secs: Some(time_remaining),
-                        filter_reason: Some("cooldown".to_string()),
-                        exit_reason: None,
-                        exit_price: None,
-                    },
-                    "cooldown",
-                );
-                return;
-            }
-        }
-
-        // 10. Max positions check
-        if self.positions.len() >= self.config.max_concurrent_positions {
+        // 12. Bayesian gate (optional)
+        let bayes_lb = if self.config.use_bayesian {
+            self.bayesian.posterior_lower_bound(
+                ask_f,
+                time_remaining,
+                sigma,
+                effective_p,
+                self.config.bayesian_credible_z,
+            )
+        } else {
+            effective_p
+        };
+        if bayes_lb < self.config.p_entry {
             self.recorder.record_filtered(
                 &BacktestSignal {
                     signal_type: SignalType::Filtered,
                     symbol: symbol.to_string(),
                     direction: format!("{}", direction),
                     timestamp: ts,
-                    p_hat: Some(fair_value_f),
+                    p_hat: Some(effective_p),
                     ev_net: Some(edge),
-                    sigma: None,
+                    sigma: Some(sigma),
                     market_price: Some(market_ask),
                     spot_price: Some(st),
                     s0: Some(window.s0),
                     time_remaining_secs: Some(time_remaining),
-                    filter_reason: Some("max_positions".to_string()),
+                    filter_reason: Some("bayesian_lb_below_threshold".to_string()),
                     exit_reason: None,
                     exit_price: None,
                 },
-                "max_positions",
+                "bayesian_lb_below_threshold",
             );
             return;
         }
 
-        // 11. Don't enter if already holding same event+direction
+
+        // 13. Cooldown check
+        if let Some(last) = self.last_entry_time.get(symbol) {
+            let elapsed = (ts - *last).num_seconds();
+            if elapsed < self.config.cooldown_secs as i64 {
+                return;
+            }
+        }
+
+        // 14. Max positions check
+        if self.positions.len() >= self.config.max_concurrent_positions {
+            return;
+        }
+
+        // 15. Don't enter if already holding same event+direction
         let already_holding = self.positions.iter().any(|p| {
             p.event_slug == window.event_slug
                 && std::mem::discriminant(&p.direction) == std::mem::discriminant(&direction)
         });
         if already_holding {
-            self.recorder.record_filtered(
-                &BacktestSignal {
-                    signal_type: SignalType::Filtered,
-                    symbol: symbol.to_string(),
-                    direction: format!("{}", direction),
-                    timestamp: ts,
-                    p_hat: Some(fair_value_f),
-                    ev_net: Some(edge),
-                    sigma: None,
-                    market_price: Some(market_ask),
-                    spot_price: Some(st),
-                    s0: Some(window.s0),
-                    time_remaining_secs: Some(time_remaining),
-                    filter_reason: Some("already_holding".to_string()),
-                    exit_reason: None,
-                    exit_price: None,
-                },
-                "already_holding",
-            );
             return;
         }
 
-        // 12. Execute entry via ExecutionSimulator
+        // 16. Execute entry via ExecutionSimulator
         let sim_result =
             self.execution_sim
                 .simulate_buy(market_ask, ts, self.config.shares_per_trade, 10_000);
@@ -724,9 +967,160 @@ impl DirectionalBacktestEngine {
             event_slug: window.event_slug.clone(),
             s0: window.s0,
             event_end_time: window.end_time,
+            entry_p_hat: effective_p,
+            entry_ev_net: edge,
+            entry_sigma: sigma,
+            latest_pm_price: market_ask,
+        });
+
+        self.last_entry_time.insert(symbol.to_string(), ts);
+
+        // Record Bayesian outcome tracking data for settlement
+        // (bayesian.record_outcome is called at settlement time)
+
+        self.recorder.record_entry(&BacktestSignal {
+            signal_type: SignalType::Entry,
+            symbol: symbol.to_string(),
+            direction: format!("{}", direction),
+            timestamp: ts,
+            p_hat: Some(effective_p),
+            ev_net: Some(edge),
+            sigma: Some(sigma),
+            market_price: Some(sim_result.fill_price),
+            spot_price: Some(st),
+            s0: Some(window.s0),
+            time_remaining_secs: Some(time_remaining),
+            filter_reason: None,
+            exit_reason: None,
+            exit_price: None,
+        });
+
+        debug!(
+            "ENTRY {} {} @ {:.4} | p_hat={:.3} z={:.3} sigma={:.4} edge={:.3}",
+            symbol,
+            direction,
+            sim_result.fill_price,
+            effective_p,
+            z,
+            sigma,
+            edge,
+        );
+    }
+
+    /// Legacy entry logic using sigmoid-momentum model (backward compatibility).
+    fn try_entry_for_window_legacy(
+        &mut self,
+        symbol: &str,
+        ts: DateTime<Utc>,
+        window: &ActiveWindowInfo,
+        st: Decimal,
+        momentum: Option<Decimal>,
+        up_ask: Option<Decimal>,
+        down_ask: Option<Decimal>,
+    ) {
+        let time_remaining = (window.end_time - ts).num_seconds() as f64;
+
+        let momentum = match momentum {
+            Some(m) => m,
+            None => return,
+        };
+
+        if momentum.abs() < self.config.min_momentum {
+            return;
+        }
+
+        let (direction, market_ask) = if momentum > Decimal::ZERO {
+            match up_ask {
+                Some(ask) => (Direction::Up, ask),
+                None => return,
+            }
+        } else {
+            match down_ask {
+                Some(ask) => (Direction::Down, ask),
+                None => return,
+            }
+        };
+
+        let mut fair_value = Self::estimate_fair_value(momentum);
+        if self.config.use_price_to_beat {
+            fair_value = Self::adjust_fair_value_for_price_to_beat(
+                fair_value,
+                momentum,
+                st,
+                window.s0,
+                time_remaining as i64,
+                window.end_time,
+            );
+        }
+
+        if market_ask > self.config.max_entry_price || market_ask < self.config.min_entry_price {
+            return;
+        }
+
+        let best_bid = (market_ask - dec!(0.02)).max(dec!(0.01));
+        let depth_ratio = Decimal::from(self.config.shares_per_trade) / dec!(10000);
+        let cost = self
+            .fee_model
+            .all_in_cost(market_ask, best_bid, market_ask, depth_ratio);
+        let fee_per_share_usd = market_ask * cost.taker_fee;
+        let spread_plus_slip = cost.spread_cost + cost.depth_slippage;
+
+        let fair_value_f = fair_value.to_f64().unwrap_or(0.5);
+        let market_ask_f = market_ask.to_f64().unwrap_or(0.5);
+        let total_cost_f =
+            fee_per_share_usd.to_f64().unwrap_or(0.01) + spread_plus_slip.to_f64().unwrap_or(0.01);
+        let edge = fair_value_f - market_ask_f - total_cost_f;
+
+        if edge < self.config.entry_threshold {
+            return;
+        }
+
+        if let Some(last) = self.last_entry_time.get(symbol) {
+            if (ts - *last).num_seconds() < self.config.cooldown_secs as i64 {
+                return;
+            }
+        }
+
+        if self.positions.len() >= self.config.max_concurrent_positions {
+            return;
+        }
+
+        let already_holding = self.positions.iter().any(|p| {
+            p.event_slug == window.event_slug
+                && std::mem::discriminant(&p.direction) == std::mem::discriminant(&direction)
+        });
+        if already_holding {
+            return;
+        }
+
+        let sim_result =
+            self.execution_sim
+                .simulate_buy(market_ask, ts, self.config.shares_per_trade, 10_000);
+
+        let entry_cost = Decimal::from(sim_result.filled_shares) * sim_result.fill_price;
+        let entry_fee = self.fee_model.fee_shares(
+            Decimal::from(sim_result.filled_shares),
+            sim_result.fill_price,
+        ) * sim_result.fill_price;
+        let total_entry_cost = entry_cost + entry_fee;
+        if total_entry_cost > self.equity {
+            return;
+        }
+
+        self.equity -= total_entry_cost;
+
+        self.positions.push(DirectionalPosition {
+            symbol: symbol.to_string(),
+            direction,
+            entry_price: sim_result.fill_price,
+            entry_time: ts,
+            shares: sim_result.filled_shares,
+            event_slug: window.event_slug.clone(),
+            s0: window.s0,
+            event_end_time: window.end_time,
             entry_p_hat: fair_value_f,
             entry_ev_net: edge,
-            entry_sigma: momentum.to_f64().unwrap_or(0.0), // store momentum in sigma field
+            entry_sigma: momentum.to_f64().unwrap_or(0.0),
             latest_pm_price: market_ask,
         });
 
@@ -748,16 +1142,6 @@ impl DirectionalBacktestEngine {
             exit_reason: None,
             exit_price: None,
         });
-
-        debug!(
-            "ENTRY {} {} @ {:.4} | fv={:.3} edge={:.3} mom={:.4}%",
-            symbol,
-            direction,
-            sim_result.fill_price,
-            fair_value_f,
-            edge,
-            momentum.to_f64().unwrap_or(0.0) * 100.0
-        );
     }
 
     // ─── Fair value estimation (from live MomentumDetector) ───
@@ -918,13 +1302,19 @@ impl DirectionalBacktestEngine {
             .fee_shares(Decimal::from(pos.shares), pos.entry_price)
             * pos.entry_price;
         let pnl = proceeds - Decimal::from(pos.shares) * pos.entry_price - entry_fee;
-        let holding_secs = (ts - pos.entry_time).num_seconds();
+        // For settlement exits, use event_end_time (not resolved_at which can be hours later)
+        let effective_exit_time = if reason == "settlement" {
+            pos.event_end_time.min(ts)
+        } else {
+            ts
+        };
+        let holding_secs = (effective_exit_time - pos.entry_time).num_seconds();
 
         self.closed_trades.push(DirectionalClosedTrade {
             symbol: pos.symbol.clone(),
             direction: format!("{}", pos.direction),
             entry_time: pos.entry_time,
-            exit_time: ts,
+            exit_time: effective_exit_time,
             entry_price: pos.entry_price,
             exit_price: final_price,
             shares: pos.shares,
