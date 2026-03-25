@@ -15,17 +15,23 @@ fi
 sudo mkdir -p \
   "${ROOT_DIR}/bin" \
   "${ROOT_DIR}/config" \
+  "${ROOT_DIR}/config/deployments" \
   "${ROOT_DIR}/data/state" \
   "${ROOT_DIR}/deployment" \
   "${ROOT_DIR}/logs" \
   "${ROOT_DIR}/run/platform" \
-  "${ROOT_DIR}/scripts"
+  "${ROOT_DIR}/scripts" \
+  "${ROOT_DIR}/scripts/drills"
 sudo chown -R ploy:ploy "${ROOT_DIR}"
 
 sudo install -m 0644 "${SERVICE_SRC}" "${SERVICE_DST}"
 
 if [[ -f "${ROOT_DIR}/data/state/deployments.json.sample" && ! -f "${ROOT_DIR}/data/state/deployments.json" ]]; then
   sudo cp "${ROOT_DIR}/data/state/deployments.json.sample" "${ROOT_DIR}/data/state/deployments.json"
+fi
+
+if [[ -f "${ROOT_DIR}/config/deployments/example.live.dry-run.json.sample" && ! -f "${ROOT_DIR}/config/deployments/example.live.dry-run.json" ]]; then
+  sudo cp "${ROOT_DIR}/config/deployments/example.live.dry-run.json.sample" "${ROOT_DIR}/config/deployments/example.live.dry-run.json"
 fi
 
 sudo touch "${ROOT_DIR}/.env"
@@ -49,7 +55,7 @@ ensure_env_default "${ROOT_DIR}/.env" "PLOY_LISTEN_ADDR" "127.0.0.1:8081"
 ensure_env_default "${ROOT_DIR}/.env" "PLOY_TICK_INTERVAL_MS" "1000"
 
 sudo chmod 600 "${ROOT_DIR}/.env"
-sudo chown ploy:ploy "${ROOT_DIR}/.env" "${ROOT_DIR}/data/state/deployments.json" 2>/dev/null || true
+sudo chown ploy:ploy "${ROOT_DIR}/.env" "${ROOT_DIR}/data/state/deployments.json" "${ROOT_DIR}/config/deployments/example.live.dry-run.json" 2>/dev/null || true
 
 sudo systemctl daemon-reload
 sudo systemctl enable ployd
@@ -61,5 +67,8 @@ echo "  sudo systemctl start ployd          # Start the platform daemon"
 echo "  sudo systemctl status ployd         # Check daemon status"
 echo "  sudo journalctl -u ployd -f         # Tail daemon logs"
 echo "  ${ROOT_DIR}/bin/ployctl system status"
+echo "  ${ROOT_DIR}/bin/ployctl system metrics"
+echo "  ${ROOT_DIR}/bin/ployctl system alerts"
 echo "  ${ROOT_DIR}/bin/ployctl trading status"
+echo "  ${ROOT_DIR}/scripts/drills/live_dry_run.sh"
 echo "  ${ROOT_DIR}/bin/ploytui"

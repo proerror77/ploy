@@ -9,6 +9,12 @@ Start the single-host trading platform runtime with:
 - one operator client path through `ployctl`
 - one optional terminal console through `ploytui`
 
+This runbook covers daemon startup and local/operator smoke checks. Remote
+live-host acceptance is documented separately in:
+
+- [`live-deployment-checklist.md`](./live-deployment-checklist.md)
+- [`live-dry-run-drill.md`](./live-dry-run-drill.md)
+
 ## Default Local Flow
 
 1. Check the daemon boots:
@@ -35,6 +41,8 @@ retry backoff during exchange/API outages.
 
 ```bash
 cargo run -p ployctl -- system status
+cargo run -p ployctl -- system metrics
+cargo run -p ployctl -- system alerts
 cargo run -p ployctl -- system audit
 cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments list
@@ -56,6 +64,8 @@ The current operator flow is:
 ployd
 ployctl deployments apply config/deployments/example.paper.json
 ployctl system status
+ployctl system metrics
+ployctl system alerts
 ployctl system audit
 ployctl trading status
 ployctl deployments list
@@ -77,3 +87,10 @@ for authenticated control-plane actions, and `ployctl system audit` reads the
 latest entries back over `/api/audit/logs`. `ployctl system status` now also
 shows `live_reconcile_failures`, `next_live_reconcile_at`, and
 `last_live_reconcile_error`, which are the primary live-venue outage signals.
+
+For a remote host that is intended to run future live trading, the default next
+step after startup is the dry-run acceptance drill:
+
+```bash
+/opt/ploy/scripts/drills/live_dry_run.sh
+```
