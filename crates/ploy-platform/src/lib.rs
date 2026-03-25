@@ -5,7 +5,7 @@ pub mod deployments;
 pub mod health;
 pub mod system;
 
-pub use accounts::AccountSnapshot;
+pub use accounts::{AccountClaimDetail, AccountClaimRegistry, AccountClaimSnapshot, AccountSnapshot};
 pub use audit::{AuditEvent, AuditLog};
 pub use control_plane::ControlPlane;
 pub use deployments::{DeploymentRecord, DeploymentRegistry};

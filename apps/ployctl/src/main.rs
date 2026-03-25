@@ -1,4 +1,4 @@
-use ployctl::{client::ControlPlaneClient, deployments, system, trading};
+use ployctl::{claims, client::ControlPlaneClient, deployments, system, trading};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
@@ -15,6 +15,12 @@ enum Command {
         rust_decimal::Decimal,
         Option<rust_decimal::Decimal>,
     ),
+    ClaimsList,
+    ClaimsInspect(String),
+    ClaimsRun(String),
+    ClaimsRescan(String),
+    ClaimsPause(String),
+    ClaimsResume(String),
     DeploymentsList,
     DeploymentsInspect(String),
     DeploymentsApply(String),
@@ -80,6 +86,22 @@ impl Command {
                     limit_price,
                 ))
             }
+            [_bin, claims, list] if claims == "claims" && list == "list" => Ok(Self::ClaimsList),
+            [_bin, claims, inspect, account_id] if claims == "claims" && inspect == "inspect" => {
+                Ok(Self::ClaimsInspect(account_id.clone()))
+            }
+            [_bin, claims, run, account_id] if claims == "claims" && run == "run" => {
+                Ok(Self::ClaimsRun(account_id.clone()))
+            }
+            [_bin, claims, rescan, account_id] if claims == "claims" && rescan == "rescan" => {
+                Ok(Self::ClaimsRescan(account_id.clone()))
+            }
+            [_bin, claims, pause, account_id] if claims == "claims" && pause == "pause" => {
+                Ok(Self::ClaimsPause(account_id.clone()))
+            }
+            [_bin, claims, resume, account_id] if claims == "claims" && resume == "resume" => {
+                Ok(Self::ClaimsResume(account_id.clone()))
+            }
             [_bin, deployments, list] if deployments == "deployments" && list == "list" => {
                 Ok(Self::DeploymentsList)
             }
@@ -128,7 +150,7 @@ impl Command {
             {
                 Ok(Self::DeploymentsArchive(deployment_id.clone()))
             }
-            _ => Err("usage: ployctl system status | ployctl system metrics | ployctl system alerts | ployctl system audit | ployctl trading status | ployctl trading inspect <deployment-id> | ployctl trading cancel <deployment-id> <order-id> | ployctl trading replace <deployment-id> <order-id> <quantity> <limit-price|-> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id> | ployctl deployments drain <deployment-id> | ployctl deployments enable <deployment-id> | ployctl deployments disable <deployment-id> | ployctl deployments archive <deployment-id>".to_string()),
+            _ => Err("usage: ployctl system status | ployctl system metrics | ployctl system alerts | ployctl system audit | ployctl trading status | ployctl trading inspect <deployment-id> | ployctl trading cancel <deployment-id> <order-id> | ployctl trading replace <deployment-id> <order-id> <quantity> <limit-price|-> | ployctl claims list | ployctl claims inspect <account-id> | ployctl claims run <account-id> | ployctl claims rescan <account-id> | ployctl claims pause <account-id> | ployctl claims resume <account-id> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id> | ployctl deployments drain <deployment-id> | ployctl deployments enable <deployment-id> | ployctl deployments disable <deployment-id> | ployctl deployments archive <deployment-id>".to_string()),
         }
     }
 }
@@ -163,6 +185,12 @@ fn execute(command: Command, client: &ControlPlaneClient) -> Result<String, Stri
         Command::TradingReplace(deployment_id, order_id, quantity, limit_price) => {
             trading::replace_order(client, &deployment_id, &order_id, quantity, limit_price)
         }
+        Command::ClaimsList => claims::render_claim_statuses(client),
+        Command::ClaimsInspect(account_id) => claims::render_claim_detail(client, &account_id),
+        Command::ClaimsRun(account_id) => claims::run_claims(client, &account_id),
+        Command::ClaimsRescan(account_id) => claims::rescan_claims(client, &account_id),
+        Command::ClaimsPause(account_id) => claims::pause_claims(client, &account_id),
+        Command::ClaimsResume(account_id) => claims::resume_claims(client, &account_id),
         Command::DeploymentsList => deployments::render_deployments(client),
         Command::DeploymentsInspect(deployment_id) => {
             deployments::render_deployment(client, &deployment_id)
@@ -308,6 +336,22 @@ mod tests {
                 Some(rust_decimal::Decimal::new(57, 2)),
             )
         );
+    }
+
+    #[test]
+    fn parses_claims_inspect_command() {
+        let command =
+            Command::parse(&["ployctl", "claims", "inspect", "acct-live"].map(str::to_string))
+                .expect("command");
+        assert_eq!(command, Command::ClaimsInspect("acct-live".to_string()));
+    }
+
+    #[test]
+    fn parses_claims_run_command() {
+        let command =
+            Command::parse(&["ployctl", "claims", "run", "acct-live"].map(str::to_string))
+                .expect("command");
+        assert_eq!(command, Command::ClaimsRun("acct-live".to_string()));
     }
 
     #[test]

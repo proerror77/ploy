@@ -1,8 +1,8 @@
 use ploy_operator_contracts::{
-    ActiveAlert, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
-    DeploymentControlRequest, DeploymentState, DeploymentSummary, DesiredState, OperatorEvent,
-    OrderControlResponse, OrderReplaceRequest, PlatformMetrics, SystemStatus,
-    TradingStateSnapshot,
+    AccountClaimActionResponse, AccountClaimDetailResponse, AccountClaimStatus, ActiveAlert,
+    AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
+    DeploymentState, DeploymentSummary, DesiredState, OperatorEvent, OrderControlResponse,
+    OrderReplaceRequest, PlatformMetrics, SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -63,6 +63,46 @@ impl ControlPlaneClient {
 
     pub fn audit_logs(&self) -> Result<Vec<AuditLogEntry>, String> {
         self.get_json("/api/audit/logs")
+    }
+
+    pub fn claim_statuses(&self) -> Result<Vec<AccountClaimStatus>, String> {
+        match self.read_claim_status_over_http() {
+            Ok(snapshot) => Ok(snapshot),
+            Err(err) if !should_fallback_to_snapshot(&err) => Err(err),
+            Err(_) => Ok(self
+                .read_claim_detail_snapshot()?
+                .into_iter()
+                .map(|detail| detail.status)
+                .collect()),
+        }
+    }
+
+    pub fn inspect_claims(&self, account_id: &str) -> Result<AccountClaimDetailResponse, String> {
+        match self.read_claim_detail_over_http(account_id) {
+            Ok(detail) => Ok(detail),
+            Err(err) if should_fallback_to_snapshot(&err) => self
+                .read_claim_detail_snapshot()?
+                .into_iter()
+                .find(|detail| detail.status.account_id == account_id)
+                .ok_or_else(|| format!("account `{account_id}` was not found")),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn run_claims(&self, account_id: &str) -> Result<AccountClaimActionResponse, String> {
+        self.send_empty("POST", &format!("/api/accounts/{account_id}/claims/run"))
+    }
+
+    pub fn rescan_claims(&self, account_id: &str) -> Result<AccountClaimActionResponse, String> {
+        self.send_empty("POST", &format!("/api/accounts/{account_id}/claims/rescan"))
+    }
+
+    pub fn pause_claims(&self, account_id: &str) -> Result<AccountClaimActionResponse, String> {
+        self.send_empty("POST", &format!("/api/accounts/{account_id}/claims/pause"))
+    }
+
+    pub fn resume_claims(&self, account_id: &str) -> Result<AccountClaimActionResponse, String> {
+        self.send_empty("POST", &format!("/api/accounts/{account_id}/claims/resume"))
     }
 
     pub fn system_metrics(&self) -> Result<PlatformMetrics, String> {
@@ -259,6 +299,12 @@ impl ControlPlaneClient {
         serde_json::from_str(&body).map_err(|err| format!("parse trading state snapshot: {err}"))
     }
 
+    fn read_claim_detail_snapshot(&self) -> Result<Vec<AccountClaimDetailResponse>, String> {
+        let body = fs::read_to_string(self.runtime_root.join("account-claims.json"))
+            .map_err(|err| format!("read claim state snapshot: {err}"))?;
+        serde_json::from_str(&body).map_err(|err| format!("parse claim state snapshot: {err}"))
+    }
+
     fn read_status_over_http(&self) -> Result<SystemStatus, String> {
         self.get_json("/api/system/status")
     }
@@ -273,6 +319,17 @@ impl ControlPlaneClient {
 
     fn read_trading_state_over_http(&self) -> Result<Vec<TradingStateSnapshot>, String> {
         self.get_json("/api/trading/state")
+    }
+
+    fn read_claim_status_over_http(&self) -> Result<Vec<AccountClaimStatus>, String> {
+        self.get_json("/api/accounts/claims")
+    }
+
+    fn read_claim_detail_over_http(
+        &self,
+        account_id: &str,
+    ) -> Result<AccountClaimDetailResponse, String> {
+        self.get_json(&format!("/api/accounts/{account_id}/claims"))
     }
 
     fn get_json<T>(&self, path: &str) -> Result<T, String>

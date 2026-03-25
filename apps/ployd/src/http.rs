@@ -538,8 +538,12 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
         | ("GET", "/api/system/alerts")
         | ("GET", "/api/deployments")
         | ("GET", "/api/trading/state")
+        | ("GET", "/api/accounts/claims")
         | ("GET", "/api/events/stream") => RequiredAccess::ReadOnly,
         ("GET", "/api/audit/logs") => RequiredAccess::Admin,
+        ("GET", _) if path.starts_with("/api/accounts/") && path.ends_with("/claims") => {
+            RequiredAccess::ReadOnly
+        }
         ("GET", _) if path.starts_with("/api/deployments/") && !path.ends_with("/control") => {
             RequiredAccess::ReadOnly
         }
@@ -562,6 +566,28 @@ fn required_access_name(required_access: RequiredAccess) -> &'static str {
         RequiredAccess::ReadOnly => "read_only",
         RequiredAccess::Operator => "operator",
         RequiredAccess::Admin => "admin",
+    }
+}
+
+fn account_claim_action_account_id<'a>(path: &'a str, suffix: &str) -> Option<&'a str> {
+    path.strip_prefix("/api/accounts/")
+        .and_then(|path| path.strip_suffix(suffix))
+        .map(|path| path.trim_end_matches('/'))
+        .filter(|account_id| !account_id.is_empty())
+}
+
+fn claim_action_error_response(err: io::Error, account_id: &str) -> (u16, String) {
+    match err.kind() {
+        io::ErrorKind::NotFound => json_error(
+            404,
+            "account_not_found",
+            Some(format!("account `{account_id}` was not found")),
+        ),
+        io::ErrorKind::InvalidInput => json_error(400, "invalid_request", Some(err.to_string())),
+        io::ErrorKind::InvalidData => {
+            json_error(503, "claim_backend_misconfigured", Some(err.to_string()))
+        }
+        _ => json_error(500, "claim_action_failed", Some(err.to_string())),
     }
 }
 
@@ -945,6 +971,14 @@ fn handle_runtime_request(
             ),
             Err(_) => json_error(503, "daemon_lock_poisoned", None),
         },
+        ("GET", "/api/accounts/claims") => match state.daemon.lock() {
+            Ok(daemon) => (
+                200,
+                serde_json::to_string(&daemon.claim_statuses())
+                    .unwrap_or_else(|_| "[]".to_string()),
+            ),
+            Err(_) => json_error(503, "daemon_lock_poisoned", None),
+        },
         ("GET", "/api/audit/logs") => match audit_log_path(state)
             .map_err(|response| response)
             .and_then(|path| {
@@ -957,6 +991,27 @@ fn handle_runtime_request(
             ),
             Err(response) => response,
         },
+        ("GET", _) if path.starts_with("/api/accounts/") && path.ends_with("/claims") => {
+            let Some(account_id) = account_claim_action_account_id(path, "/claims") else {
+                return json_error(404, "not_found", None);
+            };
+            match state.daemon.lock() {
+                Ok(daemon) => match daemon.inspect_account_claims(account_id) {
+                    Some(detail) => (
+                        200,
+                        serde_json::to_string(&detail).unwrap_or_else(|_| "{}".to_string()),
+                    ),
+                    None => claim_action_error_response(
+                        io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!("account `{account_id}` was not found"),
+                        ),
+                        account_id,
+                    ),
+                },
+                Err(_) => json_error(503, "daemon_lock_poisoned", None),
+            }
+        }
         ("GET", _) if path.starts_with("/api/deployments/") && !path.ends_with("/control") => {
             let deployment_id = path.trim_start_matches("/api/deployments/");
             match state.daemon.lock() {
@@ -1046,6 +1101,88 @@ fn handle_runtime_request(
                         Err(err) => json_error(500, "control_failed", Some(err.to_string())),
                     }
                 }
+                Err(_) => json_error(503, "daemon_lock_poisoned", None),
+            }
+        }
+        ("POST", _) if path.starts_with("/api/accounts/") && path.ends_with("/claims/run") => {
+            let Some(account_id) = account_claim_action_account_id(path, "/claims/run") else {
+                return json_error(404, "not_found", None);
+            };
+            match state.daemon.lock() {
+                Ok(mut daemon) => match daemon.run_account_claims(account_id).and_then(|response| {
+                    daemon.write_runtime_snapshots()?;
+                    publish_snapshot_events(&daemon, &state.events);
+                    Ok(response)
+                }) {
+                    Ok(response) => (
+                        200,
+                        serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+                    ),
+                    Err(err) => claim_action_error_response(err, account_id),
+                },
+                Err(_) => json_error(503, "daemon_lock_poisoned", None),
+            }
+        }
+        ("POST", _) if path.starts_with("/api/accounts/") && path.ends_with("/claims/rescan") => {
+            let Some(account_id) = account_claim_action_account_id(path, "/claims/rescan") else {
+                return json_error(404, "not_found", None);
+            };
+            match state.daemon.lock() {
+                Ok(mut daemon) => match daemon
+                    .rescan_account_claims(account_id)
+                    .and_then(|response| {
+                        daemon.write_runtime_snapshots()?;
+                        publish_snapshot_events(&daemon, &state.events);
+                        Ok(response)
+                    }) {
+                    Ok(response) => (
+                        200,
+                        serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+                    ),
+                    Err(err) => claim_action_error_response(err, account_id),
+                },
+                Err(_) => json_error(503, "daemon_lock_poisoned", None),
+            }
+        }
+        ("POST", _) if path.starts_with("/api/accounts/") && path.ends_with("/claims/pause") => {
+            let Some(account_id) = account_claim_action_account_id(path, "/claims/pause") else {
+                return json_error(404, "not_found", None);
+            };
+            match state.daemon.lock() {
+                Ok(mut daemon) => match daemon
+                    .set_account_claim_enabled(account_id, false)
+                    .and_then(|response| {
+                        daemon.write_runtime_snapshots()?;
+                        publish_snapshot_events(&daemon, &state.events);
+                        Ok(response)
+                    }) {
+                    Ok(response) => (
+                        200,
+                        serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+                    ),
+                    Err(err) => claim_action_error_response(err, account_id),
+                },
+                Err(_) => json_error(503, "daemon_lock_poisoned", None),
+            }
+        }
+        ("POST", _) if path.starts_with("/api/accounts/") && path.ends_with("/claims/resume") => {
+            let Some(account_id) = account_claim_action_account_id(path, "/claims/resume") else {
+                return json_error(404, "not_found", None);
+            };
+            match state.daemon.lock() {
+                Ok(mut daemon) => match daemon
+                    .set_account_claim_enabled(account_id, true)
+                    .and_then(|response| {
+                        daemon.write_runtime_snapshots()?;
+                        publish_snapshot_events(&daemon, &state.events);
+                        Ok(response)
+                    }) {
+                    Ok(response) => (
+                        200,
+                        serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+                    ),
+                    Err(err) => claim_action_error_response(err, account_id),
+                },
                 Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
         }
@@ -2290,5 +2427,38 @@ mod tests {
             handle_runtime_request("GET", "/api/deployments/missing.paper", None, &state);
         assert_eq!(status_code, 503);
         assert!(body.contains("\"error\":\"daemon_lock_poisoned\""));
+    }
+
+    #[test]
+    fn handle_runtime_request_reads_claim_state_from_shared_daemon() {
+        let daemon = crate::runtime::PloyDaemon::boot(&crate::config::PlatformConfig::default())
+            .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (status_code, body) = handle_runtime_request("GET", "/api/accounts/claims", None, &state);
+        assert_eq!(status_code, 200);
+        assert!(body.starts_with('['));
+    }
+
+    #[test]
+    fn handle_runtime_request_runs_account_claims() {
+        let daemon = crate::runtime::PloyDaemon::boot(&crate::config::PlatformConfig::default())
+            .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (status_code, body) = handle_runtime_request(
+            "POST",
+            "/api/accounts/acct-live/claims/run",
+            None,
+            &state,
+        );
+        assert!(matches!(status_code, 200 | 404));
+        assert!(body.contains("acct-live") || body.contains("not found"));
     }
 }

@@ -1,3 +1,63 @@
+# Auto-Claim Mainline Port (2026-03-26)
+
+## Goal
+Port the remaining unmerged value from `session/auto-claim-hardening` onto the latest `main`: relay-backed account auto-claim plus the claims operator surface. Do not re-import observability, runtime-mode, or doc changes that are already in main.
+
+## File ownership
+
+- `docs/plans/2026-03-26-auto-claim-port-design.md`
+  - owner: approved scope and behavior for the minimal auto-claim port
+- `docs/plans/2026-03-26-auto-claim-port-implementation-plan.md`
+  - owner: staged implementation and verification plan
+- `crates/ploy-operator-contracts/src/claims.rs`, `crates/ploy-operator-contracts/src/lib.rs`
+  - owner: claims wire contract
+- `crates/ploy-platform/src/accounts.rs`, `crates/ploy-platform/src/control_plane.rs`, `crates/ploy-platform/src/lib.rs`
+  - owner: account claim registry and control-plane ownership
+- `crates/ploy-connectivity/src/lib.rs`
+  - owner: relay-backed redeem discovery/execution seam
+- `apps/ployd/src/config.rs`, `apps/ployd/src/runtime.rs`, `apps/ployd/src/http.rs`
+  - owner: daemon claim loop, persistence, and HTTP handlers
+- `apps/ployctl/src/lib.rs`, `apps/ployctl/src/main.rs`, `apps/ployctl/src/client.rs`, `apps/ployctl/src/claims.rs`
+  - owner: CLI claim commands and client methods
+- `tests/platform_smoke.rs`
+  - owner: end-to-end smoke coverage for the claims control-plane
+
+## Tasks
+
+- [x] Write the design doc and implementation plan for the mainline auto-claim port.
+- [x] Add failing tests for the claims wire contract and operator surface on current main.
+- [x] Port the minimal claims contract and account registry into `ploy-platform`.
+- [x] Port the relay-backed claim discovery/execution seam into `ploy-connectivity` and `ployd`.
+- [x] Add `ployctl claims ...` plus HTTP endpoints and snapshot persistence.
+- [x] Re-run focused Rust verification and record what still remains out of scope.
+
+## Progress notes
+
+- 2026-03-26: Created clean worktree `session/auto-claim-port` from `origin/main` (`fee0ea90`) so the port can land on the latest mainline without reusing old branch state.
+- 2026-03-26: Audited `session/auto-claim-hardening` and confirmed current main already contains the branch's observability, auth-scope, runtime-mode, and dry-run deploy doc work. The still-missing value is limited to relay-backed account auto-claim and the claims operator surface.
+- 2026-03-26: Verified current main lacks `ployctl claims` commands and the account claim control-plane contract; `crates/ploy-platform/src/accounts.rs` is still only `AccountSnapshot`.
+- 2026-03-26: Added the new claims contract module, expanded `ploy-platform` account ownership into a persisted claim registry, and wired `ployctl claims list|inspect|run|rescan|pause|resume` onto the current mainline client.
+- 2026-03-26: Ported the relay-backed claim gateway from `session/auto-claim-hardening` into `ploy-connectivity`, then integrated `ployd` claim snapshots, live-account sync, auto-claim loops, and `/api/accounts/*/claims` endpoints without re-importing already-merged observability or docs work.
+- 2026-03-26: Focused verification passed:
+  - `rtk cargo test -p ployctl parses_claims_run_command -- --exact`
+  - `rtk cargo test -p ployd handle_runtime_request_reads_claim_state_from_shared_daemon -- --exact`
+  - `rtk cargo test -p ployd handle_runtime_request_runs_account_claims -- --exact`
+  - `rtk cargo test -p ploy-connectivity static_claim_gateway_replays_redeemable_positions -- --exact`
+  - `rtk cargo test -p ploy-connectivity -p ploy-operator-contracts -p ploy-platform -p ployctl -p ployd`
+  - `rtk cargo test --test platform_smoke`
+
+## Review
+
+- Delivered on current `main`:
+  - relay-backed claim connectivity seam
+  - account-level claim state registry and persistence
+  - `ployd` auto-claim loop and claim HTTP endpoints
+  - `ployctl claims` operator surface
+- Intentionally left out of this port:
+  - TUI/frontend claim dashboards
+  - legacy claimer installer retirement
+  - extra claim-specific metrics beyond the existing stale-source health projection
+
 # Live Dry-Run Deployment Drill (2026-03-25)
 
 ## Goal

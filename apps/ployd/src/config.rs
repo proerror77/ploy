@@ -13,9 +13,13 @@ pub struct PlatformConfig {
     pub status_file: PathBuf,
     pub deployment_status_file: PathBuf,
     pub trading_state_file: PathBuf,
+    pub claim_state_file: PathBuf,
     pub audit_log_file: PathBuf,
     pub tick_interval_ms: u64,
+    pub claim_tick_interval_ms: u64,
     pub request_rate_limit_per_minute: u32,
+    pub claim_backoff_base_ms: u64,
+    pub claim_backoff_max_ms: u64,
     pub live_reconcile_backoff_base_ms: u64,
     pub live_reconcile_backoff_max_ms: u64,
     pub worker_heartbeat_stale_after_ms: u64,
@@ -36,10 +40,14 @@ impl Default for PlatformConfig {
             status_file: runtime_root.join("system-status.json"),
             deployment_status_file: runtime_root.join("deployments.json"),
             trading_state_file: runtime_root.join("trading-state.json"),
+            claim_state_file: runtime_root.join("account-claims.json"),
             audit_log_file: runtime_root.join("audit-log.jsonl"),
             runtime_root,
             tick_interval_ms: 1_000,
+            claim_tick_interval_ms: 30_000,
             request_rate_limit_per_minute: 240,
+            claim_backoff_base_ms: 5_000,
+            claim_backoff_max_ms: 120_000,
             live_reconcile_backoff_base_ms: 1_000,
             live_reconcile_backoff_max_ms: 30_000,
             worker_heartbeat_stale_after_ms: 15_000,
@@ -105,6 +113,11 @@ impl PlatformConfig {
         } else {
             config.trading_state_file = config.runtime_root.join("trading-state.json");
         }
+        if let Ok(value) = std::env::var("PLOY_ACCOUNT_CLAIM_STATE_FILE") {
+            config.claim_state_file = PathBuf::from(value);
+        } else {
+            config.claim_state_file = config.runtime_root.join("account-claims.json");
+        }
         if let Ok(value) = std::env::var("PLOY_AUDIT_LOG_FILE") {
             config.audit_log_file = PathBuf::from(value);
         } else {
@@ -118,6 +131,21 @@ impl PlatformConfig {
         if let Ok(value) = std::env::var("PLOY_REQUEST_RATE_LIMIT_PER_MINUTE") {
             if let Ok(parsed) = value.parse() {
                 config.request_rate_limit_per_minute = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("PLOY_CLAIM_TICK_INTERVAL_MS") {
+            if let Ok(parsed) = value.parse() {
+                config.claim_tick_interval_ms = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("PLOY_CLAIM_BACKOFF_BASE_MS") {
+            if let Ok(parsed) = value.parse() {
+                config.claim_backoff_base_ms = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("PLOY_CLAIM_BACKOFF_MAX_MS") {
+            if let Ok(parsed) = value.parse() {
+                config.claim_backoff_max_ms = parsed;
             }
         }
         if let Ok(value) = std::env::var("PLOY_LIVE_RECONCILE_BACKOFF_BASE_MS") {
@@ -199,11 +227,18 @@ mod tests {
             "run/platform/trading-state.json"
         );
         assert_eq!(
+            config.claim_state_file.to_string_lossy(),
+            "run/platform/account-claims.json"
+        );
+        assert_eq!(
             config.audit_log_file.to_string_lossy(),
             "run/platform/audit-log.jsonl"
         );
         assert_eq!(config.tick_interval_ms, 1_000);
+        assert_eq!(config.claim_tick_interval_ms, 30_000);
         assert_eq!(config.request_rate_limit_per_minute, 240);
+        assert_eq!(config.claim_backoff_base_ms, 5_000);
+        assert_eq!(config.claim_backoff_max_ms, 120_000);
         assert_eq!(config.live_reconcile_backoff_base_ms, 1_000);
         assert_eq!(config.live_reconcile_backoff_max_ms, 30_000);
         assert_eq!(config.worker_heartbeat_stale_after_ms, 15_000);

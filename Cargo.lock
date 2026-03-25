@@ -2227,6 +2227,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2975,12 +2976,19 @@ dependencies = [
 name = "ploy-connectivity"
 version = "0.1.0"
 dependencies = [
+ "alloy",
+ "base64",
  "chrono",
+ "hmac",
  "ploy-trading",
  "polymarket-client-sdk",
+ "reqwest",
  "rust_decimal",
  "rust_decimal_macros",
  "secrecy 0.8.0",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
 ]
@@ -3521,7 +3529,9 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -3549,6 +3559,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -5009,6 +5020,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
