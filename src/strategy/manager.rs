@@ -285,6 +285,14 @@ impl StrategyFactory {
                 )?;
                 Ok(Box::new(strategy))
             }
+            "pm_5m_directional" => {
+                let adapter = super::adapters::MomentumStrategyAdapter::from_toml(
+                    strategy_id,
+                    config_content,
+                    dry_run,
+                )?;
+                Ok(Box::new(adapter))
+            }
             other => Err(anyhow!("Unknown strategy type: {}", other).into()),
         }
     }
