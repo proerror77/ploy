@@ -78,6 +78,22 @@ pub(super) async fn run_backtest(
     lv_zscore_lookback_samples: Option<usize>,
     lv_max_holding_secs: Option<u64>,
     sa_entry_after_start_max_secs: Option<u64>,
+    // ── pm_5m_directional overrides ──
+    pm5_min_edge: Option<f64>,
+    pm5_p_entry: Option<f64>,
+    pm5_min_abs_z: Option<f64>,
+    pm5_obi_weight: Option<f64>,
+    pm5_flow_weight: Option<f64>,
+    pm5_microgap_weight: Option<f64>,
+    pm5_min_obi: Option<f64>,
+    pm5_no_trade_min: Option<f64>,
+    pm5_no_trade_max: Option<f64>,
+    pm5_no_trade_override_z: Option<f64>,
+    pm5_no_trade_override_flow: Option<f64>,
+    pm5_max_entry_price: Option<f64>,
+    pm5_vol_floor: Option<f64>,
+    pm5_cooldown_secs: Option<u64>,
+    pm5_max_concurrent: Option<usize>,
 ) -> Result<()> {
     use chrono::DateTime;
     use rust_decimal::prelude::*;
@@ -220,6 +236,23 @@ pub(super) async fn run_backtest(
             let mut config = DirectionalBacktestConfig::with_symbols(symbol_list.clone());
             config.initial_capital = initial_capital;
 
+            // Apply --pm5-* CLI overrides
+            if let Some(v) = pm5_min_edge { config.min_edge = v; }
+            if let Some(v) = pm5_p_entry { config.p_entry = v; }
+            if let Some(v) = pm5_min_abs_z { config.min_abs_z = v; }
+            if let Some(v) = pm5_obi_weight { config.obi_weight = v; }
+            if let Some(v) = pm5_flow_weight { config.flow_weight = v; }
+            if let Some(v) = pm5_microgap_weight { config.microgap_weight = v; }
+            if let Some(v) = pm5_min_obi { config.min_obi = v; }
+            if let Some(v) = pm5_no_trade_min { config.no_trade_price_min = v; }
+            if let Some(v) = pm5_no_trade_max { config.no_trade_price_max = v; }
+            if let Some(v) = pm5_no_trade_override_z { config.no_trade_override_z = v; }
+            if let Some(v) = pm5_no_trade_override_flow { config.no_trade_override_flow = v; }
+            if let Some(v) = pm5_max_entry_price { config.max_entry_price = Decimal::try_from(v).unwrap_or(config.max_entry_price); }
+            if let Some(v) = pm5_vol_floor { config.vol_floor = v; }
+            if let Some(v) = pm5_cooldown_secs { config.cooldown_secs = v; }
+            if let Some(v) = pm5_max_concurrent { config.max_concurrent_positions = v; }
+
             // Create recorder: PgBacktestRecorder if --save, else NullRecorder
             let mut saved_run_id: Option<uuid::Uuid> = None;
             let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {
@@ -287,6 +320,21 @@ pub(super) async fn run_backtest(
         "pm_5m_directional" => {
             let mut config = Pm5mDirectionalBacktestConfig::with_symbols(symbol_list.clone());
             config.initial_capital = initial_capital;
+            config.min_edge = pm5_min_edge;
+            config.p_entry = pm5_p_entry;
+            config.min_abs_z = pm5_min_abs_z;
+            config.obi_weight = pm5_obi_weight;
+            config.flow_weight = pm5_flow_weight;
+            config.microgap_weight = pm5_microgap_weight;
+            config.min_obi = pm5_min_obi;
+            config.no_trade_price_min = pm5_no_trade_min;
+            config.no_trade_price_max = pm5_no_trade_max;
+            config.no_trade_override_z = pm5_no_trade_override_z;
+            config.no_trade_override_flow = pm5_no_trade_override_flow;
+            config.max_entry_price = pm5_max_entry_price;
+            config.vol_floor = pm5_vol_floor;
+            config.cooldown_secs = pm5_cooldown_secs;
+            config.max_concurrent = pm5_max_concurrent;
 
             let mut saved_run_id: Option<uuid::Uuid> = None;
             let recorder: Box<dyn crate::strategy::backtest_recorder::BacktestRecorder> = if save {

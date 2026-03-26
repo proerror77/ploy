@@ -25,6 +25,37 @@ use crate::strategy::traits::{
 pub struct Pm5mDirectionalBacktestConfig {
     pub symbols: Vec<String>,
     pub initial_capital: Decimal,
+    // ── CLI-overridable signal parameters ──
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_edge: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p_entry: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_abs_z: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obi_weight: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_weight: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub microgap_weight: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_obi: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_trade_price_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_trade_price_max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_trade_override_z: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_trade_override_flow: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_entry_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vol_floor: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<usize>,
 }
 
 impl Pm5mDirectionalBacktestConfig {
@@ -32,6 +63,21 @@ impl Pm5mDirectionalBacktestConfig {
         Self {
             symbols,
             initial_capital: Decimal::from(10_000u64),
+            min_edge: None,
+            p_entry: None,
+            min_abs_z: None,
+            obi_weight: None,
+            flow_weight: None,
+            microgap_weight: None,
+            min_obi: None,
+            no_trade_price_min: None,
+            no_trade_price_max: None,
+            no_trade_override_z: None,
+            no_trade_override_flow: None,
+            max_entry_price: None,
+            vol_floor: None,
+            cooldown_secs: None,
+            max_concurrent: None,
         }
     }
 }
@@ -93,7 +139,7 @@ impl Pm5mDirectionalBacktestEngine {
         recorder: Box<dyn BacktestRecorder>,
     ) -> anyhow::Result<Self> {
         let strategy_config_toml =
-            build_backtest_strategy_config(&config.symbols, config.initial_capital)?;
+            build_backtest_strategy_config(&config)?;
         let strategy = Pm5mDirectionalStrategy::from_toml(
             "pm_5m_directional_backtest".to_string(),
             &strategy_config_toml,
@@ -797,19 +843,60 @@ fn parse_f64(raw: Option<&String>) -> Option<f64> {
 }
 
 fn build_backtest_strategy_config(
-    symbols: &[String],
-    initial_capital: Decimal,
+    bt_config: &Pm5mDirectionalBacktestConfig,
 ) -> anyhow::Result<String> {
-    let config = build_pm_5m_directional_runtime_config(symbols)?;
+    let config = build_pm_5m_directional_runtime_config(&bt_config.symbols)?;
     let mut value: toml::Value = toml::from_str(&config)?;
-    value
+    let section = value
         .get_mut("pm_5m_directional")
         .and_then(toml::Value::as_table_mut)
-        .ok_or_else(|| anyhow::anyhow!("pm_5m_directional runtime config missing section"))?
-        .insert(
-            "initial_nav_usd".to_string(),
-            toml::Value::Float(initial_capital.to_f64().unwrap_or(0.0)),
-        );
+        .ok_or_else(|| anyhow::anyhow!("pm_5m_directional runtime config missing section"))?;
+
+    section.insert(
+        "initial_nav_usd".to_string(),
+        toml::Value::Float(bt_config.initial_capital.to_f64().unwrap_or(0.0)),
+    );
+
+    // Apply CLI overrides to TOML section
+    macro_rules! override_float {
+        ($field:ident) => {
+            if let Some(v) = bt_config.$field {
+                section.insert(stringify!($field).to_string(), toml::Value::Float(v));
+            }
+        };
+    }
+    macro_rules! override_int {
+        ($field:ident) => {
+            if let Some(v) = bt_config.$field {
+                section.insert(stringify!($field).to_string(), toml::Value::Integer(v as i64));
+            }
+        };
+    }
+
+    override_float!(min_edge);
+    override_float!(p_entry);
+    override_float!(min_abs_z);
+    override_float!(obi_weight);
+    override_float!(flow_weight);
+    override_float!(microgap_weight);
+    override_float!(min_obi);
+    override_float!(no_trade_override_z);
+    override_float!(no_trade_override_flow);
+    override_float!(vol_floor);
+    override_int!(cooldown_secs);
+    override_int!(max_concurrent);
+
+    // Decimal fields stored as floats in TOML
+    if let Some(v) = bt_config.no_trade_price_min {
+        section.insert("no_trade_price_min".to_string(), toml::Value::Float(v));
+    }
+    if let Some(v) = bt_config.no_trade_price_max {
+        section.insert("no_trade_price_max".to_string(), toml::Value::Float(v));
+    }
+    if let Some(v) = bt_config.max_entry_price {
+        section.insert("max_entry_price".to_string(), toml::Value::Float(v));
+    }
+
     toml::to_string_pretty(&value).map_err(Into::into)
 }
 

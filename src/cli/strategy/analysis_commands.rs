@@ -119,6 +119,21 @@ impl DirectionalSignalBacktestArgs {
             None,
             None,
             None,
+            None, // pm5_min_edge
+            None, // pm5_p_entry
+            None, // pm5_min_abs_z
+            None, // pm5_obi_weight
+            None, // pm5_flow_weight
+            None, // pm5_microgap_weight
+            None, // pm5_min_obi
+            None, // pm5_no_trade_min
+            None, // pm5_no_trade_max
+            None, // pm5_no_trade_override_z
+            None, // pm5_no_trade_override_flow
+            None, // pm5_max_entry_price
+            None, // pm5_vol_floor
+            None, // pm5_cooldown_secs
+            None, // pm5_max_concurrent
         )
         .await
     }
@@ -315,6 +330,68 @@ pub struct BacktestArgs {
     /// Override staggered-arb entry window (seconds after event start; 0 disables)
     #[arg(long)]
     sa_entry_after_start_max_secs: Option<u64>,
+
+    // ── pm_5m_directional overrides ──
+
+    /// Override pm5m minimum edge threshold (e.g. 0.03)
+    #[arg(long)]
+    pm5_min_edge: Option<f64>,
+
+    /// Override pm5m entry probability threshold (e.g. 0.62)
+    #[arg(long)]
+    pm5_p_entry: Option<f64>,
+
+    /// Override pm5m minimum absolute z-score (e.g. 0.35)
+    #[arg(long)]
+    pm5_min_abs_z: Option<f64>,
+
+    /// Override pm5m OBI weight in composite signal (e.g. 0.75)
+    #[arg(long)]
+    pm5_obi_weight: Option<f64>,
+
+    /// Override pm5m flow weight in composite signal (e.g. 1.10)
+    #[arg(long)]
+    pm5_flow_weight: Option<f64>,
+
+    /// Override pm5m microgap weight in composite signal (e.g. 0.40)
+    #[arg(long)]
+    pm5_microgap_weight: Option<f64>,
+
+    /// Override pm5m minimum OBI threshold (e.g. 0.05)
+    #[arg(long)]
+    pm5_min_obi: Option<f64>,
+
+    /// Override pm5m no-trade zone lower bound (e.g. 0.45)
+    #[arg(long)]
+    pm5_no_trade_min: Option<f64>,
+
+    /// Override pm5m no-trade zone upper bound (e.g. 0.55)
+    #[arg(long)]
+    pm5_no_trade_max: Option<f64>,
+
+    /// Override pm5m z-score threshold to override no-trade zone (e.g. 0.90)
+    #[arg(long)]
+    pm5_no_trade_override_z: Option<f64>,
+
+    /// Override pm5m flow threshold to override no-trade zone (e.g. 0.45)
+    #[arg(long)]
+    pm5_no_trade_override_flow: Option<f64>,
+
+    /// Override pm5m maximum entry price (e.g. 0.80)
+    #[arg(long)]
+    pm5_max_entry_price: Option<f64>,
+
+    /// Override pm5m volatility floor (e.g. 0.0005)
+    #[arg(long)]
+    pm5_vol_floor: Option<f64>,
+
+    /// Override pm5m cooldown between trades in seconds (e.g. 30)
+    #[arg(long)]
+    pm5_cooldown_secs: Option<u64>,
+
+    /// Override pm5m max concurrent open trades
+    #[arg(long)]
+    pm5_max_concurrent: Option<usize>,
 }
 
 impl BacktestArgs {
@@ -353,6 +430,21 @@ impl BacktestArgs {
             self.lv_zscore_lookback_samples,
             self.lv_max_holding_secs,
             self.sa_entry_after_start_max_secs,
+            self.pm5_min_edge,
+            self.pm5_p_entry,
+            self.pm5_min_abs_z,
+            self.pm5_obi_weight,
+            self.pm5_flow_weight,
+            self.pm5_microgap_weight,
+            self.pm5_min_obi,
+            self.pm5_no_trade_min,
+            self.pm5_no_trade_max,
+            self.pm5_no_trade_override_z,
+            self.pm5_no_trade_override_flow,
+            self.pm5_max_entry_price,
+            self.pm5_vol_floor,
+            self.pm5_cooldown_secs,
+            self.pm5_max_concurrent,
         )
         .await
     }
