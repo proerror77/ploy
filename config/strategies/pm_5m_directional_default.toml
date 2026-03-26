@@ -1,70 +1,46 @@
 # Polymarket 5m directional strategy
+# Uses momentum adapter with directional_mode = true (Binance as oracle)
 
 [strategy]
 name = "pm_5m_directional"
 enabled = true
+mode = "predictive"
 
-[pm_5m_directional]
+[entry]
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-tick_interval_ms = 1000
 
-# Entry timing window
-min_time_remaining_secs = 15
-max_time_remaining_secs = 300
-final_no_entry_secs = 10
+# Directional mode: log-normal probability model on Binance spot
+directional_mode = true
+directional_vol_floor = 0.0005
 
-# Probability model
-vol_lookback_secs = 30
-vol_floor = 0.0005
-p_entry = 0.62
-min_edge = 0.03
-min_abs_z = 0.35
+# Probability model thresholds
+min_edge = 3.0           # min_edge 3% (adapter divides by 100)
+max_entry = 80.0         # max_entry_price 0.80 (adapter divides by 100)
+min_move = 0.05          # min CEX move % to trigger
 
-# Binance confirmation
-min_obi = 0.05
-min_flow_2s = 0.10
-obi_weight = 0.75
-flow_weight = 1.10
-microgap_weight = 0.40
-max_l2_age_secs = 2
-
-# Polymarket execution gate
-max_pm_spread = 0.03
-min_pm_ask_size = 25
-max_entry_price = 0.80
-
-# Mid-band no-trade zone
-no_trade_price_min = 0.45
-no_trade_price_max = 0.55
-no_trade_override_z = 0.90
-no_trade_override_flow = 0.45
+# Binance L2 confirmation
+min_obi_confirmation = 5.0  # OBI threshold % (adapter divides by 100)
 
 # Position sizing
-shares_per_trade = 25
-min_shares = 5
-cooldown_secs = 30
-max_daily_trades = 0
+shares_per_trade = 25.0
+max_positions = 5.0
+
+# Mid-band no-trade zone (not parsed by adapter yet — kept as comments)
+# no_trade_price_min = 0.45
+# no_trade_price_max = 0.55
+
+[timing]
+min_time_remaining = 15.0    # seconds
+max_time_remaining = 300.0   # seconds
+cooldown_secs = 30.0
+
+[risk]
+shares = 25.0
+max_positions = 5.0
+max_daily_trades = 0.0       # 0 = unlimited
 use_kelly_sizing = true
-kelly_fraction_scale = 0.15
 kelly_fraction_cap = 0.25
-initial_nav_usd = 1000
-max_nav_fraction_per_trade = 0.01
 
-# EWMA volatility (Route A v2)
-ewma_lambda = 0.94
-
-# Early exit (Route A v2)
-enable_early_exit = true
-exit_reversion_pct = 0.003
-exit_obi_flip = true
-
-# Route C: Binance perp funding + liquidation (disabled by default)
-use_funding_signal = false
-funding_extreme_threshold = 0.0001
-liquidation_window_secs = 120
-min_liquidation_cascade_usd = 500000.0
-
-# Route B: Deribit IV regime filter (disabled by default)
-use_deribit_regime = false
-deribit_high_vol_threshold = 0.80
-deribit_extreme_vol_threshold = 1.20
+[exit]
+exit_edge_floor_pct = 20.0
+exit_price_band_pct = 12.0
