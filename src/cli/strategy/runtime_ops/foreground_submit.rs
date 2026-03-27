@@ -189,8 +189,10 @@ fn build_coordinator_payload(
     intent: &StrategyOrderIntent,
     dry_run: bool,
 ) -> Result<Option<Value>> {
-    let Some(deployment_id) = deployment_id_from_metadata(&intent.metadata) else {
-        return Ok(None);
+    let deployment_id = match deployment_id_from_metadata(&intent.metadata) {
+        Some(id) => id,
+        None if dry_run => format!("cli.foreground.dryrun.{}", strategy_id),
+        None => return Ok(None),
     };
     let price_limit = intent.limit_price.to_f64().ok_or_else(|| {
         PloyError::Validation(format!(
