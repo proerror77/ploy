@@ -24,8 +24,19 @@ impl ForegroundIntentSubmitter {
         intent: &StrategyOrderIntent,
     ) -> Result<ForegroundSubmitOutcome> {
         if let Some(payload) = build_coordinator_payload(strategy_id, intent, self.dry_run)? {
-            let response = submit_intent_via_coordinator(&payload).await?;
-            return Ok(ForegroundSubmitOutcome::CoordinatorAccepted(response));
+            match submit_intent_via_coordinator(&payload).await {
+                Ok(response) => {
+                    return Ok(ForegroundSubmitOutcome::CoordinatorAccepted(response));
+                }
+                Err(error) if self.dry_run => {
+                    info!(
+                        "Coordinator unreachable in dry-run mode, simulating fill: {}",
+                        error
+                    );
+                    return Ok(ForegroundSubmitOutcome::DryRunSimulated);
+                }
+                Err(error) => return Err(error),
+            }
         }
 
         Ok(ForegroundSubmitOutcome::Skipped {
@@ -37,6 +48,7 @@ impl ForegroundIntentSubmitter {
 #[derive(Debug)]
 enum ForegroundSubmitOutcome {
     CoordinatorAccepted(CoordinatorIntentResponse),
+    DryRunSimulated,
     Skipped { reason: String },
 }
 
@@ -86,6 +98,13 @@ pub(super) async fn handle_submit_intent(
             info!(
                 "Foreground runtime routed order {} through coordinator intent {}",
                 tracked_order_id, response.intent_id
+            );
+        }
+        Ok(ForegroundSubmitOutcome::DryRunSimulated) => {
+            println!("  \x1b[36m✓ Dry-run simulated fill (coordinator offline)\x1b[0m\n");
+            info!(
+                "Dry-run order {} simulated (coordinator unreachable)",
+                tracked_order_id
             );
         }
         Ok(ForegroundSubmitOutcome::Skipped { reason }) => {
