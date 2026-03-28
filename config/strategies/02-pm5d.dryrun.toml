@@ -1,8 +1,8 @@
 # Polymarket 5m directional strategy — backtest-matched params
 # Uses momentum adapter with directional_mode = true (Binance as oracle)
 #
-# Tuned to match backtest gate config (2026-03-26 report):
-#   cooldown 60s, min_time_remaining 60s, max_positions 3
+# Aligned to backtest defaults (DirectionalBacktestConfig::default()):
+#   cooldown 60s, min_time 60s, max_positions 3, min_edge 5%, max_entry 85¢
 
 [strategy]
 name = "pm_5m_directional"
@@ -17,8 +17,8 @@ directional_mode = true
 directional_vol_floor = 0.0012
 
 # Probability model thresholds
-min_edge = 3.0           # 3% min edge (adapter divides by 100)
-max_entry = 75.0         # 0.75 max entry price (adapter divides by 100)
+min_edge = 5.0           # 5% min edge — match backtest entry_threshold (adapter divides by 100)
+max_entry = 85.0         # 0.85 max entry price — match backtest (adapter divides by 100)
 min_move = 0.05          # min CEX move %
 
 # Binance L2 confirmation
