@@ -1,5 +1,8 @@
-# Polymarket 5m directional strategy
+# Polymarket 5m directional strategy — backtest-matched params
 # Uses momentum adapter with directional_mode = true (Binance as oracle)
+#
+# Tuned to match backtest gate config (2026-03-26 report):
+#   cooldown 60s, min_time_remaining 60s, max_positions 3
 
 [strategy]
 name = "pm_5m_directional"
@@ -11,33 +14,29 @@ symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 # Directional mode: log-normal probability model on Binance spot
 directional_mode = true
-directional_vol_floor = 0.0005
+directional_vol_floor = 0.0012
 
 # Probability model thresholds
-min_edge = 3.0           # min_edge 3% (adapter divides by 100)
-max_entry = 80.0         # max_entry_price 0.80 (adapter divides by 100)
-min_move = 0.05          # min CEX move % to trigger
+min_edge = 3.0           # 3% min edge (adapter divides by 100)
+max_entry = 75.0         # 0.75 max entry price (adapter divides by 100)
+min_move = 0.05          # min CEX move %
 
 # Binance L2 confirmation
 min_obi_confirmation = 5.0  # OBI threshold % (adapter divides by 100)
 
 # Position sizing
 shares_per_trade = 25.0
-max_positions = 5.0
-
-# Mid-band no-trade zone (not parsed by adapter yet — kept as comments)
-# no_trade_price_min = 0.45
-# no_trade_price_max = 0.55
+max_positions = 3.0
 
 [timing]
-min_time_remaining = 15.0    # seconds
+min_time_remaining = 60.0    # seconds — match backtest gate
 max_time_remaining = 300.0   # seconds
-cooldown_secs = 30.0
+cooldown_secs = 60.0         # match backtest gate
 
 [risk]
 shares = 25.0
-max_positions = 5.0
-max_daily_trades = 0.0       # 0 = unlimited
+max_positions = 3.0
+max_daily_trades = 1000.0
 use_kelly_sizing = true
 kelly_fraction_cap = 0.25
 

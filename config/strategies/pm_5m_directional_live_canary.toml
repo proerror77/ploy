@@ -1,5 +1,6 @@
 # Polymarket 5m directional strategy
-# Live canary profile derived from cross-window stability sweep.
+# Live canary profile — BTC only, derived from cross-window stability sweep.
+# Timing gates match backtest report (2026-03-26).
 
 [strategy]
 name = "pm_5m_directional"
@@ -23,16 +24,16 @@ min_obi_confirmation = 5.0
 
 # Position sizing
 shares_per_trade = 25.0
-max_positions = 5.0
+max_positions = 3.0
 
 [timing]
-min_time_remaining = 15.0
+min_time_remaining = 60.0    # match backtest gate
 max_time_remaining = 300.0
-cooldown_secs = 30.0
+cooldown_secs = 60.0         # match backtest gate
 
 [risk]
 shares = 25.0
-max_positions = 5.0
+max_positions = 3.0
 max_daily_trades = 0.0
 use_kelly_sizing = true
 kelly_fraction_cap = 0.25
