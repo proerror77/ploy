@@ -8,10 +8,17 @@ repository.workspace = true
 description = "Ploy strategy bundle runtime crate"
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 ploy-trading.workspace = true
 rust_decimal.workspace = true
+rust_decimal_macros.workspace = true
 serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

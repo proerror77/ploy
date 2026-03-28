@@ -114,6 +114,16 @@ impl TradingRuntime {
         self.fills.all().iter().map(|fill| fill.timestamp).max()
     }
 
+    /// Read-only access to the position ledger.
+    pub fn positions(&self) -> &PositionLedger {
+        &self.positions
+    }
+
+    /// Read-only access to the order ledger.
+    pub fn orders(&self) -> &OrderLedger {
+        &self.orders
+    }
+
     pub fn snapshot(&self, mark_prices: &BTreeMap<String, Decimal>) -> TradingRuntimeSnapshot {
         let orders = self.orders.orders().cloned().collect::<Vec<_>>();
         let active_intents = self
