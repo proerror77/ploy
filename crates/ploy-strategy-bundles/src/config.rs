@@ -97,8 +97,10 @@ impl FullConfig {
 
     /// Parse from a TOML file path.
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = std::fs::read_to_string(path)?;
-        Ok(Self::from_toml(&content)?)
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read config {path}: {e}"))?;
+        Self::from_toml(&content)
+            .map_err(|e| format!("Invalid TOML in {path}: {e}").into())
     }
 
     /// Build RuntimeConfig from the parsed config.

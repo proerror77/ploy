@@ -24,6 +24,7 @@ pub struct BufferedRecorder {
     buffer: Vec<SignalRecord>,
     batch_size: usize,
     flush_fn: Option<FlushFn>,
+    total_recorded: usize,
 }
 
 impl BufferedRecorder {
@@ -36,6 +37,7 @@ impl BufferedRecorder {
             buffer: Vec::with_capacity(batch_size),
             batch_size,
             flush_fn,
+            total_recorded: 0,
         }
     }
 
@@ -44,8 +46,13 @@ impl BufferedRecorder {
         Self::new(1000, None)
     }
 
-    /// Number of signals recorded (including flushed).
-    pub fn total_buffered(&self) -> usize {
+    /// Total number of signals recorded (including flushed).
+    pub fn total_recorded(&self) -> usize {
+        self.total_recorded
+    }
+
+    /// Number of signals currently buffered (not yet flushed).
+    pub fn buffered(&self) -> usize {
         self.buffer.len()
     }
 
@@ -71,6 +78,7 @@ impl BufferedRecorder {
 impl Recorder for BufferedRecorder {
     async fn record_signal(&mut self, signal: &SignalRecord) {
         self.buffer.push(signal.clone());
+        self.total_recorded += 1;
         if self.buffer.len() >= self.batch_size {
             self.do_flush().await;
         }

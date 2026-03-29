@@ -111,16 +111,23 @@ where
         while let Some(update) = self.feed.next().await {
             updates_processed += 1;
 
-            // Throttle: skip evaluation if within the same time slot.
+            // Throttle: skip high-frequency price/quote updates if within the same time slot.
+            // Event lifecycle updates (discovered/expired) always pass through.
             if let Some(hz) = self.config.throttle_hz {
-                if let Some(ts) = Self::update_ts(&update) {
-                    if let Some(last) = last_eval_ts {
-                        let min_gap_ms = 1000 / hz as i64;
-                        if (ts - last).num_milliseconds() < min_gap_ms {
-                            continue;
+                let is_lifecycle = matches!(
+                    update,
+                    MarketUpdate::EventDiscovered { .. } | MarketUpdate::EventExpired { .. }
+                );
+                if !is_lifecycle {
+                    if let Some(ts) = Self::update_ts(&update) {
+                        if let Some(last) = last_eval_ts {
+                            let min_gap_ms = 1000 / hz as i64;
+                            if (ts - last).num_milliseconds() < min_gap_ms {
+                                continue;
+                            }
                         }
+                        last_eval_ts = Some(ts);
                     }
-                    last_eval_ts = Some(ts);
                 }
             }
 
@@ -136,10 +143,19 @@ where
                 match decision {
                     StrategyDecision::Enter(intent) | StrategyDecision::Exit(intent) => {
                         let order_id = Uuid::new_v4().to_string();
-                        self.trading.submit_intent(intent.clone(), order_id.clone());
-                        intents_submitted += 1;
 
                         let report = self.executor.submit(&intent).await;
+
+                        if report.rejected && report.fill.is_none() {
+                            // Pure rejection — don't record the intent at all
+                            let reason = report.rejection_reason.as_deref().unwrap_or("unknown");
+                            warn!(order_id = %order_id, reason = %reason, "Order rejected");
+                            continue;
+                        }
+
+                        // Intent accepted (possibly with fill)
+                        self.trading.submit_intent(intent.clone(), order_id.clone());
+                        intents_submitted += 1;
 
                         if let Some(fill) = report.fill {
                             self.trading.record_fill(fill.clone());
@@ -152,12 +168,6 @@ where
                                 price = %fill.price,
                                 "Fill recorded",
                             );
-                        }
-
-                        if report.rejected {
-                            let reason = report.rejection_reason.as_deref().unwrap_or("unknown");
-                            self.trading.reject_order(&order_id, reason);
-                            warn!(order_id = %order_id, reason = %reason, "Order rejected");
                         }
                     }
                     StrategyDecision::Hold => {}

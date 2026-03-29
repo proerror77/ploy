@@ -56,14 +56,16 @@ fn estimate_probability(s0: f64, st: f64, sigma: f64, time_remaining_secs: f64) 
 
 // ── Fee Model ────────────────────────────────────────────
 
-/// Polymarket parabolic fee: `fee_rate * (p * (1-p))^exponent`.
+/// Polymarket parabolic fee: `fee_rate * (p * (1-p))^exponent` + spread.
 ///
 /// Crypto 5m markets: fee_rate=0.25, exponent=2.
+/// Returns total cost as fraction of position value.
 fn crypto_fee_cost(entry_price: f64) -> f64 {
     let p_factor = entry_price * (1.0 - entry_price);
-    let fee_rate = entry_price * 0.25 * p_factor * p_factor;
+    let fee_rate = 0.25 * p_factor * p_factor; // effective_rate(p)
+    let fee_cost = entry_price * fee_rate; // fee per share
     let spread = 0.01;
-    fee_rate + spread
+    fee_cost + spread
 }
 
 // ── Direction ────────────────────────────────────────────
@@ -250,8 +252,8 @@ impl DirectionalStrategy {
         // Gate 2: Probability
         let p_hat = estimate_probability(s0, st, sigma, secs_remaining);
 
-        // Gate 3: Z-score
-        let dt = (event.window_secs.max(1) as f64) / 900.0;
+        // Gate 3: Z-score (normalized by time remaining, not window size)
+        let dt = secs_remaining.max(1.0) / 900.0;
         let z = (st / s0).ln() / (sigma * dt.sqrt());
         if z.abs() < self.config.min_z_score {
             debug!(symbol, z, threshold = self.config.min_z_score, "z-score too low");
@@ -385,11 +387,11 @@ impl StrategyLogic for DirectionalStrategy {
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
-                self.spot.insert(symbol.clone(), SpotState { price: *price, _ts: *ts });
-
                 if !self.config.symbols.contains(symbol) {
                     return vec![];
                 }
+
+                self.spot.insert(symbol.clone(), SpotState { price: *price, _ts: *ts });
 
                 self.reset_daily_counter(*ts);
                 if self.daily_trades >= self.config.max_daily_trades {
