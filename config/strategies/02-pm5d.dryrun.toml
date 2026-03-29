@@ -1,3 +1,6 @@
+# ⚠️  LEGACY FORMAT — for old binary only. DO NOT use with StrategyRuntime.
+# ⚠️  New system uses 02-pm5d.unified.toml. Delete this after migration.
+#
 # Polymarket 5m directional strategy — backtest-matched params
 # Uses momentum adapter with directional_mode = true (Binance as oracle)
 #

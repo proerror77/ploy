@@ -1,3 +1,6 @@
+# ⚠️  LEGACY FORMAT — for old binary only. DO NOT use with StrategyRuntime.
+# ⚠️  New system uses 02-pm5d.unified.toml. Delete this after migration.
+#
 # Directional Live Trading — $15/trade target
 # Uses Binance as oracle for log-normal probability model entry.
 # Hold to resolution ($1/$0 settlement), no early exits.

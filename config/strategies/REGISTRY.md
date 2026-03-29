@@ -1,19 +1,44 @@
 # Strategy Registry
 
 Authoritative index of all trading strategies. Each strategy has a unique
-numeric ID used as filename prefix. Config naming convention:
+numeric ID used as filename prefix.
 
-```
-{NN}-{strategy-name}.{mode}.toml
-```
+## Config Format Migration
 
-**Modes**: `default` (baseline), `dryrun` (prod-matched dry), `live` (real
-money), `canary` (single-symbol live test), `backtest` (relaxed for replay),
-`template` (disabled reference)
+**Two incompatible config formats exist.** DO NOT mix them.
+
+| Format | Used By | Schema | Example |
+|--------|---------|--------|---------|
+| **Legacy** | Old binary on tango-1-1 | `[entry]`/`[timing]`/`[risk]`, values ÷100 | `02-pm5d.dryrun.toml` |
+| **Unified** | New `StrategyRuntime` | `[runtime]`/`[strategy]`/`[execution]`, raw values | `02-pm5d.unified.toml` |
+
+**Key differences that cause silent failures if mixed:**
+- `min_edge`: legacy `5.0` (÷100→0.05) vs unified `0.05` (raw)
+- `max_entry`: legacy `85.0` (÷100→0.85) vs unified `max_entry_price = 0.85`
+- `[timing]` section: legacy has it, unified puts fields in `[strategy]`
+- `[risk].shares`: legacy, vs unified `[strategy].quantity`
+
+**Migration plan:**
+1. Deploy new binary with StrategyRuntime to tango-1-1
+2. Switch services to use `*.unified.toml` configs
+3. Verify dry-run signal rate matches backtest (~87/day)
+4. Delete all legacy configs (marked `LEGACY` below)
 
 ---
 
-## Active Strategies (with config files)
+## Naming Convention
+
+```
+{NN}-{strategy-name}.{mode}.toml      — legacy format
+{NN}-{strategy-name}.unified.toml     — new StrategyRuntime format
+```
+
+**Modes**: `unified` (all modes via `[runtime].mode`), `default`, `dryrun`,
+`live`, `canary`, `backtest`, `template`
+
+---
+
+## Active Strategies
 
 | ID | Strategy | Domain | Description |
 |----|----------|--------|-------------|
@@ -42,40 +67,41 @@ money), `canary` (single-symbol live test), `backtest` (relaxed for replay),
 ## Config Files
 
 ### S01 — Momentum
-| File | Mode | Notes |
-|------|------|-------|
-| `01-momentum.default.toml` | default | 4 symbols, 3 shares, predictive |
-| `01-momentum.live-aws.toml` | live | 3 symbols, 4 shares, confirmatory |
+| File | Format | Notes |
+|------|--------|-------|
+| `01-momentum.default.toml` | LEGACY | 4 symbols, 3 shares, predictive |
+| `01-momentum.live-aws.toml` | LEGACY | 3 symbols, 4 shares, confirmatory |
 
 ### S02 — PM 5-Min Directional
-| File | Mode | Notes |
-|------|------|-------|
-| `02-pm5d.dryrun.toml` | dryrun | 3 symbols, backtest-matched gates (cooldown 60s, min_time 60s) |
-| `02-pm5d.live.toml` | live | 3 symbols, $1/trade, hold-to-resolution |
-| `02-pm5d.canary.toml` | canary | BTC only, same gates as dryrun |
-| `02-pm5d.backtest-relaxed.toml` | backtest | Relaxed OBI (3%), loose timing |
+| File | Format | Notes |
+|------|--------|-------|
+| `02-pm5d.unified.toml` | **UNIFIED** | All modes via `[runtime].mode`, backtest-aligned params |
+| `02-pm5d.dryrun.toml` | LEGACY — DELETE after migration | Legacy adapter format, deployed on tango-1-1 |
+| `02-pm5d.live.toml` | LEGACY — DELETE after migration | Legacy `name="momentum"` with `directional_mode` |
+| `02-pm5d.canary.toml` | LEGACY — DELETE after migration | BTC only variant |
+| `02-pm5d.backtest-relaxed.toml` | LEGACY — DELETE after migration | Relaxed OBI (3%), loose timing |
 
 ### S03 — Pattern Memory
-| File | Mode | Notes |
-|------|------|-------|
-| `03-pattern-memory.default.toml` | default | 4 symbols (BTC/ETH/SOL/XRP), corr 0.70 |
+| File | Format | Notes |
+|------|--------|-------|
+| `03-pattern-memory.default.toml` | LEGACY | 4 symbols (BTC/ETH/SOL/XRP), corr 0.70 |
 
 ### S04 — Staggered Arb
-| File | Mode | Notes |
-|------|------|-------|
-| `04-staggered-arb.live.toml` | live | 3 symbols, 20 shares, sum<0.92 |
+| File | Format | Notes |
+|------|--------|-------|
+| `04-staggered-arb.live.toml` | LEGACY | 3 symbols, 20 shares, sum<0.92 |
 
 ### S05 — Split Arb
-| File | Mode | Notes |
-|------|------|-------|
-| `05-split-arb.default.toml` | default | 50 shares, target sum 98c |
+| File | Format | Notes |
+|------|--------|-------|
+| `05-split-arb.default.toml` | LEGACY | 50 shares, target sum 98c |
 
 ### S06 — Gamma Scalping
-| File | Mode | Notes |
-|------|------|-------|
-| `06-gamma-scalping.default.toml` | default | 3 symbols, $1/leg |
+| File | Format | Notes |
+|------|--------|-------|
+| `06-gamma-scalping.default.toml` | LEGACY | 3 symbols, $1/leg |
 
 ### S07 — Liquidity Vacuum
-| File | Mode | Notes |
-|------|------|-------|
-| `07-liquidity-vacuum.template.toml` | template | Disabled, reference only |
+| File | Format | Notes |
+|------|--------|-------|
+| `07-liquidity-vacuum.template.toml` | LEGACY | Disabled, reference only |

@@ -96,9 +96,23 @@ impl FullConfig {
     }
 
     /// Parse from a TOML file path.
+    ///
+    /// Rejects legacy-format configs (those with `[timing]` or `[entry]`
+    /// sections) to prevent silent value misinterpretation.
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Cannot read config {path}: {e}"))?;
+
+        // Guard: reject legacy format that would silently misparse
+        if content.contains("[timing]") || content.contains("[entry]") || content.contains("[risk]")
+        {
+            return Err(format!(
+                "Config {path} uses legacy format ([timing]/[entry]/[risk] sections). \
+                 Use 02-pm5d.unified.toml format instead: [runtime]/[strategy]/[execution]."
+            )
+            .into());
+        }
+
         Self::from_toml(&content)
             .map_err(|e| format!("Invalid TOML in {path}: {e}").into())
     }
