@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Ploy strategy bundle runtime crate"
 
+[features]
+default = []
+database = ["sqlx"]
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
@@ -14,6 +18,8 @@ ploy-trading.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 serde.workspace = true
+serde_json = { workspace = true, optional = false }
+sqlx = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 toml.workspace = true
