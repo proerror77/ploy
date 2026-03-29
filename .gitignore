@@ -72,3 +72,13 @@ ploy-sidecar/dist/
 # Local skill/agent tooling
 skill-creator-updated/
 skills/
+
+# Codex/Claude sessions (archived monolith)
+.codex-session-*/
+
+# Reports and data (runtime artifacts)
+reports/
+data/
+
+# Skill development (not part of trading system)
+skill-creator-updated/
