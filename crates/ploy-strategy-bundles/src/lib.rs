@@ -1,4 +1,5 @@
 pub mod bundle;
+pub mod config;
 pub mod engine;
 pub mod executor;
 pub mod feed;

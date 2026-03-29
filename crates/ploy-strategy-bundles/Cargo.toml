@@ -16,9 +16,11 @@ rust_decimal_macros.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
+toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

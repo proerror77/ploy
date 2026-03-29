@@ -15,7 +15,7 @@ use ploy_trading::{
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::traits::{MarketUpdate, StrategyDecision, StrategyLogic};
@@ -79,7 +79,7 @@ pub enum Direction {
 /// Strategy configuration, loadable from TOML.
 ///
 /// Same struct drives backtest, dry-run, and live — no more divergence.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DirectionalConfig {
     // Symbols
     #[serde(default = "default_symbols")]
