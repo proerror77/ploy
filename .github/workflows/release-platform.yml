@@ -45,15 +45,17 @@ jobs:
 
       - name: Build platform binaries
         run: |
-          # Workspace app crates: apps/ployd, apps/ployctl, and apps/ploytui
+          # Workspace app crates: apps/ployd, apps/ployctl, apps/ploytui, apps/ploy-runner
           cargo build --release --locked \
             --target "${PLATFORM_TARGET}" \
             -p ployd \
             -p ployctl \
-            -p ploytui
+            -p ploytui \
+            -p ploy-runner
           strip "target/${PLATFORM_TARGET}/release/ployd" || true
           strip "target/${PLATFORM_TARGET}/release/ployctl" || true
           strip "target/${PLATFORM_TARGET}/release/ploytui" || true
+          strip "target/${PLATFORM_TARGET}/release/ploy-runner" || true
 
       - name: Create platform bundle
         run: |
@@ -68,6 +70,7 @@ jobs:
           install -m 755 "target/${PLATFORM_TARGET}/release/ployd" "${bundle_root}/bin/ployd"
           install -m 755 "target/${PLATFORM_TARGET}/release/ployctl" "${bundle_root}/bin/ployctl"
           install -m 755 "target/${PLATFORM_TARGET}/release/ploytui" "${bundle_root}/bin/ploytui"
+          install -m 755 "target/${PLATFORM_TARGET}/release/ploy-runner" "${bundle_root}/bin/ploy-runner"
           install -m 644 deployment/ployd.service "${bundle_root}/deployment/ployd.service"
           install -m 755 scripts/install-platform-service.sh "${bundle_root}/scripts/install-platform-service.sh"
           install -m 755 scripts/drills/live_dry_run.sh "${bundle_root}/scripts/drills/live_dry_run.sh"
@@ -132,6 +135,7 @@ jobs:
             $SUDO install -m 755 "${WORKDIR}/bin/ployd" "${DEPLOY_ROOT}/bin/ployd"
             $SUDO install -m 755 "${WORKDIR}/bin/ployctl" "${DEPLOY_ROOT}/bin/ployctl"
             $SUDO install -m 755 "${WORKDIR}/bin/ploytui" "${DEPLOY_ROOT}/bin/ploytui"
+            $SUDO install -m 755 "${WORKDIR}/bin/ploy-runner" "${DEPLOY_ROOT}/bin/ploy-runner"
             $SUDO install -m 644 "${WORKDIR}/deployment/ployd.service" "${DEPLOY_ROOT}/deployment/ployd.service"
             $SUDO install -m 755 "${WORKDIR}/scripts/install-platform-service.sh" "${DEPLOY_ROOT}/scripts/install-platform-service.sh"
             $SUDO install -m 755 "${WORKDIR}/scripts/drills/live_dry_run.sh" "${DEPLOY_ROOT}/scripts/drills/live_dry_run.sh"

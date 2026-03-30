@@ -1,0 +1,23 @@
+[package]
+name = "ploy-runner"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone strategy runner for ploy-strategy-bundles"
+
+[dependencies]
+chrono.workspace = true
+futures = "0.3"
+ploy-connectivity = { path = "../../crates/ploy-connectivity" }
+ploy-strategy-bundles = { path = "../../crates/ploy-strategy-bundles" }
+ploy-trading.workspace = true
+polymarket-client-sdk = { path = "../../vendor/polymarket-client-sdk", features = ["gamma", "rtds", "ws", "tracing"] }
+rust_decimal.workspace = true
+rust_decimal_macros.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
