@@ -1,3 +1,41 @@
+# ploy-runner Live Feed Debug (2026-03-30)
+
+## Goal
+Find and fix the root cause preventing `ploy-runner` from producing directional entries after the feed migration away from Polymarket WebSockets.
+
+## File ownership
+
+- `apps/ploy-runner/src/feeds.rs`
+  - owner: live spot/quote ingestion behavior and transport fallback
+- `apps/ploy-runner/src/scanner.rs`
+  - owner: active market discovery and token wiring
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+  - owner: event/spot/quote state transitions and entry evaluation
+- `apps/ploy-runner/Cargo.toml`, `Cargo.lock`
+  - owner: feed transport dependencies
+
+## Tasks
+
+- [x] Reproduce the no-signal condition with a focused regression test.
+- [x] Fix the confirmed root cause with the smallest state-transition change.
+- [x] Run focused verification for `ploy-strategy-bundles` and `ploy-runner`.
+- [x] Summarize remaining runtime concerns after verification.
+
+## Progress notes
+
+- 2026-03-30: Investigating why the deployed `ploy-runner` stays active but does not emit strategy entries after replacing Polymarket WS feeds with REST polling.
+- 2026-03-30: Confirmed the no-signal root cause in `DirectionalStrategy`: when `EventDiscovered` arrives before the first `SpotPrice`, the event window kept `open_price=None` permanently, so later quote/spot updates could never satisfy entry evaluation.
+- 2026-03-30: Fixed `DirectionalStrategy` to backfill `open_price` from the first observed spot tick for each active event on that symbol.
+- 2026-03-30: Focused verification passed:
+  - `rtk cargo test -p ploy-strategy-bundles event_before_first_spot_backfills_open_price_and_allows_entry -- --exact --nocapture`
+  - `rtk cargo test -p ploy-strategy-bundles full_signal_generates_entry -- --exact --nocapture`
+  - `rtk cargo test -p ploy-strategy-bundles`
+  - `rtk cargo check -p ploy-runner`
+- 2026-03-30: Deployed the rebuilt `ploy-runner` to `8.221.143.151` and confirmed the corrected startup ordering in logs: Binance spot poller starts before scanner discovery, then the quote poller subscribes to newly discovered tokens.
+- 2026-03-30: Sampled current live 5-minute books on the host. They are mostly quoted around `0.99` / `0.01`, so the absence of immediate `Entry signal` logs after deploy is consistent with the configured `min_edge` and fee model, not evidence of another ingestion failure.
+- 2026-03-30: Tightened `ploy-runner` logging so `polymarket_client_sdk::serde_helpers` is forced to `error`, then added first-success spot/quote logs to prove feed ingress without flooding the journal.
+- 2026-03-30: Redeployed to `8.221.143.151` and verified the new process (`PID 127201`) shows first spot prices plus first non-empty quote observations, with no new `serde_helpers` warnings after the restart timestamp.
+
 # Live Dry-Run Deployment Drill (2026-03-25)
 
 ## Goal

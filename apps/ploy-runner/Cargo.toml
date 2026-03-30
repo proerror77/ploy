@@ -9,11 +9,11 @@ description = "Standalone strategy runner for ploy-strategy-bundles"
 
 [dependencies]
 chrono.workspace = true
-futures = "0.3"
 ploy-connectivity = { path = "../../crates/ploy-connectivity" }
 ploy-strategy-bundles = { path = "../../crates/ploy-strategy-bundles" }
 ploy-trading.workspace = true
-polymarket-client-sdk = { path = "../../vendor/polymarket-client-sdk", features = ["gamma", "rtds", "ws", "tracing"] }
+polymarket-client-sdk = { path = "../../vendor/polymarket-client-sdk", features = ["gamma", "tracing"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 serde.workspace = true

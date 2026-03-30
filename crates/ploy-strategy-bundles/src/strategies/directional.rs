@@ -392,6 +392,13 @@ impl StrategyLogic for DirectionalStrategy {
                 }
 
                 self.spot.insert(symbol.clone(), SpotState { price: *price, _ts: *ts });
+                if let Some(events) = self.events.get_mut(symbol) {
+                    for event in events.iter_mut() {
+                        if event.open_price.is_none() {
+                            event.open_price = Some(*price);
+                        }
+                    }
+                }
 
                 self.reset_daily_counter(*ts);
                 if self.daily_trades >= self.config.max_daily_trades {
@@ -637,5 +644,82 @@ mod tests {
             }
             other => panic!("Expected Enter, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn event_before_first_spot_backfills_open_price_and_allows_entry() {
+        let config = default_config();
+        let mut strat = DirectionalStrategy::new(config);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+        let now = Utc::now();
+
+        strat.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: "evt1".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up1".into(),
+                down_token: "dn1".into(),
+                end_time: now + chrono::Duration::seconds(120),
+                window_secs: 300,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert_eq!(
+            strat.events["BTCUSDT"][0].open_price,
+            None,
+            "precondition: event arrived before first spot"
+        );
+
+        strat.on_update(
+            &MarketUpdate::Quote {
+                token_id: "up1".into(),
+                bid: Some(dec!(0.29)),
+                ask: Some(dec!(0.30)),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        strat.on_update(
+            &MarketUpdate::Quote {
+                token_id: "dn1".into(),
+                bid: Some(dec!(0.69)),
+                ask: Some(dec!(0.70)),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        let first_spot_decisions = strat.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            first_spot_decisions.is_empty(),
+            "first spot should initialize the event, not trade immediately"
+        );
+        assert_eq!(strat.events["BTCUSDT"][0].open_price, Some(dec!(100000)));
+
+        let decisions = strat.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(101500),
+                ts: now + chrono::Duration::seconds(2),
+            },
+            &positions,
+            &orders,
+        );
+
+        assert_eq!(decisions.len(), 1, "Expected 1 entry signal");
     }
 }

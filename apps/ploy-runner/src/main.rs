@@ -26,11 +26,16 @@ fn print_usage() {
 
 #[tokio::main]
 async fn main() {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| {
+            "info,hyper_util=off,hyper=off,reqwest=off,h2=off,rustls=off"
+                .parse()
+                .unwrap()
+        })
+        .add_directive("polymarket_client_sdk::serde_helpers=error".parse().unwrap());
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,hyper_util=off,hyper=off,reqwest=off,h2=off,rustls=off".parse().unwrap()),
-        )
+        .with_env_filter(env_filter)
         .init();
 
     let args: Vec<String> = env::args().collect();

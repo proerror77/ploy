@@ -3,147 +3,162 @@
 //! Two async tasks that bridge vendor SDK WebSocket streams into the
 //! unified `MarketUpdate` broadcast channel consumed by `LiveFeed`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
-use futures::StreamExt;
+use chrono::Utc;
 use ploy_strategy_bundles::MarketUpdate;
-use polymarket_client_sdk::clob::types::Side;
-use polymarket_client_sdk::clob::ws::Client as WsClient;
-use polymarket_client_sdk::rtds::Client as RtdsClient;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-/// Spawn a task that streams Binance spot prices via Polymarket RTDS
-/// and publishes `MarketUpdate::SpotPrice` events.
+/// Spawn a task that polls Binance REST API for spot prices
+/// and publishes `MarketUpdate::SpotPrice` events every 2 seconds.
 pub fn spawn_spot_feed(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
     symbols: Vec<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let http = reqwest::Client::new();
+        let poll_interval = std::time::Duration::from_secs(2);
+        let mut logged_spot_symbols = HashSet::new();
+
+        info!(symbols = ?symbols, "Starting Binance REST spot price poller");
+
         loop {
-            info!(symbols = ?symbols, "Connecting to RTDS spot price feed");
-
-            let client = RtdsClient::default();
-            let stream = match client.subscribe_crypto_prices(Some(symbols.clone())) {
-                Ok(s) => s,
-                Err(e) => {
-                    error!(error = %e, "Failed to subscribe to RTDS, retrying in 5s");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
-
-            let mut stream = Box::pin(stream);
-            let mut count: u64 = 0;
-
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(price) => {
-                        let symbol = price.symbol.to_uppercase();
-                        let value = match Decimal::try_from(price.value) {
-                            Ok(d) => d,
-                            Err(_) => continue,
-                        };
-                        let ts = DateTime::<Utc>::from_timestamp(price.timestamp as i64, 0)
-                            .unwrap_or_else(Utc::now);
-
-                        let update = MarketUpdate::SpotPrice {
-                            symbol,
-                            price: value,
-                            ts,
-                        };
-
-                        if tx.send(update).is_err() {
-                            warn!("All receivers dropped, stopping spot feed");
-                            return;
-                        }
-                        count += 1;
-                        if count % 10000 == 0 {
-                            debug!(count, "Spot price updates forwarded");
+            for symbol in &symbols {
+                let url = format!(
+                    "https://api.binance.com/api/v3/ticker/price?symbol={}",
+                    symbol.to_uppercase()
+                );
+                match http.get(&url).send().await {
+                    Ok(resp) => {
+                        if let Ok(body) = resp.json::<serde_json::Value>().await {
+                            if let Some(price_str) = body["price"].as_str() {
+                                if let Ok(price) = price_str.parse::<Decimal>() {
+                                    let update = MarketUpdate::SpotPrice {
+                                        symbol: symbol.to_uppercase(),
+                                        price,
+                                        ts: Utc::now(),
+                                    };
+                                    let symbol_upper = symbol.to_uppercase();
+                                    let receivers = tx.receiver_count();
+                                    match tx.send(update) {
+                                        Ok(_) => {
+                                            if logged_spot_symbols.insert(symbol_upper.clone()) {
+                                                info!(
+                                                    symbol = %symbol_upper,
+                                                    price = %price,
+                                                    receivers,
+                                                    "First spot price observed"
+                                                );
+                                            }
+                                            debug!(
+                                                symbol = %symbol_upper,
+                                                price = %price,
+                                                receivers,
+                                                "Spot price sent to broadcast"
+                                            );
+                                        }
+                                        Err(_) => {
+                                            warn!("Broadcast channel closed");
+                                            return;
+                                        }
+                                    }
+                                }
+                            } else {
+                                warn!(symbol, "No price in Binance response: {body}");
+                            }
                         }
                     }
                     Err(e) => {
-                        debug!(error = %e, "RTDS stream error, continuing");
+                        warn!(error = %e, symbol = %symbol, "Binance REST fetch failed");
                     }
                 }
             }
-
-            warn!("RTDS stream ended, reconnecting in 3s");
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            tokio::time::sleep(poll_interval).await;
         }
     })
 }
 
-/// Spawn a task that subscribes to Polymarket CLOB WS price changes
-/// for the given token IDs and publishes `MarketUpdate::Quote` events.
+/// Spawn a task that polls the Polymarket CLOB REST API for orderbook data
+/// and publishes `MarketUpdate::Quote` events.
 ///
-/// Token IDs are collected by the market scanner and passed here.
-/// Each `PriceChange` message is a batch — we flatten and emit one
-/// `Quote` per entry.
+/// REST polling is more reliable than WS for the 5-min window lifecycle.
+/// Polls every 5 seconds per token batch.
 pub fn spawn_quote_feed(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
     token_ids: Vec<U256>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let http = reqwest::Client::new();
+        let poll_interval = std::time::Duration::from_secs(5);
+        let mut quoted_tokens = 0_u64;
+        let mut logged_quote_tokens = HashSet::new();
+
+        info!(tokens = token_ids.len(), "Starting REST quote poller");
+
         loop {
-            info!(tokens = token_ids.len(), "Connecting to CLOB WS for quote feed");
+            for token in &token_ids {
+                let token_str = token.to_string();
+                let url = format!(
+                    "https://clob.polymarket.com/book?token_id={}",
+                    token_str
+                );
 
-            let client = WsClient::default();
-            let stream = match client.subscribe_prices(token_ids.clone()) {
-                Ok(s) => s,
-                Err(e) => {
-                    error!(error = %e, "Failed to subscribe to CLOB WS prices, retrying in 5s");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
+                match http.get(&url).send().await {
+                    Ok(resp) => {
+                        if let Ok(body) = resp.json::<serde_json::Value>().await {
+                            let bid = body["bids"]
+                                .as_array()
+                                .and_then(|b| b.first())
+                                .and_then(|b| b["price"].as_str())
+                                .and_then(|p| p.parse::<Decimal>().ok());
 
-            let mut stream = Box::pin(stream);
-            let mut count: u64 = 0;
+                            let ask = body["asks"]
+                                .as_array()
+                                .and_then(|a| a.first())
+                                .and_then(|a| a["price"].as_str())
+                                .and_then(|p| p.parse::<Decimal>().ok());
 
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(batch) => {
-                        for entry in &batch.price_changes {
-                            let token_id = entry.asset_id.to_string();
-                            let ts = DateTime::<Utc>::from_timestamp(batch.timestamp, 0)
-                                .unwrap_or_else(Utc::now);
-
-                            let (bid, ask) = match entry.side {
-                                Side::Buy => (Some(entry.price), None),
-                                Side::Sell => (None, Some(entry.price)),
-                                _ => continue,
-                            };
-
-                            let update = MarketUpdate::Quote {
-                                token_id,
-                                bid,
-                                ask,
-                                ts,
-                            };
-
-                            if tx.send(update).is_err() {
-                                warn!("All receivers dropped, stopping quote feed");
-                                return;
+                            if bid.is_some() || ask.is_some() {
+                                let update = MarketUpdate::Quote {
+                                    token_id: token_str.clone(),
+                                    bid,
+                                    ask,
+                                    ts: Utc::now(),
+                                };
+                                if tx.send(update).is_err() {
+                                    warn!("All receivers dropped, stopping quote poller");
+                                    return;
+                                }
+                                quoted_tokens += 1;
+                                if logged_quote_tokens.insert(token_str.clone()) {
+                                    info!(
+                                        token = %token_str,
+                                        bid = ?bid,
+                                        ask = ?ask,
+                                        "First non-empty quote observed"
+                                    );
+                                } else if quoted_tokens % 100 == 0 {
+                                    info!(
+                                        quotes = quoted_tokens,
+                                        tracked_tokens = logged_quote_tokens.len(),
+                                        "REST quote poller forwarded non-empty quotes"
+                                    );
+                                }
                             }
-                            count += 1;
-                        }
-                        if count % 50000 == 0 && count > 0 {
-                            debug!(count, "Quote updates forwarded");
                         }
                     }
                     Err(e) => {
-                        debug!(error = %e, "CLOB WS stream error, continuing");
+                        debug!(error = %e, token = %token_str, "REST book fetch failed");
                     }
                 }
             }
 
-            warn!("CLOB WS stream ended, reconnecting in 3s");
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            tokio::time::sleep(poll_interval).await;
         }
     })
 }

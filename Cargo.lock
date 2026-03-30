@@ -2317,6 +2317,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -3216,11 +3217,11 @@ name = "ploy-runner"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "futures",
  "ploy-connectivity",
  "ploy-strategy-bundles",
  "ploy-trading",
  "polymarket-client-sdk",
+ "reqwest",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
@@ -3769,6 +3770,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]

@@ -20,6 +20,20 @@ use crate::feeds::spawn_quote_feed;
 
 const SCAN_INTERVAL_SECS: u64 = 30;
 
+/// Map full asset names (from Polymarket questions) to trading pair symbols.
+fn name_to_symbol(question: &str) -> Option<&'static str> {
+    let q = question.to_uppercase();
+    if q.contains("BITCOIN") || q.contains("BTC") {
+        Some("BTCUSDT")
+    } else if q.contains("ETHEREUM") || q.contains("ETH") {
+        Some("ETHUSDT")
+    } else if q.contains("SOLANA") || q.contains("SOL ") {
+        Some("SOLUSDT")
+    } else {
+        None
+    }
+}
+
 struct TrackedEvent {
     end_time: chrono::DateTime<Utc>,
 }
@@ -64,19 +78,23 @@ pub fn spawn_market_scanner(
                 Ok(markets) => {
                     let mut new_tokens: Vec<U256> = Vec::new();
 
+                    if markets.is_empty() {
+                        debug!("No active markets in the next 6 minutes");
+                    }
+
                     for market in &markets {
                         let market_id = &market.id;
                         if tracked.contains_key(market_id) {
                             continue;
                         }
 
-                        // Match symbol from question text
+                        // Match symbol from question text (e.g. "Bitcoin Up or Down" → BTCUSDT)
                         let question = market.question.as_deref().unwrap_or("");
-                        let symbol = match symbols.iter().find(|s| {
-                            question.to_uppercase().contains(&s.to_uppercase())
-                        }) {
-                            Some(s) => s.to_uppercase(),
-                            None => continue,
+                        let symbol = match name_to_symbol(question) {
+                            Some(s) if symbols.iter().any(|cfg| cfg.to_uppercase() == s) => {
+                                s.to_owned()
+                            }
+                            _ => continue,
                         };
 
                         // Need exactly 2 CLOB token IDs (Up and Down)
