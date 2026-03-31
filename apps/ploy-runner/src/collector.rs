@@ -129,7 +129,20 @@ impl QuoteCollector {
                     result = stream.next() => {
                         match result {
                             Some(Ok(book)) => {
-                                let token_id = book.market.to_string();
+                                let token_id = book.asset_id.to_string();  // Use asset_id, not market
+
+                                // Log first few messages for debugging
+                                {
+                                    let s = self.stats.read().await;
+                                    if s.quotes_received < 10 {
+                                        info!(
+                                            token = %token_id,
+                                            bids = book.bids.len(),
+                                            asks = book.asks.len(),
+                                            "Received orderbook update"
+                                        );
+                                    }
+                                }
 
                                 // Check if we're tracking this token
                                 let is_tracked = {
@@ -181,6 +194,8 @@ impl QuoteCollector {
                                             );
                                         }
                                     }
+                                } else {
+                                    warn!(token = %token_id, "Received quote for unknown token");
                                 }
                             }
                             Some(Err(e)) => {
@@ -248,9 +263,15 @@ impl QuoteCollector {
 
     /// Query database for active markets.
     async fn get_active_markets(&self) -> Result<Vec<ActiveMarket>, sqlx::Error> {
-        let pattern = format!("%-updown-{}-", self.config.timeframe);
+        let pattern = format!("%-updown-{}-%", self.config.timeframe);
 
-        let rows = sqlx::query_as::<_, ActiveMarketRow>(
+        // Build IN clause dynamically
+        let placeholders: Vec<String> = (1..=self.config.symbols.len())
+            .map(|i| format!("${}", i))
+            .collect();
+        let in_clause = placeholders.join(", ");
+
+        let query = format!(
             r#"
             SELECT
                 market_slug,
@@ -260,18 +281,26 @@ impl QuoteCollector {
                 ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->0)::text AS up_token,
                 ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->1)::text AS down_token
             FROM pm_market_metadata
-            WHERE symbol = ANY($1)
-              AND market_slug LIKE $2
+            WHERE symbol IN ({})
+              AND market_slug LIKE ${}
               AND end_time > NOW()
               AND start_time < NOW() + INTERVAL '2 hours'
               AND raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
             ORDER BY start_time
             "#,
-        )
-        .bind(&self.config.symbols)
-        .bind(&pattern)
-        .fetch_all(&self.pool)
-        .await?;
+            in_clause,
+            self.config.symbols.len() + 1
+        );
+
+        info!(query = %query, symbols = ?self.config.symbols, pattern = %pattern, "Executing market query");
+
+        let mut q = sqlx::query_as::<_, ActiveMarketRow>(&query);
+        for symbol in &self.config.symbols {
+            q = q.bind(symbol);
+        }
+        q = q.bind(&pattern);
+
+        let rows = q.fetch_all(&self.pool).await?;
 
         let markets = rows
             .into_iter()
