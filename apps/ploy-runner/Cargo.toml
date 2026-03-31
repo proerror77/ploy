@@ -7,13 +7,17 @@ license.workspace = true
 repository.workspace = true
 description = "Standalone strategy runner for ploy-strategy-bundles"
 
+[features]
+default = []
+
 [dependencies]
 chrono.workspace = true
 futures = "0.3"
 ploy-connectivity = { path = "../../crates/ploy-connectivity" }
 ploy-strategy-bundles = { path = "../../crates/ploy-strategy-bundles" }
 ploy-trading.workspace = true
-polymarket-client-sdk = { path = "../../vendor/polymarket-client-sdk", features = ["gamma", "rtds", "tracing"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono"] }
+polymarket-client-sdk = { path = "../../vendor/polymarket-client-sdk", features = ["gamma", "rtds", "tracing", "ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true

@@ -1,3 +1,4 @@
+mod collector;
 mod feeds;
 mod scanner;
 
@@ -15,6 +16,7 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
+use collector::{CollectorConfig, QuoteCollector};
 use feeds::{new_chainlink_cache, spawn_chainlink_feed, spawn_spot_feed};
 use scanner::spawn_market_scanner;
 
@@ -24,6 +26,7 @@ fn print_usage() {
     eprintln!("Commands:");
     eprintln!("  run               Run the strategy (default)");
     eprintln!("  check-db          Check database data completeness");
+    eprintln!("  collect-quotes    Collect orderbook quotes from Polymarket CLOB WebSocket");
     eprintln!();
     eprintln!("Options for 'run':");
     eprintln!("  --config <path>   Unified TOML config file (required)");
@@ -31,6 +34,11 @@ fn print_usage() {
     eprintln!("  --foreground      Run in foreground (default, kept for compat)");
     eprintln!();
     eprintln!("Options for 'check-db':");
+    eprintln!("  --db-url <url>    Database URL (default: postgresql://postgres:postgres@localhost:5432/ploy)");
+    eprintln!();
+    eprintln!("Options for 'collect-quotes':");
+    eprintln!("  --symbols <list>  Comma-separated symbols (default: BTCUSDT,ETHUSDT,SOLUSDT)");
+    eprintln!("  --timeframe <tf>  Market timeframe: 5m or 15m (default: 5m)");
     eprintln!("  --db-url <url>    Database URL (default: postgresql://postgres:postgres@localhost:5432/ploy)");
 }
 
@@ -178,6 +186,56 @@ async fn main() {
 
             if let Err(e) = check_database(db_url).await {
                 eprintln!("Database check failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("collect-quotes") => {
+            let db_url = args.iter()
+                .position(|s| s == "--db-url")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str())
+                .unwrap_or("postgresql://postgres:postgres@localhost:5432/ploy");
+
+            let symbols_str = args.iter()
+                .position(|s| s == "--symbols")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str())
+                .unwrap_or("BTCUSDT,ETHUSDT,SOLUSDT");
+
+            let timeframe = args.iter()
+                .position(|s| s == "--timeframe")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| s.as_str())
+                .unwrap_or("5m");
+
+            let symbols: Vec<String> = symbols_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+
+            let pool = match PgPoolOptions::new()
+                .max_connections(5)
+                .connect(db_url)
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Failed to connect to database: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            let config = CollectorConfig {
+                symbols,
+                timeframe: timeframe.to_string(),
+                refresh_interval_secs: 300, // 5 minutes
+            };
+
+            let collector = QuoteCollector::new(config, pool);
+
+            if let Err(e) = collector.run().await {
+                eprintln!("Quote collector failed: {e}");
                 std::process::exit(1);
             }
             return;
