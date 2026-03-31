@@ -53,6 +53,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 down_token: dn_token.clone(),
                 end_time: window_end,
                 window_secs,
+                price_to_beat: None,
             });
 
             // Simulate spot price ticks every 10s

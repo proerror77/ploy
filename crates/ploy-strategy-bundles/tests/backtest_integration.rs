@@ -35,6 +35,7 @@ fn build_scenario() -> Vec<MarketUpdate> {
         down_token: "dn-btc-001".into(),
         end_time: event_end,
         window_secs: 300,
+        price_to_beat: None,
     });
 
     // 3. Polymarket quotes — UP token cheap at 0.30
