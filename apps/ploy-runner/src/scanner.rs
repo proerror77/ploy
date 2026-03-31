@@ -12,6 +12,7 @@ use ploy_strategy_bundles::MarketUpdate;
 use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::gamma::types::request::MarketsRequest;
 use polymarket_client_sdk::types::U256;
+use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -112,6 +113,12 @@ pub fn spawn_market_scanner(
                         let up_token = token_ids[0].to_string();
                         let down_token = token_ids[1].to_string();
 
+                        // Extract window open price from Polymarket API
+                        let price_to_beat = market
+                            .group_item_threshold
+                            .as_deref()
+                            .and_then(|s| s.parse::<Decimal>().ok());
+
                         // Collect new tokens for quote subscription
                         if subscribed_tokens.insert(up_token.clone()) {
                             new_tokens.push(token_ids[0]);
@@ -132,7 +139,7 @@ pub fn spawn_market_scanner(
                             down_token,
                             end_time,
                             window_secs,
-                            price_to_beat: None, // TODO: extract from groupItemThreshold or Chainlink
+                            price_to_beat,
                         });
                     }
 

@@ -83,7 +83,10 @@ pub fn spawn_spot_feed(
                             }
                         }
                         Err(_) => {
-                            warn!("Broadcast channel closed, stopping RTDS feed");
+                            warn!(
+                                symbols = ?symbols_upper,
+                                "Broadcast channel closed, stopping RTDS spot feed"
+                            );
                             return;
                         }
                     }
@@ -147,7 +150,10 @@ pub fn spawn_quote_feed(
                                     ts: Utc::now(),
                                 };
                                 if tx.send(update).is_err() {
-                                    warn!("All receivers dropped, stopping quote poller");
+                                    warn!(
+                                        tokens = token_ids.len(),
+                                        "All receivers dropped, stopping quote poller"
+                                    );
                                     return;
                                 }
                                 quoted_tokens += 1;
