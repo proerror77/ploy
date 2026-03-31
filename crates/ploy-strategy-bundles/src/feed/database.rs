@@ -276,17 +276,19 @@ async fn load_events(
     updates: &mut Vec<MarketUpdate>,
 ) -> Result<(), sqlx::Error> {
     let rows: Vec<(
-        String,           // market_slug (event_id)
-        Option<String>,   // symbol
+        String,                // market_slug (event_id)
+        Option<String>,        // symbol
         Option<DateTime<Utc>>, // end_time
-        Option<String>,   // up_token_id
-        Option<String>,   // down_token_id
-        Option<i64>,      // window_secs
+        Option<String>,        // up_token_id
+        Option<String>,        // down_token_id
+        Option<i64>,           // window_secs
+        Option<Decimal>,       // price_to_beat
     )> = sqlx::query_as(
         r#"
         SELECT market_slug, symbol, end_time,
                up_token_id, down_token_id,
-               EXTRACT(EPOCH FROM (end_time - start_time))::bigint as window_secs
+               EXTRACT(EPOCH FROM (end_time - start_time))::bigint as window_secs,
+               price_to_beat
         FROM pm_market_metadata
         WHERE ($1::text[] IS NULL OR symbol = ANY($1))
           AND end_time >= $2
@@ -302,7 +304,7 @@ async fn load_events(
     .unwrap_or_default();
 
     info!(count = rows.len(), "Loaded events from pm_market_metadata");
-    for (event_id, symbol, end_time, up_token, down_token, window_secs) in rows {
+    for (event_id, symbol, end_time, up_token, down_token, window_secs, price_to_beat) in rows {
         let symbol = symbol.unwrap_or_default();
         let end_time = match end_time {
             Some(t) => t,
@@ -323,6 +325,7 @@ async fn load_events(
             down_token,
             end_time,
             window_secs,
+            price_to_beat,
         });
 
         // Add expiry event after window ends
