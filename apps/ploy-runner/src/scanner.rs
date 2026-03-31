@@ -132,6 +132,7 @@ pub fn spawn_market_scanner(
                             down_token,
                             end_time,
                             window_secs,
+                            price_to_beat: None, // TODO: extract from groupItemThreshold or Chainlink
                         });
                     }
 

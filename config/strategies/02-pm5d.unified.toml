@@ -9,7 +9,7 @@ mode = "dryrun"         # "backtest" | "dryrun" | "live"
 # max_updates = 500000  # uncomment to cap backtest length
 
 [strategy]
-symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "HYPEUSDT", "BNBUSDT"]
 
 # Probability model
 vol_floor = 0.001

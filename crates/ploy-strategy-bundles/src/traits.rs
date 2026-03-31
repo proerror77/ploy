@@ -50,6 +50,9 @@ pub enum MarketUpdate {
         down_token: String,
         end_time: DateTime<Utc>,
         window_secs: u64,
+        /// Price-to-beat from the market API (window open price).
+        /// When present, used directly as S0 instead of waiting for spot.
+        price_to_beat: Option<Decimal>,
     },
 
     /// Event window expired (settlement pending or complete).

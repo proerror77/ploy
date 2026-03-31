@@ -420,7 +420,13 @@ impl StrategyLogic for DirectionalStrategy {
             }
 
             MarketUpdate::EventDiscovered {
-                event_id, symbol, up_token, down_token, end_time, window_secs,
+                event_id,
+                symbol,
+                up_token,
+                down_token,
+                end_time,
+                window_secs,
+                price_to_beat,
             } => {
                 let now = Utc::now();
                 let events = self.events.entry(symbol.clone()).or_default();
@@ -430,8 +436,9 @@ impl StrategyLogic for DirectionalStrategy {
                 if events.iter().any(|e| e.event_id == *event_id) {
                     return vec![];
                 }
-                // Record open price from current spot
-                let open_price = self.spot.get(symbol).map(|s| s.price);
+                // Use price_to_beat if available, otherwise fallback to current spot
+                let open_price = price_to_beat
+                    .or_else(|| self.spot.get(symbol).map(|s| s.price));
 
                 // Track token → symbol mapping
                 self.token_symbol.insert(up_token.clone(), symbol.clone());

@@ -6,80 +6,96 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use ploy_strategy_bundles::MarketUpdate;
+use polymarket_client_sdk::rtds::Client as RtdsClient;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-/// Spawn a task that polls Binance REST API for spot prices
-/// and publishes `MarketUpdate::SpotPrice` events every 2 seconds.
+/// Spawn a task that subscribes to Binance spot prices via RTDS WebSocket
+/// and publishes `MarketUpdate::SpotPrice` events in real-time.
 pub fn spawn_spot_feed(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
     symbols: Vec<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let http = reqwest::Client::new();
-        let poll_interval = std::time::Duration::from_secs(2);
         let mut logged_spot_symbols = HashSet::new();
+        let symbols_upper: Vec<String> = symbols.iter().map(|s| s.to_uppercase()).collect();
 
-        info!(symbols = ?symbols, "Starting Binance REST spot price poller");
+        info!(
+            symbols = ?symbols_upper,
+            "Starting RTDS WebSocket spot price feed"
+        );
 
-        loop {
-            for symbol in &symbols {
-                let url = format!(
-                    "https://api.binance.com/api/v3/ticker/price?symbol={}",
-                    symbol.to_uppercase()
-                );
-                match http.get(&url).send().await {
-                    Ok(resp) => {
-                        if let Ok(body) = resp.json::<serde_json::Value>().await {
-                            if let Some(price_str) = body["price"].as_str() {
-                                if let Ok(price) = price_str.parse::<Decimal>() {
-                                    let update = MarketUpdate::SpotPrice {
-                                        symbol: symbol.to_uppercase(),
-                                        price,
-                                        ts: Utc::now(),
-                                    };
-                                    let symbol_upper = symbol.to_uppercase();
-                                    let receivers = tx.receiver_count();
-                                    match tx.send(update) {
-                                        Ok(_) => {
-                                            if logged_spot_symbols.insert(symbol_upper.clone()) {
-                                                info!(
-                                                    symbol = %symbol_upper,
-                                                    price = %price,
-                                                    receivers,
-                                                    "First spot price observed"
-                                                );
-                                            }
-                                            debug!(
-                                                symbol = %symbol_upper,
-                                                price = %price,
-                                                receivers,
-                                                "Spot price sent to broadcast"
-                                            );
-                                        }
-                                        Err(_) => {
-                                            warn!("Broadcast channel closed");
-                                            return;
-                                        }
-                                    }
-                                }
-                            } else {
-                                warn!(symbol, "No price in Binance response: {body}");
+        // Create RTDS client with default config (wss://ws-live-data.polymarket.com)
+        let client = RtdsClient::default();
+
+        // Subscribe to crypto prices (Binance feed)
+        let stream = match client.subscribe_crypto_prices(Some(symbols_upper.clone())) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(error = %e, "Failed to subscribe to crypto_prices");
+                return;
+            }
+        };
+
+        let mut stream = Box::pin(stream);
+        let mut price_count = 0_u64;
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(crypto_price) => {
+                    // Convert Unix millis to DateTime<Utc>
+                    let ts = DateTime::from_timestamp_millis(crypto_price.timestamp)
+                        .unwrap_or_else(Utc::now);
+
+                    let update = MarketUpdate::SpotPrice {
+                        symbol: crypto_price.symbol.to_uppercase(),
+                        price: crypto_price.value,
+                        ts,
+                    };
+
+                    let symbol_upper = crypto_price.symbol.to_uppercase();
+                    let receivers = tx.receiver_count();
+
+                    match tx.send(update) {
+                        Ok(_) => {
+                            price_count += 1;
+                            if logged_spot_symbols.insert(symbol_upper.clone()) {
+                                info!(
+                                    symbol = %symbol_upper,
+                                    price = %crypto_price.value,
+                                    receivers,
+                                    "First RTDS spot price received"
+                                );
+                            }
+                            if price_count % 100 == 0 {
+                                debug!(
+                                    prices = price_count,
+                                    tracked_symbols = logged_spot_symbols.len(),
+                                    receivers,
+                                    "RTDS spot prices forwarded"
+                                );
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, symbol = %symbol, "Binance REST fetch failed");
+                        Err(_) => {
+                            warn!("Broadcast channel closed, stopping RTDS feed");
+                            return;
+                        }
                     }
                 }
+                Err(e) => {
+                    warn!(error = %e, "RTDS crypto_prices stream error");
+                    // Don't exit on transient errors, let SDK handle reconnection
+                }
             }
-            tokio::time::sleep(poll_interval).await;
         }
+
+        info!("RTDS spot price feed ended");
     })
 }
 
