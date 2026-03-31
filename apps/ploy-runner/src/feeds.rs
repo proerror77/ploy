@@ -3,7 +3,7 @@
 //! Two async tasks that bridge vendor SDK WebSocket streams into the
 //! unified `MarketUpdate` broadcast channel consumed by `LiveFeed`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -12,9 +12,20 @@ use ploy_strategy_bundles::MarketUpdate;
 use polymarket_client_sdk::rtds::Client as RtdsClient;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
+
+/// Shared cache of recent Chainlink prices.
+///
+/// Keyed by symbol (e.g., "btc/usd"), stores the most recent price and timestamp.
+/// Used by scanner to populate price_to_beat when EventDiscovered is sent.
+pub type ChainlinkPriceCache = Arc<RwLock<HashMap<String, (Decimal, DateTime<Utc>)>>>;
+
+/// Create a new empty Chainlink price cache.
+pub fn new_chainlink_cache() -> ChainlinkPriceCache {
+    Arc::new(RwLock::new(HashMap::new()))
+}
 
 /// Spawn a task that subscribes to Binance spot prices via RTDS WebSocket
 /// and publishes `MarketUpdate::SpotPrice` events in real-time.
@@ -189,8 +200,11 @@ pub fn spawn_quote_feed(
 ///
 /// Used to capture S0 (open price) at eventStartTime for 5M markets.
 /// Polymarket uses Chainlink as the canonical price source for settlement.
+///
+/// Prices are stored in the shared cache for scanner to use when creating EventDiscovered.
 pub fn spawn_chainlink_feed(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
+    cache: ChainlinkPriceCache,
     symbols: Vec<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -235,18 +249,18 @@ pub fn spawn_chainlink_feed(
                     }
 
                     // Convert Unix millis to DateTime<Utc>
-                    let _ts = DateTime::from_timestamp_millis(chainlink_price.timestamp)
+                    let ts = DateTime::from_timestamp_millis(chainlink_price.timestamp)
                         .unwrap_or_else(Utc::now);
 
-                    // Convert "btc/usd" back to "BTCUSDT" for consistency
-                    let _symbol_upper = chainlink_price
-                        .symbol
-                        .replace("/", "")
-                        .to_uppercase()
-                        + "T";
+                    // Store in cache for scanner to use
+                    {
+                        let mut cache_guard = cache.write().await;
+                        cache_guard.insert(
+                            chainlink_price.symbol.clone(),
+                            (chainlink_price.value, ts),
+                        );
+                    }
 
-                    // For now, just log Chainlink prices
-                    // TODO: Store in a cache keyed by (symbol, timestamp) for scanner to use
                     let receivers = tx.receiver_count();
                     price_count += 1;
 
@@ -255,7 +269,7 @@ pub fn spawn_chainlink_feed(
                             symbol = %chainlink_price.symbol,
                             price = %chainlink_price.value,
                             receivers,
-                            "First Chainlink price received"
+                            "First Chainlink price received and cached"
                         );
                     }
                     if price_count % 100 == 0 {
@@ -263,7 +277,7 @@ pub fn spawn_chainlink_feed(
                             prices = price_count,
                             tracked_symbols = logged_chainlink_symbols.len(),
                             receivers,
-                            "Chainlink prices received"
+                            "Chainlink prices cached"
                         );
                     }
                 }

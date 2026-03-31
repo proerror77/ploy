@@ -12,7 +12,7 @@ use ploy_trading::TradingIntent;
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
-use feeds::{spawn_chainlink_feed, spawn_spot_feed};
+use feeds::{new_chainlink_cache, spawn_chainlink_feed, spawn_spot_feed};
 use scanner::spawn_market_scanner;
 
 fn print_usage() {
@@ -94,6 +94,9 @@ async fn main() {
     let (tx, rx) = broadcast::channel(8192);
     let tx = Arc::new(tx);
 
+    // Shared Chainlink price cache for scanner to use
+    let chainlink_cache = new_chainlink_cache();
+
     // Spawn feed producers
     let symbols: Vec<String> = config
         .strategy
@@ -106,11 +109,11 @@ async fn main() {
     let spot_handle = spawn_spot_feed(tx.clone(), symbols.clone());
 
     // 2. Chainlink feed — canonical price source for S0 at eventStartTime
-    let chainlink_handle = spawn_chainlink_feed(tx.clone(), symbols.clone());
+    let chainlink_handle = spawn_chainlink_feed(tx.clone(), chainlink_cache.clone(), symbols.clone());
 
     // 3. Market scanner — discovers events and injects EventDiscovered/EventExpired
     //    Also spawns quote feeds dynamically as new tokens are discovered.
-    let scanner_handle = spawn_market_scanner(tx.clone(), symbols.clone());
+    let scanner_handle = spawn_market_scanner(tx.clone(), chainlink_cache.clone(), symbols.clone());
 
     // Build strategy
     let strategy = DirectionalStrategy::new(config.strategy.clone());

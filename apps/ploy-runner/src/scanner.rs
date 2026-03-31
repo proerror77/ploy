@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::feeds::spawn_quote_feed;
+use crate::feeds::{spawn_quote_feed, ChainlinkPriceCache};
 
 const SCAN_INTERVAL_SECS: u64 = 30;
 
@@ -30,6 +30,14 @@ fn name_to_symbol(question: &str) -> Option<&'static str> {
         Some("ETHUSDT")
     } else if q.contains("SOLANA") || q.contains("SOL ") {
         Some("SOLUSDT")
+    } else if q.contains("XRP") {
+        Some("XRPUSDT")
+    } else if q.contains("DOGECOIN") || q.contains("DOGE") {
+        Some("DOGEUSDT")
+    } else if q.contains("HYPE") {
+        Some("HYPEUSDT")
+    } else if q.contains("BNB") || q.contains("BINANCE COIN") {
+        Some("BNBUSDT")
     } else {
         None
     }
@@ -42,8 +50,12 @@ struct TrackedEvent {
 /// Spawn a background task that periodically discovers active 5-min binary
 /// option markets, injects lifecycle events, and spawns quote feeds for
 /// newly discovered token IDs.
+///
+/// Uses the Chainlink price cache to populate price_to_beat with the most
+/// recent Chainlink price for each symbol.
 pub fn spawn_market_scanner(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
+    chainlink_cache: ChainlinkPriceCache,
     symbols: Vec<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -113,11 +125,27 @@ pub fn spawn_market_scanner(
                         let up_token = token_ids[0].to_string();
                         let down_token = token_ids[1].to_string();
 
-                        // Extract window open price from Polymarket API
-                        let price_to_beat = market
-                            .group_item_threshold
-                            .as_deref()
-                            .and_then(|s| s.parse::<Decimal>().ok());
+                        // Try to get price_to_beat from Chainlink cache first (most accurate)
+                        // Fallback to Polymarket groupItemThreshold if Chainlink not available yet
+                        let price_to_beat = {
+                            // Convert BTCUSDT -> btc/usd for Chainlink lookup
+                            let chainlink_symbol = symbol
+                                .trim_end_matches("USDT")
+                                .to_lowercase()
+                                + "/usd";
+
+                            let cache_guard = chainlink_cache.read().await;
+                            cache_guard
+                                .get(&chainlink_symbol)
+                                .map(|(price, _ts)| *price)
+                                .or_else(|| {
+                                    // Fallback to Polymarket API groupItemThreshold
+                                    market
+                                        .group_item_threshold
+                                        .as_deref()
+                                        .and_then(|s| s.parse::<Decimal>().ok())
+                                })
+                        };
 
                         // Collect new tokens for quote subscription
                         if subscribed_tokens.insert(up_token.clone()) {
