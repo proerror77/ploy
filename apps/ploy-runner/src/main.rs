@@ -12,7 +12,7 @@ use ploy_trading::TradingIntent;
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
-use feeds::spawn_spot_feed;
+use feeds::{spawn_chainlink_feed, spawn_spot_feed};
 use scanner::spawn_market_scanner;
 
 fn print_usage() {
@@ -105,7 +105,10 @@ async fn main() {
     // 1. Spot feed — always available (Binance via RTDS)
     let spot_handle = spawn_spot_feed(tx.clone(), symbols.clone());
 
-    // 2. Market scanner — discovers events and injects EventDiscovered/EventExpired
+    // 2. Chainlink feed — canonical price source for S0 at eventStartTime
+    let chainlink_handle = spawn_chainlink_feed(tx.clone(), symbols.clone());
+
+    // 3. Market scanner — discovers events and injects EventDiscovered/EventExpired
     //    Also spawns quote feeds dynamically as new tokens are discovered.
     let scanner_handle = spawn_market_scanner(tx.clone(), symbols.clone());
 
@@ -153,6 +156,7 @@ async fn main() {
 
     // Clean up feed tasks
     spot_handle.abort();
+    chainlink_handle.abort();
     scanner_handle.abort();
 }
 

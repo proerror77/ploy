@@ -184,3 +184,96 @@ pub fn spawn_quote_feed(
         }
     })
 }
+
+/// Spawn a task that subscribes to Chainlink price feeds via RTDS WebSocket.
+///
+/// Used to capture S0 (open price) at eventStartTime for 5M markets.
+/// Polymarket uses Chainlink as the canonical price source for settlement.
+pub fn spawn_chainlink_feed(
+    tx: Arc<broadcast::Sender<MarketUpdate>>,
+    symbols: Vec<String>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut logged_chainlink_symbols = HashSet::new();
+        // Chainlink uses slash-separated format: "btc/usd", "eth/usd"
+        let symbols_chainlink: Vec<String> = symbols
+            .iter()
+            .map(|s| {
+                // BTCUSDT -> btc/usd
+                let base = s.trim_end_matches("USDT").to_lowercase();
+                format!("{}/usd", base)
+            })
+            .collect();
+
+        info!(
+            symbols = ?symbols_chainlink,
+            "Starting RTDS Chainlink price feed"
+        );
+
+        // Create RTDS client
+        let client = RtdsClient::default();
+
+        // Subscribe to all Chainlink symbols (None = all, Some(vec) = specific)
+        // For now subscribe to all since we only have 7 symbols
+        let stream = match client.subscribe_chainlink_prices(None) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(error = %e, "Failed to subscribe to chainlink_prices");
+                return;
+            }
+        };
+
+        let mut stream = Box::pin(stream);
+        let mut price_count = 0_u64;
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(chainlink_price) => {
+                    // Filter to only our symbols
+                    if !symbols_chainlink.contains(&chainlink_price.symbol) {
+                        continue;
+                    }
+
+                    // Convert Unix millis to DateTime<Utc>
+                    let _ts = DateTime::from_timestamp_millis(chainlink_price.timestamp)
+                        .unwrap_or_else(Utc::now);
+
+                    // Convert "btc/usd" back to "BTCUSDT" for consistency
+                    let _symbol_upper = chainlink_price
+                        .symbol
+                        .replace("/", "")
+                        .to_uppercase()
+                        + "T";
+
+                    // For now, just log Chainlink prices
+                    // TODO: Store in a cache keyed by (symbol, timestamp) for scanner to use
+                    let receivers = tx.receiver_count();
+                    price_count += 1;
+
+                    if logged_chainlink_symbols.insert(chainlink_price.symbol.clone()) {
+                        info!(
+                            symbol = %chainlink_price.symbol,
+                            price = %chainlink_price.value,
+                            receivers,
+                            "First Chainlink price received"
+                        );
+                    }
+                    if price_count % 100 == 0 {
+                        debug!(
+                            prices = price_count,
+                            tracked_symbols = logged_chainlink_symbols.len(),
+                            receivers,
+                            "Chainlink prices received"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "RTDS chainlink_prices stream error");
+                    // Don't exit on transient errors, let SDK handle reconnection
+                }
+            }
+        }
+
+        info!("RTDS Chainlink price feed ended");
+    })
+}
