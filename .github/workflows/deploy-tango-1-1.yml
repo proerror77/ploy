@@ -21,10 +21,11 @@ env:
   PLATFORM_TARGET: x86_64-unknown-linux-gnu
 
 jobs:
-  build:
-    name: Build ploy-runner for tango-1-1
+  build-and-deploy:
+    name: Build and deploy to tango-1-1
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    environment: tango-1-1
 
     steps:
       - name: Checkout code
@@ -49,35 +50,15 @@ jobs:
             -p ploy-runner
           strip "target/${PLATFORM_TARGET}/release/ploy-runner" || true
 
-      - name: Upload ploy-runner binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ploy-runner-binary
-          path: target/${{ env.PLATFORM_TARGET }}/release/ploy-runner
-          retention-days: 7
-
-  deploy:
-    name: Deploy to tango-1-1
-    needs: build
-    runs-on: ubuntu-latest
-    environment: tango-1-1
-
-    steps:
-      - name: Download ploy-runner binary
-        uses: actions/download-artifact@v4
-        with:
-          name: ploy-runner-binary
-          path: bin
-
       - name: Upload binary to tango-1-1
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.TANGO_1_1_HOST }}
           username: root
           key: ${{ secrets.TANGO_1_1_SSH_KEY }}
-          source: bin/ploy-runner
+          source: target/${{ env.PLATFORM_TARGET }}/release/ploy-runner
           target: /root/ploy/bin/
-          strip_components: 1
+          strip_components: 4
 
       - name: Restart ploy-runner services
         uses: appleboy/ssh-action@v1.0.3
