@@ -46,6 +46,10 @@ async def collect_prices():
     # Connect to database
     conn = await psycopg.AsyncConnection.connect(DB_URL)
 
+    # Statistics
+    insert_count = 0
+    last_report_time = datetime.now(timezone.utc)
+
     try:
         while RUNNING:
             try:
@@ -80,13 +84,27 @@ async def collect_prices():
                             trade_time = datetime.fromtimestamp(trade_time_ms / 1000, tz=timezone.utc)
 
                             # Insert into database
-                            await conn.execute(
-                                """
-                                INSERT INTO binance_price_ticks (symbol, price, quantity, trade_time)
-                                VALUES (%s, %s, %s, %s)
-                                """,
-                                (symbol, price, quantity, trade_time)
-                            )
+                            try:
+                                await conn.execute(
+                                    """
+                                    INSERT INTO binance_price_ticks (symbol, price, quantity, trade_time)
+                                    VALUES (%s, %s, %s, %s)
+                                    """,
+                                    (symbol, price, quantity, trade_time)
+                                )
+                                await conn.commit()
+                                insert_count += 1
+
+                                # Report stats every 60 seconds
+                                now = datetime.now(timezone.utc)
+                                if (now - last_report_time).total_seconds() >= 60:
+                                    print(f"[binance-price] Inserted {insert_count} ticks in last minute", flush=True)
+                                    insert_count = 0
+                                    last_report_time = now
+
+                            except Exception as db_err:
+                                print(f"[binance-price] Database error: {db_err}", flush=True)
+                                await conn.rollback()
 
                         except (json.JSONDecodeError, KeyError, ValueError) as e:
                             print(f"[binance-price] Error parsing message: {e}", flush=True)
