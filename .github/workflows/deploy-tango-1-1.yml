@@ -45,6 +45,7 @@ jobs:
 
       - name: Build ploy-runner
         run: |
+          cargo clean -p ploy-runner
           cargo build --release --locked \
             --target "${PLATFORM_TARGET}" \
             -p ploy-runner
