@@ -389,6 +389,7 @@ impl DirectionalStrategy {
         event: &EventWindow,
         direction: Direction,
         entry_price: Decimal,
+        now: DateTime<Utc>,
     ) -> TradingIntent {
         let token_id = match direction {
             Direction::Up => event.up_token.clone(),
@@ -399,7 +400,7 @@ impl DirectionalStrategy {
             intent_id: format!(
                 "pm5d_{}_{}_{}", event.symbol,
                 match direction { Direction::Up => "UP", Direction::Down => "DN" },
-                Utc::now().timestamp_millis(),
+                now.timestamp_millis(),
             ),
             deployment_id: String::new(), // filled by runtime
             market_id: event.event_id.clone(),
@@ -408,7 +409,7 @@ impl DirectionalStrategy {
             quantity: self.config.quantity,
             limit_price: Some(entry_price),
             purpose: IntentPurpose::Entry,
-            created_at: Utc::now(),
+            created_at: now,
         }
     }
 
@@ -480,7 +481,7 @@ impl DirectionalStrategy {
                     edge = format!("{:.1}%", edge * 100.0),
                     "✓ Entry signal PASSED all gates",
                 );
-                let intent = self.build_intent(&event, direction, entry_price);
+                let intent = self.build_intent(&event, direction, entry_price, now);
                 vec![StrategyDecision::Enter(intent)]
             }
             None => vec![],
@@ -567,7 +568,7 @@ impl StrategyLogic for DirectionalStrategy {
                 vec![]
             }
 
-            MarketUpdate::EventExpired { event_id, .. } => {
+            MarketUpdate::EventExpired { event_id, end_time } => {
                 // Settle positions: find any tokens from this event that we hold
                 let mut exits = Vec::new();
 
@@ -610,7 +611,7 @@ impl StrategyLogic for DirectionalStrategy {
                             quantity: qty,
                             limit_price: Some(settle_price),
                             purpose: IntentPurpose::Exit,
-                            created_at: Utc::now(),
+                            created_at: *end_time,
                         }));
                         info!(
                             event_id,
@@ -634,7 +635,7 @@ impl StrategyLogic for DirectionalStrategy {
                             quantity: qty,
                             limit_price: Some(settle_price),
                             purpose: IntentPurpose::Exit,
-                            created_at: Utc::now(),
+                            created_at: *end_time,
                         }));
                         info!(
                             event_id,

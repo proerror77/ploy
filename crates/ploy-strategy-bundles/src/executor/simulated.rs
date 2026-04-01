@@ -198,7 +198,7 @@ impl Executor for SimulatedExecutor {
             quantity: filled_qty,
             price: fill_price,
             fee,
-            timestamp: Utc::now(),
+            timestamp: intent.created_at, // Use intent time for backtest consistency
         };
 
         ExecutionReport {
