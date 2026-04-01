@@ -59,7 +59,7 @@ jobs:
           key: ${{ secrets.TANGO_1_1_SSH_KEY }}
           source: target/${{ env.PLATFORM_TARGET }}/release/ploy-runner
           target: /root/ploy/bin/
-          strip_components: 4
+          strip_components: 3
 
       - name: Restart ploy-runner services
         uses: appleboy/ssh-action@v1.0.3
