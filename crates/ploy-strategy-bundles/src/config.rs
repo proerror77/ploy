@@ -5,6 +5,7 @@
 
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use chrono::{DateTime, Utc};
 
 use crate::engine::{RuntimeConfig, RuntimeMode};
 use crate::executor::SimulatedExecutorConfig;
@@ -41,6 +42,10 @@ pub struct RuntimeSection {
     pub mode: String,
     pub throttle_hz: Option<u32>,
     pub max_updates: Option<u64>,
+    /// Backtest start time (ISO 8601 format, e.g., "2026-04-01T00:00:00Z")
+    pub from: Option<String>,
+    /// Backtest end time (ISO 8601 format, e.g., "2026-04-01T23:59:59Z")
+    pub to: Option<String>,
 }
 
 fn default_mode() -> String {
@@ -129,6 +134,18 @@ impl FullConfig {
             throttle_hz: self.runtime.throttle_hz,
             max_updates: self.runtime.max_updates,
         }
+    }
+
+    /// Parse backtest time range from config.
+    /// Returns (from, to) if both are specified, otherwise None.
+    pub fn backtest_time_range(&self) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+        let from_str = self.runtime.from.as_ref()?;
+        let to_str = self.runtime.to.as_ref()?;
+
+        let from = DateTime::parse_from_rfc3339(from_str).ok()?.with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339(to_str).ok()?.with_timezone(&Utc);
+
+        Some((from, to))
     }
 
     /// Build SimulatedExecutorConfig from the parsed config.

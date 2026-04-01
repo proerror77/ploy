@@ -336,13 +336,17 @@ async fn main() {
                 .await
                 .expect("Failed to connect to database");
 
-            // Use real data period only: 2026-03-24 → 2026-03-28 (has polymarket_ws quotes)
-            let from = chrono::DateTime::parse_from_rfc3339("2026-03-24T00:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc);
-            let to = chrono::DateTime::parse_from_rfc3339("2026-03-28T23:59:59Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc);
+            // Get time range from config, or use default
+            let (from, to) = config.backtest_time_range().unwrap_or_else(|| {
+                // Default: April 1st 2026 (today's collected data with full Polymarket quotes)
+                let from = chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc);
+                let to = chrono::DateTime::parse_from_rfc3339("2026-04-01T13:30:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc);
+                (from, to)
+            });
 
             info!(
                 from = %from,
