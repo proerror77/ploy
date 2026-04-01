@@ -1,0 +1,23 @@
+[Unit]
+Description=Binance Spot Price Collector
+After=postgresql.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/ploy
+Environment=BINANCE_PRICE_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT
+Environment=PLOY_DATABASE__URL=postgresql://postgres:postgres@localhost:5432/ploy
+ExecStart=/usr/bin/python3 /root/ploy/scripts/binance_price_collector.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Memory limits
+MemoryHigh=256M
+MemoryMax=512M
+OOMPolicy=kill
+
+[Install]
+WantedBy=multi-user.target
