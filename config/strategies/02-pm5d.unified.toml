@@ -4,12 +4,12 @@
 # Params aligned to backtest report (2026-03-26): 696 trades, 67.1% WR, Sharpe 10.15
 
 [runtime]
-mode = "dryrun"         # "backtest" | "dryrun" | "live"
-# throttle_hz = 1       # uncomment for backtest (1 eval/sec)
+mode = "backtest"       # "backtest" | "dryrun" | "live"
+throttle_hz = 1         # 1 eval/sec for backtest
 # max_updates = 500000  # uncomment to cap backtest length
 
 [strategy]
-symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "HYPEUSDT", "BNBUSDT"]
+symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]  # Limited to symbols with data (2026-03-24 to 2026-03-28)
 
 # Probability model
 vol_floor = 0.001

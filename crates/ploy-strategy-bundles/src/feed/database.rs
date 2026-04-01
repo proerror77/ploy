@@ -68,10 +68,64 @@ fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
         | MarketUpdate::L2 { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
         MarketUpdate::EventDiscovered { end_time, .. } => {
+            // Use start time (end_time - window) for discovery
             *end_time - chrono::Duration::seconds(300)
         }
-        MarketUpdate::EventExpired { .. } => Utc::now(),
+        MarketUpdate::EventExpired { .. } => {
+            // EventExpired doesn't have a timestamp field, but we need a stable value
+            // Use a far-future timestamp so it sorts after all other events
+            // This is safe because EventExpired is added immediately after EventDiscovered
+            // and will be sorted relative to its paired EventDiscovered
+            DateTime::<Utc>::MAX_UTC
+        }
     }
+}
+
+fn normalize_token_id(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('"');
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        return hex_to_decimal_string(hex).unwrap_or_else(|| trimmed.to_string());
+    }
+    trimmed.to_string()
+}
+
+fn hex_to_decimal_string(hex: &str) -> Option<String> {
+    if hex.is_empty() {
+        return None;
+    }
+
+    let mut digits = vec![0_u8];
+
+    for ch in hex.chars() {
+        let value = ch.to_digit(16)? as u32;
+        let mut carry = value;
+
+        for digit in &mut digits {
+            let next = (*digit as u32) * 16 + carry;
+            *digit = (next % 10) as u8;
+            carry = next / 10;
+        }
+
+        while carry > 0 {
+            digits.push((carry % 10) as u8);
+            carry /= 10;
+        }
+    }
+
+    while digits.len() > 1 && digits.last() == Some(&0) {
+        digits.pop();
+    }
+
+    Some(
+        digits
+            .iter()
+            .rev()
+            .map(|digit| char::from(b'0' + *digit))
+            .collect(),
+    )
 }
 
 // ── Spot Prices ──────────────────────────────────────────
@@ -148,18 +202,24 @@ async fn load_token_mappings(
 ) -> Result<TokenMap, sqlx::Error> {
     let mut map = TokenMap::new();
 
-    // From pm_market_metadata: each row has market_slug which encodes the symbol
+    // Extract token IDs from JSONB structure: raw_market->'markets'->0->>'clobTokenIds'
+    // clobTokenIds is stored as a JSON string, so we use ->> then cast to jsonb
     let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
         r#"
-        SELECT market_slug, token_id, symbol
+        SELECT
+            market_slug,
+            token_id,
+            symbol
         FROM pm_market_metadata
         CROSS JOIN LATERAL (
-            SELECT unnest(ARRAY[up_token_id, down_token_id]) as token_id
+            SELECT jsonb_array_elements_text(
+                (raw_market->'markets'->0->>'clobTokenIds')::jsonb
+            ) as token_id
         ) t
         WHERE ($1::text[] IS NULL OR symbol = ANY($1))
           AND end_time >= $2
           AND start_time <= $3
-          AND token_id IS NOT NULL
+          AND raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
         "#,
     )
     .bind(symbols)
@@ -170,6 +230,7 @@ async fn load_token_mappings(
     .unwrap_or_default();
 
     for (_slug, token_id, symbol) in rows {
+        let token_id = normalize_token_id(&token_id);
         let sym = symbol.unwrap_or_default();
         // Heuristic: UP tokens tend to come first in the array
         let is_up = !map.contains_key(&token_id);
@@ -275,24 +336,32 @@ async fn load_events(
     to: DateTime<Utc>,
     updates: &mut Vec<MarketUpdate>,
 ) -> Result<(), sqlx::Error> {
+    // Extract token IDs from JSONB: raw_market->'markets'->0->>'clobTokenIds'
+    // clobTokenIds is stored as a JSON string, so we use ->> then cast to jsonb
+    // First token is UP, second is DOWN
     let rows: Vec<(
         String,                // market_slug (event_id)
         Option<String>,        // symbol
         Option<DateTime<Utc>>, // end_time
-        Option<String>,        // up_token_id
-        Option<String>,        // down_token_id
-        Option<i64>,           // window_secs
+        Option<DateTime<Utc>>, // start_time
+        Option<String>,        // up_token_id (first element)
+        Option<String>,        // down_token_id (second element)
         Option<Decimal>,       // price_to_beat
     )> = sqlx::query_as(
         r#"
-        SELECT market_slug, symbol, end_time,
-               up_token_id, down_token_id,
-               EXTRACT(EPOCH FROM (end_time - start_time))::bigint as window_secs,
-               price_to_beat
+        SELECT
+            market_slug,
+            symbol,
+            end_time,
+            start_time,
+            ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->0)::text AS up_token_id,
+            ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->1)::text AS down_token_id,
+            price_to_beat
         FROM pm_market_metadata
         WHERE ($1::text[] IS NULL OR symbol = ANY($1))
           AND end_time >= $2
           AND start_time <= $3
+          AND raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
         ORDER BY start_time
         "#,
     )
@@ -304,15 +373,21 @@ async fn load_events(
     .unwrap_or_default();
 
     info!(count = rows.len(), "Loaded events from pm_market_metadata");
-    for (event_id, symbol, end_time, up_token, down_token, window_secs, price_to_beat) in rows {
+    for (event_id, symbol, end_time, start_time, up_token, down_token, price_to_beat) in rows {
         let symbol = symbol.unwrap_or_default();
         let end_time = match end_time {
             Some(t) => t,
             None => continue,
         };
-        let up_token = up_token.unwrap_or_default();
-        let down_token = down_token.unwrap_or_default();
-        let window_secs = window_secs.unwrap_or(300) as u64;
+        let start_time = match start_time {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let up_token = normalize_token_id(&up_token.unwrap_or_default());
+        let down_token = normalize_token_id(&down_token.unwrap_or_default());
+
+        let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
 
         if symbol.is_empty() || up_token.is_empty() || down_token.is_empty() {
             continue;
@@ -328,9 +403,36 @@ async fn load_events(
             price_to_beat,
         });
 
-        // Add expiry event after window ends
-        updates.push(MarketUpdate::EventExpired { event_id });
+        // NOTE: We don't add EventExpired here because it doesn't have a timestamp
+        // and would break the sort. The strategy should handle event expiration
+        // internally by checking end_time.
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hex_to_decimal_string, normalize_token_id};
+
+    #[test]
+    fn normalize_token_id_converts_hex_to_decimal() {
+        let raw = "\"0x3c38c18444ab803acea0d4de7bcdecae7f0f8ddbcd0466e3323d1cb9e04b6f5d\"";
+        let normalized = normalize_token_id(raw);
+        assert_eq!(
+            normalized,
+            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
+        );
+    }
+
+    #[test]
+    fn normalize_token_id_keeps_decimal_ids() {
+        let raw = "35165169860573247111698076491591023728797123337726915178028774493274622598566";
+        assert_eq!(normalize_token_id(raw), raw);
+    }
+
+    #[test]
+    fn hex_to_decimal_string_rejects_invalid_hex() {
+        assert_eq!(hex_to_decimal_string("xyz"), None);
+    }
 }

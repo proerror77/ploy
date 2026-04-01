@@ -195,9 +195,11 @@ WHERE m.market_slug LIKE '%-updown-5m-%'
 
 - **今天 (04-01)**:
   - ✅ 修复 Quote Collector SQL bug
-  - ⏳ 验证 quotes 是否在写入
-  - 🔲 实现 Price to Beat 采集
-  - 🔲 运行 24 小时测试
+  - ✅ 验证 quotes 是否在写入 (74,479 quotes/hour, 106 tokens)
+  - ✅ 实现 Price to Beat 采集 (自动更新 + Binance回填)
+  - ✅ 添加 XRPUSDT 币种
+  - ✅ 用 Binance 数据回填历史 price_to_beat (6,809 markets, 83% coverage)
+  - ⏳ 运行 24 小时测试
 
 - **明天 (04-02)**:
   - 🔲 改为长连接架构

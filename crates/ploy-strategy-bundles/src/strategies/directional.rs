@@ -147,7 +147,7 @@ fn default_max_daily_trades() -> u32 { 1000 }
 /// Tracked CEX spot price for a symbol.
 struct SpotState {
     price: Decimal,
-    _ts: DateTime<Utc>,
+    ts: DateTime<Utc>,
 }
 
 /// Active event window for a symbol.
@@ -234,6 +234,7 @@ impl DirectionalStrategy {
     ) -> Option<(Direction, Decimal, f64, f64)> {
         let open_price = event.open_price?;
         if open_price <= Decimal::ZERO || spot_price <= Decimal::ZERO {
+            debug!(symbol, event_id = %event.event_id, "Gate 0: Invalid prices");
             return None;
         }
 
@@ -246,6 +247,14 @@ impl DirectionalStrategy {
         if secs_remaining < self.config.min_time_remaining_secs as f64
             || secs_remaining > self.config.max_time_remaining_secs as f64
         {
+            debug!(
+                symbol,
+                event_id = %event.event_id,
+                secs_remaining,
+                min = self.config.min_time_remaining_secs,
+                max = self.config.max_time_remaining_secs,
+                "Gate 1: Time window violation"
+            );
             return None;
         }
 
@@ -256,34 +265,101 @@ impl DirectionalStrategy {
         let dt = secs_remaining.max(1.0) / 900.0;
         let z = (st / s0).ln() / (sigma * dt.sqrt());
         if z.abs() < self.config.min_z_score {
-            debug!(symbol, z, threshold = self.config.min_z_score, "z-score too low");
+            debug!(
+                symbol,
+                event_id = %event.event_id,
+                z,
+                threshold = self.config.min_z_score,
+                "Gate 3: Z-score too low"
+            );
             return None;
         }
 
         // Gate 4: Direction + quote
         let (direction, entry_price) = if p_hat >= 0.5 {
-            let ask = self.quotes.get(&event.up_token)?.ask?;
-            (Direction::Up, ask)
+            let quote = self.quotes.get(&event.up_token);
+            if quote.is_none() {
+                debug!(
+                    symbol,
+                    event_id = %event.event_id,
+                    token_id = %event.up_token,
+                    "Gate 4: UP token quote missing"
+                );
+                return None;
+            }
+            let ask = quote.unwrap().ask;
+            if ask.is_none() {
+                debug!(
+                    symbol,
+                    event_id = %event.event_id,
+                    token_id = %event.up_token,
+                    "Gate 4: UP token ask price missing"
+                );
+                return None;
+            }
+            (Direction::Up, ask.unwrap())
         } else {
-            let ask = self.quotes.get(&event.down_token)?.ask?;
-            (Direction::Down, ask)
+            let quote = self.quotes.get(&event.down_token);
+            if quote.is_none() {
+                debug!(
+                    symbol,
+                    event_id = %event.event_id,
+                    token_id = %event.down_token,
+                    "Gate 4: DOWN token quote missing"
+                );
+                return None;
+            }
+            let ask = quote.unwrap().ask;
+            if ask.is_none() {
+                debug!(
+                    symbol,
+                    event_id = %event.event_id,
+                    token_id = %event.down_token,
+                    "Gate 4: DOWN token ask price missing"
+                );
+                return None;
+            }
+            (Direction::Down, ask.unwrap())
         };
 
         let entry_f = entry_price.to_f64()?;
 
         // Gate 5: Price bounds
         if entry_f < self.config.min_entry_price || entry_f > self.config.max_entry_price {
+            debug!(
+                symbol,
+                event_id = %event.event_id,
+                entry_price = entry_f,
+                min = self.config.min_entry_price,
+                max = self.config.max_entry_price,
+                "Gate 5: Price bounds violation"
+            );
             return None;
         }
 
         // Gate 6: No-trade zone
         if entry_f >= self.config.no_trade_zone_min && entry_f <= self.config.no_trade_zone_max {
+            debug!(
+                symbol,
+                event_id = %event.event_id,
+                entry_price = entry_f,
+                no_trade_min = self.config.no_trade_zone_min,
+                no_trade_max = self.config.no_trade_zone_max,
+                "Gate 6: No-trade zone"
+            );
             return None;
         }
 
         // Gate 7: Probability threshold
         let effective_p = if direction == Direction::Up { p_hat } else { 1.0 - p_hat };
         if effective_p < self.config.min_probability {
+            debug!(
+                symbol,
+                event_id = %event.event_id,
+                effective_p,
+                threshold = self.config.min_probability,
+                "Gate 7: Probability too low"
+            );
             return None;
         }
 
@@ -291,7 +367,16 @@ impl DirectionalStrategy {
         let cost = crypto_fee_cost(entry_f);
         let edge = effective_p - entry_f - cost;
         if edge < self.config.min_edge {
-            debug!(symbol, edge, threshold = self.config.min_edge, "edge too low");
+            debug!(
+                symbol,
+                event_id = %event.event_id,
+                edge,
+                threshold = self.config.min_edge,
+                effective_p,
+                entry_price = entry_f,
+                cost,
+                "Gate 8: Edge too low"
+            );
             return None;
         }
 
@@ -337,18 +422,41 @@ impl DirectionalStrategy {
         // Position count check
         let open_count = positions.positions().count();
         if open_count >= self.config.max_positions {
+            debug!(symbol, open_count, max = self.config.max_positions, "Max positions reached");
             return vec![];
         }
 
         // Already holding this symbol?
         let spot_price = match self.spot.get(symbol) {
             Some(s) => s.price,
-            None => return vec![],
+            None => {
+                debug!(symbol, "No spot price available");
+                return vec![];
+            }
         };
 
         let event = match self.pick_event(symbol, now) {
             Some(e) => e,
-            None => return vec![],
+            None => {
+                // Log why no event was picked
+                if let Some(events) = self.events.get(symbol) {
+                    let total = events.len();
+                    let in_window = events.iter().filter(|e| {
+                        let rem = (e.end_time - now).num_seconds();
+                        rem >= self.config.min_time_remaining_secs as i64
+                            && rem <= self.config.max_time_remaining_secs as i64
+                    }).count();
+                    debug!(
+                        symbol,
+                        total_events = total,
+                        in_window,
+                        min_time = self.config.min_time_remaining_secs,
+                        max_time = self.config.max_time_remaining_secs,
+                        "No event in valid time window"
+                    );
+                }
+                return vec![];
+            }
         };
 
         // Check if we already have a position for this event's tokens
@@ -357,6 +465,7 @@ impl DirectionalStrategy {
                 && (p.token_id == event.up_token || p.token_id == event.down_token)
         });
         if already_holding {
+            debug!(symbol, event_id = %event.event_id, "Already holding position for this event");
             return vec![];
         }
 
@@ -364,11 +473,12 @@ impl DirectionalStrategy {
             Some((direction, entry_price, effective_p, edge)) => {
                 info!(
                     symbol,
+                    event_id = %event.event_id,
                     ?direction,
                     entry_price = %entry_price,
                     p = format!("{:.1}%", effective_p * 100.0),
                     edge = format!("{:.1}%", edge * 100.0),
-                    "Entry signal",
+                    "✓ Entry signal PASSED all gates",
                 );
                 let intent = self.build_intent(&event, direction, entry_price);
                 vec![StrategyDecision::Enter(intent)]
@@ -391,7 +501,7 @@ impl StrategyLogic for DirectionalStrategy {
                     return vec![];
                 }
 
-                self.spot.insert(symbol.clone(), SpotState { price: *price, _ts: *ts });
+                self.spot.insert(symbol.clone(), SpotState { price: *price, ts: *ts });
                 if let Some(events) = self.events.get_mut(symbol) {
                     for event in events.iter_mut() {
                         if event.open_price.is_none() {
@@ -428,7 +538,8 @@ impl StrategyLogic for DirectionalStrategy {
                 window_secs,
                 price_to_beat,
             } => {
-                let now = Utc::now();
+                // Use the most recent spot price timestamp as "now" for backtest compatibility
+                let now = self.spot.get(symbol).map(|s| s.ts).unwrap_or_else(Utc::now);
                 let events = self.events.entry(symbol.clone()).or_default();
                 // Prune expired
                 events.retain(|e| e.end_time > now);
@@ -606,7 +717,7 @@ mod tests {
         );
 
         // 2. Set initial spot (becomes open_price via event)
-        strat.spot.insert("BTCUSDT".into(), SpotState { price: dec!(100000), _ts: now });
+        strat.spot.insert("BTCUSDT".into(), SpotState { price: dec!(100000), ts: now });
         // Manually set open_price since event was registered before spot
         strat.events.get_mut("BTCUSDT").unwrap()[0].open_price = Some(dec!(100000));
 

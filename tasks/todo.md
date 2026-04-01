@@ -1,3 +1,69 @@
+# PM Quote Collector WS Repair (2026-04-01)
+
+## Goal
+Fix the live Polymarket quote collector so it subscribes with the correct CLOB WebSocket protocol, uses canonical decimal token IDs, and resumes writing fresh `clob_quote_ticks` for active crypto 5-minute markets.
+
+## File ownership
+
+- `scripts/polymarket_quote_collector.py`
+  - owner: live Polymarket CLOB subscription, token normalization, and quote persistence
+
+## Tasks
+
+- [x] Add a repo-owned Polymarket quote collector script with correct CLOB WS subscribe/unsubscribe payloads.
+- [x] Normalize `pm_market_metadata.raw_market.markets[0].clobTokenIds` from hex to decimal before subscribing.
+- [x] Parse actual CLOB WS message shapes (`event_type`, batch arrays) and persist best bid/ask ticks.
+- [x] Dry-run the repaired collector against the live host and verify `clob_quote_ticks` starts advancing again.
+
+## Progress notes
+
+- 2026-04-01: Confirmed the old host collector was sending the wrong payload (`{"type":"subscribe","channel":"book","market":...}`), which the PM CLOB WS rejects with plain-text `INVALID OPERATION`.
+- 2026-04-01: Confirmed the actual CLOB WS protocol in `vendor/polymarket-client-sdk` requires `{"type":"market","operation":"subscribe","markets":[],"assets_ids":[...],"initial_dump":true}` and that inbound messages use `event_type` plus batch-array initial dumps.
+- 2026-04-01: Added `scripts/polymarket_quote_collector.py` to the repo with hex->decimal token normalization, correct CLOB subscribe/unsubscribe payloads, `event_type` parsing, and robust best-bid/best-ask extraction.
+- 2026-04-01: Added fast SIGTERM shutdown by actively closing the WebSocket so the systemd unit can restart cleanly instead of hanging in `deactivating`.
+- 2026-04-01: Dry-run on `8.221.143.151` passed:
+  - `timeout 25s python3 /root/ploy/scripts/polymarket_quote_collector.py --symbols BTCUSDT --timeframe 5m --db-url postgresql://postgres:postgres@localhost:5432/ploy`
+  - observed `subscribe 12 token(s)` and first BTC quotes with continuous inserts
+- 2026-04-01: Production service verification passed on `8.221.143.151` after deploying the repo-owned collector:
+  - `systemctl start ploy-quote-collector.service`
+  - `systemctl is-active ploy-quote-collector.service` -> `active`
+  - `journalctl -u ploy-quote-collector.service` shows first quotes for BTC/ETH/SOL and ongoing `received=/inserted=` stats for 36 active tokens
+  - `SELECT COUNT(*), MAX(received_at) FROM clob_quote_ticks WHERE source = 'polymarket_ws_collector';` advanced from `8688 | 2026-04-01 05:05:42+08` to `14108 | 2026-04-01 05:07:41+08`
+
+# PM 5m Token Repair And Fresh Capture Bootstrap (2026-03-31)
+
+## Goal
+Repair the historical Polymarket 5-minute backtest token mismatch, verify the correct live token IDs via Polymarket CLI, and bootstrap a clean path for fresh PM/Binance/Deribit collection.
+
+## File ownership
+
+- `crates/ploy-strategy-bundles/src/feed/database.rs`
+  - owner: historical PM token normalization and event/quote joins
+- `scripts/discover_pm_updown_markets.py`
+  - owner: Polymarket CLI market discovery, token validation, and collection manifest output
+
+## Tasks
+
+- [x] Prove whether historical `pm_market_metadata` token IDs are hex while `clob_quote_ticks` uses decimal.
+- [x] Normalize metadata token IDs during historical feed loading so backtests can match stored quotes.
+- [x] Add a CLI discovery script that finds current/upcoming PM crypto 5m markets, converts token IDs, and validates order books.
+- [x] Verify the repaired loader and the new discovery script with focused tests / live CLI checks.
+
+## Progress notes
+
+- 2026-03-31: Confirmed Polymarket market metadata exposes `clobTokenIds` as hex strings while `polymarket clob book` accepts decimal token IDs.
+- 2026-03-31: Confirmed a live BTC 5m market (`btc-updown-5m-1774965600`) converts from hex token IDs to decimal token IDs that return valid CLOB books.
+- 2026-03-31: Identified that `groupItemThreshold=0` is expected for relative 5m up/down markets, so `price_to_beat` must come from a captured market-start price source rather than raw Gamma metadata.
+- 2026-03-31: Patched `crates/ploy-strategy-bundles/src/feed/database.rs` to normalize hex token IDs from `pm_market_metadata` into canonical decimal token IDs before quote/event joins.
+- 2026-03-31: Patched `apps/ploy-runner/src/scanner.rs` to reject bogus `groupItemThreshold=0` values instead of promoting them into `price_to_beat`.
+- 2026-03-31: Added `scripts/discover_pm_updown_markets.py` to discover current/upcoming PM up/down windows, convert token IDs, validate both books, and emit collection-ready manifests or SQL upserts.
+- 2026-03-31: Verification passed:
+  - `rtk cargo test -p ploy-strategy-bundles normalize_token_id_converts_hex_to_decimal --lib -- --exact --nocapture`
+  - `rtk cargo test -p ploy-strategy-bundles backtest_full_loop_produces_entry --test backtest_integration -- --exact --nocapture`
+  - `rtk cargo test -p ploy-runner usable_metadata_threshold_rejects_relative_zero_threshold -- --exact --nocapture`
+  - `python3 -m py_compile scripts/discover_pm_updown_markets.py`
+  - `python3 scripts/discover_pm_updown_markets.py --asset btc --timeframe 5m --lookahead-hours 2`
+
 # ploy-runner Live Feed Debug (2026-03-30)
 
 ## Goal

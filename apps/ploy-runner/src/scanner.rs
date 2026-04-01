@@ -21,6 +21,11 @@ use crate::feeds::{spawn_quote_feed, ChainlinkPriceCache};
 
 const SCAN_INTERVAL_SECS: u64 = 30;
 
+fn usable_metadata_threshold(raw: Option<&str>) -> Option<Decimal> {
+    raw.and_then(|value| value.parse::<Decimal>().ok())
+        .filter(|threshold| *threshold > Decimal::ONE)
+}
+
 /// Map full asset names (from Polymarket questions) to trading pair symbols.
 fn name_to_symbol(question: &str) -> Option<&'static str> {
     let q = question.to_uppercase();
@@ -125,8 +130,10 @@ pub fn spawn_market_scanner(
                         let up_token = token_ids[0].to_string();
                         let down_token = token_ids[1].to_string();
 
-                        // Try to get price_to_beat from Chainlink cache first (most accurate)
-                        // Fallback to Polymarket groupItemThreshold if Chainlink not available yet
+                        // Try to get price_to_beat from Chainlink cache first (most accurate).
+                        // Relative 5m/15m up/down markets frequently expose
+                        // groupItemThreshold=0 in Gamma, which is not a usable
+                        // threshold and should not enter the runtime.
                         let price_to_beat = {
                             // Convert BTCUSDT -> btc/usd for Chainlink lookup
                             let chainlink_symbol = symbol
@@ -138,13 +145,7 @@ pub fn spawn_market_scanner(
                             cache_guard
                                 .get(&chainlink_symbol)
                                 .map(|(price, _ts)| *price)
-                                .or_else(|| {
-                                    // Fallback to Polymarket API groupItemThreshold
-                                    market
-                                        .group_item_threshold
-                                        .as_deref()
-                                        .and_then(|s| s.parse::<Decimal>().ok())
-                                })
+                                .or_else(|| usable_metadata_threshold(market.group_item_threshold.as_deref()))
                         };
 
                         // Collect new tokens for quote subscription
@@ -195,4 +196,18 @@ pub fn spawn_market_scanner(
             tokio::time::sleep(std::time::Duration::from_secs(SCAN_INTERVAL_SECS)).await;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal_macros::dec;
+
+    use super::usable_metadata_threshold;
+
+    #[test]
+    fn usable_metadata_threshold_rejects_relative_zero_threshold() {
+        assert_eq!(usable_metadata_threshold(Some("0")), None);
+        assert_eq!(usable_metadata_threshold(Some("0.5")), None);
+        assert_eq!(usable_metadata_threshold(Some("123.45")), Some(dec!(123.45)));
+    }
 }

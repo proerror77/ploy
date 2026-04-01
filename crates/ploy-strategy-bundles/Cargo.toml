@@ -9,7 +9,6 @@ description = "Ploy strategy bundle runtime crate"
 
 [features]
 default = []
-database = ["sqlx"]
 
 [dependencies]
 async-trait.workspace = true
@@ -19,7 +18,7 @@ rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, optional = false }
-sqlx = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = false }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 toml.workspace = true
