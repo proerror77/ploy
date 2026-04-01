@@ -46,7 +46,7 @@ impl Default for CryptoRlPolicyConfig {
         Self {
             agent_id: "crypto_rl_policy".into(),
             name: "Crypto RL Policy".into(),
-            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
+            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into(), "DOGE".into(), "HYPE".into(), "BNB".into()],
             event_refresh_secs: 15,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 900,

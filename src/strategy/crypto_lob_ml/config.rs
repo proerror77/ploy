@@ -199,7 +199,7 @@ impl Default for CryptoLobMlConfig {
         Self {
             agent_id: "crypto_lob_ml".into(),
             name: "Crypto LOB ML".into(),
-            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
+            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into(), "DOGE".into(), "HYPE".into(), "BNB".into()],
             event_refresh_secs: 15,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 900,

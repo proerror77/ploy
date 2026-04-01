@@ -66,7 +66,7 @@ struct CryptoRlPolicyStrategyConfig {
 impl Default for CryptoRlPolicyStrategyConfig {
     fn default() -> Self {
         Self {
-            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into()],
+            coins: vec!["BTC".into(), "ETH".into(), "SOL".into(), "XRP".into(), "DOGE".into(), "HYPE".into(), "BNB".into()],
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 900,
             default_shares: 50,
