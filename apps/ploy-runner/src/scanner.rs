@@ -79,8 +79,10 @@ pub fn spawn_market_scanner(
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in &expired {
+                let end_time = tracked.get(id).map(|ev| ev.end_time).unwrap_or(now);
                 let _ = tx.send(MarketUpdate::EventExpired {
                     event_id: id.clone(),
+                    end_time,
                 });
                 tracked.remove(id);
             }

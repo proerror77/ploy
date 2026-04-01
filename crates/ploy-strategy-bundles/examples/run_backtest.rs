@@ -136,26 +136,19 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
             // Event expires
             updates.push(MarketUpdate::EventExpired {
                 event_id,
+                end_time: window_end,
             });
         }
     }
 
     // Sort by timestamp
-    let base_ts = start;
     updates.sort_by_key(|u| match u {
         MarketUpdate::SpotPrice { ts, .. }
         | MarketUpdate::Quote { ts, .. }
         | MarketUpdate::L2 { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
         MarketUpdate::EventDiscovered { end_time, .. } => *end_time - Duration::seconds(300),
-        MarketUpdate::EventExpired { event_id } => {
-            // Place expiry after all ticks for that window
-            // Parse window index from event_id
-            let idx: i64 = event_id.rsplit('-').next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            base_ts + Duration::seconds(idx * window_secs as i64 + window_secs as i64)
-        }
+        MarketUpdate::EventExpired { end_time, .. } => *end_time,
     });
 
     updates

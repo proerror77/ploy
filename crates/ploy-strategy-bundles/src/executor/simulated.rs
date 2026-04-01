@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ploy_trading::{FillRecord, TradeSide, TradingIntent};
+use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -164,9 +164,17 @@ impl Executor for SimulatedExecutor {
         let order_id = Uuid::new_v4().to_string();
         let signal_price = intent.limit_price.unwrap_or(dec!(0.50));
 
-        let (fill_price, filled_qty, slippage, impact) = match intent.side {
-            TradeSide::Buy => self.simulate_buy(signal_price, intent.quantity),
-            TradeSide::Sell => self.simulate_sell(signal_price, intent.quantity),
+        // Settlement exits bypass spread/impact simulation
+        let is_settlement = intent.purpose == IntentPurpose::Exit
+            && (signal_price == Decimal::ZERO || signal_price == Decimal::ONE);
+
+        let (fill_price, filled_qty, slippage, impact) = if is_settlement {
+            (signal_price, intent.quantity, Decimal::ZERO, Decimal::ZERO)
+        } else {
+            match intent.side {
+                TradeSide::Buy => self.simulate_buy(signal_price, intent.quantity),
+                TradeSide::Sell => self.simulate_sell(signal_price, intent.quantity),
+            }
         };
 
         if filled_qty <= Decimal::ZERO {

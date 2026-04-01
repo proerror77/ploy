@@ -71,12 +71,8 @@ fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
             // Use start time (end_time - window) for discovery
             *end_time - chrono::Duration::seconds(300)
         }
-        MarketUpdate::EventExpired { .. } => {
-            // EventExpired doesn't have a timestamp field, but we need a stable value
-            // Use a far-future timestamp so it sorts after all other events
-            // This is safe because EventExpired is added immediately after EventDiscovered
-            // and will be sorted relative to its paired EventDiscovered
-            DateTime::<Utc>::MAX_UTC
+        MarketUpdate::EventExpired { end_time, .. } => {
+            *end_time
         }
     }
 }
@@ -403,9 +399,11 @@ async fn load_events(
             price_to_beat,
         });
 
-        // NOTE: We don't add EventExpired here because it doesn't have a timestamp
-        // and would break the sort. The strategy should handle event expiration
-        // internally by checking end_time.
+        // Generate EventExpired at end_time so positions settle in backtest
+        updates.push(MarketUpdate::EventExpired {
+            event_id,
+            end_time,
+        });
     }
 
     Ok(())

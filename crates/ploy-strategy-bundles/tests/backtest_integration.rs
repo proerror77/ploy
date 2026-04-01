@@ -69,6 +69,7 @@ fn build_scenario() -> Vec<MarketUpdate> {
     // 6. Event expires (settlement)
     updates.push(MarketUpdate::EventExpired {
         event_id: "evt-btc-001".into(),
+        end_time: event_end,
     });
 
     updates

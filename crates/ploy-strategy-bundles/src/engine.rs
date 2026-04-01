@@ -225,7 +225,7 @@ where
             | MarketUpdate::L2 { ts, .. }
             | MarketUpdate::Kline { ts, .. } => Some(*ts),
             MarketUpdate::EventDiscovered { end_time, .. } => Some(*end_time),
-            MarketUpdate::EventExpired { .. } => None,
+            MarketUpdate::EventExpired { end_time, .. } => Some(*end_time),
         }
     }
 }

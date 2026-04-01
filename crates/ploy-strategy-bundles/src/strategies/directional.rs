@@ -567,11 +567,90 @@ impl StrategyLogic for DirectionalStrategy {
                 vec![]
             }
 
-            MarketUpdate::EventExpired { event_id } => {
+            MarketUpdate::EventExpired { event_id, .. } => {
+                // Settle positions: find any tokens from this event that we hold
+                let mut exits = Vec::new();
+
+                // Find the event's tokens before removing
+                let mut event_tokens: Vec<(String, String, Option<Decimal>)> = Vec::new();
+                for events in self.events.values() {
+                    for ev in events {
+                        if ev.event_id == *event_id {
+                            event_tokens.push((
+                                ev.up_token.clone(),
+                                ev.down_token.clone(),
+                                ev.open_price,
+                            ));
+                        }
+                    }
+                }
+
+                for (up_token, down_token, open_price) in &event_tokens {
+                    // Determine outcome: did price go up or down?
+                    // Find the symbol for this event to get current spot
+                    let symbol = self.token_symbol.get(up_token)
+                        .or_else(|| self.token_symbol.get(down_token));
+                    let spot = symbol.and_then(|s| self.spot.get(s)).map(|s| s.price);
+
+                    let up_won = match (spot, open_price) {
+                        (Some(current), Some(open)) => current >= *open,
+                        _ => true, // default: assume UP won if no data
+                    };
+
+                    // Check if we hold the UP token
+                    if positions.net_qty(up_token) > Decimal::ZERO {
+                        let settle_price = if up_won { dec!(1.00) } else { dec!(0.00) };
+                        let qty = positions.net_qty(up_token);
+                        exits.push(StrategyDecision::Exit(TradingIntent {
+                            intent_id: format!("settle_{}", event_id),
+                            deployment_id: String::new(),
+                            market_id: event_id.clone(),
+                            token_id: up_token.clone(),
+                            side: TradeSide::Sell,
+                            quantity: qty,
+                            limit_price: Some(settle_price),
+                            purpose: IntentPurpose::Exit,
+                            created_at: Utc::now(),
+                        }));
+                        info!(
+                            event_id,
+                            token = %up_token,
+                            outcome = if up_won { "WIN" } else { "LOSE" },
+                            settle_price = %settle_price,
+                            "Settlement: UP token"
+                        );
+                    }
+
+                    // Check if we hold the DOWN token
+                    if positions.net_qty(down_token) > Decimal::ZERO {
+                        let settle_price = if up_won { dec!(0.00) } else { dec!(1.00) };
+                        let qty = positions.net_qty(down_token);
+                        exits.push(StrategyDecision::Exit(TradingIntent {
+                            intent_id: format!("settle_{}", event_id),
+                            deployment_id: String::new(),
+                            market_id: event_id.clone(),
+                            token_id: down_token.clone(),
+                            side: TradeSide::Sell,
+                            quantity: qty,
+                            limit_price: Some(settle_price),
+                            purpose: IntentPurpose::Exit,
+                            created_at: Utc::now(),
+                        }));
+                        info!(
+                            event_id,
+                            token = %down_token,
+                            outcome = if up_won { "LOSE" } else { "WIN" },
+                            settle_price = %settle_price,
+                            "Settlement: DOWN token"
+                        );
+                    }
+                }
+
+                // Remove expired events
                 for events in self.events.values_mut() {
                     events.retain(|e| e.event_id != *event_id);
                 }
-                vec![]
+                exits
             }
 
             _ => vec![],

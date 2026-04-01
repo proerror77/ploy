@@ -58,6 +58,8 @@ pub enum MarketUpdate {
     /// Event window expired (settlement pending or complete).
     EventExpired {
         event_id: String,
+        /// The event's end time, used for timeline sorting in historical feeds.
+        end_time: DateTime<Utc>,
     },
 
     /// CEX kline (candlestick) close.
