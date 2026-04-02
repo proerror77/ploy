@@ -16,7 +16,7 @@
 //! | `pm_market_metadata` | Event windows (UP/DOWN tokens) |
 //! | `pm_token_settlements` | Settlement outcomes |
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -24,9 +24,16 @@ use tracing::info;
 
 use crate::traits::MarketUpdate;
 
+/// How far before `from` to load spot prices for EWMA volatility warm-up.
+const WARMUP_MINUTES: i64 = 30;
+
 /// Load all historical market updates for given symbols and time range.
 ///
 /// Returns updates sorted by timestamp, ready for `HistoricalFeed::new()`.
+///
+/// Spot prices are loaded from `from - WARMUP_MINUTES` to give the EWMA
+/// volatility estimator enough history before the first event arrives.
+/// All other data (quotes, events, L2) uses the exact `from..to` range.
 pub async fn load_from_database(
     pool: &PgPool,
     symbols: &[String],
@@ -35,8 +42,9 @@ pub async fn load_from_database(
 ) -> Result<Vec<MarketUpdate>, sqlx::Error> {
     let mut updates: Vec<MarketUpdate> = Vec::new();
 
-    // 1. Spot prices from sync_records (primary) or binance_price_ticks (fallback)
-    load_spot_prices(pool, symbols, from, to, &mut updates).await?;
+    // 1. Spot prices — load earlier for EWMA warm-up
+    let spot_from = from - Duration::minutes(WARMUP_MINUTES);
+    load_spot_prices(pool, symbols, spot_from, to, &mut updates).await?;
 
     // 2. Polymarket quotes from clob_quote_ticks
     let token_map = load_token_mappings(pool, symbols, from, to).await?;
