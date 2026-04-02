@@ -16,7 +16,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::traits::{MarketUpdate, StrategyDecision, StrategyLogic};
 
@@ -39,34 +39,31 @@ fn normal_cdf(x: f64) -> f64 {
     0.5 * (1.0 + sign * y)
 }
 
-/// Estimate P(S_T >= S_0) using log-normal model.
-///
-/// `p_hat = Φ((ln(St/S0) + μΔt) / (σ√Δt))`
-fn estimate_probability(s0: f64, st: f64, sigma: f64, time_remaining_secs: f64) -> f64 {
-    if time_remaining_secs <= 0.0 {
+/// Estimate P(S_T >= S_0) using log-normal model with horizon sigma.
+fn estimate_probability(s0: f64, st: f64, sigma_horizon: f64) -> f64 {
+    if sigma_horizon <= 0.0 {
         return if st >= s0 { 1.0 } else { 0.0 };
     }
-    if sigma <= 0.0 || s0 <= 0.0 || st <= 0.0 {
+    if s0 <= 0.0 || st <= 0.0 {
         return 0.5;
     }
-    let dt = time_remaining_secs / 900.0; // normalize to 15-min window
-    let z = (st / s0).ln() / (sigma * dt.sqrt());
+    let z = (st / s0).ln() / sigma_horizon;
     normal_cdf(z)
 }
 
 // ── Fee Model ────────────────────────────────────────────
 
-/// Polymarket parabolic fee: `fee_rate * (p * (1-p))^exponent` + spread.
+/// Polymarket parabolic trading fee for crypto binary markets.
 ///
 /// Crypto 5m markets: fee_rate=0.25, exponent=2.
-/// Returns total cost as fraction of position value.
+/// Returns fee per share. The quote already embeds bid/ask spread.
 fn crypto_fee_cost(entry_price: f64) -> f64 {
     let p_factor = entry_price * (1.0 - entry_price);
     let fee_rate = 0.25 * p_factor * p_factor; // effective_rate(p)
-    let fee_cost = entry_price * fee_rate; // fee per share
-    let spread = 0.01;
-    fee_cost + spread
+    entry_price * fee_rate
 }
+
+const EWMA_LAMBDA: f64 = 0.94;
 
 // ── Direction ────────────────────────────────────────────
 
@@ -159,7 +156,7 @@ struct EventWindow {
     down_token: String,
     end_time: DateTime<Utc>,
     open_price: Option<Decimal>,
-    window_secs: u64,
+    resolved_up_won: Option<bool>,
 }
 
 /// Cached Polymarket quote.
@@ -168,12 +165,18 @@ struct QuoteState {
     ask: Option<Decimal>,
 }
 
+#[derive(Default)]
+struct VolatilityState {
+    ewma_var_per_sec: f64,
+}
+
 // ── Strategy Implementation ──────────────────────────────
 
 pub struct DirectionalStrategy {
     config: DirectionalConfig,
     // Market state
     spot: HashMap<String, SpotState>,
+    volatility: HashMap<String, VolatilityState>,
     events: HashMap<String, Vec<EventWindow>>,
     quotes: HashMap<String, QuoteState>,
     // Gating state
@@ -189,6 +192,7 @@ impl DirectionalStrategy {
         Self {
             config,
             spot: HashMap::new(),
+            volatility: HashMap::new(),
             events: HashMap::new(),
             quotes: HashMap::new(),
             cooldowns: HashMap::new(),
@@ -224,6 +228,54 @@ impl DirectionalStrategy {
         }
     }
 
+    fn floor_var_per_sec(&self) -> f64 {
+        let sigma_floor = self.config.vol_floor.max(1e-9);
+        sigma_floor * sigma_floor / 900.0
+    }
+
+    fn update_volatility(&mut self, symbol: &str, price: Decimal, ts: DateTime<Utc>) {
+        let Some(previous) = self.spot.get(symbol) else {
+            return;
+        };
+        if previous.price <= Decimal::ZERO || price <= Decimal::ZERO {
+            return;
+        }
+
+        let dt_secs = (ts - previous.ts).num_milliseconds() as f64 / 1000.0;
+        if dt_secs <= 0.0 {
+            return;
+        }
+
+        let Some(prev_f) = previous.price.to_f64() else {
+            return;
+        };
+        let Some(curr_f) = price.to_f64() else {
+            return;
+        };
+        if prev_f <= 0.0 || curr_f <= 0.0 {
+            return;
+        }
+
+        let inst_var_per_sec = (curr_f / prev_f).ln().powi(2) / dt_secs.max(1e-6);
+        let floor = self.floor_var_per_sec();
+        let state = self.volatility.entry(symbol.to_string()).or_default();
+        state.ewma_var_per_sec = if state.ewma_var_per_sec <= 0.0 {
+            inst_var_per_sec.max(floor)
+        } else {
+            (EWMA_LAMBDA * state.ewma_var_per_sec) + ((1.0 - EWMA_LAMBDA) * inst_var_per_sec)
+        };
+    }
+
+    fn sigma_horizon(&self, symbol: &str, time_remaining_secs: f64) -> f64 {
+        let secs = time_remaining_secs.max(1.0);
+        let floor = self.floor_var_per_sec();
+        let realized = self.volatility
+            .get(symbol)
+            .map(|state| state.ewma_var_per_sec)
+            .unwrap_or(floor);
+        (realized.max(floor) * secs).sqrt()
+    }
+
     /// Core signal evaluation — the unified 8-gate pipeline.
     fn evaluate_entry(
         &self,
@@ -241,7 +293,7 @@ impl DirectionalStrategy {
         let s0 = open_price.to_f64()?;
         let st = spot_price.to_f64()?;
         let secs_remaining = (event.end_time - now).num_seconds().max(0) as f64;
-        let sigma = self.config.vol_floor.max(1e-9);
+        let sigma_horizon = self.sigma_horizon(symbol, secs_remaining);
 
         // Gate 1: Time window (already checked in pick_event, but verify)
         if secs_remaining < self.config.min_time_remaining_secs as f64
@@ -259,11 +311,10 @@ impl DirectionalStrategy {
         }
 
         // Gate 2: Probability
-        let p_hat = estimate_probability(s0, st, sigma, secs_remaining);
+        let p_hat = estimate_probability(s0, st, sigma_horizon);
 
-        // Gate 3: Z-score (normalized by time remaining, not window size)
-        let dt = secs_remaining.max(1.0) / 900.0;
-        let z = (st / s0).ln() / (sigma * dt.sqrt());
+        // Gate 3: Z-score on the same horizon variance used for probability.
+        let z = (st / s0).ln() / sigma_horizon.max(1e-9);
         if z.abs() < self.config.min_z_score {
             debug!(
                 symbol,
@@ -502,6 +553,7 @@ impl StrategyLogic for DirectionalStrategy {
                     return vec![];
                 }
 
+                self.update_volatility(symbol, *price, *ts);
                 self.spot.insert(symbol.clone(), SpotState { price: *price, ts: *ts });
                 if let Some(events) = self.events.get_mut(symbol) {
                     for event in events.iter_mut() {
@@ -536,8 +588,9 @@ impl StrategyLogic for DirectionalStrategy {
                 up_token,
                 down_token,
                 end_time,
-                window_secs,
+                window_secs: _window_secs,
                 price_to_beat,
+                resolved_up_won,
             } => {
                 // Use the most recent spot price timestamp as "now" for backtest compatibility
                 let now = self.spot.get(symbol).map(|s| s.ts).unwrap_or_else(Utc::now);
@@ -563,7 +616,7 @@ impl StrategyLogic for DirectionalStrategy {
                     down_token: down_token.clone(),
                     end_time: *end_time,
                     open_price,
-                    window_secs: *window_secs,
+                    resolved_up_won: *resolved_up_won,
                 });
                 vec![]
             }
@@ -573,7 +626,7 @@ impl StrategyLogic for DirectionalStrategy {
                 let mut exits = Vec::new();
 
                 // Find the event's tokens before removing
-                let mut event_tokens: Vec<(String, String, Option<Decimal>)> = Vec::new();
+                let mut event_tokens: Vec<(String, String, Option<Decimal>, Option<bool>)> = Vec::new();
                 for events in self.events.values() {
                     for ev in events {
                         if ev.event_id == *event_id {
@@ -581,21 +634,28 @@ impl StrategyLogic for DirectionalStrategy {
                                 ev.up_token.clone(),
                                 ev.down_token.clone(),
                                 ev.open_price,
+                                ev.resolved_up_won,
                             ));
                         }
                     }
                 }
 
-                for (up_token, down_token, open_price) in &event_tokens {
+                for (up_token, down_token, open_price, resolved_up_won) in &event_tokens {
                     // Determine outcome: did price go up or down?
-                    // Find the symbol for this event to get current spot
-                    let symbol = self.token_symbol.get(up_token)
-                        .or_else(|| self.token_symbol.get(down_token));
-                    let spot = symbol.and_then(|s| self.spot.get(s)).map(|s| s.price);
-
-                    let up_won = match (spot, open_price) {
-                        (Some(current), Some(open)) => current >= *open,
-                        _ => true, // default: assume UP won if no data
+                    let up_won = if let Some(resolved_up_won) = resolved_up_won {
+                        *resolved_up_won
+                    } else {
+                        // Fallback only when official settlement is unavailable.
+                        let symbol = self.token_symbol.get(up_token)
+                            .or_else(|| self.token_symbol.get(down_token));
+                        let spot = symbol.and_then(|s| self.spot.get(s)).map(|s| s.price);
+                        match (spot, open_price) {
+                            (Some(current), Some(open)) => current >= *open,
+                            _ => {
+                                warn!(event_id = %event_id, token = %up_token, "Missing official settlement and fallback spot; defaulting to UP");
+                                true
+                            }
+                        }
                     };
 
                     // Check if we hold the UP token
@@ -704,14 +764,14 @@ mod tests {
 
     #[test]
     fn probability_above_s0_is_high() {
-        // BTC up 1%, low vol, 2 min left → high probability of staying above
-        let p = estimate_probability(100_000.0, 101_000.0, 0.001, 120.0);
+        // BTC up 1%, 0.5% horizon sigma → high probability of staying above
+        let p = estimate_probability(100_000.0, 101_000.0, 0.005);
         assert!(p > 0.7, "p={}", p);
     }
 
     #[test]
     fn probability_below_s0_is_low() {
-        let p = estimate_probability(100_000.0, 99_000.0, 0.001, 120.0);
+        let p = estimate_probability(100_000.0, 99_000.0, 0.005);
         assert!(p < 0.3, "p={}", p);
     }
 
@@ -729,12 +789,12 @@ mod tests {
             EventWindow {
                 event_id: "e1".into(), symbol: "BTCUSDT".into(),
                 up_token: "up1".into(), down_token: "dn1".into(),
-                end_time: e1_end, open_price: Some(dec!(100000)), window_secs: 300,
+                end_time: e1_end, open_price: Some(dec!(100000)), resolved_up_won: None,
             },
             EventWindow {
                 event_id: "e2".into(), symbol: "BTCUSDT".into(),
                 up_token: "up2".into(), down_token: "dn2".into(),
-                end_time: e2_end, open_price: Some(dec!(100000)), window_secs: 300,
+                end_time: e2_end, open_price: Some(dec!(100000)), resolved_up_won: None,
             },
         ]);
 
@@ -791,6 +851,7 @@ mod tests {
                 end_time,
                 window_secs: 300,
                 price_to_beat: None,
+                resolved_up_won: None,
             },
             &positions,
             &orders,
@@ -862,6 +923,7 @@ mod tests {
                 end_time: now + chrono::Duration::seconds(120),
                 window_secs: 300,
                 price_to_beat: None,
+                resolved_up_won: None,
             },
             &positions,
             &orders,
@@ -914,12 +976,94 @@ mod tests {
             &MarketUpdate::SpotPrice {
                 symbol: "BTCUSDT".into(),
                 price: dec!(101500),
-                ts: now + chrono::Duration::seconds(2),
+                ts: now + chrono::Duration::seconds(60),
             },
             &positions,
             &orders,
         );
 
         assert_eq!(decisions.len(), 1, "Expected 1 entry signal");
+    }
+
+    #[test]
+    fn official_settlement_overrides_last_spot_direction() {
+        let config = default_config();
+        let mut strat = DirectionalStrategy::new(config);
+        let now = Utc::now();
+
+        strat.events.insert("BTCUSDT".into(), vec![EventWindow {
+            event_id: "evt1".into(),
+            symbol: "BTCUSDT".into(),
+            up_token: "up1".into(),
+            down_token: "dn1".into(),
+            end_time: now,
+            open_price: Some(dec!(100000)),
+            resolved_up_won: Some(false),
+        }]);
+        strat.token_symbol.insert("up1".into(), "BTCUSDT".into());
+        strat.token_symbol.insert("dn1".into(), "BTCUSDT".into());
+        strat.spot.insert("BTCUSDT".into(), SpotState {
+            price: dec!(101000),
+            ts: now,
+        });
+
+        let mut positions = PositionLedger::default();
+        positions.apply_fill(&FillRecord {
+            fill_id: "fill-1".into(),
+            order_id: "order-1".into(),
+            token_id: "up1".into(),
+            side: TradeSide::Buy,
+            quantity: dec!(5),
+            price: dec!(0.40),
+            fee: Decimal::ZERO,
+            timestamp: now,
+        });
+
+        let decisions = strat.on_update(
+            &MarketUpdate::EventExpired {
+                event_id: "evt1".into(),
+                end_time: now,
+            },
+            &positions,
+            &OrderLedger::default(),
+        );
+
+        assert_eq!(decisions.len(), 1, "Expected settlement exit");
+        match &decisions[0] {
+            StrategyDecision::Exit(intent) => assert_eq!(intent.limit_price, Some(dec!(0.00))),
+            other => panic!("Expected Exit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn spot_updates_accumulate_realized_volatility() {
+        let config = default_config();
+        let mut strat = DirectionalStrategy::new(config);
+        let now = Utc::now();
+
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        let _ = strat.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        let _ = strat.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100100),
+                ts: now + chrono::Duration::seconds(5),
+            },
+            &positions,
+            &orders,
+        );
+
+        let vol_state = strat.volatility.get("BTCUSDT").expect("vol state");
+        assert!(vol_state.ewma_var_per_sec > 0.0);
     }
 }

@@ -19,6 +19,7 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use tracing::info;
 
 use crate::traits::MarketUpdate;
@@ -368,6 +369,9 @@ async fn load_events(
     .await
     .unwrap_or_default();
 
+    let event_ids: Vec<String> = rows.iter().map(|(event_id, ..)| event_id.clone()).collect();
+    let settlement_prices = load_event_settlement_prices(pool, &event_ids).await?;
+
     info!(count = rows.len(), "Loaded events from pm_market_metadata");
     for (event_id, symbol, end_time, start_time, up_token, down_token, price_to_beat) in rows {
         let symbol = symbol.unwrap_or_default();
@@ -382,6 +386,15 @@ async fn load_events(
 
         let up_token = normalize_token_id(&up_token.unwrap_or_default());
         let down_token = normalize_token_id(&down_token.unwrap_or_default());
+        let resolved_up_won = match (
+            settlement_prices.get(&(event_id.clone(), up_token.clone())).copied(),
+            settlement_prices.get(&(event_id.clone(), down_token.clone())).copied(),
+        ) {
+            (Some(up), Some(down)) if up != down => Some(up > down),
+            (Some(up), _) => Some(up > Decimal::new(5, 1)),
+            (_, Some(down)) => Some(down < Decimal::new(5, 1)),
+            _ => None,
+        };
 
         let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
 
@@ -397,6 +410,7 @@ async fn load_events(
             end_time,
             window_secs,
             price_to_beat,
+            resolved_up_won,
         });
 
         // Generate EventExpired at end_time so positions settle in backtest
@@ -407,6 +421,37 @@ async fn load_events(
     }
 
     Ok(())
+}
+
+async fn load_event_settlement_prices(
+    pool: &PgPool,
+    event_ids: &[String],
+) -> Result<HashMap<(String, String), Decimal>, sqlx::Error> {
+    if event_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows: Vec<(Option<String>, String, Option<Decimal>)> = sqlx::query_as(
+        r#"
+        SELECT market_slug, token_id, settled_price
+        FROM pm_token_settlements
+        WHERE market_slug = ANY($1)
+          AND resolved = TRUE
+        "#,
+    )
+    .bind(event_ids)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut prices = HashMap::new();
+    for (market_slug, token_id, settled_price) in rows {
+        let Some(market_slug) = market_slug else { continue };
+        let Some(settled_price) = settled_price else { continue };
+        prices.insert((market_slug, normalize_token_id(&token_id)), settled_price);
+    }
+
+    Ok(prices)
 }
 
 #[cfg(test)]

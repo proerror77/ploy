@@ -1,3 +1,47 @@
+# PM 5m Backtest Review (2026-04-02)
+
+## Goal
+Review and fix the PM 5-minute directional backtest implementation for modelling, execution, settlement, and statistical validity issues.
+
+## File ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+  - owner: signal model, edge math, expiry/settlement logic
+- `crates/ploy-strategy-bundles/src/executor/simulated.rs`
+  - owner: simulated fill price, spread, fee, and execution accounting
+- `crates/ploy-strategy-bundles/src/config.rs`
+  - owner: backtest executor defaults and runtime wiring
+- `crates/ploy-strategy-bundles/tests/backtest_integration.rs`
+  - owner: regression coverage for the backtest loop
+
+## Tasks
+
+- [x] Verify whether signal edge math and executor fill accounting apply costs consistently or double-count them.
+- [x] Verify whether volatility, time normalization, and probability calculations are calibrated consistently for 5-minute markets.
+- [x] Verify settlement source-of-truth and whether the backtest settles against Binance spot or Chainlink-equivalent data.
+- [x] Check whether current tests would catch the modelling/accounting issues and write the review findings.
+
+## Progress notes
+
+- 2026-04-02: Confirmed `pm_5m_directional` gate math still uses constant `vol_floor` as `sigma` with `dt = remaining_secs / 900.0`; there is no rolling or realized volatility estimate in the current runtime path.
+- 2026-04-02: Quantified the calibration issue: with `sigma=0.001` and 300s remaining, a 10bp move already implies `p≈95.8%`, 20bp implies `p≈99.97%`, which explains the observed `p=100%` style signals.
+- 2026-04-02: Confirmed the earlier “double-charged PnL” framing is imprecise. Gate 8 subtracts `crypto_fee_cost(entry_price)` only for admission, while realized PnL is charged later from executor fills. The real bug is cost-model mismatch: fixed 1-cent spread + parabolic fee in the gate versus spread/impact + flat 2% fill fee in the executor.
+- 2026-04-02: Confirmed historical backtest settlement ignores `pm_token_settlements` entirely even though the loader module advertises that table. The loader only emits `EventExpired`, and the strategy resolves the outcome from the last cached spot price with `default: assume UP won if no data`.
+- 2026-04-02: Fixed historical settlement wiring by loading resolved token payouts from `pm_token_settlements`, deriving `resolved_up_won`, and carrying that official outcome into `EventDiscovered` for replay.
+- 2026-04-02: Fixed cost-model drift by removing the synthetic spread from strategy gate fees, charging the executor with the same PM parabolic trading fee curve, treating provided limit prices as executable quotes instead of mids, and making settlement exits fee-free.
+- 2026-04-02: Replaced fixed-sigma time normalization with per-symbol EWMA variance on spot returns and a horizon-consistent `sigma_horizon`.
+- 2026-04-02: Validation:
+  - `CARGO_TARGET_DIR=/tmp/ploy-backtest-fix rtk cargo test -p ploy-strategy-bundles` → `29 passed, 1 ignored`
+  - `CARGO_TARGET_DIR=/tmp/ploy-backtest-fix rtk cargo test -p ploy-trading positions -- --nocapture` → `4 passed`
+  - `CARGO_TARGET_DIR=/tmp/ploy-backtest-fix rtk cargo check -p ploy-runner -p ploy-strategy-bundles --all-targets` → `0 errors`
+
+## Review
+
+- P0: Backtest settlement is not using the official settlement source. Outcome is inferred from the last cached spot (`current >= open`) and defaults to UP when data is missing.
+- P0: The probability model is structurally overconfident because `sigma` is a fixed floor and the 5-minute horizon is normalized with a 15-minute constant.
+- P1: Signal gating and execution accounting do not share one cost model, so “edge” and realized fill economics are not directly comparable.
+- P1: Existing tests prove the loop runs, but they do not pin settlement correctness, cost-model consistency, or probability calibration.
+
 # PM Quote Collector WS Repair (2026-04-01)
 
 ## Goal

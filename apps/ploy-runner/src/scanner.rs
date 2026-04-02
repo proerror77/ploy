@@ -171,6 +171,7 @@ pub fn spawn_market_scanner(
                             end_time,
                             window_secs,
                             price_to_beat,
+                            resolved_up_won: None,
                         });
                     }
 

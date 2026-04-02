@@ -53,6 +53,9 @@ pub enum MarketUpdate {
         /// Price-to-beat from the market API (window open price).
         /// When present, used directly as S0 instead of waiting for spot.
         price_to_beat: Option<Decimal>,
+        /// Official resolved outcome for historical replay when already known.
+        /// `Some(true)` means the UP token settled to 1.0.
+        resolved_up_won: Option<bool>,
     },
 
     /// Event window expired (settlement pending or complete).

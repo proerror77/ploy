@@ -10,7 +10,6 @@
 //! dry-run (`LiveFeed + SimulatedExecutor`) modes.
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -73,14 +72,25 @@ impl SimulatedExecutor {
         price.max(MIN_BINARY_PRICE).min(MAX_BINARY_PRICE)
     }
 
-    /// Simulate a buy fill: signal_price + half_spread + impact.
-    fn simulate_buy(&self, signal_price: Decimal, quantity: Decimal) -> (Decimal, Decimal, Decimal, Decimal) {
+    fn crypto_trade_fee(fill_price: Decimal) -> Decimal {
+        let p_factor = fill_price * (Decimal::ONE - fill_price);
+        let fee_rate = dec!(0.25) * p_factor * p_factor;
+        fill_price * fee_rate
+    }
+
+    /// Simulate a buy fill from a quoted executable price.
+    fn simulate_buy(
+        &self,
+        signal_price: Decimal,
+        quantity: Decimal,
+        synthetic_mid: bool,
+    ) -> (Decimal, Decimal, Decimal, Decimal) {
         let signal_price = Self::clamp_price(signal_price);
         let shares = quantity.to_u64().unwrap_or(1);
         let depth = self.config.default_depth_shares;
 
-        // Spread
-        let half_spread = if self.config.use_spread {
+        // Only synthesize spread when we do not already have an executable quote.
+        let half_spread = if self.config.use_spread && synthetic_mid {
             signal_price * self.config.spread_pct / dec!(2)
         } else {
             Decimal::ZERO
@@ -105,13 +115,18 @@ impl SimulatedExecutor {
         (fill_price, filled_qty, slippage, impact)
     }
 
-    /// Simulate a sell fill: signal_price - half_spread - impact.
-    fn simulate_sell(&self, signal_price: Decimal, quantity: Decimal) -> (Decimal, Decimal, Decimal, Decimal) {
+    /// Simulate a sell fill from a quoted executable price.
+    fn simulate_sell(
+        &self,
+        signal_price: Decimal,
+        quantity: Decimal,
+        synthetic_mid: bool,
+    ) -> (Decimal, Decimal, Decimal, Decimal) {
         let signal_price = Self::clamp_price(signal_price);
         let shares = quantity.to_u64().unwrap_or(1);
         let depth = self.config.default_depth_shares;
 
-        let half_spread = if self.config.use_spread {
+        let half_spread = if self.config.use_spread && synthetic_mid {
             signal_price * self.config.spread_pct / dec!(2)
         } else {
             Decimal::ZERO
@@ -163,6 +178,7 @@ impl Executor for SimulatedExecutor {
     async fn submit(&mut self, intent: &TradingIntent) -> ExecutionReport {
         let order_id = Uuid::new_v4().to_string();
         let signal_price = intent.limit_price.unwrap_or(dec!(0.50));
+        let synthetic_mid = intent.limit_price.is_none();
 
         // Settlement exits bypass spread/impact simulation
         let is_settlement = intent.purpose == IntentPurpose::Exit
@@ -172,8 +188,8 @@ impl Executor for SimulatedExecutor {
             (signal_price, intent.quantity, Decimal::ZERO, Decimal::ZERO)
         } else {
             match intent.side {
-                TradeSide::Buy => self.simulate_buy(signal_price, intent.quantity),
-                TradeSide::Sell => self.simulate_sell(signal_price, intent.quantity),
+                TradeSide::Buy => self.simulate_buy(signal_price, intent.quantity, synthetic_mid),
+                TradeSide::Sell => self.simulate_sell(signal_price, intent.quantity, synthetic_mid),
             }
         };
 
@@ -188,7 +204,11 @@ impl Executor for SimulatedExecutor {
             };
         }
 
-        let fee = fill_price * filled_qty * dec!(0.02); // 2% fee
+        let fee = if is_settlement {
+            Decimal::ZERO
+        } else {
+            Self::crypto_trade_fee(fill_price) * filled_qty
+        };
 
         let fill = FillRecord {
             fill_id: Uuid::new_v4().to_string(),
@@ -219,6 +239,7 @@ impl Executor for SimulatedExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use ploy_trading::IntentPurpose;
 
     fn test_intent(side: TradeSide, price: Decimal, qty: Decimal) -> TradingIntent {
@@ -236,28 +257,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buy_applies_spread_and_impact() {
+    async fn buy_applies_quote_price_and_impact() {
         let mut exec = SimulatedExecutor::new(SimulatedExecutorConfig::default());
         let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(25));
 
         let report = exec.submit(&intent).await;
         assert!(!report.rejected);
         let fill = report.fill.unwrap();
-        // Fill price should be higher than signal (spread + impact)
+        // Fill price should be above the quoted ask only because of impact.
         assert!(fill.price > dec!(0.50), "fill={} should be > 0.50", fill.price);
         assert!(report.slippage.unwrap() > Decimal::ZERO);
+        assert_eq!(fill.price.round_dp(4), dec!(0.5025));
     }
 
     #[tokio::test]
-    async fn sell_applies_spread_and_impact() {
+    async fn sell_applies_quote_price_and_impact() {
         let mut exec = SimulatedExecutor::new(SimulatedExecutorConfig::default());
         let intent = test_intent(TradeSide::Sell, dec!(0.50), dec!(25));
 
         let report = exec.submit(&intent).await;
         assert!(!report.rejected);
         let fill = report.fill.unwrap();
-        // Fill price should be lower than signal
+        // Fill price should be below the quoted bid only because of impact.
         assert!(fill.price < dec!(0.50), "fill={} should be < 0.50", fill.price);
+        assert_eq!(fill.price.round_dp(4), dec!(0.4975));
     }
 
     #[tokio::test]
@@ -275,5 +298,33 @@ mod tests {
         let fill = report.fill.unwrap();
         assert_eq!(fill.price, dec!(0.60));
         assert_eq!(report.slippage.unwrap(), Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn settlement_exit_has_no_fee() {
+        let mut exec = SimulatedExecutor::new(SimulatedExecutorConfig::default());
+        let mut intent = test_intent(TradeSide::Sell, dec!(1.00), dec!(10));
+        intent.purpose = IntentPurpose::Exit;
+
+        let report = exec.submit(&intent).await;
+        let fill = report.fill.expect("settlement fill");
+        assert_eq!(fill.price, dec!(1.00));
+        assert_eq!(fill.fee, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn entry_fee_uses_pm_parabolic_curve() {
+        let config = SimulatedExecutorConfig {
+            use_spread: false,
+            enable_market_impact: false,
+            enable_partial_fills: false,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(10));
+
+        let report = exec.submit(&intent).await;
+        let fill = report.fill.expect("fill");
+        assert_eq!(fill.fee.round_dp(6), dec!(0.078125));
     }
 }

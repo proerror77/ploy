@@ -36,6 +36,7 @@ fn build_scenario() -> Vec<MarketUpdate> {
         end_time: event_end,
         window_secs: 300,
         price_to_beat: None,
+        resolved_up_won: Some(true),
     });
 
     // 3. Polymarket quotes — UP token cheap at 0.30
@@ -52,18 +53,23 @@ fn build_scenario() -> Vec<MarketUpdate> {
         ts: now,
     });
 
-    // 4. BTC moves up 1.5% → strong UP signal
+    // 4. BTC trends up over several updates so realized vol has a usable estimate.
+    updates.push(MarketUpdate::SpotPrice {
+        symbol: "BTCUSDT".into(),
+        price: dec!(100400),
+        ts: now + Duration::seconds(20),
+    });
+
+    updates.push(MarketUpdate::SpotPrice {
+        symbol: "BTCUSDT".into(),
+        price: dec!(100900),
+        ts: now + Duration::seconds(40),
+    });
+
     updates.push(MarketUpdate::SpotPrice {
         symbol: "BTCUSDT".into(),
         price: dec!(101500),
-        ts: now + Duration::seconds(10),
-    });
-
-    // 5. More price updates (no new entries due to cooldown)
-    updates.push(MarketUpdate::SpotPrice {
-        symbol: "BTCUSDT".into(),
-        price: dec!(101600),
-        ts: now + Duration::seconds(20),
+        ts: now + Duration::seconds(60),
     });
 
     // 6. Event expires (settlement)
@@ -115,7 +121,7 @@ async fn backtest_full_loop_produces_entry() {
     let result = runtime.run().await;
 
     assert_eq!(result.mode, RuntimeMode::Backtest);
-    assert_eq!(result.updates_processed, 7);
+    assert_eq!(result.updates_processed, 8);
     assert!(result.intents_submitted >= 1, "Expected at least 1 intent, got {}", result.intents_submitted);
     assert!(result.fills_recorded >= 1, "Expected at least 1 fill, got {}", result.fills_recorded);
 
