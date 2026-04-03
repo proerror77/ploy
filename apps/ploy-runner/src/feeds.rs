@@ -357,7 +357,7 @@ async fn persist_quote(
         r#"
         INSERT INTO clob_quote_ticks (token_id, best_bid, best_ask, received_at, source)
         VALUES ($1, $2, $3, $4, 'ploy_runner_live')
-        ON CONFLICT (token_id, date_trunc('second', received_at)) DO NOTHING
+        ON CONFLICT (token_id, date_trunc('second', received_at AT TIME ZONE 'UTC')) DO NOTHING
         "#,
     )
     .bind(token_id)
