@@ -53,14 +53,12 @@ fn estimate_probability(s0: f64, st: f64, sigma_horizon: f64) -> f64 {
 
 // ── Fee Model ────────────────────────────────────────────
 
-/// Polymarket parabolic trading fee for crypto binary markets.
+/// Polymarket trading fee for crypto binary markets.
 ///
-/// Crypto 5m markets: fee_rate=0.25, exponent=2.
-/// Returns fee per share. The quote already embeds bid/ask spread.
+/// Actual PM fee: 2% × p × (1 − p) per share.
+/// Returns fee per share (not multiplied by quantity).
 fn crypto_fee_cost(entry_price: f64) -> f64 {
-    let p_factor = entry_price * (1.0 - entry_price);
-    let fee_rate = 0.25 * p_factor * p_factor; // effective_rate(p)
-    entry_price * fee_rate
+    0.02 * entry_price * (1.0 - entry_price)
 }
 
 const EWMA_LAMBDA: f64 = 0.94;
@@ -89,6 +87,8 @@ pub struct DirectionalConfig {
     pub vol_floor: f64,
     #[serde(default = "default_min_probability")]
     pub min_probability: f64,
+    /// Deprecated: z-score gate removed (redundant with probability gate).
+    /// Kept for config backward compatibility.
     #[serde(default = "default_min_z_score")]
     pub min_z_score: f64,
 
@@ -130,7 +130,7 @@ fn default_vol_floor() -> f64 {
     0.001
 }
 fn default_min_probability() -> f64 {
-    0.62
+    0.55
 }
 fn default_min_z_score() -> f64 {
     0.35
@@ -148,7 +148,7 @@ fn default_no_trade_max() -> f64 {
     0.55
 }
 fn default_min_edge() -> f64 {
-    0.05
+    0.02
 }
 fn default_min_time() -> u64 {
     60
@@ -157,13 +157,13 @@ fn default_max_time() -> u64 {
     300
 }
 fn default_cooldown() -> u64 {
-    60
+    15
 }
 fn default_stake_usd() -> Decimal {
     dec!(25)
 }
 fn default_max_positions() -> usize {
-    3
+    30
 }
 fn default_max_daily_trades() -> u32 {
     1000
@@ -323,6 +323,13 @@ impl DirectionalStrategy {
     }
 
     /// Core signal evaluation — the unified 8-gate pipeline.
+    /// Core signal evaluation — the 5-gate pipeline.
+    ///
+    /// Gate 0: Price validity
+    /// Gate 1: Quote availability + direction
+    /// Gate 2: Price filter (bounds + no-trade zone)
+    /// Gate 3: Probability threshold
+    /// Gate 4: Edge after fees
     fn evaluate_entry(
         &self,
         symbol: &str,
@@ -330,6 +337,7 @@ impl DirectionalStrategy {
         event: &EventWindow,
         now: DateTime<Utc>,
     ) -> Option<(Direction, Decimal, f64, f64)> {
+        // Gate 0: Price validity
         let open_price = event.open_price?;
         if open_price <= Decimal::ZERO || spot_price <= Decimal::ZERO {
             debug!(symbol, event_id = %event.event_id, "Gate 0: Invalid prices");
@@ -341,38 +349,10 @@ impl DirectionalStrategy {
         let secs_remaining = (event.end_time - now).num_seconds().max(0) as f64;
         let sigma_horizon = self.sigma_horizon(symbol, secs_remaining);
 
-        // Gate 1: Time window (already checked in pick_event, but verify)
-        if secs_remaining < self.config.min_time_remaining_secs as f64
-            || secs_remaining > self.config.max_time_remaining_secs as f64
-        {
-            debug!(
-                symbol,
-                event_id = %event.event_id,
-                secs_remaining,
-                min = self.config.min_time_remaining_secs,
-                max = self.config.max_time_remaining_secs,
-                "Gate 1: Time window violation"
-            );
-            return None;
-        }
-
-        // Gate 2: Probability
+        // Probability estimation (log-normal model)
         let p_hat = estimate_probability(s0, st, sigma_horizon);
 
-        // Gate 3: Z-score on the same horizon variance used for probability.
-        let z = (st / s0).ln() / sigma_horizon.max(1e-9);
-        if z.abs() < self.config.min_z_score {
-            debug!(
-                symbol,
-                event_id = %event.event_id,
-                z,
-                threshold = self.config.min_z_score,
-                "Gate 3: Z-score too low"
-            );
-            return None;
-        }
-
-        // Gate 4: Direction + quote
+        // Gate 1: Direction + quote availability
         let (direction, entry_price) = if p_hat >= 0.5 {
             let quote = self.quotes.get(&event.up_token);
             if quote.is_none() {
@@ -380,7 +360,7 @@ impl DirectionalStrategy {
                     symbol,
                     event_id = %event.event_id,
                     token_id = %event.up_token,
-                    "Gate 4: UP token quote missing"
+                    "Gate 1: UP token quote missing"
                 );
                 return None;
             }
@@ -390,7 +370,7 @@ impl DirectionalStrategy {
                     symbol,
                     event_id = %event.event_id,
                     token_id = %event.up_token,
-                    "Gate 4: UP token ask price missing"
+                    "Gate 1: UP token ask price missing"
                 );
                 return None;
             }
@@ -402,7 +382,7 @@ impl DirectionalStrategy {
                     symbol,
                     event_id = %event.event_id,
                     token_id = %event.down_token,
-                    "Gate 4: DOWN token quote missing"
+                    "Gate 1: DOWN token quote missing"
                 );
                 return None;
             }
@@ -412,7 +392,7 @@ impl DirectionalStrategy {
                     symbol,
                     event_id = %event.event_id,
                     token_id = %event.down_token,
-                    "Gate 4: DOWN token ask price missing"
+                    "Gate 1: DOWN token ask price missing"
                 );
                 return None;
             }
@@ -421,33 +401,22 @@ impl DirectionalStrategy {
 
         let entry_f = entry_price.to_f64()?;
 
-        // Gate 5: Price bounds
-        if entry_f < self.config.min_entry_price || entry_f > self.config.max_entry_price {
+        // Gate 2: Price filter (bounds + no-trade zone)
+        if entry_f < self.config.min_entry_price
+            || entry_f > self.config.max_entry_price
+            || (entry_f >= self.config.no_trade_zone_min
+                && entry_f <= self.config.no_trade_zone_max)
+        {
             debug!(
                 symbol,
                 event_id = %event.event_id,
                 entry_price = entry_f,
-                min = self.config.min_entry_price,
-                max = self.config.max_entry_price,
-                "Gate 5: Price bounds violation"
+                "Gate 2: Price filter (bounds or no-trade zone)"
             );
             return None;
         }
 
-        // Gate 6: No-trade zone
-        if entry_f >= self.config.no_trade_zone_min && entry_f <= self.config.no_trade_zone_max {
-            debug!(
-                symbol,
-                event_id = %event.event_id,
-                entry_price = entry_f,
-                no_trade_min = self.config.no_trade_zone_min,
-                no_trade_max = self.config.no_trade_zone_max,
-                "Gate 6: No-trade zone"
-            );
-            return None;
-        }
-
-        // Gate 7: Probability threshold
+        // Gate 3: Probability threshold
         let effective_p = if direction == Direction::Up {
             p_hat
         } else {
@@ -459,12 +428,12 @@ impl DirectionalStrategy {
                 event_id = %event.event_id,
                 effective_p,
                 threshold = self.config.min_probability,
-                "Gate 7: Probability too low"
+                "Gate 3: Probability too low"
             );
             return None;
         }
 
-        // Gate 8: Edge after fees
+        // Gate 4: Edge after fees
         let cost = crypto_fee_cost(entry_f);
         let edge = effective_p - entry_f - cost;
         if edge < self.config.min_edge {
@@ -476,7 +445,7 @@ impl DirectionalStrategy {
                 effective_p,
                 entry_price = entry_f,
                 cost,
-                "Gate 8: Edge too low"
+                "Gate 4: Edge too low"
             );
             return None;
         }
@@ -825,18 +794,18 @@ mod tests {
         DirectionalConfig {
             symbols: vec!["BTCUSDT".into()],
             vol_floor: 0.001,
-            min_probability: 0.62,
+            min_probability: 0.55,
             min_z_score: 0.35,
             min_entry_price: 0.15,
             max_entry_price: 0.85,
             no_trade_zone_min: 0.45,
             no_trade_zone_max: 0.55,
-            min_edge: 0.05,
+            min_edge: 0.02,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
-            cooldown_secs: 60,
+            cooldown_secs: 15,
             stake_usd: dec!(25),
-            max_positions: 3,
+            max_positions: 30,
             max_daily_trades: 1000,
         }
     }
@@ -903,8 +872,8 @@ mod tests {
         let now = Utc::now();
 
         strat.cooldowns.insert("BTCUSDT".into(), now);
-        assert!(strat.in_cooldown("BTCUSDT", now + chrono::Duration::seconds(30)));
-        assert!(!strat.in_cooldown("BTCUSDT", now + chrono::Duration::seconds(61)));
+        assert!(strat.in_cooldown("BTCUSDT", now + chrono::Duration::seconds(10)));
+        assert!(!strat.in_cooldown("BTCUSDT", now + chrono::Duration::seconds(16)));
     }
 
     #[test]

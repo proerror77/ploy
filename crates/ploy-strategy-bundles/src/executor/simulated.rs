@@ -45,12 +45,12 @@ pub struct SimulatedExecutorConfig {
 impl Default for SimulatedExecutorConfig {
     fn default() -> Self {
         Self {
-            use_spread: true,
+            use_spread: false,
             spread_pct: dec!(0.02),
-            enable_partial_fills: true,
+            enable_partial_fills: false,
             depth_multiple: dec!(5.0),
             min_fill_pct: dec!(0.5),
-            enable_market_impact: true,
+            enable_market_impact: false,
             impact_coefficient: dec!(0.1),
             default_depth_shares: 500,
         }
@@ -71,10 +71,10 @@ impl SimulatedExecutor {
         price.max(MIN_BINARY_PRICE).min(MAX_BINARY_PRICE)
     }
 
+    /// Polymarket trading fee: 2% × p × (1 − p) per share.
     fn crypto_trade_fee(fill_price: Decimal) -> Decimal {
         let p_factor = fill_price * (Decimal::ONE - fill_price);
-        let fee_rate = dec!(0.25) * p_factor * p_factor;
-        fill_price * fee_rate
+        dec!(0.02) * p_factor
     }
 
     /// Simulate a buy fill from a quoted executable price.
@@ -254,13 +254,17 @@ mod tests {
 
     #[tokio::test]
     async fn buy_applies_quote_price_and_impact() {
-        let mut exec = SimulatedExecutor::new(SimulatedExecutorConfig::default());
+        let config = SimulatedExecutorConfig {
+            enable_market_impact: true,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
         let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(25));
 
-        let report = exec.submit(&intent).await;
+        let report = exec.submit(&intent, "test-order-1").await;
         assert!(!report.rejected);
         let fill = report.fill.unwrap();
-        // Fill price should be above the quoted ask only because of impact.
+        // Fill price should be above the quoted ask because of impact.
         assert!(
             fill.price > dec!(0.50),
             "fill={} should be > 0.50",
@@ -272,10 +276,14 @@ mod tests {
 
     #[tokio::test]
     async fn sell_applies_quote_price_and_impact() {
-        let mut exec = SimulatedExecutor::new(SimulatedExecutorConfig::default());
+        let config = SimulatedExecutorConfig {
+            enable_market_impact: true,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
         let intent = test_intent(TradeSide::Sell, dec!(0.50), dec!(25));
 
-        let report = exec.submit(&intent).await;
+        let report = exec.submit(&intent, "test-order-2").await;
         assert!(!report.rejected);
         let fill = report.fill.unwrap();
         // Fill price should be below the quoted bid only because of impact.
@@ -298,7 +306,7 @@ mod tests {
         let mut exec = SimulatedExecutor::new(config);
         let intent = test_intent(TradeSide::Buy, dec!(0.60), dec!(10));
 
-        let report = exec.submit(&intent).await;
+        let report = exec.submit(&intent, "test-order-3").await;
         let fill = report.fill.unwrap();
         assert_eq!(fill.price, dec!(0.60));
         assert_eq!(report.slippage.unwrap(), Decimal::ZERO);
@@ -310,14 +318,14 @@ mod tests {
         let mut intent = test_intent(TradeSide::Sell, dec!(1.00), dec!(10));
         intent.purpose = IntentPurpose::Exit;
 
-        let report = exec.submit(&intent).await;
+        let report = exec.submit(&intent, "test-order-4").await;
         let fill = report.fill.expect("settlement fill");
         assert_eq!(fill.price, dec!(1.00));
         assert_eq!(fill.fee, Decimal::ZERO);
     }
 
     #[tokio::test]
-    async fn entry_fee_uses_pm_parabolic_curve() {
+    async fn entry_fee_uses_pm_rate() {
         let config = SimulatedExecutorConfig {
             use_spread: false,
             enable_market_impact: false,
@@ -327,9 +335,10 @@ mod tests {
         let mut exec = SimulatedExecutor::new(config);
         let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(10));
 
-        let report = exec.submit(&intent).await;
+        let report = exec.submit(&intent, "test-order-5").await;
         let fill = report.fill.expect("fill");
-        assert_eq!(fill.fee.round_dp(6), dec!(0.078125));
+        // fee = 0.02 × 0.50 × 0.50 × 10 = 0.05
+        assert_eq!(fill.fee.round_dp(6), dec!(0.05));
     }
 
     #[tokio::test]
@@ -343,7 +352,7 @@ mod tests {
         let mut exec = SimulatedExecutor::new(config);
         let intent = test_intent(TradeSide::Buy, dec!(0.60), dec!(41.666667));
 
-        let report = exec.submit(&intent).await;
+        let report = exec.submit(&intent, "test-order-6").await;
         let fill = report.fill.expect("fill");
         assert_eq!(fill.quantity, dec!(41.666667));
         assert_eq!(fill.price, dec!(0.60));

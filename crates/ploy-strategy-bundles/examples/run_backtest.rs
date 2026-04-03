@@ -260,6 +260,26 @@ fn main() {
             load_from_database(&pool, &symbols, from_dt, to_dt)
         ).expect("Failed to load from database");
         eprintln!("Loaded {} market updates from DB\n", updates.len());
+
+        // Data diagnostics
+        let mut spot_count = 0u64;
+        let mut quote_count = 0u64;
+        let mut event_discovered = 0u64;
+        let mut event_expired = 0u64;
+        let mut l2_count = 0u64;
+        let mut kline_count = 0u64;
+        for u in &updates {
+            match u {
+                MarketUpdate::SpotPrice { .. } => spot_count += 1,
+                MarketUpdate::Quote { .. } => quote_count += 1,
+                MarketUpdate::EventDiscovered { .. } => event_discovered += 1,
+                MarketUpdate::EventExpired { .. } => event_expired += 1,
+                MarketUpdate::L2 { .. } => l2_count += 1,
+                MarketUpdate::Kline { .. } => kline_count += 1,
+            }
+        }
+        eprintln!("Data breakdown: spot={spot_count} quote={quote_count} discovered={event_discovered} expired={event_expired} l2={l2_count} kline={kline_count}");
+
         updates
     } else {
         let updates = generate_synthetic_data(&["BTCUSDT", "ETHUSDT", "SOLUSDT"], 60);

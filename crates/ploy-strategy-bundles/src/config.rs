@@ -23,7 +23,7 @@ use crate::strategies::directional::DirectionalConfig;
 ///
 /// [strategy]
 /// symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-/// min_edge = 0.05
+/// min_edge = 0.02
 /// # ... (all DirectionalConfig fields)
 ///
 /// [execution]
@@ -61,17 +61,17 @@ fn default_mode() -> String {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SimExecutionSection {
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub use_spread: bool,
     #[serde(default = "default_spread")]
     pub spread_pct: f64,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enable_partial_fills: bool,
     #[serde(default = "default_depth_multiple")]
     pub depth_multiple: f64,
     #[serde(default = "default_min_fill")]
     pub min_fill_pct: f64,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enable_market_impact: bool,
     #[serde(default = "default_impact")]
     pub impact_coefficient: f64,
@@ -79,9 +79,6 @@ pub struct SimExecutionSection {
     pub default_depth_shares: u64,
 }
 
-fn default_true() -> bool {
-    true
-}
 fn default_spread() -> f64 {
     0.02
 }
@@ -101,12 +98,12 @@ fn default_depth_shares() -> u64 {
 impl Default for SimExecutionSection {
     fn default() -> Self {
         Self {
-            use_spread: true,
+            use_spread: false,
             spread_pct: 0.02,
-            enable_partial_fills: true,
+            enable_partial_fills: false,
             depth_multiple: 5.0,
             min_fill_pct: 0.5,
-            enable_market_impact: true,
+            enable_market_impact: false,
             impact_coefficient: 0.1,
             default_depth_shares: 500,
         }
@@ -209,18 +206,18 @@ record_market_updates_to = "tmp/sample.ndjson"
 [strategy]
 symbols = ["BTCUSDT", "ETHUSDT"]
 vol_floor = 0.001
-min_probability = 0.62
+min_probability = 0.55
 min_z_score = 0.35
 min_entry_price = 0.15
 max_entry_price = 0.85
 no_trade_zone_min = 0.45
 no_trade_zone_max = 0.55
-min_edge = 0.05
+min_edge = 0.02
 min_time_remaining_secs = 60
 max_time_remaining_secs = 300
-cooldown_secs = 60
+cooldown_secs = 15
 stake_usd = 25.0
-max_positions = 3
+max_positions = 30
 max_daily_trades = 1000
 
 [execution]
@@ -239,9 +236,9 @@ enable_market_impact = true
             Some(Path::new("tmp/sample.ndjson"))
         );
         assert_eq!(config.strategy.symbols, vec!["BTCUSDT", "ETHUSDT"]);
-        assert!((config.strategy.min_edge - 0.05).abs() < 1e-10);
+        assert!((config.strategy.min_edge - 0.02).abs() < 1e-10);
         assert_eq!(config.strategy.stake_usd, Decimal::new(25, 0));
-        assert_eq!(config.strategy.max_positions, 3);
+        assert_eq!(config.strategy.max_positions, 30);
     }
 
     #[test]
@@ -277,7 +274,7 @@ replay_market_updates_from = "captures/dryrun.ndjson"
     fn builds_sim_executor_config() {
         let config = FullConfig::from_toml(SAMPLE_TOML).unwrap();
         let sec = config.sim_executor_config();
-        assert!(sec.use_spread);
+        assert!(!sec.use_spread);
         assert!(sec.enable_market_impact);
     }
 
@@ -295,8 +292,8 @@ mode = "dryrun"
             config.strategy.symbols,
             vec!["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         );
-        assert!((config.strategy.min_edge - 0.05).abs() < 1e-10);
-        assert!(config.execution.use_spread);
+        assert!((config.strategy.min_edge - 0.02).abs() < 1e-10);
+        assert!(!config.execution.use_spread);
     }
 
     #[test]

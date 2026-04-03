@@ -88,18 +88,18 @@ async fn backtest_full_loop_produces_entry() {
     let config = DirectionalConfig {
         symbols: vec!["BTCUSDT".into()],
         vol_floor: 0.001,
-        min_probability: 0.62,
+        min_probability: 0.55,
         min_z_score: 0.35,
         min_entry_price: 0.15,
         max_entry_price: 0.85,
         no_trade_zone_min: 0.45,
         no_trade_zone_max: 0.55,
-        min_edge: 0.05,
+        min_edge: 0.02,
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
-        cooldown_secs: 60,
+        cooldown_secs: 15,
         stake_usd: dec!(25),
-        max_positions: 3,
+        max_positions: 30,
         max_daily_trades: 1000,
     };
 
@@ -152,12 +152,12 @@ mode = "backtest"
 
 [strategy]
 symbols = ["BTCUSDT"]
-min_edge = 0.05
+min_edge = 0.02
 min_time_remaining_secs = 60
 max_time_remaining_secs = 300
-cooldown_secs = 60
+cooldown_secs = 15
 stake_usd = 25.0
-max_positions = 3
+max_positions = 30
 max_daily_trades = 1000
 
 [execution]
@@ -188,18 +188,18 @@ async fn empty_feed_produces_zero_trades() {
     let config = DirectionalConfig {
         symbols: vec!["BTCUSDT".into()],
         vol_floor: 0.001,
-        min_probability: 0.62,
+        min_probability: 0.55,
         min_z_score: 0.35,
         min_entry_price: 0.15,
         max_entry_price: 0.85,
         no_trade_zone_min: 0.45,
         no_trade_zone_max: 0.55,
-        min_edge: 0.05,
+        min_edge: 0.02,
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
-        cooldown_secs: 60,
+        cooldown_secs: 15,
         stake_usd: dec!(25),
-        max_positions: 3,
+        max_positions: 30,
         max_daily_trades: 1000,
     };
 
@@ -226,18 +226,18 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
     let config = DirectionalConfig {
         symbols: vec!["BTCUSDT".into()],
         vol_floor: 0.001,
-        min_probability: 0.62,
+        min_probability: 0.55,
         min_z_score: 0.35,
         min_entry_price: 0.15,
         max_entry_price: 0.85,
         no_trade_zone_min: 0.45,
         no_trade_zone_max: 0.55,
-        min_edge: 0.05,
+        min_edge: 0.02,
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
-        cooldown_secs: 60,
+        cooldown_secs: 15,
         stake_usd: dec!(25),
-        max_positions: 3,
+        max_positions: 30,
         max_daily_trades: 1000,
     };
     let sim_config = SimulatedExecutorConfig {

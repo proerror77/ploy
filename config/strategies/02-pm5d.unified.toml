@@ -1,7 +1,7 @@
 # Unified pm_5m_directional config for StrategyRuntime
 # Same file drives backtest, dry-run, and live — change [runtime].mode only
 #
-# Params aligned to backtest report (2026-03-26): 696 trades, 67.1% WR, Sharpe 10.15
+# 5-gate pipeline: price validity → quote availability → price filter → probability → edge
 
 [runtime]
 mode = "backtest"       # "backtest" | "replay" | "dryrun" | "live"
@@ -15,8 +15,8 @@ symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "HYPEUSDT", "
 
 # Probability model
 vol_floor = 0.001
-min_probability = 0.62
-min_z_score = 0.35
+min_probability = 0.55
+min_z_score = 0.35      # deprecated — z-score gate removed
 
 # Price gates
 min_entry_price = 0.15
@@ -24,25 +24,26 @@ max_entry_price = 0.85
 no_trade_zone_min = 0.45
 no_trade_zone_max = 0.55
 
-# Edge threshold (5% = backtest entry_threshold)
-min_edge = 0.05
+# Edge threshold
+min_edge = 0.02
 
 # Timing gates
 min_time_remaining_secs = 60
 max_time_remaining_secs = 300
-cooldown_secs = 60
+cooldown_secs = 15
 
 # Position sizing
 stake_usd = 25.0
-max_positions = 3
+max_positions = 30
 max_daily_trades = 1000
 
 [execution]
 # Execution simulation (backtest + dry-run modes)
-use_spread = true
+# CLOB small orders: no synthetic spread, no market impact
+use_spread = false
 spread_pct = 0.02
-enable_partial_fills = true
+enable_partial_fills = false
 min_fill_pct = 0.5
-enable_market_impact = true
+enable_market_impact = false
 impact_coefficient = 0.1
 default_depth_shares = 500
