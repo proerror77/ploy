@@ -77,6 +77,7 @@ fn build_scenario() -> Vec<MarketUpdate> {
     updates.push(MarketUpdate::EventExpired {
         event_id: "evt-btc-001".into(),
         end_time: event_end,
+        resolved_up_won: None, // synthetic data — use spot fallback
     });
 
     updates

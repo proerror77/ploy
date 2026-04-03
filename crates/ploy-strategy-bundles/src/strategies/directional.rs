@@ -186,7 +186,6 @@ struct EventWindow {
     down_token: String,
     end_time: DateTime<Utc>,
     open_price: Option<Decimal>,
-    resolved_up_won: Option<bool>,
 }
 
 /// Cached Polymarket quote.
@@ -669,7 +668,7 @@ impl StrategyLogic for DirectionalStrategy {
                 end_time,
                 window_secs: _window_secs,
                 price_to_beat,
-                resolved_up_won,
+                resolved_up_won: _,
             } => {
                 // Use feed_time (last seen spot/quote timestamp) as "now" so that
                 // replay runs are deterministic and don't drop historical windows
@@ -700,17 +699,16 @@ impl StrategyLogic for DirectionalStrategy {
                     down_token: down_token.clone(),
                     end_time: *end_time,
                     open_price,
-                    resolved_up_won: *resolved_up_won,
                 });
                 vec![]
             }
 
-            MarketUpdate::EventExpired { event_id, end_time } => {
+            MarketUpdate::EventExpired { event_id, end_time, resolved_up_won: settlement } => {
                 // Settle positions: find any tokens from this event that we hold
                 let mut exits = Vec::new();
 
                 // Find the event's tokens before removing
-                let mut event_tokens: Vec<(String, String, Option<Decimal>, Option<bool>)> =
+                let mut event_tokens: Vec<(String, String, Option<Decimal>)> =
                     Vec::new();
                 for events in self.events.values() {
                     for ev in events {
@@ -719,16 +717,16 @@ impl StrategyLogic for DirectionalStrategy {
                                 ev.up_token.clone(),
                                 ev.down_token.clone(),
                                 ev.open_price,
-                                ev.resolved_up_won,
                             ));
                         }
                     }
                 }
 
-                for (up_token, down_token, open_price, resolved_up_won) in &event_tokens {
-                    // Determine outcome: did price go up or down?
-                    let up_won = if let Some(resolved_up_won) = resolved_up_won {
-                        *resolved_up_won
+                for (up_token, down_token, open_price) in &event_tokens {
+                    // Determine outcome: use settlement from EventExpired if available,
+                    // otherwise fall back to spot price comparison.
+                    let up_won = if let Some(resolved) = settlement {
+                        *resolved
                     } else {
                         // Fallback only when official settlement is unavailable.
                         let symbol = self
@@ -882,7 +880,6 @@ mod tests {
                     down_token: "dn1".into(),
                     end_time: e1_end,
                     open_price: Some(dec!(100000)),
-                    resolved_up_won: None,
                 },
                 EventWindow {
                     event_id: "e2".into(),
@@ -891,7 +888,6 @@ mod tests {
                     down_token: "dn2".into(),
                     end_time: e2_end,
                     open_price: Some(dec!(100000)),
-                    resolved_up_won: None,
                 },
             ],
         );
@@ -1103,7 +1099,6 @@ mod tests {
                 down_token: "dn1".into(),
                 end_time: now,
                 open_price: Some(dec!(100000)),
-                resolved_up_won: Some(false),
             }],
         );
         strat.token_symbol.insert("up1".into(), "BTCUSDT".into());
@@ -1132,6 +1127,8 @@ mod tests {
             &MarketUpdate::EventExpired {
                 event_id: "evt1".into(),
                 end_time: now,
+                // resolved_up_won: Some(false) means UP lost → DOWN token wins
+                resolved_up_won: Some(false),
             },
             &positions,
             &OrderLedger::default(),

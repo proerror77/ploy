@@ -144,7 +144,7 @@ where
                     StrategyDecision::Enter(intent) | StrategyDecision::Exit(intent) => {
                         let order_id = Uuid::new_v4().to_string();
 
-                        let report = self.executor.submit(&intent).await;
+                        let report = self.executor.submit(&intent, &order_id).await;
 
                         if report.rejected && report.fill.is_none() {
                             // Pure rejection — don't record the intent at all

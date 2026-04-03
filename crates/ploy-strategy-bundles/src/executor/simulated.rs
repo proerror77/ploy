@@ -172,8 +172,7 @@ impl SimulatedExecutor {
 
 #[async_trait]
 impl Executor for SimulatedExecutor {
-    async fn submit(&mut self, intent: &TradingIntent) -> ExecutionReport {
-        let order_id = Uuid::new_v4().to_string();
+    async fn submit(&mut self, intent: &TradingIntent, order_id: &str) -> ExecutionReport {
         let signal_price = intent.limit_price.unwrap_or(dec!(0.50));
         let synthetic_mid = intent.limit_price.is_none();
 
@@ -192,7 +191,7 @@ impl Executor for SimulatedExecutor {
 
         if filled_qty <= Decimal::ZERO {
             return ExecutionReport {
-                order_id,
+                order_id: order_id.to_string(),
                 fill: None,
                 rejected: true,
                 rejection_reason: Some("No liquidity".into()),
@@ -209,7 +208,7 @@ impl Executor for SimulatedExecutor {
 
         let fill = FillRecord {
             fill_id: Uuid::new_v4().to_string(),
-            order_id: order_id.clone(),
+            order_id: order_id.to_string(),
             token_id: intent.token_id.clone(),
             side: intent.side.clone(),
             quantity: filled_qty,
@@ -219,7 +218,7 @@ impl Executor for SimulatedExecutor {
         };
 
         ExecutionReport {
-            order_id,
+            order_id: order_id.to_string(),
             fill: Some(fill),
             rejected: false,
             rejection_reason: None,

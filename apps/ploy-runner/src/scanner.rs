@@ -88,6 +88,7 @@ pub fn spawn_market_scanner(
                 let _ = tx.send(MarketUpdate::EventExpired {
                     event_id: id.clone(),
                     end_time,
+                    resolved_up_won: None, // live mode: settlement arrives separately
                 });
                 tracked.remove(id);
             }

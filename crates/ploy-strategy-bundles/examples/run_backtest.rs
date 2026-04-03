@@ -1,18 +1,25 @@
 //! Runnable backtest example for pm_5m_directional.
 //!
-//! Usage:
+//! Usage (synthetic):
 //!   cargo run -p ploy-strategy-bundles --example run_backtest -- [config.toml]
 //!
-//! If no config is given, uses built-in defaults.
-//! Generates synthetic market data simulating 1 hour of BTC/ETH/SOL
-//! 5-minute binary option windows on Polymarket.
+//! Usage (database):
+//!   cargo run -p ploy-strategy-bundles --example run_backtest -- \
+//!     --config config/strategies/02-pm5d.unified.toml \
+//!     --db-url postgresql://... \
+//!     --start-date 2026-03-28 \
+//!     --end-date 2026-04-03
+//!
+//! If no --db-url is given, uses synthetic market data.
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use ploy_strategy_bundles::{
-    config::FullConfig, DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder,
-    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyRuntime,
+    config::FullConfig, feed::load_from_database, DirectionalStrategy, HistoricalFeed,
+    MarketUpdate, NullRecorder, RuntimeConfig, RuntimeMode, SimulatedExecutor,
+    SimulatedExecutorConfig, StrategyRuntime,
 };
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
+use sqlx::postgres::PgPoolOptions;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::BTreeMap;
@@ -138,6 +145,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
             updates.push(MarketUpdate::EventExpired {
                 event_id,
                 end_time: window_end,
+                resolved_up_won: None, // synthetic data — use spot fallback
             });
         }
     }
@@ -155,11 +163,24 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
     updates
 }
 
+/// Parse a named flag value from args: `--flag value`
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2)
+        .find(|w| w[0] == flag)
+        .map(|w| w[1].clone())
+}
+
 fn main() {
-    // Parse config from CLI arg or use defaults
+    // Parse CLI flags
     let args: Vec<String> = std::env::args().collect();
-    let (strategy_config, sim_config, runtime_config) = if args.len() > 1 {
-        let config = FullConfig::from_file(&args[1]).expect("Failed to parse config");
+    let config_path = flag_value(&args, "--config")
+        .or_else(|| args.get(1).filter(|a| !a.starts_with('-')).cloned());
+    let db_url = flag_value(&args, "--db-url");
+    let start_date = flag_value(&args, "--start-date");
+    let end_date = flag_value(&args, "--end-date");
+
+    let (strategy_config, sim_config, runtime_config) = if let Some(ref path) = config_path {
+        let config = FullConfig::from_file(path).expect("Failed to parse config");
         let sim = config.sim_executor_config();
         let rt = config.runtime_config();
         (config.strategy, sim, rt)
@@ -209,9 +230,42 @@ fn main() {
     );
     eprintln!();
 
-    // Generate synthetic data (1 hour, 3 symbols)
-    let data = generate_synthetic_data(&["BTCUSDT", "ETHUSDT", "SOLUSDT"], 60);
-    eprintln!("Generated {} market updates (1 hour synthetic)\n", data.len());
+    // Build tokio runtime for async DB loading
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    let data: Vec<MarketUpdate> = if let Some(ref url) = db_url {
+        let from = start_date.as_deref().unwrap_or("2026-03-28");
+        let to = end_date.as_deref().unwrap_or("2026-04-03");
+        let from_dt = Utc.from_utc_datetime(
+            &NaiveDate::parse_from_str(from, "%Y-%m-%d")
+                .expect("Invalid --start-date (use YYYY-MM-DD)")
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        );
+        let to_dt = Utc.from_utc_datetime(
+            &NaiveDate::parse_from_str(to, "%Y-%m-%d")
+                .expect("Invalid --end-date (use YYYY-MM-DD)")
+                .and_hms_opt(23, 59, 59)
+                .unwrap(),
+        );
+        eprintln!("Loading DB data: {} → {}", from, to);
+        let pool = rt.block_on(
+            PgPoolOptions::new().max_connections(5).connect(url)
+        ).expect("DB connection failed");
+        let symbols: Vec<String> = strategy_config.symbols.clone();
+        let updates = rt.block_on(
+            load_from_database(&pool, &symbols, from_dt, to_dt)
+        ).expect("Failed to load from database");
+        eprintln!("Loaded {} market updates from DB\n", updates.len());
+        updates
+    } else {
+        let updates = generate_synthetic_data(&["BTCUSDT", "ETHUSDT", "SOLUSDT"], 60);
+        eprintln!("Generated {} market updates (1 hour synthetic)\n", updates.len());
+        updates
+    };
 
     let strategy = DirectionalStrategy::new(strategy_config);
     let feed = HistoricalFeed::new(data);
@@ -219,12 +273,6 @@ fn main() {
     let recorder = Box::new(NullRecorder);
 
     let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
-
-    // Run synchronously via tokio
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
 
     let result = rt.block_on(runtime.run());
 

@@ -395,6 +395,8 @@ async fn load_events(
 
         let up_token = normalize_token_id(&up_token.unwrap_or_default());
         let down_token = normalize_token_id(&down_token.unwrap_or_default());
+
+        // Compute settlement outcome for EventExpired (NOT EventDiscovered — no lookahead).
         let resolved_up_won = match (
             settlement_prices
                 .get(&(event_id.clone(), up_token.clone()))
@@ -423,11 +425,18 @@ async fn load_events(
             end_time,
             window_secs,
             price_to_beat,
-            resolved_up_won,
+            // Never set resolved_up_won here — that would be lookahead bias.
+            // Settlement is only known after expiry; see EventExpired below.
+            resolved_up_won: None,
         });
 
-        // Generate EventExpired at end_time so positions settle in backtest
-        updates.push(MarketUpdate::EventExpired { event_id, end_time });
+        // EventExpired carries the settlement outcome so the strategy can settle
+        // positions correctly without having seen the result at discovery time.
+        updates.push(MarketUpdate::EventExpired {
+            event_id,
+            end_time,
+            resolved_up_won,
+        });
     }
 
     Ok(())

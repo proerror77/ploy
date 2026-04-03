@@ -44,7 +44,7 @@ impl CallbackExecutor {
 
 #[async_trait]
 impl Executor for CallbackExecutor {
-    async fn submit(&mut self, intent: &TradingIntent) -> ExecutionReport {
+    async fn submit(&mut self, intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
         (self.submit_fn)(intent.clone()).await
     }
 

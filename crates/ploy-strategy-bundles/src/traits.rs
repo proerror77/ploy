@@ -65,6 +65,10 @@ pub enum MarketUpdate {
         event_id: String,
         /// The event's end time, used for timeline sorting in historical feeds.
         end_time: DateTime<Utc>,
+        /// Official resolved outcome, populated only in historical replay after the fact.
+        /// `None` in live mode (settlement arrives via separate feed).
+        /// `Some(true)` means the UP token settled to 1.0.
+        resolved_up_won: Option<bool>,
     },
 
     /// CEX kline (candlestick) close.
@@ -120,7 +124,8 @@ pub struct ExecutionReport {
 #[async_trait]
 pub trait Executor: Send {
     /// Submit a trading intent and return the execution report.
-    async fn submit(&mut self, intent: &TradingIntent) -> ExecutionReport;
+    /// `order_id` is the caller-assigned ID that must be used in the returned fill.
+    async fn submit(&mut self, intent: &TradingIntent, order_id: &str) -> ExecutionReport;
 
     /// Cancel an active order. Returns true if cancellation succeeded.
     async fn cancel(&mut self, order_id: &str) -> bool;
