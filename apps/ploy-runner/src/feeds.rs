@@ -6,12 +6,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use futures::StreamExt;
 use ploy_strategy_bundles::MarketUpdate;
 use polymarket_client_sdk::rtds::Client as RtdsClient;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
+use sqlx::PgPool;
 use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -29,13 +30,20 @@ pub fn new_chainlink_cache() -> ChainlinkPriceCache {
 
 /// Spawn a task that subscribes to Binance spot prices via RTDS WebSocket
 /// and publishes `MarketUpdate::SpotPrice` events in real-time.
+///
+/// When `pool` is provided, each tick is also persisted to `binance_price_ticks`
+/// (deduplicated at second granularity) so that historical backtests can replay
+/// the same spot-price stream.
 pub fn spawn_spot_feed(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
     symbols: Vec<String>,
+    pool: Option<PgPool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut logged_spot_symbols = HashSet::new();
         let symbols_upper: Vec<String> = symbols.iter().map(|s| s.to_uppercase()).collect();
+        // Track last-persisted second per symbol to deduplicate high-frequency ticks.
+        let mut last_persisted: HashMap<String, DateTime<Utc>> = HashMap::new();
 
         info!(
             symbols = ?symbols_upper,
@@ -64,13 +72,14 @@ pub fn spawn_spot_feed(
                     let ts = DateTime::from_timestamp_millis(crypto_price.timestamp)
                         .unwrap_or_else(Utc::now);
 
+                    let symbol_upper = crypto_price.symbol.to_uppercase();
+
                     let update = MarketUpdate::SpotPrice {
-                        symbol: crypto_price.symbol.to_uppercase(),
+                        symbol: symbol_upper.clone(),
                         price: crypto_price.value,
                         ts,
                     };
 
-                    let symbol_upper = crypto_price.symbol.to_uppercase();
                     let receivers = tx.receiver_count();
 
                     match tx.send(update) {
@@ -91,6 +100,17 @@ pub fn spawn_spot_feed(
                                     receivers,
                                     "RTDS spot prices forwarded"
                                 );
+                            }
+
+                            // Persist to DB at most once per second per symbol.
+                            if let Some(ref db) = pool {
+                                // Truncate to second by zeroing sub-second component.
+                                let ts_sec = ts.with_nanosecond(0).unwrap_or(ts);
+                                let last = last_persisted.get(&symbol_upper).copied();
+                                if last.map_or(true, |l| ts_sec > l) {
+                                    last_persisted.insert(symbol_upper.clone(), ts_sec);
+                                    persist_spot_price(db, &symbol_upper, crypto_price.value, ts).await;
+                                }
                             }
                         }
                         Err(_) => {
@@ -118,9 +138,13 @@ pub fn spawn_spot_feed(
 ///
 /// REST polling is more reliable than WS for the 5-min window lifecycle.
 /// Polls every 5 seconds per token batch.
+///
+/// When `pool` is provided, each non-empty quote is also persisted to
+/// `clob_quote_ticks` so that historical backtests can replay the same data.
 pub fn spawn_quote_feed(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
     token_ids: Vec<U256>,
+    pool: Option<PgPool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let http = reqwest::Client::new();
@@ -133,10 +157,7 @@ pub fn spawn_quote_feed(
         loop {
             for token in &token_ids {
                 let token_str = token.to_string();
-                let url = format!(
-                    "https://clob.polymarket.com/book?token_id={}",
-                    token_str
-                );
+                let url = format!("https://clob.polymarket.com/book?token_id={}", token_str);
 
                 match http.get(&url).send().await {
                     Ok(resp) => {
@@ -154,11 +175,12 @@ pub fn spawn_quote_feed(
                                 .and_then(|p| p.parse::<Decimal>().ok());
 
                             if bid.is_some() || ask.is_some() {
+                                let now = Utc::now();
                                 let update = MarketUpdate::Quote {
                                     token_id: token_str.clone(),
                                     bid,
                                     ask,
-                                    ts: Utc::now(),
+                                    ts: now,
                                 };
                                 if tx.send(update).is_err() {
                                     warn!(
@@ -167,6 +189,12 @@ pub fn spawn_quote_feed(
                                     );
                                     return;
                                 }
+
+                                // Persist to DB for backtest replay.
+                                if let Some(ref db) = pool {
+                                    persist_quote(db, &token_str, bid, ask, now).await;
+                                }
+
                                 quoted_tokens += 1;
                                 if logged_quote_tokens.insert(token_str.clone()) {
                                     info!(
@@ -255,10 +283,8 @@ pub fn spawn_chainlink_feed(
                     // Store in cache for scanner to use
                     {
                         let mut cache_guard = cache.write().await;
-                        cache_guard.insert(
-                            chainlink_price.symbol.clone(),
-                            (chainlink_price.value, ts),
-                        );
+                        cache_guard
+                            .insert(chainlink_price.symbol.clone(), (chainlink_price.value, ts));
                     }
 
                     let receivers = tx.receiver_count();
@@ -290,4 +316,58 @@ pub fn spawn_chainlink_feed(
 
         info!("RTDS Chainlink price feed ended");
     })
+}
+
+/// Persist a spot price tick to `binance_price_ticks` for backtest replay.
+/// Called at most once per second per symbol (throttled in spawn_spot_feed).
+async fn persist_spot_price(
+    pool: &PgPool,
+    symbol: &str,
+    price: Decimal,
+    trade_time: DateTime<Utc>,
+) {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO binance_price_ticks (symbol, price, trade_time, received_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(symbol)
+    .bind(price)
+    .bind(trade_time)
+    .execute(pool)
+    .await;
+
+    if let Err(e) = result {
+        debug!(symbol, error = %e, "Failed to persist spot price tick");
+    }
+}
+
+/// Persist a quote tick to `clob_quote_ticks` for backtest replay.
+/// Deduplicates at second granularity via the unique index added in migration 023.
+async fn persist_quote(
+    pool: &PgPool,
+    token_id: &str,
+    bid: Option<Decimal>,
+    ask: Option<Decimal>,
+    received_at: DateTime<Utc>,
+) {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO clob_quote_ticks (token_id, best_bid, best_ask, received_at, source)
+        VALUES ($1, $2, $3, $4, 'ploy_runner_live')
+        ON CONFLICT (token_id, date_trunc('second', received_at)) DO NOTHING
+        "#,
+    )
+    .bind(token_id)
+    .bind(bid)
+    .bind(ask)
+    .bind(received_at)
+    .execute(pool)
+    .await;
+
+    if let Err(e) = result {
+        debug!(token_id, error = %e, "Failed to persist quote tick");
+    }
 }

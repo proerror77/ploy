@@ -1,0 +1,299 @@
+//! Canonical market-update recording and replay feeds.
+//!
+//! `RecordingFeed` wraps any other feed and appends each `MarketUpdate` to an
+//! NDJSON log. `RecordedFeed` replays the exact same update sequence back into
+//! the strategy runtime.
+
+use std::collections::VecDeque;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use tracing::{error, info, warn};
+
+use crate::traits::{Feed, MarketUpdate};
+
+const FLUSH_EVERY_RECORDS: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordedMarketUpdate {
+    pub sequence: u64,
+    pub recorded_at: DateTime<Utc>,
+    pub update: MarketUpdate,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RecordedFeedError {
+    #[error("failed to open market-update log {path}: {source}")]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to read market-update log {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("invalid market-update log line {line} in {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        line: usize,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+struct MarketUpdateLogWriter {
+    path: PathBuf,
+    writer: BufWriter<File>,
+    next_sequence: u64,
+    pending_records: usize,
+}
+
+impl MarketUpdateLogWriter {
+    fn create(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
+        // If the path already exists, rotate it with a timestamp suffix so the
+        // previous session's recording is never silently destroyed.
+        let path = if path.exists() {
+            let ts = Utc::now().format("%Y%m%dT%H%M%S");
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("recording");
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("ndjson");
+            let rotated = path.with_file_name(format!("{stem}.{ts}.{ext}"));
+            warn!(
+                original = %path.display(),
+                rotated = %rotated.display(),
+                "Recording path already exists — rotating previous file to avoid data loss",
+            );
+            fs::rename(&path, &rotated)?;
+            path
+        } else {
+            path
+        };
+
+        let file = File::create(&path)?;
+        info!(path = %path.display(), "Recording market updates to NDJSON log");
+
+        Ok(Self {
+            path,
+            writer: BufWriter::new(file),
+            next_sequence: 0,
+            pending_records: 0,
+        })
+    }
+
+    fn append(&mut self, update: &MarketUpdate) -> io::Result<()> {
+        let record = RecordedMarketUpdate {
+            sequence: self.next_sequence,
+            recorded_at: Utc::now(),
+            update: update.clone(),
+        };
+        self.next_sequence += 1;
+
+        serde_json::to_writer(&mut self.writer, &record).map_err(io::Error::other)?;
+        self.writer.write_all(b"\n")?;
+        self.pending_records += 1;
+
+        let is_lifecycle = matches!(
+            update,
+            MarketUpdate::EventDiscovered { .. } | MarketUpdate::EventExpired { .. }
+        );
+
+        if self.pending_records >= FLUSH_EVERY_RECORDS || is_lifecycle {
+            self.flush()?;
+        }
+
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()?;
+        self.pending_records = 0;
+        Ok(())
+    }
+}
+
+impl Drop for MarketUpdateLogWriter {
+    fn drop(&mut self) {
+        if let Err(error) = self.flush() {
+            warn!(
+                path = %self.path.display(),
+                error = %error,
+                "Failed to flush market-update log on drop",
+            );
+        }
+    }
+}
+
+/// Wraps a feed and records each emitted update to an NDJSON log.
+pub struct RecordingFeed<F> {
+    inner: F,
+    writer: Option<MarketUpdateLogWriter>,
+}
+
+impl<F> RecordingFeed<F> {
+    pub fn new(inner: F, path: impl AsRef<Path>) -> io::Result<Self> {
+        Ok(Self {
+            inner,
+            writer: Some(MarketUpdateLogWriter::create(path)?),
+        })
+    }
+}
+
+#[async_trait]
+impl<F> Feed for RecordingFeed<F>
+where
+    F: Feed,
+{
+    async fn next(&mut self) -> Option<MarketUpdate> {
+        let update = self.inner.next().await?;
+
+        if let Some(writer) = self.writer.as_mut() {
+            if let Err(error) = writer.append(&update) {
+                error!(
+                    path = %writer.path.display(),
+                    error = %error,
+                    "Market-update recording failed; disabling recorder for the rest of the run",
+                );
+                self.writer = None;
+            }
+        }
+
+        Some(update)
+    }
+}
+
+/// Feed that replays a previously recorded market-update log in file order.
+pub struct RecordedFeed {
+    updates: VecDeque<MarketUpdate>,
+}
+
+impl RecordedFeed {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, RecordedFeedError> {
+        let path = path.as_ref().to_path_buf();
+        let file = File::open(&path).map_err(|source| RecordedFeedError::Open {
+            path: path.clone(),
+            source,
+        })?;
+        let reader = BufReader::new(file);
+        let mut updates = VecDeque::new();
+
+        for (idx, line) in reader.lines().enumerate() {
+            let line = line.map_err(|source| RecordedFeedError::Read {
+                path: path.clone(),
+                source,
+            })?;
+
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let record = serde_json::from_str::<RecordedMarketUpdate>(&line).map_err(|source| {
+                RecordedFeedError::Parse {
+                    path: path.clone(),
+                    line: idx + 1,
+                    source,
+                }
+            })?;
+            updates.push_back(record.update);
+        }
+
+        info!(
+            path = %path.display(),
+            updates = updates.len(),
+            "Loaded recorded market-update log",
+        );
+
+        Ok(Self { updates })
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.updates.len()
+    }
+}
+
+#[async_trait]
+impl Feed for RecordedFeed {
+    async fn next(&mut self) -> Option<MarketUpdate> {
+        self.updates.pop_front()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use rust_decimal_macros::dec;
+
+    fn temp_log_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("ploy-{name}-{}.ndjson", uuid::Uuid::new_v4()));
+        path
+    }
+
+    #[tokio::test]
+    async fn recording_feed_round_trips_updates() {
+        let now = Utc::now();
+        let updates = vec![
+            MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            },
+            MarketUpdate::EventDiscovered {
+                event_id: "evt-1".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up-1".into(),
+                down_token: "down-1".into(),
+                end_time: now + Duration::minutes(5),
+                window_secs: 300,
+                price_to_beat: Some(dec!(100000)),
+                resolved_up_won: Some(true),
+            },
+            MarketUpdate::Quote {
+                token_id: "up-1".into(),
+                bid: Some(dec!(0.39)),
+                ask: Some(dec!(0.40)),
+                ts: now + Duration::seconds(1),
+            },
+        ];
+
+        let path = temp_log_path("recording-feed-round-trip");
+        let mut feed =
+            RecordingFeed::new(crate::HistoricalFeed::new(updates.clone()), &path).unwrap();
+
+        let mut recorded = Vec::new();
+        while let Some(update) = feed.next().await {
+            recorded.push(update);
+        }
+        drop(feed);
+
+        let mut replay = RecordedFeed::from_path(&path).unwrap();
+        let mut replayed = Vec::new();
+        while let Some(update) = replay.next().await {
+            replayed.push(update);
+        }
+
+        assert_eq!(recorded, updates);
+        assert_eq!(replayed, updates);
+
+        let _ = fs::remove_file(path);
+    }
+}

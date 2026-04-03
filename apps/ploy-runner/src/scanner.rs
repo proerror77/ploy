@@ -7,12 +7,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use ploy_strategy_bundles::MarketUpdate;
-use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::gamma::types::request::MarketsRequest;
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
+use sqlx::PgPool;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -58,10 +59,14 @@ struct TrackedEvent {
 ///
 /// Uses the Chainlink price cache to populate price_to_beat with the most
 /// recent Chainlink price for each symbol.
+///
+/// When `pool` is provided, newly discovered markets are upserted into
+/// `pm_market_metadata` so that historical backtests can replay the same data.
 pub fn spawn_market_scanner(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
     chainlink_cache: ChainlinkPriceCache,
     symbols: Vec<String>,
+    pool: Option<PgPool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let client = GammaClient::default();
@@ -138,16 +143,18 @@ pub fn spawn_market_scanner(
                         // threshold and should not enter the runtime.
                         let price_to_beat = {
                             // Convert BTCUSDT -> btc/usd for Chainlink lookup
-                            let chainlink_symbol = symbol
-                                .trim_end_matches("USDT")
-                                .to_lowercase()
-                                + "/usd";
+                            let chainlink_symbol =
+                                symbol.trim_end_matches("USDT").to_lowercase() + "/usd";
 
                             let cache_guard = chainlink_cache.read().await;
                             cache_guard
                                 .get(&chainlink_symbol)
                                 .map(|(price, _ts)| *price)
-                                .or_else(|| usable_metadata_threshold(market.group_item_threshold.as_deref()))
+                                .or_else(|| {
+                                    usable_metadata_threshold(
+                                        market.group_item_threshold.as_deref(),
+                                    )
+                                })
                         };
 
                         // Collect new tokens for quote subscription
@@ -158,21 +165,32 @@ pub fn spawn_market_scanner(
                             new_tokens.push(token_ids[1]);
                         }
 
-                        tracked.insert(
-                            market_id.clone(),
-                            TrackedEvent { end_time },
-                        );
+                        tracked.insert(market_id.clone(), TrackedEvent { end_time });
 
                         let _ = tx.send(MarketUpdate::EventDiscovered {
                             event_id: market_id.clone(),
-                            symbol,
-                            up_token,
-                            down_token,
+                            symbol: symbol.clone(),
+                            up_token: up_token.clone(),
+                            down_token: down_token.clone(),
                             end_time,
                             window_secs,
                             price_to_beat,
                             resolved_up_won: None,
                         });
+
+                        // Persist to DB so backtest can replay the same data.
+                        if let Some(ref db) = pool {
+                            upsert_market_metadata(
+                                db,
+                                &market_id,
+                                &symbol,
+                                &up_token,
+                                &down_token,
+                                end_time,
+                                price_to_beat,
+                            )
+                            .await;
+                        }
                     }
 
                     // Spawn a new quote feed for newly discovered tokens
@@ -182,7 +200,7 @@ pub fn spawn_market_scanner(
                             total_tracked = tracked.len(),
                             "Discovered new markets, subscribing to quotes",
                         );
-                        let handle = spawn_quote_feed(tx.clone(), new_tokens);
+                        let handle = spawn_quote_feed(tx.clone(), new_tokens, pool.clone());
                         quote_handles.push(handle);
                     } else {
                         debug!(tracked = tracked.len(), "Scanner poll: no new markets");
@@ -211,6 +229,57 @@ mod tests {
     fn usable_metadata_threshold_rejects_relative_zero_threshold() {
         assert_eq!(usable_metadata_threshold(Some("0")), None);
         assert_eq!(usable_metadata_threshold(Some("0.5")), None);
-        assert_eq!(usable_metadata_threshold(Some("123.45")), Some(dec!(123.45)));
+        assert_eq!(
+            usable_metadata_threshold(Some("123.45")),
+            Some(dec!(123.45))
+        );
+    }
+}
+
+/// Upsert a discovered market into `pm_market_metadata` so that historical
+/// backtests can replay the same event stream.
+///
+/// Uses `ON CONFLICT (market_slug) DO UPDATE` so that `price_to_beat` can be
+/// refreshed if Chainlink provides a better value on a later scan.
+async fn upsert_market_metadata(
+    pool: &PgPool,
+    market_slug: &str,
+    symbol: &str,
+    up_token: &str,
+    down_token: &str,
+    end_time: DateTime<Utc>,
+    price_to_beat: Option<Decimal>,
+) {
+    // Build a minimal raw_market JSON that load_from_database can parse.
+    let raw_market = serde_json::json!({
+        "markets": [{
+            "clobTokenIds": serde_json::json!([up_token, down_token]).to_string()
+        }]
+    });
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO pm_market_metadata (
+            market_slug, symbol, start_time, end_time, price_to_beat, raw_market
+        ) VALUES ($1, $2, NOW(), $3, $4, $5)
+        ON CONFLICT (market_slug) DO UPDATE
+            SET price_to_beat = COALESCE($4, pm_market_metadata.price_to_beat),
+                end_time      = EXCLUDED.end_time
+        "#,
+    )
+    .bind(market_slug)
+    .bind(symbol)
+    .bind(end_time)
+    .bind(price_to_beat)
+    .bind(raw_market)
+    .execute(pool)
+    .await;
+
+    if let Err(e) = result {
+        warn!(
+            market_slug,
+            error = %e,
+            "Failed to upsert market metadata"
+        );
     }
 }

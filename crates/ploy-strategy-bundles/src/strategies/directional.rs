@@ -115,29 +115,59 @@ pub struct DirectionalConfig {
     pub cooldown_secs: u64,
 
     // Sizing
-    #[serde(default = "default_quantity")]
-    pub quantity: Decimal,
+    #[serde(default = "default_stake_usd", alias = "quantity")]
+    pub stake_usd: Decimal,
     #[serde(default = "default_max_positions")]
     pub max_positions: usize,
     #[serde(default = "default_max_daily_trades")]
     pub max_daily_trades: u32,
 }
 
-fn default_symbols() -> Vec<String> { vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()] }
-fn default_vol_floor() -> f64 { 0.001 }
-fn default_min_probability() -> f64 { 0.62 }
-fn default_min_z_score() -> f64 { 0.35 }
-fn default_min_entry_price() -> f64 { 0.15 }
-fn default_max_entry_price() -> f64 { 0.85 }
-fn default_no_trade_min() -> f64 { 0.45 }
-fn default_no_trade_max() -> f64 { 0.55 }
-fn default_min_edge() -> f64 { 0.05 }
-fn default_min_time() -> u64 { 60 }
-fn default_max_time() -> u64 { 300 }
-fn default_cooldown() -> u64 { 60 }
-fn default_quantity() -> Decimal { dec!(25) }
-fn default_max_positions() -> usize { 3 }
-fn default_max_daily_trades() -> u32 { 1000 }
+fn default_symbols() -> Vec<String> {
+    vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()]
+}
+fn default_vol_floor() -> f64 {
+    0.001
+}
+fn default_min_probability() -> f64 {
+    0.62
+}
+fn default_min_z_score() -> f64 {
+    0.35
+}
+fn default_min_entry_price() -> f64 {
+    0.15
+}
+fn default_max_entry_price() -> f64 {
+    0.85
+}
+fn default_no_trade_min() -> f64 {
+    0.45
+}
+fn default_no_trade_max() -> f64 {
+    0.55
+}
+fn default_min_edge() -> f64 {
+    0.05
+}
+fn default_min_time() -> u64 {
+    60
+}
+fn default_max_time() -> u64 {
+    300
+}
+fn default_cooldown() -> u64 {
+    60
+}
+fn default_stake_usd() -> Decimal {
+    dec!(25)
+}
+fn default_max_positions() -> usize {
+    3
+}
+fn default_max_daily_trades() -> u32 {
+    1000
+}
 
 // ── Internal State ───────────────────────────────────────
 
@@ -185,6 +215,9 @@ pub struct DirectionalStrategy {
     last_trade_date: Option<chrono::NaiveDate>,
     // Token → symbol mapping
     token_symbol: HashMap<String, String>,
+    /// Most recent feed timestamp seen across all updates.
+    /// Used instead of Utc::now() so replay runs are deterministic.
+    feed_time: Option<DateTime<Utc>>,
 }
 
 impl DirectionalStrategy {
@@ -199,12 +232,15 @@ impl DirectionalStrategy {
             daily_trades: 0,
             last_trade_date: None,
             token_symbol: HashMap::new(),
+            feed_time: None,
         }
     }
 
     /// Pick the nearest event within the valid time window.
     fn pick_event(&self, symbol: &str, now: DateTime<Utc>) -> Option<EventWindow> {
-        self.events.get(symbol)?.iter()
+        self.events
+            .get(symbol)?
+            .iter()
             .filter(|e| {
                 let rem = (e.end_time - now).num_seconds();
                 rem >= self.config.min_time_remaining_secs as i64
@@ -269,11 +305,22 @@ impl DirectionalStrategy {
     fn sigma_horizon(&self, symbol: &str, time_remaining_secs: f64) -> f64 {
         let secs = time_remaining_secs.max(1.0);
         let floor = self.floor_var_per_sec();
-        let realized = self.volatility
+        let realized = self
+            .volatility
             .get(symbol)
             .map(|state| state.ewma_var_per_sec)
             .unwrap_or(floor);
         (realized.max(floor) * secs).sqrt()
+    }
+
+    fn shares_for_entry_price(&self, entry_price: Decimal) -> Decimal {
+        if entry_price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        // Keep a stable venue-facing share quantity while preserving the
+        // fixed-dollar stake semantics configured at strategy level.
+        (self.config.stake_usd / entry_price).round_dp(6)
     }
 
     /// Core signal evaluation — the unified 8-gate pipeline.
@@ -402,7 +449,11 @@ impl DirectionalStrategy {
         }
 
         // Gate 7: Probability threshold
-        let effective_p = if direction == Direction::Up { p_hat } else { 1.0 - p_hat };
+        let effective_p = if direction == Direction::Up {
+            p_hat
+        } else {
+            1.0 - p_hat
+        };
         if effective_p < self.config.min_probability {
             debug!(
                 symbol,
@@ -449,15 +500,19 @@ impl DirectionalStrategy {
 
         TradingIntent {
             intent_id: format!(
-                "pm5d_{}_{}_{}", event.symbol,
-                match direction { Direction::Up => "UP", Direction::Down => "DN" },
+                "pm5d_{}_{}_{}",
+                event.symbol,
+                match direction {
+                    Direction::Up => "UP",
+                    Direction::Down => "DN",
+                },
                 now.timestamp_millis(),
             ),
             deployment_id: String::new(), // filled by runtime
             market_id: event.event_id.clone(),
             token_id,
             side: TradeSide::Buy,
-            quantity: self.config.quantity,
+            quantity: self.shares_for_entry_price(entry_price),
             limit_price: Some(entry_price),
             purpose: IntentPurpose::Entry,
             created_at: now,
@@ -474,7 +529,12 @@ impl DirectionalStrategy {
         // Position count check
         let open_count = positions.positions().count();
         if open_count >= self.config.max_positions {
-            debug!(symbol, open_count, max = self.config.max_positions, "Max positions reached");
+            debug!(
+                symbol,
+                open_count,
+                max = self.config.max_positions,
+                "Max positions reached"
+            );
             return vec![];
         }
 
@@ -493,11 +553,14 @@ impl DirectionalStrategy {
                 // Log why no event was picked
                 if let Some(events) = self.events.get(symbol) {
                     let total = events.len();
-                    let in_window = events.iter().filter(|e| {
-                        let rem = (e.end_time - now).num_seconds();
-                        rem >= self.config.min_time_remaining_secs as i64
-                            && rem <= self.config.max_time_remaining_secs as i64
-                    }).count();
+                    let in_window = events
+                        .iter()
+                        .filter(|e| {
+                            let rem = (e.end_time - now).num_seconds();
+                            rem >= self.config.min_time_remaining_secs as i64
+                                && rem <= self.config.max_time_remaining_secs as i64
+                        })
+                        .count();
                     debug!(
                         symbol,
                         total_events = total,
@@ -553,8 +616,19 @@ impl StrategyLogic for DirectionalStrategy {
                     return vec![];
                 }
 
+                // Advance feed clock so EventDiscovered pruning is deterministic in replay.
+                if self.feed_time.map_or(true, |ft| *ts > ft) {
+                    self.feed_time = Some(*ts);
+                }
+
                 self.update_volatility(symbol, *price, *ts);
-                self.spot.insert(symbol.clone(), SpotState { price: *price, ts: *ts });
+                self.spot.insert(
+                    symbol.clone(),
+                    SpotState {
+                        price: *price,
+                        ts: *ts,
+                    },
+                );
                 if let Some(events) = self.events.get_mut(symbol) {
                     for event in events.iter_mut() {
                         if event.open_price.is_none() {
@@ -574,11 +648,16 @@ impl StrategyLogic for DirectionalStrategy {
                 self.try_entry(symbol, positions, *ts)
             }
 
-            MarketUpdate::Quote { token_id, bid, ask, .. } => {
-                self.quotes.insert(token_id.clone(), QuoteState {
-                    _bid: *bid,
-                    ask: *ask,
-                });
+            MarketUpdate::Quote {
+                token_id, bid, ask, ..
+            } => {
+                self.quotes.insert(
+                    token_id.clone(),
+                    QuoteState {
+                        _bid: *bid,
+                        ask: *ask,
+                    },
+                );
                 vec![]
             }
 
@@ -592,8 +671,14 @@ impl StrategyLogic for DirectionalStrategy {
                 price_to_beat,
                 resolved_up_won,
             } => {
-                // Use the most recent spot price timestamp as "now" for backtest compatibility
-                let now = self.spot.get(symbol).map(|s| s.ts).unwrap_or_else(Utc::now);
+                // Use feed_time (last seen spot/quote timestamp) as "now" so that
+                // replay runs are deterministic and don't drop historical windows
+                // that arrived before the first spot tick.
+                // Fall back to the event's own end_time only when no feed time is
+                // known yet — this keeps the window alive until spot data arrives.
+                let now = self
+                    .feed_time
+                    .unwrap_or_else(|| *end_time - chrono::Duration::seconds(1));
                 let events = self.events.entry(symbol.clone()).or_default();
                 // Prune expired
                 events.retain(|e| e.end_time > now);
@@ -602,8 +687,7 @@ impl StrategyLogic for DirectionalStrategy {
                     return vec![];
                 }
                 // Use price_to_beat if available, otherwise fallback to current spot
-                let open_price = price_to_beat
-                    .or_else(|| self.spot.get(symbol).map(|s| s.price));
+                let open_price = price_to_beat.or_else(|| self.spot.get(symbol).map(|s| s.price));
 
                 // Track token → symbol mapping
                 self.token_symbol.insert(up_token.clone(), symbol.clone());
@@ -626,7 +710,8 @@ impl StrategyLogic for DirectionalStrategy {
                 let mut exits = Vec::new();
 
                 // Find the event's tokens before removing
-                let mut event_tokens: Vec<(String, String, Option<Decimal>, Option<bool>)> = Vec::new();
+                let mut event_tokens: Vec<(String, String, Option<Decimal>, Option<bool>)> =
+                    Vec::new();
                 for events in self.events.values() {
                     for ev in events {
                         if ev.event_id == *event_id {
@@ -646,7 +731,9 @@ impl StrategyLogic for DirectionalStrategy {
                         *resolved_up_won
                     } else {
                         // Fallback only when official settlement is unavailable.
-                        let symbol = self.token_symbol.get(up_token)
+                        let symbol = self
+                            .token_symbol
+                            .get(up_token)
                             .or_else(|| self.token_symbol.get(down_token));
                         let spot = symbol.and_then(|s| self.spot.get(s)).map(|s| s.price);
                         match (spot, open_price) {
@@ -750,7 +837,7 @@ mod tests {
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
             cooldown_secs: 60,
-            quantity: dec!(25),
+            stake_usd: dec!(25),
             max_positions: 3,
             max_daily_trades: 1000,
         }
@@ -785,18 +872,29 @@ mod tests {
         let e1_end = now + chrono::Duration::seconds(120);
         let e2_end = now + chrono::Duration::seconds(240);
 
-        strat.events.insert("BTCUSDT".into(), vec![
-            EventWindow {
-                event_id: "e1".into(), symbol: "BTCUSDT".into(),
-                up_token: "up1".into(), down_token: "dn1".into(),
-                end_time: e1_end, open_price: Some(dec!(100000)), resolved_up_won: None,
-            },
-            EventWindow {
-                event_id: "e2".into(), symbol: "BTCUSDT".into(),
-                up_token: "up2".into(), down_token: "dn2".into(),
-                end_time: e2_end, open_price: Some(dec!(100000)), resolved_up_won: None,
-            },
-        ]);
+        strat.events.insert(
+            "BTCUSDT".into(),
+            vec![
+                EventWindow {
+                    event_id: "e1".into(),
+                    symbol: "BTCUSDT".into(),
+                    up_token: "up1".into(),
+                    down_token: "dn1".into(),
+                    end_time: e1_end,
+                    open_price: Some(dec!(100000)),
+                    resolved_up_won: None,
+                },
+                EventWindow {
+                    event_id: "e2".into(),
+                    symbol: "BTCUSDT".into(),
+                    up_token: "up2".into(),
+                    down_token: "dn2".into(),
+                    end_time: e2_end,
+                    open_price: Some(dec!(100000)),
+                    resolved_up_won: None,
+                },
+            ],
+        );
 
         let picked = strat.pick_event("BTCUSDT", now).unwrap();
         assert_eq!(picked.event_id, "e1"); // nearer one
@@ -858,7 +956,13 @@ mod tests {
         );
 
         // 2. Set initial spot (becomes open_price via event)
-        strat.spot.insert("BTCUSDT".into(), SpotState { price: dec!(100000), ts: now });
+        strat.spot.insert(
+            "BTCUSDT".into(),
+            SpotState {
+                price: dec!(100000),
+                ts: now,
+            },
+        );
         // Manually set open_price since event was registered before spot
         strat.events.get_mut("BTCUSDT").unwrap()[0].open_price = Some(dec!(100000));
 
@@ -900,7 +1004,7 @@ mod tests {
             StrategyDecision::Enter(intent) => {
                 assert_eq!(intent.token_id, "up1");
                 assert_eq!(intent.side, TradeSide::Buy);
-                assert_eq!(intent.quantity, dec!(25));
+                assert_eq!(intent.quantity, dec!(83.333333));
             }
             other => panic!("Expected Enter, got {:?}", other),
         }
@@ -930,8 +1034,7 @@ mod tests {
         );
 
         assert_eq!(
-            strat.events["BTCUSDT"][0].open_price,
-            None,
+            strat.events["BTCUSDT"][0].open_price, None,
             "precondition: event arrived before first spot"
         );
 
@@ -991,21 +1094,27 @@ mod tests {
         let mut strat = DirectionalStrategy::new(config);
         let now = Utc::now();
 
-        strat.events.insert("BTCUSDT".into(), vec![EventWindow {
-            event_id: "evt1".into(),
-            symbol: "BTCUSDT".into(),
-            up_token: "up1".into(),
-            down_token: "dn1".into(),
-            end_time: now,
-            open_price: Some(dec!(100000)),
-            resolved_up_won: Some(false),
-        }]);
+        strat.events.insert(
+            "BTCUSDT".into(),
+            vec![EventWindow {
+                event_id: "evt1".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up1".into(),
+                down_token: "dn1".into(),
+                end_time: now,
+                open_price: Some(dec!(100000)),
+                resolved_up_won: Some(false),
+            }],
+        );
         strat.token_symbol.insert("up1".into(), "BTCUSDT".into());
         strat.token_symbol.insert("dn1".into(), "BTCUSDT".into());
-        strat.spot.insert("BTCUSDT".into(), SpotState {
-            price: dec!(101000),
-            ts: now,
-        });
+        strat.spot.insert(
+            "BTCUSDT".into(),
+            SpotState {
+                price: dec!(101000),
+                ts: now,
+            },
+        );
 
         let mut positions = PositionLedger::default();
         positions.apply_fill(&FillRecord {

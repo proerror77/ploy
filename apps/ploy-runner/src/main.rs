@@ -2,19 +2,22 @@ mod collector;
 mod feeds;
 mod scanner;
 
+use std::collections::BTreeMap;
 use std::env;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use ploy_strategy_bundles::{
-    CallbackExecutor, DirectionalStrategy, ExecutionReport, FullConfig, HistoricalFeed, LiveFeed,
-    NullRecorder, RuntimeMode, SimulatedExecutor, StrategyRuntime,
-};
 use ploy_strategy_bundles::feed::load_from_database;
+use ploy_strategy_bundles::{
+    CallbackExecutor, DirectionalStrategy, ExecutionReport, Feed, FullConfig, HistoricalFeed,
+    LiveFeed, NullRecorder, RecordedFeed, RecordingFeed, RuntimeMode, SimulatedExecutor,
+    StrategyRuntime,
+};
 use ploy_trading::TradingIntent;
+use rust_decimal::Decimal;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::broadcast;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use collector::{CollectorConfig, QuoteCollector};
 use feeds::{new_chainlink_cache, spawn_chainlink_feed, spawn_spot_feed};
@@ -67,12 +70,18 @@ async fn check_database(db_url: &str) -> Result<(), Box<dyn std::error::Error>> 
         .fetch_one(&pool)
         .await?;
 
-        println!("Table '{}': {}", table, if exists { "EXISTS" } else { "MISSING" });
+        println!(
+            "Table '{}': {}",
+            table,
+            if exists { "EXISTS" } else { "MISSING" }
+        );
     }
 
     println!("\n=== Data Range Analysis ===\n");
 
-    let symbols = vec!["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "HYPEUSDT", "BNBUSDT"];
+    let symbols = vec![
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "HYPEUSDT", "BNBUSDT",
+    ];
 
     // Check binance_price_ticks
     println!("--- binance_price_ticks ---");
@@ -85,44 +94,57 @@ async fn check_database(db_url: &str) -> Result<(), Box<dyn std::error::Error>> 
         .await?;
 
         if let Some((count, min_ts, max_ts)) = result {
-            println!("  {}: {} rows, {} to {}",
+            println!(
+                "  {}: {} rows, {} to {}",
                 symbol,
                 count,
-                min_ts.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "N/A".to_string()),
-                max_ts.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "N/A".to_string())
+                min_ts
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "N/A".to_string()),
+                max_ts
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "N/A".to_string())
             );
         }
     }
 
     // Check clob_quote_ticks
     println!("\n--- clob_quote_ticks ---");
-    let result: Option<(i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM clob_quote_ticks"
-    )
-    .fetch_optional(&pool)
-    .await?;
+    let result: Option<(i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> =
+        sqlx::query_as("SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM clob_quote_ticks")
+            .fetch_optional(&pool)
+            .await?;
 
     if let Some((count, min_ts, max_ts)) = result {
-        println!("  Total: {} rows, {} to {}",
+        println!(
+            "  Total: {} rows, {} to {}",
             count,
-            min_ts.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "N/A".to_string()),
-            max_ts.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "N/A".to_string())
+            min_ts
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "N/A".to_string()),
+            max_ts
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "N/A".to_string())
         );
     }
 
     // Check pm_market_metadata
     println!("\n--- pm_market_metadata ---");
-    let result: Option<(i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT COUNT(*), MIN(start_time), MAX(end_time) FROM pm_market_metadata"
-    )
-    .fetch_optional(&pool)
-    .await?;
+    let result: Option<(i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> =
+        sqlx::query_as("SELECT COUNT(*), MIN(start_time), MAX(end_time) FROM pm_market_metadata")
+            .fetch_optional(&pool)
+            .await?;
 
     if let Some((count, min_ts, max_ts)) = result {
-        println!("  Total: {} markets, {} to {}",
+        println!(
+            "  Total: {} markets, {} to {}",
             count,
-            min_ts.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "N/A".to_string()),
-            max_ts.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "N/A".to_string())
+            min_ts
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "N/A".to_string()),
+            max_ts
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "N/A".to_string())
         );
     }
 
@@ -138,11 +160,16 @@ async fn check_database(db_url: &str) -> Result<(), Box<dyn std::error::Error>> 
 
         if let Some((count, min_ts, max_ts)) = result {
             if count > 0 {
-                println!("  {}: {} rows, {} to {}",
+                println!(
+                    "  {}: {} rows, {} to {}",
                     symbol,
                     count,
-                    min_ts.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "N/A".to_string()),
-                    max_ts.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "N/A".to_string())
+                    min_ts
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "N/A".to_string()),
+                    max_ts
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "N/A".to_string())
                 );
             }
         }
@@ -165,11 +192,13 @@ async fn main() {
                 .parse()
                 .unwrap()
         })
-        .add_directive("polymarket_client_sdk::serde_helpers=error".parse().unwrap());
+        .add_directive(
+            "polymarket_client_sdk::serde_helpers=error"
+                .parse()
+                .unwrap(),
+        );
 
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     let args: Vec<String> = env::args().collect();
 
@@ -178,7 +207,8 @@ async fn main() {
 
     match command {
         Some("check-db") => {
-            let db_url = args.iter()
+            let db_url = args
+                .iter()
                 .position(|s| s == "--db-url")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
@@ -191,19 +221,22 @@ async fn main() {
             return;
         }
         Some("collect-quotes") => {
-            let db_url = args.iter()
+            let db_url = args
+                .iter()
                 .position(|s| s == "--db-url")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("postgresql://postgres:postgres@localhost:5432/ploy");
 
-            let symbols_str = args.iter()
+            let symbols_str = args
+                .iter()
                 .position(|s| s == "--symbols")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("BTCUSDT,ETHUSDT,SOLUSDT");
 
-            let timeframe = args.iter()
+            let timeframe = args
+                .iter()
                 .position(|s| s == "--timeframe")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| s.as_str())
@@ -304,18 +337,16 @@ async fn main() {
         "ploy-runner starting",
     );
 
-    // Prepare symbols for feeds
-    // For backtest mode, keep uppercase for database queries
-    // For live/dryrun modes, lowercase for RTDS feeds
-    let symbols: Vec<String> = if runtime_config.mode == RuntimeMode::Backtest {
-        config.strategy.symbols.clone()
-    } else {
-        config
+    // Prepare symbols for feeds.
+    // Historical/replay modes keep uppercase symbols; live RTDS feeds use lowercase.
+    let symbols: Vec<String> = match runtime_config.mode {
+        RuntimeMode::Backtest | RuntimeMode::Replay => config.strategy.symbols.clone(),
+        RuntimeMode::Live | RuntimeMode::DryRun => config
             .strategy
             .symbols
             .iter()
             .map(|s| s.to_lowercase())
-            .collect()
+            .collect(),
     };
 
     // Build strategy
@@ -324,11 +355,12 @@ async fn main() {
     // Build feed and executor based on mode
     let recorder: Box<dyn ploy_strategy_bundles::Recorder> = Box::new(NullRecorder);
 
-    let result = match runtime_config.mode {
+    let (result, snapshot) = match runtime_config.mode {
         RuntimeMode::Backtest => {
             // Load historical data from database
-            let db_url = env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/ploy".to_string());
+            let db_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgresql://postgres:postgres@localhost:5432/ploy".to_string()
+            });
 
             let pool = PgPoolOptions::new()
                 .max_connections(5)
@@ -349,32 +381,76 @@ async fn main() {
             });
 
             info!(
-                from = %from,
-                    to = %to,
-                    symbols = ?symbols,
-                    "Loading historical data from database",
+            from = %from,
+                to = %to,
+                symbols = ?symbols,
+                "Loading historical data from database",
+            );
+
+            let updates = load_from_database(&pool, &symbols, from, to)
+                .await
+                .expect("Failed to load historical data");
+
+            info!(updates = updates.len(), "Historical data loaded");
+
+            let feed = HistoricalFeed::new(updates);
+            let sim_config = config.sim_executor_config();
+            let executor = SimulatedExecutor::new(sim_config);
+            let mut runtime =
+                StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config.clone());
+            let result = runtime.run().await;
+            let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+            (result, snapshot)
+        }
+        RuntimeMode::Replay => {
+            let replay_path = config.replay_market_updates_path().unwrap_or_else(|| {
+                eprintln!(
+                    "Replay mode requires [runtime].replay_market_updates_from in the config"
                 );
+                std::process::exit(1);
+            });
 
-                let updates = load_from_database(&pool, &symbols, from, to)
-                    .await
-                    .expect("Failed to load historical data");
+            info!(
+                path = %replay_path.display(),
+                "Loading recorded market-update log for replay",
+            );
 
-                info!(updates = updates.len(), "Historical data loaded");
-
-                let feed = HistoricalFeed::new(updates);
-                let sim_config = config.sim_executor_config();
-                let executor = SimulatedExecutor::new(sim_config);
-                let mut runtime = StrategyRuntime::new(
-                    strategy,
-                    feed,
-                    executor,
-                    recorder,
-                    runtime_config,
+            let feed = RecordedFeed::from_path(replay_path).unwrap_or_else(|error| {
+                eprintln!(
+                    "Failed to load replay market updates from {}: {error}",
+                    replay_path.display()
                 );
-                runtime.run().await
+                std::process::exit(1);
+            });
+            let sim_config = config.sim_executor_config();
+            let executor = SimulatedExecutor::new(sim_config);
+            let mut runtime =
+                StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config.clone());
+            let result = runtime.run().await;
+            let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+            (result, snapshot)
         }
         RuntimeMode::Live | RuntimeMode::DryRun => {
-            // Use live feeds for dry-run and live modes
+            // Use live feeds for dry-run and live modes.
+            // Connect to DB if DATABASE_URL is set so that discovered markets and
+            // quotes are persisted for future backtest replay.
+            let db_pool: Option<sqlx::PgPool> = match env::var("DATABASE_URL") {
+                Ok(url) => match PgPoolOptions::new().max_connections(5).connect(&url).await {
+                    Ok(p) => {
+                        info!("DB connected — market metadata and quotes will be persisted");
+                        Some(p)
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "DB connection failed; running without persistence");
+                        None
+                    }
+                },
+                Err(_) => {
+                    info!("DATABASE_URL not set — running without DB persistence");
+                    None
+                }
+            };
+
             let (tx, rx) = broadcast::channel(8192);
             let tx = Arc::new(tx);
 
@@ -383,16 +459,31 @@ async fn main() {
 
             // Spawn feed producers
             // 1. Spot feed — always available (Binance via RTDS)
-            let spot_handle = spawn_spot_feed(tx.clone(), symbols.clone());
+            let spot_handle = spawn_spot_feed(tx.clone(), symbols.clone(), db_pool.clone());
 
             // 2. Chainlink feed — canonical price source for S0 at eventStartTime
-            let chainlink_handle = spawn_chainlink_feed(tx.clone(), chainlink_cache.clone(), symbols.clone());
+            let chainlink_handle =
+                spawn_chainlink_feed(tx.clone(), chainlink_cache.clone(), symbols.clone());
 
             // 3. Market scanner — discovers events and injects EventDiscovered/EventExpired
             //    Also spawns quote feeds dynamically as new tokens are discovered.
-            let scanner_handle = spawn_market_scanner(tx.clone(), chainlink_cache.clone(), symbols.clone());
+            let scanner_handle =
+                spawn_market_scanner(tx.clone(), chainlink_cache.clone(), symbols.clone(), db_pool.clone());
 
-            let feed = LiveFeed::new(rx);
+            let feed: Box<dyn Feed> = if let Some(record_path) = config.record_market_updates_path()
+            {
+                Box::new(
+                    RecordingFeed::new(LiveFeed::new(rx), record_path).unwrap_or_else(|error| {
+                        eprintln!(
+                            "Failed to open market-update log {}: {error}",
+                            record_path.display()
+                        );
+                        std::process::exit(1);
+                    }),
+                )
+            } else {
+                Box::new(LiveFeed::new(rx))
+            };
 
             let result = if runtime_config.mode == RuntimeMode::Live {
                 let executor = build_live_executor();
@@ -401,9 +492,11 @@ async fn main() {
                     feed,
                     executor,
                     recorder,
-                    runtime_config,
+                    runtime_config.clone(),
                 );
-                runtime.run().await
+                let result = runtime.run().await;
+                let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+                (result, snapshot)
             } else {
                 let sim_config = config.sim_executor_config();
                 let executor = SimulatedExecutor::new(sim_config);
@@ -412,9 +505,11 @@ async fn main() {
                     feed,
                     executor,
                     recorder,
-                    runtime_config,
+                    runtime_config.clone(),
                 );
-                runtime.run().await
+                let result = runtime.run().await;
+                let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+                (result, snapshot)
             };
 
             // Clean up feed tasks
@@ -434,6 +529,27 @@ async fn main() {
         elapsed = format!("{:.1}s", result.elapsed_secs),
         "ploy-runner finished",
     );
+
+    if matches!(
+        runtime_config.mode,
+        RuntimeMode::Backtest | RuntimeMode::Replay
+    ) {
+        let cashflow = snapshot.fill_cashflow_summary();
+        let roi_on_deployed_capital = cashflow
+            .roi_on_deployed_capital()
+            .map(|roi| format!("{}%", (roi * Decimal::from(100)).round_dp(2)))
+            .unwrap_or_else(|| "n/a".to_string());
+
+        info!(
+            buy_shares = %cashflow.buy_shares,
+            sell_shares = %cashflow.sell_shares,
+            deployed_capital = %cashflow.deployed_capital(),
+            gross_sell_proceeds = %cashflow.gross_sell_proceeds,
+            fees = %cashflow.total_fees,
+            roi_on_deployed_capital = %roi_on_deployed_capital,
+            "Replay/backtest cashflow summary",
+        );
+    }
 }
 
 /// Build a CallbackExecutor that routes orders through PolymarketExecutionGateway.
