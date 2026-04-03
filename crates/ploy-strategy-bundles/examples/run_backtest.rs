@@ -179,7 +179,7 @@ fn main() {
                 min_time_remaining_secs: 60,
                 max_time_remaining_secs: 300,
                 cooldown_secs: 60,
-                quantity: dec!(25),
+                stake_usd: dec!(25),
                 max_positions: 3,
                 max_daily_trades: 1000,
             },
@@ -231,6 +231,7 @@ fn main() {
     // Print results
     let mark_prices = BTreeMap::new();
     let snapshot = runtime.trading().snapshot(&mark_prices);
+    let cashflow = snapshot.fill_cashflow_summary();
 
     eprintln!("=== Results ===");
     eprintln!("Updates processed: {}", result.updates_processed);
@@ -265,6 +266,16 @@ fn main() {
     eprintln!("Realized:   {}", result.pnl.realized_pnl);
     eprintln!("Fees:       {}", result.pnl.total_fees);
     eprintln!("Net:        {}", result.pnl.net_pnl());
+    eprintln!();
+    eprintln!("=== Cashflow ===");
+    eprintln!("Buy shares:       {}", cashflow.buy_shares);
+    eprintln!("Sell shares:      {}", cashflow.sell_shares);
+    eprintln!("Deployed capital: {}", cashflow.deployed_capital());
+    eprintln!("Sell proceeds:    {}", cashflow.gross_sell_proceeds);
+    if let Some(roi) = cashflow.roi_on_deployed_capital() {
+        eprintln!("ROI on capital:   {}%", (roi * Decimal::from(100)).round_dp(2));
+    }
+    eprintln!("Note: quantity is shares/contracts; capital = shares × price");
     eprintln!();
     eprintln!("=== Risk ===");
     eprintln!("Open positions:  {}", result.risk.open_positions);

@@ -11,7 +11,6 @@
 
 use async_trait::async_trait;
 use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -86,8 +85,8 @@ impl SimulatedExecutor {
         synthetic_mid: bool,
     ) -> (Decimal, Decimal, Decimal, Decimal) {
         let signal_price = Self::clamp_price(signal_price);
-        let shares = quantity.to_u64().unwrap_or(1);
-        let depth = self.config.default_depth_shares;
+        let shares = quantity.max(Decimal::ZERO);
+        let depth = Decimal::from(self.config.default_depth_shares);
 
         // Only synthesize spread when we do not already have an executable quote.
         let half_spread = if self.config.use_spread && synthetic_mid {
@@ -98,12 +97,11 @@ impl SimulatedExecutor {
         let ask = Self::clamp_price(signal_price + half_spread);
 
         // Partial fill
-        let (filled, _is_partial) = self.fill_quantity(shares, depth);
-        let filled_qty = Decimal::from(filled);
+        let (filled_qty, _is_partial) = self.fill_quantity(shares, depth);
 
         // Market impact
-        let impact = if self.config.enable_market_impact && depth > 0 {
-            let ratio = Decimal::from(filled) / Decimal::from(depth);
+        let impact = if self.config.enable_market_impact && depth > Decimal::ZERO {
+            let ratio = filled_qty / depth;
             ask * self.config.impact_coefficient * ratio
         } else {
             Decimal::ZERO
@@ -123,8 +121,8 @@ impl SimulatedExecutor {
         synthetic_mid: bool,
     ) -> (Decimal, Decimal, Decimal, Decimal) {
         let signal_price = Self::clamp_price(signal_price);
-        let shares = quantity.to_u64().unwrap_or(1);
-        let depth = self.config.default_depth_shares;
+        let shares = quantity.max(Decimal::ZERO);
+        let depth = Decimal::from(self.config.default_depth_shares);
 
         let half_spread = if self.config.use_spread && synthetic_mid {
             signal_price * self.config.spread_pct / dec!(2)
@@ -133,11 +131,10 @@ impl SimulatedExecutor {
         };
         let bid = Self::clamp_price(signal_price - half_spread);
 
-        let (filled, _is_partial) = self.fill_quantity(shares, depth);
-        let filled_qty = Decimal::from(filled);
+        let (filled_qty, _is_partial) = self.fill_quantity(shares, depth);
 
-        let impact = if self.config.enable_market_impact && depth > 0 {
-            let ratio = Decimal::from(filled) / Decimal::from(depth);
+        let impact = if self.config.enable_market_impact && depth > Decimal::ZERO {
+            let ratio = filled_qty / depth;
             bid * self.config.impact_coefficient * ratio
         } else {
             Decimal::ZERO
@@ -150,23 +147,23 @@ impl SimulatedExecutor {
     }
 
     /// Determine fill quantity given requested shares and market depth.
-    fn fill_quantity(&self, requested: u64, depth: u64) -> (u64, bool) {
-        if !self.config.enable_partial_fills || depth == 0 {
+    fn fill_quantity(&self, requested: Decimal, depth: Decimal) -> (Decimal, bool) {
+        if !self.config.enable_partial_fills || depth <= Decimal::ZERO {
             return (requested, false);
         }
 
-        let typical = (depth as f64 / self.config.depth_multiple.to_f64().unwrap_or(5.0)) as u64;
-        let typical = typical.max(100);
+        let depth_multiple = self.config.depth_multiple.max(dec!(0.000001));
+        let typical = (depth / depth_multiple).max(dec!(100));
 
         if requested <= typical {
             (requested, false)
         } else if requested <= depth {
-            let ratio = (depth as f64 / requested as f64).min(1.0);
-            let min = (requested as f64 * self.config.min_fill_pct.to_f64().unwrap_or(0.5)) as u64;
-            let filled = ((requested as f64 * ratio) as u64).max(min).min(requested);
+            let ratio = (depth / requested).min(Decimal::ONE);
+            let min = requested * self.config.min_fill_pct;
+            let filled = (requested * ratio).max(min).min(requested);
             (filled, filled < requested)
         } else {
-            let min = (requested as f64 * self.config.min_fill_pct.to_f64().unwrap_or(0.5)) as u64;
+            let min = requested * self.config.min_fill_pct;
             let filled = depth.max(min).min(requested);
             (filled, true)
         }
@@ -265,7 +262,11 @@ mod tests {
         assert!(!report.rejected);
         let fill = report.fill.unwrap();
         // Fill price should be above the quoted ask only because of impact.
-        assert!(fill.price > dec!(0.50), "fill={} should be > 0.50", fill.price);
+        assert!(
+            fill.price > dec!(0.50),
+            "fill={} should be > 0.50",
+            fill.price
+        );
         assert!(report.slippage.unwrap() > Decimal::ZERO);
         assert_eq!(fill.price.round_dp(4), dec!(0.5025));
     }
@@ -279,7 +280,11 @@ mod tests {
         assert!(!report.rejected);
         let fill = report.fill.unwrap();
         // Fill price should be below the quoted bid only because of impact.
-        assert!(fill.price < dec!(0.50), "fill={} should be < 0.50", fill.price);
+        assert!(
+            fill.price < dec!(0.50),
+            "fill={} should be < 0.50",
+            fill.price
+        );
         assert_eq!(fill.price.round_dp(4), dec!(0.4975));
     }
 
@@ -326,5 +331,22 @@ mod tests {
         let report = exec.submit(&intent).await;
         let fill = report.fill.expect("fill");
         assert_eq!(fill.fee.round_dp(6), dec!(0.078125));
+    }
+
+    #[tokio::test]
+    async fn preserves_fractional_share_quantity() {
+        let config = SimulatedExecutorConfig {
+            use_spread: false,
+            enable_market_impact: false,
+            enable_partial_fills: false,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        let intent = test_intent(TradeSide::Buy, dec!(0.60), dec!(41.666667));
+
+        let report = exec.submit(&intent).await;
+        let fill = report.fill.expect("fill");
+        assert_eq!(fill.quantity, dec!(41.666667));
+        assert_eq!(fill.price, dec!(0.60));
     }
 }

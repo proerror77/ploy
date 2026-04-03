@@ -80,9 +80,7 @@ fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
             // Use start time (end_time - window) for discovery
             *end_time - chrono::Duration::seconds(300)
         }
-        MarketUpdate::EventExpired { end_time, .. } => {
-            *end_time
-        }
+        MarketUpdate::EventExpired { end_time, .. } => *end_time,
     }
 }
 
@@ -186,7 +184,10 @@ async fn load_spot_prices(
     .await
     .unwrap_or_default();
 
-    info!(count = rows.len(), "Loaded spot prices from binance_price_ticks");
+    info!(
+        count = rows.len(),
+        "Loaded spot prices from binance_price_ticks"
+    );
     for (ts, symbol, price) in rows {
         updates.push(MarketUpdate::SpotPrice { symbol, price, ts });
     }
@@ -395,8 +396,12 @@ async fn load_events(
         let up_token = normalize_token_id(&up_token.unwrap_or_default());
         let down_token = normalize_token_id(&down_token.unwrap_or_default());
         let resolved_up_won = match (
-            settlement_prices.get(&(event_id.clone(), up_token.clone())).copied(),
-            settlement_prices.get(&(event_id.clone(), down_token.clone())).copied(),
+            settlement_prices
+                .get(&(event_id.clone(), up_token.clone()))
+                .copied(),
+            settlement_prices
+                .get(&(event_id.clone(), down_token.clone()))
+                .copied(),
         ) {
             (Some(up), Some(down)) if up != down => Some(up > down),
             (Some(up), _) => Some(up > Decimal::new(5, 1)),
@@ -422,10 +427,7 @@ async fn load_events(
         });
 
         // Generate EventExpired at end_time so positions settle in backtest
-        updates.push(MarketUpdate::EventExpired {
-            event_id,
-            end_time,
-        });
+        updates.push(MarketUpdate::EventExpired { event_id, end_time });
     }
 
     Ok(())
@@ -454,8 +456,12 @@ async fn load_event_settlement_prices(
 
     let mut prices = HashMap::new();
     for (market_slug, token_id, settled_price) in rows {
-        let Some(market_slug) = market_slug else { continue };
-        let Some(settled_price) = settled_price else { continue };
+        let Some(market_slug) = market_slug else {
+            continue;
+        };
+        let Some(settled_price) = settled_price else {
+            continue;
+        };
         prices.insert((market_slug, normalize_token_id(&token_id)), settled_price);
     }
 

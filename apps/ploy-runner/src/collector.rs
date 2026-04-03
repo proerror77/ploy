@@ -97,10 +97,8 @@ impl QuoteCollector {
             }
 
             // Convert token IDs to U256
-            let asset_ids: Vec<polymarket_client_sdk::types::U256> = token_ids
-                .iter()
-                .filter_map(|id| id.parse().ok())
-                .collect();
+            let asset_ids: Vec<polymarket_client_sdk::types::U256> =
+                token_ids.iter().filter_map(|id| id.parse().ok()).collect();
 
             if asset_ids.is_empty() {
                 warn!("No valid U256 token IDs found");
@@ -265,7 +263,10 @@ impl QuoteCollector {
         let mut stats = self.stats.write().await;
         stats.last_refresh = Some(Utc::now());
 
-        info!(active_tokens = subscribed.len(), "Subscription refresh complete");
+        info!(
+            active_tokens = subscribed.len(),
+            "Subscription refresh complete"
+        );
 
         Ok(())
     }
@@ -366,7 +367,10 @@ impl QuoteCollector {
 
                         {
                             let mut cache = prices.write().await;
-                            cache.insert(chainlink_price.symbol.clone(), (chainlink_price.value, ts));
+                            cache.insert(
+                                chainlink_price.symbol.clone(),
+                                (chainlink_price.value, ts),
+                            );
                         }
 
                         price_count += 1;
@@ -413,7 +417,10 @@ impl QuoteCollector {
                     ORDER BY start_time
                     LIMIT 50
                     "#,
-                    (1..=symbols.len()).map(|i| format!("${}", i)).collect::<Vec<_>>().join(", "),
+                    (1..=symbols.len())
+                        .map(|i| format!("${}", i))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     symbols.len() + 1,
                     symbols.len() + 2,
                     symbols.len() + 3
@@ -439,7 +446,10 @@ impl QuoteCollector {
                     continue;
                 }
 
-                info!(markets = markets.len(), "Found markets needing price_to_beat");
+                info!(
+                    markets = markets.len(),
+                    "Found markets needing price_to_beat"
+                );
 
                 for (slug, symbol, start_time) in markets {
                     // Wait until start_time

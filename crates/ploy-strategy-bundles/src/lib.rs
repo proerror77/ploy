@@ -13,13 +13,15 @@ pub use bundle::StrategyBundle;
 pub use config::FullConfig;
 pub use engine::{RuntimeConfig, RuntimeMode, RuntimeResult, StrategyRuntime};
 pub use executor::{CallbackExecutor, SimulatedExecutor, SimulatedExecutorConfig};
-pub use feed::{HistoricalFeed, LiveFeed};
+pub use feed::{
+    HistoricalFeed, LiveFeed, RecordedFeed, RecordedFeedError, RecordedMarketUpdate, RecordingFeed,
+};
 pub use recorder::BufferedRecorder;
 pub use runtime::emit_intents;
 pub use signals::{MarketSignal, SignalConfig};
 pub use strategies::DirectionalStrategy;
 pub use traits::{
-    Executor, ExecutionReport, Feed, MarketUpdate, NullRecorder, Recorder, SignalRecord,
+    ExecutionReport, Executor, Feed, MarketUpdate, NullRecorder, Recorder, SignalRecord,
     StrategyDecision, StrategyLogic,
 };
 

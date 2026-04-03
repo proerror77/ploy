@@ -13,11 +13,8 @@ use tracing::info;
 use crate::traits::{Recorder, SignalRecord};
 
 /// Type alias for the async flush callback.
-pub type FlushFn = Box<
-    dyn Fn(Vec<SignalRecord>) -> Pin<Box<dyn Future<Output = ()> + Send>>
-        + Send
-        + Sync,
->;
+pub type FlushFn =
+    Box<dyn Fn(Vec<SignalRecord>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Recorder that buffers signals and flushes in batches.
 pub struct BufferedRecorder {

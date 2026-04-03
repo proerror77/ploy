@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use ploy_trading::{TradingRuntime, PnlSnapshot, RiskSnapshot};
+use ploy_trading::{PnlSnapshot, RiskSnapshot, TradingRuntime};
 use rust_decimal::Decimal;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -22,6 +22,8 @@ use crate::traits::{Executor, Feed, MarketUpdate, Recorder, StrategyDecision, St
 pub enum RuntimeMode {
     /// Replay historical data with simulated execution.
     Backtest,
+    /// Replay a previously recorded canonical market-update log.
+    Replay,
     /// Live market data with simulated execution.
     DryRun,
     /// Live market data with real exchange execution.
@@ -132,11 +134,9 @@ where
             }
 
             // 1. Strategy evaluates the update.
-            let decisions = self.strategy.on_update(
-                &update,
-                self.trading.positions(),
-                self.trading.orders(),
-            );
+            let decisions =
+                self.strategy
+                    .on_update(&update, self.trading.positions(), self.trading.orders());
 
             // 2. Execute each decision.
             for decision in decisions {

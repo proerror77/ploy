@@ -4,9 +4,11 @@
 # Params aligned to backtest report (2026-03-26): 696 trades, 67.1% WR, Sharpe 10.15
 
 [runtime]
-mode = "backtest"       # "backtest" | "dryrun" | "live"
+mode = "backtest"       # "backtest" | "replay" | "dryrun" | "live"
 throttle_hz = 1         # 1 eval/sec for backtest
 # max_updates = 500000  # uncomment to cap backtest length
+# record_market_updates_to = "captures/dryrun.ndjson"    # optional for live/dryrun
+# replay_market_updates_from = "captures/dryrun.ndjson"  # required when mode = "replay"
 
 [strategy]
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "HYPEUSDT", "BNBUSDT"]  # All 7 crypto symbols
@@ -31,7 +33,7 @@ max_time_remaining_secs = 300
 cooldown_secs = 60
 
 # Position sizing
-quantity = 25.0
+stake_usd = 25.0
 max_positions = 3
 max_daily_trades = 1000
 

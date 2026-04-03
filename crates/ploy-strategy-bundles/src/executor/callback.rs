@@ -21,9 +21,7 @@ use crate::traits::{ExecutionReport, Executor};
 
 /// Type alias for the async submit callback.
 pub type SubmitFn = Box<
-    dyn Fn(TradingIntent) -> Pin<Box<dyn Future<Output = ExecutionReport> + Send>>
-        + Send
-        + Sync,
+    dyn Fn(TradingIntent) -> Pin<Box<dyn Future<Output = ExecutionReport> + Send>> + Send + Sync,
 >;
 
 /// Executor backed by a user-supplied async callback.

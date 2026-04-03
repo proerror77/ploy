@@ -3,9 +3,11 @@
 //! A single config file drives backtest, dry-run, and live modes.
 //! The `[runtime].mode` field selects which Feed and Executor are wired.
 
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use chrono::{DateTime, Utc};
+use std::path::Path;
+use std::path::PathBuf;
 
 use crate::engine::{RuntimeConfig, RuntimeMode};
 use crate::executor::SimulatedExecutorConfig;
@@ -17,6 +19,7 @@ use crate::strategies::directional::DirectionalConfig;
 /// [runtime]
 /// mode = "dryrun"
 /// throttle_hz = 1
+/// record_market_updates_to = "tmp/dryrun.ndjson"
 ///
 /// [strategy]
 /// symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
@@ -46,6 +49,10 @@ pub struct RuntimeSection {
     pub from: Option<String>,
     /// Backtest end time (ISO 8601 format, e.g., "2026-04-01T23:59:59Z")
     pub to: Option<String>,
+    /// Optional NDJSON log path for canonical `MarketUpdate` recording.
+    pub record_market_updates_to: Option<PathBuf>,
+    /// Required when `mode = "replay"`; points at a previously recorded NDJSON log.
+    pub replay_market_updates_from: Option<PathBuf>,
 }
 
 fn default_mode() -> String {
@@ -72,12 +79,24 @@ pub struct SimExecutionSection {
     pub default_depth_shares: u64,
 }
 
-fn default_true() -> bool { true }
-fn default_spread() -> f64 { 0.02 }
-fn default_depth_multiple() -> f64 { 5.0 }
-fn default_min_fill() -> f64 { 0.5 }
-fn default_impact() -> f64 { 0.1 }
-fn default_depth_shares() -> u64 { 500 }
+fn default_true() -> bool {
+    true
+}
+fn default_spread() -> f64 {
+    0.02
+}
+fn default_depth_multiple() -> f64 {
+    5.0
+}
+fn default_min_fill() -> f64 {
+    0.5
+}
+fn default_impact() -> f64 {
+    0.1
+}
+fn default_depth_shares() -> u64 {
+    500
+}
 
 impl Default for SimExecutionSection {
     fn default() -> Self {
@@ -105,8 +124,8 @@ impl FullConfig {
     /// Rejects legacy-format configs (those with `[timing]` or `[entry]`
     /// sections) to prevent silent value misinterpretation.
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Cannot read config {path}: {e}"))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("Cannot read config {path}: {e}"))?;
 
         // Guard: reject legacy format that would silently misparse
         if content.contains("[timing]") || content.contains("[entry]") || content.contains("[risk]")
@@ -118,14 +137,14 @@ impl FullConfig {
             .into());
         }
 
-        Self::from_toml(&content)
-            .map_err(|e| format!("Invalid TOML in {path}: {e}").into())
+        Self::from_toml(&content).map_err(|e| format!("Invalid TOML in {path}: {e}").into())
     }
 
     /// Build RuntimeConfig from the parsed config.
     pub fn runtime_config(&self) -> RuntimeConfig {
         let mode = match self.runtime.mode.as_str() {
             "backtest" => RuntimeMode::Backtest,
+            "replay" => RuntimeMode::Replay,
             "live" => RuntimeMode::Live,
             _ => RuntimeMode::DryRun,
         };
@@ -142,10 +161,22 @@ impl FullConfig {
         let from_str = self.runtime.from.as_ref()?;
         let to_str = self.runtime.to.as_ref()?;
 
-        let from = DateTime::parse_from_rfc3339(from_str).ok()?.with_timezone(&Utc);
-        let to = DateTime::parse_from_rfc3339(to_str).ok()?.with_timezone(&Utc);
+        let from = DateTime::parse_from_rfc3339(from_str)
+            .ok()?
+            .with_timezone(&Utc);
+        let to = DateTime::parse_from_rfc3339(to_str)
+            .ok()?
+            .with_timezone(&Utc);
 
         Some((from, to))
+    }
+
+    pub fn record_market_updates_path(&self) -> Option<&Path> {
+        self.runtime.record_market_updates_to.as_deref()
+    }
+
+    pub fn replay_market_updates_path(&self) -> Option<&Path> {
+        self.runtime.replay_market_updates_from.as_deref()
     }
 
     /// Build SimulatedExecutorConfig from the parsed config.
@@ -173,6 +204,7 @@ mod tests {
 mode = "backtest"
 throttle_hz = 1
 max_updates = 10000
+record_market_updates_to = "tmp/sample.ndjson"
 
 [strategy]
 symbols = ["BTCUSDT", "ETHUSDT"]
@@ -187,7 +219,7 @@ min_edge = 0.05
 min_time_remaining_secs = 60
 max_time_remaining_secs = 300
 cooldown_secs = 60
-quantity = 25.0
+stake_usd = 25.0
 max_positions = 3
 max_daily_trades = 1000
 
@@ -202,8 +234,13 @@ enable_market_impact = true
         let config = FullConfig::from_toml(SAMPLE_TOML).unwrap();
         assert_eq!(config.runtime.mode, "backtest");
         assert_eq!(config.runtime.throttle_hz, Some(1));
+        assert_eq!(
+            config.runtime.record_market_updates_to.as_deref(),
+            Some(Path::new("tmp/sample.ndjson"))
+        );
         assert_eq!(config.strategy.symbols, vec!["BTCUSDT", "ETHUSDT"]);
         assert!((config.strategy.min_edge - 0.05).abs() < 1e-10);
+        assert_eq!(config.strategy.stake_usd, Decimal::new(25, 0));
         assert_eq!(config.strategy.max_positions, 3);
     }
 
@@ -214,6 +251,26 @@ enable_market_impact = true
         assert_eq!(rc.mode, RuntimeMode::Backtest);
         assert_eq!(rc.throttle_hz, Some(1));
         assert_eq!(rc.max_updates, Some(10000));
+    }
+
+    #[test]
+    fn parses_replay_runtime_paths() {
+        let replay_toml = r#"
+[runtime]
+mode = "replay"
+replay_market_updates_from = "captures/dryrun.ndjson"
+
+[strategy]
+"#;
+
+        let config = FullConfig::from_toml(replay_toml).unwrap();
+        let runtime = config.runtime_config();
+
+        assert_eq!(runtime.mode, RuntimeMode::Replay);
+        assert_eq!(
+            config.replay_market_updates_path(),
+            Some(Path::new("captures/dryrun.ndjson"))
+        );
     }
 
     #[test]
@@ -234,8 +291,24 @@ mode = "dryrun"
 "#;
         let config = FullConfig::from_toml(minimal).unwrap();
         assert_eq!(config.runtime.mode, "dryrun");
-        assert_eq!(config.strategy.symbols, vec!["BTCUSDT", "ETHUSDT", "SOLUSDT"]);
+        assert_eq!(
+            config.strategy.symbols,
+            vec!["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+        );
         assert!((config.strategy.min_edge - 0.05).abs() < 1e-10);
         assert!(config.execution.use_spread);
+    }
+
+    #[test]
+    fn legacy_quantity_alias_still_maps_to_stake_usd() {
+        let legacy = r#"
+[runtime]
+mode = "backtest"
+
+[strategy]
+quantity = 25.0
+"#;
+        let config = FullConfig::from_toml(legacy).unwrap();
+        assert_eq!(config.strategy.stake_usd, Decimal::new(25, 0));
     }
 }

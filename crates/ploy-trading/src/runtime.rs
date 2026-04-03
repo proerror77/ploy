@@ -1,5 +1,5 @@
 use crate::fills::{FillLedger, FillRecord};
-use crate::intents::TradingIntent;
+use crate::intents::{TradeSide, TradingIntent};
 use crate::orders::OrderLedger;
 use crate::pnl::PnlSnapshot;
 use crate::positions::{PositionLedger, PositionSnapshot};
@@ -17,6 +17,58 @@ pub struct TradingRuntimeSnapshot {
     pub positions: Vec<PositionSnapshot>,
     pub pnl: PnlSnapshot,
     pub risk: RiskSnapshot,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TradeCashflowSummary {
+    pub buy_shares: Decimal,
+    pub sell_shares: Decimal,
+    pub gross_buy_cost: Decimal,
+    pub gross_sell_proceeds: Decimal,
+    pub total_fees: Decimal,
+}
+
+impl TradeCashflowSummary {
+    pub fn deployed_capital(&self) -> Decimal {
+        self.gross_buy_cost
+    }
+
+    pub fn net_pnl(&self) -> Decimal {
+        self.gross_sell_proceeds - self.gross_buy_cost - self.total_fees
+    }
+
+    pub fn roi_on_deployed_capital(&self) -> Option<Decimal> {
+        let deployed = self.deployed_capital();
+        if deployed.is_zero() {
+            None
+        } else {
+            Some(self.net_pnl() / deployed)
+        }
+    }
+}
+
+impl TradingRuntimeSnapshot {
+    pub fn fill_cashflow_summary(&self) -> TradeCashflowSummary {
+        let mut summary = TradeCashflowSummary::default();
+
+        for fill in &self.fills {
+            let notional = fill.quantity * fill.price;
+            summary.total_fees += fill.fee;
+
+            match fill.side {
+                TradeSide::Buy => {
+                    summary.buy_shares += fill.quantity;
+                    summary.gross_buy_cost += notional;
+                }
+                TradeSide::Sell => {
+                    summary.sell_shares += fill.quantity;
+                    summary.gross_sell_proceeds += notional;
+                }
+            }
+        }
+
+        summary
+    }
 }
 
 #[derive(Debug, Default)]
@@ -157,8 +209,12 @@ impl TradingRuntime {
 #[cfg(test)]
 mod tests {
     use super::TradingRuntime;
-    use crate::{FillRecord, IntentPurpose, OrderRecord, OrderState, TradeSide, TradingIntent};
+    use crate::{
+        FillRecord, IntentPurpose, OrderRecord, OrderState, TradeSide, TradingIntent,
+        TradingRuntimeSnapshot,
+    };
     use chrono::Utc;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::collections::BTreeMap;
 
@@ -213,5 +269,50 @@ mod tests {
         assert_eq!(restored.positions.len(), 1);
         assert_eq!(restored.positions[0].net_qty, dec!(1));
         assert_eq!(restored.risk.active_orders, 1);
+    }
+
+    #[test]
+    fn cashflow_summary_treats_quantity_as_shares_not_dollars() {
+        let now = Utc::now();
+        let snapshot = TradingRuntimeSnapshot {
+            fills: vec![
+                FillRecord {
+                    fill_id: "fill-buy".to_string(),
+                    order_id: "order-buy".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(25),
+                    price: dec!(0.40),
+                    fee: dec!(0.05),
+                    timestamp: now,
+                },
+                FillRecord {
+                    fill_id: "fill-sell".to_string(),
+                    order_id: "order-sell".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Sell,
+                    quantity: dec!(25),
+                    price: dec!(1.00),
+                    fee: Decimal::ZERO,
+                    timestamp: now,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let summary = snapshot.fill_cashflow_summary();
+        assert_eq!(summary.buy_shares, dec!(25));
+        assert_eq!(summary.sell_shares, dec!(25));
+        assert_eq!(summary.gross_buy_cost, dec!(10.00));
+        assert_eq!(summary.gross_sell_proceeds, dec!(25.00));
+        assert_eq!(summary.deployed_capital(), dec!(10.00));
+        assert_eq!(summary.net_pnl(), dec!(14.95));
+        assert_eq!(
+            summary
+                .roi_on_deployed_capital()
+                .expect("roi")
+                .round_dp(4),
+            dec!(1.4950)
+        );
     }
 }

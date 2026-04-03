@@ -1,3 +1,41 @@
+# Local Rust Build Tooling Tune-up (2026-04-02)
+
+## Goal
+Reduce local macOS Rust build time by aligning workspace profiles, wiring the local Darwin target through the repo linker wrapper, and installing the missing compiler-cache toolchain pieces on this workstation.
+
+## File ownership
+
+- `Cargo.toml`
+  - owner: local dev/backtest profile tuning
+- `.cargo/config.toml`
+  - owner: Darwin target linker wiring
+
+## Tasks
+
+- [x] Confirm the current workspace profile changes and preserve any existing in-progress edit in `Cargo.toml`.
+- [x] Add the local macOS target to `.cargo/config.toml` so repo-owned linker selection also applies on this machine.
+- [x] Install the missing local build tools with the best payoff for compile latency.
+- [x] Run focused cargo validation to prove the new local setup works.
+
+## Progress notes
+
+- 2026-04-02: Preflight confirmed the worktree is on `main` with only `Cargo.toml` modified; the `fast` profile and `profile.dev.package."*".opt-level = 1` changes are already present in the local diff.
+- 2026-04-02: Verified `.cargo/config.toml` still only routes Linux targets through `scripts/fast-linker.sh`, while this macOS arm64 workstation does not currently have `sccache`, `llvm`, or `ld64.lld` installed.
+- 2026-04-02: Added both Apple Darwin targets to `.cargo/config.toml` so local macOS builds now route through the same repo-owned linker wrapper as Linux targets.
+- 2026-04-02: Updated `scripts/fast-linker.sh` to prepend common Homebrew `llvm` / `lld` formula paths before selecting `clang` and `lld`, so macOS does not depend on a user-managed shell `PATH`.
+- 2026-04-02: Installed local build tools with Homebrew: `sccache 0.14.0`, `llvm 22.1.2`, and `lld 22.1.2`.
+- 2026-04-02: Homebrew `llvm` now warns that `lld` ships as a separate formula, so `brew install llvm` alone is no longer sufficient to enable `-fuse-ld=lld` on this machine.
+- 2026-04-02: Linker smoke test via `scripts/fast-linker.sh ... -Wl,-v` reported `Homebrew LLD 22.1.2`, confirming Darwin builds now actually use lld through the wrapper.
+- 2026-04-02: `sccache --zero-stats && CARGO_TARGET_DIR=/tmp/ploy-sccache-a cargo clean && CARGO_TARGET_DIR=/tmp/ploy-sccache-a rtk cargo build -p ployctl --profile fast` followed by `sccache --show-stats` reported `20` Rust cache hits and `100%` hit rate for cacheable compilations.
+- 2026-04-02: `CARGO_TARGET_DIR=/tmp/ploy-fast-runner rtk cargo build -p ploy-runner --profile fast` passed with warnings only, confirming the new fast local profile still builds the main backtest binary successfully.
+
+## Review
+
+- Local macOS builds now use the repo wrapper for both caching and linking, instead of bypassing the linker wrapper entirely.
+- `sccache` is installed and verified active on this workstation; the cache is warm and returning Rust hits.
+- The `fast` profile change already present in `Cargo.toml` remains intact and builds `ploy-runner` successfully.
+- Remaining warnings are pre-existing in `apps/ploy-runner/src/collector.rs` and were not changed in this tuning pass.
+
 # PM 5m Backtest Review (2026-04-02)
 
 ## Goal
@@ -6665,3 +6703,146 @@ architecture.
   - `rtk cargo build --locked -p ployd -p ployctl -p ploytui -p ploy-connectivity -p ploy-deployments -p ploy-operator-contracts -p ploy-platform -p ploy-research -p ploy-strategy-bundles -p ploy-trading`
   - `rtk cargo test --locked -p ployd -p ployctl -p ploytui -p ploy-connectivity -p ploy-deployments -p ploy-operator-contracts -p ploy-platform -p ploy-research -p ploy-strategy-bundles -p ploy-trading`
   - `rtk cargo test --locked -p ploy --test platform_release_workflow --test platform_smoke --test workflow_security --test workspace_runtime_retirement`
+
+# PM Backtest Cashflow Reporting Fix (2026-04-02)
+
+## Goal
+Fix the PM directional backtest summary so Polymarket binary-option trades are
+reported with share-aware cashflow metrics instead of treating `quantity` as a
+USD stake.
+
+## File ownership
+
+- `crates/ploy-trading/src/runtime.rs`
+  - owner: derived fill cashflow summary from runtime snapshot
+- `apps/ploy-runner/src/main.rs`
+  - owner: backtest completion logging with deployed-capital metrics
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+  - owner: human-readable backtest output semantics
+- `crates/ploy-trading/tests/` or inline runtime tests
+  - owner: regression coverage for binary-option share vs cash semantics
+
+## Tasks
+
+- [x] Add a runtime-level cashflow summary that exposes buy cost, sell proceeds, share volume, and ROI-on-deployed-capital.
+- [x] Use that summary in the backtest-facing output so `quantity = 25` is no longer implied to mean `$25`.
+- [x] Add regression coverage proving a 25-share binary contract at price 0.40 has `$10` deployed capital, not `$25`.
+- [x] Run focused validation for the touched crates.
+
+## Progress notes
+
+- 2026-04-02: Confirmed core fill/PnL accounting already treats `quantity` as shares and cash exposure as `shares * price`; the incorrect `$25 × trades` interpretation is a reporting-layer bug.
+- 2026-04-02: Added `TradeCashflowSummary` on `TradingRuntimeSnapshot`, derived directly from fills so report code can distinguish buy share volume, buy cost, sell proceeds, fees, and ROI on deployed capital.
+- 2026-04-02: Wired the corrected cashflow summary into `ploy-runner` backtest completion logs and the standalone `run_backtest` example output with an explicit note that quantity means shares/contracts.
+- 2026-04-02: Added regression coverage proving `25` shares at `0.40` equals `$10.00` deployed capital and `149.50%` ROI when that position settles at `1.00` with `$0.05` fees.
+- 2026-04-02: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-backtest-report-fix rtk cargo test -p ploy-trading runtime`
+  - `CARGO_TARGET_DIR=/tmp/ploy-backtest-report-fix rtk cargo test -p ploy-strategy-bundles --test backtest_integration`
+  - `CARGO_TARGET_DIR=/tmp/ploy-backtest-report-fix rtk cargo check -p ploy-runner -p ploy-strategy-bundles --all-targets`
+
+## Review
+
+- Root cause was reporting ambiguity, not execution/PnL math. The ledger already used `shares * price`; only the summary layer was free to misread `quantity=25` as a `$25` stake.
+- Backtest output now exposes deployed capital explicitly, so future ROI calculations can use actual entry cost rather than raw share count.
+- `cargo check` surfaced only pre-existing warnings in `apps/ploy-runner/src/collector.rs`; this fix did not add new warnings or errors.
+
+# PM Backtest Fixed-Dollar Sizing (2026-04-02)
+
+## Goal
+Change PM directional sizing from fixed shares to fixed dollar stake so a config
+value of `25` means “spend $25 per entry”, not “buy 25 shares”.
+
+## File ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+  - owner: strategy sizing semantics and entry-share conversion
+- `crates/ploy-strategy-bundles/src/executor/simulated.rs`
+  - owner: fractional-share simulated fills
+- `crates/ploy-strategy-bundles/src/config.rs`
+  - owner: config parsing and backward-compatible field alias coverage
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+  - owner: example config naming and output semantics
+- `crates/ploy-strategy-bundles/tests/backtest_integration.rs`
+  - owner: integration coverage for fixed-dollar sizing
+- `config/strategies/02-pm5d.unified.toml`
+  - owner: checked-in runtime config naming
+
+## Tasks
+
+- [x] Rename sizing config to `stake_usd` while preserving legacy `quantity` TOML as an alias.
+- [x] Convert entry sizing from dollars to shares via `stake_usd / entry_price`.
+- [x] Preserve fractional shares through the simulated executor so backtests do not truncate dollar-sized entries.
+- [x] Update tests/config examples and run focused validation.
+
+## Progress notes
+
+- 2026-04-02: Confirmed the live Polymarket gateway builds `GTC` limit orders with `.size(request.quantity)`, so the venue-facing runtime expects shares while the strategy layer must handle any dollar-to-share conversion.
+- 2026-04-02: Renamed the strategy sizing field to `stake_usd` and kept `quantity` as a serde alias so existing TOML configs still parse without edits.
+- 2026-04-02: Directional entry sizing now computes venue shares as `stake_usd / entry_price` and rounds to 6 decimals before submitting the buy intent.
+- 2026-04-02: Simulated execution now preserves fractional shares end-to-end instead of truncating requested quantity to `u64`.
+- 2026-04-02: Focused validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-stake-usd rtk cargo test -p ploy-strategy-bundles`
+  - `CARGO_TARGET_DIR=/tmp/ploy-stake-usd rtk cargo check -p ploy-runner -p ploy-strategy-bundles --all-targets`
+- 2026-04-02: Reran the 2026-03-31T21:00:00Z → 2026-04-02T07:25:00Z backtest through the updated local binary against the remote database tunnel. Result: `net_pnl=276.53533707004876315181695385`, `deployed_capital=454.9379494515873626900000`, `gross_sell_proceeds=736.86962400`, `fees=5.3963374783638741581830461462`, `roi_on_deployed_capital=60.79%`.
+
+## Review
+
+- The sizing model now matches the user's intended semantics: a config value of `25` means “spend about $25 on entry”, not “buy 25 shares”.
+- Actual deployed capital landed slightly above the nominal `$450` (`18 × $25`) because simulated market impact moved the fill price against the order after the share count was chosen.
+- The previous reporting fix remains useful: it now exposes both actual deployed capital and realized ROI for the corrected fixed-dollar sizing run.
+
+# Dry Run / Replay Feed Parity (2026-04-03)
+
+## Goal
+Add a canonical `MarketUpdate` recording path plus a `replay` runtime mode so a
+captured dry-run session can be replayed through the exact same strategy and
+simulated executor logic.
+
+## File ownership
+
+- `crates/ploy-strategy-bundles/src/traits.rs`
+  - owner: serializable canonical `MarketUpdate` contract
+- `crates/ploy-strategy-bundles/src/feed/mod.rs`
+  - owner: feed module exports
+- `crates/ploy-strategy-bundles/src/feed/live.rs`
+  - owner: live-feed recording wrapper
+- `crates/ploy-strategy-bundles/src/feed/recorded.rs`
+  - owner: append-only event log and replay feed
+- `crates/ploy-strategy-bundles/src/config.rs`
+  - owner: TOML runtime config for record/replay paths and replay mode
+- `crates/ploy-strategy-bundles/src/lib.rs`
+  - owner: public feed exports
+- `crates/ploy-strategy-bundles/tests/backtest_integration.rs`
+  - owner: parity regression proving recorded feed == replay feed
+- `apps/ploy-runner/src/main.rs`
+  - owner: runtime wiring for dry-run recording and replay mode
+- `config/strategies/02-pm5d.unified.toml`
+  - owner: documented sample config knobs
+
+## Tasks
+
+- [x] Add a serializable canonical event-log format for `MarketUpdate`.
+- [x] Add a recording feed wrapper and replay feed implementation.
+- [x] Add `replay` mode plus runtime config fields for record/replay paths.
+- [x] Wire `ploy-runner` so dry-run can record and replay can consume the log.
+- [x] Add regression coverage proving recorded updates replay to the same fills/PnL.
+- [x] Run focused validation for the touched crates.
+
+## Progress notes
+
+- 2026-04-03: Confirmed the repo already had a single canonical strategy event contract, `MarketUpdate`; the parity gap was in how live vs historical feeds produce that sequence, not in strategy logic itself.
+- 2026-04-03: Made `MarketUpdate` serde-serializable and added `RecordedMarketUpdate` NDJSON records with explicit sequence numbers and receipt timestamps so replay preserves observed feed order.
+- 2026-04-03: Added `RecordingFeed<F>` to wrap any feed and append canonical updates to disk, plus `RecordedFeed::from_path(...)` to replay a captured session in file order.
+- 2026-04-03: Added `RuntimeMode::Replay` and new `[runtime]` config fields: `record_market_updates_to` and `replay_market_updates_from`.
+- 2026-04-03: Wired `ploy-runner` so live/dry-run feeds can optionally record canonical updates and replay mode can consume that same log with the simulated executor.
+- 2026-04-03: Added integration coverage proving a recorded scenario replays to the same intents/fills/cashflow summary, and unit coverage for record/replay round-tripping the raw update stream.
+- 2026-04-03: Validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-replay-parity rtk cargo test -p ploy-strategy-bundles --test backtest_integration`
+  - `CARGO_TARGET_DIR=/tmp/ploy-replay-parity rtk cargo test -p ploy-strategy-bundles`
+  - `CARGO_TARGET_DIR=/tmp/ploy-replay-parity rtk cargo check -p ploy-runner -p ploy-strategy-bundles --all-targets`
+
+## Review
+
+- Dry run and replay now share the same canonical `MarketUpdate` sequence when replay is sourced from a recorded dry-run log.
+- This closes the feed-contract parity gap without rewriting the existing historical-database backtest path; research backtests and operational replay now have separate, explicit modes.
+- Existing unrelated worktree diffs remain untouched; this slice only adds the record/replay path and the parity regression coverage.

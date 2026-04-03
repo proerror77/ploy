@@ -6,13 +6,14 @@
 //! - TradingRuntime tracks position and PnL
 
 use chrono::{Duration, Utc};
-use ploy_strategy_bundles::{
-    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, RuntimeConfig, RuntimeMode,
-    SimulatedExecutor, SimulatedExecutorConfig, StrategyRuntime,
-};
 use ploy_strategy_bundles::config::FullConfig;
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
+use ploy_strategy_bundles::{
+    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, RecordedFeed, RecordingFeed,
+    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyRuntime,
+};
 use rust_decimal_macros::dec;
+use std::fs;
 
 /// Helper: build a sequence of market updates simulating one 5-min window.
 fn build_scenario() -> Vec<MarketUpdate> {
@@ -96,7 +97,7 @@ async fn backtest_full_loop_produces_entry() {
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
         cooldown_secs: 60,
-        quantity: dec!(25),
+        stake_usd: dec!(25),
         max_positions: 3,
         max_daily_trades: 1000,
     };
@@ -122,8 +123,16 @@ async fn backtest_full_loop_produces_entry() {
 
     assert_eq!(result.mode, RuntimeMode::Backtest);
     assert_eq!(result.updates_processed, 8);
-    assert!(result.intents_submitted >= 1, "Expected at least 1 intent, got {}", result.intents_submitted);
-    assert!(result.fills_recorded >= 1, "Expected at least 1 fill, got {}", result.fills_recorded);
+    assert!(
+        result.intents_submitted >= 1,
+        "Expected at least 1 intent, got {}",
+        result.intents_submitted
+    );
+    assert!(
+        result.fills_recorded >= 1,
+        "Expected at least 1 fill, got {}",
+        result.fills_recorded
+    );
 
     // Position should exist
     let trading = runtime.trading();
@@ -146,7 +155,7 @@ min_edge = 0.05
 min_time_remaining_secs = 60
 max_time_remaining_secs = 300
 cooldown_secs = 60
-quantity = 25.0
+stake_usd = 25.0
 max_positions = 3
 max_daily_trades = 1000
 
@@ -188,7 +197,7 @@ async fn empty_feed_produces_zero_trades() {
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
         cooldown_secs: 60,
-        quantity: dec!(25),
+        stake_usd: dec!(25),
         max_positions: 3,
         max_daily_trades: 1000,
     };
@@ -209,4 +218,91 @@ async fn empty_feed_produces_zero_trades() {
     assert_eq!(result.updates_processed, 0);
     assert_eq!(result.intents_submitted, 0);
     assert_eq!(result.fills_recorded, 0);
+}
+
+#[tokio::test]
+async fn recorded_updates_replay_to_the_same_runtime_result() {
+    let config = DirectionalConfig {
+        symbols: vec!["BTCUSDT".into()],
+        vol_floor: 0.001,
+        min_probability: 0.62,
+        min_z_score: 0.35,
+        min_entry_price: 0.15,
+        max_entry_price: 0.85,
+        no_trade_zone_min: 0.45,
+        no_trade_zone_max: 0.55,
+        min_edge: 0.05,
+        min_time_remaining_secs: 60,
+        max_time_remaining_secs: 300,
+        cooldown_secs: 60,
+        stake_usd: dec!(25),
+        max_positions: 3,
+        max_daily_trades: 1000,
+    };
+    let sim_config = SimulatedExecutorConfig {
+        use_spread: true,
+        spread_pct: dec!(0.02),
+        enable_partial_fills: false,
+        enable_market_impact: false,
+        ..Default::default()
+    };
+    let runtime_config = RuntimeConfig {
+        mode: RuntimeMode::DryRun,
+        throttle_hz: None,
+        max_updates: None,
+    };
+
+    let mut record_path = std::env::temp_dir();
+    record_path.push(format!(
+        "ploy-replay-parity-{}.ndjson",
+        uuid::Uuid::new_v4()
+    ));
+
+    let record_feed =
+        RecordingFeed::new(HistoricalFeed::new(build_scenario()), &record_path).unwrap();
+    let mut recorded_runtime = StrategyRuntime::new(
+        DirectionalStrategy::new(config.clone()),
+        record_feed,
+        SimulatedExecutor::new(sim_config.clone()),
+        Box::new(NullRecorder),
+        runtime_config.clone(),
+    );
+    let recorded_result = recorded_runtime.run().await;
+    let recorded_snapshot = recorded_runtime
+        .trading()
+        .snapshot(&std::collections::BTreeMap::new());
+
+    let replay_feed = RecordedFeed::from_path(&record_path).unwrap();
+    let mut replay_runtime = StrategyRuntime::new(
+        DirectionalStrategy::new(config),
+        replay_feed,
+        SimulatedExecutor::new(sim_config),
+        Box::new(NullRecorder),
+        RuntimeConfig {
+            mode: RuntimeMode::Replay,
+            ..runtime_config
+        },
+    );
+    let replay_result = replay_runtime.run().await;
+    let replay_snapshot = replay_runtime
+        .trading()
+        .snapshot(&std::collections::BTreeMap::new());
+
+    assert_eq!(
+        recorded_result.updates_processed,
+        replay_result.updates_processed
+    );
+    assert_eq!(
+        recorded_result.intents_submitted,
+        replay_result.intents_submitted
+    );
+    assert_eq!(recorded_result.fills_recorded, replay_result.fills_recorded);
+    assert_eq!(recorded_result.pnl.net_pnl(), replay_result.pnl.net_pnl());
+    assert_eq!(
+        recorded_snapshot.fill_cashflow_summary(),
+        replay_snapshot.fill_cashflow_summary()
+    );
+    assert_eq!(recorded_snapshot.fills.len(), replay_snapshot.fills.len());
+
+    let _ = fs::remove_file(record_path);
 }

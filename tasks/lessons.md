@@ -226,3 +226,12 @@
 
 - Pattern: Running `cargo fmt --all` on a branch that already contains many in-flight structural edits explodes the worktree and destroys atomic bugfix boundaries.
 - Rule: For focused bugfix slices on this repo, format only the owned files with `rustfmt --edition 2024 <paths>` unless the branch is confirmed clean and the intent is an explicit repo-wide formatting sweep.
+
+## 2026-04-03
+
+- Pattern: Users treat dry run and backtest as parity checks, but the repo historically used live ingestion for `dryrun` and database reconstruction for `backtest`, so the two modes could disagree for feed-coverage reasons rather than strategy logic.
+- Rule: Do not claim dry-run/backtest equivalence unless they consume the same canonical `MarketUpdate` sequence. Distinguish three modes explicitly: research backtest (historical DB reconstruction), dry run (live ingestion), and replay (recorded canonical feed).
+- Parity checklist:
+  - When validating dry-run behavior historically, prefer replaying a recorded canonical feed instead of reconstructing from tables.
+  - If a result difference is caused by discovery/quote coverage, diagnose the ingestion path before blaming the strategy.
+  - For new feed changes, add a record→replay regression proving the same `MarketUpdate` log produces the same fills and PnL.

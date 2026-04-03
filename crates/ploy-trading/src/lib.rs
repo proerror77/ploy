@@ -12,7 +12,7 @@ pub use orders::{OrderLedger, OrderRecord, OrderState};
 pub use pnl::PnlSnapshot;
 pub use positions::{PositionLedger, PositionSnapshot};
 pub use risk::{snapshot_from_state, RiskSnapshot};
-pub use runtime::{TradingRuntime, TradingRuntimeSnapshot};
+pub use runtime::{TradeCashflowSummary, TradingRuntime, TradingRuntimeSnapshot};
 
 pub const CRATE_MARKER: &str = "ploy-trading";
 

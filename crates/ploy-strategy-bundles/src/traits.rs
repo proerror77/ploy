@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ploy_trading::{FillRecord, OrderLedger, PositionLedger, TradingIntent};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 // ── Market Data ──────────────────────────────────────────
 
@@ -17,7 +18,8 @@ use rust_decimal::Decimal;
 ///
 /// A single enum covers spot prices, Polymarket quotes, L2 orderbook
 /// snapshots, event lifecycle, and kline updates.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MarketUpdate {
     /// CEX spot price tick (e.g. Binance BTC/USDT).
     SpotPrice {
@@ -83,6 +85,16 @@ pub enum MarketUpdate {
 #[async_trait]
 pub trait Feed: Send {
     async fn next(&mut self) -> Option<MarketUpdate>;
+}
+
+#[async_trait]
+impl<T> Feed for Box<T>
+where
+    T: Feed + ?Sized,
+{
+    async fn next(&mut self) -> Option<MarketUpdate> {
+        (**self).next().await
+    }
 }
 
 // ── Execution ────────────────────────────────────────────

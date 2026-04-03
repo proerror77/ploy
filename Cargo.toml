@@ -77,3 +77,13 @@ split-debuginfo = "unpacked"
 
 [profile.dev.package."*"]
 debug = 0
+opt-level = 1
+
+# Fast-but-optimized profile for local backtest / dry-run.
+# Usage: cargo build --profile fast   (or cargo run --profile fast)
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 8
+incremental = true
+debug = 1
