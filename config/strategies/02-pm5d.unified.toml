@@ -2,6 +2,7 @@
 # Same file drives backtest, dry-run, and live — change [runtime].mode only
 #
 # 5-gate pipeline: price validity → quote availability → price filter → probability → edge
+# Params from TPE optimization (Trial 4, 2026-04-04): Sharpe 167.1, 12 trades, $166 PnL
 
 [runtime]
 mode = "backtest"       # "backtest" | "replay" | "dryrun" | "live"
@@ -11,11 +12,11 @@ throttle_hz = 1         # 1 eval/sec for backtest
 # replay_market_updates_from = "captures/dryrun.ndjson"  # required when mode = "replay"
 
 [strategy]
-symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "HYPEUSDT", "BNBUSDT"]  # All 7 crypto symbols
+symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "HYPEUSDT", "BNBUSDT"]
 
 # Probability model
 vol_floor = 0.001
-min_probability = 0.55
+min_probability = 0.5023
 min_z_score = 0.35      # deprecated — z-score gate removed
 
 # Price gates
@@ -25,12 +26,12 @@ no_trade_zone_min = 0.45
 no_trade_zone_max = 0.55
 
 # Edge threshold
-min_edge = 0.02
+min_edge = 0.0413
 
-# Timing gates
-min_time_remaining_secs = 60
-max_time_remaining_secs = 300
-cooldown_secs = 15
+# Timing gates — enter 114-226s before expiry (later = more certain signal)
+min_time_remaining_secs = 114
+max_time_remaining_secs = 226
+cooldown_secs = 74
 
 # Position sizing
 stake_usd = 25.0
