@@ -33,6 +33,8 @@ HALF_SPREAD = Decimal("0.005")  # 0.5% synthetic spread around mid
 
 async def get_active_tokens(conn, start: str, end: str) -> list[dict]:
     """Get all event tokens in the date range."""
+    start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+    end_dt = datetime.fromisoformat(end).replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
     rows = await conn.fetch(
         """
         SELECT
@@ -48,7 +50,7 @@ async def get_active_tokens(conn, start: str, end: str) -> list[dict]:
           AND raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
         ORDER BY start_time
         """,
-        start, end
+        start_dt, end_dt
     )
     return [dict(r) for r in rows]
 
