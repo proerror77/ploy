@@ -6867,8 +6867,9 @@ production state on `tango-1-1`.
 - [x] Compare `clob_quote_ticks` quote quality by `source` on `tango-1-1`.
 - [x] Verify which collector implementation/systemd unit is currently running in production.
 - [x] Tighten local collector selection to choose highest valid bid / lowest valid ask.
+- [x] Exclude polluted / synthetic PM quote sources from historical research backtests.
 - [ ] Deploy the fixed collector binary to `tango-1-1` through the release path and re-verify fresh rows.
-- [ ] Decide whether to quarantine or ignore pre-fix `polymarket_ws_collector` history in research backtests.
+- [x] Decide whether to quarantine or ignore pre-fix `polymarket_ws_collector` history in research backtests.
 
 ## Progress notes
 
@@ -6887,9 +6888,10 @@ production state on `tango-1-1`.
 - 2026-04-04: `systemctl cat ploy-quote-collector.service` shows production is running `/root/ploy/bin/ploy-runner collect-quotes`, not the repo Python collector script.
 - 2026-04-04: Remote host `/root/ploy` is still on commit `f75c035e30ec74cf2d6c6784129a21e90a308eba` with `/root/ploy/bin/ploy-runner` last updated `2026-04-03 11:18:22 +0800`, so local quote-quality fixes through `48a7225e` have not been deployed yet.
 - 2026-04-04: Hardened local collector selection in [collector.rs](/Users/proerror/Documents/ploy/apps/ploy-runner/src/collector.rs) so WS ingestion chooses the highest valid bid and lowest valid ask instead of the first non-placeholder level returned by the SDK.
+- 2026-04-04: Locked historical DB backtests in [database.rs](/Users/proerror/Documents/ploy/crates/ploy-strategy-bundles/src/feed/database.rs#L259) to `source = 'polymarket_ws'` only. This deliberately excludes `ploy_runner_live` synthetic midpoint rows and all current `polymarket_ws_collector` history until a later validated cutover re-enables that source.
 
 ## Review
 
 - The backtest is not mysteriously dropping good data. The database mostly contains bad PM quote rows, and the replay loader is correctly rejecting them.
 - The current production failure mode is operational as much as code-level: `tango-1-1` is still running an older collector binary, so fresh rows continue to pollute `clob_quote_ticks` even though the local repo already contains quote-quality fixes.
-- Even after deploy, pre-fix history in `clob_quote_ticks` remains low quality. Research backtests should either restrict to trusted sources or start from post-fix capture windows.
+- Even after deploy, pre-fix history in `clob_quote_ticks` remains low quality. Research backtests now restrict to the trusted `polymarket_ws` source until we explicitly bless a post-fix `polymarket_ws_collector` capture window.

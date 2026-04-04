@@ -27,6 +27,14 @@ use crate::traits::MarketUpdate;
 /// How far before `from` to load spot prices for EWMA volatility warm-up.
 const WARMUP_MINUTES: i64 = 30;
 
+/// Historical research backtests only trust canonical historical PM quote captures.
+///
+/// `ploy_runner_live` is a synthetic midpoint feed for live/dry-run operation, and
+/// the existing `polymarket_ws_collector` history before the next validated cutover
+/// is too polluted with placeholder `0.01/0.99` books to mix into research results.
+/// Dry-run parity should use recorded replay mode instead of the historical DB path.
+const TRUSTED_PM_RESEARCH_QUOTE_SOURCES: &[&str] = &["polymarket_ws"];
+
 /// Load all historical market updates for given symbols and time range.
 ///
 /// Returns updates sorted by timestamp, ready for `HistoricalFeed::new()`.
@@ -79,13 +87,15 @@ fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
         | MarketUpdate::Quote { ts, .. }
         | MarketUpdate::L2 { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
-        MarketUpdate::EventDiscovered { end_time, window_secs, .. } => {
+        MarketUpdate::EventDiscovered {
+            end_time,
+            window_secs,
+            ..
+        } => {
             // Sort EventDiscovered before all quotes for the same event.
             // Quotes can arrive before the event's official start_time (~90% of cases),
             // so we subtract an extra buffer to guarantee ordering.
-            *end_time
-                - chrono::Duration::seconds(*window_secs as i64)
-                - chrono::Duration::hours(1)
+            *end_time - chrono::Duration::seconds(*window_secs as i64) - chrono::Duration::hours(1)
         }
         MarketUpdate::EventExpired { end_time, .. } => *end_time,
     }
@@ -267,12 +277,14 @@ async fn load_pm_quotes(
     if token_ids.is_empty() {
         return Ok(());
     }
+    let trusted_sources: Vec<&str> = TRUSTED_PM_RESEARCH_QUOTE_SOURCES.to_vec();
 
     // Filter out degenerate quotes (bid < 0.02 or ask > 0.98).
     // Polymarket CLOB orderbooks often have extreme placeholder orders
     // (bid=0.01, ask=0.99) when there is no real liquidity. These are
     // useless for strategy evaluation — the real market price is the midpoint.
-    // Only load quotes where both bid and ask are in a tradeable range.
+    // Only load quotes where both bid and ask are in a tradeable range from
+    // trusted historical capture sources.
     let rows: Vec<(DateTime<Utc>, String, Option<Decimal>, Option<Decimal>)> = sqlx::query_as(
         r#"
         SELECT DISTINCT ON (date_trunc('second', received_at), token_id)
@@ -281,6 +293,7 @@ async fn load_pm_quotes(
         WHERE received_at >= $1
           AND received_at <= $2
           AND token_id = ANY($3)
+          AND source = ANY($4)
           AND best_bid  IS NOT NULL AND best_bid  > 0.02 AND best_bid  < 0.98
           AND best_ask  IS NOT NULL AND best_ask  > 0.02 AND best_ask  < 0.98
         ORDER BY date_trunc('second', received_at), token_id, received_at DESC
@@ -289,11 +302,16 @@ async fn load_pm_quotes(
     .bind(from)
     .bind(to)
     .bind(&token_ids)
+    .bind(&trusted_sources)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
 
-    info!(count = rows.len(), "Loaded PM quotes from clob_quote_ticks (filtered: bid/ask in 0.02-0.98)");
+    info!(
+        count = rows.len(),
+        sources = ?TRUSTED_PM_RESEARCH_QUOTE_SOURCES,
+        "Loaded PM quotes from clob_quote_ticks (trusted sources, filtered: bid/ask in 0.02-0.98)"
+    );
     for (ts, token_id, bid, ask) in rows {
         updates.push(MarketUpdate::Quote {
             token_id,

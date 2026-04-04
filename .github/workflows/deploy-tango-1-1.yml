@@ -74,20 +74,26 @@ jobs:
             # Make binary executable
             chmod +x /root/ploy/bin/ploy-runner
 
-            # Restart directional strategy service
-            systemctl restart ploy-strategy-directional-dryrun || echo "Service not running"
+            for service in \
+              ploy-strategy-directional-dryrun \
+              ploy-quote-collector
+            do
+              systemctl restart "${service}" || echo "Service not running: ${service}"
+            done
 
             # Check service status
             sleep 2
             systemctl status ploy-strategy-directional-dryrun --no-pager || true
+            systemctl status ploy-quote-collector --no-pager || true
 
             # Show recent logs
             journalctl -u ploy-strategy-directional-dryrun -n 20 --no-pager
+            journalctl -u ploy-quote-collector -n 20 --no-pager
 
       - name: Deployment summary
         run: |
           echo "## Deployment to tango-1-1" >> "$GITHUB_STEP_SUMMARY"
           echo "- Binary: \`ploy-runner\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Service: \`ploy-strategy-directional-dryrun\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Services: \`ploy-strategy-directional-dryrun\`, \`ploy-quote-collector\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
