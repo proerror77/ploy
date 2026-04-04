@@ -157,13 +157,13 @@ fn default_max_time() -> u64 {
     300
 }
 fn default_cooldown() -> u64 {
-    15
+    0
 }
 fn default_stake_usd() -> Decimal {
     dec!(25)
 }
 fn default_max_positions() -> usize {
-    30
+    1000
 }
 fn default_max_daily_trades() -> u32 {
     1000
@@ -819,9 +819,9 @@ mod tests {
             min_edge: 0.02,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
-            cooldown_secs: 15,
+            cooldown_secs: 0,
             stake_usd: dec!(25),
-            max_positions: 30,
+            max_positions: 1000,
             max_daily_trades: 1000,
         }
     }
@@ -888,8 +888,9 @@ mod tests {
         let now = Utc::now();
 
         strat.cooldowns.insert("BTCUSDT".into(), now);
-        assert!(strat.in_cooldown("BTCUSDT", now + chrono::Duration::seconds(10)));
-        assert!(!strat.in_cooldown("BTCUSDT", now + chrono::Duration::seconds(16)));
+        // cooldown_secs = 0 means no cooldown — always false
+        assert!(!strat.in_cooldown("BTCUSDT", now + chrono::Duration::seconds(1)));
+        assert!(!strat.in_cooldown("BTCUSDT", now));
     }
 
     #[test]

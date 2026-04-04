@@ -215,9 +215,9 @@ no_trade_zone_max = 0.55
 min_edge = 0.02
 min_time_remaining_secs = 60
 max_time_remaining_secs = 300
-cooldown_secs = 15
+cooldown_secs = 0
 stake_usd = 25.0
-max_positions = 30
+max_positions = 1000
 max_daily_trades = 1000
 
 [execution]
@@ -238,7 +238,7 @@ enable_market_impact = true
         assert_eq!(config.strategy.symbols, vec!["BTCUSDT", "ETHUSDT"]);
         assert!((config.strategy.min_edge - 0.02).abs() < 1e-10);
         assert_eq!(config.strategy.stake_usd, Decimal::new(25, 0));
-        assert_eq!(config.strategy.max_positions, 30);
+        assert_eq!(config.strategy.max_positions, 1000);
     }
 
     #[test]

@@ -31,11 +31,11 @@ min_edge = 0.0413
 # Timing gates — enter 114-226s before expiry (later = more certain signal)
 min_time_remaining_secs = 114
 max_time_remaining_secs = 226
-cooldown_secs = 74
+cooldown_secs = 0
 
 # Position sizing
 stake_usd = 25.0
-max_positions = 30
+max_positions = 1000
 max_daily_trades = 1000
 
 [execution]

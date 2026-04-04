@@ -97,9 +97,9 @@ async fn backtest_full_loop_produces_entry() {
         min_edge: 0.02,
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
-        cooldown_secs: 15,
+        cooldown_secs: 0,
         stake_usd: dec!(25),
-        max_positions: 30,
+        max_positions: 1000,
         max_daily_trades: 1000,
     };
 
@@ -155,9 +155,9 @@ symbols = ["BTCUSDT"]
 min_edge = 0.02
 min_time_remaining_secs = 60
 max_time_remaining_secs = 300
-cooldown_secs = 15
+cooldown_secs = 0
 stake_usd = 25.0
-max_positions = 30
+max_positions = 1000
 max_daily_trades = 1000
 
 [execution]
@@ -197,9 +197,9 @@ async fn empty_feed_produces_zero_trades() {
         min_edge: 0.02,
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
-        cooldown_secs: 15,
+        cooldown_secs: 0,
         stake_usd: dec!(25),
-        max_positions: 30,
+        max_positions: 1000,
         max_daily_trades: 1000,
     };
 
@@ -235,9 +235,9 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         min_edge: 0.02,
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
-        cooldown_secs: 15,
+        cooldown_secs: 0,
         stake_usd: dec!(25),
-        max_positions: 30,
+        max_positions: 1000,
         max_daily_trades: 1000,
     };
     let sim_config = SimulatedExecutorConfig {
