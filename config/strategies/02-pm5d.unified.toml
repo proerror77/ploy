@@ -28,9 +28,9 @@ no_trade_zone_max = 0.55
 # Edge threshold
 min_edge = 0.0413
 
-# Timing gates — enter 114-226s before expiry (later = more certain signal)
-min_time_remaining_secs = 114
-max_time_remaining_secs = 226
+# Timing gates — enter 60-240s before expiry (last 60s excluded, no point)
+min_time_remaining_secs = 60
+max_time_remaining_secs = 240
 cooldown_secs = 0
 
 # Position sizing
