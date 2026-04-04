@@ -6846,3 +6846,50 @@ simulated executor logic.
 - Dry run and replay now share the same canonical `MarketUpdate` sequence when replay is sourced from a recorded dry-run log.
 - This closes the feed-contract parity gap without rewriting the existing historical-database backtest path; research backtests and operational replay now have separate, explicit modes.
 - Existing unrelated worktree diffs remain untouched; this slice only adds the record/replay path and the parity regression coverage.
+
+# PM Quote Coverage Root Cause (2026-04-04)
+
+## Goal
+Explain why the PM 5-minute backtest still only finds a small number of usable
+quotes, prove whether the current collector is writing real prices or
+placeholder extremes, and lock the next deploy/cleanup steps to the actual
+production state on `tango-1-1`.
+
+## File ownership
+
+- `apps/ploy-runner/src/collector.rs`
+  - owner: WS orderbook normalization and quote selection
+- `tasks/todo.md`
+  - owner: investigation notes and deployment follow-up
+
+## Tasks
+
+- [x] Compare `clob_quote_ticks` quote quality by `source` on `tango-1-1`.
+- [x] Verify which collector implementation/systemd unit is currently running in production.
+- [x] Tighten local collector selection to choose highest valid bid / lowest valid ask.
+- [ ] Deploy the fixed collector binary to `tango-1-1` through the release path and re-verify fresh rows.
+- [ ] Decide whether to quarantine or ignore pre-fix `polymarket_ws_collector` history in research backtests.
+
+## Progress notes
+
+- 2026-04-04: Confirmed the historical backtest loader in [database.rs](/Users/proerror/Documents/ploy/crates/ploy-strategy-bundles/src/feed/database.rs#L259) only replays quotes with both sides in `(0.02, 0.98)`, so placeholder rows are intentionally excluded from replay.
+- 2026-04-04: On `tango-1-1`, `clob_quote_ticks` currently contains three PM quote sources:
+  - `polymarket_ws_collector`: `590260` rows from `2026-04-01 05:05:12+08` to `2026-04-04 12:02:46+08`
+  - `ploy_runner_live`: `238977` rows from `2026-04-03 18:07:31+08` to `2026-04-04 12:02:46+08`
+  - `polymarket_ws`: `10695` rows from `2026-04-01 09:37:55+08` to `2026-04-04 06:54:26+08`
+- 2026-04-04: Source quality split on `tango-1-1` for `2026-04-01 .. 2026-04-05`:
+  - `polymarket_ws_collector`: `589876` extreme rows, `382` tradeable rows
+  - `ploy_runner_live`: `238974` extreme rows, `0` rows with both sides tradeable
+  - `polymarket_ws`: `374` extreme rows, `9483` tradeable rows
+- 2026-04-04: Exact placeholder counts confirm the current production collector is still writing almost entirely unusable orderbooks:
+  - `polymarket_ws_collector`: `591113` total, `559533` exact `0.01 / 0.99`, `28575` one-sided rows
+  - `ploy_runner_live` (existing host version): `239379` total, `65295` exact `0.01 / 0.99`, `172144` one-sided rows
+- 2026-04-04: `systemctl cat ploy-quote-collector.service` shows production is running `/root/ploy/bin/ploy-runner collect-quotes`, not the repo Python collector script.
+- 2026-04-04: Remote host `/root/ploy` is still on commit `f75c035e30ec74cf2d6c6784129a21e90a308eba` with `/root/ploy/bin/ploy-runner` last updated `2026-04-03 11:18:22 +0800`, so local quote-quality fixes through `48a7225e` have not been deployed yet.
+- 2026-04-04: Hardened local collector selection in [collector.rs](/Users/proerror/Documents/ploy/apps/ploy-runner/src/collector.rs) so WS ingestion chooses the highest valid bid and lowest valid ask instead of the first non-placeholder level returned by the SDK.
+
+## Review
+
+- The backtest is not mysteriously dropping good data. The database mostly contains bad PM quote rows, and the replay loader is correctly rejecting them.
+- The current production failure mode is operational as much as code-level: `tango-1-1` is still running an older collector binary, so fresh rows continue to pollute `clob_quote_ticks` even though the local repo already contains quote-quality fixes.
+- Even after deploy, pre-fix history in `clob_quote_ticks` remains low quality. Research backtests should either restrict to trusted sources or start from post-fix capture windows.

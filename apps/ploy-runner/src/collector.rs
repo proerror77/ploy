@@ -54,6 +54,30 @@ struct CollectorStats {
     last_refresh: Option<DateTime<Utc>>,
 }
 
+fn is_tradeable_price(price: Decimal) -> bool {
+    price > rust_decimal_macros::dec!(0.02) && price < rust_decimal_macros::dec!(0.98)
+}
+
+fn best_tradeable_bid<I>(prices: I) -> Option<Decimal>
+where
+    I: IntoIterator<Item = Decimal>,
+{
+    prices
+        .into_iter()
+        .filter(|price| is_tradeable_price(*price))
+        .max()
+}
+
+fn best_tradeable_ask<I>(prices: I) -> Option<Decimal>
+where
+    I: IntoIterator<Item = Decimal>,
+{
+    prices
+        .into_iter()
+        .filter(|price| is_tradeable_price(*price))
+        .min()
+}
+
 impl QuoteCollector {
     /// Create a new quote collector.
     pub fn new(config: CollectorConfig, pool: PgPool) -> Self {
@@ -161,16 +185,12 @@ impl QuoteCollector {
                                     continue;
                                 }
 
-                                // Compute mid price from orderbook.
-                                // Use the innermost real bid/ask (skip extreme placeholder orders
-                                // bid=0.01 / ask=0.99 which indicate no real liquidity).
-                                // A real bid/ask is defined as price in (0.02, 0.98).
-                                let real_bid = book.bids.iter()
-                                    .find(|b| b.price > rust_decimal_macros::dec!(0.02) && b.price < rust_decimal_macros::dec!(0.98))
-                                    .map(|b| b.price);
-                                let real_ask = book.asks.iter()
-                                    .find(|a| a.price > rust_decimal_macros::dec!(0.02) && a.price < rust_decimal_macros::dec!(0.98))
-                                    .map(|a| a.price);
+                                // Select the actual best tradeable prices, not just the first
+                                // non-placeholder level returned by the SDK.
+                                let real_bid =
+                                    best_tradeable_bid(book.bids.iter().map(|bid| bid.price));
+                                let real_ask =
+                                    best_tradeable_ask(book.asks.iter().map(|ask| ask.price));
 
                                 // Only store if we have at least one real price
                                 let (best_bid, best_ask) = match (real_bid, real_ask) {
@@ -622,7 +642,10 @@ fn hex_to_decimal_string(hex: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hex_to_decimal_string, normalize_token_id};
+    use super::{
+        best_tradeable_ask, best_tradeable_bid, hex_to_decimal_string, normalize_token_id,
+    };
+    use rust_decimal_macros::dec;
 
     #[test]
     fn normalize_token_id_converts_hex_to_decimal() {
@@ -643,5 +666,24 @@ mod tests {
     #[test]
     fn hex_to_decimal_string_rejects_invalid_hex() {
         assert_eq!(hex_to_decimal_string("xyz"), None);
+    }
+
+    #[test]
+    fn best_tradeable_bid_skips_placeholders_and_takes_highest_level() {
+        let prices = vec![dec!(0.01), dec!(0.45), dec!(0.62), dec!(0.99)];
+        assert_eq!(best_tradeable_bid(prices), Some(dec!(0.62)));
+    }
+
+    #[test]
+    fn best_tradeable_ask_skips_placeholders_and_takes_lowest_level() {
+        let prices = vec![dec!(0.99), dec!(0.54), dec!(0.31), dec!(0.01)];
+        assert_eq!(best_tradeable_ask(prices), Some(dec!(0.31)));
+    }
+
+    #[test]
+    fn best_tradeable_prices_return_none_when_only_placeholders_exist() {
+        let prices = vec![dec!(0.01), dec!(0.02), dec!(0.98), dec!(0.99)];
+        assert_eq!(best_tradeable_bid(prices.clone()), None);
+        assert_eq!(best_tradeable_ask(prices), None);
     }
 }
