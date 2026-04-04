@@ -6924,14 +6924,25 @@ same message for lightweight replay.
 ## Tasks
 
 - [x] Confirm whether the repo already has a canonical Polymarket snapshot table and existing consumers.
-- [ ] Extend `collect-quotes` so each tracked WS `BookUpdate` also writes a raw row to `clob_orderbook_snapshots`.
-- [ ] Keep `clob_quote_ticks` as a derived best-bid/best-ask projection from the same WS message instead of the only persisted fact.
-- [ ] Preserve Polymarket wire metadata where available (`market`, `timestamp`, `hash`) and keep room for collector-specific context.
-- [ ] Add narrow regression coverage for snapshot serialization and derived quote selection.
-- [ ] Run targeted validation and record the deploy/backfill implications.
+- [x] Extend `collect-quotes` so each tracked WS `BookUpdate` also writes a raw row to `clob_orderbook_snapshots`.
+- [x] Keep `clob_quote_ticks` as a derived best-bid/best-ask projection from the same WS message instead of the only persisted fact.
+- [x] Preserve Polymarket wire metadata where available (`market`, `timestamp`, `hash`) and keep room for collector-specific context.
+- [x] Add narrow regression coverage for snapshot serialization and derived quote selection.
+- [x] Run targeted validation and record the deploy/backfill implications.
 
 ## Progress notes
 
 - 2026-04-04: Confirmed `migrations/018_training_data_tables.sql` already defines canonical `clob_orderbook_snapshots` with `token_id`, `market`, `bids`, `asks`, `book_timestamp`, `hash`, `source`, `context`, and `received_at`, so this slice can reuse the existing table instead of creating a new schema.
 - 2026-04-04: Confirmed the vendored `polymarket-client-sdk` `BookUpdate` already exposes the raw fields needed for point-in-time persistence: `asset_id`, `market`, millisecond `timestamp`, full `bids`/`asks`, and optional `hash`.
 - 2026-04-04: Existing training/research code already reads `clob_orderbook_snapshots`, so making the live collector write canonical snapshots closes a collection gap instead of inventing a new downstream format.
+- 2026-04-04: Updated [collector.rs](/Users/proerror/Documents/ploy/apps/ploy-runner/src/collector.rs) so each tracked WS `BookUpdate` is persisted first to `clob_orderbook_snapshots` with raw `bids`/`asks`, `market`, parsed `book_timestamp`, optional `hash`, and collector context (`slug`, `symbol`, `side`, `timeframe`, `end_time`).
+- 2026-04-04: `collect-quotes` now derives `clob_quote_ticks` from the same persisted book update instead of treating quote rows as the only durable fact; snapshots are written even when no tradeable bid/ask survives the placeholder filter.
+- 2026-04-04: Targeted validation passed:
+  - `CARGO_TARGET_DIR=/tmp/ploy-full-snapshot rtk cargo check -p ploy-runner --all-targets`
+  - `CARGO_TARGET_DIR=/tmp/ploy-full-snapshot rtk cargo test -p ploy-runner -- --nocapture`
+
+## Review
+
+- The live collector now preserves point-in-time Polymarket orderbook facts in the canonical table that downstream training scripts and research jobs already understand.
+- `clob_quote_ticks` remains available for lightweight replay, but it is now explicitly a derived projection of the WS book update rather than the sole persisted record.
+- This slice does not yet switch research backtests to consume live `clob_orderbook_snapshots`; it only fixes the collection gap so future backfill/replay work can rely on raw books.

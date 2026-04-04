@@ -1,7 +1,8 @@
 //! Polymarket CLOB quote collector — WebSocket-based continuous orderbook subscription.
 //!
 //! Subscribes to Polymarket CLOB WebSocket for active 5m/15m markets and persists
-//! best_bid/best_ask to `clob_quote_ticks` table.
+//! raw orderbook snapshots to `clob_orderbook_snapshots`, plus derived
+//! best_bid/best_ask rows to `clob_quote_ticks`.
 //!
 //! This is a standalone data collection mode, separate from the strategy runtime.
 //! Run with: `ploy-runner collect-quotes --symbols BTCUSDT,ETHUSDT,SOLUSDT --timeframe 5m`
@@ -12,9 +13,11 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use polymarket_client_sdk::clob::ws::Client as ClobWsClient;
+use polymarket_client_sdk::clob::ws::{BookUpdate, Client as ClobWsClient};
+use polymarket_client_sdk::clob::ws::types::response::OrderBookLevel;
 use polymarket_client_sdk::rtds::Client as RtdsClient;
 use rust_decimal::Decimal;
+use serde::Serialize;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
@@ -49,9 +52,32 @@ pub struct QuoteCollector {
 
 #[derive(Debug, Default)]
 struct CollectorStats {
-    quotes_received: u64,
+    books_received: u64,
+    snapshots_inserted: u64,
     quotes_inserted: u64,
     last_refresh: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct PersistedOrderBookLevel {
+    price: String,
+    size: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct SnapshotContext {
+    slug: String,
+    symbol: String,
+    side: String,
+    timeframe: String,
+    collector: &'static str,
+    end_time: String,
+}
+
+#[derive(Debug, Default)]
+struct PersistResult {
+    snapshot_inserted: bool,
+    quote_inserted: bool,
 }
 
 fn is_tradeable_price(price: Decimal) -> bool {
@@ -78,6 +104,35 @@ where
         .min()
 }
 
+fn serialize_orderbook_levels(levels: &[OrderBookLevel]) -> String {
+    let levels = levels
+        .iter()
+        .map(|level| PersistedOrderBookLevel {
+            price: level.price.to_string(),
+            size: level.size.to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::to_string(&levels).expect("serializing persisted orderbook levels cannot fail")
+}
+
+fn snapshot_context(meta: &TokenMetadata, timeframe: &str) -> String {
+    let context = SnapshotContext {
+        slug: meta.slug.clone(),
+        symbol: meta.symbol.clone(),
+        side: meta.side.clone(),
+        timeframe: timeframe.to_string(),
+        collector: "collect-quotes",
+        end_time: meta.end_time.to_rfc3339(),
+    };
+
+    serde_json::to_string(&context).expect("serializing snapshot context cannot fail")
+}
+
+fn book_timestamp(timestamp_ms: i64) -> Option<DateTime<Utc>> {
+    DateTime::from_timestamp_millis(timestamp_ms)
+}
+
 impl QuoteCollector {
     /// Create a new quote collector.
     pub fn new(config: CollectorConfig, pool: PgPool) -> Self {
@@ -100,10 +155,10 @@ impl QuoteCollector {
         );
 
         // Spawn Chainlink price feed
-        let chainlink_handle = self.spawn_chainlink_feed();
+        let _chainlink_handle = self.spawn_chainlink_feed();
 
         // Spawn price_to_beat updater
-        let price_updater_handle = self.spawn_price_to_beat_updater();
+        let _price_updater_handle = self.spawn_price_to_beat_updater();
 
         loop {
             // Refresh subscriptions and get current token list
@@ -165,7 +220,7 @@ impl QuoteCollector {
                                 // Log first few messages for debugging
                                 {
                                     let s = self.stats.read().await;
-                                    if s.quotes_received < 10 {
+                                    if s.books_received < 10 {
                                         info!(
                                             token = %token_id,
                                             bids = book.bids.len(),
@@ -185,6 +240,11 @@ impl QuoteCollector {
                                     continue;
                                 }
 
+                                {
+                                    let mut s = self.stats.write().await;
+                                    s.books_received += 1;
+                                }
+
                                 // Select the actual best tradeable prices, not just the first
                                 // non-placeholder level returned by the SDK.
                                 let real_bid =
@@ -192,11 +252,7 @@ impl QuoteCollector {
                                 let real_ask =
                                     best_tradeable_ask(book.asks.iter().map(|ask| ask.price));
 
-                                // Only store if we have at least one real price
-                                let (best_bid, best_ask) = match (real_bid, real_ask) {
-                                    (None, None) => continue, // no real liquidity, skip
-                                    (bid, ask) => (bid, ask),
-                                };
+                                let (best_bid, best_ask) = (real_bid, real_ask);
 
                                 // Get metadata
                                 let meta = {
@@ -205,28 +261,36 @@ impl QuoteCollector {
                                 };
 
                                 if let Some(meta) = meta {
-                                    if let Err(e) = insert_quote(
+                                    match persist_book_update(
                                         &self.pool,
+                                        &self.config.timeframe,
+                                        &meta,
+                                        &book,
                                         &token_id,
-                                        &meta.side,
                                         best_bid,
                                         best_ask,
                                     )
                                     .await
                                     {
-                                        warn!(error = %e, token = %token_id, "Failed to insert quote");
-                                    } else {
-                                        let mut s = self.stats.write().await;
-                                        s.quotes_received += 1;
-                                        s.quotes_inserted += 1;
+                                        Ok(result) => {
+                                            let active_tokens = self.subscribed_tokens.read().await.len();
 
-                                        if s.quotes_received % 100 == 0 {
-                                            info!(
-                                                received = s.quotes_received,
-                                                inserted = s.quotes_inserted,
-                                                active_tokens = self.subscribed_tokens.read().await.len(),
-                                                "Quote stats"
-                                            );
+                                            let mut s = self.stats.write().await;
+                                            s.snapshots_inserted += u64::from(result.snapshot_inserted);
+                                            s.quotes_inserted += u64::from(result.quote_inserted);
+
+                                            if s.books_received % 100 == 0 {
+                                                info!(
+                                                    books_received = s.books_received,
+                                                    snapshots_inserted = s.snapshots_inserted,
+                                                    quotes_inserted = s.quotes_inserted,
+                                                    active_tokens,
+                                                    "Quote collector stats"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(error = %e, token = %token_id, "Failed to persist book update");
                                         }
                                     }
                                 } else {
@@ -345,7 +409,7 @@ impl QuoteCollector {
             .map(|row| ActiveMarket {
                 slug: row.market_slug,
                 symbol: row.symbol,
-                start_time: row.start_time,
+                _start_time: row.start_time,
                 end_time: row.end_time,
                 up_token: normalize_token_id(&row.up_token),
                 down_token: normalize_token_id(&row.down_token),
@@ -535,7 +599,7 @@ impl QuoteCollector {
 struct ActiveMarket {
     slug: String,
     symbol: String,
-    start_time: DateTime<Utc>,
+    _start_time: DateTime<Utc>,
     end_time: DateTime<Utc>,
     up_token: String,
     down_token: String,
@@ -552,15 +616,47 @@ struct ActiveMarketRow {
     down_token: String,
 }
 
-/// Insert a quote into the database.
-async fn insert_quote(
+/// Persist a raw orderbook snapshot and its derived top-of-book quote.
+async fn persist_book_update(
     pool: &PgPool,
+    timeframe: &str,
+    meta: &TokenMetadata,
+    book: &BookUpdate,
     token_id: &str,
-    side: &str,
     best_bid: Option<Decimal>,
     best_ask: Option<Decimal>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+) -> Result<PersistResult, sqlx::Error> {
+    let received_at = Utc::now();
+    let bids_json = serialize_orderbook_levels(&book.bids);
+    let asks_json = serialize_orderbook_levels(&book.asks);
+    let context_json = snapshot_context(meta, timeframe);
+
+    let mut tx = pool.begin().await?;
+
+    let snapshot_rows = sqlx::query(
+        r#"
+        INSERT INTO clob_orderbook_snapshots (
+            domain, token_id, market, bids, asks,
+            book_timestamp, hash, source, context, received_at
+        ) VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9::jsonb, $10)
+        "#,
+    )
+    .bind("Crypto")
+    .bind(token_id)
+    .bind(book.market.to_string())
+    .bind(bids_json)
+    .bind(asks_json)
+    .bind(book_timestamp(book.timestamp))
+    .bind(book.hash.clone())
+    .bind("polymarket_ws_collector")
+    .bind(context_json)
+    .bind(received_at)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    let quote_rows = if best_bid.is_some() || best_ask.is_some() {
+        sqlx::query(
         r#"
         INSERT INTO clob_quote_ticks (
             token_id, side, best_bid, best_ask,
@@ -568,18 +664,27 @@ async fn insert_quote(
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT DO NOTHING
         "#,
-    )
-    .bind(token_id)
-    .bind(side)
-    .bind(best_bid)
-    .bind(best_ask)
-    .bind(Utc::now())
-    .bind("polymarket_ws_collector")
-    .bind("Crypto")
-    .execute(pool)
-    .await?;
+        )
+        .bind(token_id)
+        .bind(&meta.side)
+        .bind(best_bid)
+        .bind(best_ask)
+        .bind(received_at)
+        .bind("polymarket_ws_collector")
+        .bind("Crypto")
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    } else {
+        0
+    };
 
-    Ok(())
+    tx.commit().await?;
+
+    Ok(PersistResult {
+        snapshot_inserted: snapshot_rows > 0,
+        quote_inserted: quote_rows > 0,
+    })
 }
 
 /// Normalize token ID from hex (0x...) to decimal string.
@@ -643,8 +748,11 @@ fn hex_to_decimal_string(hex: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        best_tradeable_ask, best_tradeable_bid, hex_to_decimal_string, normalize_token_id,
+        best_tradeable_ask, best_tradeable_bid, book_timestamp, hex_to_decimal_string,
+        normalize_token_id, serialize_orderbook_levels, snapshot_context, OrderBookLevel,
+        TokenMetadata,
     };
+    use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;
 
     #[test]
@@ -685,5 +793,45 @@ mod tests {
         let prices = vec![dec!(0.01), dec!(0.02), dec!(0.98), dec!(0.99)];
         assert_eq!(best_tradeable_bid(prices.clone()), None);
         assert_eq!(best_tradeable_ask(prices), None);
+    }
+
+    #[test]
+    fn serialize_orderbook_levels_preserves_price_and_size_strings() {
+        let levels = vec![
+            OrderBookLevel::builder()
+                .price(dec!(0.45))
+                .size(dec!(12.5))
+                .build(),
+            OrderBookLevel::builder()
+                .price(dec!(0.44))
+                .size(dec!(8))
+                .build(),
+        ];
+
+        assert_eq!(
+            serialize_orderbook_levels(&levels),
+            r#"[{"price":"0.45","size":"12.5"},{"price":"0.44","size":"8"}]"#
+        );
+    }
+
+    #[test]
+    fn snapshot_context_captures_token_metadata_and_timeframe() {
+        let meta = TokenMetadata {
+            slug: "btc-updown-5m-123".to_string(),
+            symbol: "BTCUSDT".to_string(),
+            side: "UP".to_string(),
+            end_time: Utc.with_ymd_and_hms(2026, 4, 4, 4, 5, 0).unwrap(),
+        };
+
+        assert_eq!(
+            snapshot_context(&meta, "5m"),
+            r#"{"slug":"btc-updown-5m-123","symbol":"BTCUSDT","side":"UP","timeframe":"5m","collector":"collect-quotes","end_time":"2026-04-04T04:05:00+00:00"}"#
+        );
+    }
+
+    #[test]
+    fn book_timestamp_converts_millis_to_utc_datetime() {
+        let timestamp = book_timestamp(1_712_205_600_123).unwrap();
+        assert_eq!(timestamp.to_rfc3339(), "2024-04-04T04:40:00.123+00:00");
     }
 }
