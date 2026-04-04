@@ -365,14 +365,14 @@ impl QuoteCollector {
 
     /// Query database for active markets.
     async fn get_active_markets(&self) -> Result<Vec<ActiveMarket>, sqlx::Error> {
-        let pattern = format!("%-updown-{}-%", self.config.timeframe);
-
         // Build IN clause dynamically
         let placeholders: Vec<String> = (1..=self.config.symbols.len())
             .map(|i| format!("${}", i))
             .collect();
         let in_clause = placeholders.join(", ");
 
+        // Query by symbol and time window only — market slugs may be numeric IDs
+        // or human-readable strings depending on the Polymarket market type.
         let query = format!(
             r#"
             SELECT
@@ -384,23 +384,20 @@ impl QuoteCollector {
                 ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->1)::text AS down_token
             FROM pm_market_metadata
             WHERE symbol IN ({})
-              AND market_slug LIKE ${}
               AND end_time > NOW()
               AND start_time < NOW() + INTERVAL '2 hours'
               AND raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
             ORDER BY start_time
             "#,
             in_clause,
-            self.config.symbols.len() + 1
         );
 
-        info!(query = %query, symbols = ?self.config.symbols, pattern = %pattern, "Executing market query");
+        info!(symbols = ?self.config.symbols, "Querying active markets");
 
         let mut q = sqlx::query_as::<_, ActiveMarketRow>(&query);
         for symbol in &self.config.symbols {
             q = q.bind(symbol);
         }
-        q = q.bind(&pattern);
 
         let rows = q.fetch_all(&self.pool).await?;
 
@@ -492,7 +489,6 @@ impl QuoteCollector {
                 sleep(StdDuration::from_secs(10)).await;
 
                 // Query markets starting in the next 30 seconds that don't have price_to_beat
-                let pattern = format!("%-updown-{}-%", timeframe);
                 let now = Utc::now();
                 let window_start = now;
                 let window_end = now + chrono::Duration::seconds(30);
@@ -502,7 +498,6 @@ impl QuoteCollector {
                     SELECT market_slug, symbol, start_time
                     FROM pm_market_metadata
                     WHERE symbol IN ({})
-                      AND market_slug LIKE ${}
                       AND start_time >= ${}
                       AND start_time <= ${}
                       AND price_to_beat IS NULL
@@ -515,14 +510,12 @@ impl QuoteCollector {
                         .join(", "),
                     symbols.len() + 1,
                     symbols.len() + 2,
-                    symbols.len() + 3
                 );
 
                 let mut q = sqlx::query_as::<_, (String, String, DateTime<Utc>)>(&query);
                 for symbol in &symbols {
                     q = q.bind(symbol);
                 }
-                q = q.bind(&pattern);
                 q = q.bind(window_start);
                 q = q.bind(window_end);
 
