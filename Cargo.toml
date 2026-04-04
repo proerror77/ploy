@@ -47,6 +47,7 @@ toml_edit = "0.22"
 async-trait = "0.1"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
+optimizer = "1"
 
 [package]
 name = "ploy"

@@ -2904,6 +2904,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "optimizer"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eae76a9cedd8a9155f2533e1ad45793496021a7c8e0fd48676442a7eee654776"
+dependencies = [
+ "fastrand",
+ "parking_lot",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3239,6 +3250,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "optimizer",
  "ploy-trading",
  "rust_decimal",
  "rust_decimal_macros",
