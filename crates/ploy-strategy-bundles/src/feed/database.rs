@@ -60,9 +60,18 @@ pub async fn load_from_database(
     //    Loading events before quotes ensures token_symbol mappings exist.
     load_events(pool, symbols, from, to, &mut updates).await?;
 
-    // 3. Polymarket quotes from clob_quote_ticks
+    // 3. Polymarket quotes — try clob_quote_ticks first, fall back to orderbook snapshots
     let token_map = load_token_mappings(pool, symbols, from, to).await?;
+    let quote_count_before = updates.len();
     load_pm_quotes(pool, &token_map, from, to, &mut updates).await?;
+    let quote_count_after = updates.len();
+
+    // If clob_quote_ticks had no real data, try extracting mid prices from
+    // clob_orderbook_snapshots (which stores full bid/ask depth as JSONB).
+    if quote_count_after == quote_count_before {
+        info!("No real quotes in clob_quote_ticks, falling back to orderbook snapshots");
+        load_pm_quotes_from_snapshots(pool, &token_map, from, to, &mut updates).await?;
+    }
 
     // 4. L2 orderbook from binance_lob_ticks
     load_l2_data(pool, symbols, from, to, &mut updates).await?;
@@ -311,6 +320,80 @@ async fn load_pm_quotes(
         count = rows.len(),
         sources = ?TRUSTED_PM_RESEARCH_QUOTE_SOURCES,
         "Loaded PM quotes from clob_quote_ticks (trusted sources, filtered: bid/ask in 0.02-0.98)"
+    );
+    for (ts, token_id, bid, ask) in rows {
+        updates.push(MarketUpdate::Quote {
+            token_id,
+            bid,
+            ask,
+            ts,
+        });
+    }
+
+    Ok(())
+}
+
+/// Fallback quote loader from `clob_orderbook_snapshots`.
+///
+/// Extracts the innermost real bid/ask from the JSONB depth arrays.
+/// Used when `clob_quote_ticks` has no real data (all 0.01/0.99 placeholders).
+async fn load_pm_quotes_from_snapshots(
+    pool: &PgPool,
+    token_map: &TokenMap,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    updates: &mut Vec<MarketUpdate>,
+) -> Result<(), sqlx::Error> {
+    let token_ids: Vec<String> = token_map.keys().cloned().collect();
+    if token_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Extract the best real bid/ask from JSONB depth arrays.
+    // "Real" means price is in (0.02, 0.98) — not a placeholder order.
+    // We compute mid = (best_bid + best_ask) / 2 and apply a 0.5% synthetic spread.
+    let rows: Vec<(DateTime<Utc>, String, Option<Decimal>, Option<Decimal>)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (date_trunc('second', received_at), token_id)
+               received_at,
+               token_id,
+               -- Best real bid: highest bid price in (0.02, 0.98)
+               (
+                   SELECT MAX((elem->>'price')::numeric)
+                   FROM jsonb_array_elements(bids) AS elem
+                   WHERE (elem->>'price')::numeric > 0.02
+                     AND (elem->>'price')::numeric < 0.98
+               ) AS best_bid,
+               -- Best real ask: lowest ask price in (0.02, 0.98)
+               (
+                   SELECT MIN((elem->>'price')::numeric)
+                   FROM jsonb_array_elements(asks) AS elem
+                   WHERE (elem->>'price')::numeric > 0.02
+                     AND (elem->>'price')::numeric < 0.98
+               ) AS best_ask
+        FROM clob_orderbook_snapshots
+        WHERE received_at >= $1
+          AND received_at <= $2
+          AND token_id = ANY($3)
+        HAVING (
+            SELECT MAX((elem->>'price')::numeric)
+            FROM jsonb_array_elements(bids) AS elem
+            WHERE (elem->>'price')::numeric > 0.02
+              AND (elem->>'price')::numeric < 0.98
+        ) IS NOT NULL
+        ORDER BY date_trunc('second', received_at), token_id, received_at DESC
+        "#,
+    )
+    .bind(from)
+    .bind(to)
+    .bind(&token_ids)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    info!(
+        count = rows.len(),
+        "Loaded PM quotes from clob_orderbook_snapshots (real bid/ask extracted from JSONB depth)"
     );
     for (ts, token_id, bid, ask) in rows {
         updates.push(MarketUpdate::Quote {
