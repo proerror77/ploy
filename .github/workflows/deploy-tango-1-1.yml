@@ -74,12 +74,8 @@ jobs:
             # Make binary executable
             chmod +x /root/ploy/bin/ploy-runner
 
-            for service in \
-              ploy-strategy-directional-dryrun \
-              ploy-quote-collector
-            do
-              systemctl restart "${service}" || echo "Service not running: ${service}"
-            done
+            systemctl restart ploy-strategy-directional-dryrun || echo "Service not running: ploy-strategy-directional-dryrun"
+            systemctl restart ploy-quote-collector || echo "Service not running: ploy-quote-collector"
 
             # Check service status
             sleep 2

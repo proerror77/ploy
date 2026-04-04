@@ -6868,7 +6868,7 @@ production state on `tango-1-1`.
 - [x] Verify which collector implementation/systemd unit is currently running in production.
 - [x] Tighten local collector selection to choose highest valid bid / lowest valid ask.
 - [x] Exclude polluted / synthetic PM quote sources from historical research backtests.
-- [ ] Deploy the fixed collector binary to `tango-1-1` through the release path and re-verify fresh rows.
+- [x] Deploy the fixed collector binary to `tango-1-1` through the release path and re-verify fresh rows.
 - [x] Decide whether to quarantine or ignore pre-fix `polymarket_ws_collector` history in research backtests.
 
 ## Progress notes
@@ -6889,9 +6889,17 @@ production state on `tango-1-1`.
 - 2026-04-04: Remote host `/root/ploy` is still on commit `f75c035e30ec74cf2d6c6784129a21e90a308eba` with `/root/ploy/bin/ploy-runner` last updated `2026-04-03 11:18:22 +0800`, so local quote-quality fixes through `48a7225e` have not been deployed yet.
 - 2026-04-04: Hardened local collector selection in [collector.rs](/Users/proerror/Documents/ploy/apps/ploy-runner/src/collector.rs) so WS ingestion chooses the highest valid bid and lowest valid ask instead of the first non-placeholder level returned by the SDK.
 - 2026-04-04: Locked historical DB backtests in [database.rs](/Users/proerror/Documents/ploy/crates/ploy-strategy-bundles/src/feed/database.rs#L259) to `source = 'polymarket_ws'` only. This deliberately excludes `ploy_runner_live` synthetic midpoint rows and all current `polymarket_ws_collector` history until a later validated cutover re-enables that source.
+- 2026-04-04: Pushed local fixes through `837cdd86f3a6dc9708db58e8215a16b885cf54f9` to `origin/main` and triggered `deploy-tango-1-1.yml` run `23971409144`.
+- 2026-04-04: GitHub Actions built and uploaded `/root/ploy/bin/ploy-runner` successfully, but the restart step failed because `appleboy/ssh-action` wrapped the multi-line `for` loop in a way that produced `syntax error near unexpected token DRONE_SSH_PREV_COMMAND_EXIT_CODE=$?`.
+- 2026-04-04: Manually restarted `ploy-strategy-directional-dryrun` and `ploy-quote-collector` on `tango-1-1`; both services came back on the new binary at `2026-04-04 12:40:28+08`.
+- 2026-04-04: Post-cutover DB validation on `tango-1-1`:
+  - `ploy_runner_live`: `50/50` rows tradeable, `0` exact `0.01 / 0.99`
+  - `polymarket_ws_collector`: `124/127` initial rows tradeable; the only 3 bad rows were old-process tail writes at `12:40:28.009`–`12:40:28.027+08`
+  - recent `polymarket_ws_collector` window (`NOW() - 30s`): `82/82` rows tradeable on both sides
 
 ## Review
 
 - The backtest is not mysteriously dropping good data. The database mostly contains bad PM quote rows, and the replay loader is correctly rejecting them.
-- The current production failure mode is operational as much as code-level: `tango-1-1` is still running an older collector binary, so fresh rows continue to pollute `clob_quote_ticks` even though the local repo already contains quote-quality fixes.
+- The main production blocker was operational as much as code-level: `tango-1-1` was still running an older collector binary until the `2026-04-04 12:40:28+08` manual restart onto the CI-built artifact.
 - Even after deploy, pre-fix history in `clob_quote_ticks` remains low quality. Research backtests now restrict to the trusted `polymarket_ws` source until we explicitly bless a post-fix `polymarket_ws_collector` capture window.
+- New quote captures after the `2026-04-04 12:40:28+08` cutover are healthy enough to resume forward collection, but the repo still keeps research backtests pinned to `polymarket_ws` until we decide on a formal trust cutoff / source-ranking policy for re-enabling collector history.
