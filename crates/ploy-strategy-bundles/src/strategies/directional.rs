@@ -617,7 +617,7 @@ impl StrategyLogic for DirectionalStrategy {
             }
 
             MarketUpdate::Quote {
-                token_id, bid, ask, ..
+                token_id, bid, ask, ts,
             } => {
                 self.quotes.insert(
                     token_id.clone(),
@@ -626,6 +626,22 @@ impl StrategyLogic for DirectionalStrategy {
                         ask: *ask,
                     },
                 );
+
+                // Also try entry: a fresh quote may unlock a signal that was
+                // previously blocked by missing ask price (Gate 1).
+                if let Some(symbol) = self.token_symbol.get(token_id).cloned() {
+                    if self.config.symbols.contains(&symbol) {
+                        if self.feed_time.map_or(true, |ft| *ts > ft) {
+                            self.feed_time = Some(*ts);
+                        }
+                        self.reset_daily_counter(*ts);
+                        if self.daily_trades < self.config.max_daily_trades
+                            && !self.in_cooldown(&symbol, *ts)
+                        {
+                            return self.try_entry(&symbol, positions, *ts);
+                        }
+                    }
+                }
                 vec![]
             }
 
