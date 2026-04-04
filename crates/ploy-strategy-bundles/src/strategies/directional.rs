@@ -685,6 +685,19 @@ impl StrategyLogic for DirectionalStrategy {
                     end_time: *end_time,
                     open_price,
                 });
+
+                // Quotes for this event may have arrived before EventDiscovered
+                // (feed ordering: quotes sorted by received_at, events by start_time).
+                // If we already have a cached quote for either token, try entry now.
+                let has_cached_quote = self.quotes.contains_key(up_token)
+                    || self.quotes.contains_key(down_token);
+                if has_cached_quote
+                    && self.config.symbols.contains(symbol)
+                    && self.daily_trades < self.config.max_daily_trades
+                    && !self.in_cooldown(symbol, now)
+                {
+                    return self.try_entry(symbol, positions, now);
+                }
                 vec![]
             }
 

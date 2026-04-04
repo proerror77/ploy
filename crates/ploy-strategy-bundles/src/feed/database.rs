@@ -46,15 +46,18 @@ pub async fn load_from_database(
     let spot_from = from - Duration::minutes(WARMUP_MINUTES);
     load_spot_prices(pool, symbols, spot_from, to, &mut updates).await?;
 
-    // 2. Polymarket quotes from clob_quote_ticks
+    // 2. Event windows FIRST — must be registered before quotes are processed.
+    //    Quotes for a token can arrive before the event's official start_time
+    //    (Polymarket tokens are continuous; ~90% of quotes precede start_time).
+    //    Loading events before quotes ensures token_symbol mappings exist.
+    load_events(pool, symbols, from, to, &mut updates).await?;
+
+    // 3. Polymarket quotes from clob_quote_ticks
     let token_map = load_token_mappings(pool, symbols, from, to).await?;
     load_pm_quotes(pool, &token_map, from, to, &mut updates).await?;
 
-    // 3. L2 orderbook from binance_lob_ticks
+    // 4. L2 orderbook from binance_lob_ticks
     load_l2_data(pool, symbols, from, to, &mut updates).await?;
-
-    // 4. Event windows from pm_market_metadata
-    load_events(pool, symbols, from, to, &mut updates).await?;
 
     // Sort by timestamp
     updates.sort_by_key(|u| update_ts(u));
@@ -76,9 +79,13 @@ fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
         | MarketUpdate::Quote { ts, .. }
         | MarketUpdate::L2 { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
-        MarketUpdate::EventDiscovered { end_time, .. } => {
-            // Use start time (end_time - window) for discovery
-            *end_time - chrono::Duration::seconds(300)
+        MarketUpdate::EventDiscovered { end_time, window_secs, .. } => {
+            // Sort EventDiscovered before all quotes for the same event.
+            // Quotes can arrive before the event's official start_time (~90% of cases),
+            // so we subtract an extra buffer to guarantee ordering.
+            *end_time
+                - chrono::Duration::seconds(*window_secs as i64)
+                - chrono::Duration::hours(1)
         }
         MarketUpdate::EventExpired { end_time, .. } => *end_time,
     }
