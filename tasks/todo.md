@@ -6903,3 +6903,35 @@ production state on `tango-1-1`.
 - The main production blocker was operational as much as code-level: `tango-1-1` was still running an older collector binary until the `2026-04-04 12:40:28+08` manual restart onto the CI-built artifact.
 - Even after deploy, pre-fix history in `clob_quote_ticks` remains low quality. Research backtests now restrict to the trusted `polymarket_ws` source until we explicitly bless a post-fix `polymarket_ws_collector` capture window.
 - New quote captures after the `2026-04-04 12:40:28+08` cutover are healthy enough to resume forward collection, but the repo still keeps research backtests pinned to `polymarket_ws` until we decide on a formal trust cutoff / source-ranking policy for re-enabling collector history.
+
+---
+
+# PM Full Snapshot Capture (2026-04-04)
+
+## Goal
+Stop treating Polymarket WS orderbooks as quote-only data. Reuse the existing
+canonical `clob_orderbook_snapshots` table so the live collector persists the
+raw point-in-time book update first, then derives `clob_quote_ticks` from the
+same message for lightweight replay.
+
+## File ownership
+
+- `apps/ploy-runner/src/collector.rs`
+  - owner: WS snapshot persistence, quote derivation, and collector tests
+- `tasks/todo.md`
+  - owner: implementation notes and validation follow-up
+
+## Tasks
+
+- [x] Confirm whether the repo already has a canonical Polymarket snapshot table and existing consumers.
+- [ ] Extend `collect-quotes` so each tracked WS `BookUpdate` also writes a raw row to `clob_orderbook_snapshots`.
+- [ ] Keep `clob_quote_ticks` as a derived best-bid/best-ask projection from the same WS message instead of the only persisted fact.
+- [ ] Preserve Polymarket wire metadata where available (`market`, `timestamp`, `hash`) and keep room for collector-specific context.
+- [ ] Add narrow regression coverage for snapshot serialization and derived quote selection.
+- [ ] Run targeted validation and record the deploy/backfill implications.
+
+## Progress notes
+
+- 2026-04-04: Confirmed `migrations/018_training_data_tables.sql` already defines canonical `clob_orderbook_snapshots` with `token_id`, `market`, `bids`, `asks`, `book_timestamp`, `hash`, `source`, `context`, and `received_at`, so this slice can reuse the existing table instead of creating a new schema.
+- 2026-04-04: Confirmed the vendored `polymarket-client-sdk` `BookUpdate` already exposes the raw fields needed for point-in-time persistence: `asset_id`, `market`, millisecond `timestamp`, full `bids`/`asks`, and optional `hash`.
+- 2026-04-04: Existing training/research code already reads `clob_orderbook_snapshots`, so making the live collector write canonical snapshots closes a collection gap instead of inventing a new downstream format.
