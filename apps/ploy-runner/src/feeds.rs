@@ -157,24 +157,27 @@ pub fn spawn_quote_feed(
         loop {
             for token in &token_ids {
                 let token_str = token.to_string();
-                let url = format!("https://clob.polymarket.com/book?token_id={}", token_str);
+
+                // Use /midpoint API instead of /book to get the real market price.
+                // The /book endpoint returns extreme placeholder orders (bid=0.01, ask=0.99)
+                // when there is no real liquidity, which is useless for strategy evaluation.
+                // /midpoint returns the actual market consensus price.
+                let url = format!("https://clob.polymarket.com/midpoint?token_id={}", token_str);
 
                 match http.get(&url).send().await {
                     Ok(resp) => {
                         if let Ok(body) = resp.json::<serde_json::Value>().await {
-                            let bid = body["bids"]
-                                .as_array()
-                                .and_then(|b| b.first())
-                                .and_then(|b| b["price"].as_str())
+                            let mid = body["mid"]
+                                .as_str()
                                 .and_then(|p| p.parse::<Decimal>().ok());
 
-                            let ask = body["asks"]
-                                .as_array()
-                                .and_then(|a| a.first())
-                                .and_then(|a| a["price"].as_str())
-                                .and_then(|p| p.parse::<Decimal>().ok());
+                            if let Some(mid_price) = mid {
+                                // Store mid as both bid and ask — strategy uses ask for entry.
+                                // A small synthetic spread (0.5%) is applied so bid < ask.
+                                let half_spread = mid_price * rust_decimal_macros::dec!(0.005);
+                                let bid = Some((mid_price - half_spread).max(rust_decimal_macros::dec!(0.01)));
+                                let ask = Some((mid_price + half_spread).min(rust_decimal_macros::dec!(0.99)));
 
-                            if bid.is_some() || ask.is_some() {
                                 let now = Utc::now();
                                 let update = MarketUpdate::Quote {
                                     token_id: token_str.clone(),
@@ -199,22 +202,23 @@ pub fn spawn_quote_feed(
                                 if logged_quote_tokens.insert(token_str.clone()) {
                                     info!(
                                         token = %token_str,
+                                        mid = %mid_price,
                                         bid = ?bid,
                                         ask = ?ask,
-                                        "First non-empty quote observed"
+                                        "First midpoint quote observed"
                                     );
                                 } else if quoted_tokens % 100 == 0 {
                                     info!(
                                         quotes = quoted_tokens,
                                         tracked_tokens = logged_quote_tokens.len(),
-                                        "REST quote poller forwarded non-empty quotes"
+                                        "REST quote poller forwarded midpoint quotes"
                                     );
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        debug!(error = %e, token = %token_str, "REST book fetch failed");
+                        debug!(error = %e, token = %token_str, "REST midpoint fetch failed");
                     }
                 }
             }

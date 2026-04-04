@@ -136,7 +136,7 @@ impl QuoteCollector {
                     result = stream.next() => {
                         match result {
                             Some(Ok(book)) => {
-                                let token_id = book.asset_id.to_string();  // Use asset_id, not market
+                                let token_id = book.asset_id.to_string();
 
                                 // Log first few messages for debugging
                                 {
@@ -161,13 +161,22 @@ impl QuoteCollector {
                                     continue;
                                 }
 
-                                // Extract best bid/ask
-                                let best_bid = book.bids.first().map(|b| b.price);
-                                let best_ask = book.asks.first().map(|a| a.price);
+                                // Compute mid price from orderbook.
+                                // Use the innermost real bid/ask (skip extreme placeholder orders
+                                // bid=0.01 / ask=0.99 which indicate no real liquidity).
+                                // A real bid/ask is defined as price in (0.02, 0.98).
+                                let real_bid = book.bids.iter()
+                                    .find(|b| b.price > rust_decimal_macros::dec!(0.02) && b.price < rust_decimal_macros::dec!(0.98))
+                                    .map(|b| b.price);
+                                let real_ask = book.asks.iter()
+                                    .find(|a| a.price > rust_decimal_macros::dec!(0.02) && a.price < rust_decimal_macros::dec!(0.98))
+                                    .map(|a| a.price);
 
-                                if best_bid.is_none() && best_ask.is_none() {
-                                    continue;
-                                }
+                                // Only store if we have at least one real price
+                                let (best_bid, best_ask) = match (real_bid, real_ask) {
+                                    (None, None) => continue, // no real liquidity, skip
+                                    (bid, ask) => (bid, ask),
+                                };
 
                                 // Get metadata
                                 let meta = {
@@ -176,7 +185,6 @@ impl QuoteCollector {
                                 };
 
                                 if let Some(meta) = meta {
-                                    // Insert quote
                                     if let Err(e) = insert_quote(
                                         &self.pool,
                                         &token_id,

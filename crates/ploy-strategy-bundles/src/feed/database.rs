@@ -268,6 +268,11 @@ async fn load_pm_quotes(
         return Ok(());
     }
 
+    // Filter out degenerate quotes (bid < 0.02 or ask > 0.98).
+    // Polymarket CLOB orderbooks often have extreme placeholder orders
+    // (bid=0.01, ask=0.99) when there is no real liquidity. These are
+    // useless for strategy evaluation — the real market price is the midpoint.
+    // Only load quotes where both bid and ask are in a tradeable range.
     let rows: Vec<(DateTime<Utc>, String, Option<Decimal>, Option<Decimal>)> = sqlx::query_as(
         r#"
         SELECT DISTINCT ON (date_trunc('second', received_at), token_id)
@@ -276,6 +281,8 @@ async fn load_pm_quotes(
         WHERE received_at >= $1
           AND received_at <= $2
           AND token_id = ANY($3)
+          AND best_bid  IS NOT NULL AND best_bid  > 0.02 AND best_bid  < 0.98
+          AND best_ask  IS NOT NULL AND best_ask  > 0.02 AND best_ask  < 0.98
         ORDER BY date_trunc('second', received_at), token_id, received_at DESC
         "#,
     )
@@ -286,7 +293,7 @@ async fn load_pm_quotes(
     .await
     .unwrap_or_default();
 
-    info!(count = rows.len(), "Loaded PM quotes from clob_quote_ticks");
+    info!(count = rows.len(), "Loaded PM quotes from clob_quote_ticks (filtered: bid/ask in 0.02-0.98)");
     for (ts, token_id, bid, ask) in rows {
         updates.push(MarketUpdate::Quote {
             token_id,
