@@ -488,10 +488,14 @@ impl QuoteCollector {
             loop {
                 sleep(StdDuration::from_secs(10)).await;
 
-                // Query markets starting in the next 30 seconds that don't have price_to_beat
                 let now = Utc::now();
-                let window_start = now;
-                let window_end = now + chrono::Duration::seconds(30);
+
+                // Two passes:
+                // 1. Backfill: events that started in the past 10 minutes with no price_to_beat
+                //    Use the Chainlink price closest to their start_time (best available).
+                // 2. Upcoming: events starting in the next 60 seconds — write at exact start_time.
+                let window_start = now - chrono::Duration::minutes(10);
+                let window_end = now + chrono::Duration::seconds(60);
 
                 let query = format!(
                     r#"
@@ -537,10 +541,11 @@ impl QuoteCollector {
                 );
 
                 for (slug, symbol, start_time) in markets {
-                    // Wait until start_time
-                    let wait_duration = (start_time - Utc::now()).num_milliseconds();
-                    if wait_duration > 0 {
-                        sleep(StdDuration::from_millis(wait_duration as u64)).await;
+                    // For upcoming events: wait until start_time to capture the exact open price.
+                    // For past events (backfill): write immediately with current Chainlink price.
+                    let wait_ms = (start_time - Utc::now()).num_milliseconds();
+                    if wait_ms > 0 {
+                        sleep(StdDuration::from_millis(wait_ms as u64)).await;
                     }
 
                     // Get Chainlink price
