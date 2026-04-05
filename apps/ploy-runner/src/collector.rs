@@ -419,34 +419,51 @@ impl QuoteCollector {
         Ok(markets)
     }
 
-    /// Spawn settlement collector — polls Gamma API for resolved markets
+    /// Spawn settlement collector — polls /midpoint for recently expired events
     /// and persists settlement outcomes to pm_token_settlements.
     fn spawn_settlement_collector(&self) -> tokio::task::JoinHandle<()> {
         let pool = self.pool.clone();
-        let token_metadata = self.token_metadata.clone();
 
         tokio::spawn(async move {
             let http = reqwest::Client::new();
             let mut settled_count = 0u64;
 
             loop {
-                // Poll every 30 seconds
-                tokio::time::sleep(StdDuration::from_secs(30)).await;
+                // Poll every 60 seconds
+                tokio::time::sleep(StdDuration::from_secs(60)).await;
 
-                // Get all tracked tokens
-                let tokens: Vec<(String, String)> = {
-                    let m = token_metadata.read().await;
-                    m.iter()
-                        .map(|(token_id, meta)| (token_id.clone(), meta.slug.clone()))
-                        .collect()
-                };
+                // Query tokens from events that expired in the last 2 hours
+                // but don't yet have settlement data. This catches all recently
+                // expired events regardless of whether they were in the active list.
+                let rows: Vec<(String, String)> = sqlx::query_as(
+                    r#"
+                    SELECT DISTINCT
+                        trim(both '"' from jsonb_array_elements_text(
+                            (raw_market->'markets'->0->>'clobTokenIds')::jsonb
+                        )) as token_id,
+                        market_slug
+                    FROM pm_market_metadata
+                    WHERE end_time >= NOW() - INTERVAL '2 hours'
+                      AND end_time < NOW()
+                      AND raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
+                      AND market_slug NOT IN (
+                          SELECT DISTINCT market_slug FROM pm_token_settlements
+                          WHERE resolved = TRUE AND market_slug IS NOT NULL
+                      )
+                    LIMIT 200
+                    "#,
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default();
 
-                if tokens.is_empty() {
+                if rows.is_empty() {
                     continue;
                 }
 
-                // Check each token's midpoint — settled tokens return 0.001 or 0.999
-                for (token_id, slug) in &tokens {
+                info!(pending = rows.len(), "Settlement collector checking expired events");
+
+                for (token_id, slug) in &rows {
                     let url = format!(
                         "https://clob.polymarket.com/midpoint?token_id={}",
                         token_id
@@ -466,12 +483,12 @@ impl QuoteCollector {
 
                     let Some(mid) = mid else { continue };
 
-                    // Settled tokens: winner ≥ 0.99, loser ≤ 0.01
+                    // Settled: winner ≥ 0.99, loser ≤ 0.01
                     let is_winner = mid >= 0.99;
                     let is_loser = mid <= 0.01;
 
                     if !is_winner && !is_loser {
-                        continue; // Still active
+                        continue;
                     }
 
                     let settled_price = if is_winner {
@@ -504,20 +521,25 @@ impl QuoteCollector {
                     match result {
                         Ok(r) if r.rows_affected() > 0 => {
                             settled_count += 1;
-                            info!(
-                                token = %&token_id[..12],
-                                slug = %slug,
-                                mid = mid,
-                                winner = is_winner,
-                                total = settled_count,
-                                "Settlement recorded"
-                            );
+                            if settled_count % 10 == 0 || settled_count <= 5 {
+                                info!(
+                                    token = %&token_id[..12.min(token_id.len())],
+                                    slug = %slug,
+                                    mid,
+                                    winner = is_winner,
+                                    total = settled_count,
+                                    "Settlement recorded"
+                                );
+                            }
                         }
-                        Ok(_) => {} // Already recorded
+                        Ok(_) => {}
                         Err(e) => {
-                            warn!(error = %e, token = %&token_id[..12], "Failed to record settlement");
+                            warn!(error = %e, "Failed to record settlement");
                         }
                     }
+
+                    // Rate limit: ~2 req/sec
+                    tokio::time::sleep(StdDuration::from_millis(500)).await;
                 }
             }
         })
