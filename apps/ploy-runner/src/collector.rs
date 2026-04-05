@@ -464,15 +464,18 @@ impl QuoteCollector {
                 info!(pending = rows.len(), "Settlement collector checking expired events");
 
                 for (token_id, slug) in &rows {
+                    // Use /last-trade-price — works for both active and settled tokens.
+                    // /midpoint returns error for settled tokens; last-trade-price returns
+                    // the final settlement price (0.99 for winner, 0.01 for loser).
                     let url = format!(
-                        "https://clob.polymarket.com/midpoint?token_id={}",
+                        "https://clob.polymarket.com/last-trade-price?token_id={}",
                         token_id
                     );
 
-                    let mid = match http.get(&url).timeout(StdDuration::from_secs(5)).send().await {
+                    let price = match http.get(&url).timeout(StdDuration::from_secs(5)).send().await {
                         Ok(resp) => {
                             if let Ok(body) = resp.json::<serde_json::Value>().await {
-                                body["mid"].as_str()
+                                body["price"].as_str()
                                     .and_then(|s| s.parse::<f64>().ok())
                             } else {
                                 None
@@ -481,14 +484,14 @@ impl QuoteCollector {
                         Err(_) => None,
                     };
 
-                    let Some(mid) = mid else { continue };
+                    let Some(price) = price else { continue };
 
-                    // Settled: winner ≥ 0.99, loser ≤ 0.01
-                    let is_winner = mid >= 0.99;
-                    let is_loser = mid <= 0.01;
+                    // Settled: winner ≥ 0.95, loser ≤ 0.05
+                    let is_winner = price >= 0.95;
+                    let is_loser = price <= 0.05;
 
                     if !is_winner && !is_loser {
-                        continue;
+                        continue; // Still active or ambiguous
                     }
 
                     let settled_price = if is_winner {
@@ -525,7 +528,7 @@ impl QuoteCollector {
                                 info!(
                                     token = %&token_id[..12.min(token_id.len())],
                                     slug = %slug,
-                                    mid,
+                                    price,
                                     winner = is_winner,
                                     total = settled_count,
                                     "Settlement recorded"
