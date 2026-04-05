@@ -33,7 +33,8 @@ const WARMUP_MINUTES: i64 = 30;
 /// the existing `polymarket_ws_collector` history before the next validated cutover
 /// is too polluted with placeholder `0.01/0.99` books to mix into research results.
 /// Dry-run parity should use recorded replay mode instead of the historical DB path.
-const TRUSTED_PM_RESEARCH_QUOTE_SOURCES: &[&str] = &["polymarket_ws"];
+const TRUSTED_PM_RESEARCH_QUOTE_SOURCES: &[&str] =
+    &["polymarket_ws", "polymarket_ws_collector", "ploy_runner_live"];
 
 /// Load all historical market updates for given symbols and time range.
 ///
@@ -288,12 +289,10 @@ async fn load_pm_quotes(
     }
     let trusted_sources: Vec<&str> = TRUSTED_PM_RESEARCH_QUOTE_SOURCES.to_vec();
 
-    // Filter out degenerate quotes (bid < 0.02 or ask > 0.98).
-    // Polymarket CLOB orderbooks often have extreme placeholder orders
-    // (bid=0.01, ask=0.99) when there is no real liquidity. These are
-    // useless for strategy evaluation — the real market price is the midpoint.
-    // Only load quotes where both bid and ask are in a tradeable range from
-    // trusted historical capture sources.
+    // Polymarket UP/DOWN token structure:
+    // - UP token:   best_bid is the real price, best_ask may be NULL
+    // - DOWN token: best_ask is the real price, best_bid may be NULL
+    // Accept rows where EITHER bid OR ask is in the real price range (0.01, 0.99).
     let rows: Vec<(DateTime<Utc>, String, Option<Decimal>, Option<Decimal>)> = sqlx::query_as(
         r#"
         SELECT DISTINCT ON (date_trunc('second', received_at), token_id)
@@ -303,8 +302,11 @@ async fn load_pm_quotes(
           AND received_at <= $2
           AND token_id = ANY($3)
           AND source = ANY($4)
-          AND best_bid  IS NOT NULL AND best_bid  > 0.02 AND best_bid  < 0.98
-          AND best_ask  IS NOT NULL AND best_ask  > 0.02 AND best_ask  < 0.98
+          AND (
+            (best_bid  IS NOT NULL AND best_bid  > 0.01 AND best_bid  < 0.99)
+            OR
+            (best_ask  IS NOT NULL AND best_ask  > 0.01 AND best_ask  < 0.99)
+          )
         ORDER BY date_trunc('second', received_at), token_id, received_at DESC
         "#,
     )
@@ -335,8 +337,13 @@ async fn load_pm_quotes(
 
 /// Fallback quote loader from `clob_orderbook_snapshots`.
 ///
-/// Extracts the innermost real bid/ask from the JSONB depth arrays.
-/// Used when `clob_quote_ticks` has no real data (all 0.01/0.99 placeholders).
+/// Polymarket CLOB structure for UP/DOWN binary markets:
+/// - UP token:   bids array has full depth (0.01→0.99), asks is empty []
+/// - DOWN token: asks array has full depth (0.99→0.01), bids is empty []
+///
+/// So best_bid = MAX(bids prices), best_ask = MIN(asks prices).
+/// For UP tokens: best_bid is the real market price.
+/// For DOWN tokens: best_ask is the real market price (= 1 - UP price).
 async fn load_pm_quotes_from_snapshots(
     pool: &PgPool,
     token_map: &TokenMap,
@@ -349,27 +356,28 @@ async fn load_pm_quotes_from_snapshots(
         return Ok(());
     }
 
-    // Extract the best real bid/ask from JSONB depth arrays.
-    // "Real" means price is in (0.02, 0.98) — not a placeholder order.
-    // We compute mid = (best_bid + best_ask) / 2 and apply a 0.5% synthetic spread.
+    // For UP tokens: best_bid = MAX(bids), best_ask = best_bid + 0.01 (synthetic)
+    // For DOWN tokens: best_ask = MIN(asks), best_bid = best_ask - 0.01 (synthetic)
+    // Filter: only include prices in (0.01, 0.99) — exclude the extreme placeholders
+    // at exactly 0.01 and 0.99 which represent the full-book sentinel orders.
     let rows: Vec<(DateTime<Utc>, String, Option<Decimal>, Option<Decimal>)> = sqlx::query_as(
         r#"
         SELECT DISTINCT ON (date_trunc('second', received_at), token_id)
                received_at,
                token_id,
-               -- Best real bid: highest bid price in (0.02, 0.98)
+               -- Best bid: highest bid price strictly between 0.01 and 0.99
                (
                    SELECT MAX((elem->>'price')::numeric)
                    FROM jsonb_array_elements(bids) AS elem
-                   WHERE (elem->>'price')::numeric > 0.02
-                     AND (elem->>'price')::numeric < 0.98
+                   WHERE (elem->>'price')::numeric > 0.01
+                     AND (elem->>'price')::numeric < 0.99
                ) AS best_bid,
-               -- Best real ask: lowest ask price in (0.02, 0.98)
+               -- Best ask: lowest ask price strictly between 0.01 and 0.99
                (
                    SELECT MIN((elem->>'price')::numeric)
                    FROM jsonb_array_elements(asks) AS elem
-                   WHERE (elem->>'price')::numeric > 0.02
-                     AND (elem->>'price')::numeric < 0.98
+                   WHERE (elem->>'price')::numeric > 0.01
+                     AND (elem->>'price')::numeric < 0.99
                ) AS best_ask
         FROM clob_orderbook_snapshots
         WHERE received_at >= $1
@@ -378,8 +386,14 @@ async fn load_pm_quotes_from_snapshots(
         HAVING (
             SELECT MAX((elem->>'price')::numeric)
             FROM jsonb_array_elements(bids) AS elem
-            WHERE (elem->>'price')::numeric > 0.02
-              AND (elem->>'price')::numeric < 0.98
+            WHERE (elem->>'price')::numeric > 0.01
+              AND (elem->>'price')::numeric < 0.99
+        ) IS NOT NULL
+        OR (
+            SELECT MIN((elem->>'price')::numeric)
+            FROM jsonb_array_elements(asks) AS elem
+            WHERE (elem->>'price')::numeric > 0.01
+              AND (elem->>'price')::numeric < 0.99
         ) IS NOT NULL
         ORDER BY date_trunc('second', received_at), token_id, received_at DESC
         "#,
