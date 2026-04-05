@@ -19,6 +19,7 @@ use ploy_strategy_bundles::{
     SimulatedExecutorConfig, StrategyRuntime,
 };
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
+use ploy_trading::TradeSide;
 use sqlx::postgres::PgPoolOptions;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -287,6 +288,7 @@ fn main() {
         updates
     };
 
+    let stake_usd = strategy_config.stake_usd;
     let strategy = DirectionalStrategy::new(strategy_config);
     let feed = HistoricalFeed::new(data);
     let executor = SimulatedExecutor::new(sim_config);
@@ -303,45 +305,76 @@ fn main() {
 
     eprintln!("=== Results ===");
     eprintln!("Updates processed: {}", result.updates_processed);
-    eprintln!("Intents submitted: {}", result.intents_submitted);
-    eprintln!("Fills recorded:    {}", result.fills_recorded);
+    let trade_count = result.fills_recorded / 2; // entry + settlement = 2 fills per trade
+    eprintln!("Trades:            {} ({} fills)", trade_count, result.fills_recorded);
     eprintln!("Elapsed:           {:.2}s", result.elapsed_secs);
     eprintln!();
 
-    if !snapshot.fills.is_empty() {
+    // Compute max concurrent capital (peak simultaneous open positions)
+    let fills = &snapshot.fills;
+    let mut open_capital = rust_decimal::Decimal::ZERO;
+    let mut peak_capital = rust_decimal::Decimal::ZERO;
+    for fill in fills {
+        match fill.side {
+            ploy_trading::TradeSide::Buy => {
+                open_capital += fill.price * fill.quantity;
+                if open_capital > peak_capital {
+                    peak_capital = open_capital;
+                }
+            }
+            ploy_trading::TradeSide::Sell => {
+                // Settlement: reduce open capital by original entry cost
+                // (approximate: use fill qty × entry price, but we only have sell price here)
+                // Use sell notional as proxy for position size being closed
+                let notional = fill.price * fill.quantity;
+                if notional > open_capital {
+                    open_capital = rust_decimal::Decimal::ZERO;
+                } else {
+                    open_capital -= notional;
+                }
+            }
+        }
+    }
+
+    if !snapshot.fills.is_empty() && std::env::args().any(|a| a == "--show-fills") {
         eprintln!("=== Fills ===");
-        for fill in &snapshot.fills {
+        for fill in fills {
             eprintln!(
                 "  {} {:?} {}x @ {} (fee: {})",
-                fill.token_id, fill.side, fill.quantity, fill.price, fill.fee
+                &fill.token_id[..12], fill.side, fill.quantity, fill.price, fill.fee
             );
         }
         eprintln!();
     }
 
     if !snapshot.positions.is_empty() {
-        eprintln!("=== Positions ===");
+        eprintln!("=== Open Positions ===");
         for pos in &snapshot.positions {
             eprintln!(
                 "  {} qty={} avg_entry={} realized_pnl={}",
-                pos.token_id, pos.net_qty, pos.avg_entry_price, pos.realized_pnl
+                &pos.token_id[..12], pos.net_qty, pos.avg_entry_price, pos.realized_pnl
             );
         }
         eprintln!();
     }
 
     eprintln!("=== P&L ===");
-    eprintln!("Realized:   {}", result.pnl.realized_pnl);
-    eprintln!("Fees:       {}", result.pnl.total_fees);
-    eprintln!("Net:        {}", result.pnl.net_pnl());
+    eprintln!("Realized:          {}", result.pnl.realized_pnl);
+    eprintln!("Fees:              {}", result.pnl.total_fees);
+    eprintln!("Net:               {}", result.pnl.net_pnl());
     eprintln!();
-    eprintln!("=== Cashflow ===");
-    eprintln!("Buy shares:       {}", cashflow.buy_shares);
-    eprintln!("Sell shares:      {}", cashflow.sell_shares);
-    eprintln!("Deployed capital: {}", cashflow.deployed_capital());
-    eprintln!("Sell proceeds:    {}", cashflow.gross_sell_proceeds);
+    eprintln!("=== Capital Usage ===");
+    eprintln!("Stake per trade:   ${}", stake_usd);
+    eprintln!("Total trades:      {}", trade_count);
+    eprintln!("Cumulative cost:   {} (all trades summed)", cashflow.deployed_capital());
+    eprintln!("Peak concurrent:   {} (max simultaneous open)", peak_capital.round_dp(2));
+    eprintln!("Sell proceeds:     {}", cashflow.gross_sell_proceeds);
     if let Some(roi) = cashflow.roi_on_deployed_capital() {
-        eprintln!("ROI on capital:   {}%", (roi * Decimal::from(100)).round_dp(2));
+        eprintln!("ROI (cumulative):  {}%  ← total profit / total cost (misleading for multi-trade)", (roi * Decimal::from(100)).round_dp(2));
+    }
+    if peak_capital > Decimal::ZERO {
+        let roi_peak = result.pnl.net_pnl() / peak_capital * Decimal::from(100);
+        eprintln!("ROI (peak capital): {}%  ← net profit / max simultaneous capital", roi_peak.round_dp(2));
     }
     eprintln!("Note: quantity is shares/contracts; capital = shares × price");
     eprintln!();
