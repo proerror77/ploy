@@ -160,6 +160,9 @@ impl QuoteCollector {
         // Spawn price_to_beat updater
         let _price_updater_handle = self.spawn_price_to_beat_updater();
 
+        // Spawn settlement collector (market_resolved WS events)
+        let _settlement_handle = self.spawn_settlement_collector();
+
         loop {
             // Refresh subscriptions and get current token list
             self.refresh_subscriptions().await?;
@@ -414,6 +417,124 @@ impl QuoteCollector {
             .collect();
 
         Ok(markets)
+    }
+
+    /// Spawn settlement collector — subscribes to market_resolved WS events
+    /// and persists settlement outcomes to pm_token_settlements.
+    fn spawn_settlement_collector(&self) -> tokio::task::JoinHandle<()> {
+        let pool = self.pool.clone();
+        let subscribed_tokens = self.subscribed_tokens.clone();
+        let token_metadata = self.token_metadata.clone();
+
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            use polymarket_client_sdk::clob::ws::Client as ClobWsClient;
+
+            loop {
+                let token_ids = {
+                    let sub = subscribed_tokens.read().await;
+                    sub.iter().cloned().collect::<Vec<_>>()
+                };
+
+                if token_ids.is_empty() {
+                    tokio::time::sleep(StdDuration::from_secs(15)).await;
+                    continue;
+                }
+
+                let asset_ids: Vec<polymarket_client_sdk::types::U256> =
+                    token_ids.iter().filter_map(|id| id.parse().ok()).collect();
+
+                if asset_ids.is_empty() {
+                    tokio::time::sleep(StdDuration::from_secs(15)).await;
+                    continue;
+                }
+
+                let client = ClobWsClient::default();
+                let stream = match client.subscribe_market_resolutions(asset_ids) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to subscribe to market resolutions");
+                        tokio::time::sleep(StdDuration::from_secs(10)).await;
+                        continue;
+                    }
+                };
+
+                info!(tokens = token_ids.len(), "Settlement collector subscribed");
+                let mut stream = Box::pin(stream);
+
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(resolved) => {
+                            let winning_token = resolved.winning_asset_id.to_string();
+                            let meta = {
+                                let m = token_metadata.read().await;
+                                m.get(&winning_token).cloned()
+                            };
+
+                            // Determine up_won: winning token is UP if side == "UP"
+                            let up_won = meta.as_ref().map(|m| m.side == "UP");
+
+                            // Upsert all tokens in this market
+                            for asset_id in &resolved.asset_ids {
+                                let token_id = asset_id.to_string();
+                                let is_winner = token_id == winning_token;
+                                let settled_price = if is_winner {
+                                    rust_decimal_macros::dec!(1.0)
+                                } else {
+                                    rust_decimal_macros::dec!(0.0)
+                                };
+
+                                let result = sqlx::query(
+                                    r#"
+                                    INSERT INTO pm_token_settlements (
+                                        token_id, market_slug, outcome,
+                                        settled_price, resolved, resolved_at, fetched_at
+                                    ) VALUES ($1, $2, $3, $4, true, $5, NOW())
+                                    ON CONFLICT (token_id) DO UPDATE SET
+                                        settled_price = EXCLUDED.settled_price,
+                                        resolved = true,
+                                        resolved_at = EXCLUDED.resolved_at,
+                                        fetched_at = NOW()
+                                    "#,
+                                )
+                                .bind(&token_id)
+                                .bind(resolved.slug.as_deref().unwrap_or(""))
+                                .bind(if is_winner { &resolved.winning_outcome } else { "loser" })
+                                .bind(settled_price)
+                                .bind(
+                                    chrono::DateTime::from_timestamp_millis(resolved.timestamp)
+                                        .unwrap_or_else(chrono::Utc::now),
+                                )
+                                .execute(&pool)
+                                .await;
+
+                                match result {
+                                    Ok(_) => {
+                                        info!(
+                                            token = %&token_id[..12],
+                                            slug = ?resolved.slug,
+                                            winner = is_winner,
+                                            up_won = ?up_won,
+                                            "Settlement recorded"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, token = %&token_id[..12], "Failed to record settlement");
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Settlement stream error, reconnecting...");
+                            break;
+                        }
+                    }
+                }
+
+                warn!("Settlement stream ended, reconnecting in 5s...");
+                tokio::time::sleep(StdDuration::from_secs(5)).await;
+            }
+        })
     }
 
     /// Spawn Chainlink price feed subscriber.
