@@ -419,120 +419,106 @@ impl QuoteCollector {
         Ok(markets)
     }
 
-    /// Spawn settlement collector — subscribes to market_resolved WS events
+    /// Spawn settlement collector — polls Gamma API for resolved markets
     /// and persists settlement outcomes to pm_token_settlements.
     fn spawn_settlement_collector(&self) -> tokio::task::JoinHandle<()> {
         let pool = self.pool.clone();
-        let subscribed_tokens = self.subscribed_tokens.clone();
         let token_metadata = self.token_metadata.clone();
 
         tokio::spawn(async move {
-            use futures::StreamExt;
-            use polymarket_client_sdk::clob::ws::Client as ClobWsClient;
+            let http = reqwest::Client::new();
+            let mut settled_count = 0u64;
 
             loop {
-                let token_ids = {
-                    let sub = subscribed_tokens.read().await;
-                    sub.iter().cloned().collect::<Vec<_>>()
+                // Poll every 30 seconds
+                tokio::time::sleep(StdDuration::from_secs(30)).await;
+
+                // Get all tracked tokens
+                let tokens: Vec<(String, String)> = {
+                    let m = token_metadata.read().await;
+                    m.iter()
+                        .map(|(token_id, meta)| (token_id.clone(), meta.slug.clone()))
+                        .collect()
                 };
 
-                if token_ids.is_empty() {
-                    tokio::time::sleep(StdDuration::from_secs(15)).await;
+                if tokens.is_empty() {
                     continue;
                 }
 
-                let asset_ids: Vec<polymarket_client_sdk::types::U256> =
-                    token_ids.iter().filter_map(|id| id.parse().ok()).collect();
+                // Check each token's midpoint — settled tokens return 0.001 or 0.999
+                for (token_id, slug) in &tokens {
+                    let url = format!(
+                        "https://clob.polymarket.com/midpoint?token_id={}",
+                        token_id
+                    );
 
-                if asset_ids.is_empty() {
-                    tokio::time::sleep(StdDuration::from_secs(15)).await;
-                    continue;
-                }
-
-                let client = ClobWsClient::default();
-                let stream = match client.subscribe_market_resolutions(asset_ids) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to subscribe to market resolutions");
-                        tokio::time::sleep(StdDuration::from_secs(10)).await;
-                        continue;
-                    }
-                };
-
-                info!(tokens = token_ids.len(), "Settlement collector subscribed");
-                let mut stream = Box::pin(stream);
-
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok(resolved) => {
-                            let winning_token = resolved.winning_asset_id.to_string();
-                            let meta = {
-                                let m = token_metadata.read().await;
-                                m.get(&winning_token).cloned()
-                            };
-
-                            // Determine up_won: winning token is UP if side == "UP"
-                            let up_won = meta.as_ref().map(|m| m.side == "UP");
-
-                            // Upsert all tokens in this market
-                            for asset_id in &resolved.asset_ids {
-                                let token_id = asset_id.to_string();
-                                let is_winner = token_id == winning_token;
-                                let settled_price = if is_winner {
-                                    rust_decimal_macros::dec!(1.0)
-                                } else {
-                                    rust_decimal_macros::dec!(0.0)
-                                };
-
-                                let result = sqlx::query(
-                                    r#"
-                                    INSERT INTO pm_token_settlements (
-                                        token_id, market_slug, outcome,
-                                        settled_price, resolved, resolved_at, fetched_at
-                                    ) VALUES ($1, $2, $3, $4, true, $5, NOW())
-                                    ON CONFLICT (token_id) DO UPDATE SET
-                                        settled_price = EXCLUDED.settled_price,
-                                        resolved = true,
-                                        resolved_at = EXCLUDED.resolved_at,
-                                        fetched_at = NOW()
-                                    "#,
-                                )
-                                .bind(&token_id)
-                                .bind(resolved.slug.as_deref().unwrap_or(""))
-                                .bind(if is_winner { &resolved.winning_outcome } else { "loser" })
-                                .bind(settled_price)
-                                .bind(
-                                    chrono::DateTime::from_timestamp_millis(resolved.timestamp)
-                                        .unwrap_or_else(chrono::Utc::now),
-                                )
-                                .execute(&pool)
-                                .await;
-
-                                match result {
-                                    Ok(_) => {
-                                        info!(
-                                            token = %&token_id[..12],
-                                            slug = ?resolved.slug,
-                                            winner = is_winner,
-                                            up_won = ?up_won,
-                                            "Settlement recorded"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, token = %&token_id[..12], "Failed to record settlement");
-                                    }
-                                }
+                    let mid = match http.get(&url).timeout(StdDuration::from_secs(5)).send().await {
+                        Ok(resp) => {
+                            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                                body["mid"].as_str()
+                                    .and_then(|s| s.parse::<f64>().ok())
+                            } else {
+                                None
                             }
                         }
+                        Err(_) => None,
+                    };
+
+                    let Some(mid) = mid else { continue };
+
+                    // Settled tokens: winner ≥ 0.99, loser ≤ 0.01
+                    let is_winner = mid >= 0.99;
+                    let is_loser = mid <= 0.01;
+
+                    if !is_winner && !is_loser {
+                        continue; // Still active
+                    }
+
+                    let settled_price = if is_winner {
+                        rust_decimal_macros::dec!(1.0)
+                    } else {
+                        rust_decimal_macros::dec!(0.0)
+                    };
+
+                    let result = sqlx::query(
+                        r#"
+                        INSERT INTO pm_token_settlements (
+                            token_id, market_slug, outcome,
+                            settled_price, resolved, resolved_at, fetched_at
+                        ) VALUES ($1, $2, $3, $4, true, NOW(), NOW())
+                        ON CONFLICT (token_id) DO UPDATE SET
+                            settled_price = EXCLUDED.settled_price,
+                            resolved = true,
+                            resolved_at = COALESCE(pm_token_settlements.resolved_at, NOW()),
+                            fetched_at = NOW()
+                        WHERE pm_token_settlements.resolved = false
+                        "#,
+                    )
+                    .bind(token_id)
+                    .bind(slug)
+                    .bind(if is_winner { "winner" } else { "loser" })
+                    .bind(settled_price)
+                    .execute(&pool)
+                    .await;
+
+                    match result {
+                        Ok(r) if r.rows_affected() > 0 => {
+                            settled_count += 1;
+                            info!(
+                                token = %&token_id[..12],
+                                slug = %slug,
+                                mid = mid,
+                                winner = is_winner,
+                                total = settled_count,
+                                "Settlement recorded"
+                            );
+                        }
+                        Ok(_) => {} // Already recorded
                         Err(e) => {
-                            warn!(error = %e, "Settlement stream error, reconnecting...");
-                            break;
+                            warn!(error = %e, token = %&token_id[..12], "Failed to record settlement");
                         }
                     }
                 }
-
-                warn!("Settlement stream ended, reconnecting in 5s...");
-                tokio::time::sleep(StdDuration::from_secs(5)).await;
             }
         })
     }
