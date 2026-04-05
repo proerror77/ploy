@@ -310,31 +310,26 @@ fn main() {
     eprintln!("Elapsed:           {:.2}s", result.elapsed_secs);
     eprintln!();
 
-    // Compute max concurrent capital (peak simultaneous open positions)
+    // Compute max concurrent capital using stake_usd per trade.
+    // Each Buy opens one position ($stake_usd), each Sell closes one.
+    // Settlement sells at 1.00 or 0.00 — can't use fill price to track cost.
     let fills = &snapshot.fills;
-    let mut open_capital = rust_decimal::Decimal::ZERO;
-    let mut peak_capital = rust_decimal::Decimal::ZERO;
+    let mut open_positions: i64 = 0;
+    let mut peak_positions: i64 = 0;
     for fill in fills {
         match fill.side {
             ploy_trading::TradeSide::Buy => {
-                open_capital += fill.price * fill.quantity;
-                if open_capital > peak_capital {
-                    peak_capital = open_capital;
+                open_positions += 1;
+                if open_positions > peak_positions {
+                    peak_positions = open_positions;
                 }
             }
             ploy_trading::TradeSide::Sell => {
-                // Settlement: reduce open capital by original entry cost
-                // (approximate: use fill qty × entry price, but we only have sell price here)
-                // Use sell notional as proxy for position size being closed
-                let notional = fill.price * fill.quantity;
-                if notional > open_capital {
-                    open_capital = rust_decimal::Decimal::ZERO;
-                } else {
-                    open_capital -= notional;
-                }
+                open_positions = (open_positions - 1).max(0);
             }
         }
     }
+    let peak_capital = rust_decimal::Decimal::from(peak_positions) * stake_usd;
 
     if !snapshot.fills.is_empty() && std::env::args().any(|a| a == "--show-fills") {
         eprintln!("=== Fills ===");
