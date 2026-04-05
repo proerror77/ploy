@@ -542,13 +542,21 @@ impl DirectionalStrategy {
             }
         };
 
-        // Check if we already have a position for this event's tokens
-        let already_holding = positions.positions().any(|p| {
+        // Check if we already have a position for this symbol.
+        // Polymarket can have multiple parallel markets for the same symbol and end_time
+        // (different market_slugs, different token IDs, but same underlying asset).
+        // Their settlement outcomes are perfectly correlated — all depend on the same
+        // BTC/ETH price. Holding multiple positions on the same symbol at the same time
+        // is not diversification; it's concentrated directional exposure.
+        // Limit to one open position per symbol at a time.
+        let already_holding_symbol = positions.positions().any(|p| {
             p.net_qty > Decimal::ZERO
-                && (p.token_id == event.up_token || p.token_id == event.down_token)
+                && self.token_symbol.get(&p.token_id)
+                    .map(|s| s == symbol)
+                    .unwrap_or(false)
         });
-        if already_holding {
-            debug!(symbol, event_id = %event.event_id, "Already holding position for this event");
+        if already_holding_symbol {
+            debug!(symbol, event_id = %event.event_id, "Already holding position for this symbol");
             return vec![];
         }
 
