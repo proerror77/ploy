@@ -5,7 +5,7 @@
 # Params from TPE optimization (2026-04-05, real data): Sharpe 240, 121 trades/day
 
 [runtime]
-mode = "backtest"
+mode = "dryrun"
 throttle_hz = 1
 # max_updates = 500000
 
@@ -44,3 +44,15 @@ min_fill_pct = 0.5
 enable_market_impact = false
 impact_coefficient = 0.1
 default_depth_shares = 500
+
+[reference_data]
+# Optional non-crypto RTDS capture list for live/dry-run sessions.
+# pyth_symbols = ["AAPL", "XAUUSD"]
+capture_sports_state = false
+
+[backtest_data]
+# Historical DB loader stays crypto-only by default.
+include_reference_prices = false
+include_sports_state = false
+# When empty, reference-price backtests fall back to [reference_data].pyth_symbols.
+# reference_symbols = ["AAPL", "XAUUSD"]
