@@ -71,9 +71,15 @@ impl Subscription {
     /// Create a subscription for Binance crypto prices.
     #[must_use]
     pub fn crypto_prices(symbols: Option<Vec<String>>) -> Self {
-        // Server expects filters as a JSON array, e.g. ["btcusdt","ethusdt"]
-        let filters =
-            symbols.map(|s| serde_json::to_string(&s).unwrap_or_else(|_| "[]".to_owned()));
+        // RTDS expects a comma-separated lowercase string, e.g. "btcusdt,ethusdt".
+        let filters = symbols.map(|symbols| {
+            symbols
+                .into_iter()
+                .map(|symbol| symbol.trim().to_lowercase())
+                .filter(|symbol| !symbol.is_empty())
+                .collect::<Vec<_>>()
+                .join(",")
+        });
         Self {
             topic: "crypto_prices".to_owned(),
             msg_type: "update".to_owned(),
@@ -141,10 +147,9 @@ impl Serialize for Subscription {
 
         if let Some(filters) = &self.filters {
             // Chainlink endpoint expects filters as a JSON string (escaped),
-            // while other endpoints (like Binance crypto_prices) expect raw JSON.
+            // while Binance crypto prices expect a lowercase comma-separated string.
             // See: https://github.com/Polymarket/rs-clob-client/issues/136
-            if self.topic == "crypto_prices_chainlink" {
-                // Chainlink: emit filters as string, e.g. "{\"symbol\":\"btc/usd\"}"
+            if self.topic == "crypto_prices" || self.topic == "crypto_prices_chainlink" {
                 map.serialize_entry("filters", filters)?;
             } else if let Ok(json_value) = serde_json::from_str::<Value>(filters) {
                 // Other topics: parse and emit as raw JSON, e.g. ["btcusdt","ethusdt"]
@@ -177,14 +182,14 @@ mod tests {
     #[test]
     fn serialize_subscription_request() {
         let sub =
-            Subscription::crypto_prices(Some(vec!["btcusdt".to_owned(), "ethusdt".to_owned()]));
+            Subscription::crypto_prices(Some(vec!["BTCUSDT".to_owned(), "ethusdt".to_owned()]));
         let request = SubscriptionRequest::subscribe(vec![sub]);
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"action\":\"subscribe\""));
         assert!(json.contains("\"topic\":\"crypto_prices\""));
-        // Filters should be a JSON array, not a comma-separated string
-        assert!(json.contains("\"filters\":[\"btcusdt\",\"ethusdt\"]"));
+        // RTDS expects a comma-separated lowercase string for crypto filters.
+        assert!(json.contains("\"filters\":\"btcusdt,ethusdt\""));
     }
 
     #[test]
@@ -240,7 +245,7 @@ mod tests {
         // Verify Chainlink and Binance subscriptions serialize differently in same request
         let chainlink = Subscription::chainlink_prices(Some("btc/usd".to_owned()));
         let binance =
-            Subscription::crypto_prices(Some(vec!["btcusdt".to_owned(), "ethusdt".to_owned()]));
+            Subscription::crypto_prices(Some(vec!["BTCUSDT".to_owned(), "ethusdt".to_owned()]));
         let request = SubscriptionRequest::subscribe(vec![chainlink, binance]);
 
         let json = serde_json::to_string(&request).unwrap();
@@ -250,10 +255,10 @@ mod tests {
             json.contains(r#""filters":"{\"symbol\":\"btc/usd\"}""#),
             "Chainlink filters should be escaped string, got: {json}"
         );
-        // Binance should have raw JSON array filters
+        // Binance should have a comma-separated lowercase string filter
         assert!(
-            json.contains("\"filters\":[\"btcusdt\",\"ethusdt\"]"),
-            "Binance filters should be raw JSON array, got: {json}"
+            json.contains("\"filters\":\"btcusdt,ethusdt\""),
+            "Binance filters should be a comma-separated lowercase string, got: {json}"
         );
     }
 

@@ -184,6 +184,13 @@ async fn check_database(db_url: &str) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+fn prepare_feed_symbols(mode: RuntimeMode, strategy_symbols: &[String]) -> Vec<String> {
+    match mode {
+        RuntimeMode::Backtest | RuntimeMode::Replay => strategy_symbols.to_vec(),
+        RuntimeMode::Live | RuntimeMode::DryRun => strategy_symbols.to_vec(),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -339,15 +346,7 @@ async fn main() {
 
     // Prepare symbols for feeds.
     // Historical/replay modes keep uppercase symbols; live RTDS feeds use lowercase.
-    let symbols: Vec<String> = match runtime_config.mode {
-        RuntimeMode::Backtest | RuntimeMode::Replay => config.strategy.symbols.clone(),
-        RuntimeMode::Live | RuntimeMode::DryRun => config
-            .strategy
-            .symbols
-            .iter()
-            .map(|s| s.to_lowercase())
-            .collect(),
-    };
+    let symbols = prepare_feed_symbols(runtime_config.mode, &config.strategy.symbols);
 
     // Build strategy
     let strategy = DirectionalStrategy::new(config.strategy.clone());
@@ -622,4 +621,19 @@ fn build_live_executor() -> CallbackExecutor {
             }
         })
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_feed_symbols;
+    use ploy_strategy_bundles::RuntimeMode;
+
+    #[test]
+    fn keeps_strategy_symbols_canonical_for_live_feeds() {
+        let symbols = vec!["BTCUSDT".to_string(), "ethusdt".to_string()];
+
+        let prepared = prepare_feed_symbols(RuntimeMode::DryRun, &symbols);
+
+        assert_eq!(prepared, vec!["BTCUSDT".to_string(), "ethusdt".to_string()]);
+    }
 }
