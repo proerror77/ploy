@@ -5,7 +5,10 @@ use futures::StreamExt as _;
 
 use super::subscription::{SimpleParser, SubscriptionManager, TopicType};
 use super::types::request::Subscription;
-use super::types::response::{ChainlinkPrice, Comment, CommentType, CryptoPrice, RtdsMessage};
+use super::types::response::{
+    ChainlinkPrice, Comment, CommentType, CryptoPrice, EquityPriceSnapshot, EquityPriceUpdate,
+    RtdsMessage,
+};
 use crate::Result;
 use crate::auth::state::{Authenticated, State, Unauthenticated};
 use crate::auth::{Credentials, Normal};
@@ -205,6 +208,32 @@ impl<S: State> Client<S> {
         }))
     }
 
+    /// Subscribe to Pyth-backed equity, forex, commodity, and metal prices.
+    pub fn subscribe_equity_prices(
+        &self,
+        symbol: Option<String>,
+        include_snapshot: bool,
+    ) -> Result<impl Stream<Item = Result<EquityPriceMessage>>> {
+        let msg_type = if include_snapshot { "*" } else { "update" };
+        let subscription = Subscription::equity_prices(symbol, msg_type);
+        let stream = self.inner.subscriptions.subscribe(subscription)?;
+
+        Ok(stream.filter_map(|msg_result| async move {
+            match msg_result {
+                Ok(msg) => {
+                    if let Some(update) = msg.as_equity_price_update() {
+                        Some(Ok(EquityPriceMessage::Update(update)))
+                    } else {
+                        msg.as_equity_price_snapshot()
+                            .map(EquityPriceMessage::Snapshot)
+                            .map(Ok)
+                    }
+                }
+                Err(e) => Some(Err(e)),
+            }
+        }))
+    }
+
     /// Subscribe to raw RTDS messages for a custom topic/type combination.
     pub fn subscribe_raw(
         &self,
@@ -273,6 +302,13 @@ impl<S: State> Client<S> {
         self.inner.subscriptions.unsubscribe(&[topic])
     }
 
+    /// Unsubscribe from Pyth-backed equity and commodity price updates.
+    pub fn unsubscribe_equity_prices(&self, include_snapshot: bool) -> Result<()> {
+        let msg_type = if include_snapshot { "*" } else { "update" };
+        let topic = TopicType::new("equity_prices".to_owned(), msg_type.to_owned());
+        self.inner.subscriptions.unsubscribe(&[topic])
+    }
+
     /// Unsubscribe from comment events.
     ///
     /// # Arguments
@@ -288,6 +324,16 @@ impl<S: State> Client<S> {
         let topic = TopicType::new("comments".to_owned(), msg_type);
         self.inner.subscriptions.unsubscribe(&[topic])
     }
+}
+
+/// Typed RTDS equity feed messages.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum EquityPriceMessage {
+    /// Live RTDS price update (`type = "update"`)
+    Update(EquityPriceUpdate),
+    /// Initial subscribe/backfill snapshot (`type = "subscribe"`)
+    Snapshot(EquityPriceSnapshot),
 }
 
 impl Client<Authenticated<Normal>> {

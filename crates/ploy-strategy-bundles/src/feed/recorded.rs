@@ -273,6 +273,30 @@ mod tests {
                 ask: Some(dec!(0.40)),
                 ts: now + Duration::seconds(1),
             },
+            MarketUpdate::SportsState {
+                game_id: "19439".into(),
+                league: "nfl".into(),
+                slug: "nfl-lac-buf-2025-01-26".into(),
+                home_team: "LAC".into(),
+                away_team: "BUF".into(),
+                status: "InProgress".into(),
+                period: Some("Q4".into()),
+                score: Some("3-16".into()),
+                elapsed: Some("5:18".into()),
+                live: true,
+                ended: false,
+                finished_at: None,
+                ts: now + Duration::seconds(2),
+            },
+            MarketUpdate::ReferencePrice {
+                symbol: "aapl".into(),
+                source: "pyth".into(),
+                asset_class: "equity".into(),
+                price: dec!(212.45),
+                full_accuracy_value: Some("212.450000".into()),
+                is_carried_forward: false,
+                ts: now + Duration::seconds(3),
+            },
         ];
 
         let path = temp_log_path("recording-feed-round-trip");

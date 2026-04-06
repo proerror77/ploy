@@ -13,16 +13,16 @@
 //! If no --db-url is given, uses synthetic market data.
 
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
-use ploy_strategy_bundles::{
-    config::FullConfig, feed::load_from_database, DirectionalStrategy, HistoricalFeed,
-    MarketUpdate, NullRecorder, RuntimeConfig, RuntimeMode, SimulatedExecutor,
-    SimulatedExecutorConfig, StrategyRuntime,
-};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
-use ploy_trading::TradeSide;
-use sqlx::postgres::PgPoolOptions;
+use ploy_strategy_bundles::{
+    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, RuntimeConfig, RuntimeMode,
+    SimulatedExecutor, SimulatedExecutorConfig, StrategyRuntime,
+    config::FullConfig,
+    feed::{HistoricalLoadOptions, load_from_database_with_options},
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeMap;
 
 /// Generate synthetic market data: 1 hour of 5-min windows for 3 symbols.
@@ -114,7 +114,11 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
 
             // Updated quotes after price move
             let final_price = base + drift;
-            let p_up_model = if drift > Decimal::ZERO { dec!(0.80) } else { dec!(0.20) };
+            let p_up_model = if drift > Decimal::ZERO {
+                dec!(0.80)
+            } else {
+                dec!(0.20)
+            };
             let up_ask_final = if drift.abs() > base * dec!(0.005) {
                 // Market catches up partially
                 p_up_model - dec!(0.10)
@@ -156,6 +160,8 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
         MarketUpdate::SpotPrice { ts, .. }
         | MarketUpdate::Quote { ts, .. }
         | MarketUpdate::L2 { ts, .. }
+        | MarketUpdate::SportsState { ts, .. }
+        | MarketUpdate::ReferencePrice { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
         MarketUpdate::EventDiscovered { end_time, .. } => *end_time - Duration::seconds(300),
         MarketUpdate::EventExpired { end_time, .. } => *end_time,
@@ -166,9 +172,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
 
 /// Parse a named flag value from args: `--flag value`
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2)
-        .find(|w| w[0] == flag)
-        .map(|w| w[1].clone())
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
 fn main() {
@@ -180,51 +184,61 @@ fn main() {
     let start_date = flag_value(&args, "--start-date");
     let end_date = flag_value(&args, "--end-date");
 
-    let (strategy_config, sim_config, runtime_config) = if let Some(ref path) = config_path {
-        let config = FullConfig::from_file(path).expect("Failed to parse config");
-        let sim = config.sim_executor_config();
-        let rt = config.runtime_config();
-        (config.strategy, sim, rt)
-    } else {
-        eprintln!("No config file provided, using built-in defaults\n");
-        (
-            DirectionalConfig {
-                symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
-                vol_floor: 0.001,
-                min_probability: 0.62,
-                min_z_score: 0.35,
-                min_entry_price: 0.15,
-                max_entry_price: 0.85,
-                no_trade_zone_min: 0.45,
-                no_trade_zone_max: 0.55,
-                min_edge: 0.05,
-                min_time_remaining_secs: 60,
-                max_time_remaining_secs: 300,
-                cooldown_secs: 60,
-                stake_usd: dec!(25),
-                max_positions: 3,
-                max_daily_trades: 1000,
-            },
-            SimulatedExecutorConfig {
-                use_spread: true,
-                spread_pct: dec!(0.02),
-                enable_partial_fills: false,
-                enable_market_impact: true,
-                impact_coefficient: dec!(0.1),
-                ..Default::default()
-            },
-            RuntimeConfig {
-                mode: RuntimeMode::Backtest,
-                throttle_hz: None,
-                max_updates: None,
-            },
-        )
-    };
+    let (strategy_config, sim_config, runtime_config, backtest_options) =
+        if let Some(ref path) = config_path {
+            let config = FullConfig::from_file(path).expect("Failed to parse config");
+            let sim = config.sim_executor_config();
+            let rt = config.runtime_config();
+            let backtest_options = HistoricalLoadOptions {
+                include_reference_prices: config.backtest_data.include_reference_prices,
+                reference_symbols: config
+                    .backtest_data
+                    .reference_symbols(&config.reference_data),
+                include_sports_state: config.backtest_data.include_sports_state,
+            };
+            (config.strategy, sim, rt, backtest_options)
+        } else {
+            eprintln!("No config file provided, using built-in defaults\n");
+            (
+                DirectionalConfig {
+                    symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
+                    vol_floor: 0.001,
+                    min_probability: 0.62,
+                    min_z_score: 0.35,
+                    min_entry_price: 0.15,
+                    max_entry_price: 0.85,
+                    no_trade_zone_min: 0.45,
+                    no_trade_zone_max: 0.55,
+                    min_edge: 0.05,
+                    min_time_remaining_secs: 60,
+                    max_time_remaining_secs: 300,
+                    cooldown_secs: 60,
+                    stake_usd: dec!(25),
+                    max_positions: 3,
+                    max_daily_trades: 1000,
+                },
+                SimulatedExecutorConfig {
+                    use_spread: true,
+                    spread_pct: dec!(0.02),
+                    enable_partial_fills: false,
+                    enable_market_impact: true,
+                    impact_coefficient: dec!(0.1),
+                    ..Default::default()
+                },
+                RuntimeConfig {
+                    mode: RuntimeMode::Backtest,
+                    throttle_hz: None,
+                    max_updates: None,
+                },
+                HistoricalLoadOptions::default(),
+            )
+        };
 
     eprintln!("=== pm_5m_directional Backtest ===");
     eprintln!("Mode:    {:?}", runtime_config.mode);
     eprintln!("Symbols: {:?}", strategy_config.symbols);
-    eprintln!("Params:  min_edge={:.0}% min_p={:.0}% cooldown={}s",
+    eprintln!(
+        "Params:  min_edge={:.0}% min_p={:.0}% cooldown={}s",
         strategy_config.min_edge * 100.0,
         strategy_config.min_probability * 100.0,
         strategy_config.cooldown_secs,
@@ -253,13 +267,19 @@ fn main() {
                 .unwrap(),
         );
         eprintln!("Loading DB data: {} → {}", from, to);
-        let pool = rt.block_on(
-            PgPoolOptions::new().max_connections(5).connect(url)
-        ).expect("DB connection failed");
+        let pool = rt
+            .block_on(PgPoolOptions::new().max_connections(5).connect(url))
+            .expect("DB connection failed");
         let symbols: Vec<String> = strategy_config.symbols.clone();
-        let updates = rt.block_on(
-            load_from_database(&pool, &symbols, from_dt, to_dt)
-        ).expect("Failed to load from database");
+        let updates = rt
+            .block_on(load_from_database_with_options(
+                &pool,
+                &symbols,
+                from_dt,
+                to_dt,
+                &backtest_options,
+            ))
+            .expect("Failed to load from database");
         eprintln!("Loaded {} market updates from DB\n", updates.len());
 
         // Data diagnostics
@@ -276,15 +296,22 @@ fn main() {
                 MarketUpdate::EventDiscovered { .. } => event_discovered += 1,
                 MarketUpdate::EventExpired { .. } => event_expired += 1,
                 MarketUpdate::L2 { .. } => l2_count += 1,
+                MarketUpdate::SportsState { .. } => {}
+                MarketUpdate::ReferencePrice { .. } => {}
                 MarketUpdate::Kline { .. } => kline_count += 1,
             }
         }
-        eprintln!("Data breakdown: spot={spot_count} quote={quote_count} discovered={event_discovered} expired={event_expired} l2={l2_count} kline={kline_count}");
+        eprintln!(
+            "Data breakdown: spot={spot_count} quote={quote_count} discovered={event_discovered} expired={event_expired} l2={l2_count} kline={kline_count}"
+        );
 
         updates
     } else {
         let updates = generate_synthetic_data(&["BTCUSDT", "ETHUSDT", "SOLUSDT"], 60);
-        eprintln!("Generated {} market updates (1 hour synthetic)\n", updates.len());
+        eprintln!(
+            "Generated {} market updates (1 hour synthetic)\n",
+            updates.len()
+        );
         updates
     };
 
@@ -306,7 +333,10 @@ fn main() {
     eprintln!("=== Results ===");
     eprintln!("Updates processed: {}", result.updates_processed);
     let trade_count = result.fills_recorded / 2; // entry + settlement = 2 fills per trade
-    eprintln!("Trades:            {} ({} fills)", trade_count, result.fills_recorded);
+    eprintln!(
+        "Trades:            {} ({} fills)",
+        trade_count, result.fills_recorded
+    );
     eprintln!("Elapsed:           {:.2}s", result.elapsed_secs);
     eprintln!();
 
@@ -336,7 +366,11 @@ fn main() {
         for fill in fills {
             eprintln!(
                 "  {} {:?} {}x @ {} (fee: {})",
-                &fill.token_id[..12], fill.side, fill.quantity, fill.price, fill.fee
+                &fill.token_id[..12],
+                fill.side,
+                fill.quantity,
+                fill.price,
+                fill.fee
             );
         }
         eprintln!();
@@ -347,7 +381,10 @@ fn main() {
         for pos in &snapshot.positions {
             eprintln!(
                 "  {} qty={} avg_entry={} realized_pnl={}",
-                &pos.token_id[..12], pos.net_qty, pos.avg_entry_price, pos.realized_pnl
+                &pos.token_id[..12],
+                pos.net_qty,
+                pos.avg_entry_price,
+                pos.realized_pnl
             );
         }
         eprintln!();
@@ -361,15 +398,27 @@ fn main() {
     eprintln!("=== Capital Usage ===");
     eprintln!("Stake per trade:   ${}", stake_usd);
     eprintln!("Total trades:      {}", trade_count);
-    eprintln!("Cumulative cost:   {} (all trades summed)", cashflow.deployed_capital());
-    eprintln!("Peak concurrent:   {} (max simultaneous open)", peak_capital.round_dp(2));
+    eprintln!(
+        "Cumulative cost:   {} (all trades summed)",
+        cashflow.deployed_capital()
+    );
+    eprintln!(
+        "Peak concurrent:   {} (max simultaneous open)",
+        peak_capital.round_dp(2)
+    );
     eprintln!("Sell proceeds:     {}", cashflow.gross_sell_proceeds);
     if let Some(roi) = cashflow.roi_on_deployed_capital() {
-        eprintln!("ROI (cumulative):  {}%  ← total profit / total cost (misleading for multi-trade)", (roi * Decimal::from(100)).round_dp(2));
+        eprintln!(
+            "ROI (cumulative):  {}%  ← total profit / total cost (misleading for multi-trade)",
+            (roi * Decimal::from(100)).round_dp(2)
+        );
     }
     if peak_capital > Decimal::ZERO {
         let roi_peak = result.pnl.net_pnl() / peak_capital * Decimal::from(100);
-        eprintln!("ROI (peak capital): {}%  ← net profit / max simultaneous capital", roi_peak.round_dp(2));
+        eprintln!(
+            "ROI (peak capital): {}%  ← net profit / max simultaneous capital",
+            roi_peak.round_dp(2)
+        );
     }
     eprintln!("Note: quantity is shares/contracts; capital = shares × price");
     eprintln!();

@@ -185,6 +185,14 @@ required-features = [
 ]
 
 [[example]]
+name = "rtds_equity_prices"
+path = "examples/rtds_equity_prices.rs"
+required-features = [
+    "rtds",
+    "tracing",
+]
+
+[[example]]
 name = "streaming"
 path = "examples/clob/streaming.rs"
 required-features = [

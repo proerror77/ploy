@@ -71,6 +71,34 @@ pub enum MarketUpdate {
         resolved_up_won: Option<bool>,
     },
 
+    /// External sports game state update from the Polymarket sports feed.
+    SportsState {
+        game_id: String,
+        league: String,
+        slug: String,
+        home_team: String,
+        away_team: String,
+        status: String,
+        period: Option<String>,
+        score: Option<String>,
+        elapsed: Option<String>,
+        live: bool,
+        ended: bool,
+        finished_at: Option<DateTime<Utc>>,
+        ts: DateTime<Utc>,
+    },
+
+    /// Reference-price tick from Chainlink, Pyth, or another canonical source.
+    ReferencePrice {
+        symbol: String,
+        source: String,
+        asset_class: String,
+        price: Decimal,
+        full_accuracy_value: Option<String>,
+        is_carried_forward: bool,
+        ts: DateTime<Utc>,
+    },
+
     /// CEX kline (candlestick) close.
     Kline {
         symbol: String,

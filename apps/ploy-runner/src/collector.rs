@@ -13,8 +13,8 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use polymarket_client_sdk::clob::ws::{BookUpdate, Client as ClobWsClient};
 use polymarket_client_sdk::clob::ws::types::response::OrderBookLevel;
+use polymarket_client_sdk::clob::ws::{BookUpdate, Client as ClobWsClient};
 use polymarket_client_sdk::rtds::Client as RtdsClient;
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -22,6 +22,12 @@ use sqlx::PgPool;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
+
+use crate::reference_prices::{
+    ReferenceAssetClass, ReferencePriceKey, ReferencePriceRegistry, ReferencePriceSnapshot,
+    ReferencePriceSource, latest_reference_price, market_symbol_to_chainlink_symbol,
+    new_reference_price_registry, normalize_reference_symbol, upsert_reference_price,
+};
 
 /// Configuration for the quote collector.
 #[derive(Debug, Clone)]
@@ -47,7 +53,7 @@ pub struct QuoteCollector {
     subscribed_tokens: Arc<RwLock<HashSet<String>>>,
     token_metadata: Arc<RwLock<HashMap<String, TokenMetadata>>>,
     stats: Arc<RwLock<CollectorStats>>,
-    chainlink_prices: Arc<RwLock<HashMap<String, (Decimal, DateTime<Utc>)>>>,
+    reference_prices: ReferencePriceRegistry,
 }
 
 #[derive(Debug, Default)]
@@ -142,7 +148,7 @@ impl QuoteCollector {
             subscribed_tokens: Arc::new(RwLock::new(HashSet::new())),
             token_metadata: Arc::new(RwLock::new(HashMap::new())),
             stats: Arc::new(RwLock::new(CollectorStats::default())),
-            chainlink_prices: Arc::new(RwLock::new(HashMap::new())),
+            reference_prices: new_reference_price_registry(),
         }
     }
 
@@ -461,7 +467,10 @@ impl QuoteCollector {
                     continue;
                 }
 
-                info!(pending = rows.len(), "Settlement collector checking expired events");
+                info!(
+                    pending = rows.len(),
+                    "Settlement collector checking expired events"
+                );
 
                 for (token_id, slug) in &rows {
                     // Use /last-trade-price — works for both active and settled tokens.
@@ -472,11 +481,15 @@ impl QuoteCollector {
                         token_id
                     );
 
-                    let price = match http.get(&url).timeout(StdDuration::from_secs(5)).send().await {
+                    let price = match http
+                        .get(&url)
+                        .timeout(StdDuration::from_secs(5))
+                        .send()
+                        .await
+                    {
                         Ok(resp) => {
                             if let Ok(body) = resp.json::<serde_json::Value>().await {
-                                body["price"].as_str()
-                                    .and_then(|s| s.parse::<f64>().ok())
+                                body["price"].as_str().and_then(|s| s.parse::<f64>().ok())
                             } else {
                                 None
                             }
@@ -550,16 +563,13 @@ impl QuoteCollector {
 
     /// Spawn Chainlink price feed subscriber.
     fn spawn_chainlink_feed(&self) -> tokio::task::JoinHandle<()> {
-        let prices = self.chainlink_prices.clone();
+        let registry = self.reference_prices.clone();
         let symbols = self.config.symbols.clone();
 
         tokio::spawn(async move {
             let symbols_chainlink: Vec<String> = symbols
                 .iter()
-                .map(|s| {
-                    let base = s.trim_end_matches("USDT").to_lowercase();
-                    format!("{}/usd", base)
-                })
+                .map(|s| market_symbol_to_chainlink_symbol(s))
                 .collect();
 
             info!(symbols = ?symbols_chainlink, "Starting Chainlink price feed");
@@ -586,13 +596,22 @@ impl QuoteCollector {
                         let ts = DateTime::from_timestamp_millis(chainlink_price.timestamp)
                             .unwrap_or_else(Utc::now);
 
-                        {
-                            let mut cache = prices.write().await;
-                            cache.insert(
-                                chainlink_price.symbol.clone(),
-                                (chainlink_price.value, ts),
-                            );
-                        }
+                        upsert_reference_price(
+                            &registry,
+                            ReferencePriceSnapshot {
+                                key: ReferencePriceKey {
+                                    source: ReferencePriceSource::Chainlink,
+                                    symbol: normalize_reference_symbol(&chainlink_price.symbol),
+                                },
+                                asset_class: ReferenceAssetClass::Crypto,
+                                value: chainlink_price.value,
+                                full_accuracy_value: None,
+                                source_timestamp: ts,
+                                received_at: Utc::now(),
+                                is_carried_forward: false,
+                            },
+                        )
+                        .await;
 
                         price_count += 1;
                         if price_count % 100 == 0 {
@@ -612,9 +631,8 @@ impl QuoteCollector {
     /// Spawn price_to_beat updater task.
     fn spawn_price_to_beat_updater(&self) -> tokio::task::JoinHandle<()> {
         let pool = self.pool.clone();
-        let prices = self.chainlink_prices.clone();
+        let registry = self.reference_prices.clone();
         let symbols = self.config.symbols.clone();
-        let timeframe = self.config.timeframe.clone();
 
         tokio::spawn(async move {
             loop {
@@ -681,11 +699,14 @@ impl QuoteCollector {
                     }
 
                     // Get Chainlink price
-                    let chainlink_symbol = symbol.trim_end_matches("USDT").to_lowercase() + "/usd";
-                    let price = {
-                        let cache = prices.read().await;
-                        cache.get(&chainlink_symbol).map(|(p, _)| *p)
-                    };
+                    let chainlink_symbol = market_symbol_to_chainlink_symbol(&symbol);
+                    let price = latest_reference_price(
+                        &registry,
+                        ReferencePriceSource::Chainlink,
+                        &chainlink_symbol,
+                    )
+                    .await
+                    .map(|snapshot| snapshot.value);
 
                     if let Some(price) = price {
                         // Update database
@@ -787,7 +808,7 @@ async fn persist_book_update(
 
     let quote_rows = if best_bid.is_some() || best_ask.is_some() {
         sqlx::query(
-        r#"
+            r#"
         INSERT INTO clob_quote_ticks (
             token_id, side, best_bid, best_ask,
             received_at, source, domain
@@ -878,9 +899,8 @@ fn hex_to_decimal_string(hex: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        best_tradeable_ask, best_tradeable_bid, book_timestamp, hex_to_decimal_string,
-        normalize_token_id, serialize_orderbook_levels, snapshot_context, OrderBookLevel,
-        TokenMetadata,
+        OrderBookLevel, TokenMetadata, best_tradeable_ask, best_tradeable_bid, book_timestamp,
+        hex_to_decimal_string, normalize_token_id, serialize_orderbook_levels, snapshot_context,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;

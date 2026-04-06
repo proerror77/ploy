@@ -70,6 +70,8 @@ Compatibility note:
 - `ployd`, `ployctl`, and `ploytui` are the default workspace entrypoints for the trading platform spine.
 - The old root runtime tree has been retired from the compiled workspace.
 - Remaining `ploy ...` examples below are historical reference only and are not runnable entrypoints in this branch.
+- Current sports scope in this branch is `discovery + live-state data capture + replay/backtest support`.
+- Sports live execution and market making remain out of scope until lifecycle safeguards are added for game-start orderbook resets.
 
 ## Features
 
@@ -199,6 +201,25 @@ The default configuration lives in `config/default.toml`. Override the path with
 | `[nba_comeback]` | `enabled`, `min_edge`, `max_entry_price`, `shares`, `min_deficit`, `max_deficit`, `target_quarter`, `espn_poll_interval_secs` |
 
 See the inline comments in `config/default.toml` for a full explanation of every field.
+
+### Strategy Runtime Backtests
+
+`ploy-runner --config config/strategies/*.toml` uses the unified strategy-runtime config in
+`crates/ploy-strategy-bundles`.
+
+- `[reference_data]`
+  - `pyth_symbols = [...]` configures additive non-crypto reference capture.
+  - `capture_sports_state = true|false` toggles live sports-state recording.
+- `[backtest_data]`
+  - `include_reference_prices = true|false` opts historical DB backtests into `reference_price_ticks`.
+  - `include_sports_state = true|false` opts historical DB backtests into `sports_state_events`.
+  - `reference_symbols = [...]` overrides the symbols loaded from `reference_price_ticks`; when omitted, the loader falls back to `[reference_data].pyth_symbols`.
+
+Historical trust remains conservative in this phase:
+
+- PM quotes stay pinned to the existing trusted source list in `clob_quote_ticks`.
+- Official settlement truth remains `pm_token_settlements`.
+- Reference prices and sports-state are additive observational inputs until a later trust-cutover phase blesses broader historical defaults.
 
 ## Usage
 

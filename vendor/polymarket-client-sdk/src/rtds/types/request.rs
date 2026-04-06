@@ -100,6 +100,18 @@ impl Subscription {
         }
     }
 
+    /// Create a subscription for Pyth-backed equity and commodity prices.
+    #[must_use]
+    pub fn equity_prices(symbol: Option<String>, msg_type: &str) -> Self {
+        let filters = symbol.map(|s| format!(r#"{{"symbol":"{s}"}}"#));
+        Self {
+            topic: "equity_prices".to_owned(),
+            msg_type: msg_type.to_owned(),
+            filters,
+            clob_auth: None,
+        }
+    }
+
     /// Create a subscription for comments.
     #[must_use]
     pub fn comments(msg_type: Option<CommentType>) -> Self {
@@ -149,7 +161,10 @@ impl Serialize for Subscription {
             // Chainlink endpoint expects filters as a JSON string (escaped),
             // while Binance crypto prices expect a lowercase comma-separated string.
             // See: https://github.com/Polymarket/rs-clob-client/issues/136
-            if self.topic == "crypto_prices" || self.topic == "crypto_prices_chainlink" {
+            if self.topic == "crypto_prices"
+                || self.topic == "crypto_prices_chainlink"
+                || self.topic == "equity_prices"
+            {
                 map.serialize_entry("filters", filters)?;
             } else if let Ok(json_value) = serde_json::from_str::<Value>(filters) {
                 // Other topics: parse and emit as raw JSON, e.g. ["btcusdt","ethusdt"]
@@ -324,5 +339,59 @@ mod tests {
         assert!(json.contains("\"topic\":\"crypto_prices\""));
         assert!(json.contains("\"topic\":\"crypto_prices_chainlink\""));
         assert!(json.contains("\"topic\":\"comments\""));
+    }
+
+    #[test]
+    fn serialize_equity_prices_update_subscription() {
+        let sub = Subscription::equity_prices(Some("AAPL".to_owned()), "update");
+        let request = SubscriptionRequest::subscribe(vec![sub]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"topic\":\"equity_prices\""));
+        assert!(json.contains("\"type\":\"update\""));
+        assert!(
+            json.contains(r#""filters":"{\"symbol\":\"AAPL\"}""#),
+            "Equity filters should be serialized as escaped JSON string, got: {json}"
+        );
+    }
+
+    #[test]
+    fn serialize_equity_prices_wildcard_subscription() {
+        let sub = Subscription::equity_prices(Some("GOOGL".to_owned()), "*");
+        let request = SubscriptionRequest::subscribe(vec![sub]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"topic\":\"equity_prices\""));
+        assert!(json.contains("\"type\":\"*\""));
+        assert!(
+            json.contains(r#""filters":"{\"symbol\":\"GOOGL\"}""#),
+            "Equity filters should be serialized as escaped JSON string, got: {json}"
+        );
+    }
+
+    #[test]
+    fn serialize_equity_prices_without_filters() {
+        let sub = Subscription::equity_prices(None, "update");
+        let request = SubscriptionRequest::subscribe(vec![sub]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"topic\":\"equity_prices\""));
+        assert!(json.contains("\"type\":\"update\""));
+        assert!(!json.contains("\"filters\""));
+    }
+
+    #[test]
+    fn serialize_unsubscribe_equity_prices() {
+        let sub = Subscription::equity_prices(Some("XAUUSD".to_owned()), "*");
+        let request = SubscriptionRequest::unsubscribe(vec![sub]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"action\":\"unsubscribe\""));
+        assert!(json.contains("\"topic\":\"equity_prices\""));
+        assert!(json.contains("\"type\":\"*\""));
+        assert!(
+            json.contains(r#""filters":"{\"symbol\":\"XAUUSD\"}""#),
+            "Equity filters should remain escaped on unsubscribe, got: {json}"
+        );
     }
 }

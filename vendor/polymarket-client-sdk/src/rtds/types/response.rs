@@ -43,6 +43,26 @@ impl RtdsMessage {
         }
     }
 
+    /// Try to extract the payload as an equity price live update.
+    #[must_use]
+    pub fn as_equity_price_update(&self) -> Option<EquityPriceUpdate> {
+        if self.topic == "equity_prices" && self.msg_type == "update" {
+            serde_json::from_value(self.payload.clone()).ok()
+        } else {
+            None
+        }
+    }
+
+    /// Try to extract the payload as an equity price snapshot/backfill message.
+    #[must_use]
+    pub fn as_equity_price_snapshot(&self) -> Option<EquityPriceSnapshot> {
+        if self.topic == "equity_prices" && self.msg_type == "subscribe" {
+            serde_json::from_value(self.payload.clone()).ok()
+        } else {
+            None
+        }
+    }
+
     /// Try to extract the payload as a comment event.
     #[must_use]
     pub fn as_comment(&self) -> Option<Comment> {
@@ -76,6 +96,55 @@ pub struct ChainlinkPrice {
     pub timestamp: i64,
     /// Current price value
     pub value: Decimal,
+}
+
+/// Equity and commodity price update payload.
+#[non_exhaustive]
+#[derive(Debug, Clone, Deserialize, Serialize, Builder)]
+pub struct EquityPriceUpdate {
+    /// Lowercase symbol identifier (e.g. `aapl`, `xauusd`, `wti`)
+    pub symbol: String,
+    /// Current price value
+    pub value: Decimal,
+    /// Full-precision price string emitted by RTDS
+    pub full_accuracy_value: String,
+    /// Price timestamp in Unix milliseconds
+    pub timestamp: i64,
+    /// When the RTDS pipeline received the price
+    #[serde(default)]
+    pub received_at: Option<i64>,
+    /// Whether the price is carried forward outside market hours
+    #[serde(default)]
+    pub is_carried_forward: bool,
+}
+
+/// One point inside an equity price snapshot/backfill payload.
+#[non_exhaustive]
+#[derive(Debug, Clone, Deserialize, Serialize, Builder)]
+pub struct EquityPriceSnapshotPoint {
+    /// Price timestamp in Unix milliseconds
+    pub timestamp: i64,
+    /// Point-in-time value
+    pub value: Decimal,
+    /// Optional full-precision value string if RTDS emits it
+    #[serde(default)]
+    pub full_accuracy_value: Option<String>,
+    /// Optional receive timestamp if RTDS emits it
+    #[serde(default)]
+    pub received_at: Option<i64>,
+    /// Whether the point is carried forward
+    #[serde(default)]
+    pub is_carried_forward: bool,
+}
+
+/// Historical snapshot payload delivered on subscription.
+#[non_exhaustive]
+#[derive(Debug, Clone, Deserialize, Serialize, Builder)]
+pub struct EquityPriceSnapshot {
+    /// Lowercase symbol identifier (e.g. `aapl`)
+    pub symbol: String,
+    /// Last 2 minutes of data returned by RTDS on subscribe
+    pub data: Vec<EquityPriceSnapshotPoint>,
 }
 
 /// Comment event payload.
@@ -299,5 +368,91 @@ mod tests {
     fn parse_whitespace_only_input() {
         let msgs = parse_messages(b"   \n\t  ").unwrap();
         assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn parse_equity_price_update_message() {
+        let json = r#"{
+            "topic": "equity_prices",
+            "type": "update",
+            "timestamp": 1711382400000,
+            "payload": {
+                "symbol": "aapl",
+                "value": 198.45,
+                "full_accuracy_value": "198.4523",
+                "timestamp": 1711382400000,
+                "received_at": 1711382400005
+            }
+        }"#;
+
+        let msgs = parse_messages(json.as_bytes()).unwrap();
+        assert_eq!(msgs.len(), 1);
+
+        let msg = &msgs[0];
+        assert_eq!(msg.topic, "equity_prices");
+        assert_eq!(msg.msg_type, "update");
+
+        let update = msg.as_equity_price_update().unwrap();
+        assert_eq!(update.symbol, "aapl");
+        assert_eq!(update.value, dec!(198.45));
+        assert_eq!(update.full_accuracy_value, "198.4523");
+        assert_eq!(update.timestamp, 1_711_382_400_000);
+        assert_eq!(update.received_at, Some(1_711_382_400_005));
+        assert!(!update.is_carried_forward);
+    }
+
+    #[test]
+    fn parse_equity_price_update_with_carried_forward_flag() {
+        let json = r#"{
+            "topic": "equity_prices",
+            "type": "update",
+            "timestamp": 1711400000000,
+            "payload": {
+                "symbol": "xauusd",
+                "value": 2175.30,
+                "full_accuracy_value": "2175.3012",
+                "timestamp": 1711399000000,
+                "received_at": 1711400000002,
+                "is_carried_forward": true
+            }
+        }"#;
+
+        let msgs = parse_messages(json.as_bytes()).unwrap();
+        let update = msgs[0].as_equity_price_update().unwrap();
+        assert_eq!(update.symbol, "xauusd");
+        assert_eq!(update.value, dec!(2175.30));
+        assert_eq!(update.full_accuracy_value, "2175.3012");
+        assert!(update.is_carried_forward);
+    }
+
+    #[test]
+    fn parse_equity_price_snapshot_message() {
+        let json = r#"{
+            "topic": "equity_prices",
+            "type": "subscribe",
+            "timestamp": 1711382400000,
+            "payload": {
+                "symbol": "aapl",
+                "data": [
+                    { "timestamp": 1711382280000, "value": 198.30 },
+                    { "timestamp": 1711382281000, "value": 198.32 },
+                    { "timestamp": 1711382340000, "value": 198.41 }
+                ]
+            }
+        }"#;
+
+        let msgs = parse_messages(json.as_bytes()).unwrap();
+        assert_eq!(msgs.len(), 1);
+
+        let msg = &msgs[0];
+        assert_eq!(msg.topic, "equity_prices");
+        assert_eq!(msg.msg_type, "subscribe");
+
+        let snapshot = msg.as_equity_price_snapshot().unwrap();
+        assert_eq!(snapshot.symbol, "aapl");
+        assert_eq!(snapshot.data.len(), 3);
+        assert_eq!(snapshot.data[0].timestamp, 1_711_382_280_000);
+        assert_eq!(snapshot.data[0].value, dec!(198.30));
+        assert_eq!(snapshot.data[2].value, dec!(198.41));
     }
 }

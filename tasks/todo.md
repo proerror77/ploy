@@ -1,3 +1,319 @@
+# RTDS Reference Foundation Implementation (2026-04-06)
+
+## Goal
+Ship Phase 1 of the Polymarket expansion plan: typed `equity_prices` RTDS support, a shared runner-side reference-price registry, additive Pyth capture, and the first persistence hook for later backtest/replay expansion.
+
+## File ownership
+
+- `vendor/polymarket-client-sdk/src/rtds/types/request.rs`
+  - owner: `equity_prices` subscription serialization
+- `vendor/polymarket-client-sdk/src/rtds/types/response.rs`
+  - owner: typed Pyth RTDS payloads
+- `vendor/polymarket-client-sdk/src/rtds/client.rs`
+  - owner: typed RTDS subscribe/unsubscribe helpers
+- `vendor/polymarket-client-sdk/src/rtds/mod.rs`
+  - owner: public RTDS re-exports
+- `vendor/polymarket-client-sdk/examples/rtds_equity_prices.rs`
+  - owner: RTDS equity example
+- `apps/ploy-runner/src/reference_prices.rs`
+  - owner: unified in-memory reference-price registry
+- `apps/ploy-runner/src/feeds.rs`
+  - owner: Chainlink/Binance/Pyth reference feed wiring
+- `apps/ploy-runner/src/scanner.rs`
+  - owner: `price_to_beat` lookup through the shared registry
+- `apps/ploy-runner/src/collector.rs`
+  - owner: collector-side Chainlink cache migration onto the shared registry
+- `crates/ploy-strategy-bundles/src/config.rs`
+  - owner: additive `reference_data.pyth_symbols` config
+- `crates/ploy-strategy-bundles/src/feed/database.rs`
+  - owner: future-facing `reference_price_ticks` reader helper
+- `migrations/027_reference_price_ticks.sql`
+  - owner: persisted Pyth/reference-price capture contract
+
+## Tasks
+
+- [x] Add failing tests for `equity_prices` request/response behavior in the vendored RTDS client.
+- [x] Implement typed `equity_prices` request/response/client support plus a runnable RTDS example.
+- [x] Extract a shared runner-side reference-price registry and migrate existing Chainlink lookups onto it.
+- [x] Add additive Pyth capture plus `reference_price_ticks` persistence scaffolding without changing current strategy semantics.
+- [x] Leave official settlement truth on `pm_token_settlements`; do not regress settlement backfill/correction behavior while expanding the data plane.
+
+## Progress notes
+
+- 2026-04-06: Added `Subscription::equity_prices(...)`, typed `EquityPriceUpdate` / `EquityPriceSnapshot` payload models, `Client::subscribe_equity_prices(...)`, and `Client::unsubscribe_equity_prices(...)` to the vendored RTDS SDK.
+- 2026-04-06: Added `vendor/polymarket-client-sdk/examples/rtds_equity_prices.rs` and verified it compiles with `--features rtds,tracing`.
+- 2026-04-06: Created `apps/ploy-runner/src/reference_prices.rs` and rewired runner live mode, scanner lookup, and collector-side Chainlink cache use onto the shared registry.
+- 2026-04-06: Added a new additive `[reference_data]` config section with `pyth_symbols = [...]` so non-crypto capture can be configured without changing the existing directional strategy symbol contract.
+- 2026-04-06: Added `migrations/027_reference_price_ticks.sql` plus a future-facing `load_reference_price_ticks(...)` helper in `crates/ploy-strategy-bundles/src/feed/database.rs`.
+- 2026-04-06: Kept settlement truth unchanged: live/historical settlement still flows through `pm_token_settlements`, while Phase 1 only broadens reference-price capture and `price_to_beat` sourcing.
+- 2026-04-06: Verification commands:
+  - `CARGO_TARGET_DIR=/tmp/ploy-rtds-foundation rtk cargo test -p polymarket-client-sdk --features rtds rtds -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rtds-foundation rtk cargo check -p polymarket-client-sdk --features rtds,tracing --example rtds_equity_prices`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rtds-foundation rtk cargo check -p ploy-runner -p ploy-strategy-bundles --all-targets`
+  - `CARGO_TARGET_DIR=/tmp/ploy-rtds-foundation rtk cargo test -p ploy-runner -- --nocapture`
+
+## Review
+
+- Phase 1 is now an additive data-plane change: existing crypto live strategy semantics stay intact, while non-crypto RTDS capture and persistence are available for the next discovery/backtest phases.
+- The shared registry reduces duplicate Chainlink state and gives later backtest/replay work one canonical in-memory shape for Binance, Chainlink, and Pyth ticks.
+- Settlement backfill remains explicitly anchored on official PM sources rather than inferred spot direction, which preserves the user-required completion/correction path.
+
+# Market Discovery And Metadata Normalization Implementation (2026-04-06)
+
+## Goal
+Ship Phase 2 of the Polymarket expansion plan: normalize crypto and sports market discovery into a shared descriptor/catalog shape while preserving the existing crypto `EventDiscovered` runtime path for live directional trading.
+
+## File ownership
+
+- `apps/ploy-runner/src/discovery/mod.rs`
+  - owner: normalized market-catalog persistence
+- `apps/ploy-runner/src/discovery/types.rs`
+  - owner: market family / semantics / settlement descriptor contract
+- `apps/ploy-runner/src/discovery/crypto.rs`
+  - owner: crypto market normalization onto the shared descriptor
+- `apps/ploy-runner/src/discovery/sports.rs`
+  - owner: sports Gamma discovery and descriptor normalization
+- `apps/ploy-runner/src/scanner.rs`
+  - owner: runner-side crypto compatibility path plus sports catalog refresh
+- `apps/ploy-runner/src/main.rs`
+  - owner: discovery module wiring
+- `migrations/028_pm_market_catalog.sql`
+  - owner: normalized market catalog schema and `pm_market_metadata.price_to_beat` nullability fix
+- `ploy-sidecar/src/tools/polymarket.ts`
+  - owner: family-aware normalized Polymarket search/snapshot tools
+- `ploy-sidecar/src/index.ts`
+  - owner: sidecar prompt alignment with family-aware Polymarket discovery
+- `ploy-sidecar/src/schemas/output.ts`
+  - owner: normalized market metadata in structured sidecar output
+
+## Tasks
+
+- [x] Introduce a normalized runner-side market descriptor and `pm_market_catalog`.
+- [x] Move crypto discovery into `apps/ploy-runner/src/discovery/crypto.rs` and keep emitting the existing compatibility `EventDiscovered` flow.
+- [x] Persist normalized crypto descriptors to `pm_market_catalog` alongside `pm_market_metadata`.
+- [x] Add sports discovery that captures normalized descriptors to the catalog without enabling sports live execution.
+- [x] Upgrade the sidecar Polymarket tool contract so search/snapshot results expose market family and settlement source explicitly.
+
+## Progress notes
+
+- 2026-04-06: Added `MarketFamily`, `MarketSemantics`, `SettlementSource`, and `MarketDescriptor` in `apps/ploy-runner/src/discovery/types.rs`.
+- 2026-04-06: Added `migrations/028_pm_market_catalog.sql` with a new normalized `pm_market_catalog` table and an additive fix that drops the stale `NOT NULL` constraint on `pm_market_metadata.price_to_beat`, matching the existing correction/backfill codepaths.
+- 2026-04-06: Moved crypto discovery normalization into `apps/ploy-runner/src/discovery/crypto.rs`; runner scanner now uses the normalized descriptor path while still emitting the same crypto `MarketUpdate::EventDiscovered` / `EventExpired` events keyed by the compatibility market ID.
+- 2026-04-06: Added low-frequency sports discovery refresh in `apps/ploy-runner/src/scanner.rs` so active sports descriptors are captured into `pm_market_catalog` even though sports live execution remains out of scope.
+- 2026-04-06: Upgraded `ploy-sidecar/src/tools/polymarket.ts` from title-only event search to a family-aware normalized search/snapshot contract that supports sports lookup by team, league, or slug.
+- 2026-04-06: Updated the sidecar structured output schema so downstream prompts can reference `market_family`, `settlement_source`, and `reference_symbol`.
+- 2026-04-06: Verification commands:
+  - `CARGO_TARGET_DIR=/tmp/ploy-discovery rtk cargo check -p ploy-runner --all-targets`
+  - `CARGO_TARGET_DIR=/tmp/ploy-discovery rtk cargo test -p ploy-runner -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-discovery rtk cargo test -p polymarket-client-sdk gamma -- --nocapture`
+  - `cd ploy-sidecar && npm run build`
+- 2026-04-06: Verification results:
+  - `ploy-runner` check passed
+  - `ploy-runner` tests passed (`17 passed`)
+  - the vendored `gamma` test filter ran cleanly but matched no tests (`0 passed, 16 filtered out`)
+  - sidecar TypeScript build passed
+
+## Review
+
+- Phase 2 now has one normalized market descriptor contract that can carry crypto and sports data without forcing sports semantics into the crypto-only strategy runtime.
+- Crypto live behavior remains intentionally compatible: the runner still discovers and trades the same 5m/15m markets, but the discovery layer now emits a reusable descriptor and persists it to a canonical catalog.
+- Sports remains scoped exactly as requested: discovery and catalog capture are live, but no sports execution path was introduced.
+
+# Sports Discovery, Data Capture, And Backtest Support Implementation (2026-04-06)
+
+## Goal
+Ship the sports data-plane phase: capture Polymarket Sports WebSocket game-state updates, persist them, and make them survivable through canonical record/replay without enabling sports live execution.
+
+## File ownership
+
+- `crates/ploy-strategy-bundles/src/traits.rs`
+  - owner: canonical `MarketUpdate::SportsState` contract
+- `crates/ploy-strategy-bundles/src/engine.rs`
+  - owner: runtime timestamp/throttle compatibility for sports-state updates
+- `crates/ploy-strategy-bundles/src/feed/recorded.rs`
+  - owner: sports-state record/replay round-trip coverage
+- `crates/ploy-strategy-bundles/src/feed/database.rs`
+  - owner: additive sports-state historical loader helper
+- `crates/ploy-strategy-bundles/src/config.rs`
+  - owner: `reference_data.capture_sports_state` runtime flag
+- `crates/ploy-strategy-bundles/tests/backtest_integration.rs`
+  - owner: mixed crypto+sports replay parity coverage
+- `apps/ploy-runner/src/sports_feed.rs`
+  - owner: Sports WebSocket client, normalization, and DB persistence
+- `apps/ploy-runner/src/main.rs`
+  - owner: optional sports-feed runtime wiring
+- `apps/ploy-runner/Cargo.toml`
+  - owner: sports websocket client dependency
+- `migrations/029_sports_state_events.sql`
+  - owner: persisted sports-state capture contract
+- `apps/ploy-runner/tests/fixtures/polymarket_sports_ws.jsonl`
+  - owner: fixture-backed sports parser coverage
+
+## Tasks
+
+- [x] Add a canonical `MarketUpdate::SportsState` variant that survives record/replay.
+- [x] Add a Polymarket sports websocket client that handles `ping`/`pong` and normalizes `sport_result`-style payloads.
+- [x] Persist normalized sports-state updates to `sports_state_events`.
+- [x] Add fixture-backed parser coverage and mixed crypto+sports replay coverage.
+- [x] Keep sports execution explicitly out of scope; this phase is capture/replay only.
+
+## Progress notes
+
+- 2026-04-06: Added `MarketUpdate::SportsState` with canonical fields for `game_id`, `league`, `slug`, `home_team`, `away_team`, `status`, `period`, `score`, `elapsed`, `live`, `ended`, `finished_at`, and `ts`.
+- 2026-04-06: Updated runtime timestamp extraction and record/replay tests so sports-state updates can flow through the canonical NDJSON event stream without affecting existing crypto strategy behavior.
+- 2026-04-06: Added `apps/ploy-runner/src/sports_feed.rs`, a dedicated `wss://sports-api.polymarket.com/ws` client that:
+  - responds to lowercase text `ping` with `pong`
+  - best-effort joins incoming game slugs to normalized sports descriptors in `pm_market_catalog`
+  - emits `MarketUpdate::SportsState`
+  - persists raw payloads plus normalized fields into `sports_state_events`
+- 2026-04-06: Added `migrations/029_sports_state_events.sql` and `load_sports_state_events(...)` in `feed/database.rs`. The loader helper exists now, but default historical DB backtests still do not ingest sports state automatically.
+- 2026-04-06: Added `reference_data.capture_sports_state = true|false` so live/dry-run sessions can opt into sports-state recording without coupling it to the crypto runtime.
+- 2026-04-06: Added fixture-backed sports parser coverage via `apps/ploy-runner/tests/fixtures/polymarket_sports_ws.jsonl` and a mixed crypto+sports replay test in `crates/ploy-strategy-bundles/tests/backtest_integration.rs`.
+- 2026-04-06: Verification commands:
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-data rtk cargo check -p ploy-runner -p ploy-strategy-bundles --all-targets`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-data rtk cargo test -p ploy-strategy-bundles recorded -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-data rtk cargo test -p ploy-runner sports_feed -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-data rtk cargo test -p ploy-strategy-bundles --test backtest_integration -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-data rtk cargo test -p ploy-runner -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-sports-data rtk cargo test -p ploy-strategy-bundles -- --nocapture`
+- 2026-04-06: Verification results:
+  - `cargo check` passed for both `ploy-runner` and `ploy-strategy-bundles`
+  - recorded-feed tests passed (`2 passed, 33 filtered out`)
+  - runner sports parser tests passed (`2 passed, 17 filtered out`)
+  - mixed backtest integration passed (`5 passed`)
+  - full package tests passed for `ploy-runner` (`19 passed`)
+  - full package tests passed for `ploy-strategy-bundles` (`35 passed, 1 ignored`)
+
+## Review
+
+- Sports live-state now has a canonical capture path that is separate from crypto execution logic.
+- Replay/backtest support exists through the canonical recorded event stream today, while the historical DB loader remains conservative until the next source-trust phase wires sports-state loading on explicitly.
+- The sports boundary remains intact: discovery, data capture, and replay/backtest support are in; sports live execution is still out.
+
+# Backtest And Replay Expansion Implementation (2026-04-06)
+
+## Goal
+Ship Phase 4 of the Polymarket expansion plan: let historical DB backtests opt into `reference_price_ticks` and `sports_state_events`, thread reference prices through the canonical recorded event stream, and keep settlement repair anchored on official PM rows.
+
+## File ownership
+
+- `crates/ploy-strategy-bundles/src/config.rs`
+  - owner: additive `[backtest_data]` config section
+- `crates/ploy-strategy-bundles/src/traits.rs`
+  - owner: canonical `MarketUpdate::ReferencePrice` contract
+- `crates/ploy-strategy-bundles/src/engine.rs`
+  - owner: runtime timestamp compatibility for reference-price updates
+- `crates/ploy-strategy-bundles/src/feed/database.rs`
+  - owner: `HistoricalLoadOptions`, additive historical loader wiring, settlement backfill regression
+- `crates/ploy-strategy-bundles/src/feed/mod.rs`
+  - owner: historical loader exports
+- `crates/ploy-strategy-bundles/src/feed/recorded.rs`
+  - owner: reference-price record/replay coverage
+- `crates/ploy-strategy-bundles/tests/backtest_integration.rs`
+  - owner: mixed crypto+reference replay parity coverage
+- `apps/ploy-runner/src/feeds.rs`
+  - owner: live Chainlink/Pyth reference ticks into canonical event stream
+- `apps/ploy-runner/src/main.rs`
+  - owner: backtest loader options + live Pyth feed wiring
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+  - owner: backtest example against additive loader options
+- `config/strategies/02-pm5d.unified.toml`
+  - owner: commented config surface for additive backtest sources
+- `config/strategies/reference-data.backtest.toml`
+  - owner: non-crypto reference-data example
+- `config/strategies/sports-observation.backtest.toml`
+  - owner: sports-observation backtest example
+- `README.md`
+  - owner: trust rules and config documentation
+- `docs/plans/2026-04-06-polymarket-expansion-master-plan.md`
+  - owner: Phase 4 deliverable / trust wording
+
+## Tasks
+
+- [x] Add a canonical `MarketUpdate::ReferencePrice` variant and make record/replay round-trip it.
+- [x] Add `[backtest_data]` config flags so historical DB backtests can explicitly opt into reference prices and sports state.
+- [x] Expand the historical DB loader with `HistoricalLoadOptions` and additive source loading while preserving the existing PM quote trust policy.
+- [x] Keep settlement completion/backfill official by regression-testing that `pm_token_settlements` can repair an initially unresolved event expiry.
+- [x] Add example configs for observational reference-data and sports-state backtests.
+
+## Progress notes
+
+- 2026-04-06: Added `MarketUpdate::ReferencePrice { symbol, source, asset_class, price, full_accuracy_value, is_carried_forward, ts }` so Chainlink/Pyth ticks can survive canonical record/replay.
+- 2026-04-06: Added `BacktestDataSection` to the unified strategy-runtime config with:
+  - `include_reference_prices = true|false`
+  - `include_sports_state = true|false`
+  - `reference_symbols = [...]`
+- 2026-04-06: Historical loader now exposes `HistoricalLoadOptions` plus `load_from_database_with_options(...)`; the default `load_from_database(...)` path remains crypto-only for compatibility.
+- 2026-04-06: `apps/ploy-runner` backtest mode now builds `HistoricalLoadOptions` from config and passes them to the strategy-bundles DB loader.
+- 2026-04-06: Live Chainlink and Pyth feeds now emit `MarketUpdate::ReferencePrice` into the canonical broadcast stream in addition to updating the shared registry / persistence tables.
+- 2026-04-06: Added a pure regression in `feed/database.rs` proving an event that initially expires with `resolved_up_won = None` becomes `Some(true)` once official settlement rows are present.
+- 2026-04-06: Added observational configs:
+  - `config/strategies/reference-data.backtest.toml`
+  - `config/strategies/sports-observation.backtest.toml`
+- 2026-04-06: Historical trust rules after this phase:
+  - PM quote history still uses the existing trusted-source list in `clob_quote_ticks`
+  - settlement truth stays on `pm_token_settlements`
+  - `reference_price_ticks` and `sports_state_events` are opt-in additive sources, not new default truth
+- 2026-04-06: Verification commands:
+  - `CARGO_TARGET_DIR=/tmp/ploy-phase4-green1 rtk cargo test -p ploy-strategy-bundles config -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-phase4-green1 rtk cargo test -p ploy-strategy-bundles recorded -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-phase4-green1 rtk cargo test -p ploy-strategy-bundles reference_updates_round_trip_without_changing_crypto_runtime_behavior -- --exact --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-phase4 rtk cargo check -p ploy-runner -p ploy-strategy-bundles --all-targets`
+  - `CARGO_TARGET_DIR=/tmp/ploy-phase4 rtk cargo test -p ploy-strategy-bundles -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-phase4 rtk cargo test -p ploy-runner -- --nocapture`
+  - `CARGO_TARGET_DIR=/tmp/ploy-phase4 rtk cargo check -p ploy-strategy-bundles --examples`
+- 2026-04-06: Verification results:
+  - targeted config tests passed (`9 passed, 30 filtered out`)
+  - targeted recorded-feed tests passed (`2 passed, 37 filtered out`)
+  - targeted mixed reference replay parity passed (`1 passed, 38 filtered out`)
+  - full `cargo check` passed for `ploy-runner` and `ploy-strategy-bundles`
+  - full `ploy-strategy-bundles` tests passed (`39 passed, 1 ignored`)
+  - full `ploy-runner` tests passed (`19 passed`)
+  - example builds passed for `ploy-strategy-bundles`
+
+## Review
+
+- Phase 4 turns reference data into a first-class replayable event without coupling current crypto strategy logic to non-crypto signals.
+- Historical DB backtests can now opt into additive sources explicitly, instead of silently widening trust boundaries.
+- Settlement completion remains deterministic and official: the additive feeds never replace `pm_token_settlements` as the repair path for resolved outcomes.
+
+# Polymarket Expansion Planning (2026-04-06)
+
+## Goal
+Plan the full repo upgrade required to support Polymarket's new expansion surface across Chainlink-backed crypto, Pyth-backed non-crypto reference data, sports discovery/live-state ingestion, CLI/operator tooling, and historical backtest/replay flows.
+
+## File ownership
+
+- `docs/plans/2026-04-06-polymarket-expansion-master-plan.md`
+  - owner: master architecture and phased execution plan
+
+## Tasks
+
+- [x] Audit the current runtime, CLI, sidecar, and backtest assumptions against the new PM market directions.
+- [x] Capture the cross-cutting workstreams and execution order in a repo-local master plan.
+- [x] Confirm the phase boundaries and sports scope before writing the detailed per-workstream implementation plans.
+
+## Progress notes
+
+- 2026-04-06: Confirmed the live runner already consumes Polymarket RTDS Chainlink crypto prices, but the vendored SDK does not yet expose typed `equity_prices` support for Pyth-backed non-crypto feeds.
+- 2026-04-06: Confirmed the live runner market scanner remains crypto-window-centric and uses hardcoded question-to-symbol inference.
+- 2026-04-06: Confirmed `ployctl` currently has no market-data/discovery inspection surface and the sidecar Polymarket tool still depends on title-based Gamma search.
+- 2026-04-06: Wrote the master plan to `docs/plans/2026-04-06-polymarket-expansion-master-plan.md`.
+- 2026-04-06: Confirmed the sports lane is explicitly scoped to `discovery + data capture + backtest support` for the first execution pass; sports live execution remains out of scope.
+- 2026-04-06: Added an explicit expansion requirement that settlement data must remain correctly backfillable/completable from official PM sources during the backtest/replay upgrade.
+- 2026-04-06: Wrote the detailed phase plans:
+  - `docs/plans/2026-04-06-rtds-reference-foundation-implementation-plan.md`
+  - `docs/plans/2026-04-06-market-discovery-normalization-implementation-plan.md`
+  - `docs/plans/2026-04-06-sports-data-capture-implementation-plan.md`
+  - `docs/plans/2026-04-06-backtest-replay-expansion-implementation-plan.md`
+  - `docs/plans/2026-04-06-cli-operator-surface-implementation-plan.md`
+  - `docs/plans/2026-04-06-hardening-trust-cutover-implementation-plan.md`
+
+## Review
+
+- The work is large enough that it should be executed as multiple implementation plans, not one giant patch set.
+- The most important sequencing constraint is protocol/data-foundation first, then discovery normalization, then sports state, then historical/backtest upgrades, then CLI surfaces.
+
 # Local Rust Build Tooling Tune-up (2026-04-02)
 
 ## Goal
@@ -6946,3 +7262,30 @@ same message for lightweight replay.
 - The live collector now preserves point-in-time Polymarket orderbook facts in the canonical table that downstream training scripts and research jobs already understand.
 - `clob_quote_ticks` remains available for lightweight replay, but it is now explicitly a derived projection of the WS book update rather than the sole persisted record.
 - This slice does not yet switch research backtests to consume live `clob_orderbook_snapshots`; it only fixes the collection gap so future backfill/replay work can rely on raw books.
+
+---
+
+# Agent Instruction Tightening (2026-04-06)
+
+## Goal
+Fold the external AGENTS gist guidance into the repo-local instruction files
+without losing existing repo-specific workflow, safety, and RTK rules.
+
+## File ownership
+
+- `AGENTS.md`
+  - owner: collaborator philosophy, delivery priorities, and stop-to-ask rules
+- `CLAUDE.md`
+  - owner: same instruction sync as `AGENTS.md`
+- `tasks/todo.md`
+  - owner: lightweight tracking for this doc-only slice
+
+## Tasks
+
+- [x] Compare the current repo instructions against the external gist and find
+  the missing behavior.
+- [x] Add concise philosophy, execution-priority, and "only stop for genuine
+  ambiguity" sections to `AGENTS.md`.
+- [x] Mirror the same instruction changes into `CLAUDE.md` to keep both files
+  aligned.
+- [x] Diff-review the doc-only change set for consistency and repo fit.

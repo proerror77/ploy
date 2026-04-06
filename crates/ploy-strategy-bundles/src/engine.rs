@@ -223,6 +223,8 @@ where
             MarketUpdate::SpotPrice { ts, .. }
             | MarketUpdate::Quote { ts, .. }
             | MarketUpdate::L2 { ts, .. }
+            | MarketUpdate::SportsState { ts, .. }
+            | MarketUpdate::ReferencePrice { ts, .. }
             | MarketUpdate::Kline { ts, .. } => Some(*ts),
             MarketUpdate::EventDiscovered { end_time, .. } => Some(*end_time),
             MarketUpdate::EventExpired { end_time, .. } => Some(*end_time),

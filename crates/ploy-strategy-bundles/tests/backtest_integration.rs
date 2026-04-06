@@ -83,6 +83,76 @@ fn build_scenario() -> Vec<MarketUpdate> {
     updates
 }
 
+fn build_scenario_with_sports() -> Vec<MarketUpdate> {
+    let mut updates = build_scenario();
+    let now = Utc::now();
+
+    updates.insert(
+        1,
+        MarketUpdate::SportsState {
+            game_id: "19439".into(),
+            league: "nfl".into(),
+            slug: "nfl-lac-buf-2025-01-26".into(),
+            home_team: "LAC".into(),
+            away_team: "BUF".into(),
+            status: "Scheduled".into(),
+            period: Some("1Q".into()),
+            score: Some("0-0".into()),
+            elapsed: Some("0:00".into()),
+            live: false,
+            ended: false,
+            finished_at: None,
+            ts: now + Duration::seconds(1),
+        },
+    );
+    updates.push(MarketUpdate::SportsState {
+        game_id: "19439".into(),
+        league: "nfl".into(),
+        slug: "nfl-lac-buf-2025-01-26".into(),
+        home_team: "LAC".into(),
+        away_team: "BUF".into(),
+        status: "Final".into(),
+        period: Some("FT".into()),
+        score: Some("17-24".into()),
+        elapsed: None,
+        live: false,
+        ended: true,
+        finished_at: Some(now + Duration::minutes(5)),
+        ts: now + Duration::minutes(5),
+    });
+
+    updates
+}
+
+fn build_scenario_with_reference_data() -> Vec<MarketUpdate> {
+    let mut updates = build_scenario();
+    let now = Utc::now();
+
+    updates.insert(
+        1,
+        MarketUpdate::ReferencePrice {
+            symbol: "aapl".into(),
+            source: "pyth".into(),
+            asset_class: "equity".into(),
+            price: dec!(212.45),
+            full_accuracy_value: Some("212.450000".into()),
+            is_carried_forward: false,
+            ts: now + Duration::seconds(1),
+        },
+    );
+    updates.push(MarketUpdate::ReferencePrice {
+        symbol: "xauusd".into(),
+        source: "pyth".into(),
+        asset_class: "precious_metal".into(),
+        price: dec!(3098.20),
+        full_accuracy_value: None,
+        is_carried_forward: true,
+        ts: now + Duration::minutes(5),
+    });
+
+    updates
+}
+
 #[tokio::test]
 async fn backtest_full_loop_produces_entry() {
     let config = DirectionalConfig {
@@ -304,6 +374,166 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         replay_snapshot.fill_cashflow_summary()
     );
     assert_eq!(recorded_snapshot.fills.len(), replay_snapshot.fills.len());
+
+    let _ = fs::remove_file(record_path);
+}
+
+#[tokio::test]
+async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
+    let config = DirectionalConfig {
+        symbols: vec!["BTCUSDT".into()],
+        vol_floor: 0.001,
+        min_probability: 0.55,
+        min_z_score: 0.35,
+        min_entry_price: 0.15,
+        max_entry_price: 0.85,
+        no_trade_zone_min: 0.45,
+        no_trade_zone_max: 0.55,
+        min_edge: 0.02,
+        min_time_remaining_secs: 60,
+        max_time_remaining_secs: 300,
+        cooldown_secs: 0,
+        stake_usd: dec!(25),
+        max_positions: 1000,
+        max_daily_trades: 1000,
+    };
+    let sim_config = SimulatedExecutorConfig {
+        use_spread: true,
+        spread_pct: dec!(0.02),
+        enable_partial_fills: false,
+        enable_market_impact: false,
+        ..Default::default()
+    };
+    let runtime_config = RuntimeConfig {
+        mode: RuntimeMode::DryRun,
+        throttle_hz: None,
+        max_updates: None,
+    };
+
+    let mut record_path = std::env::temp_dir();
+    record_path.push(format!(
+        "ploy-sports-replay-parity-{}.ndjson",
+        uuid::Uuid::new_v4()
+    ));
+
+    let record_feed = RecordingFeed::new(
+        HistoricalFeed::new(build_scenario_with_sports()),
+        &record_path,
+    )
+    .unwrap();
+    let mut recorded_runtime = StrategyRuntime::new(
+        DirectionalStrategy::new(config.clone()),
+        record_feed,
+        SimulatedExecutor::new(sim_config.clone()),
+        Box::new(NullRecorder),
+        runtime_config.clone(),
+    );
+    let recorded_result = recorded_runtime.run().await;
+    drop(recorded_runtime);
+
+    let replay_feed = RecordedFeed::from_path(&record_path).unwrap();
+    let mut replay_runtime = StrategyRuntime::new(
+        DirectionalStrategy::new(config),
+        replay_feed,
+        SimulatedExecutor::new(sim_config),
+        Box::new(NullRecorder),
+        RuntimeConfig {
+            mode: RuntimeMode::Replay,
+            ..runtime_config
+        },
+    );
+    let replay_result = replay_runtime.run().await;
+
+    assert_eq!(
+        recorded_result.updates_processed,
+        replay_result.updates_processed
+    );
+    assert_eq!(
+        recorded_result.intents_submitted,
+        replay_result.intents_submitted
+    );
+    assert_eq!(recorded_result.fills_recorded, replay_result.fills_recorded);
+    assert_eq!(recorded_result.pnl.net_pnl(), replay_result.pnl.net_pnl());
+
+    let _ = fs::remove_file(record_path);
+}
+
+#[tokio::test]
+async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior() {
+    let config = DirectionalConfig {
+        symbols: vec!["BTCUSDT".into()],
+        vol_floor: 0.001,
+        min_probability: 0.55,
+        min_z_score: 0.35,
+        min_entry_price: 0.15,
+        max_entry_price: 0.85,
+        no_trade_zone_min: 0.45,
+        no_trade_zone_max: 0.55,
+        min_edge: 0.02,
+        min_time_remaining_secs: 60,
+        max_time_remaining_secs: 300,
+        cooldown_secs: 0,
+        stake_usd: dec!(25),
+        max_positions: 1000,
+        max_daily_trades: 1000,
+    };
+    let sim_config = SimulatedExecutorConfig {
+        use_spread: true,
+        spread_pct: dec!(0.02),
+        enable_partial_fills: false,
+        enable_market_impact: false,
+        ..Default::default()
+    };
+    let runtime_config = RuntimeConfig {
+        mode: RuntimeMode::DryRun,
+        throttle_hz: None,
+        max_updates: None,
+    };
+
+    let mut record_path = std::env::temp_dir();
+    record_path.push(format!(
+        "ploy-reference-replay-parity-{}.ndjson",
+        uuid::Uuid::new_v4()
+    ));
+
+    let record_feed = RecordingFeed::new(
+        HistoricalFeed::new(build_scenario_with_reference_data()),
+        &record_path,
+    )
+    .unwrap();
+    let mut recorded_runtime = StrategyRuntime::new(
+        DirectionalStrategy::new(config.clone()),
+        record_feed,
+        SimulatedExecutor::new(sim_config.clone()),
+        Box::new(NullRecorder),
+        runtime_config.clone(),
+    );
+    let recorded_result = recorded_runtime.run().await;
+    drop(recorded_runtime);
+
+    let replay_feed = RecordedFeed::from_path(&record_path).unwrap();
+    let mut replay_runtime = StrategyRuntime::new(
+        DirectionalStrategy::new(config),
+        replay_feed,
+        SimulatedExecutor::new(sim_config),
+        Box::new(NullRecorder),
+        RuntimeConfig {
+            mode: RuntimeMode::Replay,
+            ..runtime_config
+        },
+    );
+    let replay_result = replay_runtime.run().await;
+
+    assert_eq!(
+        recorded_result.updates_processed,
+        replay_result.updates_processed
+    );
+    assert_eq!(
+        recorded_result.intents_submitted,
+        replay_result.intents_submitted
+    );
+    assert_eq!(recorded_result.fills_recorded, replay_result.fills_recorded);
+    assert_eq!(recorded_result.pnl.net_pnl(), replay_result.pnl.net_pnl());
 
     let _ = fs::remove_file(record_path);
 }

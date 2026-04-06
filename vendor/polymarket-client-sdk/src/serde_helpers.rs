@@ -9,7 +9,18 @@
     feature = "data",
     feature = "gamma",
 ))]
-use {serde::de::DeserializeOwned, serde_json::Value};
+use serde_json::Value;
+
+#[cfg(all(
+    feature = "tracing",
+    any(
+        feature = "bridge",
+        feature = "clob",
+        feature = "data",
+        feature = "gamma"
+    )
+))]
+use serde::de::DeserializeOwned;
 
 /// A `serde_as` type that deserializes strings or integers as `String`.
 ///
@@ -194,6 +205,15 @@ pub fn deserialize_with_warnings<T: DeserializeOwned>(value: Value) -> crate::Re
 ///
 /// Returns `None` if the path doesn't exist or traverses a non-container value.
 #[cfg(feature = "tracing")]
+#[cfg(all(
+    feature = "tracing",
+    any(
+        feature = "bridge",
+        feature = "clob",
+        feature = "data",
+        feature = "gamma"
+    )
+))]
 fn lookup_value<'value>(value: &'value Value, path: &str) -> Option<&'value Value> {
     if path.is_empty() {
         return Some(value);
@@ -232,6 +252,15 @@ fn lookup_value<'value>(value: &'value Value, path: &str) -> Option<&'value Valu
 /// - `"data[15].condition_id"` -> `["data", "15", "condition_id"]`
 /// - `"items[0][1].value"` -> `["items", "0", "1", "value"]`
 #[cfg(feature = "tracing")]
+#[cfg(all(
+    feature = "tracing",
+    any(
+        feature = "bridge",
+        feature = "clob",
+        feature = "data",
+        feature = "gamma"
+    )
+))]
 fn parse_path_segments(path: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
@@ -277,6 +306,15 @@ fn parse_path_segments(path: &str) -> Vec<String> {
 
 /// Format a JSON value for logging.
 #[cfg(feature = "tracing")]
+#[cfg(all(
+    feature = "tracing",
+    any(
+        feature = "bridge",
+        feature = "clob",
+        feature = "data",
+        feature = "gamma"
+    )
+))]
 fn format_value(value: Option<&Value>) -> String {
     match value {
         Some(v) => v.to_string(),

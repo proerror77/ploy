@@ -44,10 +44,11 @@ pub mod subscription;
 pub mod types;
 
 // Re-export commonly used types
-pub use client::Client;
+pub use client::{Client, EquityPriceMessage};
 pub use error::RtdsError;
 pub use subscription::SubscriptionInfo;
 pub use types::request::{Subscription, SubscriptionAction, SubscriptionRequest};
 pub use types::response::{
-    ChainlinkPrice, Comment, CommentProfile, CommentType, CryptoPrice, RtdsMessage,
+    ChainlinkPrice, Comment, CommentProfile, CommentType, CryptoPrice, EquityPriceSnapshot,
+    EquityPriceSnapshotPoint, EquityPriceUpdate, RtdsMessage,
 };

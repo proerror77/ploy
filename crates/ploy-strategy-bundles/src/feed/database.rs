@@ -33,8 +33,74 @@ const WARMUP_MINUTES: i64 = 30;
 /// the existing `polymarket_ws_collector` history before the next validated cutover
 /// is too polluted with placeholder `0.01/0.99` books to mix into research results.
 /// Dry-run parity should use recorded replay mode instead of the historical DB path.
-const TRUSTED_PM_RESEARCH_QUOTE_SOURCES: &[&str] =
-    &["polymarket_ws", "polymarket_ws_collector", "ploy_runner_live"];
+const TRUSTED_PM_RESEARCH_QUOTE_SOURCES: &[&str] = &[
+    "polymarket_ws",
+    "polymarket_ws_collector",
+    "ploy_runner_live",
+];
+
+/// Additive historical-loader flags for non-crypto datasets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistoricalLoadOptions {
+    pub include_reference_prices: bool,
+    pub reference_symbols: Vec<String>,
+    pub include_sports_state: bool,
+}
+
+impl HistoricalLoadOptions {
+    #[must_use]
+    pub fn normalized_reference_symbols(&self) -> Vec<String> {
+        self.reference_symbols
+            .iter()
+            .map(|symbol| symbol.trim().to_lowercase())
+            .filter(|symbol| !symbol.is_empty())
+            .collect()
+    }
+}
+
+/// One persisted reference-price tick from `reference_price_ticks`.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ReferencePriceTick {
+    pub symbol: String,
+    pub source: String,
+    pub asset_class: String,
+    pub price: Decimal,
+    pub full_accuracy_value: Option<String>,
+    pub price_time: DateTime<Utc>,
+    pub received_at: DateTime<Utc>,
+    pub is_carried_forward: bool,
+}
+
+/// One persisted sports-state event from `sports_state_events`.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SportsStateEventRow {
+    pub game_id: String,
+    pub league: String,
+    pub slug: String,
+    pub home_team: String,
+    pub away_team: String,
+    pub status: String,
+    pub period: Option<String>,
+    pub score: Option<String>,
+    pub elapsed: Option<String>,
+    pub live: bool,
+    pub ended: bool,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub event_time: DateTime<Utc>,
+    pub received_at: DateTime<Utc>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct EventMetadataRow {
+    market_slug: String,
+    symbol: Option<String>,
+    end_time: Option<DateTime<Utc>>,
+    start_time: Option<DateTime<Utc>>,
+    up_token_id: Option<String>,
+    down_token_id: Option<String>,
+    price_to_beat: Option<Decimal>,
+}
 
 /// Load all historical market updates for given symbols and time range.
 ///
@@ -48,6 +114,19 @@ pub async fn load_from_database(
     symbols: &[String],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+) -> Result<Vec<MarketUpdate>, sqlx::Error> {
+    load_from_database_with_options(pool, symbols, from, to, &HistoricalLoadOptions::default())
+        .await
+}
+
+/// Load all historical market updates for given symbols and time range plus
+/// any explicitly requested additive sources.
+pub async fn load_from_database_with_options(
+    pool: &PgPool,
+    symbols: &[String],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    options: &HistoricalLoadOptions,
 ) -> Result<Vec<MarketUpdate>, sqlx::Error> {
     let mut updates: Vec<MarketUpdate> = Vec::new();
 
@@ -77,12 +156,26 @@ pub async fn load_from_database(
     // 4. L2 orderbook from binance_lob_ticks
     load_l2_data(pool, symbols, from, to, &mut updates).await?;
 
+    if options.include_reference_prices {
+        let reference_symbols = options.normalized_reference_symbols();
+        if !reference_symbols.is_empty() {
+            updates.extend(load_reference_price_updates(pool, &reference_symbols, from, to).await?);
+        }
+    }
+
+    if options.include_sports_state {
+        updates.extend(load_sports_state_events(pool, from, to).await?);
+    }
+
     // Sort by timestamp
     updates.sort_by_key(|u| update_ts(u));
 
     info!(
         count = updates.len(),
         symbols = ?symbols,
+        reference_symbols = ?options.normalized_reference_symbols(),
+        include_reference_prices = options.include_reference_prices,
+        include_sports_state = options.include_sports_state,
         from = %from,
         to = %to,
         "Loaded historical data from database",
@@ -96,6 +189,8 @@ fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
         MarketUpdate::SpotPrice { ts, .. }
         | MarketUpdate::Quote { ts, .. }
         | MarketUpdate::L2 { ts, .. }
+        | MarketUpdate::SportsState { ts, .. }
+        | MarketUpdate::ReferencePrice { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
         MarketUpdate::EventDiscovered {
             end_time,
@@ -220,6 +315,133 @@ async fn load_spot_prices(
     }
 
     Ok(())
+}
+
+/// Load reference-price ticks from the additive `reference_price_ticks` table.
+pub async fn load_reference_price_ticks(
+    pool: &PgPool,
+    symbols: &[String],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<ReferencePriceTick>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        SELECT
+            symbol,
+            source,
+            asset_class,
+            price,
+            full_accuracy_value,
+            price_time,
+            received_at,
+            is_carried_forward
+        FROM reference_price_ticks
+        WHERE symbol = ANY($1)
+          AND price_time >= $2
+          AND price_time <= $3
+        ORDER BY price_time
+        "#,
+    )
+    .bind(
+        &symbols
+            .iter()
+            .map(|symbol| symbol.trim().to_lowercase())
+            .collect::<Vec<_>>(),
+    )
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await
+}
+
+/// Load reference-price ticks as canonical `MarketUpdate` values.
+pub async fn load_reference_price_updates(
+    pool: &PgPool,
+    symbols: &[String],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<MarketUpdate>, sqlx::Error> {
+    let rows = load_reference_price_ticks(pool, symbols, from, to).await?;
+
+    info!(
+        count = rows.len(),
+        symbols = ?symbols,
+        "Loaded reference prices from reference_price_ticks"
+    );
+
+    Ok(rows
+        .into_iter()
+        .map(|row| MarketUpdate::ReferencePrice {
+            symbol: row.symbol,
+            source: row.source,
+            asset_class: row.asset_class,
+            price: row.price,
+            full_accuracy_value: row.full_accuracy_value,
+            is_carried_forward: row.is_carried_forward,
+            ts: row.price_time,
+        })
+        .collect())
+}
+
+/// Load normalized sports-state events from `sports_state_events`.
+pub async fn load_sports_state_events(
+    pool: &PgPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<MarketUpdate>, sqlx::Error> {
+    let rows: Vec<SportsStateEventRow> = sqlx::query_as(
+        r#"
+        SELECT
+            game_id,
+            league,
+            slug,
+            home_team,
+            away_team,
+            status,
+            period,
+            score,
+            elapsed,
+            live,
+            ended,
+            finished_at,
+            event_time,
+            received_at,
+            source
+        FROM sports_state_events
+        WHERE event_time >= $1
+          AND event_time <= $2
+        ORDER BY event_time, received_at, id
+        "#,
+    )
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    info!(
+        count = rows.len(),
+        "Loaded sports state from sports_state_events"
+    );
+
+    Ok(rows
+        .into_iter()
+        .map(|row| MarketUpdate::SportsState {
+            game_id: row.game_id,
+            league: row.league,
+            slug: row.slug,
+            home_team: row.home_team,
+            away_team: row.away_team,
+            status: row.status,
+            period: row.period,
+            score: row.score,
+            elapsed: row.elapsed,
+            live: row.live,
+            ended: row.ended,
+            finished_at: row.finished_at,
+            ts: row.event_time,
+        })
+        .collect())
 }
 
 // ── Token Mappings ───────────────────────────────────────
@@ -474,15 +696,7 @@ async fn load_events(
     // Extract token IDs from JSONB: raw_market->'markets'->0->>'clobTokenIds'
     // clobTokenIds is stored as a JSON string, so we use ->> then cast to jsonb
     // First token is UP, second is DOWN
-    let rows: Vec<(
-        String,                // market_slug (event_id)
-        Option<String>,        // symbol
-        Option<DateTime<Utc>>, // end_time
-        Option<DateTime<Utc>>, // start_time
-        Option<String>,        // up_token_id (first element)
-        Option<String>,        // down_token_id (second element)
-        Option<Decimal>,       // price_to_beat
-    )> = sqlx::query_as(
+    let rows: Vec<EventMetadataRow> = sqlx::query_as(
         r#"
         SELECT
             market_slug,
@@ -507,39 +721,40 @@ async fn load_events(
     .await
     .unwrap_or_default();
 
-    let event_ids: Vec<String> = rows.iter().map(|(event_id, ..)| event_id.clone()).collect();
+    let event_ids: Vec<String> = rows.iter().map(|row| row.market_slug.clone()).collect();
     let settlement_prices = load_event_settlement_prices(pool, &event_ids).await?;
 
     info!(count = rows.len(), "Loaded events from pm_market_metadata");
-    for (event_id, symbol, end_time, start_time, up_token, down_token, price_to_beat) in rows {
-        let symbol = symbol.unwrap_or_default();
-        let end_time = match end_time {
+    updates.extend(build_event_updates(rows, &settlement_prices));
+
+    Ok(())
+}
+
+fn build_event_updates(
+    rows: Vec<EventMetadataRow>,
+    settlement_prices: &HashMap<(String, String), Decimal>,
+) -> Vec<MarketUpdate> {
+    let mut updates = Vec::new();
+
+    for row in rows {
+        let symbol = row.symbol.unwrap_or_default();
+        let end_time = match row.end_time {
             Some(t) => t,
             None => continue,
         };
-        let start_time = match start_time {
+        let start_time = match row.start_time {
             Some(t) => t,
             None => continue,
         };
 
-        let up_token = normalize_token_id(&up_token.unwrap_or_default());
-        let down_token = normalize_token_id(&down_token.unwrap_or_default());
-
-        // Compute settlement outcome for EventExpired (NOT EventDiscovered — no lookahead).
-        let resolved_up_won = match (
-            settlement_prices
-                .get(&(event_id.clone(), up_token.clone()))
-                .copied(),
-            settlement_prices
-                .get(&(event_id.clone(), down_token.clone()))
-                .copied(),
-        ) {
-            (Some(up), Some(down)) if up != down => Some(up > down),
-            (Some(up), _) => Some(up > Decimal::new(5, 1)),
-            (_, Some(down)) => Some(down < Decimal::new(5, 1)),
-            _ => None,
-        };
-
+        let up_token = normalize_token_id(&row.up_token_id.unwrap_or_default());
+        let down_token = normalize_token_id(&row.down_token_id.unwrap_or_default());
+        let resolved_up_won = resolve_up_won_from_settlements(
+            settlement_prices,
+            &row.market_slug,
+            &up_token,
+            &down_token,
+        );
         let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
 
         if symbol.is_empty() || up_token.is_empty() || down_token.is_empty() {
@@ -547,28 +762,44 @@ async fn load_events(
         }
 
         updates.push(MarketUpdate::EventDiscovered {
-            event_id: event_id.clone(),
+            event_id: row.market_slug.clone(),
             symbol,
             up_token,
             down_token,
             end_time,
             window_secs,
-            price_to_beat,
-            // Never set resolved_up_won here — that would be lookahead bias.
-            // Settlement is only known after expiry; see EventExpired below.
+            price_to_beat: row.price_to_beat,
             resolved_up_won: None,
         });
-
-        // EventExpired carries the settlement outcome so the strategy can settle
-        // positions correctly without having seen the result at discovery time.
         updates.push(MarketUpdate::EventExpired {
-            event_id,
+            event_id: row.market_slug,
             end_time,
             resolved_up_won,
         });
     }
 
-    Ok(())
+    updates
+}
+
+fn resolve_up_won_from_settlements(
+    settlement_prices: &HashMap<(String, String), Decimal>,
+    event_id: &str,
+    up_token: &str,
+    down_token: &str,
+) -> Option<bool> {
+    match (
+        settlement_prices
+            .get(&(event_id.to_string(), up_token.to_string()))
+            .copied(),
+        settlement_prices
+            .get(&(event_id.to_string(), down_token.to_string()))
+            .copied(),
+    ) {
+        (Some(up), Some(down)) if up != down => Some(up > down),
+        (Some(up), _) => Some(up > Decimal::new(5, 1)),
+        (_, Some(down)) => Some(down < Decimal::new(5, 1)),
+        _ => None,
+    }
 }
 
 async fn load_event_settlement_prices(
@@ -608,7 +839,14 @@ async fn load_event_settlement_prices(
 
 #[cfg(test)]
 mod tests {
-    use super::{hex_to_decimal_string, normalize_token_id};
+    use chrono::{Duration, Utc};
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+
+    use super::{
+        EventMetadataRow, MarketUpdate, build_event_updates, hex_to_decimal_string,
+        normalize_token_id,
+    };
 
     #[test]
     fn normalize_token_id_converts_hex_to_decimal() {
@@ -629,5 +867,41 @@ mod tests {
     #[test]
     fn hex_to_decimal_string_rejects_invalid_hex() {
         assert_eq!(hex_to_decimal_string("xyz"), None);
+    }
+
+    #[test]
+    fn official_settlement_backfill_repairs_event_expiry_outcome() {
+        let now = Utc::now();
+        let row = EventMetadataRow {
+            market_slug: "evt-1".into(),
+            symbol: Some("BTCUSDT".into()),
+            end_time: Some(now + Duration::minutes(5)),
+            start_time: Some(now),
+            up_token_id: Some("up-1".into()),
+            down_token_id: Some("down-1".into()),
+            price_to_beat: Some(dec!(100000)),
+        };
+
+        let initial = build_event_updates(vec![row.clone()], &HashMap::new());
+        assert!(matches!(
+            initial.last(),
+            Some(MarketUpdate::EventExpired {
+                resolved_up_won: None,
+                ..
+            })
+        ));
+
+        let mut settlement_prices = HashMap::new();
+        settlement_prices.insert(("evt-1".to_string(), "up-1".to_string()), dec!(1));
+        settlement_prices.insert(("evt-1".to_string(), "down-1".to_string()), dec!(0));
+
+        let repaired = build_event_updates(vec![row], &settlement_prices);
+        assert!(matches!(
+            repaired.last(),
+            Some(MarketUpdate::EventExpired {
+                resolved_up_won: Some(true),
+                ..
+            })
+        ));
     }
 }

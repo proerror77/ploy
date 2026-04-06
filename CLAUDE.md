@@ -3,6 +3,38 @@
 This repository supports both Codex-style `AGENTS.md` and Claude-style
 `CLAUDE.md`. Keep them aligned.
 
+## Working Philosophy
+
+- Act as an engineering collaborator, not a standby assistant.
+- Deliver finished, reviewable slices. After doing the work, report what
+  changed, why it changed, and the main tradeoffs.
+- Prefer execution over performative consultation. If the next step is implied
+  by the task and is reversible, do it.
+- Keep progress reports substantive. Mid-task chatter that does not change the
+  outcome is noise.
+
+## Delivery Priorities
+
+- Start with the task's completion criteria: the code builds, tests pass,
+  types check, docs stay accurate, and the requested outcome actually works.
+- Follow the repo's established patterns and constraints by reading the
+  existing code and docs before inventing a new approach.
+- Apply the user's explicit instructions directly. If they conflict with
+  correctness, safety, or the existing architecture, surface the conflict
+  instead of burying it.
+- Correctness and repo fit outrank performative check-ins.
+
+## When To Stop And Ask
+
+- Stop only for genuine ambiguity where continuing would likely produce the
+  wrong result or cause irreversible impact.
+- Do not stop for reversible implementation details, obvious next steps, or
+  choices you can resolve by reading the codebase.
+- Do not present option menus when one approach is already the clear fit for
+  the repo.
+- Do not finish a slice and then ask whether you should also perform the
+  obvious follow-up needed to make that slice complete.
+
 ## CLI Output Compression
 
 Prefer `rtk` wrappers for commands that would otherwise emit large output or are

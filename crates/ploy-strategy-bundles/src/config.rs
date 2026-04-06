@@ -36,6 +36,10 @@ pub struct FullConfig {
     pub runtime: RuntimeSection,
     pub strategy: DirectionalConfig,
     #[serde(default)]
+    pub reference_data: ReferenceDataSection,
+    #[serde(default)]
+    pub backtest_data: BacktestDataSection,
+    #[serde(default)]
     pub execution: SimExecutionSection,
 }
 
@@ -53,6 +57,50 @@ pub struct RuntimeSection {
     pub record_market_updates_to: Option<PathBuf>,
     /// Required when `mode = "replay"`; points at a previously recorded NDJSON log.
     pub replay_market_updates_from: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ReferenceDataSection {
+    /// Optional Pyth/RTDS symbols to capture alongside the existing crypto runtime.
+    ///
+    /// Symbols are case-insensitive in config. RTDS payloads are normalized to lowercase.
+    #[serde(default)]
+    pub pyth_symbols: Vec<String>,
+    /// Enable Polymarket sports live-state capture for record/replay and persistence.
+    #[serde(default)]
+    pub capture_sports_state: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BacktestDataSection {
+    /// Load additive reference-price ticks into historical backtests.
+    #[serde(default)]
+    pub include_reference_prices: bool,
+    /// Load additive sports-state updates into historical backtests.
+    #[serde(default)]
+    pub include_sports_state: bool,
+    /// Optional symbol override for reference-price backtests.
+    ///
+    /// When empty, the historical loader falls back to `reference_data.pyth_symbols`.
+    #[serde(default)]
+    pub reference_symbols: Vec<String>,
+}
+
+impl BacktestDataSection {
+    #[must_use]
+    pub fn reference_symbols(&self, reference_data: &ReferenceDataSection) -> Vec<String> {
+        let raw_symbols = if self.reference_symbols.is_empty() {
+            &reference_data.pyth_symbols
+        } else {
+            &self.reference_symbols
+        };
+
+        raw_symbols
+            .iter()
+            .map(|symbol| symbol.trim().to_lowercase())
+            .filter(|symbol| !symbol.is_empty())
+            .collect()
+    }
 }
 
 fn default_mode() -> String {
@@ -220,6 +268,14 @@ stake_usd = 25.0
 max_positions = 1000
 max_daily_trades = 1000
 
+[reference_data]
+pyth_symbols = ["AAPL", "XAUUSD"]
+capture_sports_state = true
+
+[backtest_data]
+include_reference_prices = true
+include_sports_state = true
+
 [execution]
 spread_pct = 0.02
 enable_partial_fills = true
@@ -236,6 +292,10 @@ enable_market_impact = true
             Some(Path::new("tmp/sample.ndjson"))
         );
         assert_eq!(config.strategy.symbols, vec!["BTCUSDT", "ETHUSDT"]);
+        assert_eq!(config.reference_data.pyth_symbols, vec!["AAPL", "XAUUSD"]);
+        assert!(config.reference_data.capture_sports_state);
+        assert!(config.backtest_data.include_reference_prices);
+        assert!(config.backtest_data.include_sports_state);
         assert!((config.strategy.min_edge - 0.02).abs() < 1e-10);
         assert_eq!(config.strategy.stake_usd, Decimal::new(25, 0));
         assert_eq!(config.strategy.max_positions, 1000);
@@ -292,8 +352,48 @@ mode = "dryrun"
             config.strategy.symbols,
             vec!["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         );
+        assert!(config.reference_data.pyth_symbols.is_empty());
+        assert!(!config.reference_data.capture_sports_state);
+        assert!(!config.backtest_data.include_reference_prices);
+        assert!(!config.backtest_data.include_sports_state);
         assert!((config.strategy.min_edge - 0.02).abs() < 1e-10);
         assert!(!config.execution.use_spread);
+    }
+
+    #[test]
+    fn backtest_data_defaults_reference_symbols_to_reference_capture_list() {
+        let config = FullConfig::from_toml(SAMPLE_TOML).unwrap();
+        assert_eq!(
+            config
+                .backtest_data
+                .reference_symbols(&config.reference_data),
+            vec!["aapl".to_string(), "xauusd".to_string()]
+        );
+    }
+
+    #[test]
+    fn backtest_data_prefers_explicit_reference_symbols() {
+        let toml = r#"
+[runtime]
+mode = "backtest"
+
+[strategy]
+
+[reference_data]
+pyth_symbols = ["AAPL", "XAUUSD"]
+
+[backtest_data]
+include_reference_prices = true
+reference_symbols = ["GLD", "SPY"]
+"#;
+
+        let config = FullConfig::from_toml(toml).unwrap();
+        assert_eq!(
+            config
+                .backtest_data
+                .reference_symbols(&config.reference_data),
+            vec!["gld".to_string(), "spy".to_string()]
+        );
     }
 
     #[test]

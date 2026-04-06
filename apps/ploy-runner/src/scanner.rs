@@ -1,16 +1,19 @@
-//! Market scanner that discovers active Polymarket 5-min binary option windows.
+//! Market scanner that discovers active Polymarket markets.
 //!
-//! Polls the Gamma REST API every 30s for markets matching the configured
-//! symbols. Injects `EventDiscovered`/`EventExpired` into the broadcast
-//! channel. Dynamically spawns CLOB WS quote feeds for newly discovered tokens.
+//! Crypto discovery still emits the existing `EventDiscovered` /
+//! `EventExpired` runtime updates so the current strategy logic remains intact.
+//! In parallel, the scanner now persists normalized market descriptors into
+//! `pm_market_catalog`, including low-frequency sports discovery for later
+//! capture and replay work.
 
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use ploy_strategy_bundles::MarketUpdate;
-use polymarket_client_sdk::gamma::types::request::MarketsRequest;
 use polymarket_client_sdk::gamma::Client as GammaClient;
+use polymarket_client_sdk::gamma::types::request::MarketsRequest;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -18,36 +21,16 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::feeds::{spawn_quote_feed, ChainlinkPriceCache};
+use crate::discovery::crypto::DiscoveredCryptoMarket;
+use crate::discovery::crypto::discover_crypto_markets;
+use crate::discovery::sports::discover_sports_markets;
+use crate::discovery::upsert_market_catalog;
+use crate::feeds::spawn_quote_feed;
+use crate::reference_prices::ReferencePriceRegistry;
 
 const SCAN_INTERVAL_SECS: u64 = 30;
-
-fn usable_metadata_threshold(raw: Option<&str>) -> Option<Decimal> {
-    raw.and_then(|value| value.parse::<Decimal>().ok())
-        .filter(|threshold| *threshold > Decimal::ONE)
-}
-
-/// Map full asset names (from Polymarket questions) to trading pair symbols.
-fn name_to_symbol(question: &str) -> Option<&'static str> {
-    let q = question.to_uppercase();
-    if q.contains("BITCOIN") || q.contains("BTC") {
-        Some("BTCUSDT")
-    } else if q.contains("ETHEREUM") || q.contains("ETH") {
-        Some("ETHUSDT")
-    } else if q.contains("SOLANA") || q.contains("SOL ") {
-        Some("SOLUSDT")
-    } else if q.contains("XRP") {
-        Some("XRPUSDT")
-    } else if q.contains("DOGECOIN") || q.contains("DOGE") {
-        Some("DOGEUSDT")
-    } else if q.contains("HYPE") {
-        Some("HYPEUSDT")
-    } else if q.contains("BNB") || q.contains("BINANCE COIN") {
-        Some("BNBUSDT")
-    } else {
-        None
-    }
-}
+const SPORTS_DISCOVERY_REFRESH_SECS: i64 = 300;
+const SPORTS_DISCOVERY_LIMIT: i32 = 500;
 
 struct TrackedEvent {
     end_time: chrono::DateTime<Utc>,
@@ -57,14 +40,14 @@ struct TrackedEvent {
 /// option markets, injects lifecycle events, and spawns quote feeds for
 /// newly discovered token IDs.
 ///
-/// Uses the Chainlink price cache to populate price_to_beat with the most
+/// Uses the reference-price registry to populate price_to_beat with the most
 /// recent Chainlink price for each symbol.
 ///
 /// When `pool` is provided, newly discovered markets are upserted into
 /// `pm_market_metadata` so that historical backtests can replay the same data.
 pub fn spawn_market_scanner(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
-    chainlink_cache: ChainlinkPriceCache,
+    reference_prices: ReferencePriceRegistry,
     symbols: Vec<String>,
     pool: Option<PgPool>,
 ) -> JoinHandle<()> {
@@ -73,27 +56,13 @@ pub fn spawn_market_scanner(
         let mut tracked: HashMap<String, TrackedEvent> = HashMap::new();
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
         let mut quote_handles: Vec<JoinHandle<()>> = Vec::new();
+        let mut last_sports_refresh: Option<DateTime<Utc>> = None;
 
         loop {
             let now = Utc::now();
 
-            // Expire events that have passed end_time
-            let expired: Vec<String> = tracked
-                .iter()
-                .filter(|(_, ev)| ev.end_time <= now)
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in &expired {
-                let end_time = tracked.get(id).map(|ev| ev.end_time).unwrap_or(now);
-                let _ = tx.send(MarketUpdate::EventExpired {
-                    event_id: id.clone(),
-                    end_time,
-                    resolved_up_won: None, // live mode: settlement arrives separately
-                });
-                tracked.remove(id);
-            }
+            expire_tracked_events(&tx, &mut tracked, now);
 
-            // Query active markets ending in the next 6 minutes
             let mut request = MarketsRequest::default();
             request.end_date_min = Some(now);
             request.end_date_max = Some(now + Duration::minutes(6));
@@ -103,98 +72,65 @@ pub fn spawn_market_scanner(
             match client.markets(&request).await {
                 Ok(markets) => {
                     let mut new_tokens: Vec<U256> = Vec::new();
+                    let discovered =
+                        discover_crypto_markets(&markets, &symbols, &reference_prices, now).await;
 
-                    if markets.is_empty() {
-                        debug!("No active markets in the next 6 minutes");
+                    if discovered.is_empty() {
+                        debug!("No active crypto markets in the next 6 minutes");
                     }
 
-                    for market in &markets {
-                        let market_id = &market.id;
-                        if tracked.contains_key(market_id) {
+                    for market in discovered {
+                        persist_discovered_crypto_market(pool.as_ref(), &market).await;
+
+                        if tracked.contains_key(&market.compatibility_event_id) {
                             continue;
                         }
 
-                        // Match symbol from question text (e.g. "Bitcoin Up or Down" → BTCUSDT)
-                        let question = market.question.as_deref().unwrap_or("");
-                        let symbol = match name_to_symbol(question) {
-                            Some(s) if symbols.iter().any(|cfg| cfg.to_uppercase() == s) => {
-                                s.to_owned()
-                            }
-                            _ => continue,
+                        let Some(up_asset_id) = parse_token_id(&market.up_token) else {
+                            warn!(
+                                market_id = %market.descriptor.market_id,
+                                token_id = %market.up_token,
+                                "Skipping discovered market with invalid up token id"
+                            );
+                            continue;
+                        };
+                        let Some(down_asset_id) = parse_token_id(&market.down_token) else {
+                            warn!(
+                                market_id = %market.descriptor.market_id,
+                                token_id = %market.down_token,
+                                "Skipping discovered market with invalid down token id"
+                            );
+                            continue;
                         };
 
-                        // Need exactly 2 CLOB token IDs (Up and Down)
-                        let token_ids = match &market.clob_token_ids {
-                            Some(ids) if ids.len() == 2 => ids,
-                            _ => continue,
-                        };
-
-                        let end_time = match market.end_date {
-                            Some(t) => t,
-                            None => continue,
-                        };
-
-                        let window_secs = (end_time - now).num_seconds().max(0) as u64;
-                        let up_token = token_ids[0].to_string();
-                        let down_token = token_ids[1].to_string();
-
-                        // Try to get price_to_beat from Chainlink cache first (most accurate).
-                        // Relative 5m/15m up/down markets frequently expose
-                        // groupItemThreshold=0 in Gamma, which is not a usable
-                        // threshold and should not enter the runtime.
-                        let price_to_beat = {
-                            // Convert BTCUSDT -> btc/usd for Chainlink lookup
-                            let chainlink_symbol =
-                                symbol.trim_end_matches("USDT").to_lowercase() + "/usd";
-
-                            let cache_guard = chainlink_cache.read().await;
-                            cache_guard
-                                .get(&chainlink_symbol)
-                                .map(|(price, _ts)| *price)
-                                .or_else(|| {
-                                    usable_metadata_threshold(
-                                        market.group_item_threshold.as_deref(),
-                                    )
-                                })
-                        };
-
-                        // Collect new tokens for quote subscription
-                        if subscribed_tokens.insert(up_token.clone()) {
-                            new_tokens.push(token_ids[0]);
+                        if subscribed_tokens.insert(market.up_token.clone()) {
+                            new_tokens.push(up_asset_id);
                         }
-                        if subscribed_tokens.insert(down_token.clone()) {
-                            new_tokens.push(token_ids[1]);
+                        if subscribed_tokens.insert(market.down_token.clone()) {
+                            new_tokens.push(down_asset_id);
                         }
 
-                        tracked.insert(market_id.clone(), TrackedEvent { end_time });
+                        let end_time = market.end_time.clone();
+                        let window_secs = market.window_secs;
+                        let price_to_beat = market.price_to_beat.clone();
+
+                        tracked.insert(
+                            market.compatibility_event_id.clone(),
+                            TrackedEvent { end_time },
+                        );
 
                         let _ = tx.send(MarketUpdate::EventDiscovered {
-                            event_id: market_id.clone(),
-                            symbol: symbol.clone(),
-                            up_token: up_token.clone(),
-                            down_token: down_token.clone(),
+                            event_id: market.compatibility_event_id,
+                            symbol: market.symbol,
+                            up_token: market.up_token,
+                            down_token: market.down_token,
                             end_time,
                             window_secs,
                             price_to_beat,
                             resolved_up_won: None,
                         });
-
-                        // Persist to DB so backtest can replay the same data.
-                        if let Some(ref db) = pool {
-                            upsert_market_metadata(
-                                db,
-                                &market_id,
-                                &symbol,
-                                &up_token,
-                                &down_token,
-                                end_time,
-                                price_to_beat,
-                            )
-                            .await;
-                        }
                     }
 
-                    // Spawn a new quote feed for newly discovered tokens
                     if !new_tokens.is_empty() {
                         info!(
                             new_tokens = new_tokens.len(),
@@ -212,7 +148,11 @@ pub fn spawn_market_scanner(
                 }
             }
 
-            // Clean up finished quote handles
+            if should_refresh_sports_catalog(now, last_sports_refresh, pool.is_some()) {
+                refresh_sports_catalog(&client, pool.as_ref()).await;
+                last_sports_refresh = Some(now);
+            }
+
             quote_handles.retain(|h| !h.is_finished());
 
             tokio::time::sleep(std::time::Duration::from_secs(SCAN_INTERVAL_SECS)).await;
@@ -220,39 +160,117 @@ pub fn spawn_market_scanner(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use rust_decimal_macros::dec;
+fn expire_tracked_events(
+    tx: &broadcast::Sender<MarketUpdate>,
+    tracked: &mut HashMap<String, TrackedEvent>,
+    now: DateTime<Utc>,
+) {
+    let expired: Vec<String> = tracked
+        .iter()
+        .filter(|(_, event)| event.end_time <= now)
+        .map(|(event_id, _)| event_id.clone())
+        .collect();
 
-    use super::usable_metadata_threshold;
-
-    #[test]
-    fn usable_metadata_threshold_rejects_relative_zero_threshold() {
-        assert_eq!(usable_metadata_threshold(Some("0")), None);
-        assert_eq!(usable_metadata_threshold(Some("0.5")), None);
-        assert_eq!(
-            usable_metadata_threshold(Some("123.45")),
-            Some(dec!(123.45))
-        );
+    for event_id in expired {
+        let end_time = tracked
+            .remove(&event_id)
+            .map(|event| event.end_time)
+            .unwrap_or(now);
+        let _ = tx.send(MarketUpdate::EventExpired {
+            event_id,
+            end_time,
+            resolved_up_won: None,
+        });
     }
 }
 
-/// Upsert a discovered market into `pm_market_metadata` so that historical
-/// backtests can replay the same event stream.
-///
-/// Uses `ON CONFLICT (market_slug) DO UPDATE` so that `price_to_beat` can be
-/// refreshed if Chainlink provides a better value on a later scan.
+fn should_refresh_sports_catalog(
+    now: DateTime<Utc>,
+    last_refresh: Option<DateTime<Utc>>,
+    persistence_enabled: bool,
+) -> bool {
+    persistence_enabled
+        && last_refresh
+            .map(|ts| now - ts >= Duration::seconds(SPORTS_DISCOVERY_REFRESH_SECS))
+            .unwrap_or(true)
+}
+
+async fn refresh_sports_catalog(client: &GammaClient, pool: Option<&PgPool>) {
+    let Some(pool) = pool else {
+        return;
+    };
+
+    match discover_sports_markets(client, SPORTS_DISCOVERY_LIMIT).await {
+        Ok(markets) => {
+            if markets.is_empty() {
+                debug!("Sports discovery refresh returned no active markets");
+                return;
+            }
+
+            info!(
+                discovered = markets.len(),
+                "Refreshing sports market catalog",
+            );
+
+            for market in markets {
+                upsert_market_catalog(
+                    pool,
+                    &market.descriptor,
+                    market.raw_event.clone(),
+                    market.raw_market.clone(),
+                )
+                .await;
+            }
+        }
+        Err(error) => {
+            warn!(error = %error, "Sports discovery refresh failed");
+        }
+    }
+}
+
+async fn persist_discovered_crypto_market(pool: Option<&PgPool>, market: &DiscoveredCryptoMarket) {
+    let Some(pool) = pool else {
+        return;
+    };
+
+    upsert_market_catalog(
+        pool,
+        &market.descriptor,
+        market.raw_event.clone(),
+        market.raw_market.clone(),
+    )
+    .await;
+
+    upsert_market_metadata(
+        pool,
+        &market.compatibility_event_id,
+        &market.symbol,
+        &market.up_token,
+        &market.down_token,
+        market.descriptor.start_time.clone(),
+        market.end_time.clone(),
+        market.price_to_beat.clone(),
+    )
+    .await;
+}
+
+fn parse_token_id(token_id: &str) -> Option<U256> {
+    U256::from_str(token_id).ok()
+}
+
 async fn upsert_market_metadata(
     pool: &PgPool,
     market_slug: &str,
     symbol: &str,
     up_token: &str,
     down_token: &str,
+    start_time: Option<DateTime<Utc>>,
     end_time: DateTime<Utc>,
     price_to_beat: Option<Decimal>,
 ) {
-    // Build a minimal raw_market JSON that load_from_database can parse.
     let raw_market = serde_json::json!({
+        "eventStartTime": start_time.as_ref().map(DateTime::to_rfc3339),
+        "endDate": end_time.to_rfc3339(),
         "markets": [{
             "clobTokenIds": serde_json::json!([up_token, down_token]).to_string()
         }]
@@ -262,14 +280,19 @@ async fn upsert_market_metadata(
         r#"
         INSERT INTO pm_market_metadata (
             market_slug, symbol, start_time, end_time, price_to_beat, raw_market
-        ) VALUES ($1, $2, NOW(), $3, $4, $5)
+        ) VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (market_slug) DO UPDATE
-            SET price_to_beat = COALESCE($4, pm_market_metadata.price_to_beat),
-                end_time      = EXCLUDED.end_time
+            SET symbol        = COALESCE(EXCLUDED.symbol, pm_market_metadata.symbol),
+                start_time    = COALESCE(pm_market_metadata.start_time, EXCLUDED.start_time),
+                end_time      = EXCLUDED.end_time,
+                price_to_beat = COALESCE(EXCLUDED.price_to_beat, pm_market_metadata.price_to_beat),
+                raw_market    = EXCLUDED.raw_market,
+                updated_at    = NOW()
         "#,
     )
     .bind(market_slug)
     .bind(symbol)
+    .bind(start_time)
     .bind(end_time)
     .bind(price_to_beat)
     .bind(raw_market)
@@ -282,5 +305,40 @@ async fn upsert_market_metadata(
             error = %e,
             "Failed to upsert market metadata"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, TimeZone, Utc};
+
+    use super::{parse_token_id, should_refresh_sports_catalog};
+
+    #[test]
+    fn token_id_parser_accepts_decimal_strings() {
+        assert!(
+            parse_token_id(
+                "27239049953613250678046988034203198692578441444398010699401021233149338414941"
+            )
+            .is_some()
+        );
+        assert!(parse_token_id("not-a-token").is_none());
+    }
+
+    #[test]
+    fn sports_refresh_requires_pool_and_interval() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 6, 0, 5, 0).unwrap();
+        assert!(!should_refresh_sports_catalog(now, None, false));
+        assert!(should_refresh_sports_catalog(now, None, true));
+        assert!(!should_refresh_sports_catalog(
+            now,
+            Some(now - Duration::seconds(10)),
+            true
+        ));
+        assert!(should_refresh_sports_catalog(
+            now,
+            Some(now - Duration::seconds(600)),
+            true
+        ));
     }
 }
