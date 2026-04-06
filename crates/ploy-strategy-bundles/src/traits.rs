@@ -165,7 +165,10 @@ pub trait Executor: Send {
 #[derive(Debug, Clone)]
 pub enum StrategyDecision {
     /// Open a new position.
-    Enter(TradingIntent),
+    Enter {
+        intent: TradingIntent,
+        signal: Option<SignalRecord>,
+    },
     /// Close or reduce an existing position.
     Exit(TradingIntent),
     /// No action.
@@ -200,6 +203,9 @@ pub trait StrategyLogic: Send {
 #[derive(Debug, Clone)]
 pub struct SignalRecord {
     pub strategy: String,
+    pub event_id: Option<String>,
+    pub token_id: Option<String>,
+    pub intent_id: Option<String>,
     pub symbol: String,
     pub direction: String,
     pub p_hat: f64,

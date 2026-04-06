@@ -140,37 +140,42 @@ where
 
             // 2. Execute each decision.
             for decision in decisions {
-                match decision {
-                    StrategyDecision::Enter(intent) | StrategyDecision::Exit(intent) => {
-                        let order_id = Uuid::new_v4().to_string();
+                let (intent, signal) = match decision {
+                    StrategyDecision::Enter { intent, signal } => (intent, signal),
+                    StrategyDecision::Exit(intent) => (intent, None),
+                    StrategyDecision::Hold => continue,
+                };
 
-                        let report = self.executor.submit(&intent, &order_id).await;
+                if let Some(signal) = signal.as_ref() {
+                    self.recorder.record_signal(signal).await;
+                }
 
-                        if report.rejected && report.fill.is_none() {
-                            // Pure rejection — don't record the intent at all
-                            let reason = report.rejection_reason.as_deref().unwrap_or("unknown");
-                            warn!(order_id = %order_id, reason = %reason, "Order rejected");
-                            continue;
-                        }
+                let order_id = Uuid::new_v4().to_string();
 
-                        // Intent accepted (possibly with fill)
-                        self.trading.submit_intent(intent.clone(), order_id.clone());
-                        intents_submitted += 1;
+                let report = self.executor.submit(&intent, &order_id).await;
 
-                        if let Some(fill) = report.fill {
-                            self.trading.record_fill(fill.clone());
-                            self.strategy.on_fill(&fill);
-                            fills_recorded += 1;
-                            debug!(
-                                order_id = %order_id,
-                                token = %fill.token_id,
-                                qty = %fill.quantity,
-                                price = %fill.price,
-                                "Fill recorded",
-                            );
-                        }
-                    }
-                    StrategyDecision::Hold => {}
+                if report.rejected && report.fill.is_none() {
+                    // Pure rejection — keep the signal audit trail, but don't record an intent.
+                    let reason = report.rejection_reason.as_deref().unwrap_or("unknown");
+                    warn!(order_id = %order_id, reason = %reason, "Order rejected");
+                    continue;
+                }
+
+                // Intent accepted (possibly with fill)
+                self.trading.submit_intent(intent.clone(), order_id.clone());
+                intents_submitted += 1;
+
+                if let Some(fill) = report.fill {
+                    self.trading.record_fill(fill.clone());
+                    self.strategy.on_fill(&fill);
+                    fills_recorded += 1;
+                    debug!(
+                        order_id = %order_id,
+                        token = %fill.token_id,
+                        qty = %fill.quantity,
+                        price = %fill.price,
+                        "Fill recorded",
+                    );
                 }
             }
 
@@ -229,5 +234,162 @@ where
             MarketUpdate::EventDiscovered { end_time, .. } => Some(*end_time),
             MarketUpdate::EventExpired { end_time, .. } => Some(*end_time),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use ploy_trading::{
+        FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
+    };
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    use super::{RuntimeConfig, RuntimeMode, StrategyRuntime};
+    use crate::traits::{
+        ExecutionReport, Executor, Feed, MarketUpdate, Recorder, SignalRecord, StrategyDecision,
+        StrategyLogic,
+    };
+
+    struct SingleUpdateFeed {
+        next: Option<MarketUpdate>,
+    }
+
+    #[async_trait]
+    impl Feed for SingleUpdateFeed {
+        async fn next(&mut self) -> Option<MarketUpdate> {
+            self.next.take()
+        }
+    }
+
+    struct RejectingExecutor;
+
+    #[async_trait]
+    impl Executor for RejectingExecutor {
+        async fn submit(&mut self, _intent: &TradingIntent, order_id: &str) -> ExecutionReport {
+            ExecutionReport {
+                order_id: order_id.to_string(),
+                fill: None,
+                rejected: true,
+                rejection_reason: Some("simulated rejection".into()),
+                slippage: None,
+                market_impact: None,
+            }
+        }
+
+        async fn cancel(&mut self, _order_id: &str) -> bool {
+            true
+        }
+    }
+
+    struct RecordingStrategy {
+        emitted: bool,
+        signal: SignalRecord,
+        intent: TradingIntent,
+    }
+
+    impl StrategyLogic for RecordingStrategy {
+        fn on_update(
+            &mut self,
+            _update: &MarketUpdate,
+            _positions: &PositionLedger,
+            _orders: &OrderLedger,
+        ) -> Vec<StrategyDecision> {
+            if self.emitted {
+                return vec![];
+            }
+            self.emitted = true;
+            vec![StrategyDecision::Enter {
+                intent: self.intent.clone(),
+                signal: Some(self.signal.clone()),
+            }]
+        }
+
+        fn on_fill(&mut self, _fill: &FillRecord) {}
+
+        fn name(&self) -> &str {
+            "recording_strategy"
+        }
+    }
+
+    struct CollectingRecorder {
+        signals: Arc<Mutex<Vec<SignalRecord>>>,
+    }
+
+    #[async_trait]
+    impl Recorder for CollectingRecorder {
+        async fn record_signal(&mut self, signal: &SignalRecord) {
+            self.signals.lock().unwrap().push(signal.clone());
+        }
+
+        async fn flush(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn records_entry_signal_even_when_execution_is_rejected() {
+        let now = Utc::now();
+        let signal = SignalRecord {
+            strategy: "pm_5m_directional".into(),
+            event_id: Some("evt1".into()),
+            token_id: Some("token-up".into()),
+            intent_id: Some("pm5d_BTCUSDT_UP_test".into()),
+            symbol: "BTCUSDT".into(),
+            direction: "UP".into(),
+            p_hat: 0.71,
+            edge: 0.08,
+            entry_price: dec!(0.30),
+            decision: "enter".into(),
+            ts: now,
+        };
+        let intent = TradingIntent {
+            intent_id: "pm5d_BTCUSDT_UP_test".into(),
+            deployment_id: String::new(),
+            market_id: "evt1".into(),
+            token_id: "token-up".into(),
+            side: TradeSide::Buy,
+            quantity: dec!(10),
+            limit_price: Some(dec!(0.30)),
+            purpose: IntentPurpose::Entry,
+            created_at: now,
+        };
+        let recorder_store = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Box::new(CollectingRecorder {
+            signals: recorder_store.clone(),
+        });
+        let strategy = RecordingStrategy {
+            emitted: false,
+            signal,
+            intent,
+        };
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let executor = RejectingExecutor;
+        let config = RuntimeConfig {
+            mode: RuntimeMode::DryRun,
+            throttle_hz: None,
+            max_updates: None,
+        };
+
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
+        let result = runtime.run().await;
+
+        assert_eq!(result.intents_submitted, 0);
+        let signals = recorder_store.lock().unwrap();
+        assert_eq!(signals.len(), 1);
+        assert_eq!(
+            signals[0].intent_id.as_deref(),
+            Some("pm5d_BTCUSDT_UP_test")
+        );
+        assert_eq!(signals[0].decision, "enter");
+        assert_eq!(signals[0].entry_price, Decimal::new(30, 2));
     }
 }

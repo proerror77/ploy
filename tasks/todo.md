@@ -7289,3 +7289,35 @@ without losing existing repo-specific workflow, safety, and RTK rules.
 - [x] Mirror the same instruction changes into `CLAUDE.md` to keep both files
   aligned.
 - [x] Diff-review the doc-only change set for consistency and repo fit.
+# Dry-Run Entry Signal Recording (2026-04-06)
+
+## Goal
+Persist dry-run entry signals into `signal_history` so passed entry decisions can
+be audited against later execution behavior and market outcomes.
+
+## File ownership
+
+- `crates/ploy-strategy-bundles/src/traits.rs`
+  - owner: attach optional signal metadata to entry decisions
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+  - owner: construct `SignalRecord` for passed entry signals
+- `crates/ploy-strategy-bundles/src/engine.rs`
+  - owner: call `Recorder::record_signal` before execution
+- `crates/ploy-strategy-bundles/src/recorder/buffered.rs`
+  - owner: keep recorder tests compiling with enriched `SignalRecord`
+- `apps/ploy-runner/src/main.rs`
+  - owner: replace `NullRecorder` with DB-backed `BufferedRecorder` in live/dry-run
+
+## Tasks
+
+- [x] Thread passed entry signal metadata from `DirectionalStrategy` into the runtime.
+- [x] Record entry signals before simulated/live execution so dry-run keeps an audit trail even when no order/fill follows.
+- [x] Flush recorded signals into `signal_history` when `DATABASE_URL` is available.
+- [x] Add focused regression coverage and run targeted Rust validation.
+
+## Review
+
+- 2026-04-06: `DirectionalStrategy` now attaches `SignalRecord` only to passed entry decisions, which keeps the change focused on the user's dry-run audit requirement without widening exit semantics.
+- 2026-04-06: `StrategyRuntime` records entry signals before calling the executor, so simulated rejections or no-fill paths still leave an audit trail.
+- 2026-04-06: `ploy-runner` now uses a DB-backed `BufferedRecorder` in live/dry-run when `DATABASE_URL` is configured and writes batches into `signal_history`.
+- 2026-04-06: Validation passed with `CARGO_TARGET_DIR=/tmp/ploy-signal-record rtk cargo test -p ploy-strategy-bundles` and `CARGO_TARGET_DIR=/tmp/ploy-signal-record rtk cargo check -p ploy-runner -p ploy-strategy-bundles`.

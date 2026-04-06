@@ -12,12 +12,14 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use ploy_strategy_bundles::feed::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_strategy_bundles::{
-    CallbackExecutor, DirectionalStrategy, ExecutionReport, Feed, FullConfig, HistoricalFeed,
-    LiveFeed, NullRecorder, RecordedFeed, RecordingFeed, RuntimeMode, SimulatedExecutor,
-    StrategyRuntime,
+    BufferedRecorder, CallbackExecutor, DirectionalStrategy, ExecutionReport, Feed, FullConfig,
+    HistoricalFeed, LiveFeed, NullRecorder, RecordedFeed, Recorder, RecordingFeed, RuntimeMode,
+    SignalRecord, SimulatedExecutor, StrategyRuntime,
 };
 use ploy_trading::TradingIntent;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
+use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
@@ -364,8 +366,6 @@ async fn main() {
     let strategy = DirectionalStrategy::new(config.strategy.clone());
 
     // Build feed and executor based on mode
-    let recorder: Box<dyn ploy_strategy_bundles::Recorder> = Box::new(NullRecorder);
-
     let (result, snapshot) = match runtime_config.mode {
         RuntimeMode::Backtest => {
             // Load historical data from database
@@ -416,6 +416,7 @@ async fn main() {
             let feed = HistoricalFeed::new(updates);
             let sim_config = config.sim_executor_config();
             let executor = SimulatedExecutor::new(sim_config);
+            let recorder: Box<dyn Recorder> = Box::new(NullRecorder);
             let mut runtime =
                 StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config.clone());
             let result = runtime.run().await;
@@ -444,6 +445,7 @@ async fn main() {
             });
             let sim_config = config.sim_executor_config();
             let executor = SimulatedExecutor::new(sim_config);
+            let recorder: Box<dyn Recorder> = Box::new(NullRecorder);
             let mut runtime =
                 StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config.clone());
             let result = runtime.run().await;
@@ -488,11 +490,7 @@ async fn main() {
             // 1b. DB spot fallback — polls binance_price_ticks every 5s.
             //     Ensures strategy has spot prices even when RTDS is unavailable.
             let _db_spot_handle = if let Some(ref db) = db_pool {
-                Some(spawn_db_spot_feed(
-                    tx.clone(),
-                    symbols.clone(),
-                    db.clone(),
-                ))
+                Some(spawn_db_spot_feed(tx.clone(), symbols.clone(), db.clone()))
             } else {
                 None
             };
@@ -542,6 +540,7 @@ async fn main() {
             } else {
                 Box::new(LiveFeed::new(rx))
             };
+            let recorder = build_signal_recorder(db_pool.clone(), runtime_config.mode);
 
             let result = if runtime_config.mode == RuntimeMode::Live {
                 let executor = build_live_executor();
@@ -611,6 +610,97 @@ async fn main() {
             roi_on_deployed_capital = %roi_on_deployed_capital,
             "Replay/backtest cashflow summary",
         );
+    }
+}
+
+fn build_signal_recorder(db_pool: Option<sqlx::PgPool>, mode: RuntimeMode) -> Box<dyn Recorder> {
+    let Some(pool) = db_pool else {
+        info!("Signal recorder disabled — DATABASE_URL unavailable");
+        return Box::new(NullRecorder);
+    };
+
+    let mode_label = match mode {
+        RuntimeMode::Backtest => "backtest",
+        RuntimeMode::Replay => "replay",
+        RuntimeMode::DryRun => "dry_run",
+        RuntimeMode::Live => "live",
+    }
+    .to_string();
+
+    let flush_fn = Box::new(
+        move |batch: Vec<SignalRecord>| -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = ()> + Send>,
+        > {
+            let pool = pool.clone();
+            let mode_label = mode_label.clone();
+            Box::pin(async move {
+                persist_signal_batch(&pool, &mode_label, batch).await;
+            })
+        },
+    );
+
+    Box::new(BufferedRecorder::new(25, Some(flush_fn)))
+}
+
+async fn persist_signal_batch(pool: &sqlx::PgPool, mode_label: &str, batch: Vec<SignalRecord>) {
+    for signal in batch {
+        let confidence = Decimal::from_f64(signal.p_hat);
+        let edge = Decimal::from_f64(signal.edge);
+        let context = json!({
+            "runtime_mode": mode_label,
+            "event_id": signal.event_id,
+            "intent_id": signal.intent_id,
+        });
+
+        if let Err(error) = sqlx::query(
+            r#"
+            INSERT INTO signal_history (
+                recorded_at,
+                intent_id,
+                agent_id,
+                strategy_id,
+                domain,
+                signal_type,
+                token_id,
+                symbol,
+                side,
+                confidence,
+                market_price,
+                edge,
+                context
+            )
+            VALUES (
+                $1,
+                NULL,
+                'ploy-runner',
+                $2,
+                'polymarket',
+                $3,
+                $4,
+                $5,
+                $6,
+                $7,
+                $8,
+                $9,
+                $10
+            )
+            "#,
+        )
+        .bind(signal.ts)
+        .bind(signal.strategy)
+        .bind(signal.decision)
+        .bind(signal.token_id)
+        .bind(signal.symbol)
+        .bind(signal.direction)
+        .bind(confidence)
+        .bind(signal.entry_price)
+        .bind(edge)
+        .bind(context)
+        .execute(pool)
+        .await
+        {
+            warn!(error = %error, "Failed to persist signal record");
+        }
     }
 }
 

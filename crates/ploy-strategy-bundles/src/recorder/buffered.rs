@@ -96,6 +96,9 @@ mod tests {
     fn sample_signal() -> SignalRecord {
         SignalRecord {
             strategy: "test".into(),
+            event_id: Some("evt1".into()),
+            token_id: Some("token-up".into()),
+            intent_id: Some("intent-1".into()),
             symbol: "BTCUSDT".into(),
             direction: "UP".into(),
             p_hat: 0.75,

@@ -12,13 +12,13 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::traits::{MarketUpdate, StrategyDecision, StrategyLogic};
+use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 // ── Probability Model ────────────────────────────────────
 
@@ -487,6 +487,34 @@ impl DirectionalStrategy {
         }
     }
 
+    fn build_signal_record(
+        &self,
+        event: &EventWindow,
+        intent: &TradingIntent,
+        direction: Direction,
+        effective_p: f64,
+        edge: f64,
+        entry_price: Decimal,
+        now: DateTime<Utc>,
+    ) -> SignalRecord {
+        SignalRecord {
+            strategy: self.name().to_string(),
+            event_id: Some(event.event_id.clone()),
+            token_id: Some(intent.token_id.clone()),
+            intent_id: Some(intent.intent_id.clone()),
+            symbol: event.symbol.clone(),
+            direction: match direction {
+                Direction::Up => "UP".into(),
+                Direction::Down => "DOWN".into(),
+            },
+            p_hat: effective_p,
+            edge,
+            entry_price,
+            decision: "enter".into(),
+            ts: now,
+        }
+    }
+
     /// Try directional entry for a given symbol after a spot price update.
     fn try_entry(
         &self,
@@ -551,7 +579,9 @@ impl DirectionalStrategy {
         // Limit to one open position per symbol at a time.
         let already_holding_symbol = positions.positions().any(|p| {
             p.net_qty > Decimal::ZERO
-                && self.token_symbol.get(&p.token_id)
+                && self
+                    .token_symbol
+                    .get(&p.token_id)
                     .map(|s| s == symbol)
                     .unwrap_or(false)
         });
@@ -572,7 +602,19 @@ impl DirectionalStrategy {
                     "✓ Entry signal PASSED all gates",
                 );
                 let intent = self.build_intent(&event, direction, entry_price, now);
-                vec![StrategyDecision::Enter(intent)]
+                let signal = self.build_signal_record(
+                    &event,
+                    &intent,
+                    direction,
+                    effective_p,
+                    edge,
+                    entry_price,
+                    now,
+                );
+                vec![StrategyDecision::Enter {
+                    intent,
+                    signal: Some(signal),
+                }]
             }
             None => vec![],
         }
@@ -625,7 +667,10 @@ impl StrategyLogic for DirectionalStrategy {
             }
 
             MarketUpdate::Quote {
-                token_id, bid, ask, ts,
+                token_id,
+                bid,
+                ask,
+                ts,
             } => {
                 self.quotes.insert(
                     token_id.clone(),
@@ -697,8 +742,8 @@ impl StrategyLogic for DirectionalStrategy {
                 // Quotes for this event may have arrived before EventDiscovered
                 // (feed ordering: quotes sorted by received_at, events by start_time).
                 // If we already have a cached quote for either token, try entry now.
-                let has_cached_quote = self.quotes.contains_key(up_token)
-                    || self.quotes.contains_key(down_token);
+                let has_cached_quote =
+                    self.quotes.contains_key(up_token) || self.quotes.contains_key(down_token);
                 if has_cached_quote
                     && self.config.symbols.contains(symbol)
                     && self.daily_trades < self.config.max_daily_trades
@@ -709,13 +754,16 @@ impl StrategyLogic for DirectionalStrategy {
                 vec![]
             }
 
-            MarketUpdate::EventExpired { event_id, end_time, resolved_up_won: settlement } => {
+            MarketUpdate::EventExpired {
+                event_id,
+                end_time,
+                resolved_up_won: settlement,
+            } => {
                 // Settle positions: find any tokens from this event that we hold
                 let mut exits = Vec::new();
 
                 // Find the event's tokens before removing
-                let mut event_tokens: Vec<(String, String, Option<Decimal>)> =
-                    Vec::new();
+                let mut event_tokens: Vec<(String, String, Option<Decimal>)> = Vec::new();
                 for events in self.events.values() {
                     for ev in events {
                         if ev.event_id == *event_id {
@@ -1004,10 +1052,16 @@ mod tests {
 
         assert_eq!(decisions.len(), 1, "Expected 1 entry signal");
         match &decisions[0] {
-            StrategyDecision::Enter(intent) => {
+            StrategyDecision::Enter { intent, signal } => {
                 assert_eq!(intent.token_id, "up1");
                 assert_eq!(intent.side, TradeSide::Buy);
                 assert_eq!(intent.quantity, dec!(83.333333));
+                let signal = signal.as_ref().expect("entry signal should be recorded");
+                assert_eq!(signal.event_id.as_deref(), Some("evt1"));
+                assert_eq!(signal.token_id.as_deref(), Some("up1"));
+                assert_eq!(signal.intent_id.as_deref(), Some(intent.intent_id.as_str()));
+                assert_eq!(signal.direction, "UP");
+                assert_eq!(signal.decision, "enter");
             }
             other => panic!("Expected Enter, got {:?}", other),
         }
