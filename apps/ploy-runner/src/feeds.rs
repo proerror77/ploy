@@ -9,24 +9,19 @@ use std::sync::Arc;
 use chrono::{DateTime, Timelike, Utc};
 use futures::StreamExt;
 use ploy_strategy_bundles::MarketUpdate;
-use polymarket_client_sdk::rtds::Client as RtdsClient;
+use polymarket_client_sdk::rtds::{Client as RtdsClient, EquityPriceMessage};
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
-use tokio::sync::{broadcast, RwLock};
-use tokio::task::JoinHandle;
+use tokio::sync::broadcast;
+use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, warn};
 
-/// Shared cache of recent Chainlink prices.
-///
-/// Keyed by symbol (e.g., "btc/usd"), stores the most recent price and timestamp.
-/// Used by scanner to populate price_to_beat when EventDiscovered is sent.
-pub type ChainlinkPriceCache = Arc<RwLock<HashMap<String, (Decimal, DateTime<Utc>)>>>;
-
-/// Create a new empty Chainlink price cache.
-pub fn new_chainlink_cache() -> ChainlinkPriceCache {
-    Arc::new(RwLock::new(HashMap::new()))
-}
+use crate::reference_prices::{
+    ReferenceAssetClass, ReferencePriceKey, ReferencePriceRegistry, ReferencePriceSnapshot,
+    ReferencePriceSource, infer_pyth_asset_class, market_symbol_to_binance_symbol,
+    normalize_reference_symbol, pyth_symbol, upsert_reference_price,
+};
 
 /// Spawn a task that subscribes to Binance spot prices via RTDS WebSocket
 /// and publishes `MarketUpdate::SpotPrice` events in real-time.
@@ -36,6 +31,7 @@ pub fn new_chainlink_cache() -> ChainlinkPriceCache {
 /// the same spot-price stream.
 pub fn spawn_spot_feed(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
+    reference_prices: ReferencePriceRegistry,
     symbols: Vec<String>,
     pool: Option<PgPool>,
 ) -> JoinHandle<()> {
@@ -74,6 +70,23 @@ pub fn spawn_spot_feed(
 
                     let symbol_upper = crypto_price.symbol.to_uppercase();
 
+                    upsert_reference_price(
+                        &reference_prices,
+                        ReferencePriceSnapshot {
+                            key: ReferencePriceKey {
+                                source: ReferencePriceSource::Binance,
+                                symbol: market_symbol_to_binance_symbol(&crypto_price.symbol),
+                            },
+                            asset_class: ReferenceAssetClass::Crypto,
+                            value: crypto_price.value,
+                            full_accuracy_value: None,
+                            source_timestamp: ts,
+                            received_at: Utc::now(),
+                            is_carried_forward: false,
+                        },
+                    )
+                    .await;
+
                     let update = MarketUpdate::SpotPrice {
                         symbol: symbol_upper.clone(),
                         price: crypto_price.value,
@@ -109,7 +122,8 @@ pub fn spawn_spot_feed(
                                 let last = last_persisted.get(&symbol_upper).copied();
                                 if last.map_or(true, |l| ts_sec > l) {
                                     last_persisted.insert(symbol_upper.clone(), ts_sec);
-                                    persist_spot_price(db, &symbol_upper, crypto_price.value, ts).await;
+                                    persist_spot_price(db, &symbol_upper, crypto_price.value, ts)
+                                        .await;
                                 }
                             }
                         }
@@ -130,6 +144,67 @@ pub fn spawn_spot_feed(
         }
 
         info!("RTDS spot price feed ended");
+    })
+}
+
+/// Spawn a task that polls `binance_price_ticks` every 5 seconds and publishes
+/// `MarketUpdate::SpotPrice` events as a fallback when the RTDS WebSocket is unavailable.
+///
+/// This ensures the strategy always has fresh spot prices even if the RTDS
+/// subscription fails (e.g. protocol mismatch, network issues).
+pub fn spawn_db_spot_feed(
+    tx: Arc<broadcast::Sender<MarketUpdate>>,
+    symbols: Vec<String>,
+    pool: PgPool,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let symbols_upper: Vec<String> = symbols.iter().map(|s| s.to_uppercase()).collect();
+        let mut last_ts: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
+        let mut price_count = 0u64;
+
+        info!(symbols = ?symbols_upper, "Starting DB spot price fallback feed");
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            // Fetch latest price per symbol from binance_price_ticks
+            let rows: Vec<(String, rust_decimal::Decimal, chrono::DateTime<chrono::Utc>)> =
+                match sqlx::query_as(
+                    r#"
+                    SELECT DISTINCT ON (symbol) symbol, price, trade_time
+                    FROM binance_price_ticks
+                    WHERE symbol = ANY($1)
+                      AND trade_time > NOW() - INTERVAL '30 seconds'
+                    ORDER BY symbol, trade_time DESC
+                    "#,
+                )
+                .bind(&symbols_upper)
+                .fetch_all(&pool)
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(error = %e, "DB spot feed query failed");
+                        continue;
+                    }
+                };
+
+            for (symbol, price, ts) in rows {
+                // Only emit if newer than last seen
+                let last = last_ts.get(&symbol).copied();
+                if last.map_or(true, |l| ts > l) {
+                    last_ts.insert(symbol.clone(), ts);
+                    let update = MarketUpdate::SpotPrice { symbol, price, ts };
+                    if tx.send(update).is_err() {
+                        return; // channel closed
+                    }
+                    price_count += 1;
+                    if price_count % 50 == 0 {
+                        debug!(prices = price_count, "DB spot feed forwarded prices");
+                    }
+                }
+            }
+        }
     })
 }
 
@@ -162,21 +237,26 @@ pub fn spawn_quote_feed(
                 // The /book endpoint returns extreme placeholder orders (bid=0.01, ask=0.99)
                 // when there is no real liquidity, which is useless for strategy evaluation.
                 // /midpoint returns the actual market consensus price.
-                let url = format!("https://clob.polymarket.com/midpoint?token_id={}", token_str);
+                let url = format!(
+                    "https://clob.polymarket.com/midpoint?token_id={}",
+                    token_str
+                );
 
                 match http.get(&url).send().await {
                     Ok(resp) => {
                         if let Ok(body) = resp.json::<serde_json::Value>().await {
-                            let mid = body["mid"]
-                                .as_str()
-                                .and_then(|p| p.parse::<Decimal>().ok());
+                            let mid = body["mid"].as_str().and_then(|p| p.parse::<Decimal>().ok());
 
                             if let Some(mid_price) = mid {
                                 // Store mid as both bid and ask — strategy uses ask for entry.
                                 // A small synthetic spread (0.5%) is applied so bid < ask.
                                 let half_spread = mid_price * rust_decimal_macros::dec!(0.005);
-                                let bid = Some((mid_price - half_spread).max(rust_decimal_macros::dec!(0.01)));
-                                let ask = Some((mid_price + half_spread).min(rust_decimal_macros::dec!(0.99)));
+                                let bid = Some(
+                                    (mid_price - half_spread).max(rust_decimal_macros::dec!(0.01)),
+                                );
+                                let ask = Some(
+                                    (mid_price + half_spread).min(rust_decimal_macros::dec!(0.99)),
+                                );
 
                                 let now = Utc::now();
                                 let update = MarketUpdate::Quote {
@@ -236,16 +316,15 @@ pub fn spawn_quote_feed(
 /// Prices are stored in the shared cache for scanner to use when creating EventDiscovered.
 pub fn spawn_chainlink_feed(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
-    cache: ChainlinkPriceCache,
+    reference_prices: ReferencePriceRegistry,
     symbols: Vec<String>,
+    pool: Option<PgPool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut logged_chainlink_symbols = HashSet::new();
-        // Chainlink uses slash-separated format: "btc/usd", "eth/usd"
         let symbols_chainlink: Vec<String> = symbols
             .iter()
             .map(|s| {
-                // BTCUSDT -> btc/usd
                 let base = s.trim_end_matches("USDT").to_lowercase();
                 format!("{}/usd", base)
             })
@@ -284,11 +363,49 @@ pub fn spawn_chainlink_feed(
                     let ts = DateTime::from_timestamp_millis(chainlink_price.timestamp)
                         .unwrap_or_else(Utc::now);
 
-                    // Store in cache for scanner to use
-                    {
-                        let mut cache_guard = cache.write().await;
-                        cache_guard
-                            .insert(chainlink_price.symbol.clone(), (chainlink_price.value, ts));
+                    upsert_reference_price(
+                        &reference_prices,
+                        ReferencePriceSnapshot {
+                            key: ReferencePriceKey {
+                                source: ReferencePriceSource::Chainlink,
+                                symbol: normalize_reference_symbol(&chainlink_price.symbol),
+                            },
+                            asset_class: ReferenceAssetClass::Crypto,
+                            value: chainlink_price.value,
+                            full_accuracy_value: None,
+                            source_timestamp: ts,
+                            received_at: Utc::now(),
+                            is_carried_forward: false,
+                        },
+                    )
+                    .await;
+
+                    let update = MarketUpdate::ReferencePrice {
+                        symbol: normalize_reference_symbol(&chainlink_price.symbol),
+                        source: ReferencePriceSource::Chainlink.as_str().to_string(),
+                        asset_class: ReferenceAssetClass::Crypto.as_str().to_string(),
+                        price: chainlink_price.value,
+                        full_accuracy_value: None,
+                        is_carried_forward: false,
+                        ts,
+                    };
+
+                    if tx.send(update).is_err() {
+                        warn!(
+                            symbols = ?symbols_chainlink,
+                            "Broadcast channel closed, stopping RTDS Chainlink feed"
+                        );
+                        return;
+                    }
+
+                    if let Some(ref db) = pool {
+                        persist_chainlink_price(
+                            db,
+                            &chainlink_price.symbol,
+                            chainlink_price.value,
+                            ts,
+                        )
+                        .await;
                     }
 
                     let receivers = tx.receiver_count();
@@ -319,6 +436,164 @@ pub fn spawn_chainlink_feed(
         }
 
         info!("RTDS Chainlink price feed ended");
+    })
+}
+
+/// Spawn one RTDS Pyth feed task per symbol and publish all ticks into the
+/// shared reference-price registry.
+pub fn spawn_pyth_reference_feed(
+    tx: Arc<broadcast::Sender<MarketUpdate>>,
+    reference_prices: ReferencePriceRegistry,
+    symbols: Vec<String>,
+    pool: Option<PgPool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if symbols.is_empty() {
+            info!("No Pyth symbols configured, skipping equity_prices feed");
+            return;
+        }
+
+        let mut join_set = JoinSet::new();
+
+        for raw_symbol in symbols {
+            let tx = tx.clone();
+            let registry = reference_prices.clone();
+            let pool = pool.clone();
+            let subscribe_symbol = raw_symbol.clone();
+
+            join_set.spawn(async move {
+                let normalized_symbol = pyth_symbol(&subscribe_symbol);
+                let asset_class = infer_pyth_asset_class(&subscribe_symbol);
+                let client = RtdsClient::default();
+                let stream =
+                    match client.subscribe_equity_prices(Some(subscribe_symbol.clone()), true) {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            error!(
+                                symbol = %subscribe_symbol,
+                                error = %error,
+                                "Failed to subscribe to equity_prices"
+                            );
+                            return;
+                        }
+                    };
+
+                let mut stream = Box::pin(stream);
+                let mut message_count = 0_u64;
+
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(EquityPriceMessage::Update(update)) => {
+                            let source_timestamp =
+                                DateTime::from_timestamp_millis(update.timestamp)
+                                    .unwrap_or_else(Utc::now);
+                            let received_at = update
+                                .received_at
+                                .and_then(DateTime::from_timestamp_millis)
+                                .unwrap_or_else(Utc::now);
+
+                            let snapshot = ReferencePriceSnapshot {
+                                key: ReferencePriceKey {
+                                    source: ReferencePriceSource::Pyth,
+                                    symbol: normalize_reference_symbol(&update.symbol),
+                                },
+                                asset_class,
+                                value: update.value,
+                                full_accuracy_value: Some(update.full_accuracy_value.clone()),
+                                source_timestamp,
+                                received_at,
+                                is_carried_forward: update.is_carried_forward,
+                            };
+
+                            upsert_reference_price(&registry, snapshot.clone()).await;
+
+                            if tx.send(reference_price_update(&snapshot)).is_err() {
+                                warn!(
+                                    symbol = %subscribe_symbol,
+                                    "Broadcast channel closed, stopping Pyth reference-price worker"
+                                );
+                                return;
+                            }
+
+                            if let Some(ref db) = pool {
+                                persist_reference_price(db, &snapshot).await;
+                            }
+
+                            message_count += 1;
+                            if message_count == 1 || message_count % 100 == 0 {
+                                info!(
+                                    symbol = %normalized_symbol,
+                                    source = %ReferencePriceSource::Pyth.as_str(),
+                                    asset_class = %asset_class.as_str(),
+                                    carried_forward = snapshot.is_carried_forward,
+                                    count = message_count,
+                                    "Pyth reference prices captured"
+                                );
+                            }
+                        }
+                        Ok(EquityPriceMessage::Snapshot(snapshot)) => {
+                            let snapshot_symbol = normalize_reference_symbol(&snapshot.symbol);
+                            for point in snapshot.data {
+                                let source_timestamp =
+                                    DateTime::from_timestamp_millis(point.timestamp)
+                                        .unwrap_or_else(Utc::now);
+                                let received_at = point
+                                    .received_at
+                                    .and_then(DateTime::from_timestamp_millis)
+                                    .unwrap_or_else(Utc::now);
+                                let snapshot = ReferencePriceSnapshot {
+                                    key: ReferencePriceKey {
+                                        source: ReferencePriceSource::Pyth,
+                                        symbol: snapshot_symbol.clone(),
+                                    },
+                                    asset_class,
+                                    value: point.value,
+                                    full_accuracy_value: point.full_accuracy_value.clone(),
+                                    source_timestamp,
+                                    received_at,
+                                    is_carried_forward: point.is_carried_forward,
+                                };
+
+                                upsert_reference_price(&registry, snapshot.clone()).await;
+
+                                if tx.send(reference_price_update(&snapshot)).is_err() {
+                                    warn!(
+                                        symbol = %subscribe_symbol,
+                                        "Broadcast channel closed, stopping Pyth reference-price worker"
+                                    );
+                                    return;
+                                }
+
+                                if let Some(ref db) = pool {
+                                    persist_reference_price(db, &snapshot).await;
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            debug!(
+                                symbol = %subscribe_symbol,
+                                "Ignoring unsupported non-exhaustive equity_prices message"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                symbol = %subscribe_symbol,
+                                error = %error,
+                                "RTDS equity_prices stream error"
+                            );
+                        }
+                    }
+                }
+
+                warn!(symbol = %subscribe_symbol, "RTDS equity_prices stream ended");
+            });
+        }
+
+        while let Some(result) = join_set.join_next().await {
+            if let Err(error) = result {
+                warn!(error = %error, "A Pyth reference-price worker exited");
+            }
+        }
     })
 }
 
@@ -373,5 +648,70 @@ async fn persist_quote(
 
     if let Err(e) = result {
         debug!(token_id, error = %e, "Failed to persist quote tick");
+    }
+}
+
+async fn persist_chainlink_price(
+    pool: &PgPool,
+    symbol: &str,
+    price: Decimal,
+    source_timestamp: DateTime<Utc>,
+) {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO chainlink_price_ticks (symbol, price, source_timestamp, received_at)
+        VALUES ($1, $2, $3, NOW())
+        "#,
+    )
+    .bind(symbol)
+    .bind(price)
+    .bind(source_timestamp)
+    .execute(pool)
+    .await;
+
+    if let Err(error) = result {
+        debug!(symbol, error = %error, "Failed to persist Chainlink price tick");
+    }
+}
+
+async fn persist_reference_price(pool: &PgPool, snapshot: &ReferencePriceSnapshot) {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO reference_price_ticks (
+            symbol, source, asset_class, price, full_accuracy_value,
+            price_time, received_at, is_carried_forward
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(&snapshot.key.symbol)
+    .bind(snapshot.key.source.as_str())
+    .bind(snapshot.asset_class.as_str())
+    .bind(snapshot.value)
+    .bind(snapshot.full_accuracy_value.as_deref())
+    .bind(snapshot.source_timestamp)
+    .bind(snapshot.received_at)
+    .bind(snapshot.is_carried_forward)
+    .execute(pool)
+    .await;
+
+    if let Err(error) = result {
+        debug!(
+            symbol = %snapshot.key.symbol,
+            source = %snapshot.key.source.as_str(),
+            error = %error,
+            "Failed to persist reference price tick"
+        );
+    }
+}
+
+fn reference_price_update(snapshot: &ReferencePriceSnapshot) -> MarketUpdate {
+    MarketUpdate::ReferencePrice {
+        symbol: snapshot.key.symbol.clone(),
+        source: snapshot.key.source.as_str().to_string(),
+        asset_class: snapshot.asset_class.as_str().to_string(),
+        price: snapshot.value,
+        full_accuracy_value: snapshot.full_accuracy_value.clone(),
+        is_carried_forward: snapshot.is_carried_forward,
+        ts: snapshot.source_timestamp,
     }
 }

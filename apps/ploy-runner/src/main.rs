@@ -1,13 +1,16 @@
 mod collector;
+mod discovery;
 mod feeds;
+mod reference_prices;
 mod scanner;
+mod sports_feed;
 
 use std::collections::BTreeMap;
 use std::env;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use ploy_strategy_bundles::feed::load_from_database;
+use ploy_strategy_bundles::feed::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_strategy_bundles::{
     CallbackExecutor, DirectionalStrategy, ExecutionReport, Feed, FullConfig, HistoricalFeed,
     LiveFeed, NullRecorder, RecordedFeed, RecordingFeed, RuntimeMode, SimulatedExecutor,
@@ -20,8 +23,10 @@ use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use collector::{CollectorConfig, QuoteCollector};
-use feeds::{new_chainlink_cache, spawn_chainlink_feed, spawn_spot_feed};
+use feeds::{spawn_chainlink_feed, spawn_db_spot_feed, spawn_pyth_reference_feed, spawn_spot_feed};
+use reference_prices::new_reference_price_registry;
 use scanner::spawn_market_scanner;
+use sports_feed::spawn_sports_feed;
 
 fn print_usage() {
     eprintln!("Usage: ploy-runner [COMMAND] [OPTIONS]");
@@ -37,12 +42,16 @@ fn print_usage() {
     eprintln!("  --foreground      Run in foreground (default, kept for compat)");
     eprintln!();
     eprintln!("Options for 'check-db':");
-    eprintln!("  --db-url <url>    Database URL (default: postgresql://postgres:postgres@localhost:5432/ploy)");
+    eprintln!(
+        "  --db-url <url>    Database URL (default: postgresql://postgres:postgres@localhost:5432/ploy)"
+    );
     eprintln!();
     eprintln!("Options for 'collect-quotes':");
     eprintln!("  --symbols <list>  Comma-separated symbols (default: BTCUSDT,ETHUSDT,SOLUSDT)");
     eprintln!("  --timeframe <tf>  Market timeframe: 5m or 15m (default: 5m)");
-    eprintln!("  --db-url <url>    Database URL (default: postgresql://postgres:postgres@localhost:5432/ploy)");
+    eprintln!(
+        "  --db-url <url>    Database URL (default: postgresql://postgres:postgres@localhost:5432/ploy)"
+    );
 }
 
 async fn check_database(db_url: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -59,6 +68,9 @@ async fn check_database(db_url: &str) -> Result<(), Box<dyn std::error::Error>> 
         "binance_price_ticks",
         "clob_quote_ticks",
         "pm_market_metadata",
+        "pm_market_catalog",
+        "reference_price_ticks",
+        "sports_state_events",
         "binance_lob_ticks",
     ];
 
@@ -380,15 +392,24 @@ async fn main() {
             });
 
             info!(
-            from = %from,
+                from = %from,
                 to = %to,
                 symbols = ?symbols,
                 "Loading historical data from database",
             );
 
-            let updates = load_from_database(&pool, &symbols, from, to)
-                .await
-                .expect("Failed to load historical data");
+            let backtest_options = HistoricalLoadOptions {
+                include_reference_prices: config.backtest_data.include_reference_prices,
+                reference_symbols: config
+                    .backtest_data
+                    .reference_symbols(&config.reference_data),
+                include_sports_state: config.backtest_data.include_sports_state,
+            };
+
+            let updates =
+                load_from_database_with_options(&pool, &symbols, from, to, &backtest_options)
+                    .await
+                    .expect("Failed to load historical data");
 
             info!(updates = updates.len(), "Historical data loaded");
 
@@ -453,21 +474,59 @@ async fn main() {
             let (tx, rx) = broadcast::channel(8192);
             let tx = Arc::new(tx);
 
-            // Shared Chainlink price cache for scanner to use
-            let chainlink_cache = new_chainlink_cache();
+            let reference_prices = new_reference_price_registry();
 
             // Spawn feed producers
-            // 1. Spot feed — always available (Binance via RTDS)
-            let spot_handle = spawn_spot_feed(tx.clone(), symbols.clone(), db_pool.clone());
+            // 1. Spot feed — Binance via RTDS WebSocket (primary)
+            let spot_handle = spawn_spot_feed(
+                tx.clone(),
+                reference_prices.clone(),
+                symbols.clone(),
+                db_pool.clone(),
+            );
+
+            // 1b. DB spot fallback — polls binance_price_ticks every 5s.
+            //     Ensures strategy has spot prices even when RTDS is unavailable.
+            let _db_spot_handle = if let Some(ref db) = db_pool {
+                Some(crate::feeds::spawn_db_spot_feed(
+                    tx.clone(),
+                    symbols.clone(),
+                    db.clone(),
+                ))
+            } else {
+                None
+            };
 
             // 2. Chainlink feed — canonical price source for S0 at eventStartTime
-            let chainlink_handle =
-                spawn_chainlink_feed(tx.clone(), chainlink_cache.clone(), symbols.clone());
+            let chainlink_handle = spawn_chainlink_feed(
+                tx.clone(),
+                reference_prices.clone(),
+                symbols.clone(),
+                db_pool.clone(),
+            );
 
-            // 3. Market scanner — discovers events and injects EventDiscovered/EventExpired
+            // 3. Pyth feed — additive reference-data plane for non-crypto markets.
+            let pyth_handle = spawn_pyth_reference_feed(
+                tx.clone(),
+                reference_prices.clone(),
+                config.reference_data.pyth_symbols.clone(),
+                db_pool.clone(),
+            );
+
+            // 4. Market scanner — discovers events and injects EventDiscovered/EventExpired
             //    Also spawns quote feeds dynamically as new tokens are discovered.
-            let scanner_handle =
-                spawn_market_scanner(tx.clone(), chainlink_cache.clone(), symbols.clone(), db_pool.clone());
+            let scanner_handle = spawn_market_scanner(
+                tx.clone(),
+                reference_prices.clone(),
+                symbols.clone(),
+                db_pool.clone(),
+            );
+
+            let sports_handle = if config.reference_data.capture_sports_state {
+                Some(spawn_sports_feed(tx.clone(), db_pool.clone()))
+            } else {
+                None
+            };
 
             let feed: Box<dyn Feed> = if let Some(record_path) = config.record_market_updates_path()
             {
@@ -514,7 +573,11 @@ async fn main() {
             // Clean up feed tasks
             spot_handle.abort();
             chainlink_handle.abort();
+            pyth_handle.abort();
             scanner_handle.abort();
+            if let Some(handle) = sports_handle {
+                handle.abort();
+            }
 
             result
         }
