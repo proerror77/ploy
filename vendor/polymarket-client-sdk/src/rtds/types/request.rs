@@ -68,23 +68,43 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    /// Create a subscription for Binance crypto prices.
+    /// Create a subscription for one Binance crypto symbol.
     #[must_use]
-    pub fn crypto_prices(symbols: Option<Vec<String>>) -> Self {
-        // RTDS expects a comma-separated lowercase string, e.g. "btcusdt,ethusdt".
-        let filters = symbols.map(|symbols| {
-            symbols
-                .into_iter()
-                .map(|symbol| symbol.trim().to_lowercase())
-                .filter(|symbol| !symbol.is_empty())
-                .collect::<Vec<_>>()
-                .join(",")
-        });
+    pub fn crypto_prices(symbol: Option<String>) -> Self {
+        let filters = symbol
+            .map(|symbol| symbol.trim().to_lowercase())
+            .filter(|symbol| !symbol.is_empty())
+            .map(|symbol| format!(r#"{{"symbol":"{symbol}"}}"#));
         Self {
             topic: "crypto_prices".to_owned(),
             msg_type: "update".to_owned(),
             filters,
             clob_auth: None,
+        }
+    }
+
+    /// Create one Binance subscription per requested symbol.
+    ///
+    /// RTDS currently validates `crypto_prices` filters as a JSON string containing
+    /// exactly one symbol, for example `{"symbol":"btcusdt"}`. Multi-symbol filters
+    /// inside one subscription are rejected by the server.
+    #[must_use]
+    pub fn crypto_price_subscriptions(symbols: Option<Vec<String>>) -> Vec<Self> {
+        match symbols {
+            Some(symbols) => {
+                let subscriptions: Vec<Self> = symbols
+                    .into_iter()
+                    .map(|symbol| Self::crypto_prices(Some(symbol)))
+                    .filter(|subscription| subscription.filters.is_some())
+                    .collect();
+
+                if subscriptions.is_empty() {
+                    vec![Self::crypto_prices(None)]
+                } else {
+                    subscriptions
+                }
+            }
+            None => vec![Self::crypto_prices(None)],
         }
     }
 
@@ -158,9 +178,8 @@ impl Serialize for Subscription {
         map.serialize_entry("type", &self.msg_type)?;
 
         if let Some(filters) = &self.filters {
-            // Chainlink endpoint expects filters as a JSON string (escaped),
-            // while Binance crypto prices expect a lowercase comma-separated string.
-            // See: https://github.com/Polymarket/rs-clob-client/issues/136
+            // RTDS currently expects these topics to receive filters as JSON strings
+            // rather than raw nested JSON objects.
             if self.topic == "crypto_prices"
                 || self.topic == "crypto_prices_chainlink"
                 || self.topic == "equity_prices"
@@ -196,15 +215,18 @@ mod tests {
 
     #[test]
     fn serialize_subscription_request() {
-        let sub =
-            Subscription::crypto_prices(Some(vec!["BTCUSDT".to_owned(), "ethusdt".to_owned()]));
-        let request = SubscriptionRequest::subscribe(vec![sub]);
+        let subs = Subscription::crypto_price_subscriptions(Some(vec![
+            "BTCUSDT".to_owned(),
+            "ethusdt".to_owned(),
+        ]));
+        let request = SubscriptionRequest::subscribe(subs);
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"action\":\"subscribe\""));
         assert!(json.contains("\"topic\":\"crypto_prices\""));
-        // RTDS expects a comma-separated lowercase string for crypto filters.
-        assert!(json.contains("\"filters\":\"btcusdt,ethusdt\""));
+        assert_eq!(json.matches("\"topic\":\"crypto_prices\"").count(), 2);
+        assert!(json.contains(r#""filters":"{\"symbol\":\"btcusdt\"}""#));
+        assert!(json.contains(r#""filters":"{\"symbol\":\"ethusdt\"}""#));
     }
 
     #[test]
@@ -247,8 +269,8 @@ mod tests {
     #[test]
     fn serialize_crypto_prices_without_filters() {
         // When no symbols are provided, there should be no filters field
-        let sub = Subscription::crypto_prices(None);
-        let request = SubscriptionRequest::subscribe(vec![sub]);
+        let subs = Subscription::crypto_price_subscriptions(None);
+        let request = SubscriptionRequest::subscribe(subs);
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"topic\":\"crypto_prices\""));
@@ -259,9 +281,12 @@ mod tests {
     fn serialize_mixed_subscriptions() {
         // Verify Chainlink and Binance subscriptions serialize differently in same request
         let chainlink = Subscription::chainlink_prices(Some("btc/usd".to_owned()));
-        let binance =
-            Subscription::crypto_prices(Some(vec!["BTCUSDT".to_owned(), "ethusdt".to_owned()]));
-        let request = SubscriptionRequest::subscribe(vec![chainlink, binance]);
+        let mut subscriptions = vec![chainlink];
+        subscriptions.extend(Subscription::crypto_price_subscriptions(Some(vec![
+            "BTCUSDT".to_owned(),
+            "ethusdt".to_owned(),
+        ])));
+        let request = SubscriptionRequest::subscribe(subscriptions);
 
         let json = serde_json::to_string(&request).unwrap();
 
@@ -270,16 +295,17 @@ mod tests {
             json.contains(r#""filters":"{\"symbol\":\"btc/usd\"}""#),
             "Chainlink filters should be escaped string, got: {json}"
         );
-        // Binance should have a comma-separated lowercase string filter
+        // Binance should subscribe once per symbol using an escaped JSON string filter
         assert!(
-            json.contains("\"filters\":\"btcusdt,ethusdt\""),
-            "Binance filters should be a comma-separated lowercase string, got: {json}"
+            json.contains(r#""filters":"{\"symbol\":\"btcusdt\"}""#)
+                && json.contains(r#""filters":"{\"symbol\":\"ethusdt\"}""#),
+            "Binance filters should be one escaped JSON string per symbol, got: {json}"
         );
     }
 
     #[test]
     fn serialize_unsubscribe_request() {
-        let sub = Subscription::crypto_prices(Some(vec!["btcusdt".to_owned()]));
+        let sub = Subscription::crypto_prices(Some("btcusdt".to_owned()));
         let request = SubscriptionRequest::unsubscribe(vec![sub]);
 
         let json = serde_json::to_string(&request).unwrap();

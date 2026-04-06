@@ -488,7 +488,7 @@ async fn main() {
             // 1b. DB spot fallback — polls binance_price_ticks every 5s.
             //     Ensures strategy has spot prices even when RTDS is unavailable.
             let _db_spot_handle = if let Some(ref db) = db_pool {
-                Some(crate::feeds::spawn_db_spot_feed(
+                Some(spawn_db_spot_feed(
                     tx.clone(),
                     symbols.clone(),
                     db.clone(),

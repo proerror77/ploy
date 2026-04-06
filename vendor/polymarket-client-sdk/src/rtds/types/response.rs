@@ -1,7 +1,7 @@
 use bon::Builder;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::types::{Address, Decimal};
 
@@ -221,6 +221,21 @@ pub enum CommentType {
     Unknown(String),
 }
 
+fn is_error_envelope(map: &Map<String, Value>) -> bool {
+    !map.contains_key("topic")
+        && map.contains_key("statusCode")
+        && map
+            .get("body")
+            .is_some_and(|body| matches!(body, Value::Object(_)))
+}
+
+fn parse_message_value(value: Value) -> crate::Result<Option<RtdsMessage>> {
+    match value {
+        Value::Object(map) if is_error_envelope(&map) => Ok(None),
+        other => Ok(Some(serde_json::from_value(other)?)),
+    }
+}
+
 /// Deserialize messages from the byte slice.
 ///
 /// Handles both single objects and arrays of messages.
@@ -236,12 +251,19 @@ pub fn parse_messages(bytes: &[u8]) -> crate::Result<Vec<RtdsMessage>> {
         return Ok(Vec::new());
     }
 
-    // Try parsing as array first, fall back to single object
-    if trimmed.first() == Some(&b'[') {
-        Ok(serde_json::from_slice(trimmed)?)
-    } else {
-        let msg: RtdsMessage = serde_json::from_slice(trimmed)?;
-        Ok(vec![msg])
+    let parsed: Value = serde_json::from_slice(trimmed)?;
+
+    match parsed {
+        Value::Array(values) => {
+            let mut messages = Vec::with_capacity(values.len());
+            for value in values {
+                if let Some(message) = parse_message_value(value)? {
+                    messages.push(message);
+                }
+            }
+            Ok(messages)
+        }
+        other => Ok(parse_message_value(other)?.into_iter().collect()),
     }
 }
 
@@ -367,6 +389,19 @@ mod tests {
     #[test]
     fn parse_whitespace_only_input() {
         let msgs = parse_messages(b"   \n\t  ").unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn ignore_error_envelope_without_topic() {
+        let json = r#"{
+            "body": {
+                "message": "invalid Subscriptions.Subscriptions[0]: embedded message failed validation"
+            },
+            "statusCode": 400
+        }"#;
+
+        let msgs = parse_messages(json.as_bytes()).unwrap();
         assert!(msgs.is_empty());
     }
 

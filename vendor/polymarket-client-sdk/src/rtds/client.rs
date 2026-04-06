@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures::future;
 use futures::Stream;
 use futures::StreamExt as _;
 
@@ -181,14 +182,30 @@ impl<S: State> Client<S> {
         &self,
         symbols: Option<Vec<String>>,
     ) -> Result<impl Stream<Item = Result<CryptoPrice>>> {
-        let subscription = Subscription::crypto_prices(symbols);
-        let stream = self.inner.subscriptions.subscribe(subscription)?;
+        let requested_symbols = symbols.clone().map(|symbols| {
+            symbols
+                .into_iter()
+                .map(|symbol| symbol.trim().to_lowercase())
+                .filter(|symbol| !symbol.is_empty())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        let subscriptions = Subscription::crypto_price_subscriptions(symbols);
+        let stream = self.inner.subscriptions.subscribe_many(subscriptions)?;
 
-        Ok(stream.filter_map(|msg_result| async move {
-            match msg_result {
-                Ok(msg) => msg.as_crypto_price().map(Ok),
+        Ok(stream.filter_map(move |msg_result| {
+            let requested_symbols = requested_symbols.clone();
+            future::ready(match msg_result {
+                Ok(msg) => match msg.as_crypto_price() {
+                    Some(price) => {
+                        let matches_request = requested_symbols.as_ref().is_none_or(|symbols| {
+                            symbols.contains(&price.symbol.to_lowercase())
+                        });
+                        matches_request.then_some(Ok(price))
+                    }
+                    None => None,
+                },
                 Err(e) => Some(Err(e)),
-            }
+            })
         }))
     }
 
