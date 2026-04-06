@@ -76,7 +76,7 @@ jobs:
       - name: Upload binary to tango-1-1
         run: |
           for attempt in 1 2 3; do
-            scp -O target/${PLATFORM_TARGET}/release/ploy-runner tango-1-1:/root/ploy/bin/ploy-runner.new
+            ssh tango-1-1 'rm -f /root/ploy/bin/ploy-runner.new && cat > /root/ploy/bin/ploy-runner.new' < target/${PLATFORM_TARGET}/release/ploy-runner
             ssh tango-1-1 'mv /root/ploy/bin/ploy-runner.new /root/ploy/bin/ploy-runner'
             exit 0
             echo "binary upload attempt ${attempt} failed" >&2
