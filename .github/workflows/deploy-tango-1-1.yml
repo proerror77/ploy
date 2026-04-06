@@ -76,7 +76,9 @@ jobs:
       - name: Upload binary to tango-1-1
         run: |
           for attempt in 1 2 3; do
-            scp target/${PLATFORM_TARGET}/release/ploy-runner tango-1-1:/root/ploy/bin/ploy-runner && exit 0
+            scp -O target/${PLATFORM_TARGET}/release/ploy-runner tango-1-1:/root/ploy/bin/ploy-runner.new
+            ssh tango-1-1 'mv /root/ploy/bin/ploy-runner.new /root/ploy/bin/ploy-runner'
+            exit 0
             echo "binary upload attempt ${attempt} failed" >&2
             sleep 10
           done
@@ -84,13 +86,13 @@ jobs:
 
       - name: Upload config to tango-1-1
         run: |
-          scp config/strategies/02-pm5d.unified.toml tango-1-1:/root/ploy/config/strategies/02-pm5d.unified.toml
+          scp -O config/strategies/02-pm5d.unified.toml tango-1-1:/root/ploy/config/strategies/02-pm5d.unified.toml
 
       - name: Upload required migrations to tango-1-1
         run: |
-          scp migrations/027_reference_price_ticks.sql tango-1-1:/root/ploy/migrations/027_reference_price_ticks.sql
-          scp migrations/028_pm_market_catalog.sql tango-1-1:/root/ploy/migrations/028_pm_market_catalog.sql
-          scp migrations/029_sports_state_events.sql tango-1-1:/root/ploy/migrations/029_sports_state_events.sql
+          scp -O migrations/027_reference_price_ticks.sql tango-1-1:/root/ploy/migrations/027_reference_price_ticks.sql
+          scp -O migrations/028_pm_market_catalog.sql tango-1-1:/root/ploy/migrations/028_pm_market_catalog.sql
+          scp -O migrations/029_sports_state_events.sql tango-1-1:/root/ploy/migrations/029_sports_state_events.sql
 
       - name: Restart ploy-runner services
         uses: appleboy/ssh-action@v1.0.3
