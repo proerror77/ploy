@@ -639,7 +639,7 @@ fn build_signal_recorder(db_pool: Option<sqlx::PgPool>, mode: RuntimeMode) -> Bo
         },
     );
 
-    Box::new(BufferedRecorder::new(25, Some(flush_fn)))
+    Box::new(BufferedRecorder::new(1, Some(flush_fn)))
 }
 
 async fn persist_signal_batch(pool: &sqlx::PgPool, mode_label: &str, batch: Vec<SignalRecord>) {
