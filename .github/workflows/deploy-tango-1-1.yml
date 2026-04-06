@@ -71,6 +71,16 @@ jobs:
           target: /root/ploy/config/strategies/
           strip_components: 2
 
+      - name: Upload required migrations to tango-1-1
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.TANGO_1_1_HOST }}
+          username: root
+          key: ${{ secrets.TANGO_1_1_SSH_KEY }}
+          source: migrations/027_reference_price_ticks.sql,migrations/028_pm_market_catalog.sql,migrations/029_sports_state_events.sql
+          target: /root/ploy/migrations/
+          strip_components: 1
+
       - name: Restart ploy-runner services
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -83,6 +93,17 @@ jobs:
 
             # Make binary executable
             chmod +x /root/ploy/bin/ploy-runner
+
+            # Apply additive runner migrations before restarting services.
+            mkdir -p /root/ploy/migrations
+            for migration in \
+              /root/ploy/migrations/027_reference_price_ticks.sql \
+              /root/ploy/migrations/028_pm_market_catalog.sql \
+              /root/ploy/migrations/029_sports_state_events.sql; do
+              if [ -f "${migration}" ]; then
+                PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f "${migration}"
+              fi
+            done
 
             systemctl restart ploy-strategy-directional-dryrun || echo "Service not running: ploy-strategy-directional-dryrun"
             systemctl restart ploy-quote-collector || echo "Service not running: ploy-quote-collector"
