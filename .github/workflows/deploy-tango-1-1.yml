@@ -61,6 +61,16 @@ jobs:
           target: /root/ploy/bin/
           strip_components: 3
 
+      - name: Upload config to tango-1-1
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.TANGO_1_1_HOST }}
+          username: root
+          key: ${{ secrets.TANGO_1_1_SSH_KEY }}
+          source: config/strategies/02-pm5d.unified.toml
+          target: /root/ploy/config/strategies/
+          strip_components: 2
+
       - name: Restart ploy-runner services
         uses: appleboy/ssh-action@v1.0.3
         with:
