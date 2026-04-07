@@ -109,8 +109,12 @@ jobs:
           object_prefix="${DEPLOY_OSS_PREFIX}/${GITHUB_SHA}"
           bundle_object="oss://${OSS_BUCKET}/${object_prefix}/${DEPLOY_BUNDLE_NAME}"
           checksum_object="oss://${OSS_BUCKET}/${object_prefix}/${DEPLOY_BUNDLE_NAME}.sha256"
-          ossutil cp "${DEPLOY_BUNDLE_NAME}" "${bundle_object}"
-          ossutil cp "${DEPLOY_BUNDLE_NAME}.sha256" "${checksum_object}"
+          ossutil cp "${DEPLOY_BUNDLE_NAME}" "${bundle_object}" \
+            -i "${OSS_ACCESS_KEY_ID}" -k "${OSS_ACCESS_KEY_SECRET}" \
+            -e "https://oss-${DEPLOY_OSS_REGION}.aliyuncs.com"
+          ossutil cp "${DEPLOY_BUNDLE_NAME}.sha256" "${checksum_object}" \
+            -i "${OSS_ACCESS_KEY_ID}" -k "${OSS_ACCESS_KEY_SECRET}" \
+            -e "https://oss-${DEPLOY_OSS_REGION}.aliyuncs.com"
           echo "bundle_object=${bundle_object}" >> "${GITHUB_OUTPUT}"
           echo "checksum_object=${checksum_object}" >> "${GITHUB_OUTPUT}"
 
@@ -190,8 +194,12 @@ jobs:
             test -n "\${OSS_ACCESS_KEY_SECRET}"
             test -n "\${OSS_BUCKET}"
 
-            ossutil cp "oss://\${OSS_BUCKET}/\${OSS_OBJECT_PREFIX}/${DEPLOY_BUNDLE_NAME}" "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}"
-            ossutil cp "oss://\${OSS_BUCKET}/\${OSS_OBJECT_PREFIX}/${DEPLOY_BUNDLE_NAME}.sha256" "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}.sha256"
+            ossutil cp "oss://\${OSS_BUCKET}/\${OSS_OBJECT_PREFIX}/${DEPLOY_BUNDLE_NAME}" "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}" \
+              -i "\${OSS_ACCESS_KEY_ID}" -k "\${OSS_ACCESS_KEY_SECRET}" \
+              -e "\${OSS_ENDPOINT}"
+            ossutil cp "oss://\${OSS_BUCKET}/\${OSS_OBJECT_PREFIX}/${DEPLOY_BUNDLE_NAME}.sha256" "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}.sha256" \
+              -i "\${OSS_ACCESS_KEY_ID}" -k "\${OSS_ACCESS_KEY_SECRET}" \
+              -e "\${OSS_ENDPOINT}"
 
             cd "\${WORKDIR}"
             sha256sum -c "${DEPLOY_BUNDLE_NAME}.sha256"
