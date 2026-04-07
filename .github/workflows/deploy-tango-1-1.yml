@@ -13,14 +13,15 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   PLATFORM_TARGET: x86_64-unknown-linux-gnu
   DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
-  DEPLOY_RELEASE_TAG: deploy-tango-1-1-latest
+  DEPLOY_OSS_REGION: ${{ vars.ALIYUN_REGION || 'ap-northeast-1' }}
+  DEPLOY_OSS_PREFIX: deploy/tango-1-1
   DEPLOY_BUNDLE_NAME: ploy-runner-tango-1-1.tar.gz
 
 jobs:
@@ -69,31 +70,49 @@ jobs:
           tar -C dist -czf "${DEPLOY_BUNDLE_NAME}" .
           sha256sum "${DEPLOY_BUNDLE_NAME}" > "${DEPLOY_BUNDLE_NAME}.sha256"
 
-      - name: Publish deploy bundle to GitHub release
+      - name: Validate OSS deploy secrets
         env:
-          GH_TOKEN: ${{ github.token }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
         run: |
-          gh release delete "${DEPLOY_RELEASE_TAG}" --yes --cleanup-tag || true
-          gh release create "${DEPLOY_RELEASE_TAG}" \
-            "${DEPLOY_BUNDLE_NAME}#${DEPLOY_BUNDLE_NAME}" \
-            "${DEPLOY_BUNDLE_NAME}.sha256#${DEPLOY_BUNDLE_NAME}.sha256" \
-            --target "${GITHUB_SHA}" \
-            --title "Deploy bundle for tango-1-1" \
-            --notes "Deploy bundle for ${GITHUB_SHA}" \
-            --prerelease
+          missing=()
+          [ -n "${OSS_ACCESS_KEY_ID}" ] || missing+=("ALIYUN_OSS_ACCESS_KEY_ID")
+          [ -n "${OSS_ACCESS_KEY_SECRET}" ] || missing+=("ALIYUN_OSS_ACCESS_KEY_SECRET")
+          [ -n "${OSS_BUCKET}" ] || missing+=("ALIYUN_OSS_BUCKET")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing required OSS deploy secrets: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
 
-      - name: Resolve deploy asset ids
-        id: resolve_deploy_asset_ids
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Install ossutil
         run: |
-          release_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${DEPLOY_RELEASE_TAG}")
-          bundle_asset_id=$(jq -r '.assets[] | select(.name == "'"${DEPLOY_BUNDLE_NAME}"'") | .id' <<<"${release_json}")
-          checksum_asset_id=$(jq -r '.assets[] | select(.name == "'"${DEPLOY_BUNDLE_NAME}.sha256"'") | .id' <<<"${release_json}")
-          test -n "${bundle_asset_id}" && test "${bundle_asset_id}" != "null"
-          test -n "${checksum_asset_id}" && test "${checksum_asset_id}" != "null"
-          echo "bundle_asset_id=${bundle_asset_id}" >> "${GITHUB_OUTPUT}"
-          echo "checksum_asset_id=${checksum_asset_id}" >> "${GITHUB_OUTPUT}"
+          if ! command -v ossutil >/dev/null 2>&1; then
+            curl -fsSL https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
+          fi
+          export PATH="/usr/local/bin:/usr/bin:/bin:${PATH}"
+          command -v ossutil >/dev/null 2>&1
+
+      - name: Upload deploy bundle to OSS
+        id: upload_bundle_to_oss
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+        run: |
+          export PATH="/usr/local/bin:/usr/bin:/bin:${PATH}"
+          test -n "${OSS_ACCESS_KEY_ID}"
+          test -n "${OSS_ACCESS_KEY_SECRET}"
+          test -n "${OSS_BUCKET}"
+          export OSS_REGION="${DEPLOY_OSS_REGION}"
+          export OSS_ENDPOINT="https://oss-${DEPLOY_OSS_REGION}.aliyuncs.com"
+          object_prefix="${DEPLOY_OSS_PREFIX}/${GITHUB_SHA}"
+          bundle_object="oss://${OSS_BUCKET}/${object_prefix}/${DEPLOY_BUNDLE_NAME}"
+          checksum_object="oss://${OSS_BUCKET}/${object_prefix}/${DEPLOY_BUNDLE_NAME}.sha256"
+          ossutil cp "${DEPLOY_BUNDLE_NAME}" "${bundle_object}"
+          ossutil cp "${DEPLOY_BUNDLE_NAME}.sha256" "${checksum_object}"
+          echo "bundle_object=${bundle_object}" >> "${GITHUB_OUTPUT}"
+          echo "checksum_object=${checksum_object}" >> "${GITHUB_OUTPUT}"
 
       - name: Configure SSH for deploy
         run: |
@@ -116,9 +135,7 @@ jobs:
         run: |
           ssh tango-1-1 'mkdir -p /root/ploy/bin /root/ploy/config/strategies /root/ploy/migrations /root/ploy/tmp'
 
-      - name: Pull bundle from GitHub and restart services
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Pull bundle from OSS and restart services
         run: |
           ssh tango-1-1 /bin/bash <<EOF
             set -euo pipefail
@@ -150,38 +167,31 @@ jobs:
               test "\${memory_max}" != "[not set]"
             }
 
-            download_release_asset() {
-              local asset_id="\$1"
-              local output_path="\$2"
-              local attempt
-
-              rm -f "\${output_path}"
-              for attempt in 1 2 3 4 5; do
-                echo "Downloading asset \${asset_id} (attempt \${attempt})"
-                if curl -fL --http1.1 \
-                  --connect-timeout 30 \
-                  --max-time 300 \
-                  --retry 5 \
-                  --retry-delay 5 \
-                  --retry-all-errors \
-                  --speed-time 30 \
-                  --speed-limit 10240 \
-                  --continue-at - \
-                  -H "Authorization: Bearer ${GH_TOKEN}" \
-                  -H "Accept: application/octet-stream" \
-                  "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/\${asset_id}" \
-                  -o "\${output_path}"; then
-                  return 0
-                fi
-                sleep 5
-              done
-
-              echo "Failed to download asset \${asset_id} after retries" >&2
-              return 1
+            ensure_ossutil() {
+              export PATH="/usr/local/bin:/usr/bin:/bin:\${PATH}"
+              if command -v ossutil >/dev/null 2>&1; then
+                return 0
+              fi
+              curl -fsSL https://gosspublic.alicdn.com/ossutil/install.sh | bash
+              export PATH="/usr/local/bin:/usr/bin:/bin:\${PATH}"
+              command -v ossutil >/dev/null 2>&1
             }
 
-            download_release_asset "${{ steps.resolve_deploy_asset_ids.outputs.bundle_asset_id }}" "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}"
-            download_release_asset "${{ steps.resolve_deploy_asset_ids.outputs.checksum_asset_id }}" "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}.sha256"
+            ensure_ossutil
+
+            export OSS_ACCESS_KEY_ID='${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+            export OSS_ACCESS_KEY_SECRET='${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+            export OSS_REGION='${DEPLOY_OSS_REGION}'
+            export OSS_ENDPOINT="https://oss-${DEPLOY_OSS_REGION}-internal.aliyuncs.com"
+            OSS_BUCKET='${{ secrets.ALIYUN_OSS_BUCKET }}'
+            OSS_OBJECT_PREFIX='${DEPLOY_OSS_PREFIX}/${GITHUB_SHA}'
+
+            test -n "\${OSS_ACCESS_KEY_ID}"
+            test -n "\${OSS_ACCESS_KEY_SECRET}"
+            test -n "\${OSS_BUCKET}"
+
+            ossutil cp "oss://\${OSS_BUCKET}/\${OSS_OBJECT_PREFIX}/${DEPLOY_BUNDLE_NAME}" "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}"
+            ossutil cp "oss://\${OSS_BUCKET}/\${OSS_OBJECT_PREFIX}/${DEPLOY_BUNDLE_NAME}.sha256" "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}.sha256"
 
             cd "\${WORKDIR}"
             sha256sum -c "${DEPLOY_BUNDLE_NAME}.sha256"
@@ -245,6 +255,8 @@ jobs:
           echo "## Deployment to tango-1-1" >> "$GITHUB_STEP_SUMMARY"
           echo "- Binary: \`ploy-runner\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Transport: \`GitHub Actions -> OSS -> ECS\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- OSS object: \`${{ steps.upload_bundle_to_oss.outputs.bundle_object }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Services: \`ploy-strategy-directional-dryrun\`, \`ploy-quote-collector\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Postgres pre/postflight: required" >> "$GITHUB_STEP_SUMMARY"
