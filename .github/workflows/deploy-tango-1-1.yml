@@ -149,17 +149,34 @@ jobs:
               test "\${memory_max}" != "[not set]"
             }
 
-            curl -fsSL \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/octet-stream" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.resolve_deploy_asset_ids.outputs.bundle_asset_id }}" \
-              -o "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}"
+            download_release_asset() {
+              local asset_id="\$1"
+              local output_path="\$2"
+              local attempt
 
-            curl -fsSL \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/octet-stream" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.resolve_deploy_asset_ids.outputs.checksum_asset_id }}" \
-              -o "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}.sha256"
+              rm -f "\${output_path}"
+              for attempt in 1 2 3 4 5; do
+                echo "Downloading asset \${asset_id} (attempt \${attempt})"
+                if curl -fL --http1.1 \
+                  --retry 5 \
+                  --retry-delay 5 \
+                  --retry-all-errors \
+                  --continue-at - \
+                  -H "Authorization: Bearer ${GH_TOKEN}" \
+                  -H "Accept: application/octet-stream" \
+                  "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/\${asset_id}" \
+                  -o "\${output_path}"; then
+                  return 0
+                fi
+                sleep 5
+              done
+
+              echo "Failed to download asset \${asset_id} after retries" >&2
+              return 1
+            }
+
+            download_release_asset "${{ steps.resolve_deploy_asset_ids.outputs.bundle_asset_id }}" "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}"
+            download_release_asset "${{ steps.resolve_deploy_asset_ids.outputs.checksum_asset_id }}" "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}.sha256"
 
             cd "\${WORKDIR}"
             sha256sum -c "${DEPLOY_BUNDLE_NAME}.sha256"
