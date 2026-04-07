@@ -57,12 +57,14 @@ jobs:
       - name: Build deploy bundle
         run: |
           rm -rf dist
-          mkdir -p dist/bin dist/config/strategies dist/migrations
+          mkdir -p dist/bin dist/config/strategies dist/migrations dist/deployment/systemd
           cp target/${PLATFORM_TARGET}/release/ploy-runner dist/bin/ploy-runner
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
           cp migrations/027_reference_price_ticks.sql dist/migrations/027_reference_price_ticks.sql
           cp migrations/028_pm_market_catalog.sql dist/migrations/028_pm_market_catalog.sql
           cp migrations/029_sports_state_events.sql dist/migrations/029_sports_state_events.sql
+          cp deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf dist/deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf
+          cp deployment/systemd/ploy-quote-collector.hardening.conf dist/deployment/systemd/ploy-quote-collector.hardening.conf
           tar -C dist -czf "${DEPLOY_BUNDLE_NAME}" .
           sha256sum "${DEPLOY_BUNDLE_NAME}" > "${DEPLOY_BUNDLE_NAME}.sha256"
 
@@ -169,6 +171,12 @@ jobs:
             install -m 0644 ./migrations/027_reference_price_ticks.sql /root/ploy/migrations/027_reference_price_ticks.sql
             install -m 0644 ./migrations/028_pm_market_catalog.sql /root/ploy/migrations/028_pm_market_catalog.sql
             install -m 0644 ./migrations/029_sports_state_events.sql /root/ploy/migrations/029_sports_state_events.sql
+
+            install -d /etc/systemd/system/ploy-strategy-directional-dryrun.service.d
+            install -d /etc/systemd/system/ploy-quote-collector.service.d
+            install -m 0644 ./deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf /etc/systemd/system/ploy-strategy-directional-dryrun.service.d/hardening.conf
+            install -m 0644 ./deployment/systemd/ploy-quote-collector.hardening.conf /etc/systemd/system/ploy-quote-collector.service.d/hardening.conf
+            systemctl daemon-reload
 
             # Apply additive runner migrations before restarting services.
             mkdir -p /root/ploy/migrations
