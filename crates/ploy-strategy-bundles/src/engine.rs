@@ -145,14 +145,19 @@ where
                     StrategyDecision::Exit(intent) => (intent, None),
                     StrategyDecision::Hold => continue,
                 };
+                let strategy_name = self.strategy.name().to_string();
+                let signal_ref = signal.as_ref();
 
-                if let Some(signal) = signal.as_ref() {
+                if let Some(signal) = signal_ref {
                     self.recorder.record_signal(signal).await;
                 }
 
                 let order_id = Uuid::new_v4().to_string();
 
                 let report = self.executor.submit(&intent, &order_id).await;
+                self.recorder
+                    .record_order(&strategy_name, &intent, signal_ref, &report, &order_id)
+                    .await;
 
                 if report.rejected && report.fill.is_none() {
                     // Pure rejection — keep the signal audit trail, but don't record an intent.
@@ -165,8 +170,11 @@ where
                 self.trading.submit_intent(intent.clone(), order_id.clone());
                 intents_submitted += 1;
 
-                if let Some(fill) = report.fill {
+                if let Some(fill) = report.fill.as_ref() {
                     self.trading.record_fill(fill.clone());
+                    self.recorder
+                        .record_fill(&strategy_name, &intent, signal_ref, fill, &report)
+                        .await;
                     self.strategy.on_fill(&fill);
                     fills_recorded += 1;
                     debug!(
@@ -318,12 +326,39 @@ mod tests {
 
     struct CollectingRecorder {
         signals: Arc<Mutex<Vec<SignalRecord>>>,
+        orders: Arc<Mutex<Vec<(String, String)>>>,
+        fills: Arc<Mutex<Vec<String>>>,
     }
 
     #[async_trait]
     impl Recorder for CollectingRecorder {
         async fn record_signal(&mut self, signal: &SignalRecord) {
             self.signals.lock().unwrap().push(signal.clone());
+        }
+
+        async fn record_order(
+            &mut self,
+            strategy: &str,
+            intent: &TradingIntent,
+            _signal: Option<&SignalRecord>,
+            _report: &ExecutionReport,
+            _order_id: &str,
+        ) {
+            self.orders
+                .lock()
+                .unwrap()
+                .push((strategy.to_string(), intent.intent_id.clone()));
+        }
+
+        async fn record_fill(
+            &mut self,
+            _strategy: &str,
+            _intent: &TradingIntent,
+            _signal: Option<&SignalRecord>,
+            fill: &FillRecord,
+            _report: &ExecutionReport,
+        ) {
+            self.fills.lock().unwrap().push(fill.fill_id.clone());
         }
 
         async fn flush(&mut self) {}
@@ -357,8 +392,12 @@ mod tests {
             created_at: now,
         };
         let recorder_store = Arc::new(Mutex::new(Vec::new()));
+        let order_store = Arc::new(Mutex::new(Vec::new()));
+        let fill_store = Arc::new(Mutex::new(Vec::new()));
         let recorder = Box::new(CollectingRecorder {
             signals: recorder_store.clone(),
+            orders: order_store.clone(),
+            fills: fill_store.clone(),
         });
         let strategy = RecordingStrategy {
             emitted: false,
@@ -391,5 +430,102 @@ mod tests {
         );
         assert_eq!(signals[0].decision, "enter");
         assert_eq!(signals[0].entry_price, Decimal::new(30, 2));
+        let orders = order_store.lock().unwrap();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].0, "recording_strategy");
+        assert_eq!(orders[0].1, "pm5d_BTCUSDT_UP_test");
+        assert!(fill_store.lock().unwrap().is_empty());
+    }
+
+    struct FillingExecutor;
+
+    #[async_trait]
+    impl Executor for FillingExecutor {
+        async fn submit(&mut self, intent: &TradingIntent, order_id: &str) -> ExecutionReport {
+            ExecutionReport {
+                order_id: order_id.to_string(),
+                fill: Some(FillRecord {
+                    fill_id: "fill-1".into(),
+                    order_id: order_id.to_string(),
+                    token_id: intent.token_id.clone(),
+                    side: intent.side,
+                    quantity: intent.quantity,
+                    price: intent.limit_price.expect("limit price"),
+                    fee: dec!(0.01),
+                    timestamp: intent.created_at,
+                }),
+                rejected: false,
+                rejection_reason: None,
+                slippage: Some(Decimal::ZERO),
+                market_impact: Some(Decimal::ZERO),
+            }
+        }
+
+        async fn cancel(&mut self, _order_id: &str) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn records_order_and_fill_audit_for_successful_execution() {
+        let now = Utc::now();
+        let signal = SignalRecord {
+            strategy: "pm_5m_directional".into(),
+            event_id: Some("evt1".into()),
+            token_id: Some("token-up".into()),
+            intent_id: Some("pm5d_BTCUSDT_UP_fill".into()),
+            symbol: "BTCUSDT".into(),
+            direction: "UP".into(),
+            p_hat: 0.71,
+            edge: 0.08,
+            entry_price: dec!(0.30),
+            decision: "enter".into(),
+            ts: now,
+        };
+        let intent = TradingIntent {
+            intent_id: "pm5d_BTCUSDT_UP_fill".into(),
+            deployment_id: String::new(),
+            market_id: "evt1".into(),
+            token_id: "token-up".into(),
+            side: TradeSide::Buy,
+            quantity: dec!(10),
+            limit_price: Some(dec!(0.30)),
+            purpose: IntentPurpose::Entry,
+            created_at: now,
+        };
+        let recorder_store = Arc::new(Mutex::new(Vec::new()));
+        let order_store = Arc::new(Mutex::new(Vec::new()));
+        let fill_store = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Box::new(CollectingRecorder {
+            signals: recorder_store.clone(),
+            orders: order_store.clone(),
+            fills: fill_store.clone(),
+        });
+        let strategy = RecordingStrategy {
+            emitted: false,
+            signal,
+            intent,
+        };
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let executor = FillingExecutor;
+        let config = RuntimeConfig {
+            mode: RuntimeMode::DryRun,
+            throttle_hz: None,
+            max_updates: None,
+        };
+
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
+        let result = runtime.run().await;
+
+        assert_eq!(result.intents_submitted, 1);
+        assert_eq!(result.fills_recorded, 1);
+        assert_eq!(order_store.lock().unwrap().len(), 1);
+        assert_eq!(fill_store.lock().unwrap().as_slice(), ["fill-1"]);
     }
 }

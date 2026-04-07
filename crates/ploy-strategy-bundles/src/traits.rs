@@ -222,6 +222,28 @@ pub trait Recorder: Send {
     /// Record a signal evaluation (both entries and rejections).
     async fn record_signal(&mut self, signal: &SignalRecord);
 
+    /// Record order submission or rejection for execution audit.
+    async fn record_order(
+        &mut self,
+        _strategy: &str,
+        _intent: &TradingIntent,
+        _signal: Option<&SignalRecord>,
+        _report: &ExecutionReport,
+        _order_id: &str,
+    ) {
+    }
+
+    /// Record a fill for execution audit.
+    async fn record_fill(
+        &mut self,
+        _strategy: &str,
+        _intent: &TradingIntent,
+        _signal: Option<&SignalRecord>,
+        _fill: &FillRecord,
+        _report: &ExecutionReport,
+    ) {
+    }
+
     /// Flush buffered records to storage.
     async fn flush(&mut self);
 }

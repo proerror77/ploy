@@ -11,6 +11,7 @@ description = "Standalone strategy runner for ploy-strategy-bundles"
 default = []
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 futures = "0.3"
 ploy-connectivity = { path = "../../crates/ploy-connectivity" }
