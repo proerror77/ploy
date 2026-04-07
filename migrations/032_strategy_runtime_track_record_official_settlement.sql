@@ -2,7 +2,10 @@
 -- Description: Recompute dry-run track record using official Polymarket settlement
 --              prices whenever they are available.
 
-CREATE OR REPLACE VIEW strategy_runtime_event_track_record AS
+DROP VIEW IF EXISTS strategy_runtime_daily_track_record;
+DROP VIEW IF EXISTS strategy_runtime_event_track_record;
+
+CREATE VIEW strategy_runtime_event_track_record AS
 WITH settlement_prices AS (
     SELECT
         token_id,
@@ -142,7 +145,7 @@ SELECT
     END AS open_quantity
 FROM aggregated;
 
-CREATE OR REPLACE VIEW strategy_runtime_daily_track_record AS
+CREATE VIEW strategy_runtime_daily_track_record AS
 SELECT
     runtime_mode,
     strategy_id,
