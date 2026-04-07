@@ -13,13 +13,15 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   PLATFORM_TARGET: x86_64-unknown-linux-gnu
   DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
+  DEPLOY_RELEASE_TAG: deploy-tango-1-1-latest
+  DEPLOY_BUNDLE_NAME: ploy-runner-tango-1-1.tar.gz
 
 jobs:
   build-and-deploy:
@@ -52,6 +54,44 @@ jobs:
             -p ploy-runner
           strip "target/${PLATFORM_TARGET}/release/ploy-runner" || true
 
+      - name: Build deploy bundle
+        run: |
+          rm -rf dist
+          mkdir -p dist/bin dist/config/strategies dist/migrations
+          cp target/${PLATFORM_TARGET}/release/ploy-runner dist/bin/ploy-runner
+          cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
+          cp migrations/027_reference_price_ticks.sql dist/migrations/027_reference_price_ticks.sql
+          cp migrations/028_pm_market_catalog.sql dist/migrations/028_pm_market_catalog.sql
+          cp migrations/029_sports_state_events.sql dist/migrations/029_sports_state_events.sql
+          tar -C dist -czf "${DEPLOY_BUNDLE_NAME}" .
+          sha256sum "${DEPLOY_BUNDLE_NAME}" > "${DEPLOY_BUNDLE_NAME}.sha256"
+
+      - name: Publish deploy bundle to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "${DEPLOY_RELEASE_TAG}" --yes --cleanup-tag || true
+          gh release create "${DEPLOY_RELEASE_TAG}" \
+            "${DEPLOY_BUNDLE_NAME}#${DEPLOY_BUNDLE_NAME}" \
+            "${DEPLOY_BUNDLE_NAME}.sha256#${DEPLOY_BUNDLE_NAME}.sha256" \
+            --target "${GITHUB_SHA}" \
+            --title "Deploy bundle for tango-1-1" \
+            --notes "Deploy bundle for ${GITHUB_SHA}" \
+            --prerelease
+
+      - name: Resolve deploy asset ids
+        id: resolve_deploy_asset_ids
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${DEPLOY_RELEASE_TAG}")
+          bundle_asset_id=$(jq -r '.assets[] | select(.name == "'"${DEPLOY_BUNDLE_NAME}"'") | .id' <<<"${release_json}")
+          checksum_asset_id=$(jq -r '.assets[] | select(.name == "'"${DEPLOY_BUNDLE_NAME}.sha256"'") | .id' <<<"${release_json}")
+          test -n "${bundle_asset_id}" && test "${bundle_asset_id}" != "null"
+          test -n "${checksum_asset_id}" && test "${checksum_asset_id}" != "null"
+          echo "bundle_asset_id=${bundle_asset_id}" >> "${GITHUB_OUTPUT}"
+          echo "checksum_asset_id=${checksum_asset_id}" >> "${GITHUB_OUTPUT}"
+
       - name: Configure SSH for deploy
         run: |
           install -m 700 -d ~/.ssh
@@ -71,41 +111,40 @@ jobs:
 
       - name: Prepare remote directories
         run: |
-          ssh tango-1-1 'mkdir -p /root/ploy/bin /root/ploy/config/strategies /root/ploy/migrations'
+          ssh tango-1-1 'mkdir -p /root/ploy/bin /root/ploy/config/strategies /root/ploy/migrations /root/ploy/tmp'
 
-      - name: Upload binary to tango-1-1
+      - name: Pull bundle from GitHub and restart services
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          for attempt in 1 2 3; do
-            ssh tango-1-1 'rm -f /root/ploy/bin/ploy-runner.new && cat > /root/ploy/bin/ploy-runner.new' < target/${PLATFORM_TARGET}/release/ploy-runner
-            ssh tango-1-1 'mv /root/ploy/bin/ploy-runner.new /root/ploy/bin/ploy-runner'
-            exit 0
-            echo "binary upload attempt ${attempt} failed" >&2
-            sleep 10
-          done
-          exit 1
-
-      - name: Upload config to tango-1-1
-        run: |
-          scp -O config/strategies/02-pm5d.unified.toml tango-1-1:/root/ploy/config/strategies/02-pm5d.unified.toml
-
-      - name: Upload required migrations to tango-1-1
-        run: |
-          scp -O migrations/027_reference_price_ticks.sql tango-1-1:/root/ploy/migrations/027_reference_price_ticks.sql
-          scp -O migrations/028_pm_market_catalog.sql tango-1-1:/root/ploy/migrations/028_pm_market_catalog.sql
-          scp -O migrations/029_sports_state_events.sql tango-1-1:/root/ploy/migrations/029_sports_state_events.sql
-
-      - name: Restart ploy-runner services
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ env.DEPLOY_HOST }}
-          username: root
-          key: ${{ secrets.TANGO_1_1_SSH_KEY }}
-          script_stop: true
-          script: |
+          ssh tango-1-1 /bin/bash <<EOF
             set -euo pipefail
+            WORKDIR=/root/ploy/tmp/deploy-${GITHUB_SHA}
+            rm -rf "\${WORKDIR}"
+            mkdir -p "\${WORKDIR}"
+
+            curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/octet-stream" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.resolve_deploy_asset_ids.outputs.bundle_asset_id }}" \
+              -o "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}"
+
+            curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/octet-stream" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${{ steps.resolve_deploy_asset_ids.outputs.checksum_asset_id }}" \
+              -o "\${WORKDIR}/${DEPLOY_BUNDLE_NAME}.sha256"
+
+            cd "\${WORKDIR}"
+            sha256sum -c "${DEPLOY_BUNDLE_NAME}.sha256"
+            tar -xzf "${DEPLOY_BUNDLE_NAME}"
 
             # Make binary executable
-            chmod +x /root/ploy/bin/ploy-runner
+            install -m 0755 ./bin/ploy-runner /root/ploy/bin/ploy-runner
+            install -m 0644 ./config/strategies/02-pm5d.unified.toml /root/ploy/config/strategies/02-pm5d.unified.toml
+            install -m 0644 ./migrations/027_reference_price_ticks.sql /root/ploy/migrations/027_reference_price_ticks.sql
+            install -m 0644 ./migrations/028_pm_market_catalog.sql /root/ploy/migrations/028_pm_market_catalog.sql
+            install -m 0644 ./migrations/029_sports_state_events.sql /root/ploy/migrations/029_sports_state_events.sql
 
             # Apply additive runner migrations before restarting services.
             mkdir -p /root/ploy/migrations
@@ -129,6 +168,7 @@ jobs:
             # Show recent logs
             journalctl -u ploy-strategy-directional-dryrun -n 20 --no-pager
             journalctl -u ploy-quote-collector -n 20 --no-pager
+          EOF
 
       - name: Deployment summary
         run: |
