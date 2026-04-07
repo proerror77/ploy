@@ -121,7 +121,7 @@ jobs:
         run: |
           ssh tango-1-1 /bin/bash <<EOF
             set -euo pipefail
-            DEPLOY_STARTED_AT=\$(date -u +"%Y-%m-%d %H:%M:%S")
+            DEPLOY_STARTED_AT=\$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             WORKDIR=/root/ploy/tmp/deploy-${GITHUB_SHA}
             rm -rf "\${WORKDIR}"
             mkdir -p "\${WORKDIR}"
