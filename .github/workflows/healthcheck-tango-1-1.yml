@@ -86,10 +86,15 @@ jobs:
               exit 1
             fi
 
+            latest_signal=$(
+              PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
+                "SELECT coalesce(max(recorded_at)::text, 'none') FROM signal_history"
+            )
+
             echo "postgres=$(systemctl show -P ActiveState postgresql@16-main)"
             echo "dryrun=$(systemctl show -P ActiveState ploy-strategy-directional-dryrun.service)"
             echo "collector=$(systemctl show -P ActiveState ploy-quote-collector.service)"
-            echo "latest_signal=$(PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \"SELECT coalesce(max(recorded_at)::text, 'none') FROM signal_history\")"
+            echo "latest_signal=${latest_signal}"
           EOF
 
       - name: Healthcheck summary
