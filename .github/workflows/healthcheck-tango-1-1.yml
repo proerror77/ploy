@@ -1,0 +1,101 @@
+name: Healthcheck tango-1-1
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"
+
+concurrency:
+  group: healthcheck-tango-1-1
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
+
+jobs:
+  healthcheck:
+    name: Verify tango-1-1 runtime health
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: tango-1-1
+
+    steps:
+      - name: Install SSH client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client
+
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' '${{ secrets.TANGO_1_1_SSH_KEY }}' > ~/.ssh/tango_1_1_key
+          chmod 600 ~/.ssh/tango_1_1_key
+          cat > ~/.ssh/config <<EOF
+          Host tango-1-1
+            HostName ${DEPLOY_HOST}
+            User root
+            IdentityFile ~/.ssh/tango_1_1_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ServerAliveInterval 30
+            ServerAliveCountMax 20
+            ConnectTimeout 30
+          EOF
+
+      - name: Run remote health checks
+        run: |
+          ssh tango-1-1 /bin/bash <<'EOF'
+            set -euo pipefail
+
+            require_postgres() {
+              systemctl is-active --quiet postgresql@16-main
+              PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -v ON_ERROR_STOP=1 -Atqc "SELECT 1" >/dev/null
+            }
+
+            require_service_guardrails() {
+              local unit="$1"
+              local restart_policy
+              local oom_policy
+              local memory_high
+              local memory_max
+
+              restart_policy=$(systemctl show -P Restart "${unit}")
+              oom_policy=$(systemctl show -P OOMPolicy "${unit}")
+              memory_high=$(systemctl show -P MemoryHigh "${unit}")
+              memory_max=$(systemctl show -P MemoryMax "${unit}")
+
+              test "${restart_policy}" = "always"
+              test "${oom_policy}" = "kill"
+              test "${memory_high}" != "[not set]"
+              test "${memory_max}" != "[not set]"
+            }
+
+            require_postgres
+
+            systemctl is-active --quiet ploy-strategy-directional-dryrun.service
+            systemctl is-active --quiet ploy-quote-collector.service
+            require_service_guardrails ploy-strategy-directional-dryrun.service
+            require_service_guardrails ploy-quote-collector.service
+
+            if journalctl -u ploy-strategy-directional-dryrun.service --since '15 minutes ago' --no-pager \
+              | grep -E "DB connection failed|running without persistence|Signal recorder disabled"; then
+              echo "dry-run persistence degraded within the last 15 minutes" >&2
+              exit 1
+            fi
+
+            echo "postgres=$(systemctl show -P ActiveState postgresql@16-main)"
+            echo "dryrun=$(systemctl show -P ActiveState ploy-strategy-directional-dryrun.service)"
+            echo "collector=$(systemctl show -P ActiveState ploy-quote-collector.service)"
+            echo "latest_signal=$(PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \"SELECT coalesce(max(recorded_at)::text, 'none') FROM signal_history\")"
+          EOF
+
+      - name: Healthcheck summary
+        run: |
+          echo "## tango-1-1 healthcheck" >> "$GITHUB_STEP_SUMMARY"
+          echo "- PostgreSQL must be active and queryable" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ploy-strategy-directional-dryrun and ploy-quote-collector must be active" >> "$GITHUB_STEP_SUMMARY"
+          echo "- systemd guardrails must remain configured on both services" >> "$GITHUB_STEP_SUMMARY"
+          echo "- dry-run must not log degraded persistence messages in the last 15 minutes" >> "$GITHUB_STEP_SUMMARY"

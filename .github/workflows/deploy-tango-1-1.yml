@@ -119,9 +119,33 @@ jobs:
         run: |
           ssh tango-1-1 /bin/bash <<EOF
             set -euo pipefail
+            DEPLOY_STARTED_AT=\$(date -u +"%Y-%m-%d %H:%M:%S")
             WORKDIR=/root/ploy/tmp/deploy-${GITHUB_SHA}
             rm -rf "\${WORKDIR}"
             mkdir -p "\${WORKDIR}"
+
+            require_postgres() {
+              systemctl is-active --quiet postgresql@16-main
+              PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -v ON_ERROR_STOP=1 -Atqc "SELECT 1" >/dev/null
+            }
+
+            require_service_guardrails() {
+              local unit="\$1"
+              local restart_policy
+              local oom_policy
+              local memory_high
+              local memory_max
+
+              restart_policy=\$(systemctl show -P Restart "\${unit}")
+              oom_policy=\$(systemctl show -P OOMPolicy "\${unit}")
+              memory_high=\$(systemctl show -P MemoryHigh "\${unit}")
+              memory_max=\$(systemctl show -P MemoryMax "\${unit}")
+
+              test "\${restart_policy}" = "always"
+              test "\${oom_policy}" = "kill"
+              test "\${memory_high}" != "[not set]"
+              test "\${memory_max}" != "[not set]"
+            }
 
             curl -fsSL \
               -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -157,17 +181,31 @@ jobs:
               fi
             done
 
-            systemctl restart ploy-strategy-directional-dryrun || echo "Service not running: ploy-strategy-directional-dryrun"
-            systemctl restart ploy-quote-collector || echo "Service not running: ploy-quote-collector"
+            require_postgres
+
+            systemctl restart ploy-strategy-directional-dryrun.service
+            systemctl restart ploy-quote-collector.service
+
+            sleep 5
+            require_postgres
+            systemctl is-active --quiet ploy-strategy-directional-dryrun.service
+            systemctl is-active --quiet ploy-quote-collector.service
+            require_service_guardrails ploy-strategy-directional-dryrun.service
+            require_service_guardrails ploy-quote-collector.service
+
+            if journalctl -u ploy-strategy-directional-dryrun.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
+              | grep -E "DB connection failed|running without persistence|Signal recorder disabled"; then
+              echo "ploy-strategy-directional-dryrun started in degraded persistence mode" >&2
+              exit 1
+            fi
 
             # Check service status
-            sleep 2
-            systemctl status ploy-strategy-directional-dryrun --no-pager || true
-            systemctl status ploy-quote-collector --no-pager || true
+            systemctl status ploy-strategy-directional-dryrun.service --no-pager
+            systemctl status ploy-quote-collector.service --no-pager
 
             # Show recent logs
-            journalctl -u ploy-strategy-directional-dryrun -n 20 --no-pager
-            journalctl -u ploy-quote-collector -n 20 --no-pager
+            journalctl -u ploy-strategy-directional-dryrun.service -n 20 --no-pager
+            journalctl -u ploy-quote-collector.service -n 20 --no-pager
           EOF
 
       - name: Deployment summary
@@ -177,3 +215,5 @@ jobs:
           echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Services: \`ploy-strategy-directional-dryrun\`, \`ploy-quote-collector\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Postgres pre/postflight: required" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Persistence guardrail: deployment fails if dry-run starts without DB-backed recorder" >> "$GITHUB_STEP_SUMMARY"

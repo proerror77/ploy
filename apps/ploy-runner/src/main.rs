@@ -205,6 +205,10 @@ fn prepare_feed_symbols(mode: RuntimeMode, strategy_symbols: &[String]) -> Vec<S
     }
 }
 
+fn database_unavailable_is_fatal(mode: RuntimeMode, database_url_present: bool) -> bool {
+    database_url_present && matches!(mode, RuntimeMode::Live | RuntimeMode::DryRun)
+}
+
 #[tokio::main]
 async fn main() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -456,18 +460,27 @@ async fn main() {
             // Use live feeds for dry-run and live modes.
             // Connect to DB if DATABASE_URL is set so that discovered markets and
             // quotes are persisted for future backtest replay.
-            let db_pool: Option<sqlx::PgPool> = match env::var("DATABASE_URL") {
-                Ok(url) => match PgPoolOptions::new().max_connections(5).connect(&url).await {
+            let db_url = env::var("DATABASE_URL").ok();
+            let db_pool: Option<sqlx::PgPool> = match db_url.as_deref() {
+                Some(url) => match PgPoolOptions::new().max_connections(5).connect(url).await {
                     Ok(p) => {
                         info!("DB connected — market metadata and quotes will be persisted");
                         Some(p)
                     }
                     Err(e) => {
+                        if database_unavailable_is_fatal(runtime_config.mode, true) {
+                            error!(
+                                error = %e,
+                                "DB connection failed for configured runtime; refusing to start without persistence"
+                            );
+                            std::process::exit(1);
+                        }
+
                         warn!(error = %e, "DB connection failed; running without persistence");
                         None
                     }
                 },
-                Err(_) => {
+                None => {
                     info!("DATABASE_URL not set — running without DB persistence");
                     None
                 }
@@ -778,7 +791,7 @@ fn build_live_executor() -> CallbackExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_feed_symbols;
+    use super::{database_unavailable_is_fatal, prepare_feed_symbols};
     use ploy_strategy_bundles::RuntimeMode;
 
     #[test]
@@ -788,5 +801,14 @@ mod tests {
         let prepared = prepare_feed_symbols(RuntimeMode::DryRun, &symbols);
 
         assert_eq!(prepared, vec!["BTCUSDT".to_string(), "ethusdt".to_string()]);
+    }
+
+    #[test]
+    fn treats_live_and_dry_run_db_connection_failures_as_fatal_when_configured() {
+        assert!(database_unavailable_is_fatal(RuntimeMode::Live, true));
+        assert!(database_unavailable_is_fatal(RuntimeMode::DryRun, true));
+        assert!(!database_unavailable_is_fatal(RuntimeMode::Backtest, true));
+        assert!(!database_unavailable_is_fatal(RuntimeMode::Replay, true));
+        assert!(!database_unavailable_is_fatal(RuntimeMode::DryRun, false));
     }
 }
