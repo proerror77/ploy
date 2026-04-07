@@ -6,14 +6,14 @@
 //! Implements [`StrategyLogic`] so it plugs into [`StrategyRuntime`]
 //! for backtest, dry-run, and live modes identically.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -320,6 +320,136 @@ impl DirectionalStrategy {
         // Keep a stable venue-facing share quantity while preserving the
         // fixed-dollar stake semantics configured at strategy level.
         (self.config.stake_usd / entry_price).round_dp(6)
+    }
+
+    fn event_has_open_position(&self, event: &EventWindow, positions: &PositionLedger) -> bool {
+        positions.net_qty(&event.up_token) > Decimal::ZERO
+            || positions.net_qty(&event.down_token) > Decimal::ZERO
+    }
+
+    fn resolve_expired_event_outcome(
+        &self,
+        event: &EventWindow,
+        settlement: Option<bool>,
+    ) -> Option<bool> {
+        if let Some(resolved) = settlement {
+            return Some(resolved);
+        }
+
+        match (
+            self.spot.get(&event.symbol).map(|spot| spot.price),
+            event.open_price,
+        ) {
+            (Some(current), Some(open)) => Some(current >= open),
+            _ => None,
+        }
+    }
+
+    fn build_settlement_exits(
+        &self,
+        event: &EventWindow,
+        end_time: DateTime<Utc>,
+        up_won: bool,
+        positions: &PositionLedger,
+    ) -> Vec<StrategyDecision> {
+        let mut exits = Vec::new();
+
+        if positions.net_qty(&event.up_token) > Decimal::ZERO {
+            let settle_price = if up_won { dec!(1.00) } else { dec!(0.00) };
+            let qty = positions.net_qty(&event.up_token);
+            exits.push(StrategyDecision::Exit(TradingIntent {
+                intent_id: format!("settle_{}", event.event_id),
+                deployment_id: String::new(),
+                market_id: event.event_id.clone(),
+                token_id: event.up_token.clone(),
+                side: TradeSide::Sell,
+                quantity: qty,
+                limit_price: Some(settle_price),
+                purpose: IntentPurpose::Exit,
+                created_at: end_time,
+            }));
+            info!(
+                event_id = %event.event_id,
+                token = %event.up_token,
+                outcome = if up_won { "WIN" } else { "LOSE" },
+                settle_price = %settle_price,
+                "Settlement: UP token"
+            );
+        }
+
+        if positions.net_qty(&event.down_token) > Decimal::ZERO {
+            let settle_price = if up_won { dec!(0.00) } else { dec!(1.00) };
+            let qty = positions.net_qty(&event.down_token);
+            exits.push(StrategyDecision::Exit(TradingIntent {
+                intent_id: format!("settle_{}", event.event_id),
+                deployment_id: String::new(),
+                market_id: event.event_id.clone(),
+                token_id: event.down_token.clone(),
+                side: TradeSide::Sell,
+                quantity: qty,
+                limit_price: Some(settle_price),
+                purpose: IntentPurpose::Exit,
+                created_at: end_time,
+            }));
+            info!(
+                event_id = %event.event_id,
+                token = %event.down_token,
+                outcome = if up_won { "LOSE" } else { "WIN" },
+                settle_price = %settle_price,
+                "Settlement: DOWN token"
+            );
+        }
+
+        exits
+    }
+
+    fn settle_expired_events_for_symbol(
+        &mut self,
+        symbol: &str,
+        positions: &PositionLedger,
+        now: DateTime<Utc>,
+    ) -> Vec<StrategyDecision> {
+        let expired_events: Vec<EventWindow> = self
+            .events
+            .get(symbol)
+            .map(|events| {
+                events
+                    .iter()
+                    .filter(|event| event.end_time <= now)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut exits = Vec::new();
+        let mut resolved_event_ids = HashSet::new();
+
+        for event in expired_events {
+            if !self.event_has_open_position(&event, positions) {
+                resolved_event_ids.insert(event.event_id.clone());
+                continue;
+            }
+
+            let Some(up_won) = self.resolve_expired_event_outcome(&event, None) else {
+                warn!(
+                    event_id = %event.event_id,
+                    symbol = %event.symbol,
+                    "Settlement pending: official outcome unavailable and fallback spot/open price missing"
+                );
+                continue;
+            };
+
+            exits.extend(self.build_settlement_exits(&event, event.end_time, up_won, positions));
+            resolved_event_ids.insert(event.event_id.clone());
+        }
+
+        if !resolved_event_ids.is_empty() {
+            if let Some(events) = self.events.get_mut(symbol) {
+                events.retain(|event| !resolved_event_ids.contains(&event.event_id));
+            }
+        }
+
+        exits
     }
 
     /// Core signal evaluation — the unified 8-gate pipeline.
@@ -655,6 +785,11 @@ impl StrategyLogic for DirectionalStrategy {
                     }
                 }
 
+                let exits = self.settle_expired_events_for_symbol(symbol, positions, *ts);
+                if !exits.is_empty() {
+                    return exits;
+                }
+
                 self.reset_daily_counter(*ts);
                 if self.daily_trades >= self.config.max_daily_trades {
                     return vec![];
@@ -716,9 +851,21 @@ impl StrategyLogic for DirectionalStrategy {
                 let now = self
                     .feed_time
                     .unwrap_or_else(|| *end_time - chrono::Duration::seconds(1));
+                let mut stale_expired = Vec::new();
+                if let Some(existing) = self.events.get(symbol) {
+                    stale_expired = existing
+                        .iter()
+                        .filter(|event| {
+                            event.end_time <= now && !self.event_has_open_position(event, positions)
+                        })
+                        .map(|event| event.event_id.clone())
+                        .collect();
+                }
                 let events = self.events.entry(symbol.clone()).or_default();
-                // Prune expired
-                events.retain(|e| e.end_time > now);
+                if !stale_expired.is_empty() {
+                    let stale_expired: HashSet<String> = stale_expired.into_iter().collect();
+                    events.retain(|event| !stale_expired.contains(&event.event_id));
+                }
                 // Dedup
                 if events.iter().any(|e| e.event_id == *event_id) {
                     return vec![];
@@ -759,96 +906,39 @@ impl StrategyLogic for DirectionalStrategy {
                 end_time,
                 resolved_up_won: settlement,
             } => {
-                // Settle positions: find any tokens from this event that we hold
                 let mut exits = Vec::new();
-
-                // Find the event's tokens before removing
-                let mut event_tokens: Vec<(String, String, Option<Decimal>)> = Vec::new();
+                let mut remove_event = true;
+                let mut matching_events = Vec::new();
                 for events in self.events.values() {
                     for ev in events {
                         if ev.event_id == *event_id {
-                            event_tokens.push((
-                                ev.up_token.clone(),
-                                ev.down_token.clone(),
-                                ev.open_price,
-                            ));
+                            matching_events.push(ev.clone());
                         }
                     }
                 }
 
-                for (up_token, down_token, open_price) in &event_tokens {
-                    // Determine outcome: use settlement from EventExpired if available,
-                    // otherwise fall back to spot price comparison.
-                    let up_won = if let Some(resolved) = settlement {
-                        *resolved
-                    } else {
-                        // Fallback only when official settlement is unavailable.
-                        let symbol = self
-                            .token_symbol
-                            .get(up_token)
-                            .or_else(|| self.token_symbol.get(down_token));
-                        let spot = symbol.and_then(|s| self.spot.get(s)).map(|s| s.price);
-                        match (spot, open_price) {
-                            (Some(current), Some(open)) => current >= *open,
-                            _ => {
-                                warn!(event_id = %event_id, token = %up_token, "Missing official settlement and fallback spot; defaulting to UP");
-                                true
-                            }
-                        }
+                for event in matching_events {
+                    if !self.event_has_open_position(&event, positions) {
+                        continue;
+                    }
+
+                    let Some(up_won) = self.resolve_expired_event_outcome(&event, *settlement) else {
+                        warn!(
+                            event_id = %event_id,
+                            symbol = %event.symbol,
+                            "Settlement pending: official outcome unavailable and fallback spot/open price missing"
+                        );
+                        remove_event = false;
+                        continue;
                     };
 
-                    // Check if we hold the UP token
-                    if positions.net_qty(up_token) > Decimal::ZERO {
-                        let settle_price = if up_won { dec!(1.00) } else { dec!(0.00) };
-                        let qty = positions.net_qty(up_token);
-                        exits.push(StrategyDecision::Exit(TradingIntent {
-                            intent_id: format!("settle_{}", event_id),
-                            deployment_id: String::new(),
-                            market_id: event_id.clone(),
-                            token_id: up_token.clone(),
-                            side: TradeSide::Sell,
-                            quantity: qty,
-                            limit_price: Some(settle_price),
-                            purpose: IntentPurpose::Exit,
-                            created_at: *end_time,
-                        }));
-                        info!(
-                            event_id,
-                            token = %up_token,
-                            outcome = if up_won { "WIN" } else { "LOSE" },
-                            settle_price = %settle_price,
-                            "Settlement: UP token"
-                        );
-                    }
-
-                    // Check if we hold the DOWN token
-                    if positions.net_qty(down_token) > Decimal::ZERO {
-                        let settle_price = if up_won { dec!(0.00) } else { dec!(1.00) };
-                        let qty = positions.net_qty(down_token);
-                        exits.push(StrategyDecision::Exit(TradingIntent {
-                            intent_id: format!("settle_{}", event_id),
-                            deployment_id: String::new(),
-                            market_id: event_id.clone(),
-                            token_id: down_token.clone(),
-                            side: TradeSide::Sell,
-                            quantity: qty,
-                            limit_price: Some(settle_price),
-                            purpose: IntentPurpose::Exit,
-                            created_at: *end_time,
-                        }));
-                        info!(
-                            event_id,
-                            token = %down_token,
-                            outcome = if up_won { "LOSE" } else { "WIN" },
-                            settle_price = %settle_price,
-                            "Settlement: DOWN token"
-                        );
-                    }
+                    exits.extend(self.build_settlement_exits(&event, *end_time, up_won, positions));
                 }
 
-                // Remove expired events
-                for events in self.events.values_mut() {
-                    events.retain(|e| e.event_id != *event_id);
+                if remove_event {
+                    for events in self.events.values_mut() {
+                        events.retain(|e| e.event_id != *event_id);
+                    }
                 }
                 exits
             }
@@ -1200,6 +1290,78 @@ mod tests {
             StrategyDecision::Exit(intent) => assert_eq!(intent.limit_price, Some(dec!(0.00))),
             other => panic!("Expected Exit, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn unresolved_expiry_waits_for_later_spot_instead_of_defaulting_up() {
+        let config = default_config();
+        let mut strat = DirectionalStrategy::new(config);
+        let now = Utc::now();
+
+        strat.events.insert(
+            "BTCUSDT".into(),
+            vec![EventWindow {
+                event_id: "evt1".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up1".into(),
+                down_token: "dn1".into(),
+                end_time: now,
+                open_price: Some(dec!(100000)),
+            }],
+        );
+        strat.token_symbol.insert("up1".into(), "BTCUSDT".into());
+        strat.token_symbol.insert("dn1".into(), "BTCUSDT".into());
+
+        let mut positions = PositionLedger::default();
+        positions.apply_fill(&FillRecord {
+            fill_id: "fill-1".into(),
+            order_id: "order-1".into(),
+            token_id: "up1".into(),
+            side: TradeSide::Buy,
+            quantity: dec!(5),
+            price: dec!(0.40),
+            fee: Decimal::ZERO,
+            timestamp: now,
+        });
+
+        let pending = strat.on_update(
+            &MarketUpdate::EventExpired {
+                event_id: "evt1".into(),
+                end_time: now,
+                resolved_up_won: None,
+            },
+            &positions,
+            &OrderLedger::default(),
+        );
+
+        assert!(
+            pending.is_empty(),
+            "unresolved expiry should stay pending until settlement can be determined"
+        );
+        assert_eq!(strat.events["BTCUSDT"].len(), 1, "event should remain tracked");
+
+        let decisions = strat.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(99000),
+                ts: now + chrono::Duration::seconds(5),
+            },
+            &positions,
+            &OrderLedger::default(),
+        );
+
+        assert_eq!(decisions.len(), 1, "later spot should resolve the expiry");
+        match &decisions[0] {
+            StrategyDecision::Exit(intent) => assert_eq!(intent.limit_price, Some(dec!(0.00))),
+            other => panic!("Expected Exit, got {:?}", other),
+        }
+        assert!(
+            strat.events
+                .get("BTCUSDT")
+                .map(|events| events.is_empty())
+                .unwrap_or(true),
+            "resolved expiry should be pruned after settlement"
+        );
     }
 
     #[test]
