@@ -65,6 +65,7 @@ jobs:
           cp migrations/028_pm_market_catalog.sql dist/migrations/028_pm_market_catalog.sql
           cp migrations/029_sports_state_events.sql dist/migrations/029_sports_state_events.sql
           cp migrations/030_strategy_runtime_execution_audit.sql dist/migrations/030_strategy_runtime_execution_audit.sql
+          cp migrations/031_strategy_runtime_track_record_views.sql dist/migrations/031_strategy_runtime_track_record_views.sql
           cp deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf dist/deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf
           cp deployment/systemd/ploy-quote-collector.hardening.conf dist/deployment/systemd/ploy-quote-collector.hardening.conf
           tar -C dist -czf "${DEPLOY_BUNDLE_NAME}" .
@@ -212,6 +213,7 @@ jobs:
             install -m 0644 ./migrations/028_pm_market_catalog.sql /root/ploy/migrations/028_pm_market_catalog.sql
             install -m 0644 ./migrations/029_sports_state_events.sql /root/ploy/migrations/029_sports_state_events.sql
             install -m 0644 ./migrations/030_strategy_runtime_execution_audit.sql /root/ploy/migrations/030_strategy_runtime_execution_audit.sql
+            install -m 0644 ./migrations/031_strategy_runtime_track_record_views.sql /root/ploy/migrations/031_strategy_runtime_track_record_views.sql
 
             install -d /etc/systemd/system/ploy-strategy-directional-dryrun.service.d
             install -d /etc/systemd/system/ploy-quote-collector.service.d
@@ -225,7 +227,8 @@ jobs:
               /root/ploy/migrations/027_reference_price_ticks.sql \
               /root/ploy/migrations/028_pm_market_catalog.sql \
               /root/ploy/migrations/029_sports_state_events.sql \
-              /root/ploy/migrations/030_strategy_runtime_execution_audit.sql; do
+              /root/ploy/migrations/030_strategy_runtime_execution_audit.sql \
+              /root/ploy/migrations/031_strategy_runtime_track_record_views.sql; do
               if [ -f "\${migration}" ]; then
                 PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f "\${migration}"
               fi
