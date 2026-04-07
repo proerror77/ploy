@@ -226,8 +226,8 @@ jobs:
               /root/ploy/migrations/028_pm_market_catalog.sql \
               /root/ploy/migrations/029_sports_state_events.sql \
               /root/ploy/migrations/030_strategy_runtime_execution_audit.sql; do
-              if [ -f "${migration}" ]; then
-                PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f "${migration}"
+              if [ -f "\${migration}" ]; then
+                PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f "\${migration}"
               fi
             done
 
