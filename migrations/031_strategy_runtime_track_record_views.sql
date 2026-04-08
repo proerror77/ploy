@@ -1,6 +1,10 @@
 -- Migration: 031_strategy_runtime_track_record_views
 -- Description: Add readable track-record views on top of strategy runtime fill/order audits.
 
+-- Drop existing views to allow column changes (CASCADE handles dependent views).
+DROP VIEW IF EXISTS strategy_runtime_daily_track_record CASCADE;
+DROP VIEW IF EXISTS strategy_runtime_event_track_record CASCADE;
+
 CREATE OR REPLACE VIEW strategy_runtime_event_track_record AS
 WITH normalized_fills AS (
     SELECT
