@@ -7351,3 +7351,30 @@ fully applied on-host.
 - 2026-04-08: Host verification after deploy: `ploy-strategy-directional-dryrun` and `ploy-quote-collector` are active, required systemd guardrails are present, no `cargo`/`rustc` build remains on-host, and recent `clob_orderbook_snapshots` / `clob_quote_ticks` rows continue to grow.
 - 2026-04-08: Residual runtime risk remains in `ploy-quote-collector`: the service keeps ingesting data, but recent journals still show repeated WebSocket heartbeat timeouts and `ResetWithoutClosingHandshake` reconnect churn.
 - 2026-04-08: After relaxing the collector heartbeat window, the dominant failure mode shifted from heartbeat timeout to `Subscription lagged, missed N messages`, which points at the SDK broadcast buffer saturating under orderbook bursts while the collector is busy persisting each update.
+
+# Collector RTDS Heartbeat Follow-up (2026-04-09)
+
+## Goal
+Eliminate the last residual WebSocket heartbeat timeout in `ploy-quote-collector`
+by fixing the remaining RTDS client that still uses the SDK's default `5s/15s`
+heartbeat window.
+
+## File ownership
+
+- `apps/ploy-runner/src/collector.rs`
+  - owner: align Chainlink RTDS client heartbeat config with the collector's relaxed market-data settings
+- `tasks/todo.md`
+  - owner: track the root-cause confirmation and verification notes for the residual warning
+
+## Tasks
+
+- [x] Confirm the residual `Heartbeat timeout: no PONG received within 15s` cannot come from the main orderbook stream.
+- [x] Reuse the relaxed market-data WS config for the Chainlink RTDS client.
+- [x] Add focused regression coverage for the shared collector market-data WS config.
+- [ ] Re-run targeted runner validation and redeploy `tango-1-1`.
+
+## Progress notes
+
+- 2026-04-09: The only residual warning seen on host for collector PID `711917` was `Heartbeat timeout: no PONG received within 15s`. That cannot come from the main orderbook stream anymore because the collector CLOB client already uses a `45s` heartbeat timeout; it points at the remaining `RtdsClient::default()` Chainlink feed path, which still uses SDK defaults (`5s` interval / `15s` timeout).
+- 2026-04-09: `spawn_settlement_collector()` is HTTP polling, not WebSocket, so it is not part of the residual heartbeat problem.
+- 2026-04-09: Local validation passed with `CARGO_TARGET_DIR=/tmp/ploy-rtds-heartbeat rtk cargo check -p ploy-runner --bin ploy-runner` and `CARGO_TARGET_DIR=/tmp/ploy-rtds-heartbeat rtk cargo test -p ploy-runner collector_market_data_uses_relaxed_ws_heartbeat_settings`.
