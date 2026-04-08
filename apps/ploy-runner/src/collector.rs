@@ -25,9 +25,9 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 use crate::reference_prices::{
-    ReferenceAssetClass, ReferencePriceKey, ReferencePriceRegistry, ReferencePriceSnapshot,
-    ReferencePriceSource, latest_reference_price, market_symbol_to_chainlink_symbol,
-    new_reference_price_registry, normalize_reference_symbol, upsert_reference_price,
+    latest_reference_price, market_symbol_to_chainlink_symbol, new_reference_price_registry,
+    normalize_reference_symbol, upsert_reference_price, ReferenceAssetClass, ReferencePriceKey,
+    ReferencePriceRegistry, ReferencePriceSnapshot, ReferencePriceSource,
 };
 
 /// Configuration for the quote collector.
@@ -88,6 +88,7 @@ struct PersistResult {
 }
 
 const POLYMARKET_CLOB_WS_ENDPOINT: &str = "wss://ws-subscriptions-clob.polymarket.com";
+const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
 
 fn is_tradeable_price(price: Decimal) -> bool {
     price > rust_decimal_macros::dec!(0.02) && price < rust_decimal_macros::dec!(0.98)
@@ -142,7 +143,7 @@ fn book_timestamp(timestamp_ms: i64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis(timestamp_ms)
 }
 
-fn quote_collector_ws_config() -> PolymarketWsConfig {
+fn collector_market_data_ws_config() -> PolymarketWsConfig {
     let mut config = PolymarketWsConfig::default();
     // The collector only needs a healthy market-data stream, not a tightly policed
     // heartbeat. A wider window reduces needless reconnect churn on transient stalls.
@@ -210,8 +211,11 @@ impl QuoteCollector {
             info!(tokens = asset_ids.len(), "Subscribing to orderbook updates");
 
             // Create WebSocket client and subscribe
-            let client = ClobWsClient::new(POLYMARKET_CLOB_WS_ENDPOINT, quote_collector_ws_config())
-                .expect("collector WebSocket config should be valid");
+            let client = ClobWsClient::new(
+                POLYMARKET_CLOB_WS_ENDPOINT,
+                collector_market_data_ws_config(),
+            )
+            .expect("collector WebSocket config should be valid");
             let stream = match client.subscribe_orderbook(asset_ids) {
                 Ok(s) => s,
                 Err(e) => {
@@ -588,7 +592,11 @@ impl QuoteCollector {
 
             info!(symbols = ?symbols_chainlink, "Starting Chainlink price feed");
 
-            let client = RtdsClient::default();
+            let client = RtdsClient::new(
+                POLYMARKET_RTDS_WS_ENDPOINT,
+                collector_market_data_ws_config(),
+            )
+            .expect("collector RTDS WebSocket config should be valid");
             let stream = match client.subscribe_chainlink_prices(None) {
                 Ok(s) => s,
                 Err(e) => {
@@ -913,9 +921,9 @@ fn hex_to_decimal_string(hex: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OrderBookLevel, TokenMetadata, best_tradeable_ask, best_tradeable_bid, book_timestamp,
-        hex_to_decimal_string, normalize_token_id, quote_collector_ws_config,
-        serialize_orderbook_levels, snapshot_context,
+        best_tradeable_ask, best_tradeable_bid, book_timestamp, collector_market_data_ws_config,
+        hex_to_decimal_string, normalize_token_id, serialize_orderbook_levels, snapshot_context,
+        OrderBookLevel, TokenMetadata,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;
@@ -1002,8 +1010,8 @@ mod tests {
     }
 
     #[test]
-    fn quote_collector_uses_relaxed_ws_heartbeat_settings() {
-        let config = quote_collector_ws_config();
+    fn collector_market_data_uses_relaxed_ws_heartbeat_settings() {
+        let config = collector_market_data_ws_config();
         assert_eq!(config.heartbeat_interval, Duration::from_secs(15));
         assert_eq!(config.heartbeat_timeout, Duration::from_secs(45));
         assert!(config.reconnect.max_attempts.is_none());
