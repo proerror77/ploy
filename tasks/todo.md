@@ -7321,3 +7321,32 @@ be audited against later execution behavior and market outcomes.
 - 2026-04-06: `StrategyRuntime` records entry signals before calling the executor, so simulated rejections or no-fill paths still leave an audit trail.
 - 2026-04-06: `ploy-runner` now uses a DB-backed `BufferedRecorder` in live/dry-run when `DATABASE_URL` is configured and writes batches into `signal_history`.
 - 2026-04-06: Validation passed with `CARGO_TARGET_DIR=/tmp/ploy-signal-record rtk cargo test -p ploy-strategy-bundles` and `CARGO_TARGET_DIR=/tmp/ploy-signal-record rtk cargo check -p ploy-runner -p ploy-strategy-bundles`.
+
+# Deploy Follow-up Cleanup (2026-04-08)
+
+## Goal
+Remove repository state that causes `actions/checkout` post-job cleanup to emit a
+`git exit 128` warning, then re-verify that the latest `tango-1-1` deployment is
+fully applied on-host.
+
+## File ownership
+
+- `.gitignore`
+  - owner: ignore local Codex worktree scratch paths
+- `tasks/todo.md`
+  - owner: track deploy follow-up and review notes
+
+## Tasks
+
+- [x] Confirm whether the latest `Deploy to tango-1-1` run actually completed or only partially applied.
+- [x] Identify the cause of the lingering `/usr/bin/git` exit `128` annotation in GitHub Actions.
+- [x] Remove accidental `.codex/worktrees/*` gitlinks from the repo index and ignore that path going forward.
+- [x] Re-run targeted verification for checkout cleanliness and summarize any remaining remote runtime risks.
+
+## Review
+
+- 2026-04-08: Deploy run `24140301645` completed successfully and applied the migration/view fix on `tango-1-1`; both `strategy_runtime_event_track_record` and `strategy_runtime_daily_track_record` now exist on-host.
+- 2026-04-08: The remaining GitHub Actions annotation is not a deploy failure. `actions/checkout` post-job cleanup calls `git submodule foreach`, which fails because the repo index tracks three `.codex/worktrees/*` gitlinks without a matching `.gitmodules` entry.
+- 2026-04-08: Removed the accidental `.codex/worktrees/*` gitlinks from the index and ignored `.codex/worktrees/`, so future `actions/checkout` cleanup should stop emitting the false-positive submodule warning.
+- 2026-04-08: Host verification after deploy: `ploy-strategy-directional-dryrun` and `ploy-quote-collector` are active, required systemd guardrails are present, no `cargo`/`rustc` build remains on-host, and recent `clob_orderbook_snapshots` / `clob_quote_ticks` rows continue to grow.
+- 2026-04-08: Residual runtime risk remains in `ploy-quote-collector`: the service keeps ingesting data, but recent journals still show repeated WebSocket heartbeat timeouts and `ResetWithoutClosingHandshake` reconnect churn.

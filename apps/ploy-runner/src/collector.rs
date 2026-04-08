@@ -16,6 +16,7 @@ use futures::StreamExt;
 use polymarket_client_sdk::clob::ws::types::response::OrderBookLevel;
 use polymarket_client_sdk::clob::ws::{BookUpdate, Client as ClobWsClient};
 use polymarket_client_sdk::rtds::Client as RtdsClient;
+use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -86,6 +87,8 @@ struct PersistResult {
     quote_inserted: bool,
 }
 
+const POLYMARKET_CLOB_WS_ENDPOINT: &str = "wss://ws-subscriptions-clob.polymarket.com";
+
 fn is_tradeable_price(price: Decimal) -> bool {
     price > rust_decimal_macros::dec!(0.02) && price < rust_decimal_macros::dec!(0.98)
 }
@@ -137,6 +140,16 @@ fn snapshot_context(meta: &TokenMetadata, timeframe: &str) -> String {
 
 fn book_timestamp(timestamp_ms: i64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis(timestamp_ms)
+}
+
+fn quote_collector_ws_config() -> PolymarketWsConfig {
+    let mut config = PolymarketWsConfig::default();
+    // The collector only needs a healthy market-data stream, not a tightly policed
+    // heartbeat. A wider window reduces needless reconnect churn on transient stalls.
+    config.heartbeat_interval = StdDuration::from_secs(15);
+    config.heartbeat_timeout = StdDuration::from_secs(45);
+    config.reconnect = ReconnectConfig::default();
+    config
 }
 
 impl QuoteCollector {
@@ -197,7 +210,8 @@ impl QuoteCollector {
             info!(tokens = asset_ids.len(), "Subscribing to orderbook updates");
 
             // Create WebSocket client and subscribe
-            let client = ClobWsClient::default();
+            let client = ClobWsClient::new(POLYMARKET_CLOB_WS_ENDPOINT, quote_collector_ws_config())
+                .expect("collector WebSocket config should be valid");
             let stream = match client.subscribe_orderbook(asset_ids) {
                 Ok(s) => s,
                 Err(e) => {
@@ -900,10 +914,12 @@ fn hex_to_decimal_string(hex: &str) -> Option<String> {
 mod tests {
     use super::{
         OrderBookLevel, TokenMetadata, best_tradeable_ask, best_tradeable_bid, book_timestamp,
-        hex_to_decimal_string, normalize_token_id, serialize_orderbook_levels, snapshot_context,
+        hex_to_decimal_string, normalize_token_id, quote_collector_ws_config,
+        serialize_orderbook_levels, snapshot_context,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;
+    use std::time::Duration;
 
     #[test]
     fn normalize_token_id_converts_hex_to_decimal() {
@@ -983,5 +999,13 @@ mod tests {
     fn book_timestamp_converts_millis_to_utc_datetime() {
         let timestamp = book_timestamp(1_712_205_600_123).unwrap();
         assert_eq!(timestamp.to_rfc3339(), "2024-04-04T04:40:00.123+00:00");
+    }
+
+    #[test]
+    fn quote_collector_uses_relaxed_ws_heartbeat_settings() {
+        let config = quote_collector_ws_config();
+        assert_eq!(config.heartbeat_interval, Duration::from_secs(15));
+        assert_eq!(config.heartbeat_timeout, Duration::from_secs(45));
+        assert!(config.reconnect.max_attempts.is_none());
     }
 }

@@ -49,6 +49,7 @@ gen_parts/
 
 # Git worktrees (ephemeral, recreated per session)
 .worktrees/
+.codex/worktrees/
 
 # Codex/Claude sessions (legacy monolith, superseded by workspace crates)
 .codex-session-*/
