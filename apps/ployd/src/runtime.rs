@@ -11,7 +11,9 @@ use ploy_operator_contracts::{
     ActiveAlert, DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState,
     FillSnapshot, IntentPurpose, ObservedState, OrderControlResponse, OrderReplaceRequest,
     OrderSnapshot, PaperIntentResponse, PlatformMetrics, PnlSnapshotResponse,
-    PositionSnapshotResponse, RiskSnapshotResponse, TradingIntentSnapshot, TradingStateSnapshot,
+    PositionSnapshotResponse, ProposalActionKind, ProposalCreateRequest, ProposalDecisionRequest,
+    ProposalStatus, RiskSnapshotResponse, SafetyProposal, TradingIntentSnapshot,
+    TradingStateSnapshot,
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
 use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
@@ -21,9 +23,20 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub fn request_shutdown() {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+fn shutdown_requested() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+}
 
 #[cfg(test)]
 use ploy_trading::FillRecord;
@@ -41,6 +54,7 @@ pub struct PloyDaemon {
     pub control_plane: ControlPlane,
     pub supervisor: WorkerSupervisor,
     pub trading: BTreeMap<String, TradingRuntime>,
+    proposals: Vec<SafetyProposal>,
     live_execution: Box<dyn LiveExecutionGateway>,
     live_reconcile_failures: u32,
     next_live_reconcile_at: Option<DateTime<Utc>>,
@@ -66,6 +80,7 @@ impl PloyDaemon {
             control_plane,
             supervisor: WorkerSupervisor::default(),
             trading: BTreeMap::new(),
+            proposals: Vec::new(),
             live_execution,
             live_reconcile_failures: 0,
             next_live_reconcile_at: None,
@@ -73,6 +88,7 @@ impl PloyDaemon {
         };
         daemon.load_registry()?;
         daemon.load_trading_snapshots()?;
+        daemon.load_proposals()?;
         if daemon.config.trading_state_file.exists() {
             daemon
                 .control_plane
@@ -101,6 +117,9 @@ impl PloyDaemon {
             Err(err) => self.mark_live_runtime_degraded(err),
         }
         self.refresh_source_health();
+        if self.config.circuit_breaker_enabled {
+            self.evaluate_circuit_breakers();
+        }
         if let Err(err) = self.persist_registry() {
             self.control_plane.system.set_database_connected(false);
             self.control_plane
@@ -124,6 +143,7 @@ impl PloyDaemon {
             &self.control_plane.deployments.summaries(),
         )?;
         write_json(&self.config.trading_state_file, &self.trading_state())?;
+        write_json(&self.config.proposals_file, &self.proposals)?;
         Ok(())
     }
 
@@ -134,7 +154,10 @@ impl PloyDaemon {
     pub fn platform_metrics(&self) -> PlatformMetrics {
         let records = self.control_plane.deployments.records();
         let total_deployments = records.len();
-        let live_deployments = records.iter().filter(|record| record.runtime_mode == "live").count();
+        let live_deployments = records
+            .iter()
+            .filter(|record| record.runtime_mode == "live")
+            .count();
         let degraded_deployments = records
             .iter()
             .filter(|record| record.observed_state == ObservedState::Degraded)
@@ -146,6 +169,10 @@ impl PloyDaemon {
 
     pub fn active_alerts(&self) -> Vec<ActiveAlert> {
         self.control_plane.system.active_alerts()
+    }
+
+    pub fn proposals(&self) -> Vec<SafetyProposal> {
+        self.proposals.clone()
     }
 
     pub fn trading_state(&self) -> Vec<TradingStateSnapshot> {
@@ -187,6 +214,158 @@ impl PloyDaemon {
             .get(&record.deployment_id)
             .cloned()
             .expect("deployment persisted"))
+    }
+
+    pub fn create_proposal(
+        &mut self,
+        request: ProposalCreateRequest,
+    ) -> io::Result<SafetyProposal> {
+        if self
+            .control_plane
+            .deployments
+            .get(&request.target_deployment_id)
+            .is_none()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "deployment `{}` was not found",
+                    request.target_deployment_id
+                ),
+            ));
+        }
+
+        if matches!(
+            request.action_kind,
+            ProposalActionKind::ReduceMaxExposure
+        ) && request.proposed_max_gross_exposure.is_none()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reduce_max_exposure proposals require proposed_max_gross_exposure",
+            ));
+        }
+
+        let proposal = SafetyProposal {
+            proposal_id: next_proposal_id(&request.target_deployment_id),
+            action_kind: request.action_kind,
+            target_deployment_id: request.target_deployment_id,
+            status: ProposalStatus::Pending,
+            rationale: request.rationale,
+            evidence: request.evidence,
+            source_run_id: request.source_run_id,
+            proposed_max_gross_exposure: request.proposed_max_gross_exposure,
+            created_at: Utc::now(),
+            decided_at: None,
+            decision_note: None,
+        };
+        self.proposals.push(proposal.clone());
+        Ok(proposal)
+    }
+
+    pub fn approve_proposal(
+        &mut self,
+        proposal_id: &str,
+        request: ProposalDecisionRequest,
+    ) -> io::Result<Option<SafetyProposal>> {
+        let index = match self
+            .proposals
+            .iter()
+            .position(|proposal| proposal.proposal_id == proposal_id)
+        {
+            Some(index) => index,
+            None => return Ok(None),
+        };
+
+        if self.proposals[index].status != ProposalStatus::Pending {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("proposal `{proposal_id}` is no longer pending"),
+            ));
+        }
+
+        let action_kind = self.proposals[index].action_kind;
+        let target_deployment_id = self.proposals[index].target_deployment_id.clone();
+        let proposed_max_gross_exposure = self.proposals[index].proposed_max_gross_exposure;
+        let decision_note = request
+            .decision_note
+            .clone()
+            .or_else(|| Some("approved by operator".to_string()));
+
+        let action_result = match action_kind {
+            ProposalActionKind::PauseDeployment => self.control_deployment(
+                &target_deployment_id,
+                DeploymentControlRequest {
+                    desired_state: Some(DesiredState::Paused),
+                    deployment_state: None,
+                },
+            ),
+            ProposalActionKind::DrainDeployment => self.control_deployment(
+                &target_deployment_id,
+                DeploymentControlRequest {
+                    desired_state: None,
+                    deployment_state: Some(DeploymentState::Draining),
+                },
+            ),
+            ProposalActionKind::ReduceMaxExposure => {
+                let max_gross_exposure = proposed_max_gross_exposure.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "proposal missing proposed_max_gross_exposure",
+                    )
+                })?;
+                self.set_deployment_max_gross_exposure(
+                    &target_deployment_id,
+                    Some(max_gross_exposure),
+                )?;
+                Ok(self.inspect_deployment(&target_deployment_id))
+            }
+        };
+
+        match action_result {
+            Ok(_) => {
+                let proposal = &mut self.proposals[index];
+                proposal.status = ProposalStatus::Approved;
+                proposal.decided_at = Some(Utc::now());
+                proposal.decision_note = decision_note;
+                Ok(Some(proposal.clone()))
+            }
+            Err(err) => {
+                let proposal = &mut self.proposals[index];
+                proposal.status = ProposalStatus::Failed;
+                proposal.decided_at = Some(Utc::now());
+                proposal.decision_note = Some(err.to_string());
+                Err(err)
+            }
+        }
+    }
+
+    pub fn reject_proposal(
+        &mut self,
+        proposal_id: &str,
+        request: ProposalDecisionRequest,
+    ) -> io::Result<Option<SafetyProposal>> {
+        let Some(proposal) = self
+            .proposals
+            .iter_mut()
+            .find(|proposal| proposal.proposal_id == proposal_id)
+        else {
+            return Ok(None);
+        };
+
+        if proposal.status != ProposalStatus::Pending {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("proposal `{proposal_id}` is no longer pending"),
+            ));
+        }
+
+        proposal.status = ProposalStatus::Rejected;
+        proposal.decided_at = Some(Utc::now());
+        proposal.decision_note = request
+            .decision_note
+            .or_else(|| Some("rejected by operator".to_string()));
+        Ok(Some(proposal.clone()))
     }
 
     pub fn control_deployment(
@@ -918,6 +1097,21 @@ impl PloyDaemon {
         Ok(())
     }
 
+    fn load_proposals(&mut self) -> io::Result<()> {
+        if !self.config.proposals_file.exists() {
+            return Ok(());
+        }
+
+        let raw = fs::read_to_string(&self.config.proposals_file)?;
+        if raw.trim().is_empty() {
+            return Ok(());
+        }
+
+        self.proposals = serde_json::from_str(&raw)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(())
+    }
+
     fn tick(&mut self) {
         let records = self.control_plane.deployments.records();
 
@@ -939,7 +1133,9 @@ impl PloyDaemon {
                         self.control_plane.system.note_source_heartbeat(
                             format!("worker:{}", record.deployment_id),
                             "worker",
-                            ChronoDuration::milliseconds(self.config.worker_heartbeat_stale_after_ms as i64),
+                            ChronoDuration::milliseconds(
+                                self.config.worker_heartbeat_stale_after_ms as i64,
+                            ),
                         );
                     }
                 }
@@ -989,7 +1185,10 @@ impl PloyDaemon {
                 .source_is_stale(&format!("worker:{}", record.deployment_id));
             let live_source_stale = record.runtime_mode == "live"
                 && (self.control_plane.system.source_is_stale("live_reconcile")
-                    || self.control_plane.system.source_is_stale("venue:polymarket"));
+                    || self
+                        .control_plane
+                        .system
+                        .source_is_stale("venue:polymarket"));
 
             if worker_stale || live_source_stale {
                 self.control_plane
@@ -1028,6 +1227,77 @@ impl PloyDaemon {
             &self.control_plane.deployments.records(),
         )
     }
+
+    fn set_deployment_max_gross_exposure(
+        &mut self,
+        deployment_id: &str,
+        max_gross_exposure: Option<Decimal>,
+    ) -> io::Result<()> {
+        // Validate against current exposure BEFORE mutating the registry so that
+        // a failed check never leaves a partially-applied limit in memory.
+        if let Some(limit) = max_gross_exposure {
+            if let Some(runtime) = self.trading.get(deployment_id) {
+                let current = runtime.snapshot(&BTreeMap::new()).risk.total_gross_exposure;
+                if current > limit {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "current exposure {} exceeds proposed limit {} for `{}`",
+                            current, limit, deployment_id
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let record = self
+            .control_plane
+            .deployments
+            .set_max_gross_exposure(deployment_id, max_gross_exposure)
+            .cloned()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("deployment `{deployment_id}` was not found"),
+                )
+            })?;
+
+        self.persist_registry()?;
+
+        if self.trading.contains_key(&record.deployment_id) {
+            let _ = self.enforce_current_exposure_limit(&record);
+        }
+        Ok(())
+    }
+
+    fn enforce_current_exposure_limit(&self, record: &DeploymentRecord) -> io::Result<()> {
+        let Some(limit) = record.max_gross_exposure else {
+            return Ok(());
+        };
+        let Some(runtime) = self.trading.get(&record.deployment_id) else {
+            return Ok(());
+        };
+        let current = runtime.snapshot(&BTreeMap::new()).risk.total_gross_exposure;
+        if current > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "current exposure {} exceeds proposed limit {} for `{}`",
+                    current, limit, record.deployment_id
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn next_proposal_id(target_deployment_id: &str) -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_millis();
+    let target = target_deployment_id.replace('.', "-");
+    format!("proposal-{target}-{millis}")
 }
 
 fn build_trading_state_snapshot(
@@ -1322,6 +1592,17 @@ pub fn run_shared_forever(
     events: Arc<EventBroker>,
 ) -> io::Result<()> {
     loop {
+        if shutdown_requested() {
+            eprintln!("ployd: shutdown signal received, writing final snapshots");
+            let mut daemon = daemon
+                .lock()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "daemon lock poisoned"))?;
+            if let Err(err) = daemon.write_runtime_snapshots() {
+                eprintln!("ployd: final snapshot write failed: {err}");
+            }
+            eprintln!("ployd: shutdown complete");
+            return Ok(());
+        }
         let tick_interval_ms = {
             let mut daemon = daemon
                 .lock()
@@ -1346,7 +1627,9 @@ where
     fs::create_dir_all(parent)?;
     let body = serde_json::to_vec_pretty(value)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    fs::write(path, body)
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, &body)?;
+    fs::rename(&tmp_path, path)
 }
 
 #[cfg(test)]
@@ -2617,8 +2900,17 @@ mod tests {
 
         let alerts = daemon.active_alerts();
         assert_eq!(alerts.len(), 2);
-        assert!(alerts.iter().any(|alert| alert.source_id == "live_reconcile"));
-        assert!(alerts.iter().any(|alert| alert.source_id == "venue:polymarket"));
-        assert!(daemon.control_plane.system.status().status.starts_with("degraded@"));
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.source_id == "live_reconcile"));
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.source_id == "venue:polymarket"));
+        assert!(daemon
+            .control_plane
+            .system
+            .status()
+            .status
+            .starts_with("degraded@"));
     }
 }
