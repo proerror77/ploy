@@ -10,6 +10,7 @@ description = "Ploy platform daemon workspace entry point"
 [dependencies]
 chrono.workspace = true
 hmac.workspace = true
+libc = "0.2"
 ploy-connectivity.workspace = true
 ploy-deployments.workspace = true
 ploy-operator-contracts.workspace = true

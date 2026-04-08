@@ -19,7 +19,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,7 +30,7 @@ use std::path::Path;
 
 #[derive(Debug)]
 pub struct AppState {
-    pub daemon: Arc<Mutex<PloyDaemon>>,
+    pub daemon: Arc<RwLock<PloyDaemon>>,
     pub events: Arc<EventBroker>,
 }
 
@@ -281,17 +281,35 @@ pub fn handle_api_request(
 pub fn spawn_server(state: Arc<AppState>) -> io::Result<thread::JoinHandle<()>> {
     let listen_addr = state
         .daemon
-        .lock()
+        .read()
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "daemon lock poisoned"))?
         .config
         .listen_addr
         .clone();
+    let max_threads: usize = std::env::var("PLOY_MAX_HTTP_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
     let listener = TcpListener::bind(&listen_addr)?;
+    let semaphore = Arc::new((Mutex::new(0_usize), Condvar::new()));
     Ok(thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let state = state.clone();
+            let semaphore = semaphore.clone();
+            {
+                let (lock, cvar) = &*semaphore;
+                let mut count = lock.lock().expect("semaphore lock");
+                while *count >= max_threads {
+                    count = cvar.wait(count).expect("semaphore wait");
+                }
+                *count += 1;
+            }
             thread::spawn(move || {
                 let _ = handle_connection(stream, &state);
+                let (lock, cvar) = &*semaphore;
+                let mut count = lock.lock().expect("semaphore lock");
+                *count -= 1;
+                cvar.notify_one();
             });
         }
     }))
@@ -468,7 +486,7 @@ fn configured_auth(
 > {
     state
         .daemon
-        .lock()
+        .read()
         .map(|daemon| {
             (
                 daemon.config.admin_token.clone(),
@@ -487,7 +505,7 @@ fn request_rate_limiter() -> &'static Mutex<RateLimiter> {
 fn request_rate_limit_per_minute(state: &Arc<AppState>) -> Result<u32, (u16, String)> {
     state
         .daemon
-        .lock()
+        .read()
         .map(|daemon| daemon.config.request_rate_limit_per_minute)
         .map_err(|_| json_error(503, "daemon_lock_poisoned", None))
 }
@@ -585,7 +603,7 @@ fn response_message(body: &str) -> Option<String> {
 fn audit_log_path(state: &Arc<AppState>) -> Result<PathBuf, (u16, String)> {
     state
         .daemon
-        .lock()
+        .read()
         .map(|daemon| daemon.config.audit_log_file.clone())
         .map_err(|_| json_error(503, "daemon_lock_poisoned", None))
 }
@@ -651,7 +669,7 @@ fn read_recent_audit_entries(path: &PathBuf, limit: usize) -> io::Result<Vec<Aud
 fn agent_runs_path(state: &Arc<AppState>) -> Result<PathBuf, (u16, String)> {
     state
         .daemon
-        .lock()
+        .read()
         .map(|daemon| daemon.config.agent_runs_file.clone())
         .map_err(|_| json_error(503, "daemon_lock_poisoned", None))
 }
@@ -1344,7 +1362,7 @@ fn handle_authenticated_runtime_request(
                 return (200, serde_json::json!({ "success": true }).to_string());
             }
 
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(daemon) => match daemon
                     .config
                     .admin_token
@@ -1393,7 +1411,7 @@ fn handle_runtime_request(
     state: &Arc<AppState>,
 ) -> (u16, String) {
     match (method, path) {
-        ("GET", "/health") | ("GET", "/api/system/status") => match state.daemon.lock() {
+        ("GET", "/health") | ("GET", "/api/system/status") => match state.daemon.read() {
             Ok(daemon) => (
                 200,
                 serde_json::to_string(&daemon.control_plane.system.status())
@@ -1401,7 +1419,7 @@ fn handle_runtime_request(
             ),
             Err(_) => json_error(503, "daemon_lock_poisoned", None),
         },
-        ("GET", "/api/system/metrics") => match state.daemon.lock() {
+        ("GET", "/api/system/metrics") => match state.daemon.read() {
             Ok(daemon) => (
                 200,
                 serde_json::to_string(&daemon.platform_metrics())
@@ -1409,14 +1427,14 @@ fn handle_runtime_request(
             ),
             Err(_) => json_error(503, "daemon_lock_poisoned", None),
         },
-        ("GET", "/api/system/alerts") => match state.daemon.lock() {
+        ("GET", "/api/system/alerts") => match state.daemon.read() {
             Ok(daemon) => (
                 200,
                 serde_json::to_string(&daemon.active_alerts()).unwrap_or_else(|_| "[]".to_string()),
             ),
             Err(_) => json_error(503, "daemon_lock_poisoned", None),
         },
-        ("GET", "/api/deployments") => match state.daemon.lock() {
+        ("GET", "/api/deployments") => match state.daemon.read() {
             Ok(daemon) => (
                 200,
                 serde_json::to_string(&daemon.control_plane.deployments.summaries())
@@ -1424,7 +1442,7 @@ fn handle_runtime_request(
             ),
             Err(_) => json_error(503, "daemon_lock_poisoned", None),
         },
-        ("GET", "/api/trading/state") => match state.daemon.lock() {
+        ("GET", "/api/trading/state") => match state.daemon.read() {
             Ok(daemon) => (
                 200,
                 serde_json::to_string(&daemon.trading_state()).unwrap_or_else(|_| "[]".to_string()),
@@ -1443,7 +1461,7 @@ fn handle_runtime_request(
             ),
             Err(response) => response,
         },
-        ("GET", "/api/system/diagnose") => match state.daemon.lock() {
+        ("GET", "/api/system/diagnose") => match state.daemon.read() {
             Ok(daemon) => match build_platform_diagnostics_report(&daemon, state) {
                 Ok(report) => (
                     200,
@@ -1487,7 +1505,7 @@ fn handle_runtime_request(
                 Err(response) => response,
             }
         }
-        ("GET", "/api/proposals") => match state.daemon.lock() {
+        ("GET", "/api/proposals") => match state.daemon.read() {
             Ok(daemon) => (
                 200,
                 serde_json::to_string(&daemon.proposals()).unwrap_or_else(|_| "[]".to_string()),
@@ -1496,7 +1514,7 @@ fn handle_runtime_request(
         },
         ("GET", _) if path.starts_with("/api/proposals/") => {
             let proposal_id = path.trim_start_matches("/api/proposals/");
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(daemon) => match daemon
                     .proposals()
                     .into_iter()
@@ -1523,7 +1541,7 @@ fn handle_runtime_request(
                 Ok(request) => request,
                 Err(err) => return json_error(400, "invalid_json", Some(err.to_string())),
             };
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(mut daemon) => match daemon.create_proposal(request).and_then(|proposal| {
                     daemon.write_runtime_snapshots()?;
                     publish_snapshot_events(&daemon, &state.events);
@@ -1546,7 +1564,7 @@ fn handle_runtime_request(
         }
         ("GET", _) if path.starts_with("/api/deployments/") && !path.ends_with("/control") => {
             let deployment_id = path.trim_start_matches("/api/deployments/");
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(daemon) => match daemon.inspect_deployment(deployment_id) {
                     Some(record) => (
                         200,
@@ -1563,7 +1581,7 @@ fn handle_runtime_request(
         }
         ("GET", _) if path.starts_with("/api/trading/diagnose/") => {
             let deployment_id = path.trim_start_matches("/api/trading/diagnose/");
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(daemon) => match build_deployment_diagnostics_report(&daemon, state, deployment_id)
                 {
                     Ok(report) => (
@@ -1597,7 +1615,7 @@ fn handle_runtime_request(
                     )),
                 );
             }
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(mut daemon) => {
                     match daemon.apply_deployment(request).and_then(|record| {
                         daemon.write_runtime_snapshots()?;
@@ -1626,7 +1644,7 @@ fn handle_runtime_request(
                 Ok(request) => request,
                 Err(err) => return json_error(400, "invalid_json", Some(err.to_string())),
             };
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(mut daemon) => {
                     match daemon
                         .control_deployment(deployment_id, request)
@@ -1665,7 +1683,7 @@ fn handle_runtime_request(
                 return json_error(404, "not_found", None);
             }
 
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(mut daemon) => {
                     match daemon
                         .cancel_order(deployment_id, order_id)
@@ -1703,7 +1721,7 @@ fn handle_runtime_request(
                 Err(err) => return json_error(400, "invalid_json", Some(err.to_string())),
             };
 
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(mut daemon) => {
                     match daemon
                         .replace_order(deployment_id, order_id, request)
@@ -1739,7 +1757,7 @@ fn handle_runtime_request(
                 Err(error) => return json_error(400, &error.error, error.message),
             };
 
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(mut daemon) => {
                     let response = daemon.submit_intent(TradingIntent {
                         intent_id: next_paper_intent_id(deployment_id),
@@ -1785,7 +1803,7 @@ fn handle_runtime_request(
                 Ok(None) => ProposalDecisionRequest::default(),
                 Err(response) => return response,
             };
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(mut daemon) => match daemon.approve_proposal(proposal_id, request).and_then(
                     |proposal| {
                         daemon.write_runtime_snapshots()?;
@@ -1827,7 +1845,7 @@ fn handle_runtime_request(
                 Ok(None) => ProposalDecisionRequest::default(),
                 Err(response) => return response,
             };
-            match state.daemon.lock() {
+            match state.daemon.write() {
                 Ok(mut daemon) => match daemon.reject_proposal(proposal_id, request).and_then(
                     |proposal| {
                         daemon.write_runtime_snapshots()?;
@@ -1913,7 +1931,7 @@ fn handle_event_stream(mut stream: TcpStream, state: &Arc<AppState>) -> io::Resu
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n"
     )?;
 
-    if let Ok(daemon) = state.daemon.lock() {
+    if let Ok(daemon) = state.daemon.read() {
         for event in snapshot_events(&daemon) {
             write_sse_event(&mut stream, &event)?;
         }
@@ -1955,7 +1973,7 @@ mod tests {
     use ploy_trading::{IntentPurpose as TradingIntentPurpose, TradeSide, TradingIntent};
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, RwLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -2052,7 +2070,7 @@ mod tests {
 
         let daemon = crate::runtime::PloyDaemon::boot(&config).expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2074,7 +2092,7 @@ mod tests {
         )
         .expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2106,7 +2124,7 @@ mod tests {
         )
         .expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2137,7 +2155,7 @@ mod tests {
         )
         .expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2233,7 +2251,7 @@ mod tests {
         )
         .expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2290,7 +2308,7 @@ mod tests {
         )
         .expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2519,7 +2537,7 @@ mod tests {
         daemon.control_plane.system.refresh_source_health();
 
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2612,7 +2630,7 @@ mod tests {
         )
         .expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2680,7 +2698,7 @@ mod tests {
         )
         .expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2747,7 +2765,7 @@ mod tests {
             crate::runtime::PloyDaemon::boot_with_live_execution(&config, Box::new(gateway))
                 .expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2830,7 +2848,7 @@ mod tests {
             crate::runtime::PloyDaemon::boot_with_live_execution(&config, Box::new(gateway))
                 .expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2930,7 +2948,7 @@ mod tests {
             .expect("submit intent");
 
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2945,7 +2963,7 @@ mod tests {
         let daemon = crate::runtime::PloyDaemon::boot(&crate::config::PlatformConfig::default())
             .expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -2961,10 +2979,10 @@ mod tests {
     fn handle_runtime_request_reports_poisoned_lock_as_503() {
         let daemon = crate::runtime::PloyDaemon::boot(&crate::config::PlatformConfig::default())
             .expect("boot daemon");
-        let poisoned = Arc::new(Mutex::new(daemon));
+        let poisoned = Arc::new(RwLock::new(daemon));
         let poison_handle = poisoned.clone();
         let _ = std::thread::spawn(move || {
-            let _guard = poison_handle.lock().expect("lock daemon");
+            let _guard = poison_handle.write().expect("lock daemon");
             panic!("poison daemon lock for test");
         })
         .join();
@@ -3047,7 +3065,7 @@ mod tests {
 
         let daemon = crate::runtime::PloyDaemon::boot(&config).expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -3091,7 +3109,7 @@ mod tests {
 
         let daemon = crate::runtime::PloyDaemon::boot(&config).expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -3151,7 +3169,7 @@ mod tests {
 
         let daemon = crate::runtime::PloyDaemon::boot(&config).expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
@@ -3216,7 +3234,7 @@ mod tests {
 
         let daemon = crate::runtime::PloyDaemon::boot(&config).expect("boot daemon");
         let state = Arc::new(AppState {
-            daemon: Arc::new(Mutex::new(daemon)),
+            daemon: Arc::new(RwLock::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 

@@ -77,6 +77,7 @@ pub struct TradingRuntime {
     orders: OrderLedger,
     fills: FillLedger,
     positions: PositionLedger,
+    cached_risk: Option<RiskSnapshot>,
 }
 
 impl TradingRuntime {
@@ -91,6 +92,7 @@ impl TradingRuntime {
             orders: OrderLedger::restore(snapshot.orders),
             fills: FillLedger::restore(snapshot.fills),
             positions,
+            cached_risk: None,
         }
     }
 
@@ -99,6 +101,7 @@ impl TradingRuntime {
         intent: TradingIntent,
         order_id: impl Into<String>,
     ) -> &crate::orders::OrderRecord {
+        self.cached_risk = None;
         self.intents.push(intent.clone());
         self.orders.insert_from_intent(order_id, &intent)
     }
@@ -108,6 +111,7 @@ impl TradingRuntime {
         order_id: &str,
         venue_order_id: impl Into<String>,
     ) -> Option<&crate::orders::OrderRecord> {
+        self.cached_risk = None;
         self.orders.acknowledge(order_id, venue_order_id)
     }
 
@@ -118,6 +122,7 @@ impl TradingRuntime {
         limit_price: Option<Decimal>,
         venue_order_id: impl Into<String>,
     ) -> Option<&crate::orders::OrderRecord> {
+        self.cached_risk = None;
         self.orders
             .replace(order_id, requested_qty, limit_price, venue_order_id)
     }
@@ -127,6 +132,7 @@ impl TradingRuntime {
         order_id: &str,
         reason: impl Into<String>,
     ) -> Option<&crate::orders::OrderRecord> {
+        self.cached_risk = None;
         self.orders.reject(order_id, reason)
     }
 
@@ -139,6 +145,7 @@ impl TradingRuntime {
     }
 
     pub fn cancel_order(&mut self, order_id: &str) -> Option<&crate::orders::OrderRecord> {
+        self.cached_risk = None;
         self.orders.cancel(order_id)
     }
 
@@ -156,6 +163,7 @@ impl TradingRuntime {
         if self.fills.contains(&fill.fill_id) {
             return false;
         }
+        self.cached_risk = None;
         self.orders.apply_fill(&fill);
         self.positions.apply_fill(&fill);
         self.fills.record(fill);
@@ -308,10 +316,7 @@ mod tests {
         assert_eq!(summary.deployed_capital(), dec!(10.00));
         assert_eq!(summary.net_pnl(), dec!(14.95));
         assert_eq!(
-            summary
-                .roi_on_deployed_capital()
-                .expect("roi")
-                .round_dp(4),
+            summary.roi_on_deployed_capital().expect("roi").round_dp(4),
             dec!(1.4950)
         );
     }

@@ -24,7 +24,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -70,13 +70,14 @@ impl PloyDaemon {
         config: &PlatformConfig,
         live_execution: Box<dyn LiveExecutionGateway>,
     ) -> io::Result<Self> {
+        let config = config.normalized();
         let mut control_plane = ControlPlane::default();
         control_plane
             .system
             .set_status(format!("starting@{}", config.listen_addr));
 
         let mut daemon = Self {
-            config: config.clone(),
+            config,
             control_plane,
             supervisor: WorkerSupervisor::default(),
             trading: BTreeMap::new(),
@@ -381,6 +382,9 @@ impl PloyDaemon {
             self.control_plane
                 .deployments
                 .set_deployment_state(deployment_id, deployment_state);
+            if deployment_state == DeploymentState::Draining {
+                self.generate_drain_exit_intents(deployment_id);
+            }
         }
         if let Some(desired_state) = request.desired_state {
             self.control_plane
@@ -406,6 +410,46 @@ impl PloyDaemon {
             .get(deployment_id)
             .cloned()
             .or(Some(existing)))
+    }
+
+    fn generate_drain_exit_intents(&mut self, deployment_id: &str) {
+        let Some(runtime) = self.trading.get(deployment_id) else {
+            return;
+        };
+        let snapshot = runtime.snapshot(&BTreeMap::new());
+        let exit_intents: Vec<TradingIntent> = snapshot
+            .positions
+            .iter()
+            .filter(|p| p.net_qty != Decimal::ZERO)
+            .map(|p| {
+                let side = if p.net_qty > Decimal::ZERO {
+                    TradeSide::Sell
+                } else {
+                    TradeSide::Buy
+                };
+                let intent_id = next_paper_intent_id(deployment_id);
+                TradingIntent {
+                    intent_id,
+                    deployment_id: deployment_id.to_string(),
+                    market_id: p.token_id.clone(),
+                    token_id: p.token_id.clone(),
+                    side,
+                    quantity: p.net_qty.abs(),
+                    limit_price: Some(p.avg_entry_price),
+                    purpose: ploy_trading::IntentPurpose::Exit,
+                    created_at: Utc::now(),
+                }
+            })
+            .collect();
+
+        for intent in exit_intents {
+            let order_id = format!("order-{}", intent.intent_id);
+            let venue_order_id = format!("drain-{}", intent.intent_id);
+            if let Some(runtime) = self.trading.get_mut(deployment_id) {
+                runtime.submit_intent(intent, order_id.clone());
+                runtime.acknowledge_order(&order_id, venue_order_id);
+            }
+        }
     }
 
     pub fn submit_intent(&mut self, intent: TradingIntent) -> io::Result<PaperIntentResponse> {
@@ -1027,6 +1071,126 @@ impl PloyDaemon {
             .sum()
     }
 
+    fn evaluate_circuit_breakers(&mut self) {
+        let snapshots = self.trading_state();
+        for snapshot in &snapshots {
+            let deployment_id = &snapshot.deployment_id;
+
+            // PnL floor check
+            if let Some(pnl_floor) = self.config.circuit_breaker_pnl_floor {
+                if snapshot.pnl.net_pnl <= pnl_floor {
+                    self.trigger_circuit_breaker(
+                        deployment_id,
+                        ProposalActionKind::DrainDeployment,
+                        format!(
+                            "circuit breaker: net_pnl {} breached floor {}",
+                            snapshot.pnl.net_pnl, pnl_floor
+                        ),
+                        vec![
+                            format!("net_pnl={}", snapshot.pnl.net_pnl),
+                            format!("pnl_floor={}", pnl_floor),
+                        ],
+                    );
+                }
+            }
+
+            // Exposure ceiling check
+            if let Some(multiplier) = self.config.circuit_breaker_exposure_ceiling_multiplier {
+                if let Some(deployment) = self.control_plane.deployments.get(deployment_id) {
+                    if let Some(max_exposure) = deployment.max_gross_exposure {
+                        let ceiling = max_exposure * multiplier;
+                        if snapshot.risk.total_gross_exposure > ceiling {
+                            self.trigger_circuit_breaker(
+                                deployment_id,
+                                ProposalActionKind::PauseDeployment,
+                                format!(
+                                    "circuit breaker: exposure {} breached ceiling {} ({}x limit)",
+                                    snapshot.risk.total_gross_exposure, ceiling, multiplier
+                                ),
+                                vec![
+                                    format!("total_gross_exposure={}", snapshot.risk.total_gross_exposure),
+                                    format!("max_gross_exposure={}", max_exposure),
+                                    format!("ceiling_multiplier={}", multiplier),
+                                ],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn trigger_circuit_breaker(
+        &mut self,
+        deployment_id: &str,
+        action_kind: ProposalActionKind,
+        rationale: String,
+        evidence: Vec<String>,
+    ) {
+        // Prevent duplicate triggers
+        let already_triggered = self.proposals.iter().any(|p| {
+            p.target_deployment_id == deployment_id
+                && p.status == ProposalStatus::Pending
+                && p.source_run_id.as_deref() == Some("circuit_breaker")
+        });
+        if already_triggered {
+            return;
+        }
+
+        eprintln!("ployd circuit breaker: {rationale}");
+
+        let proposal_id = format!("cb-{}-{}", deployment_id, Utc::now().timestamp_millis());
+        let proposal = SafetyProposal {
+            proposal_id: proposal_id.clone(),
+            action_kind,
+            target_deployment_id: deployment_id.to_string(),
+            status: ProposalStatus::Pending,
+            rationale: rationale.clone(),
+            evidence,
+            source_run_id: Some("circuit_breaker".to_string()),
+            proposed_max_gross_exposure: None,
+            created_at: Utc::now(),
+            decided_at: None,
+            decision_note: None,
+        };
+        self.proposals.push(proposal);
+
+        // Auto-execute: apply the action immediately
+        let result = match action_kind {
+            ProposalActionKind::PauseDeployment => self.control_deployment(
+                deployment_id,
+                DeploymentControlRequest {
+                    desired_state: Some(DesiredState::Paused),
+                    deployment_state: None,
+                },
+            ),
+            ProposalActionKind::DrainDeployment => self.control_deployment(
+                deployment_id,
+                DeploymentControlRequest {
+                    desired_state: None,
+                    deployment_state: Some(DeploymentState::Draining),
+                },
+            ),
+            ProposalActionKind::ReduceMaxExposure => Ok(None),
+        };
+
+        // Update proposal status
+        if let Some(p) = self.proposals.iter_mut().rev().find(|p| p.proposal_id == proposal_id) {
+            match result {
+                Ok(_) => {
+                    p.status = ProposalStatus::Approved;
+                    p.decided_at = Some(Utc::now());
+                    p.decision_note = Some("auto-approved by circuit breaker".to_string());
+                }
+                Err(err) => {
+                    p.status = ProposalStatus::Failed;
+                    p.decided_at = Some(Utc::now());
+                    p.decision_note = Some(format!("circuit breaker action failed: {err}"));
+                }
+            }
+        }
+    }
+
     fn load_registry(&mut self) -> io::Result<()> {
         if !self.config.registry_file.exists() {
             return Ok(());
@@ -1547,7 +1711,12 @@ fn intent_counts_toward_exposure(purpose: ploy_trading::IntentPurpose) -> bool {
 }
 
 fn intent_allowed_while_draining(purpose: ploy_trading::IntentPurpose) -> bool {
-    !matches!(purpose, ploy_trading::IntentPurpose::Entry)
+    matches!(
+        purpose,
+        ploy_trading::IntentPurpose::Exit
+            | ploy_trading::IntentPurpose::Reduce
+            | ploy_trading::IntentPurpose::Cancel
+    )
 }
 
 fn observed_state_for_desired(desired_state: DesiredState) -> ObservedState {
@@ -1588,14 +1757,14 @@ pub fn next_paper_intent_id(deployment_id: &str) -> String {
 }
 
 pub fn run_shared_forever(
-    daemon: Arc<Mutex<PloyDaemon>>,
+    daemon: Arc<RwLock<PloyDaemon>>,
     events: Arc<EventBroker>,
 ) -> io::Result<()> {
     loop {
         if shutdown_requested() {
             eprintln!("ployd: shutdown signal received, writing final snapshots");
             let mut daemon = daemon
-                .lock()
+                .write()
                 .map_err(|_| io::Error::new(io::ErrorKind::Other, "daemon lock poisoned"))?;
             if let Err(err) = daemon.write_runtime_snapshots() {
                 eprintln!("ployd: final snapshot write failed: {err}");
@@ -1605,7 +1774,7 @@ pub fn run_shared_forever(
         }
         let tick_interval_ms = {
             let mut daemon = daemon
-                .lock()
+                .write()
                 .map_err(|_| io::Error::new(io::ErrorKind::Other, "daemon lock poisoned"))?;
             if let Err(err) = daemon.write_runtime_snapshots() {
                 eprintln!("ployd tick degraded: {err}");

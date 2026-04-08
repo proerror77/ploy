@@ -11,7 +11,7 @@ pub use intents::{IntentPurpose, TradeSide, TradingIntent};
 pub use orders::{OrderLedger, OrderRecord, OrderState};
 pub use pnl::PnlSnapshot;
 pub use positions::{PositionLedger, PositionSnapshot};
-pub use risk::{snapshot_from_state, RiskSnapshot};
+pub use risk::{snapshot_from_state, snapshot_from_state_with_prices, RiskSnapshot};
 pub use runtime::{TradeCashflowSummary, TradingRuntime, TradingRuntimeSnapshot};
 
 pub const CRATE_MARKER: &str = "ploy-trading";

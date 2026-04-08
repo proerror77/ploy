@@ -3,6 +3,7 @@ use crate::orders::OrderLedger;
 use crate::positions::PositionLedger;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RiskSnapshot {
@@ -19,9 +20,25 @@ pub fn snapshot_from_state(
     orders: &OrderLedger,
     positions: &PositionLedger,
 ) -> RiskSnapshot {
+    snapshot_from_state_with_prices(intents, orders, positions, &BTreeMap::new())
+}
+
+pub fn snapshot_from_state_with_prices(
+    intents: &[TradingIntent],
+    orders: &OrderLedger,
+    positions: &PositionLedger,
+    reference_prices: &BTreeMap<String, Decimal>,
+) -> RiskSnapshot {
     let gross_exposure = positions
         .positions()
-        .map(|position| position.net_qty.abs() * position.avg_entry_price)
+        .map(|position| {
+            let ref_price = reference_prices.get(&position.token_id).copied();
+            let price = match ref_price {
+                Some(rp) => rp.max(position.avg_entry_price),
+                None => position.avg_entry_price,
+            };
+            position.net_qty.abs() * price
+        })
         .sum();
 
     let reserved_order_exposure = intents
@@ -45,7 +62,11 @@ pub fn snapshot_from_state(
         })
         .map(|order| {
             let remaining_qty = (order.requested_qty - order.filled_qty).max(Decimal::ZERO);
-            remaining_qty * order.limit_price.unwrap_or(Decimal::ONE)
+            let price = order
+                .limit_price
+                .or_else(|| reference_prices.get(&order.token_id).copied())
+                .unwrap_or(Decimal::ONE);
+            remaining_qty * price
         })
         .sum();
 

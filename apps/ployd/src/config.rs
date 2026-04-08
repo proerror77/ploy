@@ -1,3 +1,4 @@
+use rust_decimal::Decimal;
 use secrecy::SecretString;
 use std::path::PathBuf;
 
@@ -14,6 +15,8 @@ pub struct PlatformConfig {
     pub deployment_status_file: PathBuf,
     pub trading_state_file: PathBuf,
     pub audit_log_file: PathBuf,
+    pub proposals_file: PathBuf,
+    pub agent_runs_file: PathBuf,
     pub tick_interval_ms: u64,
     pub request_rate_limit_per_minute: u32,
     pub live_reconcile_backoff_base_ms: u64,
@@ -21,6 +24,9 @@ pub struct PlatformConfig {
     pub worker_heartbeat_stale_after_ms: u64,
     pub live_reconcile_stale_after_ms: u64,
     pub venue_stale_after_ms: u64,
+    pub circuit_breaker_enabled: bool,
+    pub circuit_breaker_pnl_floor: Option<Decimal>,
+    pub circuit_breaker_exposure_ceiling_multiplier: Option<Decimal>,
 }
 
 impl Default for PlatformConfig {
@@ -37,6 +43,8 @@ impl Default for PlatformConfig {
             deployment_status_file: runtime_root.join("deployments.json"),
             trading_state_file: runtime_root.join("trading-state.json"),
             audit_log_file: runtime_root.join("audit-log.jsonl"),
+            proposals_file: runtime_root.join("proposals.json"),
+            agent_runs_file: PathBuf::from("run/sidecar/agent-runs.jsonl"),
             runtime_root,
             tick_interval_ms: 1_000,
             request_rate_limit_per_minute: 240,
@@ -45,11 +53,37 @@ impl Default for PlatformConfig {
             worker_heartbeat_stale_after_ms: 15_000,
             live_reconcile_stale_after_ms: 15_000,
             venue_stale_after_ms: 15_000,
+            circuit_breaker_enabled: false,
+            circuit_breaker_pnl_floor: None,
+            circuit_breaker_exposure_ceiling_multiplier: None,
         }
     }
 }
 
 impl PlatformConfig {
+    pub fn normalized(&self) -> Self {
+        let mut config = self.clone();
+        let default = Self::default();
+
+        if config.status_file == default.status_file {
+            config.status_file = config.runtime_root.join("system-status.json");
+        }
+        if config.deployment_status_file == default.deployment_status_file {
+            config.deployment_status_file = config.runtime_root.join("deployments.json");
+        }
+        if config.trading_state_file == default.trading_state_file {
+            config.trading_state_file = config.runtime_root.join("trading-state.json");
+        }
+        if config.audit_log_file == default.audit_log_file {
+            config.audit_log_file = config.runtime_root.join("audit-log.jsonl");
+        }
+        if config.proposals_file == default.proposals_file {
+            config.proposals_file = config.runtime_root.join("proposals.json");
+        }
+
+        config
+    }
+
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
@@ -110,6 +144,16 @@ impl PlatformConfig {
         } else {
             config.audit_log_file = config.runtime_root.join("audit-log.jsonl");
         }
+        if let Ok(value) = std::env::var("PLOY_PROPOSALS_FILE") {
+            config.proposals_file = PathBuf::from(value);
+        } else {
+            config.proposals_file = config.runtime_root.join("proposals.json");
+        }
+        if let Ok(value) = std::env::var("PLOY_AGENT_RUNS_FILE") {
+            config.agent_runs_file = PathBuf::from(value);
+        } else {
+            config.agent_runs_file = PathBuf::from("run/sidecar/agent-runs.jsonl");
+        }
         if let Ok(value) = std::env::var("PLOY_TICK_INTERVAL_MS") {
             if let Ok(parsed) = value.parse() {
                 config.tick_interval_ms = parsed;
@@ -145,8 +189,21 @@ impl PlatformConfig {
                 config.venue_stale_after_ms = parsed;
             }
         }
+        if let Ok(value) = std::env::var("PLOY_CIRCUIT_BREAKER_ENABLED") {
+            config.circuit_breaker_enabled = value == "true" || value == "1";
+        }
+        if let Ok(value) = std::env::var("PLOY_CIRCUIT_BREAKER_PNL_FLOOR") {
+            if let Ok(parsed) = value.parse::<Decimal>() {
+                config.circuit_breaker_pnl_floor = Some(parsed);
+            }
+        }
+        if let Ok(value) = std::env::var("PLOY_CIRCUIT_BREAKER_EXPOSURE_CEILING_MULTIPLIER") {
+            if let Ok(parsed) = value.parse::<Decimal>() {
+                config.circuit_breaker_exposure_ceiling_multiplier = Some(parsed);
+            }
+        }
 
-        config
+        config.normalized()
     }
 }
 
@@ -171,6 +228,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use secrecy::ExposeSecret;
+    use std::path::PathBuf;
 
     use super::PlatformConfig;
 
@@ -202,6 +260,14 @@ mod tests {
             config.audit_log_file.to_string_lossy(),
             "run/platform/audit-log.jsonl"
         );
+        assert_eq!(
+            config.proposals_file.to_string_lossy(),
+            "run/platform/proposals.json"
+        );
+        assert_eq!(
+            config.agent_runs_file.to_string_lossy(),
+            "run/sidecar/agent-runs.jsonl"
+        );
         assert_eq!(config.tick_interval_ms, 1_000);
         assert_eq!(config.request_rate_limit_per_minute, 240);
         assert_eq!(config.live_reconcile_backoff_base_ms, 1_000);
@@ -209,5 +275,35 @@ mod tests {
         assert_eq!(config.worker_heartbeat_stale_after_ms, 15_000);
         assert_eq!(config.live_reconcile_stale_after_ms, 15_000);
         assert_eq!(config.venue_stale_after_ms, 15_000);
+    }
+
+    #[test]
+    fn normalized_updates_runtime_root_derived_paths() {
+        let config = PlatformConfig {
+            runtime_root: PathBuf::from("/tmp/ploy-runtime"),
+            ..PlatformConfig::default()
+        }
+        .normalized();
+
+        assert_eq!(
+            config.status_file.to_string_lossy(),
+            "/tmp/ploy-runtime/system-status.json"
+        );
+        assert_eq!(
+            config.deployment_status_file.to_string_lossy(),
+            "/tmp/ploy-runtime/deployments.json"
+        );
+        assert_eq!(
+            config.trading_state_file.to_string_lossy(),
+            "/tmp/ploy-runtime/trading-state.json"
+        );
+        assert_eq!(
+            config.audit_log_file.to_string_lossy(),
+            "/tmp/ploy-runtime/audit-log.jsonl"
+        );
+        assert_eq!(
+            config.proposals_file.to_string_lossy(),
+            "/tmp/ploy-runtime/proposals.json"
+        );
     }
 }
