@@ -1,5 +1,10 @@
 use crate::client::ControlPlaneClient;
-use ploy_operator_contracts::{AlertKind, AlertSeverity, HeartbeatState};
+use crate::diagnostics::{audit_entry_to_evidence, event_to_evidence, likely_causes};
+use ploy_operator_contracts::{
+    compute_oversight_report, AlertKind, AlertSeverity, DiagnosticsEvidence, DiagnosticsFinding,
+    HeartbeatState, PlatformDiagnosticsReport,
+};
+use std::collections::BTreeSet;
 
 pub fn render_system_status(client: &ControlPlaneClient) -> Result<String, String> {
     let status = client.system_snapshot()?;
@@ -116,6 +121,144 @@ pub fn render_system_alerts(client: &ControlPlaneClient) -> Result<String, Strin
         .join("\n"))
 }
 
+pub fn render_system_diagnostics(client: &ControlPlaneClient) -> Result<String, String> {
+    let system = client.system_snapshot()?;
+    let metrics = client.system_metrics().ok();
+    let alerts = client.system_alerts().unwrap_or_default();
+    let deployments = client.deployment_summaries().unwrap_or_default();
+    let trading = client.trading_state().unwrap_or_default();
+    let oversight = compute_oversight_report(&system, &deployments, &trading);
+    let audit_lines = client
+        .audit_logs()
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+        .take(4)
+        .map(|entry| audit_entry_to_evidence(&entry));
+    let recent_events = client
+        .recent_events(8)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|event| event_to_evidence(&event));
+
+    let mut seen = BTreeSet::new();
+    let mut findings = Vec::new();
+
+    for alert in alerts {
+        let key = format!(
+            "alert:{}:{}",
+            format!("{:?}", alert.kind).to_lowercase(),
+            alert.message
+        );
+        if seen.insert(key) {
+            findings.push(DiagnosticsFinding {
+                severity: alert_severity_name(alert.severity).to_string(),
+                kind: alert_kind_name(alert.kind).to_string(),
+                message: alert.message.clone(),
+                first_observed_at: Some(alert.triggered_at.to_rfc3339()),
+                likely_causes: likely_causes(alert_kind_name(alert.kind)),
+                operator_command: Some("ployctl system audit".to_string()),
+                evidence: vec![DiagnosticsEvidence {
+                    source: "system_alert".to_string(),
+                    label: alert.source_id.clone(),
+                    detail: format!("alert_id={}", alert.alert_id),
+                    observed_at: Some(alert.triggered_at.to_rfc3339()),
+                }],
+            });
+        }
+    }
+
+    for signal in oversight.signals {
+        let key = format!("oversight:{}:{}", signal.kind, signal.message);
+        if seen.insert(key) {
+            findings.push(DiagnosticsFinding {
+                severity: signal.severity.clone(),
+                kind: signal.kind.clone(),
+                message: signal.message.clone(),
+                first_observed_at: Some(oversight.timestamp.clone()),
+                likely_causes: likely_causes(&signal.kind),
+                operator_command: Some(format!(
+                    "ployctl {}",
+                    match signal.recommended_action.as_str() {
+                        "human_follow_up" => "system audit".to_string(),
+                        other => format!("research {other}"),
+                    }
+                )),
+                evidence: signal
+                    .evidence
+                    .iter()
+                    .map(|detail| DiagnosticsEvidence {
+                        source: "oversight_signal".to_string(),
+                        label: signal.recommended_action.clone(),
+                        detail: detail.clone(),
+                        observed_at: Some(oversight.timestamp.clone()),
+                    })
+                    .collect(),
+            });
+        }
+    }
+
+    if let Some(metrics) = metrics.as_ref() {
+        if metrics.live_reconcile_failures > 0
+            && seen.insert(format!(
+                "metrics:live_reconcile_failures:{}",
+                metrics.live_reconcile_failures
+            ))
+        {
+            findings.push(DiagnosticsFinding {
+                severity: "warning".to_string(),
+                kind: "live_reconcile_failures".to_string(),
+                message: format!(
+                    "live reconcile reported {} consecutive failures",
+                    metrics.live_reconcile_failures
+                ),
+                first_observed_at: metrics
+                    .last_live_reconcile_success_at
+                    .map(|value| value.to_rfc3339()),
+                likely_causes: vec!["reconcile_loop_stalled".to_string()],
+                operator_command: Some("ployctl system audit".to_string()),
+                evidence: vec![DiagnosticsEvidence {
+                    source: "system_metrics".to_string(),
+                    label: "live_reconcile_failures".to_string(),
+                    detail: format!(
+                        "live_reconcile_failures={}",
+                        metrics.live_reconcile_failures
+                    ),
+                    observed_at: metrics
+                        .last_live_reconcile_success_at
+                        .map(|value| value.to_rfc3339()),
+                }],
+            });
+        }
+    }
+
+    let recent_evidence = audit_lines.chain(recent_events).take(8).collect();
+    let first_diverged_metric = if system.active_alert_count > 0 {
+        Some("active_alerts".to_string())
+    } else if system.stale_source_count > 0 {
+        Some("stale_sources".to_string())
+    } else if system.error_count_1h > 0 {
+        Some("error_count_1h".to_string())
+    } else if metrics
+        .as_ref()
+        .map(|value| value.live_reconcile_failures > 0)
+        .unwrap_or(false)
+    {
+        Some("live_reconcile_failures".to_string())
+    } else {
+        findings.first().map(|finding| finding.kind.clone())
+    };
+
+    serde_json::to_string_pretty(&PlatformDiagnosticsReport {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        platform_status: system.status,
+        first_diverged_metric,
+        findings,
+        recent_evidence,
+    })
+    .map_err(|err| format!("serialize system diagnostics: {err}"))
+}
+
 fn heartbeat_state_name(state: HeartbeatState) -> &'static str {
     match state {
         HeartbeatState::Healthy => "healthy",
@@ -139,7 +282,8 @@ fn alert_kind_name(kind: AlertKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_audit_log, render_system_alerts, render_system_metrics, render_system_status,
+        render_audit_log, render_system_alerts, render_system_diagnostics, render_system_metrics,
+        render_system_status,
     };
     use crate::client::ControlPlaneClient;
     use chrono::Utc;
@@ -348,5 +492,89 @@ mod tests {
 
         let output = render_system_alerts(&client).expect("alerts");
         assert_eq!(output, "none");
+    }
+
+    #[test]
+    fn renders_system_diagnostics_from_snapshot_and_oversight() {
+        let runtime_root = temp_dir("diagnostics");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+        fs::write(
+            runtime_root.join("system-status.json"),
+            serde_json::json!({
+                "status": "degraded",
+                "uptime_seconds": 3,
+                "version": "0.1.0",
+                "strategy": "platform",
+                "last_trade_time": null,
+                "websocket_connected": false,
+                "database_connected": true,
+                "error_count_1h": 2,
+                "live_reconcile_failures": 0,
+                "next_live_reconcile_at": null,
+                "last_live_reconcile_error": null,
+                "active_alert_count": 1,
+                "stale_source_count": 1,
+                "last_live_reconcile_success_at": null
+            })
+            .to_string(),
+        )
+        .expect("write status");
+        fs::write(
+            runtime_root.join("deployments.json"),
+            serde_json::json!([{
+                "deployment_id": "example.paper",
+                "bundle_id": "example",
+                "runtime_mode": "paper",
+                "account_id": "acct-paper",
+                "max_gross_exposure": "5.00",
+                "deployment_state": "enabled",
+                "desired_state": "running",
+                "observed_state": "degraded"
+            }])
+            .to_string(),
+        )
+        .expect("write deployments");
+        fs::write(
+            runtime_root.join("trading-state.json"),
+            serde_json::json!([{
+                "deployment_id": "example.paper",
+                "runtime_mode": "paper",
+                "intents": [],
+                "orders": [],
+                "fills": [],
+                "positions": [],
+                "pnl": {
+                    "realized_pnl": "0",
+                    "unrealized_pnl": "0",
+                    "total_fees": "0",
+                    "net_pnl": "-2.50"
+                },
+                "risk": {
+                    "pending_intents": 0,
+                    "active_orders": 0,
+                    "open_positions": 0,
+                    "gross_exposure": "0",
+                    "reserved_order_exposure": "0",
+                    "total_gross_exposure": "0"
+                }
+            }])
+            .to_string(),
+        )
+        .expect("write trading");
+
+        let client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        let output = render_system_diagnostics(&client).expect("system diagnostics");
+        let value: serde_json::Value =
+            serde_json::from_str(&output).expect("parse system diagnostics json");
+        assert_eq!(value["platform_status"], serde_json::json!("degraded"));
+        assert_eq!(
+            value["first_diverged_metric"],
+            serde_json::json!("active_alerts")
+        );
+        assert!(value["findings"]
+            .as_array()
+            .expect("findings array")
+            .iter()
+            .any(|finding| finding["kind"] == serde_json::json!("system_errors")));
     }
 }

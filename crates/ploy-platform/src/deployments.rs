@@ -26,6 +26,8 @@ impl DeploymentRecord {
     pub fn summary(&self) -> DeploymentSummary {
         DeploymentSummary {
             deployment_id: self.deployment_id.clone(),
+            bundle_id: self.bundle_id.clone(),
+            runtime_mode: self.runtime_mode.clone(),
             account_id: self.account_id.clone(),
             max_gross_exposure: self.max_gross_exposure,
             deployment_state: self.deployment_state,
@@ -76,6 +78,16 @@ impl DeploymentRegistry {
     ) -> Option<&DeploymentRecord> {
         let record = self.deployments.get_mut(deployment_id)?;
         record.observed_state = observed_state;
+        Some(record)
+    }
+
+    pub fn set_max_gross_exposure(
+        &mut self,
+        deployment_id: &str,
+        max_gross_exposure: Option<Decimal>,
+    ) -> Option<&DeploymentRecord> {
+        let record = self.deployments.get_mut(deployment_id)?;
+        record.max_gross_exposure = max_gross_exposure;
         Some(record)
     }
 
@@ -139,10 +151,13 @@ mod tests {
         registry.set_desired_state("openclaw.default", DesiredState::Paused);
         registry.set_deployment_state("openclaw.default", DeploymentState::Draining);
         registry.set_observed_state("openclaw.default", ObservedState::Paused);
+        registry.set_max_gross_exposure("openclaw.default", Some(Decimal::new(300, 2)));
 
         let summary = registry.summaries().pop().expect("summary");
+        assert_eq!(summary.bundle_id, "openclaw");
+        assert_eq!(summary.runtime_mode, "paper");
         assert_eq!(summary.account_id, "acct-main");
-        assert_eq!(summary.max_gross_exposure, Some(Decimal::new(500, 2)));
+        assert_eq!(summary.max_gross_exposure, Some(Decimal::new(300, 2)));
         assert_eq!(summary.deployment_state, DeploymentState::Draining);
         assert_eq!(summary.desired_state, DesiredState::Paused);
         assert_eq!(summary.observed_state, ObservedState::Paused);

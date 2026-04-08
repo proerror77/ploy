@@ -103,6 +103,13 @@ rules.
   introduce new deployment guidance that depends on them.
 - Do not introduce or rely on direct live order paths unless explicitly
   required.
+- Keep the harness layer in one of three modes: trace-only research, oversight,
+  or proposal mode.
+- Proposal mode is operator-mediated only. Agents may create a proposal, but
+  they must not directly mutate live strategy behavior or approve their own
+  safety actions.
+- When adding agent features, prefer replay/backtest/diagnostics/oversight
+  surfaces over realtime decision-making logic.
 - On trading hosts, do not build Rust source on-host. Build in CI and deploy
   release artifacts only.
 - Preferred production workflow: `.github/workflows/release-platform.yml`.

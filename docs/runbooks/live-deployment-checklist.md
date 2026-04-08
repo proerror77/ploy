@@ -47,6 +47,8 @@ curl -fsS http://127.0.0.1:8081/health
 /opt/ploy/bin/ployctl system metrics
 /opt/ploy/bin/ployctl system alerts
 /opt/ploy/bin/ployctl system audit
+/opt/ploy/bin/ployctl system diagnose
+/opt/ploy/bin/ployctl proposals list
 ```
 
 Go only if:
@@ -55,6 +57,7 @@ Go only if:
 - `/health` returns success
 - `ployctl system status` is `running`, `recovering`, or `degraded`
 - no critical alerts are active
+- any pending safety proposal is understood before proceeding
 
 Stop if:
 
@@ -85,8 +88,12 @@ manually reviewed:
 - `ployctl system status`
 - `ployctl system metrics`
 - `ployctl system alerts`
+- `ployctl system diagnose`
 - `ployctl trading status`
+- `ployctl proposals list`
 - the most recent audit log entries
+
+Agent-generated safety proposals may inform the review, but they must never be treated as autonomous approval. Operators own the final go/no-go decision.
 
 ## Not Covered By This Checklist
 
@@ -96,3 +103,4 @@ This checklist does not:
 - cancel live venue orders
 - trigger real redeem / claim flows
 - replace a separate game-day rehearsal for production funds
+- allow agent-owned live strategy mutation

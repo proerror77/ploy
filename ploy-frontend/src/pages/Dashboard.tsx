@@ -28,7 +28,7 @@ import {
 } from 'recharts';
 
 export function Dashboard() {
-  const { positions, marketData } = useStore();
+  const { positions, marketData, oversightReport } = useStore();
   const [wsConnected, setWsConnected] = useState(ws.isConnected());
   const [realtimePositions, setRealtimePositions] = useState<Position[]>([]);
   const [recentTradeCount, setRecentTradeCount] = useState(0);
@@ -267,6 +267,72 @@ export function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      <Card className="mt-8">
+        <CardHeader>
+          <CardTitle>Oversight</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {!oversightReport ? (
+            <p className="text-muted-foreground">No oversight snapshot yet</p>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+                <span>Status {oversightReport.platform_status}</span>
+                <span>Signals {oversightReport.signal_count}</span>
+                <span>Deployments {oversightReport.deployments_reviewed}</span>
+              </div>
+
+              {oversightReport.signals.length === 0 ? (
+                <p className="text-muted-foreground">No active oversight signals</p>
+              ) : (
+                oversightReport.signals.slice(0, 5).map((signal, index) => (
+                  <div key={`${signal.kind}-${signal.deployment_id ?? 'platform'}-${index}`} className="rounded-lg border p-4">
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <div className="font-medium">{signal.message}</div>
+                      <Badge
+                        variant={
+                          signal.severity === 'critical'
+                            ? 'destructive'
+                            : signal.severity === 'warning'
+                              ? 'warning'
+                              : 'secondary'
+                        }
+                      >
+                        {signal.severity}
+                      </Badge>
+                    </div>
+                    <div className="text-sm text-muted-foreground">
+                      {signal.deployment_id ?? 'platform'} · next {signal.recommended_action}
+                    </div>
+                  </div>
+                ))
+              )}
+
+              {oversightReport.recommended_actions.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium">Suggested commands</div>
+                  {oversightReport.recommended_actions.slice(0, 3).map((action, index) => (
+                    <div key={`${action.kind}-${action.target}-${index}`} className="rounded-lg bg-muted p-3 text-sm">
+                      <div className="font-medium">
+                        {action.kind} {action.target}
+                      </div>
+                      <div className="mt-1 font-mono text-xs text-muted-foreground">
+                        {action.operator_command}
+                      </div>
+                      {action.config_hint && (
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          config {action.config_hint}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

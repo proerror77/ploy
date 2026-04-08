@@ -3227,6 +3227,7 @@ dependencies = [
 name = "ploy-runner"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "futures",
  "ploy-connectivity",
@@ -3284,9 +3285,16 @@ dependencies = [
  "chrono",
  "ploy-operator-contracts",
  "ploy-platform",
+ "ploy-research",
+ "ploy-strategy-bundles",
+ "ploy-trading",
  "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_json",
+ "sqlx",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

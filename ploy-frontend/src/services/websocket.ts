@@ -3,8 +3,10 @@ import type {
   DeploymentSummary,
   LogEntry,
   MarketData,
+  OversightReport,
   PlatformMetrics,
   Position,
+  SafetyProposal,
   SystemStatus,
   Trade,
   TradingStateSnapshot,
@@ -20,7 +22,9 @@ export type WebSocketEvent =
   | { type: 'deployment_snapshot'; data: { deployments: DeploymentSummary[] } }
   | { type: 'trading_snapshot'; data: { trading: TradingStateSnapshot[] } }
   | { type: 'metrics_snapshot'; data: { metrics: PlatformMetrics } }
-  | { type: 'alert_snapshot'; data: { alerts: ActiveAlert[] } };
+  | { type: 'alert_snapshot'; data: { alerts: ActiveAlert[] } }
+  | { type: 'oversight_snapshot'; data: { oversight: OversightReport } }
+  | { type: 'proposal_snapshot'; data: { proposals: SafetyProposal[] } };
 
 type ConnectionCallback = (connected: boolean) => void;
 
@@ -90,7 +94,9 @@ export class WebSocketService {
         t === 'deployment_snapshot' ||
         t === 'trading_snapshot' ||
         t === 'metrics_snapshot' ||
-        t === 'alert_snapshot'
+        t === 'alert_snapshot' ||
+        t === 'oversight_snapshot' ||
+        t === 'proposal_snapshot'
       ) {
         this.emit({ type: t, data } as WebSocketEvent);
       }

@@ -1,7 +1,12 @@
 import type {
+  AgentRunRecord,
+  AuditLogEntry,
+  DeploymentDiagnosticsReport,
   TodayStats,
   Trade,
   Position,
+  PlatformDiagnosticsReport,
+  SafetyProposal,
   SystemStatus,
   SystemControlResponse,
   StrategyConfig,
@@ -173,6 +178,48 @@ class ApiService {
     return this.fetch<ActiveAlert[]>('/system/alerts');
   }
 
+  async getSystemDiagnostics(): Promise<PlatformDiagnosticsReport> {
+    return this.fetch<PlatformDiagnosticsReport>('/system/diagnose');
+  }
+
+  async getAuditLogs(): Promise<AuditLogEntry[]> {
+    return this.fetch<AuditLogEntry[]>('/audit/logs');
+  }
+
+  async getAgentRuns(): Promise<AgentRunRecord[]> {
+    return this.fetch<AgentRunRecord[]>('/agent/runs');
+  }
+
+  async getAgentRun(runId: string): Promise<AgentRunRecord> {
+    return this.fetch<AgentRunRecord>(`/agent/runs/${encodeURIComponent(runId)}`);
+  }
+
+  async getProposals(): Promise<SafetyProposal[]> {
+    return this.fetch<SafetyProposal[]>('/proposals');
+  }
+
+  async getProposal(proposalId: string): Promise<SafetyProposal> {
+    return this.fetch<SafetyProposal>(`/proposals/${encodeURIComponent(proposalId)}`);
+  }
+
+  async approveProposal(proposalId: string, decisionNote?: string): Promise<SafetyProposal> {
+    return this.fetch<SafetyProposal>(`/proposals/${proposalId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({
+        decision_note: decisionNote ?? null,
+      }),
+    });
+  }
+
+  async rejectProposal(proposalId: string, decisionNote?: string): Promise<SafetyProposal> {
+    return this.fetch<SafetyProposal>(`/proposals/${proposalId}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({
+        decision_note: decisionNote ?? null,
+      }),
+    });
+  }
+
   async startSystem(): Promise<SystemControlResponse> {
     return this.fetch<SystemControlResponse>('/system/start', {
       method: 'POST',
@@ -210,6 +257,14 @@ class ApiService {
 
   async getDeployments(): Promise<DeploymentSummary[]> {
     return this.fetch<DeploymentSummary[]>('/deployments');
+  }
+
+  async getDeploymentDiagnostics(
+    deploymentId: string
+  ): Promise<DeploymentDiagnosticsReport> {
+    return this.fetch<DeploymentDiagnosticsReport>(
+      `/trading/diagnose/${encodeURIComponent(deploymentId)}`
+    );
   }
 
   async updateDeploymentState(

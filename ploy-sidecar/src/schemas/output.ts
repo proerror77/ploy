@@ -1,86 +1,111 @@
 /**
- * Structured output schema for the Claude Commander agent.
+ * Structured output schema for the research-and-oversight sidecar.
  *
- * Forces Claude to return structured JSON with trading opportunities and
- * explicit operator actions, ensuring deterministic parsing by the sidecar.
+ * Keeps the sidecar focused on research runs, oversight alerts, and operator
+ * recommendations rather than trade decisions.
  */
 
-export const tradingOutputSchema = {
+export const researchOutputSchema = {
   type: "object" as const,
   properties: {
-    scan_summary: {
+    summary: {
       type: "object" as const,
       properties: {
-        games_scanned: { type: "number" as const },
-        in_progress_games: { type: "number" as const },
-        comeback_candidates: { type: "number" as const },
-        markets_checked: { type: "number" as const },
         timestamp: { type: "string" as const },
+        platform_status: { type: "string" as const },
+        deployments_reviewed: { type: "number" as const },
+        research_tasks: { type: "number" as const },
+        oversight_alerts: { type: "number" as const },
+        operator_recommendations: { type: "number" as const },
       },
-      required: ["games_scanned", "in_progress_games", "timestamp"],
+      required: [
+        "timestamp",
+        "platform_status",
+        "deployments_reviewed",
+        "research_tasks",
+        "oversight_alerts",
+        "operator_recommendations",
+      ],
     },
-    opportunities: {
+    research_reports: {
       type: "array" as const,
       items: {
         type: "object" as const,
         properties: {
-          game_id: { type: "string" as const },
-          game_name: { type: "string" as const },
-          trailing_team: { type: "string" as const },
-          trailing_abbrev: { type: "string" as const },
-          deficit: { type: "number" as const },
-          quarter: { type: "number" as const },
-          clock: { type: "string" as const },
-          // Market data
-          market_slug: { type: "string" as const },
-          market_price: { type: "number" as const },
-          // Risk metrics
-          reward_risk_ratio: { type: "number" as const },
-          estimated_win_prob: { type: "number" as const },
-          expected_value: { type: "number" as const },
-          kelly_fraction: { type: "number" as const },
-          // Decision
-          action: {
+          subject: { type: "string" as const },
+          kind: {
             type: "string" as const,
-            enum: ["TRADE", "PASS", "MONITOR"],
+            enum: ["replay", "backtest", "config_compare", "market_scan", "diagnostic"],
           },
-          grok_decision: {
+          status: {
             type: "string" as const,
-            enum: ["trade", "pass", "not_queried"],
+            enum: ["completed", "skipped", "failed"],
           },
-          confidence: {
-            type: "string" as const,
-            enum: ["low", "medium", "high"],
-          },
-          reasoning: { type: "string" as const },
-          risk_factors: {
+          finding: { type: "string" as const },
+          evidence: {
             type: "array" as const,
             items: { type: "string" as const },
           },
         },
-        required: [
-          "game_id",
-          "trailing_team",
-          "deficit",
-          "action",
-          "confidence",
-          "reasoning",
-        ],
+        required: ["subject", "kind", "status", "finding"],
       },
     },
-    operator_actions: {
+    oversight_alerts: {
       type: "array" as const,
       items: {
         type: "object" as const,
         properties: {
-          kind: { type: "string" as const },
-          target: { type: "string" as const },
-          status: { type: "string" as const },
-          details: { type: "string" as const },
+          severity: {
+            type: "string" as const,
+            enum: ["info", "warning", "critical"],
+          },
+          deployment_id: { type: "string" as const },
+          kind: {
+            type: "string" as const,
+            enum: [
+              "drift",
+              "runaway_risk",
+              "pnl_regression",
+              "exposure_watch",
+              "config_mismatch",
+              "data_gap",
+              "none",
+            ],
+          },
+          message: { type: "string" as const },
+          recommended_action: { type: "string" as const },
         },
-        required: ["kind", "target", "status"],
+        required: ["severity", "kind", "message"],
+      },
+    },
+    operator_recommendations: {
+      type: "array" as const,
+      items: {
+        type: "object" as const,
+        properties: {
+          kind: {
+            type: "string" as const,
+            enum: [
+              "monitor",
+              "replay",
+              "backtest",
+              "diagnose",
+              "compare_configs",
+              "create_proposal",
+              "pause_review",
+              "human_follow_up",
+            ],
+          },
+          target: { type: "string" as const },
+          rationale: { type: "string" as const },
+          evidence: {
+            type: "array" as const,
+            items: { type: "string" as const },
+          },
+        },
+        required: ["kind", "target", "rationale"],
       },
     },
   },
-  required: ["scan_summary", "opportunities", "operator_actions"],
+  required: ["summary", "research_reports", "oversight_alerts", "operator_recommendations"],
 };

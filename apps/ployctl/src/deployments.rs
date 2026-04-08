@@ -9,8 +9,10 @@ pub fn render_deployments(client: &ControlPlaneClient) -> Result<String, String>
         .into_iter()
         .map(|deployment| {
             format!(
-                "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
+                "{} bundle={} mode={} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
                 deployment.deployment_id,
+                deployment.bundle_id,
+                deployment.runtime_mode,
                 deployment.account_id,
                 deployment
                     .max_gross_exposure
@@ -31,8 +33,10 @@ pub fn render_deployment(
 ) -> Result<String, String> {
     client.inspect_deployment(deployment_id).map(|deployment| {
         format!(
-            "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
+            "{} bundle={} mode={} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
             deployment.deployment_id,
+            deployment.bundle_id,
+            deployment.runtime_mode,
             deployment.account_id,
             deployment
                 .max_gross_exposure
@@ -59,8 +63,10 @@ pub fn apply_deployment_file(
         serde_json::from_str(&body).map_err(|err| format!("parse deployment manifest: {err}"))?;
     let deployment = client.apply_deployment(&request)?;
     Ok(format!(
-        "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
+        "{} bundle={} mode={} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
         deployment.deployment_id,
+        deployment.bundle_id,
+        deployment.runtime_mode,
         deployment.account_id,
         deployment
             .max_gross_exposure
@@ -79,8 +85,10 @@ pub fn control_deployment(
 ) -> Result<String, String> {
     let deployment = client.set_desired_state(deployment_id, desired_state)?;
     Ok(format!(
-        "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
+        "{} bundle={} mode={} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
         deployment.deployment_id,
+        deployment.bundle_id,
+        deployment.runtime_mode,
         deployment.account_id,
         deployment
             .max_gross_exposure
@@ -99,8 +107,10 @@ pub fn set_lifecycle_state(
 ) -> Result<String, String> {
     let deployment = client.set_deployment_state(deployment_id, deployment_state)?;
     Ok(format!(
-        "{} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
+        "{} bundle={} mode={} account={} max_gross_exposure={} lifecycle={:?} desired={:?} observed={:?}",
         deployment.deployment_id,
+        deployment.bundle_id,
+        deployment.runtime_mode,
         deployment.account_id,
         deployment
             .max_gross_exposure

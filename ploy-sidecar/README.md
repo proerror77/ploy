@@ -1,8 +1,8 @@
 # ploy-sidecar
 
-NBA comeback research sidecar and deployment-aware operator client powered by the Claude Agent SDK.
+Research, oversight, diagnostics, and proposal-only safety sidecar powered by the Claude Agent SDK.
 
-It orchestrates a research loop every few minutes while reading the new trading-platform control plane exposed by `ployd`.
+It orchestrates a read-only operator loop every few minutes while reading the trading-platform control plane exposed by `ployd`.
 
 ## Architecture
 
@@ -11,15 +11,16 @@ Claude Sidecar (Sonnet/Opus)
 ├── espn MCP       → Live NBA scores, quarter, clock
 ├── polymarket MCP → Market search and snapshots
 ├── WebSearch      → X.com sentiment, injuries, momentum
+├── diagnostics MCP  → `ployctl system diagnose`, `ployctl trading diagnose`, proposal creation
+├── research MCP     → `ployctl research replay/backtest/compare/oversight`
 └── ploy-backend MCP
     ├── get_system_status    → ployd health + uptime
     ├── get_trading_state    → canonical trading snapshots
     ├── list/get_deployment  → deployment resources
-    ├── apply/control deployment resources
-    └── submit_paper_intent  → paper-only intent ingress
+    └── read-only control-plane inspection
 ```
 
-The sidecar does research and operator inspection. The platform control plane owns deployment lifecycle and trading state.
+The sidecar does research, diagnostics, proposal creation, and operator inspection. The platform control plane owns deployment lifecycle and trading state, and operators still approve every safety proposal before it can change runtime behavior.
 
 ## Installation
 
@@ -121,28 +122,26 @@ node dist/index.js
 Each scan cycle:
 
 1. **Platform inspection** — fetch `/api/system/status`, `/api/deployments`, and `/api/trading/state`
-2. **ESPN scan** — fetch today's live NBA games
-3. **Filter** — Q3 or early Q4 games with 1–15 point deficit
-4. **Market lookup** — find corresponding Polymarket market
-5. **Risk check** — reward-to-risk ≥ 4x (price ≤ $0.20), EV ≥ 5%
-6. **X.com research** — injuries, momentum, betting sentiment via WebSearch
-7. **Recommendation** — emit research findings plus any deployment-resource action actually taken
+2. **Rust oversight check** — run `ployctl research oversight` to get deterministic signals and playbook actions
+3. **Diagnostics pass** — run `ployctl system diagnose` or `ployctl trading diagnose <deployment-id>` when a deployment looks suspicious
+4. **Research pass** — run replay, backtest, or config compare only when they help explain current state
+5. **Proposal pass** — create a safety proposal only when the evidence supports operator review; proposals never execute runtime mutations directly
+6. **External context** — use ESPN, Polymarket, and WebSearch only as supporting evidence
+7. **Recommendation** — emit alerts and operator recommendations only; no live mutation path exists in the sidecar
 
 ## Control-Plane Endpoints
 
-The sidecar now aligns to the new trading-platform operator surface:
+The sidecar aligns to the trading-platform operator surface:
 
 ```
-GET  /api/system/status             Platform health snapshot
-GET  /api/trading/state             Canonical trading-state snapshots
-GET  /api/deployments               Deployment summaries
-GET  /api/deployments/:id           Deployment resource details
-PUT  /api/deployments/:id           Apply/update a deployment resource
-POST /api/deployments/:id/control   Set desired_state = running|paused|stopped
-POST /api/deployments/:id/intents   Submit a paper trading intent
+GET  /api/system/status   Platform health snapshot
+GET  /api/trading/state   Canonical trading-state snapshots
+GET  /api/deployments     Deployment summaries
+GET  /api/deployments/:id Deployment resource details
+POST /api/proposals       Create operator-approved safety proposal
 ```
 
-Legacy `/api/sidecar/*`, `/api/config`, and `enable/disable` deployment mutations are not part of the default workspace control plane on this branch.
+The sidecar does not call deployment mutation or intent-ingress endpoints. Proposal creation is the maximum authority it gets, and every proposal still requires an operator to approve it through `ployctl` or the frontend. Legacy `/api/sidecar/*`, `/api/config`, and direct `enable/disable` mutations are not part of the default workspace control plane on this branch.
 
 ## Output
 
@@ -150,31 +149,50 @@ Each scan produces structured JSON:
 
 ```json
 {
-  "scan_summary": { "games_scanned": 4, "in_progress_games": 2, "comeback_candidates": 1 },
-  "opportunities": [
+  "summary": {
+    "timestamp": "2026-04-07T10:00:00Z",
+    "platform_status": "degraded",
+    "deployments_reviewed": 3,
+    "research_tasks": 1,
+    "oversight_alerts": 2,
+    "operator_recommendations": 2
+  },
+  "research_reports": [
     {
-      "trailing_team": "LAL",
-      "deficit": 8,
-      "quarter": 3,
-      "market_price": 0.18,
-      "reward_risk_ratio": 4.56,
-      "expected_value": 0.07,
-      "action": "TRADE",
-      "grok_decision": "trade",
-      "confidence": "high",
-      "reasoning": "..."
+      "subject": "example.paper",
+      "kind": "diagnostic",
+      "status": "completed",
+      "finding": "state mismatch preceded pnl regression",
+      "evidence": ["desired_state=running", "observed_state=degraded", "net_pnl=-2.50"]
     }
   ],
-  "operator_actions": [
+  "oversight_alerts": [
     {
-      "kind": "deployment_control",
+      "severity": "critical",
+      "deployment_id": "example.paper",
+      "kind": "pnl_regression",
+      "message": "net pnl deteriorated to -2.50",
+      "recommended_action": "backtest"
+    }
+  ],
+  "operator_recommendations": [
+    {
+      "kind": "diagnose",
       "target": "example.paper",
-      "status": "not_needed",
-      "details": "paper deployment already running"
+      "rationale": "state mismatch and pnl regression need a root-cause report",
+      "evidence": ["ployctl trading diagnose example.paper"]
+    },
+    {
+      "kind": "create_proposal",
+      "target": "example.paper",
+      "rationale": "operator should review whether this deployment needs a pause",
+      "evidence": ["proposal_id=proposal-example-paper-123"]
     }
   ]
 }
 ```
+
+Each cycle also appends a trace record to `run/sidecar/agent-runs.jsonl` with run id, tool calls, cost, failure reason, and lightweight evaluation metadata.
 
 ## File Structure
 
@@ -182,10 +200,15 @@ Each scan produces structured JSON:
 ploy-sidecar/
 ├── src/
 │   ├── index.ts              Main loop (Claude Commander)
+│   ├── runtime/
+│   │   ├── diagnostics.ts    Diagnostics type helpers
+│   │   └── run-recorder.ts   JSONL trace persistence
 │   ├── tools/
+│   │   ├── diagnostics.ts    Diagnostics MCP server
 │   │   ├── espn.ts           ESPN MCP server
 │   │   ├── polymarket.ts     Polymarket MCP server
-│   │   └── ploy-backend.ts   Ploy Rust backend MCP server
+│   │   ├── ploy-backend.ts   Ploy Rust backend MCP server
+│   │   └── research.ts       Ploy CLI research MCP server
 │   ├── schemas/
 │   │   └── output.ts         Structured output JSON schema
 │   └── hooks/

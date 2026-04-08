@@ -1,8 +1,8 @@
 use ploy_operator_contracts::{
     ActiveAlert, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
     DeploymentControlRequest, DeploymentState, DeploymentSummary, DesiredState, OperatorEvent,
-    OrderControlResponse, OrderReplaceRequest, PlatformMetrics, SystemStatus,
-    TradingStateSnapshot,
+    OrderControlResponse, OrderReplaceRequest, PlatformMetrics, ProposalDecisionRequest,
+    SafetyProposal, SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -159,6 +159,26 @@ impl ControlPlaneClient {
             .into_iter()
             .find(|state| state.deployment_id == deployment_id)
             .ok_or_else(|| format!("trading state for `{deployment_id}` was not found"))
+    }
+
+    pub fn list_proposals(&self) -> Result<Vec<SafetyProposal>, String> {
+        self.get_json("/api/proposals")
+    }
+
+    pub fn approve_proposal(
+        &self,
+        proposal_id: &str,
+        request: &ProposalDecisionRequest,
+    ) -> Result<SafetyProposal, String> {
+        self.send_json("POST", &format!("/api/proposals/{proposal_id}/approve"), request)
+    }
+
+    pub fn reject_proposal(
+        &self,
+        proposal_id: &str,
+        request: &ProposalDecisionRequest,
+    ) -> Result<SafetyProposal, String> {
+        self.send_json("POST", &format!("/api/proposals/{proposal_id}/reject"), request)
     }
 
     pub fn apply_deployment(
@@ -461,6 +481,8 @@ mod tests {
             runtime_root.join("deployments.json"),
             serde_json::to_string(&vec![DeploymentSummary {
                 deployment_id: "example.paper".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: "paper".to_string(),
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: Some(rust_decimal::Decimal::new(500, 2)),
                 deployment_state: DeploymentState::Enabled,
@@ -674,6 +696,8 @@ mod tests {
                 DeploymentSnapshotEvent {
                     deployments: vec![DeploymentSummary {
                         deployment_id: "example.paper".to_string(),
+                        bundle_id: "example".to_string(),
+                        runtime_mode: "paper".to_string(),
                         account_id: "acct-paper".to_string(),
                         max_gross_exposure: Some(rust_decimal::Decimal::new(500, 2)),
                         deployment_state: DeploymentState::Enabled,

@@ -13,6 +13,8 @@ import {
   Shield,
   TrendingUp,
   ShieldAlert,
+  Microscope,
+  Siren,
 } from 'lucide-react';
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -28,6 +30,8 @@ const navigation = [
   { name: '交易历史', href: '/trades', icon: History },
   { name: '实时日志', href: '/monitor', icon: Activity },
   { name: '部署控制', href: '/deployments', icon: Target },
+  { name: 'Research Runs', href: '/research-runs', icon: Microscope },
+  { name: 'Oversight', href: '/oversight', icon: Siren },
   { name: 'NBA Legacy', href: '/nba-swing', icon: TrendingUp },
   { name: 'Risk Monitor', href: '/risk', icon: ShieldAlert },
   { name: '系统控制', href: '/control', icon: Power },
@@ -51,6 +55,11 @@ export function Layout() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
   const [adminToken, setAdminToken] = useState('');
+
+  const isNavActive = (href: string) =>
+    href === '/'
+      ? location.pathname === href
+      : location.pathname === href || location.pathname.startsWith(`${href}/`);
 
   useEffect(() => {
     let active = true;
@@ -116,7 +125,7 @@ export function Layout() {
         <nav className="space-y-1 p-4">
           {navigation.map((item) => {
             const Icon = item.icon;
-            const isActive = location.pathname === item.href;
+            const isActive = isNavActive(item.href);
             return (
               <Link
                 key={item.name}

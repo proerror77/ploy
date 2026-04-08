@@ -44,7 +44,11 @@ cargo run -p ployctl -- system status
 cargo run -p ployctl -- system metrics
 cargo run -p ployctl -- system alerts
 cargo run -p ployctl -- system audit
+cargo run -p ployctl -- system diagnose
 cargo run -p ployctl -- trading status
+cargo run -p ployctl -- trading diagnose example.paper
+cargo run -p ployctl -- research oversight
+cargo run -p ployctl -- proposals list
 cargo run -p ployctl -- deployments list
 cargo run -p ploytui
 curl -N http://127.0.0.1:8081/api/events/stream
@@ -67,7 +71,11 @@ ployctl system status
 ployctl system metrics
 ployctl system alerts
 ployctl system audit
+ployctl system diagnose
 ployctl trading status
+ployctl trading diagnose example.paper
+ployctl research oversight
+ployctl proposals list
 ployctl deployments list
 ployctl deployments inspect example.paper
 ployctl trading cancel example.live <order-id>
@@ -87,6 +95,14 @@ for authenticated control-plane actions, and `ployctl system audit` reads the
 latest entries back over `/api/audit/logs`. `ployctl system status` now also
 shows `live_reconcile_failures`, `next_live_reconcile_at`, and
 `last_live_reconcile_error`, which are the primary live-venue outage signals.
+
+## Harness Rollout Modes
+
+- **Trace-only research mode**: use `ployctl research replay`, `ployctl research backtest`, `ployctl research compare`, and inspect `run/sidecar/agent-runs.jsonl`.
+- **Oversight mode**: use `ployctl research oversight`, `ployctl system diagnose`, and `ployctl trading diagnose <deployment-id>`; consume `oversight_snapshot` over SSE or the frontend.
+- **Proposal mode**: allow the sidecar to create safety proposals, but review them with `ployctl proposals list`, `ployctl proposals approve <proposal-id>`, or `ployctl proposals reject <proposal-id>`.
+
+Do not skip directly from trace-only work to agent-owned runtime mutation. Proposal mode is the highest authority the harness gets in this branch.
 
 For a remote host that is intended to run future live trading, the default next
 step after startup is the dry-run acceptance drill:

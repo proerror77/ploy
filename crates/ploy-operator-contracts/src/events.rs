@@ -1,4 +1,6 @@
 use crate::deployments::DeploymentSummary;
+use crate::oversight::OversightSnapshotEvent;
+use crate::proposals::ProposalSnapshotEvent;
 use crate::system::{ActiveAlert, PlatformMetrics, SystemStatus};
 use crate::trading::{MarketData, PositionResponse, TradeResponse, TradingStateSnapshot};
 use chrono::{DateTime, Utc};
@@ -66,6 +68,10 @@ pub enum OperatorEvent {
     MetricsSnapshot(MetricsSnapshotEvent),
     #[serde(rename = "alert_snapshot")]
     AlertSnapshot(AlertSnapshotEvent),
+    #[serde(rename = "oversight_snapshot")]
+    OversightSnapshot(OversightSnapshotEvent),
+    #[serde(rename = "proposal_snapshot")]
+    ProposalSnapshot(ProposalSnapshotEvent),
 }
 
 pub type WsMessage = OperatorEvent;
@@ -74,12 +80,14 @@ pub type WsMessage = OperatorEvent;
 mod tests {
     use super::{
         AlertSnapshotEvent, DeploymentSnapshotEvent, MetricsSnapshotEvent, OperatorEvent,
-        StatusUpdate, SystemSnapshotEvent, TradingSnapshotEvent,
+        OversightSnapshotEvent, ProposalSnapshotEvent, StatusUpdate, SystemSnapshotEvent,
+        TradingSnapshotEvent,
     };
     use crate::{
         ActiveAlert, AlertKind, AlertSeverity, DeploymentState, DeploymentSummary, DesiredState,
-        HeartbeatState, HeartbeatStatus, ObservedState, PlatformMetrics, SystemStatus,
-        TradingStateSnapshot,
+        HeartbeatState, HeartbeatStatus, ObservedState, OversightAction, OversightReport,
+        OversightSignal, PlatformMetrics, ProposalActionKind, ProposalStatus, SafetyProposal,
+        SystemStatus, TradingStateSnapshot,
     };
     use chrono::Utc;
     use rust_decimal::Decimal;
@@ -109,6 +117,8 @@ mod tests {
             serde_json::to_value(OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
                 deployments: vec![DeploymentSummary {
                     deployment_id: "example.paper".to_string(),
+                    bundle_id: "example".to_string(),
+                    runtime_mode: "paper".to_string(),
                     account_id: "acct-paper".to_string(),
                     max_gross_exposure: Some(Decimal::new(500, 2)),
                     deployment_state: DeploymentState::Enabled,
@@ -125,6 +135,8 @@ mod tests {
                 "data": {
                     "deployments": [{
                         "deployment_id": "example.paper",
+                        "bundle_id": "example",
+                        "runtime_mode": "paper",
                         "account_id": "acct-paper",
                         "max_gross_exposure": "5.00",
                         "deployment_state": "enabled",
@@ -253,7 +265,10 @@ mod tests {
 
         assert_eq!(value["type"], json!("metrics_snapshot"));
         assert_eq!(value["data"]["metrics"]["total_deployments"], json!(2));
-        assert_eq!(value["data"]["metrics"]["heartbeats"][0]["state"], json!("stale"));
+        assert_eq!(
+            value["data"]["metrics"]["heartbeats"][0]["state"],
+            json!("stale")
+        );
     }
 
     #[test]
@@ -273,5 +288,80 @@ mod tests {
         assert_eq!(value["type"], json!("alert_snapshot"));
         assert_eq!(value["data"]["alerts"][0]["kind"], json!("source_stale"));
         assert_eq!(value["data"]["alerts"][0]["severity"], json!("critical"));
+    }
+
+    #[test]
+    fn oversight_snapshot_event_uses_stable_wire_shape() {
+        let value =
+            serde_json::to_value(OperatorEvent::OversightSnapshot(OversightSnapshotEvent {
+                oversight: OversightReport {
+                    timestamp: "2026-04-07T00:00:00Z".to_string(),
+                    platform_status: "degraded".to_string(),
+                    deployments_reviewed: 1,
+                    signal_count: 1,
+                    signals: vec![OversightSignal {
+                        severity: "warning".to_string(),
+                        kind: "order_buildup".to_string(),
+                        deployment_id: Some("example.paper".to_string()),
+                        message: "pending intents elevated at 4".to_string(),
+                        recommended_action: "replay".to_string(),
+                        evidence: vec!["pending_intents=4".to_string()],
+                    }],
+                    recommended_actions: vec![OversightAction {
+                        kind: "replay".to_string(),
+                        target: "example.paper".to_string(),
+                        rationale: "pending intents elevated at 4".to_string(),
+                        operator_command: "ployctl research replay example.paper".to_string(),
+                        config_hint: Some("config/strategies/02-pm5d.unified.toml".to_string()),
+                        evidence: vec!["pending_intents=4".to_string()],
+                    }],
+                },
+            }))
+            .expect("to_value");
+
+        assert_eq!(value["type"], json!("oversight_snapshot"));
+        assert_eq!(
+            value["data"]["oversight"]["platform_status"],
+            json!("degraded")
+        );
+        assert_eq!(
+            value["data"]["oversight"]["recommended_actions"][0]["operator_command"],
+            json!("ployctl research replay example.paper")
+        );
+        assert_eq!(
+            value["data"]["oversight"]["recommended_actions"][0]["config_hint"],
+            json!("config/strategies/02-pm5d.unified.toml")
+        );
+    }
+
+    #[test]
+    fn proposal_snapshot_event_uses_stable_wire_shape() {
+        let value =
+            serde_json::to_value(OperatorEvent::ProposalSnapshot(ProposalSnapshotEvent {
+                proposals: vec![SafetyProposal {
+                    proposal_id: "proposal-1".to_string(),
+                    action_kind: ProposalActionKind::PauseDeployment,
+                    target_deployment_id: "example.paper".to_string(),
+                    status: ProposalStatus::Pending,
+                    rationale: "pnl regression crossed threshold".to_string(),
+                    evidence: vec!["net_pnl=-2.50".to_string()],
+                    source_run_id: Some("run-1".to_string()),
+                    proposed_max_gross_exposure: None,
+                    created_at: Utc::now(),
+                    decided_at: None,
+                    decision_note: None,
+                }],
+            }))
+            .expect("to_value");
+
+        assert_eq!(value["type"], json!("proposal_snapshot"));
+        assert_eq!(
+            value["data"]["proposals"][0]["action_kind"],
+            json!("pause_deployment")
+        );
+        assert_eq!(
+            value["data"]["proposals"][0]["target_deployment_id"],
+            json!("example.paper")
+        );
     }
 }

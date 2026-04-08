@@ -22,10 +22,14 @@ Current smoke path:
 cargo run -p ployd
 cargo run -p ployctl -- system status
 cargo run -p ployctl -- system audit
+cargo run -p ployctl -- system diagnose
 cargo run -p ployctl -- trading status
+cargo run -p ployctl -- trading diagnose example.paper
+cargo run -p ployctl -- research oversight
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
+cargo run -p ployctl -- proposals list
 cargo run -p ployctl -- trading cancel example.live <order-id>
 cargo run -p ploytui
 # realtime operator stream
@@ -96,6 +100,28 @@ Production runtime now uses a 4-plane model:
 
 Key rule: OpenClaw does not sit in the synchronous per-order decision path for HFT. It governs boundaries; strategies decide entries/exits inside those boundaries.
 
+### Platform Constitution
+
+Ploy is a rule-driven trading platform, not an agent-driven trading engine.
+
+- **Human owns alpha**: strategy ideas, market hypotheses, and live trading logic stay human-authored.
+- **Rules decide trades**: realtime entry/exit, sizing, throttling, and execution decisions stay in deterministic strategy/runtime code.
+- **Governance owns capital policy**: budgets, lifecycle controls, exposure boundaries, pause/resume, and deployment-scoped policy belong to governance/control surfaces.
+- **Execution owns hard enforcement**: live order ingress, queueing, risk gates, execution, and reconciliation remain on the canonical execution path.
+- **Agent evaluates, monitors, and explains**: agents may orchestrate replay/backtest/optimization workflows, monitor for drift or runaway behavior, diagnose failures, and propose operator actions; they do not own realtime strategy judgment or direct live execution.
+
+Harness work in this repo should follow that split. Agents are allowed to help with research and oversight, but not to replace deterministic trading logic on the hot path.
+
+### Research And Oversight Harness Modes
+
+The harness layer rolls out in three explicit modes:
+
+- **Trace-only research mode**: sidecar runs replay/backtest/compare/diagnostics workflows and persists run traces, but does not create control-plane proposals.
+- **Oversight mode**: daemon and frontend surface oversight snapshots, diagnostics evidence, and operator-facing recommendations for drift, runaway risk, and PnL degradation.
+- **Proposal mode**: sidecar may create safety proposals such as `pause_deployment`, `drain_deployment`, or `reduce_max_exposure`, but every proposal still requires explicit operator approval through the canonical control plane before any runtime mutation occurs.
+
+Proposal mode is the maximum allowed agent authority in this branch. Agent-owned live strategy mutation is not allowed.
+
 Live strategies now start only through the canonical managed `Strategy` runtime.
 
 Collector / backfill command routing is documented in [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md).
@@ -109,6 +135,13 @@ The default workspace control plane is:
 - `GET /api/deployments/:id`
 - `POST /api/deployments/:id/control`
 - `GET /api/trading/state`
+- `GET /api/system/diagnose`
+- `GET /api/trading/diagnose/:deployment_id`
+- `GET /api/agent/runs`
+- `GET /api/proposals`
+- `POST /api/proposals`
+- `POST /api/proposals/:proposal_id/approve`
+- `POST /api/proposals/:proposal_id/reject`
 - `POST /api/deployments/:id/intents`
 - `POST /api/deployments/:id/orders/:order_id/cancel`
 - `POST /api/deployments/:id/orders/:order_id/replace`

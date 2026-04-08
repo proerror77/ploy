@@ -1,5 +1,15 @@
 import { create } from 'zustand';
-import type { DeploymentSummary, LogEntry, MarketData, Position, Trade, TradingStateSnapshot } from '@/types';
+import type {
+  AgentRunRecord,
+  DeploymentSummary,
+  LogEntry,
+  MarketData,
+  OversightReport,
+  Position,
+  SafetyProposal,
+  Trade,
+  TradingStateSnapshot,
+} from '@/types';
 
 interface AppState {
   // WebSocket connection state
@@ -32,6 +42,15 @@ interface AppState {
 
   tradingSnapshots: TradingStateSnapshot[];
   setTradingSnapshots: (snapshots: TradingStateSnapshot[]) => void;
+
+  oversightReport: OversightReport | null;
+  setOversightReport: (report: OversightReport) => void;
+
+  proposals: SafetyProposal[];
+  setProposals: (proposals: SafetyProposal[]) => void;
+
+  agentRuns: AgentRunRecord[];
+  setAgentRuns: (runs: AgentRunRecord[]) => void;
 }
 
 const MAX_LOGS = 1000;
@@ -93,4 +112,13 @@ export const useStore = create<AppState>((set) => ({
 
   tradingSnapshots: [],
   setTradingSnapshots: (tradingSnapshots) => set({ tradingSnapshots }),
+
+  oversightReport: null,
+  setOversightReport: (oversightReport) => set({ oversightReport }),
+
+  proposals: [],
+  setProposals: (proposals) => set({ proposals }),
+
+  agentRuns: [],
+  setAgentRuns: (agentRuns) => set({ agentRuns }),
 }));
