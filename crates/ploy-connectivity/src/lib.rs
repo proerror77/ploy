@@ -668,9 +668,9 @@ pub fn crate_marker() -> &'static str {
 mod tests {
     use super::{
         tracked_trade_fill, CancellationOutcome, CancellationRequest, ExecutionError,
-        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, PolymarketExecutionConfig,
-        PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
-        TrackedOrder, WalletSignatureType,
+        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
+        PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest,
+        StaticExecutionGateway, TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
