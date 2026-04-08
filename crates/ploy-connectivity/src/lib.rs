@@ -691,6 +691,8 @@ mod tests {
                 side: TradeSide::Buy,
                 quantity: dec!(1),
                 limit_price: Some(dec!(0.55)),
+                order_type: OrderExecutionType::GTC,
+                aggressive_ticks: 0,
             })
             .expect("ack outcome");
 
@@ -719,6 +721,8 @@ mod tests {
                 side: TradeSide::Buy,
                 quantity: dec!(1),
                 limit_price: None,
+                order_type: OrderExecutionType::GTC,
+                aggressive_ticks: 0,
             })
             .expect_err("limit price should be required");
 
