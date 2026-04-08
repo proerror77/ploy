@@ -229,6 +229,7 @@ fn main() {
                     mode: RuntimeMode::Backtest,
                     throttle_hz: None,
                     max_updates: None,
+                    skip_settlement_exits: false,
                 },
                 HistoricalLoadOptions::default(),
             )

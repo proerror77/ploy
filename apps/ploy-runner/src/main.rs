@@ -1015,6 +1015,8 @@ fn build_live_executor() -> CallbackExecutor {
                 side: intent.side,
                 quantity: intent.quantity,
                 limit_price: intent.limit_price,
+                order_type: ploy_connectivity::OrderExecutionType::FAK,
+                aggressive_ticks: 2,
             };
 
             match tokio::task::spawn_blocking(move || gw.submit(&request)).await {

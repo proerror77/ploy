@@ -520,6 +520,8 @@ impl PloyDaemon {
             side: intent.side,
             quantity: intent.quantity,
             limit_price: intent.limit_price,
+            order_type: ploy_connectivity::OrderExecutionType::GTC,
+            aggressive_ticks: 0,
         });
 
         match outcome {
