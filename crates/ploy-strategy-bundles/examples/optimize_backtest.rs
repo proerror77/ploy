@@ -136,6 +136,7 @@ fn make_config(
         stake_usd: dec!(25),
         max_positions: 30,
         max_daily_trades: 1000,
+        max_daily_loss_usd: None,
     }
 }
 
