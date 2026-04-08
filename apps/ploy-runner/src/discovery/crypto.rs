@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::discovery::types::{MarketDescriptor, MarketFamily, MarketSemantics, SettlementSource};
 use crate::reference_prices::{
-    ReferencePriceRegistry, ReferencePriceSource, latest_reference_price,
-    market_symbol_to_chainlink_symbol,
+    latest_reference_price, market_symbol_to_chainlink_symbol, ReferencePriceRegistry,
+    ReferencePriceSource,
 };
 
 #[derive(Debug, Clone)]
@@ -161,8 +161,8 @@ mod tests {
 
     use super::discover_crypto_markets;
     use crate::reference_prices::{
-        ReferenceAssetClass, ReferencePriceKey, ReferencePriceSnapshot, ReferencePriceSource,
-        new_reference_price_registry, upsert_reference_price,
+        new_reference_price_registry, upsert_reference_price, ReferenceAssetClass,
+        ReferencePriceKey, ReferencePriceSnapshot, ReferencePriceSource,
     };
 
     #[tokio::test]

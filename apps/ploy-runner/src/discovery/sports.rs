@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::gamma::types::request::{MarketsRequest, TeamsRequest};
 use polymarket_client_sdk::gamma::types::response::{Event, Market, Team};
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use serde_json::Value;
 
 use crate::discovery::types::{MarketDescriptor, MarketFamily, MarketSemantics, SettlementSource};

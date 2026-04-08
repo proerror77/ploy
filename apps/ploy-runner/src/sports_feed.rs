@@ -336,7 +336,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use ploy_strategy_bundles::MarketUpdate;
 
-    use super::{SportsDescriptor, SportsDescriptorCache, parse_message_text};
+    use super::{parse_message_text, SportsDescriptor, SportsDescriptorCache};
 
     #[test]
     fn fixture_messages_normalize_into_sports_state_updates() {

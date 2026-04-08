@@ -18,9 +18,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, warn};
 
 use crate::reference_prices::{
-    ReferenceAssetClass, ReferencePriceKey, ReferencePriceRegistry, ReferencePriceSnapshot,
-    ReferencePriceSource, infer_pyth_asset_class, market_symbol_to_binance_symbol,
-    normalize_reference_symbol, pyth_symbol, upsert_reference_price,
+    infer_pyth_asset_class, market_symbol_to_binance_symbol, normalize_reference_symbol,
+    pyth_symbol, upsert_reference_price, ReferenceAssetClass, ReferencePriceKey,
+    ReferencePriceRegistry, ReferencePriceSnapshot, ReferencePriceSource,
 };
 
 /// Spawn a task that subscribes to Binance spot prices via RTDS WebSocket

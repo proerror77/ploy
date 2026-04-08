@@ -12,7 +12,6 @@
 use serde_json::Value;
 
 #[cfg(all(
-    feature = "tracing",
     any(
         feature = "bridge",
         feature = "clob",

@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use ploy_strategy_bundles::MarketUpdate;
-use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::gamma::types::request::MarketsRequest;
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -21,8 +21,8 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::crypto::discover_crypto_markets;
+use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::sports::discover_sports_markets;
 use crate::discovery::upsert_market_catalog;
 use crate::feeds::spawn_quote_feed;
@@ -31,6 +31,8 @@ use crate::reference_prices::ReferencePriceRegistry;
 const SCAN_INTERVAL_SECS: u64 = 30;
 const SPORTS_DISCOVERY_REFRESH_SECS: i64 = 300;
 const SPORTS_DISCOVERY_LIMIT: i32 = 500;
+/// How far back to look for open positions that need recovery on startup.
+const RECOVERY_LOOKBACK_HOURS: i64 = 48;
 
 struct TrackedEvent {
     end_time: chrono::DateTime<Utc>,
@@ -57,6 +59,13 @@ pub fn spawn_market_scanner(
         let mut subscribed_tokens: HashSet<String> = HashSet::new();
         let mut quote_handles: Vec<JoinHandle<()>> = Vec::new();
         let mut last_sports_refresh: Option<DateTime<Utc>> = None;
+
+        // On startup, recover any open positions from events that expired while
+        // the runner was offline. These will never receive a new EventExpired from
+        // the live scanner, so we emit them now with official settlement outcomes.
+        if let Some(ref db) = pool {
+            recover_expired_open_positions(&tx, db).await;
+        }
 
         loop {
             let now = Utc::now();
@@ -158,6 +167,85 @@ pub fn spawn_market_scanner(
             tokio::time::sleep(std::time::Duration::from_secs(SCAN_INTERVAL_SECS)).await;
         }
     })
+}
+
+/// On startup, find events that expired while the runner was offline and still
+/// have open positions in `strategy_runtime_fills`. Emit `EventExpired` with
+/// the official settlement outcome from `pm_token_settlements` so the strategy
+/// can close those positions immediately.
+async fn recover_expired_open_positions(
+    tx: &broadcast::Sender<MarketUpdate>,
+    pool: &PgPool,
+) {
+    let lookback = Utc::now() - Duration::hours(RECOVERY_LOOKBACK_HOURS);
+
+    // Find open positions: BUY fills with no matching SELL, for events that
+    // ended before now. Join pm_market_catalog on market_id because runtime
+    // event_id uses the compatibility market id, not market_slug.
+    let rows: Vec<(String, String, String, DateTime<Utc>, Option<bool>)> = match sqlx::query_as(
+        r#"
+        SELECT DISTINCT
+            f.event_id,
+            f.token_id,
+            COALESCE(f.symbol, '') AS symbol,
+            COALESCE(c.end_time, NOW() - INTERVAL '1 second') AS end_time,
+            CASE
+                WHEN s.resolved AND s.settled_price >= 0.99 THEN true
+                WHEN s.resolved AND s.settled_price <= 0.01 THEN false
+                ELSE NULL
+            END AS resolved_up_won
+        FROM strategy_runtime_fills f
+        LEFT JOIN pm_market_catalog c ON c.market_id = f.event_id
+        LEFT JOIN pm_token_settlements s ON s.token_id = f.token_id
+        WHERE f.fill_side = 'BUY'
+          AND f.fill_timestamp >= $1
+          AND COALESCE(c.end_time, NOW()) < NOW()
+          AND NOT EXISTS (
+              SELECT 1 FROM strategy_runtime_fills s2
+              WHERE s2.token_id = f.token_id
+                AND s2.fill_side = 'SELL'
+                AND s2.intent_id LIKE 'settle_%'
+          )
+        "#,
+    )
+    .bind(lookback)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(error = %e, "Failed to query open positions for recovery");
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        debug!("Startup recovery: no expired open positions found");
+        return;
+    }
+
+    info!(
+        count = rows.len(),
+        "Startup recovery: emitting EventExpired for expired open positions"
+    );
+
+    // Group by event_id — one EventExpired per event is enough.
+    let mut seen_events: HashSet<String> = HashSet::new();
+    for (event_id, _token_id, _symbol, end_time, resolved_up_won) in rows {
+        if seen_events.insert(event_id.clone()) {
+            info!(
+                event_id = %event_id,
+                end_time = %end_time,
+                resolved_up_won = ?resolved_up_won,
+                "Recovery: emitting EventExpired",
+            );
+            let _ = tx.send(MarketUpdate::EventExpired {
+                event_id,
+                end_time,
+                resolved_up_won,
+            });
+        }
+    }
 }
 
 fn expire_tracked_events(
@@ -316,12 +404,10 @@ mod tests {
 
     #[test]
     fn token_id_parser_accepts_decimal_strings() {
-        assert!(
-            parse_token_id(
-                "27239049953613250678046988034203198692578441444398010699401021233149338414941"
-            )
-            .is_some()
-        );
+        assert!(parse_token_id(
+            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
+        )
+        .is_some());
         assert!(parse_token_id("not-a-token").is_none());
     }
 

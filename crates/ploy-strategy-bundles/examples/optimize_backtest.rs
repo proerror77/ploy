@@ -15,11 +15,11 @@
 
 use chrono::{NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
+use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
     feed::load_from_database, DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder,
     RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyRuntime,
 };
-use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_trading::TradeSide;
 use rust_decimal_macros::dec;
 use sqlx::postgres::PgPoolOptions;
@@ -27,9 +27,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2)
-        .find(|w| w[0] == flag)
-        .map(|w| w[1].clone())
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
 fn parse_date_start(s: &str) -> chrono::DateTime<Utc> {
@@ -96,7 +94,11 @@ fn run_backtest(config: DirectionalConfig, data: &[MarketUpdate]) -> (f64, usize
     } else {
         let n = per_trade_pnl.len() as f64;
         let mean = per_trade_pnl.iter().sum::<f64>() / n;
-        let variance = per_trade_pnl.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        let variance = per_trade_pnl
+            .iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>()
+            / n;
         let std_dev = variance.sqrt();
         if std_dev < 1e-9 {
             0.0
@@ -118,8 +120,13 @@ fn make_config(
 ) -> DirectionalConfig {
     DirectionalConfig {
         symbols: vec![
-            "BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into(),
-            "XRPUSDT".into(), "DOGEUSDT".into(), "HYPEUSDT".into(), "BNBUSDT".into(),
+            "BTCUSDT".into(),
+            "ETHUSDT".into(),
+            "SOLUSDT".into(),
+            "XRPUSDT".into(),
+            "DOGEUSDT".into(),
+            "HYPEUSDT".into(),
+            "BNBUSDT".into(),
         ],
         vol_floor: 0.001,
         min_probability,
@@ -143,9 +150,9 @@ fn main() {
 
     let db_url = flag_value(&args, "--db-url").expect("--db-url required");
     let train_start = flag_value(&args, "--train-start").unwrap_or_else(|| "2026-04-01".into());
-    let train_end   = flag_value(&args, "--train-end").unwrap_or_else(|| "2026-04-03".into());
-    let val_start   = flag_value(&args, "--val-start").unwrap_or_else(|| "2026-04-04".into());
-    let val_end     = flag_value(&args, "--val-end").unwrap_or_else(|| "2026-04-04".into());
+    let train_end = flag_value(&args, "--train-end").unwrap_or_else(|| "2026-04-03".into());
+    let val_start = flag_value(&args, "--val-start").unwrap_or_else(|| "2026-04-04".into());
+    let val_end = flag_value(&args, "--val-end").unwrap_or_else(|| "2026-04-04".into());
     let n_trials: usize = flag_value(&args, "--trials")
         .and_then(|s| s.parse().ok())
         .unwrap_or(200);
@@ -161,25 +168,40 @@ fn main() {
         .build()
         .unwrap();
 
-    let pool = rt.block_on(
-        PgPoolOptions::new().max_connections(3).connect(&db_url)
-    ).expect("DB connection failed");
+    let pool = rt
+        .block_on(PgPoolOptions::new().max_connections(3).connect(&db_url))
+        .expect("DB connection failed");
 
     let symbols: Vec<String> = vec![
-        "BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into(),
-        "XRPUSDT".into(), "DOGEUSDT".into(), "HYPEUSDT".into(), "BNBUSDT".into(),
+        "BTCUSDT".into(),
+        "ETHUSDT".into(),
+        "SOLUSDT".into(),
+        "XRPUSDT".into(),
+        "DOGEUSDT".into(),
+        "HYPEUSDT".into(),
+        "BNBUSDT".into(),
     ];
 
     eprintln!("Loading training data ({} → {})...", train_start, train_end);
-    let train_data = rt.block_on(
-        load_from_database(&pool, &symbols, parse_date_start(&train_start), parse_date_end(&train_end))
-    ).expect("Failed to load training data");
+    let train_data = rt
+        .block_on(load_from_database(
+            &pool,
+            &symbols,
+            parse_date_start(&train_start),
+            parse_date_end(&train_end),
+        ))
+        .expect("Failed to load training data");
     eprintln!("  {} updates loaded", train_data.len());
 
     eprintln!("Loading validation data ({} → {})...", val_start, val_end);
-    let val_data = rt.block_on(
-        load_from_database(&pool, &symbols, parse_date_start(&val_start), parse_date_end(&val_end))
-    ).expect("Failed to load validation data");
+    let val_data = rt
+        .block_on(load_from_database(
+            &pool,
+            &symbols,
+            parse_date_start(&val_start),
+            parse_date_end(&val_end),
+        ))
+        .expect("Failed to load validation data");
     eprintln!("  {} updates loaded\n", val_data.len());
 
     let train_data = Arc::new(train_data);
@@ -244,7 +266,11 @@ fn main() {
     // Validate on held-out window
     eprintln!("\n=== Validation (held-out) ===");
     let val_config = make_config(
-        best_min_prob, best_min_edge, best_cooldown, best_min_time, best_max_time,
+        best_min_prob,
+        best_min_edge,
+        best_cooldown,
+        best_min_time,
+        best_max_time,
     );
     let (val_pnl, val_trades, val_sharpe) = run_backtest(val_config, &val_data);
     eprintln!("Val Sharpe:  {val_sharpe:.3}");
@@ -267,12 +293,19 @@ fn main() {
 
     // Top 10 trials
     let mut all_trials = study.trials();
-    all_trials.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap_or(std::cmp::Ordering::Equal));
+    all_trials.sort_by(|a, b| {
+        b.value
+            .partial_cmp(&a.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     eprintln!("\n=== Top 10 Trials ===");
-    eprintln!("{:<6} {:<8} {:<8} {:<8} {:<10} {:<10}",
-        "Trial", "Sharpe", "p_min", "edge", "cooldown", "min_time");
+    eprintln!(
+        "{:<6} {:<8} {:<8} {:<8} {:<10} {:<10}",
+        "Trial", "Sharpe", "p_min", "edge", "cooldown", "min_time"
+    );
     for t in all_trials.iter().take(10) {
-        eprintln!("{:<6} {:<8.3} {:<8.3} {:<8.4} {:<10} {:<10}",
+        eprintln!(
+            "{:<6} {:<8.3} {:<8.3} {:<8.4} {:<10} {:<10}",
             t.id,
             t.value,
             t.get(&p_min_prob).unwrap_or(0.0),

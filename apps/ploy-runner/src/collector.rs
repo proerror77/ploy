@@ -24,9 +24,9 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 use crate::reference_prices::{
-    ReferenceAssetClass, ReferencePriceKey, ReferencePriceRegistry, ReferencePriceSnapshot,
-    ReferencePriceSource, latest_reference_price, market_symbol_to_chainlink_symbol,
-    new_reference_price_registry, normalize_reference_symbol, upsert_reference_price,
+    latest_reference_price, market_symbol_to_chainlink_symbol, new_reference_price_registry,
+    normalize_reference_symbol, upsert_reference_price, ReferenceAssetClass, ReferencePriceKey,
+    ReferencePriceRegistry, ReferencePriceSnapshot, ReferencePriceSource,
 };
 
 /// Configuration for the quote collector.
@@ -899,8 +899,9 @@ fn hex_to_decimal_string(hex: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OrderBookLevel, TokenMetadata, best_tradeable_ask, best_tradeable_bid, book_timestamp,
-        hex_to_decimal_string, normalize_token_id, serialize_orderbook_levels, snapshot_context,
+        best_tradeable_ask, best_tradeable_bid, book_timestamp, hex_to_decimal_string,
+        normalize_token_id, serialize_orderbook_levels, snapshot_context, OrderBookLevel,
+        TokenMetadata,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;

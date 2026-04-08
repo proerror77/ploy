@@ -221,10 +221,9 @@ impl SubscriptionManager {
 
         let target_topics: Vec<TopicType> = subscriptions
             .iter()
-            .map(|subscription| TopicType::new(
-                subscription.topic.clone(),
-                subscription.msg_type.clone(),
-            ))
+            .map(|subscription| {
+                TopicType::new(subscription.topic.clone(), subscription.msg_type.clone())
+            })
             .collect();
 
         // Store auth for re-subscription on reconnect.
@@ -360,30 +359,32 @@ impl SubscriptionManager {
                 .collect();
 
             for matching_topic in matching_topics {
-                if let Entry::Occupied(mut entry) = self.subscribed_topics.entry(matching_topic.clone()) {
-                let refcount = entry.get_mut();
-                *refcount = refcount.saturating_sub(1);
-                if *refcount == 0 {
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(
-                        topic = %matching_topic.topic,
-                        msg_type = %matching_topic.msg_type,
-                        filters = ?matching_topic.filters,
-                        "Unsubscribing from RTDS topic"
-                    );
+                if let Entry::Occupied(mut entry) =
+                    self.subscribed_topics.entry(matching_topic.clone())
+                {
+                    let refcount = entry.get_mut();
+                    *refcount = refcount.saturating_sub(1);
+                    if *refcount == 0 {
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            topic = %matching_topic.topic,
+                            msg_type = %matching_topic.msg_type,
+                            filters = ?matching_topic.filters,
+                            "Unsubscribing from RTDS topic"
+                        );
 
-                    // Send unsubscribe while holding the entry lock to prevent
-                    // a concurrent subscribe from racing with us
-                    let request = SubscriptionRequest::unsubscribe(vec![Subscription {
-                        topic: matching_topic.topic.clone(),
-                        msg_type: matching_topic.msg_type.clone(),
-                        filters: matching_topic.filters.clone(),
-                        clob_auth: None,
-                    }]);
-                    self.connection.send(&request)?;
-                    entry.remove();
+                        // Send unsubscribe while holding the entry lock to prevent
+                        // a concurrent subscribe from racing with us
+                        let request = SubscriptionRequest::unsubscribe(vec![Subscription {
+                            topic: matching_topic.topic.clone(),
+                            msg_type: matching_topic.msg_type.clone(),
+                            filters: matching_topic.filters.clone(),
+                            clob_auth: None,
+                        }]);
+                        self.connection.send(&request)?;
+                        entry.remove();
+                    }
                 }
-            }
             }
         }
 

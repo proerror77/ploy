@@ -844,8 +844,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        EventMetadataRow, MarketUpdate, build_event_updates, hex_to_decimal_string,
-        normalize_token_id,
+        build_event_updates, hex_to_decimal_string, normalize_token_id, EventMetadataRow,
+        MarketUpdate,
     };
 
     #[test]
