@@ -65,6 +65,7 @@ fn run_backtest(config: DirectionalConfig, data: &[MarketUpdate]) -> (f64, usize
         mode: RuntimeMode::Backtest,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);

@@ -187,6 +187,7 @@ async fn backtest_full_loop_produces_entry() {
         mode: RuntimeMode::Backtest,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
@@ -281,6 +282,7 @@ async fn empty_feed_produces_zero_trades() {
         mode: RuntimeMode::Backtest,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
@@ -321,6 +323,7 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         mode: RuntimeMode::DryRun,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut record_path = std::env::temp_dir();
@@ -408,6 +411,7 @@ async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
         mode: RuntimeMode::DryRun,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut record_path = std::env::temp_dir();
@@ -488,6 +492,7 @@ async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior()
         mode: RuntimeMode::DryRun,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut record_path = std::env::temp_dir();

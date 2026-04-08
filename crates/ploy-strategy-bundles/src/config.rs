@@ -197,6 +197,7 @@ impl FullConfig {
             mode,
             throttle_hz: self.runtime.throttle_hz,
             max_updates: self.runtime.max_updates,
+            skip_settlement_exits: mode == RuntimeMode::Live,
         }
     }
 
