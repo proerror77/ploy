@@ -7378,3 +7378,32 @@ heartbeat window.
 - 2026-04-09: The only residual warning seen on host for collector PID `711917` was `Heartbeat timeout: no PONG received within 15s`. That cannot come from the main orderbook stream anymore because the collector CLOB client already uses a `45s` heartbeat timeout; it points at the remaining `RtdsClient::default()` Chainlink feed path, which still uses SDK defaults (`5s` interval / `15s` timeout).
 - 2026-04-09: `spawn_settlement_collector()` is HTTP polling, not WebSocket, so it is not part of the residual heartbeat problem.
 - 2026-04-09: Local validation passed with `CARGO_TARGET_DIR=/tmp/ploy-rtds-heartbeat rtk cargo check -p ploy-runner --bin ploy-runner` and `CARGO_TARGET_DIR=/tmp/ploy-rtds-heartbeat rtk cargo test -p ploy-runner collector_market_data_uses_relaxed_ws_heartbeat_settings`.
+
+# Dry-Run RTDS Heartbeat Follow-up (2026-04-09)
+
+## Goal
+Eliminate the remaining `Heartbeat timeout: no PONG received within 15s` and
+related RTDS reconnect churn in the dry-run feed path by removing all uses of
+`RtdsClient::default()` from `apps/ploy-runner/src/feeds.rs`.
+
+## File ownership
+
+- `apps/ploy-runner/src/feeds.rs`
+  - owner: shared RTDS market-data WebSocket config for dry-run spot, Chainlink, and Pyth feeds
+- `tasks/todo.md`
+  - owner: root-cause notes and validation for the dry-run feed fix
+
+## Tasks
+
+- [x] Confirm which dry-run feeds still use the SDK default `5s/15s` RTDS heartbeat config.
+- [x] Add a shared relaxed RTDS market-data config in `feeds.rs`.
+- [x] Switch dry-run RTDS spot, Chainlink, and Pyth feeds to the shared config.
+- [x] Add focused regression coverage for the shared dry-run RTDS config.
+- [ ] Re-run targeted validation and redeploy `tango-1-1`.
+
+## Progress notes
+
+- 2026-04-09: `apps/ploy-runner/src/feeds.rs` still constructs three RTDS clients with `RtdsClient::default()`: `spawn_spot_feed()` for `crypto_prices`, `spawn_chainlink_feed()` for `chainlink_prices`, and `spawn_pyth_reference_feed()` for `equity_prices`.
+- 2026-04-09: Dry-run host PID `725622` still logged `Heartbeat timeout: no PONG received within 15s` plus `ResetWithoutClosingHandshake`, which matches the SDK default RTDS heartbeat policy and explains why the collector-only fix did not clean up the strategy service.
+- 2026-04-09: Added a shared `rtds_market_data_ws_config()` helper in `feeds.rs` and switched all three dry-run RTDS clients to `RtdsClient::new(..., rtds_market_data_ws_config())`, so the strategy service no longer uses the SDK default `5s/15s` heartbeat window on any market-data RTDS feed.
+- 2026-04-09: Local validation passed with `CARGO_TARGET_DIR=/tmp/ploy-dryrun-rtds rtk cargo test -p ploy-runner dry_run_rtds_market_data_uses_relaxed_ws_heartbeat_settings` and `CARGO_TARGET_DIR=/tmp/ploy-dryrun-rtds rtk cargo check -p ploy-runner --bin ploy-runner`.

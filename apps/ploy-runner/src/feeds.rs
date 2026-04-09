@@ -5,12 +5,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Timelike, Utc};
 use futures::StreamExt;
 use ploy_strategy_bundles::MarketUpdate;
 use polymarket_client_sdk::rtds::{Client as RtdsClient, EquityPriceMessage};
 use polymarket_client_sdk::types::U256;
+use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
@@ -18,10 +20,22 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, warn};
 
 use crate::reference_prices::{
-    ReferenceAssetClass, ReferencePriceKey, ReferencePriceRegistry, ReferencePriceSnapshot,
-    ReferencePriceSource, infer_pyth_asset_class, market_symbol_to_binance_symbol,
-    normalize_reference_symbol, pyth_symbol, upsert_reference_price,
+    infer_pyth_asset_class, market_symbol_to_binance_symbol, normalize_reference_symbol,
+    pyth_symbol, upsert_reference_price, ReferenceAssetClass, ReferencePriceKey,
+    ReferencePriceRegistry, ReferencePriceSnapshot, ReferencePriceSource,
 };
+
+const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
+
+fn rtds_market_data_ws_config() -> PolymarketWsConfig {
+    let mut config = PolymarketWsConfig::default();
+    // These feeds only need resilient market-data delivery. A wider heartbeat
+    // window avoids unnecessary reconnect churn on transient stalls.
+    config.heartbeat_interval = StdDuration::from_secs(15);
+    config.heartbeat_timeout = StdDuration::from_secs(45);
+    config.reconnect = ReconnectConfig::default();
+    config
+}
 
 /// Spawn a task that subscribes to Binance spot prices via RTDS WebSocket
 /// and publishes `MarketUpdate::SpotPrice` events in real-time.
@@ -46,8 +60,8 @@ pub fn spawn_spot_feed(
             "Starting RTDS WebSocket spot price feed"
         );
 
-        // Create RTDS client with default config (wss://ws-live-data.polymarket.com)
-        let client = RtdsClient::default();
+        let client = RtdsClient::new(POLYMARKET_RTDS_WS_ENDPOINT, rtds_market_data_ws_config())
+            .expect("RTDS market-data config should be valid");
 
         // Subscribe to crypto prices (Binance feed)
         let stream = match client.subscribe_crypto_prices(Some(symbols_upper.clone())) {
@@ -335,8 +349,8 @@ pub fn spawn_chainlink_feed(
             "Starting RTDS Chainlink price feed"
         );
 
-        // Create RTDS client
-        let client = RtdsClient::default();
+        let client = RtdsClient::new(POLYMARKET_RTDS_WS_ENDPOINT, rtds_market_data_ws_config())
+            .expect("RTDS market-data config should be valid");
 
         // Subscribe to all Chainlink symbols (None = all, Some(vec) = specific)
         // For now subscribe to all since we only have 7 symbols
@@ -464,7 +478,9 @@ pub fn spawn_pyth_reference_feed(
             join_set.spawn(async move {
                 let normalized_symbol = pyth_symbol(&subscribe_symbol);
                 let asset_class = infer_pyth_asset_class(&subscribe_symbol);
-                let client = RtdsClient::default();
+                let client =
+                    RtdsClient::new(POLYMARKET_RTDS_WS_ENDPOINT, rtds_market_data_ws_config())
+                        .expect("RTDS market-data config should be valid");
                 let stream =
                     match client.subscribe_equity_prices(Some(subscribe_symbol.clone()), true) {
                         Ok(stream) => stream,
@@ -713,5 +729,19 @@ fn reference_price_update(snapshot: &ReferencePriceSnapshot) -> MarketUpdate {
         full_accuracy_value: snapshot.full_accuracy_value.clone(),
         is_carried_forward: snapshot.is_carried_forward,
         ts: snapshot.source_timestamp,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rtds_market_data_ws_config;
+    use std::time::Duration;
+
+    #[test]
+    fn dry_run_rtds_market_data_uses_relaxed_ws_heartbeat_settings() {
+        let config = rtds_market_data_ws_config();
+        assert_eq!(config.heartbeat_interval, Duration::from_secs(15));
+        assert_eq!(config.heartbeat_timeout, Duration::from_secs(45));
+        assert!(config.reconnect.max_attempts.is_none());
     }
 }
