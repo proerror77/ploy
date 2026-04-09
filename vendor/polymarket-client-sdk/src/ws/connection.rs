@@ -27,7 +27,10 @@ use crate::{Result, error::Error};
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Broadcast channel capacity for incoming messages.
-const BROADCAST_CAPACITY: usize = 1024;
+///
+/// Orderbook bursts can briefly outrun slower consumers that also persist each update.
+/// A larger ring buffer reduces unnecessary lag-induced disconnect/reconnect churn.
+const BROADCAST_CAPACITY: usize = 8192;
 
 /// Connection state tracking.
 #[non_exhaustive]

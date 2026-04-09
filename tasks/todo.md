@@ -7321,3 +7321,89 @@ be audited against later execution behavior and market outcomes.
 - 2026-04-06: `StrategyRuntime` records entry signals before calling the executor, so simulated rejections or no-fill paths still leave an audit trail.
 - 2026-04-06: `ploy-runner` now uses a DB-backed `BufferedRecorder` in live/dry-run when `DATABASE_URL` is configured and writes batches into `signal_history`.
 - 2026-04-06: Validation passed with `CARGO_TARGET_DIR=/tmp/ploy-signal-record rtk cargo test -p ploy-strategy-bundles` and `CARGO_TARGET_DIR=/tmp/ploy-signal-record rtk cargo check -p ploy-runner -p ploy-strategy-bundles`.
+
+# Deploy Follow-up Cleanup (2026-04-08)
+
+## Goal
+Remove repository state that causes `actions/checkout` post-job cleanup to emit a
+`git exit 128` warning, then re-verify that the latest `tango-1-1` deployment is
+fully applied on-host.
+
+## File ownership
+
+- `.gitignore`
+  - owner: ignore local Codex worktree scratch paths
+- `tasks/todo.md`
+  - owner: track deploy follow-up and review notes
+
+## Tasks
+
+- [x] Confirm whether the latest `Deploy to tango-1-1` run actually completed or only partially applied.
+- [x] Identify the cause of the lingering `/usr/bin/git` exit `128` annotation in GitHub Actions.
+- [x] Remove accidental `.codex/worktrees/*` gitlinks from the repo index and ignore that path going forward.
+- [x] Re-run targeted verification for checkout cleanliness and summarize any remaining remote runtime risks.
+
+## Review
+
+- 2026-04-08: Deploy run `24140301645` completed successfully and applied the migration/view fix on `tango-1-1`; both `strategy_runtime_event_track_record` and `strategy_runtime_daily_track_record` now exist on-host.
+- 2026-04-08: The remaining GitHub Actions annotation is not a deploy failure. `actions/checkout` post-job cleanup calls `git submodule foreach`, which fails because the repo index tracks three `.codex/worktrees/*` gitlinks without a matching `.gitmodules` entry.
+- 2026-04-08: Removed the accidental `.codex/worktrees/*` gitlinks from the index and ignored `.codex/worktrees/`, so future `actions/checkout` cleanup should stop emitting the false-positive submodule warning.
+- 2026-04-08: Host verification after deploy: `ploy-strategy-directional-dryrun` and `ploy-quote-collector` are active, required systemd guardrails are present, no `cargo`/`rustc` build remains on-host, and recent `clob_orderbook_snapshots` / `clob_quote_ticks` rows continue to grow.
+- 2026-04-08: Residual runtime risk remains in `ploy-quote-collector`: the service keeps ingesting data, but recent journals still show repeated WebSocket heartbeat timeouts and `ResetWithoutClosingHandshake` reconnect churn.
+- 2026-04-08: After relaxing the collector heartbeat window, the dominant failure mode shifted from heartbeat timeout to `Subscription lagged, missed N messages`, which points at the SDK broadcast buffer saturating under orderbook bursts while the collector is busy persisting each update.
+
+# Collector RTDS Heartbeat Follow-up (2026-04-09)
+
+## Goal
+Eliminate the last residual WebSocket heartbeat timeout in `ploy-quote-collector`
+by fixing the remaining RTDS client that still uses the SDK's default `5s/15s`
+heartbeat window.
+
+## File ownership
+
+- `apps/ploy-runner/src/collector.rs`
+  - owner: align Chainlink RTDS client heartbeat config with the collector's relaxed market-data settings
+- `tasks/todo.md`
+  - owner: track the root-cause confirmation and verification notes for the residual warning
+
+## Tasks
+
+- [x] Confirm the residual `Heartbeat timeout: no PONG received within 15s` cannot come from the main orderbook stream.
+- [x] Reuse the relaxed market-data WS config for the Chainlink RTDS client.
+- [x] Add focused regression coverage for the shared collector market-data WS config.
+- [ ] Re-run targeted runner validation and redeploy `tango-1-1`.
+
+## Progress notes
+
+- 2026-04-09: The only residual warning seen on host for collector PID `711917` was `Heartbeat timeout: no PONG received within 15s`. That cannot come from the main orderbook stream anymore because the collector CLOB client already uses a `45s` heartbeat timeout; it points at the remaining `RtdsClient::default()` Chainlink feed path, which still uses SDK defaults (`5s` interval / `15s` timeout).
+- 2026-04-09: `spawn_settlement_collector()` is HTTP polling, not WebSocket, so it is not part of the residual heartbeat problem.
+- 2026-04-09: Local validation passed with `CARGO_TARGET_DIR=/tmp/ploy-rtds-heartbeat rtk cargo check -p ploy-runner --bin ploy-runner` and `CARGO_TARGET_DIR=/tmp/ploy-rtds-heartbeat rtk cargo test -p ploy-runner collector_market_data_uses_relaxed_ws_heartbeat_settings`.
+
+# Dry-Run RTDS Heartbeat Follow-up (2026-04-09)
+
+## Goal
+Eliminate the remaining `Heartbeat timeout: no PONG received within 15s` and
+related RTDS reconnect churn in the dry-run feed path by removing all uses of
+`RtdsClient::default()` from `apps/ploy-runner/src/feeds.rs`.
+
+## File ownership
+
+- `apps/ploy-runner/src/feeds.rs`
+  - owner: shared RTDS market-data WebSocket config for dry-run spot, Chainlink, and Pyth feeds
+- `tasks/todo.md`
+  - owner: root-cause notes and validation for the dry-run feed fix
+
+## Tasks
+
+- [x] Confirm which dry-run feeds still use the SDK default `5s/15s` RTDS heartbeat config.
+- [x] Add a shared relaxed RTDS market-data config in `feeds.rs`.
+- [x] Switch dry-run RTDS spot, Chainlink, and Pyth feeds to the shared config.
+- [x] Add focused regression coverage for the shared dry-run RTDS config.
+- [ ] Re-run targeted validation and redeploy `tango-1-1`.
+
+## Progress notes
+
+- 2026-04-09: `apps/ploy-runner/src/feeds.rs` still constructs three RTDS clients with `RtdsClient::default()`: `spawn_spot_feed()` for `crypto_prices`, `spawn_chainlink_feed()` for `chainlink_prices`, and `spawn_pyth_reference_feed()` for `equity_prices`.
+- 2026-04-09: Dry-run host PID `725622` still logged `Heartbeat timeout: no PONG received within 15s` plus `ResetWithoutClosingHandshake`, which matches the SDK default RTDS heartbeat policy and explains why the collector-only fix did not clean up the strategy service.
+- 2026-04-09: Added a shared `rtds_market_data_ws_config()` helper in `feeds.rs` and switched all three dry-run RTDS clients to `RtdsClient::new(..., rtds_market_data_ws_config())`, so the strategy service no longer uses the SDK default `5s/15s` heartbeat window on any market-data RTDS feed.
+- 2026-04-09: Local validation passed with `CARGO_TARGET_DIR=/tmp/ploy-dryrun-rtds rtk cargo test -p ploy-runner dry_run_rtds_market_data_uses_relaxed_ws_heartbeat_settings` and `CARGO_TARGET_DIR=/tmp/ploy-dryrun-rtds rtk cargo check -p ploy-runner --bin ploy-runner`.

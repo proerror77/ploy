@@ -216,6 +216,7 @@ fn main() {
                     stake_usd: dec!(25),
                     max_positions: 3,
                     max_daily_trades: 1000,
+                    max_daily_loss_usd: None,
                 },
                 SimulatedExecutorConfig {
                     use_spread: true,
@@ -229,6 +230,7 @@ fn main() {
                     mode: RuntimeMode::Backtest,
                     throttle_hz: None,
                     max_updates: None,
+                    skip_settlement_exits: false,
                 },
                 HistoricalLoadOptions::default(),
             )

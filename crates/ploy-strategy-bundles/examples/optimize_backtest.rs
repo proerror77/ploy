@@ -65,6 +65,7 @@ fn run_backtest(config: DirectionalConfig, data: &[MarketUpdate]) -> (f64, usize
         mode: RuntimeMode::Backtest,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
@@ -135,6 +136,7 @@ fn make_config(
         stake_usd: dec!(25),
         max_positions: 30,
         max_daily_trades: 1000,
+        max_daily_loss_usd: None,
     }
 }
 

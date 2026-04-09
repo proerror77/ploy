@@ -171,6 +171,7 @@ async fn backtest_full_loop_produces_entry() {
         stake_usd: dec!(25),
         max_positions: 1000,
         max_daily_trades: 1000,
+        max_daily_loss_usd: None,
     };
 
     let strategy = DirectionalStrategy::new(config);
@@ -187,6 +188,7 @@ async fn backtest_full_loop_produces_entry() {
         mode: RuntimeMode::Backtest,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
@@ -271,6 +273,7 @@ async fn empty_feed_produces_zero_trades() {
         stake_usd: dec!(25),
         max_positions: 1000,
         max_daily_trades: 1000,
+        max_daily_loss_usd: None,
     };
 
     let strategy = DirectionalStrategy::new(config);
@@ -281,6 +284,7 @@ async fn empty_feed_produces_zero_trades() {
         mode: RuntimeMode::Backtest,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
@@ -309,6 +313,7 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         stake_usd: dec!(25),
         max_positions: 1000,
         max_daily_trades: 1000,
+        max_daily_loss_usd: None,
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,
@@ -321,6 +326,7 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         mode: RuntimeMode::DryRun,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut record_path = std::env::temp_dir();
@@ -396,6 +402,7 @@ async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
         stake_usd: dec!(25),
         max_positions: 1000,
         max_daily_trades: 1000,
+        max_daily_loss_usd: None,
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,
@@ -408,6 +415,7 @@ async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
         mode: RuntimeMode::DryRun,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut record_path = std::env::temp_dir();
@@ -476,6 +484,7 @@ async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior()
         stake_usd: dec!(25),
         max_positions: 1000,
         max_daily_trades: 1000,
+        max_daily_loss_usd: None,
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,
@@ -488,6 +497,7 @@ async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior()
         mode: RuntimeMode::DryRun,
         throttle_hz: None,
         max_updates: None,
+        skip_settlement_exits: false,
     };
 
     let mut record_path = std::env::temp_dir();

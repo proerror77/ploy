@@ -15,6 +15,9 @@ use rust_decimal::Decimal;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use ploy_trading::{FillRecord, IntentPurpose};
+use rust_decimal_macros::dec;
+
 use crate::traits::{Executor, Feed, MarketUpdate, Recorder, StrategyDecision, StrategyLogic};
 
 /// Operating mode for the runtime.
@@ -38,6 +41,8 @@ pub struct RuntimeConfig {
     pub throttle_hz: Option<u32>,
     /// Stop after N updates (backtest bound). `None` = run forever.
     pub max_updates: Option<u64>,
+    /// Skip settlement exit orders (live mode: Polymarket auto-settles on-chain).
+    pub skip_settlement_exits: bool,
 }
 
 /// Summary produced at the end of a runtime session.
@@ -138,6 +143,20 @@ where
                 self.strategy
                     .on_update(&update, self.trading.positions(), self.trading.orders());
 
+            // 1b. In live mode, filter out settlement exits (Polymarket auto-settles on-chain).
+            let decisions: Vec<StrategyDecision> = if self.config.skip_settlement_exits {
+                decisions
+                    .into_iter()
+                    .filter(|d| {
+                        !matches!(d, StrategyDecision::Exit(intent)
+                            if intent.purpose == IntentPurpose::Exit
+                            && intent.limit_price.map_or(false, |p| p == dec!(0) || p == dec!(1)))
+                    })
+                    .collect()
+            } else {
+                decisions
+            };
+
             // 2. Execute each decision.
             for decision in decisions {
                 let (intent, signal) = match decision {
@@ -183,6 +202,26 @@ where
                         qty = %fill.quantity,
                         price = %fill.price,
                         "Fill recorded",
+                    );
+                } else if !report.rejected {
+                    // Live mode: executor acknowledged but no immediate fill.
+                    // Arm cooldown/daily counter with a synthetic fill so the
+                    // strategy doesn't re-signal for the same symbol immediately.
+                    let synthetic = FillRecord {
+                        fill_id: format!("synthetic_{order_id}"),
+                        order_id: order_id.clone(),
+                        token_id: intent.token_id.clone(),
+                        side: intent.side.clone(),
+                        quantity: intent.quantity,
+                        price: intent.limit_price.unwrap_or_default(),
+                        fee: Decimal::ZERO,
+                        timestamp: intent.created_at,
+                    };
+                    self.strategy.on_fill(&synthetic);
+                    debug!(
+                        order_id = %order_id,
+                        token = %intent.token_id,
+                        "Synthetic fill for cooldown (live acknowledged)",
                     );
                 }
             }
@@ -416,6 +455,7 @@ mod tests {
             mode: RuntimeMode::DryRun,
             throttle_hz: None,
             max_updates: None,
+            skip_settlement_exits: false,
         };
 
         let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
@@ -518,6 +558,7 @@ mod tests {
             mode: RuntimeMode::DryRun,
             throttle_hz: None,
             max_updates: None,
+            skip_settlement_exits: false,
         };
 
         let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);

@@ -121,8 +121,9 @@ pub struct DirectionalConfig {
     pub max_positions: usize,
     #[serde(default = "default_max_daily_trades")]
     pub max_daily_trades: u32,
-    /// Hard stop: halt new entries when cumulative daily P&L drops below this threshold.
-    /// None = no limit. Value is a loss amount in USD (positive number, e.g. 200.0 = stop at -$200).
+
+    // Risk
+    /// Daily loss circuit breaker (USD). `None` = no limit.
     #[serde(default)]
     pub max_daily_loss_usd: Option<Decimal>,
 }
@@ -217,8 +218,12 @@ pub struct DirectionalStrategy {
     daily_trades: u32,
     daily_pnl: Decimal,
     last_trade_date: Option<chrono::NaiveDate>,
+    /// Realized PnL for the current trading day (circuit breaker).
+    daily_realized_pnl: Decimal,
     // Token → symbol mapping
     token_symbol: HashMap<String, String>,
+    /// Entry price cache: token_id → entry price (for PnL tracking on settlement).
+    entry_prices: HashMap<String, Decimal>,
     /// Most recent feed timestamp seen across all updates.
     /// Used instead of Utc::now() so replay runs are deterministic.
     feed_time: Option<DateTime<Utc>>,
@@ -236,7 +241,9 @@ impl DirectionalStrategy {
             daily_trades: 0,
             daily_pnl: Decimal::ZERO,
             last_trade_date: None,
+            daily_realized_pnl: Decimal::ZERO,
             token_symbol: HashMap::new(),
+            entry_prices: HashMap::new(),
             feed_time: None,
         }
     }
@@ -265,7 +272,7 @@ impl DirectionalStrategy {
         let today = now.date_naive();
         if self.last_trade_date != Some(today) {
             self.daily_trades = 0;
-            self.daily_pnl = Decimal::ZERO;
+            self.daily_realized_pnl = Decimal::ZERO;
             self.last_trade_date = Some(today);
         }
     }
@@ -453,11 +460,11 @@ impl DirectionalStrategy {
             let down_qty = positions.net_qty(&event.down_token);
             if up_qty > Decimal::ZERO {
                 let payout = if up_won { up_qty } else { Decimal::ZERO };
-                self.daily_pnl += payout - self.config.stake_usd;
+                self.daily_realized_pnl += payout - self.config.stake_usd;
             }
             if down_qty > Decimal::ZERO {
                 let payout = if up_won { Decimal::ZERO } else { down_qty };
-                self.daily_pnl += payout - self.config.stake_usd;
+                self.daily_realized_pnl += payout - self.config.stake_usd;
             }
 
             exits.extend(self.build_settlement_exits(&event, event.end_time, up_won, positions));
@@ -673,6 +680,19 @@ impl DirectionalStrategy {
         positions: &PositionLedger,
         now: DateTime<Utc>,
     ) -> Vec<StrategyDecision> {
+        // Daily loss circuit breaker
+        if let Some(max_loss) = self.config.max_daily_loss_usd {
+            if self.daily_realized_pnl <= -max_loss {
+                debug!(
+                    symbol,
+                    daily_pnl = %self.daily_realized_pnl,
+                    max_loss = %max_loss,
+                    "Daily loss circuit breaker triggered"
+                );
+                return vec![];
+            }
+        }
+
         // Position count check
         let open_count = positions.positions().count();
         if open_count >= self.config.max_positions {
@@ -816,7 +836,7 @@ impl StrategyLogic for DirectionalStrategy {
                     return vec![];
                 }
                 if let Some(loss_limit) = self.config.max_daily_loss_usd {
-                    if self.daily_pnl <= -loss_limit {
+                    if self.daily_realized_pnl <= -loss_limit {
                         return vec![];
                     }
                 }
@@ -851,7 +871,7 @@ impl StrategyLogic for DirectionalStrategy {
                         self.reset_daily_counter(*ts);
                         if self.daily_trades < self.config.max_daily_trades
                             && !self.in_cooldown(&symbol, *ts)
-                            && self.config.max_daily_loss_usd.map_or(true, |limit| self.daily_pnl > -limit)
+                            && self.config.max_daily_loss_usd.map_or(true, |limit| self.daily_realized_pnl > -limit)
                         {
                             return self.try_entry(&symbol, positions, *ts);
                         }
@@ -979,6 +999,20 @@ impl StrategyLogic for DirectionalStrategy {
             self.cooldowns.insert(symbol.clone(), fill.timestamp);
             self.daily_trades += 1;
         }
+
+        // Track entry prices and realized PnL for circuit breaker.
+        match fill.side {
+            ploy_trading::TradeSide::Buy => {
+                self.entry_prices
+                    .insert(fill.token_id.clone(), fill.price);
+            }
+            ploy_trading::TradeSide::Sell => {
+                if let Some(entry_price) = self.entry_prices.remove(&fill.token_id) {
+                    let pnl = (fill.price - entry_price) * fill.quantity - fill.fee;
+                    self.daily_realized_pnl += pnl;
+                }
+            }
+        }
     }
 
     fn name(&self) -> &str {
@@ -1009,6 +1043,7 @@ mod tests {
             stake_usd: dec!(25),
             max_positions: 1000,
             max_daily_trades: 1000,
+            max_daily_loss_usd: None,
         }
     }
 

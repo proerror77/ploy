@@ -7,12 +7,35 @@ use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::types::{Address, U256};
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use secrecy::{ExposeSecret, SecretString};
 use std::str::FromStr;
 use thiserror::Error;
 
 pub const CRATE_MARKER: &str = "ploy-connectivity";
 const DEFAULT_POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
+
+/// Order execution type for live trading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OrderExecutionType {
+    /// Good-Til-Cancelled (rests on book).
+    GTC,
+    /// Fill-and-Kill (fill what you can, cancel rest). Default for 5-min markets.
+    #[default]
+    FAK,
+    /// Fill-or-Kill (fill entirely or cancel entirely).
+    FOK,
+}
+
+impl OrderExecutionType {
+    pub fn into_sdk(self) -> OrderType {
+        match self {
+            Self::GTC => OrderType::GTC,
+            Self::FAK => OrderType::FAK,
+            Self::FOK => OrderType::FOK,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionRequest {
@@ -21,6 +44,10 @@ pub struct ExecutionRequest {
     pub side: TradeSide,
     pub quantity: Decimal,
     pub limit_price: Option<Decimal>,
+    /// Order execution type (default: FAK for immediate execution).
+    pub order_type: OrderExecutionType,
+    /// Extra ticks above best ask for aggressive pricing (0 = use exact limit_price).
+    pub aggressive_ticks: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,11 +362,20 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                 .await
                 .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))?;
 
+            // Compute aggressive price: limit_price + N ticks (capped at 0.99).
+            let tick_size = dec!(0.01);
+            let aggressive_price = if request.aggressive_ticks > 0 {
+                let offset = tick_size * Decimal::from(request.aggressive_ticks);
+                (limit_price + offset).min(dec!(0.99))
+            } else {
+                limit_price
+            };
+
             let order = client
                 .limit_order()
                 .token_id(token_id)
-                .order_type(OrderType::GTC)
-                .price(limit_price)
+                .order_type(request.order_type.into_sdk())
+                .price(aggressive_price)
                 .size(request.quantity)
                 .side(polymarket_side(request.side))
                 .build()
@@ -548,6 +584,8 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
             side: request.side,
             quantity: request.quantity,
             limit_price: request.limit_price,
+            order_type: OrderExecutionType::GTC,
+            aggressive_ticks: 0,
         })? {
             ExecutionOutcome::Acknowledged { venue_order_id } => {
                 Ok(ReplaceOutcome::Replaced { venue_order_id })
@@ -630,9 +668,9 @@ pub fn crate_marker() -> &'static str {
 mod tests {
     use super::{
         tracked_trade_fill, CancellationOutcome, CancellationRequest, ExecutionError,
-        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, PolymarketExecutionConfig,
-        PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
-        TrackedOrder, WalletSignatureType,
+        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
+        PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest,
+        StaticExecutionGateway, TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -653,6 +691,8 @@ mod tests {
                 side: TradeSide::Buy,
                 quantity: dec!(1),
                 limit_price: Some(dec!(0.55)),
+                order_type: OrderExecutionType::GTC,
+                aggressive_ticks: 0,
             })
             .expect("ack outcome");
 
@@ -681,6 +721,8 @@ mod tests {
                 side: TradeSide::Buy,
                 quantity: dec!(1),
                 limit_price: None,
+                order_type: OrderExecutionType::GTC,
+                aggressive_ticks: 0,
             })
             .expect_err("limit price should be required");
 

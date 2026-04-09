@@ -235,3 +235,21 @@
   - When validating dry-run behavior historically, prefer replaying a recorded canonical feed instead of reconstructing from tables.
   - If a result difference is caused by discovery/quote coverage, diagnose the ingestion path before blaming the strategy.
   - For new feed changes, add a record→replay regression proving the same `MarketUpdate` log produces the same fills and PnL.
+
+## 2026-04-06
+
+- Pattern: When a GitHub deployment path is slow or appears stuck, it is tempting to bypass it with manual SCP/upload to get the host unstuck quickly.
+- Rule: On this repo, deployment code for trading hosts must not be uploaded manually. Use GitHub Actions artifacts and the checked-in workflow only. If the GitHub path is blocked, debug or fix the workflow, or stop and report, but do not hand-deploy binaries or code to the host.
+- Deployment guardrail:
+  - Treat manual upload of deployable code or binaries to trading hosts as prohibited, even for rollback or hotfix pressure.
+  - If a workflow is hung in upload/restart, inspect the workflow and logs first, not the host filesystem as an alternate deploy path.
+  - If recovery is urgently needed, use the last known good GitHub-built artifact and documented GitHub release path, not a locally produced binary.
+
+## 2026-04-07
+
+- Pattern: The user does not want new TypeScript by default when the same behavior can live in Rust.
+- Rule: On this repo, prefer Rust for new backend, control-plane, research, and oversight logic whenever it is feasible to run in Rust. Use TypeScript only for the existing frontend/sidecar shell where Rust is not yet the chosen host, and keep new TS additions minimal and bridge-like.
+- Implementation guardrail:
+  - Before adding non-trivial TS logic, ask whether the behavior can instead live in `ployctl`, `ployd`, or a Rust crate.
+  - If TS is temporarily unavoidable, keep it as a thin wrapper over canonical Rust surfaces rather than embedding core logic there.
+  - Do not move strategy, execution, or oversight policy deeper into TS just because the sidecar currently runs on Node.
