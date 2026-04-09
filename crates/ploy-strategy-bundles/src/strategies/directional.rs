@@ -121,6 +121,10 @@ pub struct DirectionalConfig {
     pub max_positions: usize,
     #[serde(default = "default_max_daily_trades")]
     pub max_daily_trades: u32,
+    /// Hard stop: halt new entries when cumulative daily P&L drops below this threshold.
+    /// None = no limit. Value is a loss amount in USD (positive number, e.g. 200.0 = stop at -$200).
+    #[serde(default)]
+    pub max_daily_loss_usd: Option<Decimal>,
 }
 
 fn default_symbols() -> Vec<String> {
@@ -211,6 +215,7 @@ pub struct DirectionalStrategy {
     // Gating state
     cooldowns: HashMap<String, DateTime<Utc>>,
     daily_trades: u32,
+    daily_pnl: Decimal,
     last_trade_date: Option<chrono::NaiveDate>,
     // Token → symbol mapping
     token_symbol: HashMap<String, String>,
@@ -229,6 +234,7 @@ impl DirectionalStrategy {
             quotes: HashMap::new(),
             cooldowns: HashMap::new(),
             daily_trades: 0,
+            daily_pnl: Decimal::ZERO,
             last_trade_date: None,
             token_symbol: HashMap::new(),
             feed_time: None,
@@ -259,6 +265,7 @@ impl DirectionalStrategy {
         let today = now.date_naive();
         if self.last_trade_date != Some(today) {
             self.daily_trades = 0;
+            self.daily_pnl = Decimal::ZERO;
             self.last_trade_date = Some(today);
         }
     }
@@ -438,6 +445,20 @@ impl DirectionalStrategy {
                 );
                 continue;
             };
+
+            // Track P&L for daily loss limit: payout - cost (cost = qty * entry_price ≈ qty * ask)
+            // Approximation: we don't have the exact entry price here, so use settle_price * qty
+            // as the realized value and subtract stake_usd as the cost basis.
+            let up_qty = positions.net_qty(&event.up_token);
+            let down_qty = positions.net_qty(&event.down_token);
+            if up_qty > Decimal::ZERO {
+                let payout = if up_won { up_qty } else { Decimal::ZERO };
+                self.daily_pnl += payout - self.config.stake_usd;
+            }
+            if down_qty > Decimal::ZERO {
+                let payout = if up_won { Decimal::ZERO } else { down_qty };
+                self.daily_pnl += payout - self.config.stake_usd;
+            }
 
             exits.extend(self.build_settlement_exits(&event, event.end_time, up_won, positions));
             resolved_event_ids.insert(event.event_id.clone());
@@ -794,6 +815,11 @@ impl StrategyLogic for DirectionalStrategy {
                 if self.daily_trades >= self.config.max_daily_trades {
                     return vec![];
                 }
+                if let Some(loss_limit) = self.config.max_daily_loss_usd {
+                    if self.daily_pnl <= -loss_limit {
+                        return vec![];
+                    }
+                }
                 if self.in_cooldown(symbol, *ts) {
                     return vec![];
                 }
@@ -825,6 +851,7 @@ impl StrategyLogic for DirectionalStrategy {
                         self.reset_daily_counter(*ts);
                         if self.daily_trades < self.config.max_daily_trades
                             && !self.in_cooldown(&symbol, *ts)
+                            && self.config.max_daily_loss_usd.map_or(true, |limit| self.daily_pnl > -limit)
                         {
                             return self.try_entry(&symbol, positions, *ts);
                         }
