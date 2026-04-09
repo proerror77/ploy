@@ -14,6 +14,7 @@ default = []
 async-trait.workspace = true
 chrono.workspace = true
 futures = "0.3"
+ploy-claimer = { path = "../../crates/ploy-claimer" }
 ploy-connectivity = { path = "../../crates/ploy-connectivity" }
 ploy-strategy-bundles = { path = "../../crates/ploy-strategy-bundles" }
 ploy-trading.workspace = true

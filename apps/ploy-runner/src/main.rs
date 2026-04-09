@@ -6,6 +6,7 @@ mod scanner;
 mod sports_feed;
 
 use async_trait::async_trait;
+use ploy_claimer::ensure_account_claimer_daemon;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::env;
@@ -558,6 +559,10 @@ async fn main() {
             let recorder = build_signal_recorder(db_pool.clone(), runtime_config.mode);
 
             let result = if runtime_config.mode == RuntimeMode::Live {
+                // Start auto-claimer daemon for live mode (singleton, safe to call multiple times)
+                if let Err(e) = ensure_account_claimer_daemon().await {
+                    warn!("Auto-claimer daemon failed to start: {e}");
+                }
                 let executor = build_live_executor();
                 let mut runtime = StrategyRuntime::new(
                     strategy,

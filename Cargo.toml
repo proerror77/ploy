@@ -6,6 +6,7 @@ members = [
     "apps/ploy-runner",
     "apps/ploytui",
     "crates/ploy-connectivity",
+    "crates/ploy-claimer",
     "crates/ploy-deployments",
     "crates/ploy-operator-contracts",
     "crates/ploy-platform",
@@ -25,6 +26,7 @@ repository = "https://github.com/proerror77/ploy"
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 hmac = "0.12"
+ploy-claimer = { path = "crates/ploy-claimer" }
 ploy-connectivity = { path = "crates/ploy-connectivity" }
 ploy-deployments = { path = "crates/ploy-deployments" }
 ploy-operator-contracts = { path = "crates/ploy-operator-contracts" }

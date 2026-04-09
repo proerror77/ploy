@@ -192,7 +192,7 @@ pub fn deserialize_with_warnings<T: DeserializeOwned>(value: Value) -> crate::Re
         feature = "gamma"
     )
 ))]
-pub fn deserialize_with_warnings<T: DeserializeOwned>(value: Value) -> crate::Result<T> {
+pub fn deserialize_with_warnings<T: serde::de::DeserializeOwned>(value: Value) -> crate::Result<T> {
     Ok(serde_json::from_value(value)?)
 }
 
