@@ -3,8 +3,9 @@ use tracing::warn;
 
 
 use super::{
-    AutoClaimer, CONDITIONAL_TOKENS_POLYGON, POLYGON_CHAIN_ID, POLYGON_RPC_DEFAULT,
-    RedeemablePosition, USDC_E_POLYGON, env_flag, env_string_any, env_u64_any,
+    AutoClaimer, CONDITIONAL_TOKENS_POLYGON, NEG_RISK_ADAPTER_POLYGON, POLYGON_CHAIN_ID,
+    POLYGON_RPC_DEFAULT, RedeemablePosition, USDC_E_POLYGON, env_flag, env_string_any,
+    env_u64_any,
 };
 
 mod legacy_flow;

@@ -1,4 +1,6 @@
-use super::proxy_support::{ensure_0x_prefix, relayer_hmac_signature};
+use super::proxy_support::{
+    RelayerBuilderCredentials, ensure_0x_prefix, relayer_hmac_signature,
+};
 use super::*;
 
 use ethers_core::types::{Address as EthersAddress, U256 as EthersU256};
@@ -88,6 +90,42 @@ fn test_encode_proxy_transaction_data_accepts_tuple_calls() {
     let encoded = AutoClaimer::encode_proxy_transaction_data(call_to, vec![0x12, 0x34])
         .expect("proxy calldata should encode");
     assert!(!encoded.is_empty());
+}
+
+#[test]
+fn test_encode_redeem_calldata_uses_standard_ctf_signature_for_binary_markets() {
+    let encoded = AutoClaimer::encode_redeem_calldata(
+        [0x11; 32],
+        false,
+        &[EthersU256::from(1_000_000u64), EthersU256::from(0u64)],
+    )
+        .expect("standard redeem calldata should encode");
+    assert_eq!(hex::encode(&encoded[..4]), "9c542ed7");
+}
+
+#[test]
+fn test_encode_redeem_calldata_uses_neg_risk_signature_for_neg_risk_markets() {
+    let encoded = AutoClaimer::encode_redeem_calldata(
+        [0x22; 32],
+        true,
+        &[EthersU256::from(500_000u64), EthersU256::from(500_000u64)],
+    )
+        .expect("neg-risk redeem calldata should encode");
+    assert_eq!(hex::encode(&encoded[..4]), "d2d72a51");
+}
+
+#[test]
+fn test_relayer_builder_credentials_debug_redacts_secrets() {
+    let creds = RelayerBuilderCredentials {
+        api_key: "api-key".to_string(),
+        secret: "super-secret".to_string(),
+        passphrase: "passphrase".to_string(),
+    };
+    let debug = format!("{creds:?}");
+    assert!(!debug.contains("api-key"));
+    assert!(!debug.contains("super-secret"));
+    assert!(!debug.contains("passphrase"));
+    assert!(debug.contains("[redacted]"));
 }
 
 #[tokio::test]

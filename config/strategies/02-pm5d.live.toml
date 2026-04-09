@@ -1,5 +1,5 @@
 # Live pm_5m_directional config for StrategyRuntime
-# Conservative live config — reduced stakes and position limits
+# Live config — uncapped positions/trades, hard stop at $200 total account loss
 #
 # 5-gate pipeline: price validity → quote availability → price filter → probability → edge
 # Params from TPE optimization (2026-04-05, real data): Sharpe 240, 121 trades/day
@@ -31,9 +31,8 @@ max_time_remaining_secs = 240
 cooldown_secs = 71
 
 stake_usd = 5.0
-max_positions = 3
-max_daily_trades = 20
-# TODO: add max_daily_loss_usd once DirectionalConfig supports it (Task #5)
+max_daily_loss_usd = 200.0
+# No max_positions or max_daily_trades limit — strategy runs freely until loss limit hit
 
 [execution]
 # Execution simulation (backtest + dry-run modes)

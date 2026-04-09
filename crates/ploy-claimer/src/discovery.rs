@@ -94,6 +94,14 @@ pub(crate) fn collapse_positions_by_condition(
             existing.size += pos.size;
             existing.payout += pos.payout;
             existing.neg_risk = existing.neg_risk || pos.neg_risk;
+            if existing.claim_amounts.len() < pos.claim_amounts.len() {
+                existing
+                    .claim_amounts
+                    .resize(pos.claim_amounts.len(), Decimal::ZERO);
+            }
+            for (idx, amount) in pos.claim_amounts.iter().enumerate() {
+                existing.claim_amounts[idx] += *amount;
+            }
             if existing.outcome.is_empty() && !pos.outcome.is_empty() {
                 existing.outcome = pos.outcome;
             }
@@ -166,13 +174,18 @@ pub(crate) async fn get_redeemable_positions(
 
         let token_id = format!("{}", p.asset);
         let payout = p.size;
+        let outcome_index = p.outcome_index.max(0) as usize;
+        let mut claim_amounts = vec![Decimal::ZERO; outcome_index + 1];
+        claim_amounts[outcome_index] = p.size;
 
         redeemable.push(RedeemablePosition {
             condition_id: condition_id.clone(),
             token_id,
             outcome: p.outcome.clone(),
+            outcome_index,
             size: p.size,
             payout,
+            claim_amounts,
             neg_risk: p.negative_risk,
         });
 

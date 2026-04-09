@@ -310,11 +310,17 @@ pub(super) async fn claim_position(
             e
         ))
     })?;
+    let neg_risk_adapter_addr: Address = NEG_RISK_ADAPTER_POLYGON.parse().map_err(|e| {
+        ClaimerError::Network(format!(
+            "Invalid NegRisk adapter address: {}",
+            e
+        ))
+    })?;
     let collateral_addr: Address = USDC_E_POLYGON.parse().map_err(|e| {
         ClaimerError::Network(format!("Invalid USDC.e address: {}", e))
     })?;
 
-    let contract = IConditionalTokens::new(conditional_tokens_addr, provider);
+    let contract = IConditionalTokens::new(conditional_tokens_addr, provider.clone());
 
     let condition_hex = pos
         .condition_id
@@ -326,25 +332,44 @@ pub(super) async fn claim_position(
         .try_into()
         .map_err(|_| ClaimerError::Internal("Condition ID wrong length".into()))?;
 
-    let parent_collection_id = [0u8; 32];
-    let index_sets = vec![U256::from(1), U256::from(2)];
+    let pending = if pos.neg_risk {
+        let contract = INegRiskAdapter::new(neg_risk_adapter_addr, provider.clone());
+        let amounts = pos
+            .claim_amounts
+            .iter()
+            .map(|amount| crate::decimal_to_token_units(*amount).map(U256::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        info!(
+            "Calling NegRiskAdapter.redeemPositions for condition {} (amounts={:?})...",
+            &condition_hex.chars().take(16).collect::<String>(),
+            amounts
+        );
+        contract
+            .redeemPositions(condition_id.into(), amounts)
+            .send()
+            .await
+            .map_err(|e| ClaimerError::Contract(format!("NegRisk redeem tx failed: {}", e)))?
+    } else {
+        let parent_collection_id = [0u8; 32];
+        let index_sets = vec![U256::from(1), U256::from(2)];
 
-    info!(
-        "Calling ConditionalTokens.redeemPositions for condition {} (neg_risk={})...",
-        &condition_hex.chars().take(16).collect::<String>(),
-        pos.neg_risk
-    );
+        info!(
+            "Calling ConditionalTokens.redeemPositions for condition {} (neg_risk={})...",
+            &condition_hex.chars().take(16).collect::<String>(),
+            pos.neg_risk
+        );
 
-    let tx = contract.redeemPositions(
-        collateral_addr,
-        parent_collection_id.into(),
-        condition_id.into(),
-        index_sets,
-    );
-
-    let pending = tx.send().await.map_err(|e| {
-        ClaimerError::Contract(format!("Redeem tx failed: {}", e))
-    })?;
+        contract
+            .redeemPositions(
+                collateral_addr,
+                parent_collection_id.into(),
+                condition_id.into(),
+                index_sets,
+            )
+            .send()
+            .await
+            .map_err(|e| ClaimerError::Contract(format!("Redeem tx failed: {}", e)))?
+    };
 
     let receipt = pending.get_receipt().await.map_err(|e| {
         ClaimerError::Contract(format!("Tx confirmation failed: {}", e))

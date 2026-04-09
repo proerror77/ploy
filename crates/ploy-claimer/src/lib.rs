@@ -38,6 +38,8 @@ use self::relayer::{
 // CTF contracts on Polygon
 pub(crate) const CONDITIONAL_TOKENS_POLYGON: &str =
     "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
+pub(crate) const NEG_RISK_ADAPTER_POLYGON: &str =
+    "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296";
 pub(crate) const USDC_E_POLYGON: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 pub(crate) const POLYGON_RPC_DEFAULT: &str = "https://polygon-bor-rpc.publicnode.com";
 pub(crate) const POLYGON_CHAIN_ID: u64 = 137;
@@ -62,6 +64,15 @@ sol! {
         ) external;
 
         function balanceOf(address account, uint256 id) external view returns (uint256);
+    }
+
+    #[allow(missing_docs)]
+    #[sol(rpc)]
+    interface INegRiskAdapter {
+        function redeemPositions(
+            bytes32 conditionId,
+            uint256[] calldata amounts
+        ) external;
     }
 }
 
@@ -216,6 +227,22 @@ pub(crate) fn u256_to_u128_saturating(value: U256) -> u128 {
     value.to_string().parse::<u128>().unwrap_or(u128::MAX)
 }
 
+pub(crate) fn decimal_to_token_units(amount: Decimal) -> Result<u128, ClaimerError> {
+    if amount < Decimal::ZERO {
+        return Err(ClaimerError::Internal(format!(
+            "Cannot encode negative claim amount: {}",
+            amount
+        )));
+    }
+
+    let scaled = (amount * Decimal::from(1_000_000u64)).round_dp(0);
+    let raw = scaled.to_string();
+    let parsed = raw.parse::<u128>().map_err(|e| {
+        ClaimerError::Internal(format!("Invalid scaled claim amount {}: {}", raw, e))
+    })?;
+    Ok(parsed)
+}
+
 pub(crate) fn needs_native_gas_preflight(auto_claim: bool, relayer_ready: bool) -> bool {
     auto_claim && !relayer_ready
 }
@@ -232,8 +259,10 @@ pub struct RedeemablePosition {
     pub condition_id: String,
     pub token_id: String,
     pub outcome: String,
+    pub outcome_index: usize,
     pub size: Decimal,
     pub payout: Decimal,
+    pub claim_amounts: Vec<Decimal>,
     pub neg_risk: bool,
 }
 
@@ -261,7 +290,7 @@ pub enum ClaimerError {
 }
 
 /// Auto-claimer configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClaimerConfig {
     /// How often to check for redeemable positions (seconds, min 10).
     pub check_interval_secs: u64,
@@ -271,6 +300,20 @@ pub struct ClaimerConfig {
     pub auto_claim: bool,
     /// Private key for signing transactions.
     pub private_key: Option<String>,
+}
+
+impl std::fmt::Debug for ClaimerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaimerConfig")
+            .field("check_interval_secs", &self.check_interval_secs)
+            .field("min_claim_size", &self.min_claim_size)
+            .field("auto_claim", &self.auto_claim)
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "[redacted]"),
+            )
+            .finish()
+    }
 }
 
 impl Default for ClaimerConfig {
@@ -526,16 +569,20 @@ mod tests {
                 condition_id: "cond-1".to_string(),
                 token_id: "tok-a".to_string(),
                 outcome: "Yes".to_string(),
+                outcome_index: 0,
                 size: dec!(10),
                 payout: dec!(10),
+                claim_amounts: vec![dec!(10)],
                 neg_risk: false,
             },
             RedeemablePosition {
                 condition_id: "cond-1".to_string(),
                 token_id: "tok-b".to_string(),
                 outcome: "No".to_string(),
+                outcome_index: 1,
                 size: dec!(5),
                 payout: dec!(5),
+                claim_amounts: vec![Decimal::ZERO, dec!(5)],
                 neg_risk: true,
             },
         ];
@@ -543,5 +590,19 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].size, dec!(15));
         assert!(merged[0].neg_risk);
+        assert_eq!(merged[0].claim_amounts, vec![dec!(10), dec!(5)]);
+    }
+
+    #[test]
+    fn claimer_config_debug_redacts_private_key() {
+        let config = ClaimerConfig {
+            check_interval_secs: 60,
+            min_claim_size: Decimal::ONE,
+            auto_claim: true,
+            private_key: Some("0xdeadbeef".to_string()),
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("0xdeadbeef"));
+        assert!(debug.contains("[redacted]"));
     }
 }

@@ -45,7 +45,13 @@ impl AutoClaimer {
             .map_err(|e| crate::ClaimerError::Internal(format!("Invalid condition ID: {}", e)))?
             .try_into()
             .map_err(|_| crate::ClaimerError::Internal("Condition ID wrong length".into()))?;
-        let redeem_call_data = Self::encode_ctf_redeem_calldata(condition_bytes)?;
+        let redeem_amounts = pos
+            .claim_amounts
+            .iter()
+            .map(|amount| crate::decimal_to_token_units(*amount).map(ethers_core::types::U256::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        let redeem_call_data =
+            Self::encode_redeem_calldata(condition_bytes, pos.neg_risk, &redeem_amounts)?;
         let metadata = format!(
             "redeem {}",
             &condition_hex.chars().take(16).collect::<String>()
@@ -54,6 +60,12 @@ impl AutoClaimer {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| POLYGON_RPC_DEFAULT.to_string());
+
+        let call_target = if pos.neg_risk {
+            NEG_RISK_ADAPTER_POLYGON.to_string()
+        } else {
+            CONDITIONAL_TOKENS_POLYGON.to_string()
+        };
 
         let relayer_client = RelayClient::new_with_type(
             relayer_base_url(),
@@ -71,7 +83,7 @@ impl AutoClaimer {
         let submitted = relayer_client
             .execute_proxy_transactions(
                 vec![BuilderProxyTransaction {
-                    to: CONDITIONAL_TOKENS_POLYGON.to_string(),
+                    to: call_target,
                     type_code: BuilderCallType::Call,
                     data: format!("0x{}", hex::encode(redeem_call_data)),
                     value: "0".to_string(),
@@ -133,7 +145,7 @@ impl AutoClaimer {
             sleep(Duration::from_millis(relayer_poll_interval_ms())).await;
         }
 
-        Err(crate::error::PloyError::OrderTimeout(format!(
+        Err(crate::ClaimerError::Contract(format!(
             "Relayer redeem polling timed out: id={}",
             submitted.transaction_id
         )))

@@ -40,13 +40,28 @@ impl AutoClaimer {
             .try_into()
             .map_err(|_| crate::ClaimerError::Internal("Condition ID wrong length".into()))?;
 
-        let redeem_call_data = Self::encode_ctf_redeem_calldata(condition_bytes)?;
-        let ctf_addr: EthersAddress = CONDITIONAL_TOKENS_POLYGON.parse().map_err(|e| {
-            crate::ClaimerError::Network(format!(
-                "Invalid ConditionalTokens address: {}",
-                e
-            ))
-        })?;
+        let redeem_amounts = pos
+            .claim_amounts
+            .iter()
+            .map(|amount| crate::decimal_to_token_units(*amount).map(EthersU256::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        let redeem_call_data =
+            Self::encode_redeem_calldata(condition_bytes, pos.neg_risk, &redeem_amounts)?;
+        let call_target: EthersAddress = if pos.neg_risk {
+            NEG_RISK_ADAPTER_POLYGON.parse().map_err(|e| {
+                crate::ClaimerError::Network(format!(
+                    "Invalid NegRisk adapter address: {}",
+                    e
+                ))
+            })?
+        } else {
+            CONDITIONAL_TOKENS_POLYGON.parse().map_err(|e| {
+                crate::ClaimerError::Network(format!(
+                    "Invalid ConditionalTokens address: {}",
+                    e
+                ))
+            })?
+        };
         let proxy_factory_addr: EthersAddress =
             RELAYER_PROXY_FACTORY_POLYGON.parse().map_err(|e| {
                 crate::ClaimerError::Network(format!(
@@ -58,7 +73,8 @@ impl AutoClaimer {
             crate::ClaimerError::Network(format!("Invalid relayer hub address: {}", e))
         })?;
         let proxy_wallet = Self::derive_proxy_wallet_address(signer_addr)?;
-        let proxy_call_data = Self::encode_proxy_transaction_data(ctf_addr, redeem_call_data)?;
+        let proxy_call_data =
+            Self::encode_proxy_transaction_data(call_target, redeem_call_data)?;
 
         let polygon_rpc = std::env::var("POLYGON_RPC_URL")
             .ok()

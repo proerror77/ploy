@@ -11,11 +11,21 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct RelayerBuilderCredentials {
     pub(super) api_key: String,
     pub(super) secret: String,
     pub(super) passphrase: String,
+}
+
+impl std::fmt::Debug for RelayerBuilderCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayerBuilderCredentials")
+            .field("api_key", &"[redacted]")
+            .field("secret", &"[redacted]")
+            .field("passphrase", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,29 +138,44 @@ pub(super) fn ensure_0x_prefix(hex: &str) -> String {
 }
 
 impl AutoClaimer {
-    pub(super) fn encode_ctf_redeem_calldata(condition_id: [u8; 32]) -> Result<Vec<u8>, crate::ClaimerError> {
-        let function = AbiParser::default()
-            .parse_function(
-                "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
+    pub(super) fn encode_redeem_calldata(
+        condition_id: [u8; 32],
+        neg_risk: bool,
+        amounts: &[EthersU256],
+    ) -> Result<Vec<u8>, crate::ClaimerError> {
+        let (signature, tokens) = if neg_risk {
+            (
+                "function redeemPositions(bytes32 conditionId, uint256[] amounts)",
+                vec![
+                    Token::FixedBytes(condition_id.to_vec()),
+                    Token::Array(amounts.iter().copied().map(Token::Uint).collect()),
+                ],
             )
-            .map_err(|e| {
-                crate::ClaimerError::Internal(format!("Failed to parse redeem ABI: {}", e))
+        } else {
+            let usdc_addr: EthersAddress = USDC_E_POLYGON.parse().map_err(|e| {
+                crate::ClaimerError::Network(format!("Invalid USDC.e address: {}", e))
             })?;
 
-        let usdc_addr: EthersAddress = USDC_E_POLYGON.parse().map_err(|e| {
-            crate::ClaimerError::Network(format!("Invalid USDC.e address: {}", e))
-        })?;
+            (
+                "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
+                vec![
+                    Token::Address(usdc_addr),
+                    Token::FixedBytes(vec![0u8; 32]),
+                    Token::FixedBytes(condition_id.to_vec()),
+                    Token::Array(vec![
+                        Token::Uint(EthersU256::from(1u8)),
+                        Token::Uint(EthersU256::from(2u8)),
+                    ]),
+                ],
+            )
+        };
 
-        function
-            .encode_input(&[
-                Token::Address(usdc_addr),
-                Token::FixedBytes(vec![0u8; 32]),
-                Token::FixedBytes(condition_id.to_vec()),
-                Token::Array(vec![
-                    Token::Uint(EthersU256::from(1u8)),
-                    Token::Uint(EthersU256::from(2u8)),
-                ]),
-            ])
+        AbiParser::default()
+            .parse_function(signature)
+            .map_err(|e| {
+                crate::ClaimerError::Internal(format!("Failed to parse redeem ABI: {}", e))
+            })?
+            .encode_input(&tokens)
             .map_err(|e| {
                 crate::ClaimerError::Internal(format!(
                     "Failed to encode redeem calldata: {}",
