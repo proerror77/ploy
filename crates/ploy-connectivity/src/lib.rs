@@ -362,14 +362,10 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                 .await
                 .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))?;
 
-            // Compute aggressive price: limit_price + N ticks (capped at 0.99).
+            // Polymarket CLOB enforces 0.01 pricing; normalize before adding aggression.
             let tick_size = dec!(0.01);
-            let aggressive_price = if request.aggressive_ticks > 0 {
-                let offset = tick_size * Decimal::from(request.aggressive_ticks);
-                (limit_price + offset).min(dec!(0.99))
-            } else {
-                limit_price
-            };
+            let aggressive_price =
+                normalize_aggressive_price(limit_price, request.aggressive_ticks, tick_size);
 
             let order = client
                 .limit_order()
@@ -602,6 +598,20 @@ fn polymarket_side(side: TradeSide) -> Side {
     }
 }
 
+fn normalize_aggressive_price(
+    limit_price: Decimal,
+    aggressive_ticks: u8,
+    tick_size: Decimal,
+) -> Decimal {
+    let rounded_limit = (limit_price / tick_size).round() * tick_size;
+    if aggressive_ticks == 0 {
+        rounded_limit
+    } else {
+        let offset = tick_size * Decimal::from(aggressive_ticks);
+        (rounded_limit + offset).min(dec!(0.99))
+    }
+}
+
 fn tracked_trade_fill(tracked_order: &TrackedOrder, trade: &TradeResponse) -> Option<FillRecord> {
     if trade.taker_order_id == tracked_order.venue_order_id {
         return Some(FillRecord {
@@ -667,10 +677,11 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        tracked_trade_fill, CancellationOutcome, CancellationRequest, ExecutionError,
-        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
-        PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest,
-        StaticExecutionGateway, TrackedOrder, WalletSignatureType,
+        normalize_aggressive_price, tracked_trade_fill, CancellationOutcome,
+        CancellationRequest, ExecutionError, ExecutionOutcome, ExecutionRequest,
+        LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
+        PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
+        TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -731,6 +742,18 @@ mod tests {
             ExecutionError::Validation(
                 "live Polymarket execution currently requires a limit price".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn normalize_aggressive_price_rounds_to_tick_size_before_offset() {
+        assert_eq!(
+            normalize_aggressive_price(dec!(0.607925), 0, dec!(0.01)),
+            dec!(0.61)
+        );
+        assert_eq!(
+            normalize_aggressive_price(dec!(0.607925), 2, dec!(0.01)),
+            dec!(0.63)
         );
     }
 
