@@ -49,6 +49,10 @@ async fn normalize_crypto_market(
     now: DateTime<Utc>,
 ) -> Option<DiscoveredCryptoMarket> {
     let question = market.question.as_deref().unwrap_or("");
+    if !is_allowed_crypto_window(market, question) {
+        return None;
+    }
+
     let strategy_symbol = infer_crypto_strategy_symbol(question)?;
 
     if !configured_symbols
@@ -121,6 +125,28 @@ async fn normalize_crypto_market(
         raw_event: event.and_then(event_to_value),
         raw_market: serde_json::to_value(market).ok()?,
     })
+}
+
+fn is_allowed_crypto_window(market: &Market, question: &str) -> bool {
+    if let (Some(start_time), Some(end_time)) = (market.start_date, market.end_date) {
+        let window_secs = (end_time - start_time).num_seconds();
+        if matches!(window_secs, 300 | 900) {
+            return true;
+        }
+        if window_secs > 0 {
+            return false;
+        }
+    }
+
+    let normalized = question.to_ascii_lowercase();
+    normalized.contains("5 minute")
+        || normalized.contains("5 minutes")
+        || normalized.contains("five minute")
+        || normalized.contains("five minutes")
+        || normalized.contains("15 minute")
+        || normalized.contains("15 minutes")
+        || normalized.contains("fifteen minute")
+        || normalized.contains("fifteen minutes")
 }
 
 fn event_to_value(event: &Event) -> Option<Value> {
@@ -223,5 +249,75 @@ mod tests {
         assert_eq!(item.compatibility_event_id, "market-123");
         assert_eq!(item.up_token, "111");
         assert_eq!(item.down_token, "222");
+    }
+
+    #[tokio::test]
+    async fn keeps_fifteen_minute_crypto_markets() {
+        let registry = new_reference_price_registry();
+
+        let market: polymarket_client_sdk::gamma::types::response::Market =
+            serde_json::from_value(json!({
+                "id": "market-999",
+                "question": "Will Bitcoin be up or down in 15 minutes?",
+                "slug": "bitcoin-up-or-down-apr-6-0000",
+                "endDate": "2026-04-06T00:15:00Z",
+                "startDate": "2026-04-06T00:00:00Z",
+                "groupItemThreshold": "0",
+                "clobTokenIds": "[\"111\",\"222\"]",
+                "active": true,
+                "acceptingOrders": true,
+                "events": [{
+                    "id": "event-999",
+                    "slug": "bitcoin-up-or-down-apr-6-0000",
+                    "title": "Bitcoin Up Or Down",
+                    "startDate": "2026-04-06T00:00:00Z"
+                }]
+            }))
+            .unwrap();
+
+        let discovered = discover_crypto_markets(
+            &[market],
+            &["BTCUSDT".to_string()],
+            &registry,
+            Utc.with_ymd_and_hms(2026, 4, 6, 0, 0, 30).unwrap(),
+        )
+        .await;
+
+        assert_eq!(discovered.len(), 1, "15-minute markets should be kept");
+    }
+
+    #[tokio::test]
+    async fn ignores_one_hour_crypto_markets() {
+        let registry = new_reference_price_registry();
+
+        let market: polymarket_client_sdk::gamma::types::response::Market =
+            serde_json::from_value(json!({
+                "id": "market-1000",
+                "question": "Will Bitcoin be up or down in 1 hour?",
+                "slug": "bitcoin-up-or-down-apr-6-0000",
+                "endDate": "2026-04-06T01:00:00Z",
+                "startDate": "2026-04-06T00:00:00Z",
+                "groupItemThreshold": "0",
+                "clobTokenIds": "[\"111\",\"222\"]",
+                "active": true,
+                "acceptingOrders": true,
+                "events": [{
+                    "id": "event-1000",
+                    "slug": "bitcoin-up-or-down-apr-6-0000",
+                    "title": "Bitcoin Up Or Down",
+                    "startDate": "2026-04-06T00:00:00Z"
+                }]
+            }))
+            .unwrap();
+
+        let discovered = discover_crypto_markets(
+            &[market],
+            &["BTCUSDT".to_string()],
+            &registry,
+            Utc.with_ymd_and_hms(2026, 4, 6, 0, 0, 30).unwrap(),
+        )
+        .await;
+
+        assert!(discovered.is_empty(), "1-hour markets should be ignored");
     }
 }
