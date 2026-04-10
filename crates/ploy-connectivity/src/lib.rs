@@ -2,7 +2,7 @@ use ploy_trading::{FillRecord, TradeSide};
 use polymarket_client_sdk::auth::{LocalSigner, Signer};
 use polymarket_client_sdk::clob::types::request::TradesRequest;
 use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
-use polymarket_client_sdk::clob::types::{OrderType, Side, SignatureType};
+use polymarket_client_sdk::clob::types::{Amount, OrderType, Side, SignatureType};
 use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::types::{Address, U256};
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
@@ -367,18 +367,35 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
             let aggressive_price =
                 normalize_aggressive_price(limit_price, request.aggressive_ticks, tick_size);
 
-            let normalized_quantity = normalize_order_quantity(request.quantity);
-
-            let order = client
-                .limit_order()
-                .token_id(token_id)
-                .order_type(request.order_type.into_sdk())
-                .price(aggressive_price)
-                .size(normalized_quantity)
-                .side(polymarket_side(request.side))
-                .build()
-                .await
-                .map_err(|err| ExecutionError::Validation(format!("build limit order: {err}")))?;
+            let side = polymarket_side(request.side);
+            let order = match request.order_type {
+                OrderExecutionType::GTC => {
+                    let normalized_quantity = normalize_order_quantity(request.quantity);
+                    client
+                        .limit_order()
+                        .token_id(token_id)
+                        .order_type(request.order_type.into_sdk())
+                        .price(aggressive_price)
+                        .size(normalized_quantity)
+                        .side(side)
+                        .build()
+                        .await
+                }
+                OrderExecutionType::FAK | OrderExecutionType::FOK => {
+                    let amount = normalize_execution_amount(request.quantity, limit_price, side)
+                        .map_err(|err| ExecutionError::Validation(format!("build amount: {err}")))?;
+                    client
+                        .market_order()
+                        .token_id(token_id)
+                        .order_type(request.order_type.into_sdk())
+                        .price(aggressive_price)
+                        .amount(amount)
+                        .side(side)
+                        .build()
+                        .await
+                }
+            }
+            .map_err(|err| ExecutionError::Validation(format!("build limit order: {err}")))?;
 
             let signed_order = client
                 .sign(&signer, order)
@@ -618,6 +635,22 @@ fn normalize_order_quantity(quantity: Decimal) -> Decimal {
     quantity.trunc_with_scale(2)
 }
 
+fn normalize_order_notional(quantity: Decimal, limit_price: Decimal) -> Decimal {
+    (quantity * limit_price).trunc_with_scale(2)
+}
+
+fn normalize_execution_amount(
+    quantity: Decimal,
+    limit_price: Decimal,
+    side: Side,
+) -> Result<Amount, polymarket_client_sdk::error::Error> {
+    match side {
+        Side::Buy => Amount::usdc(normalize_order_notional(quantity, limit_price)),
+        Side::Sell => Amount::shares(normalize_order_quantity(quantity)),
+        _ => unreachable!("invalid Polymarket side"),
+    }
+}
+
 fn tracked_trade_fill(tracked_order: &TrackedOrder, trade: &TradeResponse) -> Option<FillRecord> {
     if trade.taker_order_id == tracked_order.venue_order_id {
         return Some(FillRecord {
@@ -683,17 +716,18 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_aggressive_price, normalize_order_quantity, tracked_trade_fill,
-        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
-        ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
-        PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest,
-        StaticExecutionGateway, TrackedOrder, WalletSignatureType,
+        normalize_aggressive_price, normalize_execution_amount, normalize_order_notional,
+        normalize_order_quantity, tracked_trade_fill, CancellationOutcome, CancellationRequest,
+        ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
+        OrderExecutionType, PolymarketExecutionConfig, PolymarketExecutionGateway,
+        ReplaceOutcome, ReplaceRequest, StaticExecutionGateway, TrackedOrder,
+        WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
     use polymarket_client_sdk::auth::ApiKey;
     use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
-    use polymarket_client_sdk::clob::types::{TradeStatusType, TraderSide};
+    use polymarket_client_sdk::clob::types::{Side, TradeStatusType, TraderSide};
     use polymarket_client_sdk::types::{Address, B256, U256};
     use rust_decimal_macros::dec;
     use std::str::FromStr;
@@ -767,6 +801,27 @@ mod tests {
     fn normalize_order_quantity_truncates_to_lot_size_scale() {
         assert_eq!(normalize_order_quantity(dec!(24.467825)), dec!(24.46));
         assert_eq!(normalize_order_quantity(dec!(17.663163)), dec!(17.66));
+    }
+
+    #[test]
+    fn normalize_order_notional_truncates_to_two_decimals() {
+        assert_eq!(
+            normalize_order_notional(dec!(24.467825), dec!(0.61305)),
+            dec!(15.00)
+        );
+    }
+
+    #[test]
+    fn normalize_execution_amount_uses_usdc_for_buy_and_shares_for_sell() {
+        let buy = normalize_execution_amount(dec!(24.467825), dec!(0.61305), Side::Buy)
+            .expect("buy amount");
+        let sell = normalize_execution_amount(dec!(24.467825), dec!(0.61305), Side::Sell)
+            .expect("sell amount");
+
+        assert!(buy.is_usdc());
+        assert_eq!(buy.as_inner(), dec!(15.00));
+        assert!(sell.is_shares());
+        assert_eq!(sell.as_inner(), dec!(24.46));
     }
 
     #[test]
