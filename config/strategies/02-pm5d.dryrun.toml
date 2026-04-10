@@ -40,6 +40,7 @@ cooldown_secs = 60.0         # match backtest gate
 shares = 25.0
 max_positions = 3.0
 max_daily_trades = 1000.0
+allowed_window_secs = [300, 900]
 use_kelly_sizing = true
 kelly_fraction_cap = 0.25
 

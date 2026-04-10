@@ -144,6 +144,12 @@ pub struct BayesianDirectionalConfig {
     /// Daily loss circuit breaker (USD). `None` = no limit.
     #[serde(default)]
     pub max_daily_loss_usd: Option<Decimal>,
+
+    /// Only trade markets whose total window duration (seconds) is in this list.
+    /// e.g. [300, 900] for 5-minute and 15-minute markets only.
+    /// Empty or absent = no filter.
+    #[serde(default)]
+    pub allowed_window_secs: Vec<u64>,
 }
 
 fn default_symbols() -> Vec<String> {
@@ -278,6 +284,25 @@ impl BayesianDirectionalStrategy {
             .cloned()
     }
 
+    fn candidate_events(&self, symbol: &str, now: DateTime<Utc>) -> Vec<EventWindow> {
+        self.events
+            .get(symbol)
+            .map(|events| {
+                let mut candidates: Vec<EventWindow> = events
+                    .iter()
+                    .filter(|event| {
+                        let rem = (event.end_time - now).num_seconds();
+                        rem >= self.config.min_time_remaining_secs as i64
+                            && rem <= self.config.max_time_remaining_secs as i64
+                    })
+                    .cloned()
+                    .collect();
+                candidates.sort_by_key(|event| event.end_time);
+                candidates
+            })
+            .unwrap_or_default()
+    }
+
     fn in_cooldown(&self, symbol: &str, now: DateTime<Utc>) -> bool {
         self.cooldowns.get(symbol).map_or(false, |last| {
             (now - *last).num_seconds() < self.config.cooldown_secs as i64
@@ -352,6 +377,22 @@ impl BayesianDirectionalStrategy {
     fn event_has_open_position(&self, event: &EventWindow, positions: &PositionLedger) -> bool {
         positions.net_qty(&event.up_token) > Decimal::ZERO
             || positions.net_qty(&event.down_token) > Decimal::ZERO
+    }
+
+    fn event_has_active_order(&self, event: &EventWindow, orders: &OrderLedger) -> bool {
+        orders.orders().any(|order| {
+            matches!(
+                order.state,
+                ploy_trading::OrderState::Pending
+                    | ploy_trading::OrderState::Acknowledged
+                    | ploy_trading::OrderState::PartiallyFilled
+            ) && (order.token_id == event.up_token || order.token_id == event.down_token)
+        })
+    }
+
+    fn window_allowed(&self, window_secs: u64) -> bool {
+        self.config.allowed_window_secs.is_empty()
+            || self.config.allowed_window_secs.contains(&window_secs)
     }
 
     fn resolve_expired_event_outcome(
@@ -708,6 +749,7 @@ impl BayesianDirectionalStrategy {
         &self,
         symbol: &str,
         positions: &PositionLedger,
+        orders: &OrderLedger,
         now: DateTime<Utc>,
     ) -> Vec<StrategyDecision> {
         // Daily loss circuit breaker
@@ -743,48 +785,43 @@ impl BayesianDirectionalStrategy {
             }
         };
 
-        let event = match self.pick_event(symbol, now) {
-            Some(e) => e,
-            None => {
-                if let Some(events) = self.events.get(symbol) {
-                    let total = events.len();
-                    let in_window = events
-                        .iter()
-                        .filter(|e| {
-                            let rem = (e.end_time - now).num_seconds();
-                            rem >= self.config.min_time_remaining_secs as i64
-                                && rem <= self.config.max_time_remaining_secs as i64
-                        })
-                        .count();
-                    debug!(
-                        symbol,
-                        total_events = total,
-                        in_window,
-                        min_time = self.config.min_time_remaining_secs,
-                        max_time = self.config.max_time_remaining_secs,
-                        "No event in valid time window"
-                    );
-                }
-                return vec![];
+        let candidates = self.candidate_events(symbol, now);
+        if candidates.is_empty() {
+            if let Some(events) = self.events.get(symbol) {
+                let total = events.len();
+                let in_window = events
+                    .iter()
+                    .filter(|e| {
+                        let rem = (e.end_time - now).num_seconds();
+                        rem >= self.config.min_time_remaining_secs as i64
+                            && rem <= self.config.max_time_remaining_secs as i64
+                    })
+                    .count();
+                debug!(
+                    symbol,
+                    total_events = total,
+                    in_window,
+                    min_time = self.config.min_time_remaining_secs,
+                    max_time = self.config.max_time_remaining_secs,
+                    "No event in valid time window"
+                );
             }
-        };
-
-        // Limit to one open position per symbol at a time.
-        let already_holding_symbol = positions.positions().any(|p| {
-            p.net_qty > Decimal::ZERO
-                && self
-                    .token_symbol
-                    .get(&p.token_id)
-                    .map(|s| s == symbol)
-                    .unwrap_or(false)
-        });
-        if already_holding_symbol {
-            debug!(symbol, event_id = %event.event_id, "Already holding position for this symbol");
             return vec![];
         }
 
-        match self.evaluate_entry(symbol, spot_price, &event, now) {
-            Some((direction, entry_price, effective_p, edge)) => {
+        for event in candidates {
+            if self.event_has_open_position(&event, positions) {
+                debug!(symbol, event_id = %event.event_id, "Already holding position for this event");
+                continue;
+            }
+            if self.event_has_active_order(&event, orders) {
+                debug!(symbol, event_id = %event.event_id, "Active order already exists for this event");
+                continue;
+            }
+
+            if let Some((direction, entry_price, effective_p, edge)) =
+                self.evaluate_entry(symbol, spot_price, &event, now)
+            {
                 info!(
                     symbol,
                     event_id = %event.event_id,
@@ -804,13 +841,14 @@ impl BayesianDirectionalStrategy {
                     entry_price,
                     now,
                 );
-                vec![StrategyDecision::Enter {
+                return vec![StrategyDecision::Enter {
                     intent,
                     signal: Some(signal),
-                }]
+                }];
             }
-            None => vec![],
         }
+
+        vec![]
     }
 }
 
@@ -819,7 +857,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
         &mut self,
         update: &MarketUpdate,
         positions: &PositionLedger,
-        _orders: &OrderLedger,
+        orders: &OrderLedger,
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
@@ -865,7 +903,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                     return vec![];
                 }
 
-                self.try_entry(symbol, positions, *ts)
+                self.try_entry(symbol, positions, orders, *ts)
             }
 
             MarketUpdate::Quote {
@@ -892,7 +930,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                             && !self.in_cooldown(&symbol, *ts)
                             && self.config.max_daily_loss_usd.map_or(true, |limit| self.daily_realized_pnl > -limit)
                         {
-                            return self.try_entry(&symbol, positions, *ts);
+                            return self.try_entry(&symbol, positions, orders, *ts);
                         }
                     }
                 }
@@ -905,10 +943,14 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                 up_token,
                 down_token,
                 end_time,
-                window_secs: _window_secs,
+                window_secs,
                 price_to_beat,
                 resolved_up_won: _,
             } => {
+                if !self.window_allowed(*window_secs) {
+                    debug!(symbol, event_id = %event_id, window_secs = *window_secs, "Ignoring disallowed event window");
+                    return vec![];
+                }
                 let now = self
                     .feed_time
                     .unwrap_or_else(|| *end_time - chrono::Duration::seconds(1));
@@ -951,7 +993,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                     && self.daily_trades < self.config.max_daily_trades
                     && !self.in_cooldown(symbol, now)
                 {
-                    return self.try_entry(symbol, positions, now);
+                    return self.try_entry(symbol, positions, orders, now);
                 }
                 vec![]
             }
@@ -1051,6 +1093,7 @@ mod tests {
             max_positions: 1000,
             max_daily_trades: 1000,
             max_daily_loss_usd: None,
+            allowed_window_secs: vec![300, 900],
         }
     }
 

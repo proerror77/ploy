@@ -28,6 +28,7 @@ cooldown_secs = 71
 stake_usd = 25.0
 max_positions = 10
 max_daily_trades = 1000
+allowed_window_secs = [300, 900]
 
 [execution]
 use_spread = false

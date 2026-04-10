@@ -37,6 +37,7 @@ cooldown_secs = 30.0
 shares = 25.0
 max_positions = 5.0
 max_daily_trades = 0.0
+allowed_window_secs = [300, 900]
 use_kelly_sizing = true
 kelly_fraction_cap = 0.25
 

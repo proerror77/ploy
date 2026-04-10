@@ -126,6 +126,13 @@ pub struct DirectionalConfig {
     /// Daily loss circuit breaker (USD). `None` = no limit.
     #[serde(default)]
     pub max_daily_loss_usd: Option<Decimal>,
+
+    // Time-frame filter
+    /// Only trade markets whose total window duration (seconds) is in this list.
+    /// e.g. [300, 900] for 5-minute and 15-minute markets only.
+    /// Empty or absent = no filter (trade all allowed windows).
+    #[serde(default)]
+    pub allowed_window_secs: Vec<u64>,
 }
 
 fn default_symbols() -> Vec<String> {
@@ -260,6 +267,25 @@ impl DirectionalStrategy {
             .cloned()
     }
 
+    fn candidate_events(&self, symbol: &str, now: DateTime<Utc>) -> Vec<EventWindow> {
+        self.events
+            .get(symbol)
+            .map(|events| {
+                let mut candidates: Vec<EventWindow> = events
+                    .iter()
+                    .filter(|event| {
+                        let rem = (event.end_time - now).num_seconds();
+                        rem >= self.config.min_time_remaining_secs as i64
+                            && rem <= self.config.max_time_remaining_secs as i64
+                    })
+                    .cloned()
+                    .collect();
+                candidates.sort_by_key(|event| event.end_time);
+                candidates
+            })
+            .unwrap_or_default()
+    }
+
     fn in_cooldown(&self, symbol: &str, now: DateTime<Utc>) -> bool {
         self.cooldowns.get(symbol).map_or(false, |last| {
             (now - *last).num_seconds() < self.config.cooldown_secs as i64
@@ -337,6 +363,22 @@ impl DirectionalStrategy {
     fn event_has_open_position(&self, event: &EventWindow, positions: &PositionLedger) -> bool {
         positions.net_qty(&event.up_token) > Decimal::ZERO
             || positions.net_qty(&event.down_token) > Decimal::ZERO
+    }
+
+    fn event_has_active_order(&self, event: &EventWindow, orders: &OrderLedger) -> bool {
+        orders.orders().any(|order| {
+            matches!(
+                order.state,
+                ploy_trading::OrderState::Pending
+                    | ploy_trading::OrderState::Acknowledged
+                    | ploy_trading::OrderState::PartiallyFilled
+            ) && (order.token_id == event.up_token || order.token_id == event.down_token)
+        })
+    }
+
+    fn window_allowed(&self, window_secs: u64) -> bool {
+        self.config.allowed_window_secs.is_empty()
+            || self.config.allowed_window_secs.contains(&window_secs)
     }
 
     fn resolve_expired_event_outcome(
@@ -713,72 +755,44 @@ impl DirectionalStrategy {
             }
         };
 
-        let event = match self.pick_event(symbol, now) {
-            Some(e) => e,
-            None => {
-                // Log why no event was picked
-                if let Some(events) = self.events.get(symbol) {
-                    let total = events.len();
-                    let in_window = events
-                        .iter()
-                        .filter(|e| {
-                            let rem = (e.end_time - now).num_seconds();
-                            rem >= self.config.min_time_remaining_secs as i64
-                                && rem <= self.config.max_time_remaining_secs as i64
-                        })
-                        .count();
-                    debug!(
-                        symbol,
-                        total_events = total,
-                        in_window,
-                        min_time = self.config.min_time_remaining_secs,
-                        max_time = self.config.max_time_remaining_secs,
-                        "No event in valid time window"
-                    );
-                }
-                return vec![];
+        let candidates = self.candidate_events(symbol, now);
+        if candidates.is_empty() {
+            if let Some(events) = self.events.get(symbol) {
+                let total = events.len();
+                let in_window = events
+                    .iter()
+                    .filter(|e| {
+                        let rem = (e.end_time - now).num_seconds();
+                        rem >= self.config.min_time_remaining_secs as i64
+                            && rem <= self.config.max_time_remaining_secs as i64
+                    })
+                    .count();
+                debug!(
+                    symbol,
+                    total_events = total,
+                    in_window,
+                    min_time = self.config.min_time_remaining_secs,
+                    max_time = self.config.max_time_remaining_secs,
+                    "No event in valid time window"
+                );
             }
-        };
-
-        // Check if we already have a position for this symbol.
-        // Polymarket can have multiple parallel markets for the same symbol and end_time
-        // (different market_slugs, different token IDs, but same underlying asset).
-        // Their settlement outcomes are perfectly correlated — all depend on the same
-        // BTC/ETH price. Holding multiple positions on the same symbol at the same time
-        // is not diversification; it's concentrated directional exposure.
-        // Limit to one open position per symbol at a time.
-        let already_holding_symbol = positions.positions().any(|p| {
-            p.net_qty > Decimal::ZERO
-                && self
-                    .token_symbol
-                    .get(&p.token_id)
-                    .map(|s| s == symbol)
-                    .unwrap_or(false)
-        });
-        if already_holding_symbol {
-            debug!(symbol, event_id = %event.event_id, "Already holding position for this symbol");
             return vec![];
         }
 
-        let has_active_order_for_symbol = orders.orders().any(|order| {
-            matches!(
-                order.state,
-                ploy_trading::OrderState::Pending
-                    | ploy_trading::OrderState::Acknowledged
-                    | ploy_trading::OrderState::PartiallyFilled
-            ) && self
-                .token_symbol
-                .get(&order.token_id)
-                .map(|tracked_symbol| tracked_symbol == symbol)
-                .unwrap_or(false)
-        });
-        if has_active_order_for_symbol {
-            debug!(symbol, event_id = %event.event_id, "Active order already exists for this symbol");
-            return vec![];
-        }
+        for event in candidates {
+            if self.event_has_open_position(&event, positions) {
+                debug!(symbol, event_id = %event.event_id, "Already holding position for this event");
+                continue;
+            }
 
-        match self.evaluate_entry(symbol, spot_price, &event, now) {
-            Some((direction, entry_price, effective_p, edge)) => {
+            if self.event_has_active_order(&event, orders) {
+                debug!(symbol, event_id = %event.event_id, "Active order already exists for this event");
+                continue;
+            }
+
+            if let Some((direction, entry_price, effective_p, edge)) =
+                self.evaluate_entry(symbol, spot_price, &event, now)
+            {
                 info!(
                     symbol,
                     event_id = %event.event_id,
@@ -798,13 +812,14 @@ impl DirectionalStrategy {
                     entry_price,
                     now,
                 );
-                vec![StrategyDecision::Enter {
+                return vec![StrategyDecision::Enter {
                     intent,
                     signal: Some(signal),
-                }]
+                }];
             }
-            None => vec![],
         }
+
+        vec![]
     }
 }
 
@@ -902,10 +917,14 @@ impl StrategyLogic for DirectionalStrategy {
                 up_token,
                 down_token,
                 end_time,
-                window_secs: _window_secs,
+                window_secs,
                 price_to_beat,
                 resolved_up_won: _,
             } => {
+                if !self.window_allowed(*window_secs) {
+                    debug!(symbol, event_id = %event_id, window_secs = *window_secs, "Ignoring disallowed event window");
+                    return vec![];
+                }
                 // Use feed_time (last seen spot/quote timestamp) as "now" so that
                 // replay runs are deterministic and don't drop historical windows
                 // that arrived before the first spot tick.
@@ -1060,6 +1079,7 @@ mod tests {
             max_positions: 1000,
             max_daily_trades: 1000,
             max_daily_loss_usd: None,
+            allowed_window_secs: vec![300, 900],
         }
     }
 
@@ -1314,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    fn active_order_blocks_duplicate_entry_for_same_symbol() {
+    fn active_order_blocks_duplicate_entry_for_same_event() {
         let config = default_config();
         let mut strat = DirectionalStrategy::new(config);
         let positions = PositionLedger::default();
@@ -1394,8 +1414,104 @@ mod tests {
 
         assert!(
             decisions.is_empty(),
-            "active order should block duplicate entry for the same symbol"
+            "active order should block duplicate entry for the same event"
         );
+    }
+
+    #[test]
+    fn active_order_on_nearer_event_does_not_block_later_window_for_same_symbol() {
+        let config = default_config();
+        let mut strat = DirectionalStrategy::new(config);
+        let positions = PositionLedger::default();
+        let now = Utc::now();
+        strat.feed_time = Some(now);
+
+        strat.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: "evt-near".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up-near".into(),
+                down_token: "dn-near".into(),
+                end_time: now + chrono::Duration::seconds(120),
+                window_secs: 300,
+                price_to_beat: None,
+                resolved_up_won: None,
+            },
+            &positions,
+            &OrderLedger::default(),
+        );
+        strat.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: "evt-far".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up-far".into(),
+                down_token: "dn-far".into(),
+                end_time: now + chrono::Duration::seconds(220),
+                window_secs: 900,
+                price_to_beat: None,
+                resolved_up_won: None,
+            },
+            &positions,
+            &OrderLedger::default(),
+        );
+
+        strat.spot.insert(
+            "BTCUSDT".into(),
+            SpotState {
+                price: dec!(100000),
+                ts: now,
+            },
+        );
+        strat.events.get_mut("BTCUSDT").unwrap()[0].open_price = Some(dec!(100000));
+        strat.events.get_mut("BTCUSDT").unwrap()[1].open_price = Some(dec!(100000));
+
+        for token_id in ["up-near", "dn-near", "up-far", "dn-far"] {
+            let ask = if token_id.starts_with("up") { dec!(0.30) } else { dec!(0.70) };
+            let bid = ask - dec!(0.01);
+            strat.on_update(
+                &MarketUpdate::Quote {
+                    token_id: token_id.into(),
+                    bid: Some(bid),
+                    ask: Some(ask),
+                    ts: now,
+                },
+                &positions,
+                &OrderLedger::default(),
+            );
+        }
+
+        let mut orders = OrderLedger::default();
+        orders.insert_from_intent(
+            "order-1",
+            &TradingIntent {
+                intent_id: "intent-1".into(),
+                deployment_id: "live".into(),
+                market_id: "evt-near".into(),
+                token_id: "up-near".into(),
+                side: TradeSide::Buy,
+                quantity: dec!(10),
+                limit_price: Some(dec!(0.30)),
+                purpose: IntentPurpose::Entry,
+                created_at: now,
+            },
+        );
+        orders.acknowledge("order-1", "venue-1");
+
+        let decisions = strat.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(101500),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert_eq!(decisions.len(), 1, "later event should still be tradable");
+        match &decisions[0] {
+            StrategyDecision::Enter { intent, .. } => assert_eq!(intent.token_id, "up-far"),
+            other => panic!("Expected Enter, got {:?}", other),
+        }
     }
 
     #[test]

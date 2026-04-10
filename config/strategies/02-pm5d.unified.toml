@@ -34,6 +34,7 @@ stake_usd = 25.0
 max_positions = 10
 max_daily_trades = 1000
 max_daily_loss_usd = 500.0
+allowed_window_secs = [300, 900]
 
 [execution]
 # Execution simulation (backtest + dry-run modes)

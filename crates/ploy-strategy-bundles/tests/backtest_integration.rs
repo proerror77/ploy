@@ -172,6 +172,7 @@ async fn backtest_full_loop_produces_entry() {
         max_positions: 1000,
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
+        allowed_window_secs: vec![],
     };
 
     let strategy = DirectionalStrategy::new(config);
@@ -274,6 +275,7 @@ async fn empty_feed_produces_zero_trades() {
         max_positions: 1000,
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
+        allowed_window_secs: vec![],
     };
 
     let strategy = DirectionalStrategy::new(config);
@@ -314,6 +316,7 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         max_positions: 1000,
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
+        allowed_window_secs: vec![],
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,
@@ -403,6 +406,7 @@ async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
         max_positions: 1000,
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
+        allowed_window_secs: vec![],
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,
@@ -485,6 +489,7 @@ async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior()
         max_positions: 1000,
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
+        allowed_window_secs: vec![],
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,
