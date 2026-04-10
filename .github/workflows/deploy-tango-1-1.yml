@@ -179,7 +179,7 @@ jobs:
             }
 
             service_exists() {
-              systemctl list-unit-files --type=service --no-legend "\$1" 2>/dev/null | grep -q "^\\$1"
+              systemctl cat "\$1" >/dev/null 2>&1
             }
 
             ensure_ossutil() {
