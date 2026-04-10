@@ -10,7 +10,7 @@ throttle_hz = 1
 # max_updates = 500000
 
 [strategy]
-symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "HYPEUSDT", "BNBUSDT"]
+symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "BNBUSDT"]
 
 vol_floor = 0.001
 min_probability = 0.5253
