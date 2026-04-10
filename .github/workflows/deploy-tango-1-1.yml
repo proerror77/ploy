@@ -70,6 +70,7 @@ jobs:
           cp target/${PLATFORM_TARGET}/release/ploy-runner dist/bin/ploy-runner
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
           for migration in ${DEPLOY_MIGRATIONS}; do
+            [ -n "${migration}" ] || continue
             cp "migrations/${migration}" "dist/migrations/${migration}"
           done
           cp deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf dist/deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf
@@ -232,6 +233,7 @@ jobs:
             # Apply additive runner migrations before restarting services.
             mkdir -p /root/ploy/migrations
             for migration in ${DEPLOY_MIGRATIONS}; do
+              [ -n "\${migration}" ] || continue
               migration="/root/ploy/migrations/${migration}"
               if [ -f "\${migration}" ]; then
                 PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f "\${migration}"
