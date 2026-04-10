@@ -224,7 +224,7 @@ jobs:
             for migration in ${DEPLOY_MIGRATIONS}; do
               migration="$(printf '%s' "\${migration}" | xargs)"
               [ -n "\${migration}" ] || continue
-              install -m 0644 "./migrations/${migration}" "/root/ploy/migrations/${migration}"
+              install -m 0644 "./migrations/\${migration}" "/root/ploy/migrations/\${migration}"
             done
 
             install -d /etc/systemd/system/ploy-strategy-directional-dryrun.service.d
@@ -238,7 +238,7 @@ jobs:
             for migration in ${DEPLOY_MIGRATIONS}; do
               migration="$(printf '%s' "\${migration}" | xargs)"
               [ -n "\${migration}" ] || continue
-              migration="/root/ploy/migrations/${migration}"
+              migration="/root/ploy/migrations/\${migration}"
               if [ -f "\${migration}" ]; then
                 PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f "\${migration}"
               fi
