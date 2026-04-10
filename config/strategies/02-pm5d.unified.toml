@@ -30,10 +30,9 @@ min_time_remaining_secs = 60
 max_time_remaining_secs = 240
 cooldown_secs = 71
 
-stake_usd = 25.0
-max_positions = 10
+stake_usd = 15.0
+max_positions = 1000
 max_daily_trades = 1000
-max_daily_loss_usd = 500.0
 allowed_window_secs = [300, 900]
 
 [execution]

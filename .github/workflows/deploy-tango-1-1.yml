@@ -69,6 +69,7 @@ jobs:
           mkdir -p dist/bin dist/config/strategies dist/migrations dist/deployment/systemd
           cp target/${PLATFORM_TARGET}/release/ploy-runner dist/bin/ploy-runner
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
+          cp config/strategies/02-pm5d.live.toml dist/config/strategies/02-pm5d.live.toml
           for migration in ${DEPLOY_MIGRATIONS}; do
             migration="$(printf '%s' "${migration}" | xargs)"
             [ -n "${migration}" ] || continue
@@ -221,6 +222,7 @@ jobs:
             # Make binary executable
             install -m 0755 ./bin/ploy-runner /root/ploy/bin/ploy-runner
             install -m 0644 ./config/strategies/02-pm5d.unified.toml /root/ploy/config/strategies/02-pm5d.unified.toml
+            install -m 0644 ./config/strategies/02-pm5d.live.toml /root/ploy/config/strategies/02-pm5d.live.toml
             for migration in ${DEPLOY_MIGRATIONS}; do
               migration="$(printf '%s' "\${migration}" | xargs)"
               [ -n "\${migration}" ] || continue
