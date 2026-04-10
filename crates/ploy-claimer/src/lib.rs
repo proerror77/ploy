@@ -186,8 +186,8 @@ pub async fn ensure_account_claimer_daemon() -> Result<(), ClaimerError> {
     };
 
     let interval_secs = env_u64_any(&["CLAIMER_CHECK_INTERVAL_SECS", "CLAIMER_INTERVAL_SECS"])
-        .unwrap_or(60)
-        .max(10);
+        .unwrap_or(300) // Default: check every 5 minutes (matches 5-min market settlement cycle)
+        .max(60);       // Minimum 60s to avoid accidental hammering
     let min_claim_size = env_string_any(&["CLAIMER_MIN_CLAIM_SIZE", "CLAIMER_MIN_SIZE_USDC"])
         .and_then(|v| Decimal::from_str(v.trim()).ok())
         .unwrap_or(Decimal::ONE);
@@ -373,8 +373,10 @@ impl AutoClaimer {
                 break;
             }
 
-            match self.check_and_claim().await {
+            let sleep_secs = match self.check_and_claim().await {
                 Ok(results) => {
+                    let mut had_relayer_limit = false;
+                    let mut had_no_gas = false;
                     for result in results {
                         if result.success {
                             info!(
@@ -386,15 +388,34 @@ impl AutoClaimer {
                                 "Failed to claim condition {}: {:?}",
                                 result.condition_id, result.error
                             );
+                            if let Some(ref err) = result.error {
+                                if err.contains("status=429") || err.contains("quota exceeded") {
+                                    had_relayer_limit = true;
+                                } else if err.contains("Insufficient native gas") {
+                                    had_no_gas = true;
+                                }
+                            }
                         }
+                    }
+                    // Back off based on failure type to avoid burning relayer quota.
+                    // 5-minute markets settle every 5 minutes, so normal interval = 5 min.
+                    if had_relayer_limit {
+                        warn!("Relayer quota exhausted — backing off 30 minutes before next claim attempt");
+                        1800 // 30 minutes
+                    } else if had_no_gas {
+                        warn!("No MATIC gas — backing off 10 minutes before next claim attempt");
+                        600 // 10 minutes
+                    } else {
+                        self.config.check_interval_secs
                     }
                 }
                 Err(e) => {
                     error!("Error checking redeemable positions: {}", e);
+                    self.config.check_interval_secs
                 }
-            }
+            };
 
-            tokio::time::sleep(Duration::from_secs(self.config.check_interval_secs)).await;
+            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
         }
 
         info!("AutoClaimer stopped");
