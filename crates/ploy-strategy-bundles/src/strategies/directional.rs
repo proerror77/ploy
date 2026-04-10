@@ -676,6 +676,7 @@ impl DirectionalStrategy {
         &self,
         symbol: &str,
         positions: &PositionLedger,
+        orders: &OrderLedger,
         now: DateTime<Utc>,
     ) -> Vec<StrategyDecision> {
         // Daily loss circuit breaker
@@ -759,6 +760,23 @@ impl DirectionalStrategy {
             return vec![];
         }
 
+        let has_active_order_for_symbol = orders.orders().any(|order| {
+            matches!(
+                order.state,
+                ploy_trading::OrderState::Pending
+                    | ploy_trading::OrderState::Acknowledged
+                    | ploy_trading::OrderState::PartiallyFilled
+            ) && self
+                .token_symbol
+                .get(&order.token_id)
+                .map(|tracked_symbol| tracked_symbol == symbol)
+                .unwrap_or(false)
+        });
+        if has_active_order_for_symbol {
+            debug!(symbol, event_id = %event.event_id, "Active order already exists for this symbol");
+            return vec![];
+        }
+
         match self.evaluate_entry(symbol, spot_price, &event, now) {
             Some((direction, entry_price, effective_p, edge)) => {
                 info!(
@@ -795,7 +813,7 @@ impl StrategyLogic for DirectionalStrategy {
         &mut self,
         update: &MarketUpdate,
         positions: &PositionLedger,
-        _orders: &OrderLedger,
+        orders: &OrderLedger,
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
@@ -842,7 +860,7 @@ impl StrategyLogic for DirectionalStrategy {
                     return vec![];
                 }
 
-                self.try_entry(symbol, positions, *ts)
+                self.try_entry(symbol, positions, orders, *ts)
             }
 
             MarketUpdate::Quote {
@@ -871,7 +889,7 @@ impl StrategyLogic for DirectionalStrategy {
                             && !self.in_cooldown(&symbol, *ts)
                             && self.config.max_daily_loss_usd.map_or(true, |limit| self.daily_realized_pnl > -limit)
                         {
-                            return self.try_entry(&symbol, positions, *ts);
+                            return self.try_entry(&symbol, positions, orders, *ts);
                         }
                     }
                 }
@@ -941,7 +959,7 @@ impl StrategyLogic for DirectionalStrategy {
                     && self.daily_trades < self.config.max_daily_trades
                     && !self.in_cooldown(symbol, now)
                 {
-                    return self.try_entry(symbol, positions, now);
+                    return self.try_entry(symbol, positions, orders, now);
                 }
                 vec![]
             }
@@ -1293,6 +1311,91 @@ mod tests {
         );
 
         assert_eq!(decisions.len(), 1, "Expected 1 entry signal");
+    }
+
+    #[test]
+    fn active_order_blocks_duplicate_entry_for_same_symbol() {
+        let config = default_config();
+        let mut strat = DirectionalStrategy::new(config);
+        let positions = PositionLedger::default();
+        let now = Utc::now();
+
+        strat.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: "evt1".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up1".into(),
+                down_token: "dn1".into(),
+                end_time: now + chrono::Duration::seconds(120),
+                window_secs: 300,
+                price_to_beat: None,
+                resolved_up_won: None,
+            },
+            &positions,
+            &OrderLedger::default(),
+        );
+
+        strat.spot.insert(
+            "BTCUSDT".into(),
+            SpotState {
+                price: dec!(100000),
+                ts: now,
+            },
+        );
+        strat.events.get_mut("BTCUSDT").unwrap()[0].open_price = Some(dec!(100000));
+
+        strat.on_update(
+            &MarketUpdate::Quote {
+                token_id: "up1".into(),
+                bid: Some(dec!(0.29)),
+                ask: Some(dec!(0.30)),
+                ts: now,
+            },
+            &positions,
+            &OrderLedger::default(),
+        );
+        strat.on_update(
+            &MarketUpdate::Quote {
+                token_id: "dn1".into(),
+                bid: Some(dec!(0.69)),
+                ask: Some(dec!(0.70)),
+                ts: now,
+            },
+            &positions,
+            &OrderLedger::default(),
+        );
+
+        let mut orders = OrderLedger::default();
+        orders.insert_from_intent(
+            "order-1",
+            &TradingIntent {
+                intent_id: "intent-1".into(),
+                deployment_id: "live".into(),
+                market_id: "evt1".into(),
+                token_id: "up1".into(),
+                side: TradeSide::Buy,
+                quantity: dec!(10),
+                limit_price: Some(dec!(0.30)),
+                purpose: IntentPurpose::Entry,
+                created_at: now,
+            },
+        );
+        orders.acknowledge("order-1", "venue-1");
+
+        let decisions = strat.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(101500),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "active order should block duplicate entry for the same symbol"
+        );
     }
 
     #[test]
