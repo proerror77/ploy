@@ -359,20 +359,21 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                 .await
                 .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))?;
 
-            // Polymarket CLOB enforces 0.01 pricing; normalize before adding aggression.
-            let tick_size = dec!(0.01);
-            let aggressive_price =
-                normalize_aggressive_price(limit_price, request.aggressive_ticks, tick_size);
-
             let side = polymarket_side(request.side);
             let order = match request.order_type {
                 OrderExecutionType::GTC => {
+                    let price = execution_price_override(
+                        request.order_type,
+                        limit_price,
+                        request.aggressive_ticks,
+                    )
+                    .expect("GTC orders must keep an explicit price");
                     let normalized_quantity = normalize_order_quantity(request.quantity);
                     client
                         .limit_order()
                         .token_id(token_id)
                         .order_type(request.order_type.into_sdk())
-                        .price(aggressive_price)
+                        .price(price)
                         .size(normalized_quantity)
                         .side(side)
                         .build()
@@ -385,7 +386,6 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                         .market_order()
                         .token_id(token_id)
                         .order_type(request.order_type.into_sdk())
-                        .price(aggressive_price)
                         .amount(amount)
                         .side(side)
                         .build()
@@ -614,6 +614,24 @@ fn polymarket_side(side: TradeSide) -> Side {
     }
 }
 
+fn execution_price_override(
+    order_type: OrderExecutionType,
+    limit_price: Decimal,
+    aggressive_ticks: u8,
+) -> Option<Decimal> {
+    match order_type {
+        OrderExecutionType::GTC => {
+            let tick_size = dec!(0.01);
+            Some(normalize_aggressive_price(
+                limit_price,
+                aggressive_ticks,
+                tick_size,
+            ))
+        }
+        OrderExecutionType::FAK | OrderExecutionType::FOK => None,
+    }
+}
+
 fn first_env_value(keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| std::env::var(key).ok())
 }
@@ -743,12 +761,12 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_aggressive_price, normalize_execution_amount, normalize_order_notional,
-        normalize_order_quantity, polymarket_signature_type_from_env, tracked_trade_fill,
-        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
-        ExecutionRequest, LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
-        PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
-        TrackedOrder, WalletSignatureType,
+        execution_price_override, normalize_aggressive_price, normalize_execution_amount,
+        normalize_order_notional, normalize_order_quantity, polymarket_signature_type_from_env,
+        tracked_trade_fill, CancellationOutcome, CancellationRequest, ExecutionError,
+        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
+        PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest,
+        StaticExecutionGateway, TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -860,6 +878,22 @@ mod tests {
         assert_eq!(
             polymarket_signature_type_from_env(false),
             WalletSignatureType::Eoa
+        );
+    }
+
+    #[test]
+    fn immediate_execution_uses_orderbook_pricing_instead_of_signal_cap() {
+        assert_eq!(
+            execution_price_override(OrderExecutionType::GTC, dec!(0.417075), 2),
+            Some(dec!(0.44))
+        );
+        assert_eq!(
+            execution_price_override(OrderExecutionType::FAK, dec!(0.417075), 2),
+            None
+        );
+        assert_eq!(
+            execution_price_override(OrderExecutionType::FOK, dec!(0.417075), 2),
+            None
         );
     }
 
