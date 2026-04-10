@@ -1,10 +1,15 @@
-//! Directional binary-option strategy (pm_5m_directional).
+//! Bayesian directional binary-option strategy (pm_5m_directional_bayes).
 //!
-//! Estimates P(S_T >= S_0) via log-normal model on CEX spot prices,
-//! then buys UP or DOWN tokens on Polymarket when edge exceeds threshold.
+//! Fork of [`directional`] with a single change: the raw log-normal `p_hat`
+//! is fused with the Polymarket ask price (market consensus) via Bayesian
+//! posterior odds before the probability and edge gates fire.
 //!
-//! Implements [`StrategyLogic`] so it plugs into [`StrategyRuntime`]
-//! for backtest, dry-run, and live modes identically.
+//! **Prior** = Polymarket ask price (`entry_f`), representing market consensus.
+//! **Likelihood** = log-normal model estimate (`p_hat`).
+//! **Posterior** = `prior_odds * likelihood_ratio / (1 + prior_odds * likelihood_ratio)`.
+//!
+//! This shrinks extreme model estimates toward the market price, reducing
+//! false signals when the model disagrees strongly with the order book.
 
 use std::collections::{HashMap, HashSet};
 
@@ -51,11 +56,24 @@ fn estimate_probability(s0: f64, st: f64, sigma_horizon: f64) -> f64 {
     normal_cdf(z)
 }
 
+// ── Bayesian Fusion ─────────────────────────────────────
+
+/// Fuse a log-normal model probability (likelihood) with the Polymarket
+/// ask price (prior / market consensus) via Bayes' rule in odds space.
+///
+/// Returns the posterior probability.
+fn bayesian_posterior(prior: f64, likelihood: f64) -> f64 {
+    let prior_odds = prior / (1.0 - prior).max(1e-9);
+    let likelihood_ratio = likelihood / (1.0 - likelihood).max(1e-9);
+    let posterior_odds = prior_odds * likelihood_ratio;
+    posterior_odds / (1.0 + posterior_odds)
+}
+
 // ── Fee Model ────────────────────────────────────────────
 
 /// Polymarket trading fee for crypto binary markets.
 ///
-/// Actual PM fee: 2% × p × (1 − p) per share.
+/// Actual PM fee: 2% x p x (1 - p) per share.
 /// Returns fee per share (not multiplied by quantity).
 fn crypto_fee_cost(entry_price: f64) -> f64 {
     0.02 * entry_price * (1.0 - entry_price)
@@ -77,7 +95,7 @@ pub enum Direction {
 ///
 /// Same struct drives backtest, dry-run, and live — no more divergence.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DirectionalConfig {
+pub struct BayesianDirectionalConfig {
     // Symbols
     #[serde(default = "default_symbols")]
     pub symbols: Vec<String>,
@@ -206,8 +224,8 @@ struct VolatilityState {
 
 // ── Strategy Implementation ──────────────────────────────
 
-pub struct DirectionalStrategy {
-    config: DirectionalConfig,
+pub struct BayesianDirectionalStrategy {
+    config: BayesianDirectionalConfig,
     // Market state
     spot: HashMap<String, SpotState>,
     volatility: HashMap<String, VolatilityState>,
@@ -219,17 +237,17 @@ pub struct DirectionalStrategy {
     last_trade_date: Option<chrono::NaiveDate>,
     /// Realized PnL for the current trading day (circuit breaker).
     daily_realized_pnl: Decimal,
-    // Token → symbol mapping
+    // Token -> symbol mapping
     token_symbol: HashMap<String, String>,
-    /// Entry price cache: token_id → entry price (for PnL tracking on settlement).
+    /// Entry price cache: token_id -> entry price (for PnL tracking on settlement).
     entry_prices: HashMap<String, Decimal>,
     /// Most recent feed timestamp seen across all updates.
     /// Used instead of Utc::now() so replay runs are deterministic.
     feed_time: Option<DateTime<Utc>>,
 }
 
-impl DirectionalStrategy {
-    pub fn new(config: DirectionalConfig) -> Self {
+impl BayesianDirectionalStrategy {
+    pub fn new(config: BayesianDirectionalConfig) -> Self {
         Self {
             config,
             spot: HashMap::new(),
@@ -328,9 +346,6 @@ impl DirectionalStrategy {
         if entry_price <= Decimal::ZERO {
             return Decimal::ZERO;
         }
-
-        // Keep a stable venue-facing share quantity while preserving the
-        // fixed-dollar stake semantics configured at strategy level.
         (self.config.stake_usd / entry_price).round_dp(6)
     }
 
@@ -451,9 +466,6 @@ impl DirectionalStrategy {
                 continue;
             };
 
-            // Track P&L for daily loss limit: payout - cost (cost = qty * entry_price ≈ qty * ask)
-            // Approximation: we don't have the exact entry price here, so use settle_price * qty
-            // as the realized value and subtract stake_usd as the cost basis.
             let up_qty = positions.net_qty(&event.up_token);
             let down_qty = positions.net_qty(&event.down_token);
             if up_qty > Decimal::ZERO {
@@ -478,14 +490,14 @@ impl DirectionalStrategy {
         exits
     }
 
-    /// Core signal evaluation — the unified 8-gate pipeline.
-    /// Core signal evaluation — the 5-gate pipeline.
+    /// Core signal evaluation — the 5-gate pipeline with Bayesian fusion.
     ///
     /// Gate 0: Price validity
-    /// Gate 1: Quote availability + direction
+    /// Gate 1: Quote availability + direction (uses raw p_hat)
+    /// Gate B: Bayesian posterior fusion (prior=ask, likelihood=model)
     /// Gate 2: Price filter (bounds + no-trade zone)
-    /// Gate 3: Probability threshold
-    /// Gate 4: Edge after fees
+    /// Gate 3: Probability threshold (uses posterior)
+    /// Gate 4: Edge after fees (uses posterior)
     fn evaluate_entry(
         &self,
         symbol: &str,
@@ -508,7 +520,7 @@ impl DirectionalStrategy {
         // Probability estimation (log-normal model)
         let p_hat = estimate_probability(s0, st, sigma_horizon);
 
-        // Gate 1: Direction + quote availability
+        // Gate 1: Direction + quote availability (uses raw p_hat for direction)
         let (direction, entry_price) = if p_hat >= 0.5 {
             let quote = self.quotes.get(&event.up_token);
             if quote.is_none() {
@@ -557,6 +569,30 @@ impl DirectionalStrategy {
 
         let entry_f = entry_price.to_f64()?;
 
+        // ── Gate B: Bayesian posterior fusion ──
+        // Prior = Polymarket ask (market consensus for the chosen direction).
+        // Likelihood = log-normal model estimate.
+        // For UP direction: prior = entry_f (ask for UP token),
+        //                   likelihood = p_hat (model's P(up)).
+        // For DOWN direction: prior = entry_f (ask for DOWN token),
+        //                     likelihood = 1 - p_hat (model's P(down)).
+        let (prior, likelihood) = match direction {
+            Direction::Up => (entry_f, p_hat),
+            Direction::Down => (entry_f, 1.0 - p_hat),
+        };
+        let posterior = bayesian_posterior(prior, likelihood);
+
+        debug!(
+            symbol,
+            event_id = %event.event_id,
+            ?direction,
+            p_hat,
+            prior,
+            likelihood,
+            posterior,
+            "Gate B: Bayesian fusion"
+        );
+
         // Gate 2: Price filter (bounds + no-trade zone)
         if entry_f < self.config.min_entry_price
             || entry_f > self.config.max_entry_price
@@ -572,24 +608,20 @@ impl DirectionalStrategy {
             return None;
         }
 
-        // Gate 3: Probability threshold
-        let effective_p = if direction == Direction::Up {
-            p_hat
-        } else {
-            1.0 - p_hat
-        };
+        // Gate 3: Probability threshold (uses Bayesian posterior)
+        let effective_p = posterior;
         if effective_p < self.config.min_probability {
             debug!(
                 symbol,
                 event_id = %event.event_id,
                 effective_p,
                 threshold = self.config.min_probability,
-                "Gate 3: Probability too low"
+                "Gate 3: Posterior probability too low"
             );
             return None;
         }
 
-        // Gate 4: Edge after fees
+        // Gate 4: Edge after fees (uses Bayesian posterior)
         let cost = crypto_fee_cost(entry_f);
         let edge = effective_p - entry_f - cost;
         if edge < self.config.min_edge {
@@ -624,7 +656,7 @@ impl DirectionalStrategy {
 
         TradingIntent {
             intent_id: format!(
-                "pm5d_{}_{}_{}",
+                "pm5db_{}_{}_{}",
                 event.symbol,
                 match direction {
                     Direction::Up => "UP",
@@ -632,7 +664,7 @@ impl DirectionalStrategy {
                 },
                 now.timestamp_millis(),
             ),
-            deployment_id: String::new(), // filled by runtime
+            deployment_id: String::new(),
             market_id: event.event_id.clone(),
             token_id,
             side: TradeSide::Buy,
@@ -703,7 +735,6 @@ impl DirectionalStrategy {
             return vec![];
         }
 
-        // Already holding this symbol?
         let spot_price = match self.spot.get(symbol) {
             Some(s) => s.price,
             None => {
@@ -715,7 +746,6 @@ impl DirectionalStrategy {
         let event = match self.pick_event(symbol, now) {
             Some(e) => e,
             None => {
-                // Log why no event was picked
                 if let Some(events) = self.events.get(symbol) {
                     let total = events.len();
                     let in_window = events
@@ -739,12 +769,6 @@ impl DirectionalStrategy {
             }
         };
 
-        // Check if we already have a position for this symbol.
-        // Polymarket can have multiple parallel markets for the same symbol and end_time
-        // (different market_slugs, different token IDs, but same underlying asset).
-        // Their settlement outcomes are perfectly correlated — all depend on the same
-        // BTC/ETH price. Holding multiple positions on the same symbol at the same time
-        // is not diversification; it's concentrated directional exposure.
         // Limit to one open position per symbol at a time.
         let already_holding_symbol = positions.positions().any(|p| {
             p.net_qty > Decimal::ZERO
@@ -768,7 +792,7 @@ impl DirectionalStrategy {
                     entry_price = %entry_price,
                     p = format!("{:.1}%", effective_p * 100.0),
                     edge = format!("{:.1}%", edge * 100.0),
-                    "✓ Entry signal PASSED all gates",
+                    "Bayes entry signal PASSED all gates",
                 );
                 let intent = self.build_intent(&event, direction, entry_price, now);
                 let signal = self.build_signal_record(
@@ -790,7 +814,7 @@ impl DirectionalStrategy {
     }
 }
 
-impl StrategyLogic for DirectionalStrategy {
+impl StrategyLogic for BayesianDirectionalStrategy {
     fn on_update(
         &mut self,
         update: &MarketUpdate,
@@ -803,7 +827,6 @@ impl StrategyLogic for DirectionalStrategy {
                     return vec![];
                 }
 
-                // Advance feed clock so EventDiscovered pruning is deterministic in replay.
                 if self.feed_time.map_or(true, |ft| *ts > ft) {
                     self.feed_time = Some(*ts);
                 }
@@ -859,8 +882,6 @@ impl StrategyLogic for DirectionalStrategy {
                     },
                 );
 
-                // Also try entry: a fresh quote may unlock a signal that was
-                // previously blocked by missing ask price (Gate 1).
                 if let Some(symbol) = self.token_symbol.get(token_id).cloned() {
                     if self.config.symbols.contains(&symbol) {
                         if self.feed_time.map_or(true, |ft| *ts > ft) {
@@ -888,11 +909,6 @@ impl StrategyLogic for DirectionalStrategy {
                 price_to_beat,
                 resolved_up_won: _,
             } => {
-                // Use feed_time (last seen spot/quote timestamp) as "now" so that
-                // replay runs are deterministic and don't drop historical windows
-                // that arrived before the first spot tick.
-                // Fall back to the event's own end_time only when no feed time is
-                // known yet — this keeps the window alive until spot data arrives.
                 let now = self
                     .feed_time
                     .unwrap_or_else(|| *end_time - chrono::Duration::seconds(1));
@@ -911,14 +927,11 @@ impl StrategyLogic for DirectionalStrategy {
                     let stale_expired: HashSet<String> = stale_expired.into_iter().collect();
                     events.retain(|event| !stale_expired.contains(&event.event_id));
                 }
-                // Dedup
                 if events.iter().any(|e| e.event_id == *event_id) {
                     return vec![];
                 }
-                // Use price_to_beat if available, otherwise fallback to current spot
                 let open_price = price_to_beat.or_else(|| self.spot.get(symbol).map(|s| s.price));
 
-                // Track token → symbol mapping
                 self.token_symbol.insert(up_token.clone(), symbol.clone());
                 self.token_symbol.insert(down_token.clone(), symbol.clone());
 
@@ -931,9 +944,6 @@ impl StrategyLogic for DirectionalStrategy {
                     open_price,
                 });
 
-                // Quotes for this event may have arrived before EventDiscovered
-                // (feed ordering: quotes sorted by received_at, events by start_time).
-                // If we already have a cached quote for either token, try entry now.
                 let has_cached_quote =
                     self.quotes.contains_key(up_token) || self.quotes.contains_key(down_token);
                 if has_cached_quote
@@ -998,7 +1008,6 @@ impl StrategyLogic for DirectionalStrategy {
             self.daily_trades += 1;
         }
 
-        // Track entry prices and realized PnL for circuit breaker.
         match fill.side {
             ploy_trading::TradeSide::Buy => {
                 self.entry_prices
@@ -1014,7 +1023,7 @@ impl StrategyLogic for DirectionalStrategy {
     }
 
     fn name(&self) -> &str {
-        "pm_5m_directional"
+        "pm_5m_directional_bayes"
     }
 }
 
@@ -1024,8 +1033,8 @@ mod tests {
     use crate::traits::MarketUpdate;
     use ploy_trading::{OrderLedger, PositionLedger};
 
-    fn default_config() -> DirectionalConfig {
-        DirectionalConfig {
+    fn default_config() -> BayesianDirectionalConfig {
+        BayesianDirectionalConfig {
             symbols: vec!["BTCUSDT".into()],
             vol_floor: 0.001,
             min_probability: 0.55,
@@ -1046,95 +1055,39 @@ mod tests {
     }
 
     #[test]
-    fn normal_cdf_at_zero_is_half() {
-        let p = normal_cdf(0.0);
+    fn bayesian_posterior_equal_prior_and_likelihood() {
+        // When prior == likelihood == 0.5, posterior should be 0.5
+        let p = bayesian_posterior(0.5, 0.5);
         assert!((p - 0.5).abs() < 1e-6, "got {}", p);
+        // When prior == likelihood != 0.5, posterior is amplified (odds multiply)
+        let p2 = bayesian_posterior(0.6, 0.6);
+        assert!(p2 > 0.6, "expected amplification, got {}", p2);
     }
 
     #[test]
-    fn probability_above_s0_is_high() {
-        // BTC up 1%, 0.5% horizon sigma → high probability of staying above
-        let p = estimate_probability(100_000.0, 101_000.0, 0.005);
-        assert!(p > 0.7, "p={}", p);
+    fn bayesian_posterior_shrinks_toward_prior() {
+        // Model says 0.8, market says 0.3 → posterior should be between 0.3 and 0.8
+        let p = bayesian_posterior(0.3, 0.8);
+        assert!(p > 0.3 && p < 0.8, "got {}", p);
     }
 
     #[test]
-    fn probability_below_s0_is_low() {
-        let p = estimate_probability(100_000.0, 99_000.0, 0.005);
-        assert!(p < 0.3, "p={}", p);
+    fn bayesian_posterior_at_half() {
+        // Uninformative prior (0.5) should just return the likelihood
+        let p = bayesian_posterior(0.5, 0.7);
+        assert!((p - 0.7).abs() < 1e-6, "got {}", p);
     }
 
     #[test]
-    fn event_windowing_picks_nearest() {
+    fn name_returns_bayes_variant() {
+        let strat = BayesianDirectionalStrategy::new(default_config());
+        assert_eq!(strat.name(), "pm_5m_directional_bayes");
+    }
+
+    #[test]
+    fn full_signal_generates_entry_with_bayesian_fusion() {
         let config = default_config();
-        let mut strat = DirectionalStrategy::new(config);
-        let now = Utc::now();
-
-        // Register two events: one ending in 120s, one in 240s
-        let e1_end = now + chrono::Duration::seconds(120);
-        let e2_end = now + chrono::Duration::seconds(240);
-
-        strat.events.insert(
-            "BTCUSDT".into(),
-            vec![
-                EventWindow {
-                    event_id: "e1".into(),
-                    symbol: "BTCUSDT".into(),
-                    up_token: "up1".into(),
-                    down_token: "dn1".into(),
-                    end_time: e1_end,
-                    open_price: Some(dec!(100000)),
-                },
-                EventWindow {
-                    event_id: "e2".into(),
-                    symbol: "BTCUSDT".into(),
-                    up_token: "up2".into(),
-                    down_token: "dn2".into(),
-                    end_time: e2_end,
-                    open_price: Some(dec!(100000)),
-                },
-            ],
-        );
-
-        let picked = strat.pick_event("BTCUSDT", now).unwrap();
-        assert_eq!(picked.event_id, "e1"); // nearer one
-    }
-
-    #[test]
-    fn cooldown_blocks_entry() {
-        let config = default_config();
-        let mut strat = DirectionalStrategy::new(config);
-        let now = Utc::now();
-
-        strat.cooldowns.insert("BTCUSDT".into(), now);
-        // cooldown_secs = 0 means no cooldown — always false
-        assert!(!strat.in_cooldown("BTCUSDT", now + chrono::Duration::seconds(1)));
-        assert!(!strat.in_cooldown("BTCUSDT", now));
-    }
-
-    #[test]
-    fn on_update_processes_spot_price() {
-        let config = default_config();
-        let mut strat = DirectionalStrategy::new(config);
-        let positions = PositionLedger::default();
-        let orders = OrderLedger::default();
-
-        let update = MarketUpdate::SpotPrice {
-            symbol: "BTCUSDT".into(),
-            price: dec!(100000),
-            ts: Utc::now(),
-        };
-
-        // No event registered → no decisions, but price is stored
-        let decisions = strat.on_update(&update, &positions, &orders);
-        assert!(decisions.is_empty());
-        assert!(strat.spot.contains_key("BTCUSDT"));
-    }
-
-    #[test]
-    fn full_signal_generates_entry() {
-        let config = default_config();
-        let mut strat = DirectionalStrategy::new(config);
+        let mut strat = BayesianDirectionalStrategy::new(config);
         let positions = PositionLedger::default();
         let orders = OrderLedger::default();
         let now = Utc::now();
@@ -1156,7 +1109,7 @@ mod tests {
             &orders,
         );
 
-        // 2. Set initial spot (becomes open_price via event)
+        // 2. Set initial spot
         strat.spot.insert(
             "BTCUSDT".into(),
             SpotState {
@@ -1164,10 +1117,9 @@ mod tests {
                 ts: now,
             },
         );
-        // Manually set open_price since event was registered before spot
         strat.events.get_mut("BTCUSDT").unwrap()[0].open_price = Some(dec!(100000));
 
-        // 3. Provide quotes — UP ask cheap (0.30) meaning market underprices UP
+        // 3. Provide quotes — UP ask cheap (0.30)
         strat.on_update(
             &MarketUpdate::Quote {
                 token_id: "up1".into(),
@@ -1189,7 +1141,7 @@ mod tests {
             &orders,
         );
 
-        // 4. BTC moved up 1.5% → should trigger UP entry
+        // 4. BTC moved up 1.5% -> should trigger UP entry
         let decisions = strat.on_update(
             &MarketUpdate::SpotPrice {
                 symbol: "BTCUSDT".into(),
@@ -1205,254 +1157,11 @@ mod tests {
             StrategyDecision::Enter { intent, signal } => {
                 assert_eq!(intent.token_id, "up1");
                 assert_eq!(intent.side, TradeSide::Buy);
-                assert_eq!(intent.quantity, dec!(83.333333));
                 let signal = signal.as_ref().expect("entry signal should be recorded");
-                assert_eq!(signal.event_id.as_deref(), Some("evt1"));
-                assert_eq!(signal.token_id.as_deref(), Some("up1"));
-                assert_eq!(signal.intent_id.as_deref(), Some(intent.intent_id.as_str()));
+                assert_eq!(signal.strategy, "pm_5m_directional_bayes");
                 assert_eq!(signal.direction, "UP");
-                assert_eq!(signal.decision, "enter");
             }
             other => panic!("Expected Enter, got {:?}", other),
         }
-    }
-
-    #[test]
-    fn event_before_first_spot_backfills_open_price_and_allows_entry() {
-        let config = default_config();
-        let mut strat = DirectionalStrategy::new(config);
-        let positions = PositionLedger::default();
-        let orders = OrderLedger::default();
-        let now = Utc::now();
-
-        strat.on_update(
-            &MarketUpdate::EventDiscovered {
-                event_id: "evt1".into(),
-                symbol: "BTCUSDT".into(),
-                up_token: "up1".into(),
-                down_token: "dn1".into(),
-                end_time: now + chrono::Duration::seconds(120),
-                window_secs: 300,
-                price_to_beat: None,
-                resolved_up_won: None,
-            },
-            &positions,
-            &orders,
-        );
-
-        assert_eq!(
-            strat.events["BTCUSDT"][0].open_price, None,
-            "precondition: event arrived before first spot"
-        );
-
-        strat.on_update(
-            &MarketUpdate::Quote {
-                token_id: "up1".into(),
-                bid: Some(dec!(0.29)),
-                ask: Some(dec!(0.30)),
-                ts: now,
-            },
-            &positions,
-            &orders,
-        );
-        strat.on_update(
-            &MarketUpdate::Quote {
-                token_id: "dn1".into(),
-                bid: Some(dec!(0.69)),
-                ask: Some(dec!(0.70)),
-                ts: now,
-            },
-            &positions,
-            &orders,
-        );
-
-        let first_spot_decisions = strat.on_update(
-            &MarketUpdate::SpotPrice {
-                symbol: "BTCUSDT".into(),
-                price: dec!(100000),
-                ts: now,
-            },
-            &positions,
-            &orders,
-        );
-
-        assert!(
-            first_spot_decisions.is_empty(),
-            "first spot should initialize the event, not trade immediately"
-        );
-        assert_eq!(strat.events["BTCUSDT"][0].open_price, Some(dec!(100000)));
-
-        let decisions = strat.on_update(
-            &MarketUpdate::SpotPrice {
-                symbol: "BTCUSDT".into(),
-                price: dec!(101500),
-                ts: now + chrono::Duration::seconds(60),
-            },
-            &positions,
-            &orders,
-        );
-
-        assert_eq!(decisions.len(), 1, "Expected 1 entry signal");
-    }
-
-    #[test]
-    fn official_settlement_overrides_last_spot_direction() {
-        let config = default_config();
-        let mut strat = DirectionalStrategy::new(config);
-        let now = Utc::now();
-
-        strat.events.insert(
-            "BTCUSDT".into(),
-            vec![EventWindow {
-                event_id: "evt1".into(),
-                symbol: "BTCUSDT".into(),
-                up_token: "up1".into(),
-                down_token: "dn1".into(),
-                end_time: now,
-                open_price: Some(dec!(100000)),
-            }],
-        );
-        strat.token_symbol.insert("up1".into(), "BTCUSDT".into());
-        strat.token_symbol.insert("dn1".into(), "BTCUSDT".into());
-        strat.spot.insert(
-            "BTCUSDT".into(),
-            SpotState {
-                price: dec!(101000),
-                ts: now,
-            },
-        );
-
-        let mut positions = PositionLedger::default();
-        positions.apply_fill(&FillRecord {
-            fill_id: "fill-1".into(),
-            order_id: "order-1".into(),
-            token_id: "up1".into(),
-            side: TradeSide::Buy,
-            quantity: dec!(5),
-            price: dec!(0.40),
-            fee: Decimal::ZERO,
-            timestamp: now,
-        });
-
-        let decisions = strat.on_update(
-            &MarketUpdate::EventExpired {
-                event_id: "evt1".into(),
-                end_time: now,
-                // resolved_up_won: Some(false) means UP lost → DOWN token wins
-                resolved_up_won: Some(false),
-            },
-            &positions,
-            &OrderLedger::default(),
-        );
-
-        assert_eq!(decisions.len(), 1, "Expected settlement exit");
-        match &decisions[0] {
-            StrategyDecision::Exit(intent) => assert_eq!(intent.limit_price, Some(dec!(0.00))),
-            other => panic!("Expected Exit, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn unresolved_expiry_waits_for_later_spot_instead_of_defaulting_up() {
-        let config = default_config();
-        let mut strat = DirectionalStrategy::new(config);
-        let now = Utc::now();
-
-        strat.events.insert(
-            "BTCUSDT".into(),
-            vec![EventWindow {
-                event_id: "evt1".into(),
-                symbol: "BTCUSDT".into(),
-                up_token: "up1".into(),
-                down_token: "dn1".into(),
-                end_time: now,
-                open_price: Some(dec!(100000)),
-            }],
-        );
-        strat.token_symbol.insert("up1".into(), "BTCUSDT".into());
-        strat.token_symbol.insert("dn1".into(), "BTCUSDT".into());
-
-        let mut positions = PositionLedger::default();
-        positions.apply_fill(&FillRecord {
-            fill_id: "fill-1".into(),
-            order_id: "order-1".into(),
-            token_id: "up1".into(),
-            side: TradeSide::Buy,
-            quantity: dec!(5),
-            price: dec!(0.40),
-            fee: Decimal::ZERO,
-            timestamp: now,
-        });
-
-        let pending = strat.on_update(
-            &MarketUpdate::EventExpired {
-                event_id: "evt1".into(),
-                end_time: now,
-                resolved_up_won: None,
-            },
-            &positions,
-            &OrderLedger::default(),
-        );
-
-        assert!(
-            pending.is_empty(),
-            "unresolved expiry should stay pending until settlement can be determined"
-        );
-        assert_eq!(strat.events["BTCUSDT"].len(), 1, "event should remain tracked");
-
-        let decisions = strat.on_update(
-            &MarketUpdate::SpotPrice {
-                symbol: "BTCUSDT".into(),
-                price: dec!(99000),
-                ts: now + chrono::Duration::seconds(5),
-            },
-            &positions,
-            &OrderLedger::default(),
-        );
-
-        assert_eq!(decisions.len(), 1, "later spot should resolve the expiry");
-        match &decisions[0] {
-            StrategyDecision::Exit(intent) => assert_eq!(intent.limit_price, Some(dec!(0.00))),
-            other => panic!("Expected Exit, got {:?}", other),
-        }
-        assert!(
-            strat.events
-                .get("BTCUSDT")
-                .map(|events| events.is_empty())
-                .unwrap_or(true),
-            "resolved expiry should be pruned after settlement"
-        );
-    }
-
-    #[test]
-    fn spot_updates_accumulate_realized_volatility() {
-        let config = default_config();
-        let mut strat = DirectionalStrategy::new(config);
-        let now = Utc::now();
-
-        let positions = PositionLedger::default();
-        let orders = OrderLedger::default();
-
-        let _ = strat.on_update(
-            &MarketUpdate::SpotPrice {
-                symbol: "BTCUSDT".into(),
-                price: dec!(100000),
-                ts: now,
-            },
-            &positions,
-            &orders,
-        );
-        let _ = strat.on_update(
-            &MarketUpdate::SpotPrice {
-                symbol: "BTCUSDT".into(),
-                price: dec!(100100),
-                ts: now + chrono::Duration::seconds(5),
-            },
-            &positions,
-            &orders,
-        );
-
-        let vol_state = strat.volatility.get("BTCUSDT").expect("vol state");
-        assert!(vol_state.ewma_var_per_sec > 0.0);
     }
 }

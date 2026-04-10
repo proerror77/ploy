@@ -15,9 +15,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::{
-    CallbackExecutor, DirectionalStrategy, ExecutionReport, Feed, FullConfig, HistoricalFeed,
-    LiveFeed, NullRecorder, RecordedFeed, Recorder, RecordingFeed, RuntimeMode, SignalRecord,
-    SimulatedExecutor, StrategyRuntime,
+    BayesianDirectionalStrategy, CallbackExecutor, DirectionalStrategy, ExecutionReport, Feed,
+    FullConfig, HistoricalFeed, LiveFeed, NullRecorder, RecordedFeed, Recorder, RecordingFeed,
+    RuntimeMode, SignalRecord, SimulatedExecutor, StrategyLogic, StrategyRuntime,
 };
 use ploy_trading::{FillRecord, TradeSide, TradingIntent};
 use rust_decimal::prelude::FromPrimitive;
@@ -369,8 +369,18 @@ async fn main() {
     // Historical/replay modes keep uppercase symbols; live RTDS feeds use lowercase.
     let symbols = prepare_feed_symbols(runtime_config.mode, &config.strategy.symbols);
 
-    // Build strategy
-    let strategy = DirectionalStrategy::new(config.strategy.clone());
+    // Build strategy (variant selected via [runtime].strategy_variant)
+    let strategy: Box<dyn StrategyLogic> = match config.runtime.strategy_variant.as_str() {
+        "directional_bayes" => {
+            info!("Using Bayesian directional strategy variant");
+            // Both config structs have identical fields; round-trip through JSON.
+            let json = serde_json::to_value(&config.strategy).expect("serialize DirectionalConfig");
+            let bayes_config: ploy_strategy_bundles::strategies::directional_bayes::BayesianDirectionalConfig =
+                serde_json::from_value(json).expect("deserialize BayesianDirectionalConfig");
+            Box::new(BayesianDirectionalStrategy::new(bayes_config))
+        }
+        _ => Box::new(DirectionalStrategy::new(config.strategy.clone())),
+    };
 
     // Build feed and executor based on mode
     let (result, snapshot) = match runtime_config.mode {

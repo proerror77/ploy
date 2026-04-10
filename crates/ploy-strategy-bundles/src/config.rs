@@ -49,6 +49,9 @@ pub struct RuntimeSection {
     pub mode: String,
     pub throttle_hz: Option<u32>,
     pub max_updates: Option<u64>,
+    /// Strategy variant: `"directional"` (default) or `"directional_bayes"`.
+    #[serde(default = "default_strategy_variant")]
+    pub strategy_variant: String,
     /// Backtest start time (ISO 8601 format, e.g., "2026-04-01T00:00:00Z")
     pub from: Option<String>,
     /// Backtest end time (ISO 8601 format, e.g., "2026-04-01T23:59:59Z")
@@ -105,6 +108,10 @@ impl BacktestDataSection {
 
 fn default_mode() -> String {
     "dryrun".into()
+}
+
+fn default_strategy_variant() -> String {
+    "directional".into()
 }
 
 #[derive(Debug, Clone, Deserialize)]

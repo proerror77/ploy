@@ -197,6 +197,26 @@ pub trait StrategyLogic: Send {
     fn name(&self) -> &str;
 }
 
+/// Blanket impl so `Box<dyn StrategyLogic>` can be used as a generic `S: StrategyLogic`.
+impl StrategyLogic for Box<dyn StrategyLogic> {
+    fn on_update(
+        &mut self,
+        update: &MarketUpdate,
+        positions: &PositionLedger,
+        orders: &OrderLedger,
+    ) -> Vec<StrategyDecision> {
+        (**self).on_update(update, positions, orders)
+    }
+
+    fn on_fill(&mut self, fill: &FillRecord) {
+        (**self).on_fill(fill);
+    }
+
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+}
+
 // ── Recording ────────────────────────────────────────────
 
 /// A signal evaluation record for persistence and analysis.
