@@ -70,6 +70,7 @@ jobs:
           cp target/${PLATFORM_TARGET}/release/ploy-runner dist/bin/ploy-runner
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
           for migration in ${DEPLOY_MIGRATIONS}; do
+            migration="$(printf '%s' "${migration}" | xargs)"
             [ -n "${migration}" ] || continue
             cp "migrations/${migration}" "dist/migrations/${migration}"
           done
@@ -221,6 +222,7 @@ jobs:
             install -m 0755 ./bin/ploy-runner /root/ploy/bin/ploy-runner
             install -m 0644 ./config/strategies/02-pm5d.unified.toml /root/ploy/config/strategies/02-pm5d.unified.toml
             for migration in ${DEPLOY_MIGRATIONS}; do
+              migration="$(printf '%s' "\${migration}" | xargs)"
               [ -n "\${migration}" ] || continue
               install -m 0644 "./migrations/${migration}" "/root/ploy/migrations/${migration}"
             done
@@ -234,6 +236,7 @@ jobs:
             # Apply additive runner migrations before restarting services.
             mkdir -p /root/ploy/migrations
             for migration in ${DEPLOY_MIGRATIONS}; do
+              migration="$(printf '%s' "\${migration}" | xargs)"
               [ -n "\${migration}" ] || continue
               migration="/root/ploy/migrations/${migration}"
               if [ -f "\${migration}" ]; then
