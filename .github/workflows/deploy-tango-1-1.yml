@@ -23,6 +23,14 @@ env:
   DEPLOY_OSS_REGION: ${{ vars.ALIYUN_REGION || 'ap-northeast-1' }}
   DEPLOY_OSS_PREFIX: deploy/tango-1-1
   DEPLOY_BUNDLE_NAME: ploy-runner-tango-1-1.tar.gz
+  DEPLOY_MIGRATIONS: >-
+    027_reference_price_ticks.sql
+    028_pm_market_catalog.sql
+    029_sports_state_events.sql
+    030_strategy_runtime_execution_audit.sql
+    031_strategy_runtime_track_record_views.sql
+    032_strategy_runtime_track_record_official_settlement.sql
+    033_fix_settlement_view_join_and_confirmed_flag.sql
 
 jobs:
   build-and-deploy:
@@ -61,12 +69,9 @@ jobs:
           mkdir -p dist/bin dist/config/strategies dist/migrations dist/deployment/systemd
           cp target/${PLATFORM_TARGET}/release/ploy-runner dist/bin/ploy-runner
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
-          cp migrations/027_reference_price_ticks.sql dist/migrations/027_reference_price_ticks.sql
-          cp migrations/028_pm_market_catalog.sql dist/migrations/028_pm_market_catalog.sql
-          cp migrations/029_sports_state_events.sql dist/migrations/029_sports_state_events.sql
-          cp migrations/030_strategy_runtime_execution_audit.sql dist/migrations/030_strategy_runtime_execution_audit.sql
-          cp migrations/031_strategy_runtime_track_record_views.sql dist/migrations/031_strategy_runtime_track_record_views.sql
-          cp migrations/032_strategy_runtime_track_record_official_settlement.sql dist/migrations/032_strategy_runtime_track_record_official_settlement.sql
+          for migration in ${DEPLOY_MIGRATIONS}; do
+            cp "migrations/${migration}" "dist/migrations/${migration}"
+          done
           cp deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf dist/deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf
           cp deployment/systemd/ploy-quote-collector.hardening.conf dist/deployment/systemd/ploy-quote-collector.hardening.conf
           tar -C dist -czf "${DEPLOY_BUNDLE_NAME}" .
@@ -173,6 +178,10 @@ jobs:
               test "\${memory_max}" != "[not set]"
             }
 
+            service_exists() {
+              systemctl list-unit-files --type=service --no-legend "\$1" 2>/dev/null | grep -q "^\\$1"
+            }
+
             ensure_ossutil() {
               export PATH="/usr/local/bin:/usr/bin:/bin:\${PATH}"
               if command -v ossutil >/dev/null 2>&1; then
@@ -210,12 +219,9 @@ jobs:
             # Make binary executable
             install -m 0755 ./bin/ploy-runner /root/ploy/bin/ploy-runner
             install -m 0644 ./config/strategies/02-pm5d.unified.toml /root/ploy/config/strategies/02-pm5d.unified.toml
-            install -m 0644 ./migrations/027_reference_price_ticks.sql /root/ploy/migrations/027_reference_price_ticks.sql
-            install -m 0644 ./migrations/028_pm_market_catalog.sql /root/ploy/migrations/028_pm_market_catalog.sql
-            install -m 0644 ./migrations/029_sports_state_events.sql /root/ploy/migrations/029_sports_state_events.sql
-            install -m 0644 ./migrations/030_strategy_runtime_execution_audit.sql /root/ploy/migrations/030_strategy_runtime_execution_audit.sql
-            install -m 0644 ./migrations/031_strategy_runtime_track_record_views.sql /root/ploy/migrations/031_strategy_runtime_track_record_views.sql
-            install -m 0644 ./migrations/032_strategy_runtime_track_record_official_settlement.sql /root/ploy/migrations/032_strategy_runtime_track_record_official_settlement.sql
+            for migration in ${DEPLOY_MIGRATIONS}; do
+              install -m 0644 "./migrations/${migration}" "/root/ploy/migrations/${migration}"
+            done
 
             install -d /etc/systemd/system/ploy-strategy-directional-dryrun.service.d
             install -d /etc/systemd/system/ploy-quote-collector.service.d
@@ -225,13 +231,8 @@ jobs:
 
             # Apply additive runner migrations before restarting services.
             mkdir -p /root/ploy/migrations
-            for migration in \
-              /root/ploy/migrations/027_reference_price_ticks.sql \
-              /root/ploy/migrations/028_pm_market_catalog.sql \
-              /root/ploy/migrations/029_sports_state_events.sql \
-              /root/ploy/migrations/030_strategy_runtime_execution_audit.sql \
-              /root/ploy/migrations/031_strategy_runtime_track_record_views.sql \
-              /root/ploy/migrations/032_strategy_runtime_track_record_official_settlement.sql; do
+            for migration in ${DEPLOY_MIGRATIONS}; do
+              migration="/root/ploy/migrations/${migration}"
               if [ -f "\${migration}" ]; then
                 PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f "\${migration}"
               fi
@@ -241,6 +242,9 @@ jobs:
 
             systemctl restart ploy-strategy-directional-dryrun.service
             systemctl restart ploy-quote-collector.service
+            if service_exists ploy-strategy-directional-live.service; then
+              systemctl restart ploy-strategy-directional-live.service
+            fi
 
             sleep 5
             require_postgres
@@ -248,6 +252,10 @@ jobs:
             systemctl is-active --quiet ploy-quote-collector.service
             require_service_guardrails ploy-strategy-directional-dryrun.service
             require_service_guardrails ploy-quote-collector.service
+            if service_exists ploy-strategy-directional-live.service; then
+              systemctl is-active --quiet ploy-strategy-directional-live.service
+              require_service_guardrails ploy-strategy-directional-live.service
+            fi
 
             if journalctl -u ploy-strategy-directional-dryrun.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
               | grep -E "DB connection failed|running without persistence|Signal recorder disabled"; then
@@ -258,10 +266,16 @@ jobs:
             # Check service status
             systemctl status ploy-strategy-directional-dryrun.service --no-pager
             systemctl status ploy-quote-collector.service --no-pager
+            if service_exists ploy-strategy-directional-live.service; then
+              systemctl status ploy-strategy-directional-live.service --no-pager
+            fi
 
             # Show recent logs
             journalctl -u ploy-strategy-directional-dryrun.service -n 20 --no-pager
             journalctl -u ploy-quote-collector.service -n 20 --no-pager
+            if service_exists ploy-strategy-directional-live.service; then
+              journalctl -u ploy-strategy-directional-live.service -n 20 --no-pager
+            fi
           EOF
 
       - name: Deployment summary
@@ -271,7 +285,8 @@ jobs:
           echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Transport: \`GitHub Actions -> OSS -> ECS\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- OSS object: \`${{ steps.upload_bundle_to_oss.outputs.bundle_object }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Services: \`ploy-strategy-directional-dryrun\`, \`ploy-quote-collector\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Services: \`ploy-strategy-directional-dryrun\`, \`ploy-quote-collector\`, \`ploy-strategy-directional-live\` (if installed)" >> "$GITHUB_STEP_SUMMARY"
           echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Migrations: \`${DEPLOY_MIGRATIONS}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Postgres pre/postflight: required" >> "$GITHUB_STEP_SUMMARY"
           echo "- Persistence guardrail: deployment fails if dry-run starts without DB-backed recorder" >> "$GITHUB_STEP_SUMMARY"
