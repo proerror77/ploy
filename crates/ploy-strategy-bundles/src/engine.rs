@@ -187,6 +187,10 @@ where
 
                 // Intent accepted (possibly with fill)
                 self.trading.submit_intent(intent.clone(), order_id.clone());
+                if !report.order_id.is_empty() && report.order_id != order_id {
+                    self.trading
+                        .acknowledge_order(&order_id, report.order_id.clone());
+                }
                 intents_submitted += 1;
 
                 if let Some(fill) = report.fill.as_ref() {
@@ -286,6 +290,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -506,6 +511,26 @@ mod tests {
         }
     }
 
+    struct AcknowledgingExecutor;
+
+    #[async_trait]
+    impl Executor for AcknowledgingExecutor {
+        async fn submit(&mut self, _intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
+            ExecutionReport {
+                order_id: "venue-order-1".into(),
+                fill: None,
+                rejected: false,
+                rejection_reason: None,
+                slippage: None,
+                market_impact: None,
+            }
+        }
+
+        async fn cancel(&mut self, _order_id: &str) -> bool {
+            true
+        }
+    }
+
     #[tokio::test]
     async fn records_order_and_fill_audit_for_successful_execution() {
         let now = Utc::now();
@@ -568,5 +593,69 @@ mod tests {
         assert_eq!(result.fills_recorded, 1);
         assert_eq!(order_store.lock().unwrap().len(), 1);
         assert_eq!(fill_store.lock().unwrap().as_slice(), ["fill-1"]);
+    }
+
+    #[tokio::test]
+    async fn acknowledged_orders_update_runtime_order_state_with_venue_id() {
+        let now = Utc::now();
+        let signal = SignalRecord {
+            strategy: "pm_5m_directional".into(),
+            event_id: Some("evt1".into()),
+            token_id: Some("token-up".into()),
+            intent_id: Some("pm5d_BTCUSDT_UP_ack".into()),
+            symbol: "BTCUSDT".into(),
+            direction: "UP".into(),
+            p_hat: 0.71,
+            edge: 0.08,
+            entry_price: dec!(0.30),
+            decision: "enter".into(),
+            ts: now,
+        };
+        let intent = TradingIntent {
+            intent_id: "pm5d_BTCUSDT_UP_ack".into(),
+            deployment_id: String::new(),
+            market_id: "evt1".into(),
+            token_id: "token-up".into(),
+            side: TradeSide::Buy,
+            quantity: dec!(10),
+            limit_price: Some(dec!(0.30)),
+            purpose: IntentPurpose::Entry,
+            created_at: now,
+        };
+        let recorder = Box::new(CollectingRecorder {
+            signals: Arc::new(Mutex::new(Vec::new())),
+            orders: Arc::new(Mutex::new(Vec::new())),
+            fills: Arc::new(Mutex::new(Vec::new())),
+        });
+        let strategy = RecordingStrategy {
+            emitted: false,
+            signal,
+            intent,
+        };
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let executor = AcknowledgingExecutor;
+        let config = RuntimeConfig {
+            mode: RuntimeMode::Live,
+            throttle_hz: None,
+            max_updates: None,
+            skip_settlement_exits: true,
+        };
+
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
+        let _ = runtime.run().await;
+        let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+
+        assert_eq!(snapshot.orders.len(), 1);
+        assert_eq!(snapshot.orders[0].state, ploy_trading::OrderState::Acknowledged);
+        assert_eq!(
+            snapshot.orders[0].venue_order_id.as_deref(),
+            Some("venue-order-1")
+        );
     }
 }
