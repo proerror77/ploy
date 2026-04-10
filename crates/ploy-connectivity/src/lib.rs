@@ -367,12 +367,14 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
             let aggressive_price =
                 normalize_aggressive_price(limit_price, request.aggressive_ticks, tick_size);
 
+            let normalized_quantity = normalize_order_quantity(request.quantity);
+
             let order = client
                 .limit_order()
                 .token_id(token_id)
                 .order_type(request.order_type.into_sdk())
                 .price(aggressive_price)
-                .size(request.quantity)
+                .size(normalized_quantity)
                 .side(polymarket_side(request.side))
                 .build()
                 .await
@@ -612,6 +614,10 @@ fn normalize_aggressive_price(
     }
 }
 
+fn normalize_order_quantity(quantity: Decimal) -> Decimal {
+    quantity.trunc_with_scale(2)
+}
+
 fn tracked_trade_fill(tracked_order: &TrackedOrder, trade: &TradeResponse) -> Option<FillRecord> {
     if trade.taker_order_id == tracked_order.venue_order_id {
         return Some(FillRecord {
@@ -677,11 +683,11 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_aggressive_price, tracked_trade_fill, CancellationOutcome,
-        CancellationRequest, ExecutionError, ExecutionOutcome, ExecutionRequest,
-        LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
-        PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
-        TrackedOrder, WalletSignatureType,
+        normalize_aggressive_price, normalize_order_quantity, tracked_trade_fill,
+        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
+        ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
+        PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest,
+        StaticExecutionGateway, TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -755,6 +761,12 @@ mod tests {
             normalize_aggressive_price(dec!(0.607925), 2, dec!(0.01)),
             dec!(0.63)
         );
+    }
+
+    #[test]
+    fn normalize_order_quantity_truncates_to_lot_size_scale() {
+        assert_eq!(normalize_order_quantity(dec!(24.467825)), dec!(24.46));
+        assert_eq!(normalize_order_quantity(dec!(17.663163)), dec!(17.66));
     }
 
     #[test]
