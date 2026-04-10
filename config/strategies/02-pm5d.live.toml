@@ -30,7 +30,7 @@ min_time_remaining_secs = 60
 max_time_remaining_secs = 240
 cooldown_secs = 71
 
-stake_usd = 5.0
+stake_usd = 15.0
 max_daily_loss_usd = 200.0
 # No max_positions or max_daily_trades limit — strategy runs freely until loss limit hit
 
