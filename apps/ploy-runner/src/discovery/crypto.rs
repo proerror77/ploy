@@ -17,7 +17,10 @@ pub struct DiscoveredCryptoMarket {
     pub up_token: String,
     pub down_token: String,
     pub end_time: DateTime<Utc>,
+    /// Remaining seconds until expiry at discovery time.
     pub window_secs: u64,
+    /// Total market duration in seconds (300 = 5-minute, 900 = 15-minute).
+    pub market_window_secs: u64,
     pub price_to_beat: Option<Decimal>,
     pub raw_event: Option<Value>,
     pub raw_market: Value,
@@ -49,9 +52,8 @@ async fn normalize_crypto_market(
     now: DateTime<Utc>,
 ) -> Option<DiscoveredCryptoMarket> {
     let question = market.question.as_deref().unwrap_or("");
-    if !is_allowed_crypto_window(market, question) {
-        return None;
-    }
+    let event = market.events.as_ref().and_then(|events| events.first());
+    let market_start_time = crypto_market_start_time(market, event);
 
     let strategy_symbol = infer_crypto_strategy_symbol(question)?;
 
@@ -69,10 +71,13 @@ async fn normalize_crypto_market(
 
     let end_time = market.end_date?;
     let window_secs = (end_time - now).num_seconds().max(0) as u64;
+    let market_window_secs = infer_market_window_secs(market_start_time, end_time, question);
+    if !matches!(market_window_secs, Some(300 | 900)) {
+        return None;
+    }
     let up_token = token_ids[0].to_string();
     let down_token = token_ids[1].to_string();
     let reference_symbol = market_symbol_to_chainlink_symbol(strategy_symbol);
-    let event = market.events.as_ref().and_then(|events| events.first());
 
     let price_to_beat = latest_reference_price(
         reference_prices,
@@ -101,9 +106,7 @@ async fn normalize_crypto_market(
             .clone()
             .or_else(|| market.category.clone()),
         sport: Some("crypto".to_string()),
-        start_time: market
-            .start_date
-            .or_else(|| event.and_then(|value| value.start_date)),
+        start_time: market_start_time,
         end_time: Some(end_time),
         token_ids: vec![up_token.clone(), down_token.clone()],
         market_semantics: MarketSemantics::UpDown,
@@ -121,32 +124,52 @@ async fn normalize_crypto_market(
         down_token,
         end_time,
         window_secs,
+        market_window_secs: market_window_secs.expect("validated allowed market window"),
         price_to_beat,
         raw_event: event.and_then(event_to_value),
         raw_market: serde_json::to_value(market).ok()?,
     })
 }
 
-fn is_allowed_crypto_window(market: &Market, question: &str) -> bool {
-    if let (Some(start_time), Some(end_time)) = (market.start_date, market.end_date) {
+fn crypto_market_start_time(market: &Market, event: Option<&Event>) -> Option<DateTime<Utc>> {
+    market
+        .event_start_time
+        .or_else(|| event.and_then(|value| value.start_time))
+        .or_else(|| market.start_date)
+        .or_else(|| event.and_then(|value| value.start_date))
+}
+
+fn infer_market_window_secs(
+    start_time: Option<DateTime<Utc>>,
+    end_time: DateTime<Utc>,
+    question: &str,
+) -> Option<u64> {
+    if let Some(start_time) = start_time {
         let window_secs = (end_time - start_time).num_seconds();
         if matches!(window_secs, 300 | 900) {
-            return true;
+            return Some(window_secs as u64);
         }
         if window_secs > 0 {
-            return false;
+            return None;
         }
     }
 
     let normalized = question.to_ascii_lowercase();
-    normalized.contains("5 minute")
-        || normalized.contains("5 minutes")
-        || normalized.contains("five minute")
-        || normalized.contains("five minutes")
-        || normalized.contains("15 minute")
+    if normalized.contains("15 minute")
         || normalized.contains("15 minutes")
         || normalized.contains("fifteen minute")
         || normalized.contains("fifteen minutes")
+    {
+        Some(900)
+    } else if normalized.contains("5 minute")
+        || normalized.contains("5 minutes")
+        || normalized.contains("five minute")
+        || normalized.contains("five minutes")
+    {
+        Some(300)
+    } else {
+        None
+    }
 }
 
 fn event_to_value(event: &Event) -> Option<Value> {
@@ -185,7 +208,7 @@ mod tests {
     use rust_decimal_macros::dec;
     use serde_json::json;
 
-    use super::discover_crypto_markets;
+    use super::{crypto_market_start_time, discover_crypto_markets, infer_market_window_secs};
     use crate::reference_prices::{
         ReferenceAssetClass, ReferencePriceKey, ReferencePriceSnapshot, ReferencePriceSource,
         new_reference_price_registry, upsert_reference_price,
@@ -319,5 +342,35 @@ mod tests {
         .await;
 
         assert!(discovered.is_empty(), "1-hour markets should be ignored");
+    }
+
+    #[test]
+    fn prefers_event_start_time_over_series_start_date() {
+        let market: polymarket_client_sdk::gamma::types::response::Market =
+            serde_json::from_value(json!({
+                "id": "market-actual",
+                "question": "Bitcoin Up or Down - April 10, 3:45AM-3:50AM ET",
+                "startDate": "2026-04-09T07:53:03.027282Z",
+                "endDate": "2026-04-10T07:50:00Z",
+                "eventStartTime": "2026-04-10T07:45:00Z",
+                "clobTokenIds": "[\"111\",\"222\"]",
+                "events": [{
+                    "id": "event-actual",
+                    "startDate": "2026-04-09T07:56:35.383348Z",
+                    "startTime": "2026-04-10T07:45:00Z"
+                }]
+            }))
+            .unwrap();
+
+        let event = market.events.as_ref().and_then(|events| events.first());
+        let start_time = crypto_market_start_time(&market, event);
+        assert_eq!(
+            start_time,
+            Some(Utc.with_ymd_and_hms(2026, 4, 10, 7, 45, 0).unwrap())
+        );
+        assert_eq!(
+            infer_market_window_secs(start_time, market.end_date.unwrap(), market.question.as_deref().unwrap()),
+            Some(300)
+        );
     }
 }
