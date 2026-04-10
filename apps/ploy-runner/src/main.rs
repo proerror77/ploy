@@ -11,13 +11,14 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::{
-    BayesianDirectionalStrategy, CallbackExecutor, DirectionalStrategy, ExecutionReport, Feed,
-    FullConfig, HistoricalFeed, LiveFeed, NullRecorder, RecordedFeed, Recorder, RecordingFeed,
-    RuntimeMode, SignalRecord, SimulatedExecutor, StrategyLogic, StrategyRuntime,
+    BayesianDirectionalStrategy, DirectionalStrategy, ExecutionReport, Feed, FullConfig,
+    HistoricalFeed, LiveFeed, NullRecorder, RecordedFeed, Recorder, RecordingFeed, RuntimeMode,
+    SignalRecord, SimulatedExecutor, StrategyLogic, StrategyRuntime,
 };
 use ploy_trading::{FillRecord, TradeSide, TradingIntent};
 use rust_decimal::prelude::FromPrimitive;
@@ -1015,78 +1016,159 @@ fn build_signal_recorder(db_pool: Option<sqlx::PgPool>, mode: RuntimeMode) -> Bo
     Box::new(RuntimeDbRecorder::new(pool, mode_label))
 }
 
-/// Build a CallbackExecutor that routes orders through PolymarketExecutionGateway.
-fn build_live_executor() -> CallbackExecutor {
-    use ploy_connectivity::{ExecutionRequest, LiveExecutionGateway, PolymarketExecutionGateway};
+#[derive(Clone)]
+struct LiveExecutor {
+    gateway: Arc<ploy_connectivity::PolymarketExecutionGateway>,
+    next_reconcile_at: Option<Instant>,
+}
 
-    let gateway = Arc::new(PolymarketExecutionGateway::from_env());
+impl LiveExecutor {
+    fn new(gateway: Arc<ploy_connectivity::PolymarketExecutionGateway>) -> Self {
+        Self {
+            gateway,
+            next_reconcile_at: None,
+        }
+    }
 
-    CallbackExecutor::new(Box::new(move |intent: TradingIntent| {
-        let gw = gateway.clone();
-        Box::pin(async move {
-            let request = ExecutionRequest {
-                order_id: intent.intent_id.clone(),
-                token_id: intent.token_id.clone(),
-                side: intent.side,
-                quantity: intent.quantity,
-                limit_price: intent.limit_price,
-                order_type: ploy_connectivity::OrderExecutionType::FAK,
-                aggressive_ticks: 2,
-            };
+    fn build_request(&self, intent: &TradingIntent) -> ploy_connectivity::ExecutionRequest {
+        // Polymarket requires price rounded to 2 decimal places (tick size 0.01)
+        // and quantity truncated to 2 decimal places (max lot size precision).
+        let limit_price = intent.limit_price.map(|p| p.round_dp(2));
+        let quantity = intent.quantity.trunc_with_scale(2);
+        ploy_connectivity::ExecutionRequest {
+            order_id: intent.intent_id.clone(),
+            token_id: intent.token_id.clone(),
+            side: intent.side,
+            quantity,
+            limit_price,
+            order_type: ploy_connectivity::OrderExecutionType::FAK,
+            // aggressive_ticks=0: use exact signal price, no extra tick premium.
+            // Adding ticks inflates cost without improving fill rate on FAK orders.
+            aggressive_ticks: 0,
+        }
+    }
+}
 
-            match tokio::task::spawn_blocking(move || gw.submit(&request)).await {
-                Ok(Ok(outcome)) => {
-                    use ploy_connectivity::ExecutionOutcome;
-                    match outcome {
-                        ExecutionOutcome::Acknowledged { venue_order_id } => {
-                            info!(venue_order_id = %venue_order_id, "Order acknowledged");
-                            ExecutionReport {
-                                order_id: venue_order_id,
-                                fill: None, // fills come from reconciliation
-                                rejected: false,
-                                rejection_reason: None,
-                                slippage: None,
-                                market_impact: None,
-                            }
-                        }
-                        ExecutionOutcome::Rejected { reason } => {
-                            error!(reason = %reason, "Order rejected by venue");
-                            ExecutionReport {
-                                order_id: String::new(),
-                                fill: None,
-                                rejected: true,
-                                rejection_reason: Some(reason),
-                                slippage: None,
-                                market_impact: None,
-                            }
-                        }
-                    }
-                }
-                Ok(Err(e)) => {
-                    error!(error = %e, "Execution gateway error");
+#[async_trait]
+impl ploy_strategy_bundles::Executor for LiveExecutor {
+    async fn submit(&mut self, intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
+        use ploy_connectivity::{ExecutionOutcome, LiveExecutionGateway};
+
+        let gw = self.gateway.clone();
+        let request = self.build_request(intent);
+
+        match tokio::task::spawn_blocking(move || gw.submit(&request)).await {
+            Ok(Ok(outcome)) => match outcome {
+                ExecutionOutcome::Acknowledged { venue_order_id } => {
+                    info!(venue_order_id = %venue_order_id, "Order acknowledged");
                     ExecutionReport {
-                        order_id: String::new(),
+                        order_id: venue_order_id,
                         fill: None,
-                        rejected: true,
-                        rejection_reason: Some(e.to_string()),
+                        rejected: false,
+                        rejection_reason: None,
                         slippage: None,
                         market_impact: None,
                     }
                 }
-                Err(e) => {
-                    error!(error = %e, "Spawn blocking failed");
+                ExecutionOutcome::Rejected { reason } => {
+                    error!(reason = %reason, "Order rejected by venue");
                     ExecutionReport {
                         order_id: String::new(),
                         fill: None,
                         rejected: true,
-                        rejection_reason: Some(format!("internal: {e}")),
+                        rejection_reason: Some(reason),
                         slippage: None,
                         market_impact: None,
                     }
+                }
+            },
+            Ok(Err(e)) => {
+                error!(error = %e, "Execution gateway error");
+                ExecutionReport {
+                    order_id: String::new(),
+                    fill: None,
+                    rejected: true,
+                    rejection_reason: Some(e.to_string()),
+                    slippage: None,
+                    market_impact: None,
                 }
             }
-        })
-    }))
+            Err(e) => {
+                error!(error = %e, "Spawn blocking failed");
+                ExecutionReport {
+                    order_id: String::new(),
+                    fill: None,
+                    rejected: true,
+                    rejection_reason: Some(format!("internal: {e}")),
+                    slippage: None,
+                    market_impact: None,
+                }
+            }
+        }
+    }
+
+    async fn cancel(&mut self, _order_id: &str) -> bool {
+        false
+    }
+
+    async fn reconcile_fills(
+        &mut self,
+        orders: &ploy_trading::OrderLedger,
+    ) -> Result<Vec<FillRecord>, String> {
+        use ploy_connectivity::{LiveExecutionGateway, TrackedOrder};
+        let now = Instant::now();
+        if let Some(next) = self.next_reconcile_at {
+            if now < next {
+                return Ok(Vec::new());
+            }
+        }
+
+        let tracked_orders: Vec<TrackedOrder> = orders
+            .orders()
+            .filter(|order| {
+                order.venue_order_id.is_some()
+                    && matches!(
+                        order.state,
+                        ploy_trading::OrderState::Acknowledged
+                            | ploy_trading::OrderState::PartiallyFilled
+                    )
+            })
+            .filter_map(|order| {
+                Some(TrackedOrder {
+                    order_id: order.order_id.clone(),
+                    venue_order_id: order.venue_order_id.clone()?,
+                    token_id: order.token_id.clone(),
+                })
+            })
+            .collect();
+
+        if tracked_orders.is_empty() {
+            self.next_reconcile_at = None;
+            return Ok(Vec::new());
+        }
+
+        let gw = self.gateway.clone();
+        match tokio::task::spawn_blocking(move || gw.reconcile_fills(&tracked_orders)).await {
+            Ok(Ok(fills)) => {
+                self.next_reconcile_at = Some(now + Duration::from_secs(3));
+                Ok(fills)
+            }
+            Ok(Err(error)) => {
+                self.next_reconcile_at = Some(now + Duration::from_secs(10));
+                Err(error.to_string())
+            }
+            Err(error) => {
+                self.next_reconcile_at = Some(now + Duration::from_secs(10));
+                Err(format!("reconcile task failed: {error}"))
+            }
+        }
+    }
+}
+
+/// Build a live executor backed by PolymarketExecutionGateway.
+fn build_live_executor() -> LiveExecutor {
+    let gateway = Arc::new(ploy_connectivity::PolymarketExecutionGateway::from_env());
+    LiveExecutor::new(gateway)
 }
 
 #[cfg(test)]

@@ -180,8 +180,11 @@ where
 
                 if report.rejected && report.fill.is_none() {
                     // Pure rejection — keep the signal audit trail, but don't record an intent.
+                    // Notify the strategy so it can arm cooldowns and avoid hammering the same
+                    // signal on every tick (e.g. balance exhausted, FAK no match).
                     let reason = report.rejection_reason.as_deref().unwrap_or("unknown");
                     warn!(order_id = %order_id, reason = %reason, "Order rejected");
+                    self.strategy.on_reject(&intent, reason);
                     continue;
                 }
 
@@ -227,6 +230,52 @@ where
                         token = %intent.token_id,
                         "Synthetic fill for cooldown (live acknowledged)",
                     );
+                }
+            }
+
+            match self.executor.reconcile_fills(self.trading.orders()).await {
+                Ok(fills) => {
+                    let strategy_name = self.strategy.name().to_string();
+                    for fill in fills {
+                        if !self.trading.record_fill(fill.clone()) {
+                            continue;
+                        }
+
+                        let Some(order) = self.trading.order(&fill.order_id).cloned() else {
+                            continue;
+                        };
+                        let Some(intent) = self.trading.intent(&order.intent_id).cloned() else {
+                            continue;
+                        };
+
+                        let report = crate::traits::ExecutionReport {
+                            order_id: order
+                                .venue_order_id
+                                .clone()
+                                .unwrap_or_else(|| fill.order_id.clone()),
+                            fill: Some(fill.clone()),
+                            rejected: false,
+                            rejection_reason: None,
+                            slippage: None,
+                            market_impact: None,
+                        };
+
+                        self.recorder
+                            .record_fill(&strategy_name, &intent, None, &fill, &report)
+                            .await;
+                        self.strategy.on_fill(&fill);
+                        fills_recorded += 1;
+                        debug!(
+                            order_id = %fill.order_id,
+                            token = %fill.token_id,
+                            qty = %fill.quantity,
+                            price = %fill.price,
+                            "Reconciled fill recorded",
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!(error = %error, "Fill reconciliation failed");
                 }
             }
 

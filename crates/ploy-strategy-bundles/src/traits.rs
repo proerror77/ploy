@@ -157,6 +157,14 @@ pub trait Executor: Send {
 
     /// Cancel an active order. Returns true if cancellation succeeded.
     async fn cancel(&mut self, order_id: &str) -> bool;
+
+    /// Reconcile fills for active venue orders. Default executors can ignore this.
+    async fn reconcile_fills(
+        &mut self,
+        _orders: &OrderLedger,
+    ) -> Result<Vec<FillRecord>, String> {
+        Ok(Vec::new())
+    }
 }
 
 // ── Strategy Logic ───────────────────────────────────────
@@ -193,6 +201,13 @@ pub trait StrategyLogic: Send {
     /// internal state (cooldowns, daily counters, etc.).
     fn on_fill(&mut self, fill: &FillRecord);
 
+    /// Called when an order is rejected by the venue so the strategy can
+    /// arm cooldowns and avoid hammering the same signal repeatedly.
+    ///
+    /// `reason` is the raw rejection string from the venue.
+    /// Default: no-op (strategies that don't need rejection handling can ignore it).
+    fn on_reject(&mut self, _intent: &ploy_trading::TradingIntent, _reason: &str) {}
+
     /// Strategy name for logging and metrics.
     fn name(&self) -> &str;
 }
@@ -210,6 +225,10 @@ impl StrategyLogic for Box<dyn StrategyLogic> {
 
     fn on_fill(&mut self, fill: &FillRecord) {
         (**self).on_fill(fill);
+    }
+
+    fn on_reject(&mut self, intent: &ploy_trading::TradingIntent, reason: &str) {
+        (**self).on_reject(intent, reason);
     }
 
     fn name(&self) -> &str {

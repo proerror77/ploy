@@ -250,6 +250,8 @@ pub struct BayesianDirectionalStrategy {
     /// Most recent feed timestamp seen across all updates.
     /// Used instead of Utc::now() so replay runs are deterministic.
     feed_time: Option<DateTime<Utc>>,
+    /// When set, all new entries are blocked until this time (balance exhausted pause).
+    balance_exhausted_until: Option<DateTime<Utc>>,
 }
 
 impl BayesianDirectionalStrategy {
@@ -267,6 +269,7 @@ impl BayesianDirectionalStrategy {
             token_symbol: HashMap::new(),
             entry_prices: HashMap::new(),
             feed_time: None,
+            balance_exhausted_until: None,
         }
     }
 
@@ -752,6 +755,18 @@ impl BayesianDirectionalStrategy {
         orders: &OrderLedger,
         now: DateTime<Utc>,
     ) -> Vec<StrategyDecision> {
+        // Balance exhausted pause (set by on_reject when venue returns insufficient balance)
+        if let Some(until) = self.balance_exhausted_until {
+            if now < until {
+                debug!(
+                    symbol,
+                    until = %until,
+                    "Balance exhausted pause active, skipping entry"
+                );
+                return vec![];
+            }
+        }
+
         // Daily loss circuit breaker
         if let Some(max_loss) = self.config.max_daily_loss_usd {
             if self.daily_realized_pnl <= -max_loss {
@@ -1061,6 +1076,25 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                     self.daily_realized_pnl += pnl;
                 }
             }
+        }
+    }
+
+    fn on_reject(&mut self, intent: &ploy_trading::TradingIntent, reason: &str) {
+        let now = self.feed_time.unwrap_or_else(Utc::now);
+
+        if reason.contains("not enough balance") {
+            let pause_until = now + chrono::Duration::minutes(5);
+            warn!(
+                until = %pause_until,
+                "Balance exhausted — pausing all entries for 5 minutes"
+            );
+            self.balance_exhausted_until = Some(pause_until);
+            return;
+        }
+
+        if let Some(symbol) = self.token_symbol.get(&intent.token_id).cloned() {
+            self.cooldowns.insert(symbol.clone(), now);
+            debug!(symbol, reason, "Rejection cooldown armed");
         }
     }
 
