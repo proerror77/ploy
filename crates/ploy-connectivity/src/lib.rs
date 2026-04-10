@@ -258,17 +258,14 @@ pub struct PolymarketExecutionConfig {
 
 impl Default for PolymarketExecutionConfig {
     fn default() -> Self {
+        let funder = polymarket_funder_from_env();
         Self {
             host: DEFAULT_POLY_CLOB_HOST.to_string(),
-            private_key: std::env::var(PRIVATE_KEY_VAR).ok().map(SecretString::from),
+            private_key: polymarket_private_key_from_env()
+                .map(SecretString::from),
             use_server_time: true,
-            funder: std::env::var("POLY_FUNDER").ok(),
-            signature_type: std::env::var("POLY_SIGNATURE_TYPE")
-                .ok()
-                .map(|value| WalletSignatureType::from_str(&value))
-                .transpose()
-                .unwrap_or(None)
-                .unwrap_or_default(),
+            signature_type: polymarket_signature_type_from_env(funder.is_some()),
+            funder,
         }
     }
 }
@@ -617,6 +614,36 @@ fn polymarket_side(side: TradeSide) -> Side {
     }
 }
 
+fn first_env_value(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| std::env::var(key).ok())
+}
+
+fn polymarket_private_key_from_env() -> Option<String> {
+    first_env_value(&[PRIVATE_KEY_VAR, "PRIVATE_KEY"])
+}
+
+fn polymarket_funder_from_env() -> Option<String> {
+    first_env_value(&[
+        "POLY_FUNDER",
+        "POLYMARKET_FUNDER",
+        "POLYMARKET_FUNDER_ADDRESS",
+    ])
+}
+
+fn polymarket_signature_type_from_env(has_funder: bool) -> WalletSignatureType {
+    first_env_value(&["POLY_SIGNATURE_TYPE", "POLYMARKET_SIGNATURE_TYPE"])
+        .map(|value| WalletSignatureType::from_str(&value))
+        .transpose()
+        .unwrap_or(None)
+        .unwrap_or_else(|| {
+            if has_funder {
+                WalletSignatureType::Proxy
+            } else {
+                WalletSignatureType::Eoa
+            }
+        })
+}
+
 fn normalize_aggressive_price(
     limit_price: Decimal,
     aggressive_ticks: u8,
@@ -717,11 +744,11 @@ pub fn crate_marker() -> &'static str {
 mod tests {
     use super::{
         normalize_aggressive_price, normalize_execution_amount, normalize_order_notional,
-        normalize_order_quantity, tracked_trade_fill, CancellationOutcome, CancellationRequest,
-        ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
-        OrderExecutionType, PolymarketExecutionConfig, PolymarketExecutionGateway,
-        ReplaceOutcome, ReplaceRequest, StaticExecutionGateway, TrackedOrder,
-        WalletSignatureType,
+        normalize_order_quantity, polymarket_signature_type_from_env, tracked_trade_fill,
+        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
+        ExecutionRequest, LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
+        PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
+        TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -822,6 +849,18 @@ mod tests {
         assert_eq!(buy.as_inner(), dec!(15.00));
         assert!(sell.is_shares());
         assert_eq!(sell.as_inner(), dec!(24.46));
+    }
+
+    #[test]
+    fn signature_type_defaults_to_proxy_when_funder_is_present() {
+        assert_eq!(
+            polymarket_signature_type_from_env(true),
+            WalletSignatureType::Proxy
+        );
+        assert_eq!(
+            polymarket_signature_type_from_env(false),
+            WalletSignatureType::Eoa
+        );
     }
 
     #[test]
