@@ -187,6 +187,27 @@ jobs:
               test "\${memory_max}" != "[not set]"
             }
 
+            assert_recent_rows() {
+              local sql="\$1"
+              local message="\$2"
+              local result
+              result=\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc "\${sql}")
+              if [ "\${result}" != "t" ]; then
+                echo "\${message}" >&2
+                exit 1
+              fi
+            }
+
+            assert_no_recent_logs() {
+              local unit="\$1"
+              local pattern="\$2"
+              local message="\$3"
+              if journalctl -u "\${unit}" --since "\${DEPLOY_STARTED_AT}" --no-pager | grep -E "\${pattern}"; then
+                echo "\${message}" >&2
+                exit 1
+              fi
+            }
+
             service_exists() {
               systemctl cat "\$1" >/dev/null 2>&1
             }
@@ -293,44 +314,35 @@ jobs:
               require_service_guardrails ploy-strategy-directional-live.service
             fi
 
-            if [ "\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
-              \"SELECT EXISTS (SELECT 1 FROM binance_lob_ticks WHERE event_time >= NOW() - INTERVAL '10 minutes')\")" != "t" ]; then
-              echo "binance_lob_ticks is not fresh after deploy" >&2
-              exit 1
-            fi
+            assert_recent_rows \
+              "SELECT EXISTS (SELECT 1 FROM binance_lob_ticks WHERE event_time >= NOW() - INTERVAL '10 minutes')" \
+              "binance_lob_ticks is not fresh after deploy"
             if service_exists ploy-binance-price-collector.service; then
-              if [ "\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
-                \"SELECT EXISTS (SELECT 1 FROM binance_price_ticks WHERE trade_time >= NOW() - INTERVAL '10 minutes')\")" != "t" ]; then
-                echo "binance_price_ticks is not fresh after deploy" >&2
-                exit 1
-              fi
+              assert_recent_rows \
+                "SELECT EXISTS (SELECT 1 FROM binance_price_ticks WHERE trade_time >= NOW() - INTERVAL '10 minutes')" \
+                "binance_price_ticks is not fresh after deploy"
             fi
             if service_exists ploy-deribit-iv-collector.service; then
-              if [ "\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
-                \"SELECT EXISTS (SELECT 1 FROM deribit_iv_ticks WHERE fetched_at >= NOW() - INTERVAL '15 minutes')\")" != "t" ]; then
-                echo "deribit_iv_ticks is not fresh after deploy" >&2
-                exit 1
-              fi
+              assert_recent_rows \
+                "SELECT EXISTS (SELECT 1 FROM deribit_iv_ticks WHERE fetched_at >= NOW() - INTERVAL '15 minutes')" \
+                "deribit_iv_ticks is not fresh after deploy"
             fi
 
-            if journalctl -u ploy-strategy-directional-dryrun.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
-              | grep -E "DB connection failed|running without persistence|Signal recorder disabled"; then
-              echo "ploy-strategy-directional-dryrun started in degraded persistence mode" >&2
-              exit 1
-            fi
+            assert_no_recent_logs \
+              "ploy-strategy-directional-dryrun.service" \
+              "DB connection failed|running without persistence|Signal recorder disabled" \
+              "ploy-strategy-directional-dryrun started in degraded persistence mode"
             if service_exists ploy-binance-price-collector.service; then
-              if journalctl -u ploy-binance-price-collector.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
-                | grep -E "uq_binance_price_ticks_symbol_second|duplicate key value"; then
-                echo "binance price collector is still thrashing on duplicate writes" >&2
-                exit 1
-              fi
+              assert_no_recent_logs \
+                "ploy-binance-price-collector.service" \
+                "uq_binance_price_ticks_symbol_second|duplicate key value" \
+                "binance price collector is still thrashing on duplicate writes"
             fi
             if service_exists ploy-deribit-iv-collector.service; then
-              if journalctl -u ploy-deribit-iv-collector.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
-                | grep -E "no partition of relation \"deribit_iv_ticks\""; then
-                echo "deribit iv collector still lacks active partitions" >&2
-                exit 1
-              fi
+              assert_no_recent_logs \
+                "ploy-deribit-iv-collector.service" \
+                "no partition of relation \"deribit_iv_ticks\"" \
+                "deribit iv collector still lacks active partitions"
             fi
 
             # Check service status
