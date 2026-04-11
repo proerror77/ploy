@@ -31,6 +31,7 @@ env:
     031_strategy_runtime_track_record_views.sql
     032_strategy_runtime_track_record_official_settlement.sql
     033_fix_settlement_view_join_and_confirmed_flag.sql
+    034_clob_quote_ticks_full_resolution.sql
 
 jobs:
   build-and-deploy:
