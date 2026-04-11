@@ -189,6 +189,116 @@ struct SpotState {
     ts: DateTime<Utc>,
 }
 
+/// Ring buffer of recent tick returns for realized volatility calculation.
+struct ReturnBuffer {
+    /// (log_return, dt_secs) pairs, newest at the back.
+    entries: Vec<(f64, f64)>,
+    /// Cumulative age in seconds from the newest entry.
+    total_secs: f64,
+    /// Rolling high/low within the buffer window.
+    high: f64,
+    low: f64,
+}
+
+impl ReturnBuffer {
+    fn new() -> Self {
+        Self {
+            entries: Vec::with_capacity(256),
+            total_secs: 0.0,
+            high: f64::NEG_INFINITY,
+            low: f64::INFINITY,
+        }
+    }
+
+    /// Push a new tick and evict entries older than `window_secs`.
+    fn push(&mut self, log_return: f64, dt_secs: f64, price: f64, window_secs: f64) {
+        self.entries.push((log_return, dt_secs));
+        self.total_secs += dt_secs;
+
+        // Update high/low
+        if price > self.high {
+            self.high = price;
+        }
+        if price < self.low {
+            self.low = price;
+        }
+
+        // Evict old entries
+        while self.total_secs > window_secs && self.entries.len() > 2 {
+            let (_, old_dt) = self.entries.remove(0);
+            self.total_secs -= old_dt;
+        }
+    }
+
+    /// Realized variance per second: sum(r²) / total_time.
+    fn realized_var_per_sec(&self) -> f64 {
+        if self.total_secs <= 0.0 || self.entries.is_empty() {
+            return 0.0;
+        }
+        let sum_r2: f64 = self.entries.iter().map(|(r, _)| r * r).sum();
+        sum_r2 / self.total_secs
+    }
+
+    /// Parkinson range-based variance per second: ln(H/L)² / (4·ln2·T).
+    fn parkinson_var_per_sec(&self) -> f64 {
+        if self.high <= 0.0 || self.low <= 0.0 || self.high <= self.low || self.total_secs <= 0.0 {
+            return 0.0;
+        }
+        let log_hl = (self.high / self.low).ln();
+        log_hl * log_hl / (4.0 * std::f64::consts::LN_2 * self.total_secs)
+    }
+
+    /// Directional consistency: fraction of ticks moving in the dominant direction.
+    /// Returns (consistency 0.0-1.0, dominant_direction +1/-1).
+    fn directional_consistency(&self) -> (f64, f64) {
+        if self.entries.is_empty() {
+            return (0.5, 0.0);
+        }
+        let up_count = self.entries.iter().filter(|(r, _)| *r > 0.0).count();
+        let total = self.entries.len();
+        let up_frac = up_count as f64 / total as f64;
+        if up_frac >= 0.5 {
+            (up_frac, 1.0)
+        } else {
+            (1.0 - up_frac, -1.0)
+        }
+    }
+
+    /// Price drift speed: cumulative log return / elapsed time.
+    fn drift_speed(&self) -> f64 {
+        if self.total_secs <= 0.0 {
+            return 0.0;
+        }
+        let cum_return: f64 = self.entries.iter().map(|(r, _)| r).sum();
+        cum_return / self.total_secs
+    }
+
+    /// Price acceleration: compare drift speed of recent half vs older half.
+    fn drift_acceleration(&self) -> f64 {
+        let n = self.entries.len();
+        if n < 4 {
+            return 0.0;
+        }
+        let mid = n / 2;
+        let (old_sum, old_dt): (f64, f64) = self.entries[..mid]
+            .iter()
+            .fold((0.0, 0.0), |(sr, sd), (r, d)| (sr + r, sd + d));
+        let (new_sum, new_dt): (f64, f64) = self.entries[mid..]
+            .iter()
+            .fold((0.0, 0.0), |(sr, sd), (r, d)| (sr + r, sd + d));
+        if old_dt <= 0.0 || new_dt <= 0.0 {
+            return 0.0;
+        }
+        let old_speed = old_sum / old_dt;
+        let new_speed = new_sum / new_dt;
+        new_speed - old_speed
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// Active event window for a symbol.
 #[derive(Clone)]
 struct EventWindow {
@@ -206,6 +316,9 @@ struct QuoteState {
     ask: Option<Decimal>,
 }
 
+/// Rolling window for return buffer (seconds).
+const RETURN_BUFFER_WINDOW_SECS: f64 = 300.0;
+
 #[derive(Default)]
 struct VolatilityState {
     ewma_var_per_sec: f64,
@@ -218,6 +331,7 @@ pub struct DirectionalStrategy {
     // Market state
     spot: HashMap<String, SpotState>,
     volatility: HashMap<String, VolatilityState>,
+    return_buffers: HashMap<String, ReturnBuffer>,
     events: HashMap<String, Vec<EventWindow>>,
     quotes: HashMap<String, QuoteState>,
     // Gating state
@@ -243,6 +357,7 @@ impl DirectionalStrategy {
             config,
             spot: HashMap::new(),
             volatility: HashMap::new(),
+            return_buffers: HashMap::new(),
             events: HashMap::new(),
             quotes: HashMap::new(),
             cooldowns: HashMap::new(),
@@ -332,7 +447,10 @@ impl DirectionalStrategy {
             return;
         }
 
-        let inst_var_per_sec = (curr_f / prev_f).ln().powi(2) / dt_secs.max(1e-6);
+        let log_return = (curr_f / prev_f).ln();
+        let inst_var_per_sec = log_return * log_return / dt_secs.max(1e-6);
+
+        // 1. EWMA (existing)
         let floor = self.floor_var_per_sec();
         let state = self.volatility.entry(symbol.to_string()).or_default();
         state.ewma_var_per_sec = if state.ewma_var_per_sec <= 0.0 {
@@ -340,17 +458,38 @@ impl DirectionalStrategy {
         } else {
             (EWMA_LAMBDA * state.ewma_var_per_sec) + ((1.0 - EWMA_LAMBDA) * inst_var_per_sec)
         };
+
+        // 2. Return buffer for RV, Parkinson, and price structure features
+        let buf = self
+            .return_buffers
+            .entry(symbol.to_string())
+            .or_insert_with(ReturnBuffer::new);
+        buf.push(log_return, dt_secs, curr_f, RETURN_BUFFER_WINDOW_SECS);
     }
 
     fn sigma_horizon(&self, symbol: &str, time_remaining_secs: f64) -> f64 {
         let secs = time_remaining_secs.max(1.0);
         let floor = self.floor_var_per_sec();
-        let realized = self
+
+        let ewma = self
             .volatility
             .get(symbol)
             .map(|state| state.ewma_var_per_sec)
             .unwrap_or(floor);
-        (realized.max(floor) * secs).sqrt()
+
+        // Use the maximum of three estimators for a conservative sigma.
+        // - EWMA: smooth, adapts slowly, good for regime detection
+        // - Realized Var: direct measurement of recent tick-level volatility
+        // - Parkinson: range-based, 5x more efficient, captures intra-window extremes
+        let (rv, parkinson) = self
+            .return_buffers
+            .get(symbol)
+            .filter(|buf| buf.len() >= 5)
+            .map(|buf| (buf.realized_var_per_sec(), buf.parkinson_var_per_sec()))
+            .unwrap_or((0.0, 0.0));
+
+        let best_var = ewma.max(rv).max(parkinson).max(floor);
+        (best_var * secs).sqrt()
     }
 
     fn shares_for_entry_price(&self, entry_price: Decimal) -> Decimal {
@@ -523,14 +662,15 @@ impl DirectionalStrategy {
         exits
     }
 
-    /// Core signal evaluation — the unified 8-gate pipeline.
-    /// Core signal evaluation — the 5-gate pipeline.
+    /// Core signal evaluation — the 7-gate pipeline.
     ///
     /// Gate 0: Price validity
     /// Gate 1: Quote availability + direction
     /// Gate 2: Price filter (bounds + no-trade zone)
-    /// Gate 3: Probability threshold
-    /// Gate 4: Edge after fees
+    /// Gate 3: Probability threshold (log-normal base)
+    /// Gate 4: Price structure adjustment (drift, consistency, acceleration)
+    /// Gate 5: Adjusted probability threshold
+    /// Gate 6: Edge after fees
     fn evaluate_entry(
         &self,
         symbol: &str,
@@ -617,24 +757,107 @@ impl DirectionalStrategy {
             return None;
         }
 
-        // Gate 3: Probability threshold
-        let effective_p = if direction == Direction::Up {
+        // Gate 3: Base probability threshold
+        let base_p = if direction == Direction::Up {
             p_hat
         } else {
             1.0 - p_hat
         };
-        if effective_p < self.config.min_probability {
+        if base_p < self.config.min_probability {
             debug!(
                 symbol,
                 event_id = %event.event_id,
-                effective_p,
+                effective_p = base_p,
                 threshold = self.config.min_probability,
                 "Gate 3: Probability too low"
             );
             return None;
         }
 
-        // Gate 4: Edge after fees
+        // Gate 4: Price structure adjustment (Bayesian likelihood update)
+        // Use drift speed, acceleration, and directional consistency from the
+        // return buffer to adjust the base probability up or down.
+        let effective_p = if let Some(buf) = self.return_buffers.get(symbol) {
+            if buf.len() >= 10 {
+                let drift = buf.drift_speed();
+                let accel = buf.drift_acceleration();
+                let (consistency, dom_dir) = buf.directional_consistency();
+
+                // Signal direction: +1 for Up, -1 for Down
+                let signal_dir = if direction == Direction::Up { 1.0 } else { -1.0 };
+
+                // Drift alignment: is the price moving in our signal direction?
+                // Positive = drift confirms signal, negative = drift opposes signal.
+                let drift_alignment = drift * signal_dir;
+
+                // Acceleration alignment: is the drift accelerating in our direction?
+                let accel_alignment = accel * signal_dir;
+
+                // Consistency bonus: if >70% of ticks move in our direction, boost confidence.
+                // If dominant direction opposes our signal, penalize.
+                let consistency_factor = if dom_dir * signal_dir > 0.0 {
+                    // Ticks confirm our direction
+                    1.0 + (consistency - 0.5).max(0.0) * 0.3 // up to +15% boost
+                } else {
+                    // Ticks oppose our direction
+                    1.0 - (consistency - 0.5).max(0.0) * 0.3 // up to -15% penalty
+                };
+
+                // Drift factor: strong drift in our direction boosts, against penalizes.
+                // Normalize by sigma to make it scale-invariant.
+                let drift_factor = if sigma_horizon > 0.0 {
+                    let normalized_drift = drift_alignment * secs_remaining.sqrt() / sigma_horizon;
+                    1.0 + normalized_drift.clamp(-0.3, 0.3) * 0.2
+                } else {
+                    1.0
+                };
+
+                // Acceleration factor: accelerating in our direction is bullish.
+                let accel_factor = if sigma_horizon > 0.0 {
+                    let normalized_accel = accel_alignment * secs_remaining / sigma_horizon;
+                    1.0 + normalized_accel.clamp(-0.5, 0.5) * 0.1
+                } else {
+                    1.0
+                };
+
+                // Apply all factors to base probability (multiplicative on odds ratio)
+                let combined_factor = consistency_factor * drift_factor * accel_factor;
+                let odds = base_p / (1.0 - base_p).max(1e-9);
+                let adjusted_odds = odds * combined_factor;
+                let adjusted_p = adjusted_odds / (1.0 + adjusted_odds);
+
+                debug!(
+                    symbol,
+                    event_id = %event.event_id,
+                    base_p = format!("{:.3}", base_p),
+                    adjusted_p = format!("{:.3}", adjusted_p),
+                    drift = format!("{:.6}", drift),
+                    accel = format!("{:.6}", accel),
+                    consistency = format!("{:.2}", consistency),
+                    "Gate 4: Price structure adjustment"
+                );
+
+                adjusted_p
+            } else {
+                base_p
+            }
+        } else {
+            base_p
+        };
+
+        // Gate 5: Adjusted probability threshold
+        if effective_p < self.config.min_probability {
+            debug!(
+                symbol,
+                event_id = %event.event_id,
+                effective_p,
+                base_p,
+                "Gate 5: Adjusted probability below threshold"
+            );
+            return None;
+        }
+
+        // Gate 6: Edge after fees
         let cost = crypto_fee_cost(entry_f);
         let edge = effective_p - entry_f - cost;
         if edge < self.config.min_edge {
