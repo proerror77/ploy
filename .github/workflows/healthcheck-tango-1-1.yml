@@ -75,8 +75,10 @@ jobs:
 
             require_postgres
 
+            systemctl is-active --quiet ploy-binance-lob-collector.service
             systemctl is-active --quiet ploy-strategy-directional-dryrun.service
             systemctl is-active --quiet ploy-quote-collector.service
+            require_service_guardrails ploy-binance-lob-collector.service
             require_service_guardrails ploy-strategy-directional-dryrun.service
             require_service_guardrails ploy-quote-collector.service
 
@@ -86,14 +88,26 @@ jobs:
               exit 1
             fi
 
+            if ! PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
+              "SELECT EXISTS (SELECT 1 FROM binance_lob_ticks WHERE event_time >= NOW() - INTERVAL '15 minutes')"; then
+              echo "binance_lob_ticks has not advanced within the last 15 minutes" >&2
+              exit 1
+            fi
+
             latest_signal=$(
               PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
                 "SELECT coalesce(max(recorded_at)::text, 'none') FROM signal_history"
             )
+            latest_lob=$(
+              PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
+                "SELECT coalesce(max(event_time)::text, 'none') FROM binance_lob_ticks"
+            )
 
             echo "postgres=$(systemctl show -P ActiveState postgresql@16-main)"
+            echo "lob=$(systemctl show -P ActiveState ploy-binance-lob-collector.service)"
             echo "dryrun=$(systemctl show -P ActiveState ploy-strategy-directional-dryrun.service)"
             echo "collector=$(systemctl show -P ActiveState ploy-quote-collector.service)"
+            echo "latest_lob=${latest_lob}"
             echo "latest_signal=${latest_signal}"
           EOF
 
@@ -101,6 +115,7 @@ jobs:
         run: |
           echo "## tango-1-1 healthcheck" >> "$GITHUB_STEP_SUMMARY"
           echo "- PostgreSQL must be active and queryable" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ploy-strategy-directional-dryrun and ploy-quote-collector must be active" >> "$GITHUB_STEP_SUMMARY"
-          echo "- systemd guardrails must remain configured on both services" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ploy-binance-lob-collector, ploy-strategy-directional-dryrun, and ploy-quote-collector must be active" >> "$GITHUB_STEP_SUMMARY"
+          echo "- systemd guardrails must remain configured on all checked services" >> "$GITHUB_STEP_SUMMARY"
+          echo "- binance_lob_ticks must advance within the last 15 minutes" >> "$GITHUB_STEP_SUMMARY"
           echo "- dry-run must not log degraded persistence messages in the last 15 minutes" >> "$GITHUB_STEP_SUMMARY"

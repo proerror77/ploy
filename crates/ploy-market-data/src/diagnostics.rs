@@ -44,7 +44,7 @@ pub async fn check_database(db_url: &str) -> Result<(), Box<dyn std::error::Erro
     println!("--- binance_price_ticks ---");
     for symbol in &symbols {
         let result: Option<(i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
-            "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM binance_price_ticks WHERE symbol = $1"
+            "SELECT COUNT(*), MIN(trade_time), MAX(trade_time) FROM binance_price_ticks WHERE symbol = $1"
         )
         .bind(symbol)
         .fetch_optional(&pool)
@@ -67,7 +67,7 @@ pub async fn check_database(db_url: &str) -> Result<(), Box<dyn std::error::Erro
 
     println!("\n--- clob_quote_ticks ---");
     let result: Option<(i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> =
-        sqlx::query_as("SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM clob_quote_ticks")
+        sqlx::query_as("SELECT COUNT(*), MIN(received_at), MAX(received_at) FROM clob_quote_ticks")
             .fetch_optional(&pool)
             .await?;
 
@@ -106,7 +106,7 @@ pub async fn check_database(db_url: &str) -> Result<(), Box<dyn std::error::Erro
     println!("\n--- binance_lob_ticks ---");
     for symbol in &symbols {
         let result: Option<(i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
-            "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM binance_lob_ticks WHERE symbol = $1"
+            "SELECT COUNT(*), MIN(event_time), MAX(event_time) FROM binance_lob_ticks WHERE symbol = $1"
         )
         .bind(symbol)
         .fetch_optional(&pool)
