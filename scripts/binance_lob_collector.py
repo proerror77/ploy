@@ -9,11 +9,10 @@ import asyncio
 import json
 import os
 import signal
-import sys
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Iterable, Optional
+from typing import Iterable
 
 import psycopg
 import websockets
@@ -94,6 +93,15 @@ async def _flush(conn: psycopg.AsyncConnection, pending: int) -> int:
     return 0
 
 
+def _infer_symbol(stream_name: str | None, payload_symbol: str | None) -> str | None:
+    if payload_symbol:
+        return payload_symbol
+    if not stream_name:
+        return None
+    raw_symbol = stream_name.split("@", 1)[0]
+    return raw_symbol.upper() if raw_symbol else None
+
+
 async def collect_lob():
     streams = [f"{symbol.lower()}@depth{DEPTH_LEVELS}@100ms" for symbol in SYMBOLS]
     subscribe_msg = {"method": "SUBSCRIBE", "params": streams, "id": 1}
@@ -153,14 +161,26 @@ async def collect_lob():
                         if not data:
                             continue
 
-                        symbol = data.get("s")
+                        stream_name = payload.get("stream")
+                        symbol = _infer_symbol(stream_name, data.get("s"))
                         event_time_ms = data.get("E")
-                        update_id = data.get("u")
-                        raw_bids = data.get("b") or []
-                        raw_asks = data.get("a") or []
+                        update_id = data.get("u") or data.get("lastUpdateId")
+                        raw_bids = data.get("b") or data.get("bids") or []
+                        raw_asks = data.get("a") or data.get("asks") or []
 
                         if not symbol or event_time_ms is None or update_id is None:
-                            continue
+                            if symbol and event_time_ms is None and raw_bids and raw_asks and update_id is not None:
+                                event_time = datetime.now(timezone.utc)
+                            else:
+                                print(
+                                    "[binance-lob] Skipping payload with missing symbol/event/update_id",
+                                    flush=True,
+                                )
+                                continue
+                        else:
+                            event_time = datetime.fromtimestamp(
+                                event_time_ms / 1000, tz=timezone.utc
+                            )
 
                         bids = _parse_levels(raw_bids)
                         asks = _parse_levels(raw_asks)
@@ -181,10 +201,6 @@ async def collect_lob():
                         ask_volume_5 = _sum_volume(asks, 5)
                         bid_volume_10 = _sum_volume(bids, 10)
                         ask_volume_10 = _sum_volume(asks, 10)
-                        event_time = datetime.fromtimestamp(
-                            event_time_ms / 1000, tz=timezone.utc
-                        )
-
                         try:
                             await conn.execute(
                                 insert_sql,

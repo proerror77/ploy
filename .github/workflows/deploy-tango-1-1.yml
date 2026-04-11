@@ -71,7 +71,10 @@ jobs:
           cp target/${PLATFORM_TARGET}/release/new-ploy-runner dist/bin/ploy-runner
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
           cp config/strategies/02-pm5d.live.toml dist/config/strategies/02-pm5d.live.toml
+          cp scripts/binance_price_collector.py dist/scripts/binance_price_collector.py
           cp scripts/binance_lob_collector.py dist/scripts/binance_lob_collector.py
+          cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
+          cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
           for migration in ${DEPLOY_MIGRATIONS}; do
             migration="$(printf '%s' "${migration}" | xargs)"
             [ -n "${migration}" ] || continue
@@ -226,7 +229,10 @@ jobs:
             install -m 0755 ./bin/ploy-runner /root/ploy/bin/ploy-runner
             install -m 0644 ./config/strategies/02-pm5d.unified.toml /root/ploy/config/strategies/02-pm5d.unified.toml
             install -m 0644 ./config/strategies/02-pm5d.live.toml /root/ploy/config/strategies/02-pm5d.live.toml
+            install -m 0755 ./scripts/binance_price_collector.py /root/ploy/scripts/binance_price_collector.py
             install -m 0755 ./scripts/binance_lob_collector.py /root/ploy/scripts/binance_lob_collector.py
+            install -m 0644 ./scripts/fix_binance_lob_partitions.sql /root/ploy/scripts/fix_binance_lob_partitions.sql
+            install -m 0644 ./scripts/fix_deribit_partitions.sql /root/ploy/scripts/fix_deribit_partitions.sql
             for migration in ${DEPLOY_MIGRATIONS}; do
               migration="$(printf '%s' "\${migration}" | xargs)"
               [ -n "\${migration}" ] || continue
@@ -250,10 +256,18 @@ jobs:
                 PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f "\${migration}"
               fi
             done
+            PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f /root/ploy/scripts/fix_binance_lob_partitions.sql
+            PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f /root/ploy/scripts/fix_deribit_partitions.sql
 
             require_postgres
 
             systemctl enable --now ploy-binance-lob-collector.service
+            if service_exists ploy-binance-price-collector.service; then
+              systemctl restart ploy-binance-price-collector.service
+            fi
+            if service_exists ploy-deribit-iv-collector.service; then
+              systemctl restart ploy-deribit-iv-collector.service
+            fi
             systemctl restart ploy-strategy-directional-dryrun.service
             systemctl restart ploy-quote-collector.service
             if service_exists ploy-strategy-directional-live.service; then
@@ -268,14 +282,32 @@ jobs:
             require_service_guardrails ploy-binance-lob-collector.service
             require_service_guardrails ploy-strategy-directional-dryrun.service
             require_service_guardrails ploy-quote-collector.service
+            if service_exists ploy-binance-price-collector.service; then
+              systemctl is-active --quiet ploy-binance-price-collector.service
+            fi
+            if service_exists ploy-deribit-iv-collector.service; then
+              systemctl is-active --quiet ploy-deribit-iv-collector.service
+            fi
             if service_exists ploy-strategy-directional-live.service; then
               systemctl is-active --quiet ploy-strategy-directional-live.service
               require_service_guardrails ploy-strategy-directional-live.service
             fi
 
-            if ! PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
-              "SELECT EXISTS (SELECT 1 FROM binance_lob_ticks WHERE event_time >= NOW() - INTERVAL '10 minutes')"; then
+            if [ "\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
+              \"SELECT EXISTS (SELECT 1 FROM binance_lob_ticks WHERE event_time >= NOW() - INTERVAL '10 minutes')\")" != "t" ]; then
               echo "binance_lob_ticks is not fresh after deploy" >&2
+              exit 1
+            fi
+            if service_exists ploy-binance-price-collector.service && \
+              [ "\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
+              \"SELECT EXISTS (SELECT 1 FROM binance_price_ticks WHERE trade_time >= NOW() - INTERVAL '10 minutes')\")" != "t" ]; then
+              echo "binance_price_ticks is not fresh after deploy" >&2
+              exit 1
+            fi
+            if service_exists ploy-deribit-iv-collector.service && \
+              [ "\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
+              \"SELECT EXISTS (SELECT 1 FROM deribit_iv_ticks WHERE fetched_at >= NOW() - INTERVAL '15 minutes')\")" != "t" ]; then
+              echo "deribit_iv_ticks is not fresh after deploy" >&2
               exit 1
             fi
 
@@ -284,9 +316,27 @@ jobs:
               echo "ploy-strategy-directional-dryrun started in degraded persistence mode" >&2
               exit 1
             fi
+            if service_exists ploy-binance-price-collector.service && \
+              journalctl -u ploy-binance-price-collector.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
+              | grep -E "uq_binance_price_ticks_symbol_second|duplicate key value"; then
+              echo "binance price collector is still thrashing on duplicate writes" >&2
+              exit 1
+            fi
+            if service_exists ploy-deribit-iv-collector.service && \
+              journalctl -u ploy-deribit-iv-collector.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
+              | grep -E "no partition of relation \"deribit_iv_ticks\""; then
+              echo "deribit iv collector still lacks active partitions" >&2
+              exit 1
+            fi
 
             # Check service status
+            if service_exists ploy-binance-price-collector.service; then
+              systemctl status ploy-binance-price-collector.service --no-pager
+            fi
             systemctl status ploy-binance-lob-collector.service --no-pager
+            if service_exists ploy-deribit-iv-collector.service; then
+              systemctl status ploy-deribit-iv-collector.service --no-pager
+            fi
             systemctl status ploy-strategy-directional-dryrun.service --no-pager
             systemctl status ploy-quote-collector.service --no-pager
             if service_exists ploy-strategy-directional-live.service; then
@@ -294,7 +344,13 @@ jobs:
             fi
 
             # Show recent logs
+            if service_exists ploy-binance-price-collector.service; then
+              journalctl -u ploy-binance-price-collector.service -n 20 --no-pager
+            fi
             journalctl -u ploy-binance-lob-collector.service -n 20 --no-pager
+            if service_exists ploy-deribit-iv-collector.service; then
+              journalctl -u ploy-deribit-iv-collector.service -n 20 --no-pager
+            fi
             journalctl -u ploy-strategy-directional-dryrun.service -n 20 --no-pager
             journalctl -u ploy-quote-collector.service -n 20 --no-pager
             if service_exists ploy-strategy-directional-live.service; then
@@ -309,7 +365,7 @@ jobs:
           echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Transport: \`GitHub Actions -> OSS -> ECS\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- OSS object: \`${{ steps.upload_bundle_to_oss.outputs.bundle_object }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Services: \`ploy-binance-lob-collector\`, \`ploy-strategy-directional-dryrun\`, \`ploy-quote-collector\`, \`ploy-strategy-directional-live\` (if installed)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Services: \`ploy-binance-price-collector\`, \`ploy-binance-lob-collector\`, \`ploy-deribit-iv-collector\`, \`ploy-strategy-directional-dryrun\`, \`ploy-quote-collector\`, \`ploy-strategy-directional-live\` (if installed)" >> "$GITHUB_STEP_SUMMARY"
           echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Migrations: \`${DEPLOY_MIGRATIONS}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Postgres pre/postflight: required" >> "$GITHUB_STEP_SUMMARY"

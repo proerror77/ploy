@@ -23,6 +23,8 @@ RETENTION_NBA_OBS_DAYS="${PLOY_RETENTION_NBA_OBS_DAYS:-7}"
 RETENTION_ORDER_EXEC_DAYS="${PLOY_RETENTION_ORDER_EXEC_DAYS:-7}"
 RETENTION_LOG_DAYS="${PLOY_RETENTION_LOG_DAYS:-14}"
 JOURNAL_VACUUM_SIZE="${PLOY_JOURNAL_VACUUM_SIZE:-200M}"
+DERIBIT_PARTITION_LOOKBACK_DAYS="${PLOY_DERIBIT_PARTITION_LOOKBACK_DAYS:-7}"
+DERIBIT_PARTITION_LOOKAHEAD_DAYS="${PLOY_DERIBIT_PARTITION_LOOKAHEAD_DAYS:-14}"
 
 is_uint() {
   [[ "${1:-}" =~ ^[0-9]+$ ]]
@@ -68,8 +70,16 @@ if ! is_uint "$RETENTION_LOG_DAYS"; then
   echo "invalid PLOY_RETENTION_LOG_DAYS: $RETENTION_LOG_DAYS" >&2
   exit 2
 fi
+if ! is_uint "$DERIBIT_PARTITION_LOOKBACK_DAYS"; then
+  echo "invalid PLOY_DERIBIT_PARTITION_LOOKBACK_DAYS: $DERIBIT_PARTITION_LOOKBACK_DAYS" >&2
+  exit 2
+fi
+if ! is_uint "$DERIBIT_PARTITION_LOOKAHEAD_DAYS"; then
+  echo "invalid PLOY_DERIBIT_PARTITION_LOOKAHEAD_DAYS: $DERIBIT_PARTITION_LOOKAHEAD_DAYS" >&2
+  exit 2
+fi
 
-echo "ploy_maintenance: db=${DB_NAME} log_dir=${LOG_DIR} clob_ticks_days=${RETENTION_CLOB_TICKS_DAYS} clob_book_days=${RETENTION_CLOB_BOOK_DAYS} clob_obh_days=${RETENTION_CLOB_ORDERBOOK_HISTORY_DAYS} clob_trades_days=${RETENTION_CLOB_TRADES_DAYS} clob_alerts_days=${RETENTION_CLOB_ALERTS_DAYS} binance_ticks_days=${RETENTION_BINANCE_TICKS_DAYS} binance_lob_days=${RETENTION_BINANCE_LOB_DAYS} nba_obs_days=${RETENTION_NBA_OBS_DAYS} order_exec_days=${RETENTION_ORDER_EXEC_DAYS} log_days=${RETENTION_LOG_DAYS}"
+echo "ploy_maintenance: db=${DB_NAME} log_dir=${LOG_DIR} clob_ticks_days=${RETENTION_CLOB_TICKS_DAYS} clob_book_days=${RETENTION_CLOB_BOOK_DAYS} clob_obh_days=${RETENTION_CLOB_ORDERBOOK_HISTORY_DAYS} clob_trades_days=${RETENTION_CLOB_TRADES_DAYS} clob_alerts_days=${RETENTION_CLOB_ALERTS_DAYS} binance_ticks_days=${RETENTION_BINANCE_TICKS_DAYS} binance_lob_days=${RETENTION_BINANCE_LOB_DAYS} nba_obs_days=${RETENTION_NBA_OBS_DAYS} order_exec_days=${RETENTION_ORDER_EXEC_DAYS} log_days=${RETENTION_LOG_DAYS} deribit_partition_lookback_days=${DERIBIT_PARTITION_LOOKBACK_DAYS} deribit_partition_lookahead_days=${DERIBIT_PARTITION_LOOKAHEAD_DAYS}"
 
 if [[ -n "${DATABASE_URL:-}" ]]; then
   PSQL=(psql "$DATABASE_URL" -v ON_ERROR_STOP=1)
@@ -82,6 +92,59 @@ fi
 
 echo "==> DB retention"
 "${PSQL[@]}" <<SQL
+DO \$\$
+DECLARE
+  partition_day date := current_date - ${DERIBIT_PARTITION_LOOKBACK_DAYS};
+  end_day date := current_date + ${DERIBIT_PARTITION_LOOKAHEAD_DAYS};
+  partition_name text;
+BEGIN
+  IF to_regclass('public.deribit_iv_ticks') IS NOT NULL THEN
+    WHILE partition_day <= end_day LOOP
+      partition_name := format('deribit_iv_ticks_new_%s', to_char(partition_day, 'YYYYMMDD'));
+      EXECUTE format(
+        'CREATE TABLE IF NOT EXISTS %I PARTITION OF deribit_iv_ticks FOR VALUES FROM (%L) TO (%L);',
+        partition_name,
+        format('%s 00:00:00+08', partition_day),
+        format('%s 00:00:00+08', partition_day + 1)
+      );
+      partition_day := partition_day + 1;
+    END LOOP;
+  END IF;
+END
+\$\$;
+
+DO \$\$
+DECLARE
+  partition_day date := current_date - ${DERIBIT_PARTITION_LOOKBACK_DAYS};
+  end_day date := current_date + ${DERIBIT_PARTITION_LOOKAHEAD_DAYS};
+  partition_name text;
+BEGIN
+  IF to_regclass('public.binance_lob_ticks') IS NOT NULL THEN
+    WHILE partition_day <= end_day LOOP
+      partition_name := format('binance_lob_ticks_new_%s', to_char(partition_day, 'YYYYMMDD'));
+      BEGIN
+        EXECUTE format(
+          'CREATE TABLE IF NOT EXISTS %I PARTITION OF binance_lob_ticks FOR VALUES FROM (%L) TO (%L);',
+          partition_name,
+          format('%s 00:00:00+08', partition_day),
+          format('%s 00:00:00+08', partition_day + 1)
+        );
+      EXCEPTION
+        WHEN duplicate_table THEN
+          NULL;
+        WHEN OTHERS THEN
+          IF position('would overlap partition' in SQLERRM) > 0 THEN
+            NULL;
+          ELSE
+            RAISE;
+          END IF;
+      END;
+      partition_day := partition_day + 1;
+    END LOOP;
+  END IF;
+END
+\$\$;
+
 -- High-volume tick table
 DELETE FROM clob_quote_ticks
 WHERE received_at < NOW() - INTERVAL '${RETENTION_CLOB_TICKS_DAYS} days';
