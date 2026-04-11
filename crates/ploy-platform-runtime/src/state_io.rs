@@ -69,7 +69,6 @@ pub fn load_proposal_store(path: &Path) -> io::Result<ProposalStore> {
 mod tests {
     use super::{load_proposal_store, load_registry_records, load_trading_runtimes};
     use chrono::Utc;
-    use ploy_operator_contracts::{IntentPurpose, TradingIntentSnapshot, TradingStateSnapshot};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -1,47 +1,37 @@
 use crate::config::PlatformConfig;
 use crate::events::EventBroker;
 use crate::http::publish_snapshot_events;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use ploy_platform_runtime::{
     apply_loaded_registry_state,
     apply_deployment as apply_deployment_record, control_deployment as control_deployment_record,
     LiveHealthConfig, mark_live_runtime_degraded as mark_runtime_degraded_state,
     mark_runtime_healthy as mark_runtime_healthy_state,
-    next_live_reconcile_at as next_reconcile_attempt_at,
     WorkerTickConfig, refresh_source_health as refresh_platform_source_health,
     tick_workers as tick_platform_workers,
     reconcile_live_fills as reconcile_runtime_live_fills,
     cancel_order as cancel_runtime_order, replace_order as replace_runtime_order,
     enforce_exposure_limit as enforce_intent_exposure_limit,
-    enforce_order_replacement_exposure as enforce_replace_exposure_limit,
     ensure_intent_allowed, set_deployment_max_gross_exposure as set_record_max_gross_exposure,
     load_proposal_store, load_registry_records, load_trading_runtimes,
     ProposalStore,
     submit_live_intent as submit_live_runtime_intent,
-    ReconcileStatus, build_order_control_response, build_trading_state_snapshot,
-    deployment_state_wire, intent_allowed_while_draining, intent_counts_toward_exposure,
-    intent_purpose_from_contract, intent_purpose_wire, io_error_from_execution_error,
-    live_reconcile_backoff_ms, next_proposal_id, observed_state_for_desired,
-    order_state_from_wire, order_state_wire, restore_trading_runtime, trade_side_from_wire,
-    submit_paper_intent as submit_paper_runtime_intent, trade_side_wire, write_json,
+    ReconcileStatus, build_trading_state_snapshot, submit_paper_intent as submit_paper_runtime_intent,
+    write_json,
 };
 use ploy_connectivity::{
-    CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome, ExecutionRequest,
-    LiveExecutionGateway, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, TrackedOrder,
+    LiveExecutionGateway, PolymarketExecutionGateway,
 };
-use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
+use ploy_deployments::WorkerSupervisor;
 use ploy_operator_contracts::{
     ActiveAlert, DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState,
-    FillSnapshot, IntentPurpose, ObservedState, OrderControlResponse, OrderReplaceRequest,
-    OrderSnapshot, PaperIntentResponse, PlatformMetrics, PnlSnapshotResponse,
-    PositionSnapshotResponse, ProposalActionKind, ProposalCreateRequest, ProposalDecisionRequest,
-    ProposalStatus, RiskSnapshotResponse, SafetyProposal, TradingIntentSnapshot,
-    TradingStateSnapshot,
+    ObservedState, OrderControlResponse, OrderReplaceRequest, PaperIntentResponse,
+    PlatformMetrics, ProposalActionKind, ProposalCreateRequest, ProposalDecisionRequest,
+    SafetyProposal, TradingStateSnapshot,
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
-use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
+use ploy_trading::{TradingIntent, TradingRuntime};
 use rust_decimal::Decimal;
-use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -54,6 +44,7 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub use ploy_platform_runtime::next_paper_intent_id;
 
+#[allow(dead_code)]
 pub fn request_shutdown() {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
@@ -489,10 +480,6 @@ impl PloyDaemon {
         // current compile contract without inventing behavior.
     }
 
-    fn next_live_reconcile_at(&self, failures: u32) -> DateTime<Utc> {
-        next_reconcile_attempt_at(&self.live_health_config(), failures)
-    }
-
     fn live_health_config(&self) -> LiveHealthConfig {
         LiveHealthConfig {
             listen_addr: self.config.listen_addr.clone(),
@@ -661,13 +648,14 @@ pub fn run_shared_forever(
 
 #[cfg(test)]
 mod tests {
-    use super::{live_reconcile_backoff_ms, PloyDaemon, ReconcileStatus};
+    use super::{PloyDaemon, ReconcileStatus};
     use crate::config::PlatformConfig;
     use ploy_connectivity::{
         CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
         ExecutionRequest, LiveExecutionGateway, ReplaceOutcome, ReplaceRequest,
         StaticExecutionGateway,
     };
+    use ploy_platform_runtime::live_reconcile_backoff_ms;
     use ploy_operator_contracts::{
         DeploymentApplyRequest, DeploymentState, DesiredState, ObservedState,
     };
