@@ -13,6 +13,7 @@ use ploy_strategy_bundles::MarketUpdate;
 use polymarket_client_sdk::rtds::{Client as RtdsClient, EquityPriceMessage};
 use polymarket_client_sdk::types::U256;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
@@ -216,6 +217,149 @@ pub fn spawn_db_spot_feed(
                     if price_count % 50 == 0 {
                         debug!(prices = price_count, "DB spot feed forwarded prices");
                     }
+                }
+            }
+        }
+    })
+}
+
+/// Spawn a task that polls `binance_agg_trade_ticks` and publishes
+/// `MarketUpdate::AggTrade` events for live/dry-run strategies.
+///
+/// This keeps aggTrade collection decoupled from strategy runtimes while still
+/// allowing the runtime to consume a near-real-time trade-flow signal stream.
+pub fn spawn_db_aggtrade_feed(
+    tx: Arc<broadcast::Sender<MarketUpdate>>,
+    symbols: Vec<String>,
+    pool: PgPool,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let symbols_upper: Vec<String> = symbols.iter().map(|s| s.to_uppercase()).collect();
+        let mut last_seen: HashMap<String, (chrono::DateTime<chrono::Utc>, i64)> = HashMap::new();
+        let mut trade_count = 0u64;
+
+        info!(symbols = ?symbols_upper, "Starting DB aggTrade fallback feed");
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let rows: Vec<(
+                String,
+                i64,
+                rust_decimal::Decimal,
+                rust_decimal::Decimal,
+                bool,
+                chrono::DateTime<chrono::Utc>,
+            )> = match sqlx::query_as(
+                r#"
+                SELECT symbol, agg_trade_id, price, quantity, is_buyer_maker, trade_time
+                FROM binance_agg_trade_ticks
+                WHERE symbol = ANY($1)
+                  AND trade_time > NOW() - INTERVAL '30 seconds'
+                ORDER BY trade_time ASC, agg_trade_id ASC
+                "#,
+            )
+            .bind(&symbols_upper)
+            .fetch_all(&pool)
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(error = %e, "DB aggTrade feed query failed");
+                    continue;
+                }
+            };
+
+            for (symbol, agg_trade_id, price, quantity, is_buyer_maker, ts) in rows {
+                let should_emit = match last_seen.get(&symbol).copied() {
+                    Some((last_ts, last_id)) => ts > last_ts || (ts == last_ts && agg_trade_id > last_id),
+                    None => true,
+                };
+                if !should_emit {
+                    continue;
+                }
+
+                last_seen.insert(symbol.clone(), (ts, agg_trade_id));
+                let update = MarketUpdate::AggTrade {
+                    symbol,
+                    agg_trade_id: agg_trade_id as u64,
+                    price,
+                    quantity,
+                    is_buyer_maker,
+                    ts,
+                };
+                if tx.send(update).is_err() {
+                    return;
+                }
+                trade_count += 1;
+                if trade_count % 100 == 0 {
+                    debug!(trades = trade_count, "DB aggTrade feed forwarded trades");
+                }
+            }
+        }
+    })
+}
+
+/// Spawn a task that polls `binance_lob_ticks` and publishes
+/// `MarketUpdate::L2` events for live/dry-run strategies.
+pub fn spawn_db_l2_feed(
+    tx: Arc<broadcast::Sender<MarketUpdate>>,
+    symbols: Vec<String>,
+    pool: PgPool,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let symbols_upper: Vec<String> = symbols.iter().map(|s| s.to_uppercase()).collect();
+        let mut last_seen: HashMap<String, (chrono::DateTime<chrono::Utc>, i64)> = HashMap::new();
+        let mut l2_count = 0u64;
+
+        info!(symbols = ?symbols_upper, "Starting DB L2 feed");
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let rows: Vec<(String, i64, rust_decimal::Decimal, i32, chrono::DateTime<chrono::Utc>)> =
+                match sqlx::query_as(
+                    r#"
+                    SELECT symbol, COALESCE(update_id, 0) AS update_id, obi_5, spread_bps, event_time
+                    FROM binance_lob_ticks
+                    WHERE symbol = ANY($1)
+                      AND event_time > NOW() - INTERVAL '30 seconds'
+                    ORDER BY event_time ASC, update_id ASC
+                    "#,
+                )
+                .bind(&symbols_upper)
+                .fetch_all(&pool)
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(error = %e, "DB L2 feed query failed");
+                        continue;
+                    }
+                };
+
+            for (symbol, update_id, obi, spread_bps, ts) in rows {
+                let should_emit = match last_seen.get(&symbol).copied() {
+                    Some((last_ts, last_id)) => ts > last_ts || (ts == last_ts && update_id > last_id),
+                    None => true,
+                };
+                if !should_emit {
+                    continue;
+                }
+
+                last_seen.insert(symbol.clone(), (ts, update_id));
+                let update = MarketUpdate::L2 {
+                    symbol,
+                    obi: obi.to_f64().unwrap_or_default(),
+                    spread_bps: spread_bps as u32,
+                    ts,
+                };
+                if tx.send(update).is_err() {
+                    return;
+                }
+                l2_count += 1;
+                if l2_count % 100 == 0 {
+                    debug!(updates = l2_count, "DB L2 feed forwarded updates");
                 }
             }
         }

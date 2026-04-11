@@ -134,6 +134,9 @@ pub async fn load_from_database_with_options(
     let spot_from = from - Duration::minutes(WARMUP_MINUTES);
     load_spot_prices(pool, symbols, spot_from, to, &mut updates).await?;
 
+    // 1b. Aggregated trade flow — additive signal stream for roadmap work.
+    load_agg_trades(pool, symbols, from, to, &mut updates).await?;
+
     // 2. Event windows FIRST — must be registered before quotes are processed.
     //    Quotes for a token can arrive before the event's official start_time
     //    (Polymarket tokens are continuous; ~90% of quotes precede start_time).
@@ -187,6 +190,7 @@ pub async fn load_from_database_with_options(
 fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
     match u {
         MarketUpdate::SpotPrice { ts, .. }
+        | MarketUpdate::AggTrade { ts, .. }
         | MarketUpdate::Quote { ts, .. }
         | MarketUpdate::L2 { ts, .. }
         | MarketUpdate::SportsState { ts, .. }
@@ -312,6 +316,45 @@ async fn load_spot_prices(
     );
     for (ts, symbol, price) in rows {
         updates.push(MarketUpdate::SpotPrice { symbol, price, ts });
+    }
+
+    Ok(())
+}
+
+async fn load_agg_trades(
+    pool: &PgPool,
+    symbols: &[String],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    updates: &mut Vec<MarketUpdate>,
+) -> Result<(), sqlx::Error> {
+    let rows: Vec<(DateTime<Utc>, String, i64, Decimal, Decimal, bool)> = sqlx::query_as(
+        r#"
+        SELECT trade_time, symbol, agg_trade_id, price, quantity, is_buyer_maker
+        FROM binance_agg_trade_ticks
+        WHERE symbol = ANY($1)
+          AND trade_time >= $2
+          AND trade_time <= $3
+        ORDER BY trade_time, agg_trade_id
+        "#,
+    )
+    .bind(symbols)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    info!(count = rows.len(), "Loaded agg trades from binance_agg_trade_ticks");
+    for (ts, symbol, agg_trade_id, price, quantity, is_buyer_maker) in rows {
+        updates.push(MarketUpdate::AggTrade {
+            symbol,
+            agg_trade_id: agg_trade_id as u64,
+            price,
+            quantity,
+            is_buyer_maker,
+            ts,
+        });
     }
 
     Ok(())
@@ -654,14 +697,14 @@ async fn load_l2_data(
 ) -> Result<(), sqlx::Error> {
     let rows: Vec<(DateTime<Utc>, String, f64, i32)> = sqlx::query_as(
         r#"
-        SELECT received_at, symbol,
+        SELECT event_time, symbol,
                COALESCE(obi_5, 0.0) as obi,
                COALESCE(spread_bps, 0) as spread_bps
         FROM binance_lob_ticks
         WHERE symbol = ANY($1)
-          AND received_at >= $2
-          AND received_at <= $3
-        ORDER BY received_at
+          AND event_time >= $2
+          AND event_time <= $3
+        ORDER BY event_time
         "#,
     )
     .bind(symbols)

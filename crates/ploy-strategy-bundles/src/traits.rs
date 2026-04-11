@@ -28,6 +28,16 @@ pub enum MarketUpdate {
         ts: DateTime<Utc>,
     },
 
+    /// Binance aggregated trade tick with aggressor-side metadata.
+    AggTrade {
+        symbol: String,
+        agg_trade_id: u64,
+        price: Decimal,
+        quantity: Decimal,
+        is_buyer_maker: bool,
+        ts: DateTime<Utc>,
+    },
+
     /// Polymarket token quote update.
     Quote {
         token_id: String,

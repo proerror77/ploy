@@ -158,6 +158,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
     // Sort by timestamp
     updates.sort_by_key(|u| match u {
         MarketUpdate::SpotPrice { ts, .. }
+        | MarketUpdate::AggTrade { ts, .. }
         | MarketUpdate::Quote { ts, .. }
         | MarketUpdate::L2 { ts, .. }
         | MarketUpdate::SportsState { ts, .. }
@@ -294,6 +295,7 @@ fn main() {
         for u in &updates {
             match u {
                 MarketUpdate::SpotPrice { .. } => spot_count += 1,
+                MarketUpdate::AggTrade { .. } => {}
                 MarketUpdate::Quote { .. } => quote_count += 1,
                 MarketUpdate::EventDiscovered { .. } => event_discovered += 1,
                 MarketUpdate::EventExpired { .. } => event_expired += 1,

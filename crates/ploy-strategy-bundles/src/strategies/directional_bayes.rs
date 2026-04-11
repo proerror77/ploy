@@ -952,6 +952,8 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                 vec![]
             }
 
+            MarketUpdate::AggTrade { .. } => vec![],
+
             MarketUpdate::EventDiscovered {
                 event_id,
                 symbol,
