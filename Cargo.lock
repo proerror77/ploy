@@ -4067,14 +4067,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ploy-runner"
-version = "0.1.0"
-dependencies = [
- "ploy-runner-host",
- "tokio",
-]
-
-[[package]]
 name = "ploy-runner-host"
 version = "0.1.0"
 dependencies = [
@@ -4148,13 +4140,6 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "ployd"
-version = "0.1.0"
-dependencies = [
- "ploy-daemon-host",
 ]
 
 [[package]]
