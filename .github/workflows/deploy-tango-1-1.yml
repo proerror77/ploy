@@ -298,17 +298,19 @@ jobs:
               echo "binance_lob_ticks is not fresh after deploy" >&2
               exit 1
             fi
-            if service_exists ploy-binance-price-collector.service && \
-              [ "\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
-              \"SELECT EXISTS (SELECT 1 FROM binance_price_ticks WHERE trade_time >= NOW() - INTERVAL '10 minutes')\")" != "t" ]; then
-              echo "binance_price_ticks is not fresh after deploy" >&2
-              exit 1
+            if service_exists ploy-binance-price-collector.service; then
+              if [ "\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
+                \"SELECT EXISTS (SELECT 1 FROM binance_price_ticks WHERE trade_time >= NOW() - INTERVAL '10 minutes')\")" != "t" ]; then
+                echo "binance_price_ticks is not fresh after deploy" >&2
+                exit 1
+              fi
             fi
-            if service_exists ploy-deribit-iv-collector.service && \
-              [ "\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
-              \"SELECT EXISTS (SELECT 1 FROM deribit_iv_ticks WHERE fetched_at >= NOW() - INTERVAL '15 minutes')\")" != "t" ]; then
-              echo "deribit_iv_ticks is not fresh after deploy" >&2
-              exit 1
+            if service_exists ploy-deribit-iv-collector.service; then
+              if [ "\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
+                \"SELECT EXISTS (SELECT 1 FROM deribit_iv_ticks WHERE fetched_at >= NOW() - INTERVAL '15 minutes')\")" != "t" ]; then
+                echo "deribit_iv_ticks is not fresh after deploy" >&2
+                exit 1
+              fi
             fi
 
             if journalctl -u ploy-strategy-directional-dryrun.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
@@ -316,17 +318,19 @@ jobs:
               echo "ploy-strategy-directional-dryrun started in degraded persistence mode" >&2
               exit 1
             fi
-            if service_exists ploy-binance-price-collector.service && \
-              journalctl -u ploy-binance-price-collector.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
-              | grep -E "uq_binance_price_ticks_symbol_second|duplicate key value"; then
-              echo "binance price collector is still thrashing on duplicate writes" >&2
-              exit 1
+            if service_exists ploy-binance-price-collector.service; then
+              if journalctl -u ploy-binance-price-collector.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
+                | grep -E "uq_binance_price_ticks_symbol_second|duplicate key value"; then
+                echo "binance price collector is still thrashing on duplicate writes" >&2
+                exit 1
+              fi
             fi
-            if service_exists ploy-deribit-iv-collector.service && \
-              journalctl -u ploy-deribit-iv-collector.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
-              | grep -E "no partition of relation \"deribit_iv_ticks\""; then
-              echo "deribit iv collector still lacks active partitions" >&2
-              exit 1
+            if service_exists ploy-deribit-iv-collector.service; then
+              if journalctl -u ploy-deribit-iv-collector.service --since "\${DEPLOY_STARTED_AT}" --no-pager \
+                | grep -E "no partition of relation \"deribit_iv_ticks\""; then
+                echo "deribit iv collector still lacks active partitions" >&2
+                exit 1
+              fi
             fi
 
             # Check service status

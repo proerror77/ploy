@@ -47,6 +47,28 @@ def _on_signal(signum: int, _frame):
     print(f"[binance-lob] received signal={signum}, stopping...", flush=True)
 
 
+async def _reconnect_db(conn: psycopg.AsyncConnection) -> psycopg.AsyncConnection:
+    try:
+        await conn.rollback()
+    except Exception:
+        pass
+    try:
+        await conn.close()
+    except Exception:
+        pass
+
+    while RUNNING:
+        try:
+            new_conn = await psycopg.AsyncConnection.connect(DB_URL)
+            print("[binance-lob] Database connection re-established", flush=True)
+            return new_conn
+        except Exception as exc:
+            print(f"[binance-lob] Database reconnect failed: {exc}, retrying in 5s...", flush=True)
+            await asyncio.sleep(5)
+
+    return conn
+
+
 def _decimal(raw: str) -> Decimal:
     return Decimal(raw)
 
@@ -225,9 +247,9 @@ async def collect_lob():
                             inserted += 1
                         except Exception as db_err:
                             print(f"[binance-lob] Database error: {db_err}", flush=True)
-                            await conn.rollback()
                             pending = 0
                             last_commit_at = time.monotonic()
+                            conn = await _reconnect_db(conn)
                             continue
 
                         now = time.monotonic()

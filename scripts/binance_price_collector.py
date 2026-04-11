@@ -33,6 +33,28 @@ def _on_signal(signum: int, _frame):
     print(f"[binance-price] received signal={signum}, stopping...", flush=True)
 
 
+async def _reconnect_db(conn: psycopg.AsyncConnection) -> psycopg.AsyncConnection:
+    try:
+        await conn.rollback()
+    except Exception:
+        pass
+    try:
+        await conn.close()
+    except Exception:
+        pass
+
+    while RUNNING:
+        try:
+            new_conn = await psycopg.AsyncConnection.connect(DB_URL)
+            print("[binance-price] Database connection re-established", flush=True)
+            return new_conn
+        except Exception as exc:
+            print(f"[binance-price] Database reconnect failed: {exc}, retrying in 5s...", flush=True)
+            await asyncio.sleep(5)
+
+    return conn
+
+
 async def collect_prices():
     """Main collector loop."""
     # Build WebSocket subscription payload
@@ -128,9 +150,9 @@ async def collect_prices():
 
                             except Exception as db_err:
                                 print(f"[binance-price] Database error: {db_err}", flush=True)
-                                await conn.rollback()
                                 pending = 0
                                 last_commit_at = time.monotonic()
+                                conn = await _reconnect_db(conn)
 
                         except (json.JSONDecodeError, KeyError, ValueError) as e:
                             print(f"[binance-price] Error parsing message: {e}", flush=True)

@@ -19,12 +19,23 @@ BEGIN
         range_start := format('%s 00:00:00+08', partition_day);
         range_end := format('%s 00:00:00+08', partition_day + 1);
 
-        EXECUTE format(
-            'CREATE TABLE IF NOT EXISTS %I PARTITION OF deribit_iv_ticks FOR VALUES FROM (%L) TO (%L);',
-            partition_name,
-            range_start,
-            range_end
-        );
+        BEGIN
+            EXECUTE format(
+                'CREATE TABLE IF NOT EXISTS %I PARTITION OF deribit_iv_ticks FOR VALUES FROM (%L) TO (%L);',
+                partition_name,
+                range_start,
+                range_end
+            );
+        EXCEPTION
+            WHEN duplicate_table THEN
+                NULL;
+            WHEN OTHERS THEN
+                IF position('would overlap partition' in SQLERRM) > 0 THEN
+                    NULL;
+                ELSE
+                    RAISE;
+                END IF;
+        END;
 
         partition_day := partition_day + 1;
     END LOOP;
