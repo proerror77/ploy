@@ -125,7 +125,6 @@ jobs:
             -p ploy-daemon-host \
             -p new-ployd \
             -p new-ploy-runner \
-            -p ployd \
             -p ployctl \
             -p ploy-control-client \
             -p ploytui \
@@ -136,7 +135,6 @@ jobs:
             -p ploy-platform \
             -p ploy-platform-runtime \
             -p ploy-research \
-            -p ploy-runner \
             -p ploy-runner-host \
             -p ploy-strategy-runtime \
             -p ploy-strategy-bundles \
@@ -152,7 +150,6 @@ jobs:
             -p ploy-daemon-host \
             -p new-ployd \
             -p new-ploy-runner \
-            -p ployd \
             -p ployctl \
             -p ploy-control-client \
             -p ploytui \
@@ -163,7 +160,6 @@ jobs:
             -p ploy-platform \
             -p ploy-platform-runtime \
             -p ploy-research \
-            -p ploy-runner \
             -p ploy-runner-host \
             -p ploy-strategy-runtime \
             -p ploy-strategy-bundles \

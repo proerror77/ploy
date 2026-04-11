@@ -133,9 +133,7 @@ A running PostgreSQL instance is required for integration tests. Set `DATABASE_U
 ```
 apps/
   new-ployd/         -- Next-generation daemon entrypoint
-  ployd/             -- Compatibility daemon wrapper
   new-ploy-runner/   -- Next-generation runner entrypoint
-  ploy-runner/       -- Compatibility runner wrapper
   ployctl/           -- Operator CLI
   ploytui/           -- Operator TUI
 crates/

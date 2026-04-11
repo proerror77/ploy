@@ -152,6 +152,13 @@ pub fn render_event_line(event: &OperatorEvent) -> String {
         OperatorEvent::AlertSnapshot(event) => {
             format!("alert_snapshot count={}", event.alerts.len())
         }
+        OperatorEvent::OversightSnapshot(event) => format!(
+            "oversight_snapshot status={} signals={}",
+            event.oversight.platform_status, event.oversight.signal_count
+        ),
+        OperatorEvent::ProposalSnapshot(event) => {
+            format!("proposal_snapshot count={}", event.proposals.len())
+        }
         OperatorEvent::Status(event) => format!("status {}", event.status),
         OperatorEvent::Log(event) => format!("log {} {}", event.level, event.message),
         OperatorEvent::Trade(event) => format!(

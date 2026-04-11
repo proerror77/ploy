@@ -6,7 +6,6 @@ A high-performance Polymarket trading bot focused on crypto and sports predictio
 
 The workspace now also includes the platform-refactor spine:
 
-- `ployd`: daemon entrypoint
 - `new-ployd`: next-generation daemon entrypoint
 - `ployctl`: operator client entrypoint
 - `ploytui`: thin terminal operator console
@@ -76,8 +75,7 @@ Remote live-host acceptance path:
 
 Compatibility note:
 
-- `new-ployd`, `new-ploy-runner`, `ployctl`, and `ploytui` are the default workspace entrypoints for the trading platform spine.
-- `ployd` and `ploy-runner` remain compatibility wrappers over the shared host crates.
+- `new-ployd`, `new-ploy-runner`, `ployctl`, and `ploytui` are the workspace entrypoints for the trading platform spine.
 - The old root runtime tree has been retired from the compiled workspace.
 - Remaining `ploy ...` examples below are historical reference only and are not runnable entrypoints in this branch.
 - Current sports scope in this branch is `discovery + live-state data capture + replay/backtest support`.
@@ -214,7 +212,7 @@ See the inline comments in `config/default.toml` for a full explanation of every
 
 ### Strategy Runtime Backtests
 
-`ploy-runner --config config/strategies/*.toml` uses the unified strategy-runtime config in
+`new-ploy-runner --config config/strategies/*.toml` uses the unified strategy-runtime config in
 `crates/ploy-strategy-bundles`.
 
 - `[reference_data]`
@@ -464,9 +462,7 @@ Strategies run independently and can be managed as daemons (start/stop/status). 
 ```
 apps/
   new-ployd/     Next-generation daemon entrypoint
-  ployd/         Compatibility daemon wrapper
   new-ploy-runner/ Next-generation runner entrypoint
-  ploy-runner/   Compatibility runner wrapper
   ployctl/       Operator client entrypoint
   ploytui/       Thin terminal operator console
 crates/

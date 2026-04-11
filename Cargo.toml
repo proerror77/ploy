@@ -4,8 +4,6 @@ members = [
     "apps/new-ployd",
     "apps/new-ploy-runner",
     "apps/ployctl",
-    "apps/ployd",
-    "apps/ploy-runner",
     "apps/ploytui",
     "crates/ploy-control-client",
     "crates/ploy-connectivity",
@@ -25,8 +23,8 @@ members = [
 default-members = [
     ".",
     "apps/new-ployd",
+    "apps/new-ploy-runner",
     "apps/ployctl",
-    "apps/ployd",
     "apps/ploytui",
     "crates/ploy-control-client",
     "crates/ploy-deployments",
