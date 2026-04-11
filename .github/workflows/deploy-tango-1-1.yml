@@ -32,6 +32,7 @@ env:
     032_strategy_runtime_track_record_official_settlement.sql
     033_fix_settlement_view_join_and_confirmed_flag.sql
     034_clob_quote_ticks_full_resolution.sql
+    035_binance_agg_trade_ticks.sql
 
 jobs:
   build-and-deploy:
@@ -71,6 +72,7 @@ jobs:
           cp target/${PLATFORM_TARGET}/release/new-ploy-runner dist/bin/ploy-runner
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
           cp config/strategies/02-pm5d.live.toml dist/config/strategies/02-pm5d.live.toml
+          cp scripts/binance_aggtrade_collector.py dist/scripts/binance_aggtrade_collector.py
           cp scripts/binance_price_collector.py dist/scripts/binance_price_collector.py
           cp scripts/binance_lob_collector.py dist/scripts/binance_lob_collector.py
           cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
@@ -80,6 +82,7 @@ jobs:
             [ -n "${migration}" ] || continue
             cp "migrations/${migration}" "dist/migrations/${migration}"
           done
+          cp deployment/systemd/ploy-binance-aggtrade-collector.service dist/deployment/systemd/ploy-binance-aggtrade-collector.service
           cp deployment/systemd/ploy-binance-lob-collector.service dist/deployment/systemd/ploy-binance-lob-collector.service
           cp deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf dist/deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf
           cp deployment/systemd/ploy-quote-collector.hardening.conf dist/deployment/systemd/ploy-quote-collector.hardening.conf
@@ -250,6 +253,7 @@ jobs:
             install -m 0755 ./bin/ploy-runner /root/ploy/bin/ploy-runner
             install -m 0644 ./config/strategies/02-pm5d.unified.toml /root/ploy/config/strategies/02-pm5d.unified.toml
             install -m 0644 ./config/strategies/02-pm5d.live.toml /root/ploy/config/strategies/02-pm5d.live.toml
+            install -m 0755 ./scripts/binance_aggtrade_collector.py /root/ploy/scripts/binance_aggtrade_collector.py
             install -m 0755 ./scripts/binance_price_collector.py /root/ploy/scripts/binance_price_collector.py
             install -m 0755 ./scripts/binance_lob_collector.py /root/ploy/scripts/binance_lob_collector.py
             install -m 0644 ./scripts/fix_binance_lob_partitions.sql /root/ploy/scripts/fix_binance_lob_partitions.sql
@@ -262,6 +266,7 @@ jobs:
 
             install -d /etc/systemd/system/ploy-strategy-directional-dryrun.service.d
             install -d /etc/systemd/system/ploy-quote-collector.service.d
+            install -m 0644 ./deployment/systemd/ploy-binance-aggtrade-collector.service /etc/systemd/system/ploy-binance-aggtrade-collector.service
             install -m 0644 ./deployment/systemd/ploy-binance-lob-collector.service /etc/systemd/system/ploy-binance-lob-collector.service
             install -m 0644 ./deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf /etc/systemd/system/ploy-strategy-directional-dryrun.service.d/hardening.conf
             install -m 0644 ./deployment/systemd/ploy-quote-collector.hardening.conf /etc/systemd/system/ploy-quote-collector.service.d/hardening.conf
@@ -282,6 +287,7 @@ jobs:
 
             require_postgres
 
+            systemctl enable --now ploy-binance-aggtrade-collector.service
             systemctl enable --now ploy-binance-lob-collector.service
             if service_exists ploy-binance-price-collector.service; then
               systemctl restart ploy-binance-price-collector.service
@@ -297,6 +303,7 @@ jobs:
 
             sleep 5
             require_postgres
+            systemctl is-active --quiet ploy-binance-aggtrade-collector.service
             systemctl is-active --quiet ploy-binance-lob-collector.service
             systemctl is-active --quiet ploy-strategy-directional-dryrun.service
             systemctl is-active --quiet ploy-quote-collector.service
@@ -314,6 +321,11 @@ jobs:
               require_service_guardrails ploy-strategy-directional-live.service
             fi
 
+            if [ "$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
+              "SELECT EXISTS (SELECT 1 FROM binance_agg_trade_ticks WHERE trade_time >= NOW() - INTERVAL '10 minutes')")" != "t" ]; then
+              echo "binance_agg_trade_ticks is not fresh after deploy" >&2
+              exit 1
+            fi
             assert_recent_rows \
               "SELECT EXISTS (SELECT 1 FROM binance_lob_ticks WHERE event_time >= NOW() - INTERVAL '10 minutes')" \
               "binance_lob_ticks is not fresh after deploy"
@@ -346,6 +358,7 @@ jobs:
             fi
 
             # Check service status
+            systemctl status ploy-binance-aggtrade-collector.service --no-pager
             if service_exists ploy-binance-price-collector.service; then
               systemctl status ploy-binance-price-collector.service --no-pager
             fi
@@ -360,6 +373,7 @@ jobs:
             fi
 
             # Show recent logs
+            journalctl -u ploy-binance-aggtrade-collector.service -n 20 --no-pager
             if service_exists ploy-binance-price-collector.service; then
               journalctl -u ploy-binance-price-collector.service -n 20 --no-pager
             fi
@@ -381,7 +395,7 @@ jobs:
           echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Transport: \`GitHub Actions -> OSS -> ECS\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- OSS object: \`${{ steps.upload_bundle_to_oss.outputs.bundle_object }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Services: \`ploy-binance-price-collector\`, \`ploy-binance-lob-collector\`, \`ploy-deribit-iv-collector\`, \`ploy-strategy-directional-dryrun\`, \`ploy-quote-collector\`, \`ploy-strategy-directional-live\` (if installed)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Services: \`ploy-binance-aggtrade-collector\`, \`ploy-binance-price-collector\`, \`ploy-binance-lob-collector\`, \`ploy-deribit-iv-collector\`, \`ploy-strategy-directional-dryrun\`, \`ploy-quote-collector\`, \`ploy-strategy-directional-live\` (if installed)" >> "$GITHUB_STEP_SUMMARY"
           echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Migrations: \`${DEPLOY_MIGRATIONS}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Postgres pre/postflight: required" >> "$GITHUB_STEP_SUMMARY"

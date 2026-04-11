@@ -75,6 +75,7 @@ jobs:
 
             require_postgres
 
+            systemctl is-active --quiet ploy-binance-aggtrade-collector.service
             systemctl is-active --quiet ploy-binance-price-collector.service
             systemctl is-active --quiet ploy-binance-lob-collector.service
             systemctl is-active --quiet ploy-deribit-iv-collector.service
@@ -93,6 +94,11 @@ jobs:
             if [ "$(PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
               "SELECT EXISTS (SELECT 1 FROM binance_lob_ticks WHERE event_time >= NOW() - INTERVAL '15 minutes')")" != "t" ]; then
               echo "binance_lob_ticks has not advanced within the last 15 minutes" >&2
+              exit 1
+            fi
+            if [ "$(PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
+              "SELECT EXISTS (SELECT 1 FROM binance_agg_trade_ticks WHERE trade_time >= NOW() - INTERVAL '10 minutes')")" != "t" ]; then
+              echo "binance_agg_trade_ticks has not advanced within the last 10 minutes" >&2
               exit 1
             fi
             if [ "$(PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
@@ -120,6 +126,10 @@ jobs:
               PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
                 "SELECT coalesce(max(recorded_at)::text, 'none') FROM signal_history"
             )
+            latest_aggtrade=$(
+              PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
+                "SELECT coalesce(max(trade_time)::text, 'none') FROM binance_agg_trade_ticks"
+            )
             latest_price=$(
               PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
                 "SELECT coalesce(max(trade_time)::text, 'none') FROM binance_price_ticks"
@@ -134,11 +144,13 @@ jobs:
             )
 
             echo "postgres=$(systemctl show -P ActiveState postgresql@16-main)"
+            echo "aggtrade=$(systemctl show -P ActiveState ploy-binance-aggtrade-collector.service)"
             echo "price=$(systemctl show -P ActiveState ploy-binance-price-collector.service)"
             echo "lob=$(systemctl show -P ActiveState ploy-binance-lob-collector.service)"
             echo "deribit=$(systemctl show -P ActiveState ploy-deribit-iv-collector.service)"
             echo "dryrun=$(systemctl show -P ActiveState ploy-strategy-directional-dryrun.service)"
             echo "collector=$(systemctl show -P ActiveState ploy-quote-collector.service)"
+            echo "latest_aggtrade=${latest_aggtrade}"
             echo "latest_price=${latest_price}"
             echo "latest_lob=${latest_lob}"
             echo "latest_deribit=${latest_deribit}"
@@ -149,8 +161,9 @@ jobs:
         run: |
           echo "## tango-1-1 healthcheck" >> "$GITHUB_STEP_SUMMARY"
           echo "- PostgreSQL must be active and queryable" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ploy-binance-price-collector, ploy-binance-lob-collector, ploy-deribit-iv-collector, ploy-strategy-directional-dryrun, and ploy-quote-collector must be active" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ploy-binance-aggtrade-collector, ploy-binance-price-collector, ploy-binance-lob-collector, ploy-deribit-iv-collector, ploy-strategy-directional-dryrun, and ploy-quote-collector must be active" >> "$GITHUB_STEP_SUMMARY"
           echo "- systemd guardrails must remain configured on all checked services" >> "$GITHUB_STEP_SUMMARY"
+          echo "- binance_agg_trade_ticks must advance within the last 10 minutes" >> "$GITHUB_STEP_SUMMARY"
           echo "- binance_price_ticks must advance within the last 10 minutes" >> "$GITHUB_STEP_SUMMARY"
           echo "- binance_lob_ticks must advance within the last 15 minutes" >> "$GITHUB_STEP_SUMMARY"
           echo "- deribit_iv_ticks must advance within the last 15 minutes" >> "$GITHUB_STEP_SUMMARY"
