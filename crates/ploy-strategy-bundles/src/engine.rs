@@ -210,10 +210,14 @@ where
                         price = %fill.price,
                         "Fill recorded",
                     );
-                } else if !report.rejected {
-                    // Live mode: executor acknowledged but no immediate fill.
+                } else if !report.rejected && intent.purpose == IntentPurpose::Entry {
+                    // Live mode: executor acknowledged an entry but no immediate fill.
                     // Arm cooldown/daily counter with a synthetic fill so the
                     // strategy doesn't re-signal for the same symbol immediately.
+                    //
+                    // Do not synthesize fills for exits: a live exit acknowledge
+                    // without a real fill must not make the strategy believe the
+                    // position is closed.
                     let synthetic = FillRecord {
                         fill_id: format!("synthetic_{order_id}"),
                         order_id: order_id.clone(),
@@ -326,6 +330,7 @@ where
     fn update_ts(update: &MarketUpdate) -> Option<DateTime<Utc>> {
         match update {
             MarketUpdate::SpotPrice { ts, .. }
+            | MarketUpdate::AggTrade { ts, .. }
             | MarketUpdate::Quote { ts, .. }
             | MarketUpdate::L2 { ts, .. }
             | MarketUpdate::SportsState { ts, .. }
@@ -393,6 +398,8 @@ mod tests {
         intent: TradingIntent,
     }
 
+    struct NoopStrategy;
+
     impl StrategyLogic for RecordingStrategy {
         fn on_update(
             &mut self,
@@ -414,6 +421,52 @@ mod tests {
 
         fn name(&self) -> &str {
             "recording_strategy"
+        }
+    }
+
+    impl StrategyLogic for NoopStrategy {
+        fn on_update(
+            &mut self,
+            _update: &MarketUpdate,
+            _positions: &PositionLedger,
+            _orders: &OrderLedger,
+        ) -> Vec<StrategyDecision> {
+            vec![]
+        }
+
+        fn on_fill(&mut self, _fill: &FillRecord) {}
+
+        fn name(&self) -> &str {
+            "noop_strategy"
+        }
+    }
+
+    struct FillCountingStrategy {
+        emitted: bool,
+        intent: TradingIntent,
+        fill_count: Arc<Mutex<u32>>,
+    }
+
+    impl StrategyLogic for FillCountingStrategy {
+        fn on_update(
+            &mut self,
+            _update: &MarketUpdate,
+            _positions: &PositionLedger,
+            _orders: &OrderLedger,
+        ) -> Vec<StrategyDecision> {
+            if self.emitted {
+                return vec![];
+            }
+            self.emitted = true;
+            vec![StrategyDecision::Exit(self.intent.clone())]
+        }
+
+        fn on_fill(&mut self, _fill: &FillRecord) {
+            *self.fill_count.lock().unwrap() += 1;
+        }
+
+        fn name(&self) -> &str {
+            "fill_counting_strategy"
         }
     }
 
@@ -706,5 +759,85 @@ mod tests {
             snapshot.orders[0].venue_order_id.as_deref(),
             Some("venue-order-1")
         );
+    }
+
+    #[tokio::test]
+    async fn live_exit_ack_without_fill_does_not_trigger_synthetic_fill() {
+        let now = Utc::now();
+        let fill_count = Arc::new(Mutex::new(0));
+        let intent = TradingIntent {
+            intent_id: "pm5d_BTCUSDT_UP_exit_ack".into(),
+            deployment_id: String::new(),
+            market_id: "evt1".into(),
+            token_id: "token-up".into(),
+            side: TradeSide::Sell,
+            quantity: dec!(10),
+            limit_price: Some(dec!(0.42)),
+            purpose: IntentPurpose::Exit,
+            created_at: now,
+        };
+        let strategy = FillCountingStrategy {
+            emitted: false,
+            intent,
+            fill_count: fill_count.clone(),
+        };
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let recorder = Box::new(CollectingRecorder {
+            signals: Arc::new(Mutex::new(Vec::new())),
+            orders: Arc::new(Mutex::new(Vec::new())),
+            fills: Arc::new(Mutex::new(Vec::new())),
+        });
+        let executor = AcknowledgingExecutor;
+        let config = RuntimeConfig {
+            mode: RuntimeMode::Live,
+            throttle_hz: None,
+            max_updates: None,
+            skip_settlement_exits: true,
+        };
+
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
+        let _ = runtime.run().await;
+
+        assert_eq!(*fill_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn agg_trade_updates_are_accepted_by_runtime() {
+        let now = Utc::now();
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::AggTrade {
+                symbol: "BTCUSDT".into(),
+                agg_trade_id: 42,
+                price: dec!(100000),
+                quantity: dec!(0.25),
+                is_buyer_maker: false,
+                ts: now,
+            }),
+        };
+        let recorder = Box::new(CollectingRecorder {
+            signals: Arc::new(Mutex::new(Vec::new())),
+            orders: Arc::new(Mutex::new(Vec::new())),
+            fills: Arc::new(Mutex::new(Vec::new())),
+        });
+        let executor = RejectingExecutor;
+        let config = RuntimeConfig {
+            mode: RuntimeMode::DryRun,
+            throttle_hz: None,
+            max_updates: None,
+            skip_settlement_exits: true,
+        };
+
+        let mut runtime = StrategyRuntime::new(NoopStrategy, feed, executor, recorder, config);
+        let result = runtime.run().await;
+
+        assert_eq!(result.updates_processed, 1);
+        assert_eq!(result.intents_submitted, 0);
+        assert_eq!(result.fills_recorded, 0);
     }
 }

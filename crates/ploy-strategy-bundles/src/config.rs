@@ -49,7 +49,16 @@ pub struct RuntimeSection {
     pub mode: String,
     pub throttle_hz: Option<u32>,
     pub max_updates: Option<u64>,
-    /// Strategy variant: `"directional"` (default) or `"directional_bayes"`.
+    /// Strategy variant.
+    ///
+    /// Canonical runtime values are:
+    /// - `"directional"` — current PM5D directional engine
+    /// - `"directional_bayes"` — experimental Bayesian directional engine
+    /// - `"mean_reversion"` — V4 prototype mean-reversion engine
+    ///
+    /// Roadmap aliases normalize onto those canonical variants:
+    /// - `"v1"`, `"v2"`, `"v3"` => `"directional"`
+    /// - `"v4"` => `"mean_reversion"`
     #[serde(default = "default_strategy_variant")]
     pub strategy_variant: String,
     /// Backtest start time (ISO 8601 format, e.g., "2026-04-01T00:00:00Z")
@@ -112,6 +121,24 @@ fn default_mode() -> String {
 
 fn default_strategy_variant() -> String {
     "directional".into()
+}
+
+impl RuntimeSection {
+    #[must_use]
+    pub fn canonical_strategy_variant(&self) -> String {
+        match self.strategy_variant.trim().to_ascii_lowercase().as_str() {
+            "" | "directional" | "v1" | "v2" | "v3" | "pm5d_v1" | "pm5d_v2" | "pm5d_v3" => {
+                "directional".to_string()
+            }
+            "directional_bayes" | "directional-bayes" | "pm5d_bayes" => {
+                "directional_bayes".to_string()
+            }
+            "mean_reversion" | "mean-reversion" | "pm5d_v4" | "v4" => {
+                "mean_reversion".to_string()
+            }
+            other => other.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -415,5 +442,58 @@ quantity = 25.0
 "#;
         let config = FullConfig::from_toml(legacy).unwrap();
         assert_eq!(config.strategy.stake_usd, Decimal::new(25, 0));
+    }
+
+    #[test]
+    fn canonical_strategy_variant_normalizes_roadmap_aliases() {
+        for (raw, expected) in [
+            ("directional", "directional"),
+            ("v1", "directional"),
+            ("v2", "directional"),
+            ("v3", "directional"),
+            ("directional_bayes", "directional_bayes"),
+            ("v4", "mean_reversion"),
+            ("pm5d_v4", "mean_reversion"),
+        ] {
+            let config = FullConfig::from_toml(&format!(
+                r#"
+[runtime]
+mode = "dryrun"
+strategy_variant = "{raw}"
+
+[strategy]
+"#
+            ))
+            .unwrap();
+            assert_eq!(config.runtime.canonical_strategy_variant(), expected);
+        }
+    }
+
+    #[test]
+    fn roadmap_config_family_parses() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let config_dir = manifest_dir.join("../../config/strategies");
+
+        for file in [
+            "02-pm5d.v1-dryrun.toml",
+            "02-pm5d.v1-live.toml",
+            "02-pm5d.v2-dryrun.toml",
+            "02-pm5d.v2-live.toml",
+            "02-pm5d.v3-dryrun.toml",
+            "02-pm5d.v3-live.toml",
+            "02-pm5d.v4-dryrun.toml",
+            "02-pm5d.v4-live.toml",
+        ] {
+            let path = config_dir.join(file);
+            let config = FullConfig::from_file(path.to_str().unwrap()).unwrap();
+            assert!(
+                !config.strategy.symbols.is_empty(),
+                "{file} should define at least one symbol"
+            );
+            assert!(
+                !config.runtime.canonical_strategy_variant().is_empty(),
+                "{file} should resolve to a runtime variant"
+            );
+        }
     }
 }

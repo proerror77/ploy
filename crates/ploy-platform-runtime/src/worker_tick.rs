@@ -1,12 +1,77 @@
 use chrono::Duration;
-use ploy_deployments::WorkerSupervisor;
+use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{DesiredState, ObservedState};
-use ploy_platform::ControlPlane;
+use ploy_platform::{ControlPlane, DeploymentRecord};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct WorkerTickConfig {
     pub listen_addr: String,
     pub worker_heartbeat_stale_after_ms: u64,
+    pub runner_binary: PathBuf,
+    pub strategy_config_root: PathBuf,
+    pub working_directory: PathBuf,
+}
+
+pub fn build_worker_launch_spec(
+    record: &DeploymentRecord,
+    config: &WorkerTickConfig,
+) -> WorkerLaunchSpec {
+    let command = resolve_command_path(&config.runner_binary, &config.working_directory);
+    let config_path = resolve_bundle_config_path(
+        &record.bundle_id,
+        &config.strategy_config_root,
+        &config.working_directory,
+    );
+
+    let mut args = vec![
+        "run".to_string(),
+        "--config".to_string(),
+        config_path.to_string_lossy().into_owned(),
+        "--foreground".to_string(),
+    ];
+    if record.runtime_mode == "paper" {
+        args.push("--dry-run".to_string());
+    }
+
+    WorkerLaunchSpec {
+        deployment_id: record.deployment_id.clone(),
+        bundle_id: record.bundle_id.clone(),
+        runtime_mode: record.runtime_mode.clone(),
+        desired_state: record.desired_state,
+        command,
+        args,
+        working_directory: config.working_directory.clone(),
+        pid_file: config
+            .working_directory
+            .join("run/platform/workers")
+            .join(format!("{}.pid", record.deployment_id)),
+    }
+}
+
+fn resolve_command_path(command: &Path, working_directory: &Path) -> PathBuf {
+    if command.is_absolute() {
+        command.to_path_buf()
+    } else {
+        working_directory.join(command)
+    }
+}
+
+fn resolve_bundle_config_path(
+    bundle_id: &str,
+    strategy_config_root: &Path,
+    working_directory: &Path,
+) -> PathBuf {
+    let raw = PathBuf::from(bundle_id);
+    if raw.is_absolute() {
+        return raw;
+    }
+
+    if bundle_id.contains('/') || bundle_id.ends_with(".toml") {
+        return working_directory.join(raw);
+    }
+
+    strategy_config_root.join(format!("{bundle_id}.toml"))
 }
 
 pub fn tick_workers(
@@ -19,13 +84,15 @@ pub fn tick_workers(
     for record in records {
         match record.desired_state {
             DesiredState::Running => {
-                if supervisor.status(&record.deployment_id).is_none() {
-                    supervisor.start(ploy_deployments::WorkerLaunchSpec {
-                        deployment_id: record.deployment_id.clone(),
-                        bundle_id: record.bundle_id.clone(),
-                        runtime_mode: record.runtime_mode.clone(),
-                        desired_state: record.desired_state,
-                    });
+                let status = supervisor.status(&record.deployment_id).map(|status| status.observed_state);
+                match status {
+                    None => {
+                        supervisor.start(build_worker_launch_spec(&record, config));
+                    }
+                    Some(ObservedState::Paused | ObservedState::Stopped | ObservedState::Failed) => {
+                        supervisor.restart(&record.deployment_id);
+                    }
+                    Some(ObservedState::Starting | ObservedState::Running | ObservedState::Degraded) => {}
                 }
                 if let Some(status) = supervisor.heartbeat(&record.deployment_id) {
                     control_plane
@@ -119,11 +186,15 @@ mod tests {
     use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
     use ploy_platform::{ControlPlane, DeploymentRecord};
     use rust_decimal_macros::dec;
+    use std::path::PathBuf;
 
     fn config() -> WorkerTickConfig {
         WorkerTickConfig {
             listen_addr: "127.0.0.1:8081".to_string(),
             worker_heartbeat_stale_after_ms: 15_000,
+            runner_binary: PathBuf::from("/bin/sh"),
+            strategy_config_root: PathBuf::from("config/strategies"),
+            working_directory: std::env::current_dir().expect("cwd"),
         }
     }
 
@@ -169,5 +240,83 @@ mod tests {
 
         refresh_source_health(&mut control_plane, "127.0.0.1:8081");
         assert!(control_plane.system.is_degraded());
+    }
+
+    #[test]
+    fn build_launch_spec_resolves_strategy_config_path_and_dry_run_flag() {
+        let spec = super::build_worker_launch_spec(
+            &DeploymentRecord {
+                deployment_id: "pm5d.v2.paper".to_string(),
+                bundle_id: "02-pm5d.v2-dryrun".to_string(),
+                runtime_mode: "paper".to_string(),
+                account_id: "acct-paper".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+                observed_state: ObservedState::Starting,
+            },
+            &config(),
+        );
+
+        assert_eq!(spec.command, PathBuf::from("/bin/sh"));
+        assert!(
+            spec.args
+                .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string())
+        );
+        assert!(spec.args.contains(&"--dry-run".to_string()));
+    }
+
+    #[test]
+    fn repeated_ticks_do_not_respawn_running_worker() {
+        let mut control_plane = ControlPlane::default();
+        let mut supervisor = WorkerSupervisor::default();
+        control_plane.deployments.upsert(DeploymentRecord {
+            deployment_id: "example.paper".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: "paper".to_string(),
+            account_id: "acct-paper".to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Running,
+            observed_state: ObservedState::Starting,
+        });
+
+        tick_workers(&mut control_plane, &mut supervisor, &config());
+        let first_pid = supervisor
+            .status("example.paper")
+            .and_then(|status| status.pid)
+            .expect("first pid");
+
+        tick_workers(&mut control_plane, &mut supervisor, &config());
+        let second_pid = supervisor
+            .status("example.paper")
+            .and_then(|status| status.pid)
+            .expect("second pid");
+
+        assert_eq!(first_pid, second_pid);
+    }
+
+    #[test]
+    fn running_desired_state_restarts_paused_worker() {
+        let mut control_plane = ControlPlane::default();
+        let mut supervisor = WorkerSupervisor::default();
+        control_plane.deployments.upsert(DeploymentRecord {
+            deployment_id: "example.paper".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: "paper".to_string(),
+            account_id: "acct-paper".to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Running,
+            observed_state: ObservedState::Starting,
+        });
+
+        tick_workers(&mut control_plane, &mut supervisor, &config());
+        supervisor.pause("example.paper");
+
+        tick_workers(&mut control_plane, &mut supervisor, &config());
+        let status = supervisor.status("example.paper").expect("status");
+        assert!(matches!(status.observed_state, ObservedState::Starting | ObservedState::Running));
+        assert!(status.pid.is_some());
     }
 }

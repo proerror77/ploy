@@ -41,6 +41,103 @@ curl -N http://127.0.0.1:8081/api/events/stream
 rtk cargo test --test platform_smoke -- --nocapture
 ```
 
+## Deployment Workflow
+
+The default operating model is now:
+
+1. `ployd` is the only long-running platform daemon
+2. strategy configs live in `config/strategies/*.toml`
+3. deployment manifests live in `config/deployments/*.json`
+4. operators use `ployctl deployments apply|inspect|pause|resume|stop`
+5. `ployd` starts and supervises `ploy-runner --config ...` workers for each deployment
+
+Do not create new per-strategy systemd units for normal operation.
+Use deployment manifests instead.
+
+### Bundle Resolution
+
+Deployment manifests use `bundle_id` to select a strategy config:
+
+- if `bundle_id` ends with `.toml` or contains a path separator, it is treated as a config path
+- otherwise it resolves to `config/strategies/<bundle_id>.toml`
+
+Example:
+
+```json
+{
+  "deployment_id": "pm5d.v3.dryrun",
+  "bundle_id": "02-pm5d.v3-dryrun",
+  "account_id": "acct-pm5d-dryrun",
+  "max_gross_exposure": "5.00",
+  "runtime_mode": "paper",
+  "desired_state": "running"
+}
+```
+
+This resolves to:
+
+```text
+config/strategies/02-pm5d.v3-dryrun.toml
+```
+
+### PM5D Dry-Run Deployments
+
+The repo now includes three PM5D deployment manifests:
+
+- `config/deployments/pm5d.v2.dryrun.json`
+- `config/deployments/pm5d.v3.dryrun.json`
+- `config/deployments/pm5d.v4.dryrun.json`
+
+Each one targets:
+
+- `02-pm5d.v2-dryrun.toml`
+- `02-pm5d.v3-dryrun.toml`
+- `02-pm5d.v4-dryrun.toml`
+
+Apply them with:
+
+```bash
+cargo run -p ployctl -- deployments apply config/deployments/pm5d.v2.dryrun.json
+cargo run -p ployctl -- deployments apply config/deployments/pm5d.v3.dryrun.json
+cargo run -p ployctl -- deployments apply config/deployments/pm5d.v4.dryrun.json
+```
+
+Inspect and control them with:
+
+```bash
+cargo run -p ployctl -- deployments list
+cargo run -p ployctl -- deployments inspect pm5d.v3.dryrun
+cargo run -p ployctl -- deployments pause pm5d.v3.dryrun
+cargo run -p ployctl -- deployments resume pm5d.v3.dryrun
+cargo run -p ployctl -- deployments stop pm5d.v3.dryrun
+```
+
+Remote host equivalent:
+
+```bash
+/opt/ploy/bin/ployctl deployments list
+/opt/ploy/bin/ployctl deployments inspect pm5d.v3.dryrun
+/opt/ploy/bin/ployctl deployments pause pm5d.v3.dryrun
+/opt/ploy/bin/ployctl deployments resume pm5d.v3.dryrun
+/opt/ploy/bin/ployctl deployments stop pm5d.v3.dryrun
+```
+
+### Direct Runner Usage
+
+Use `new-ploy-runner -- run --config ...` for:
+
+- local backtests
+- local dry-run debugging
+- one-off manual strategy inspection
+
+Example:
+
+```bash
+cargo run -p new-ploy-runner -- run --config config/strategies/02-pm5d.v4-dryrun.toml --dry-run
+```
+
+Use deployment manifests when you want the platform daemon to own lifecycle and supervision.
+
 Optional admin auth:
 
 - Set `PLOY_ADMIN_TOKEN` or `PLOY_API_ADMIN_TOKEN` before booting `ployd` to require a bearer token on the control-plane API.

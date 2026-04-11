@@ -514,11 +514,19 @@ impl PloyDaemon {
 
     fn load_registry(&mut self) -> io::Result<()> {
         let records = load_registry_records(&self.config.registry_file)?;
+        let worker_tick_config = WorkerTickConfig {
+            listen_addr: self.config.listen_addr.clone(),
+            worker_heartbeat_stale_after_ms: self.config.worker_heartbeat_stale_after_ms,
+            runner_binary: self.config.runner_binary.clone(),
+            strategy_config_root: self.config.strategy_config_root.clone(),
+            working_directory: deployment_working_directory(&self.config),
+        };
         apply_loaded_registry_state(
             records,
             &mut self.control_plane.deployments,
             &mut self.supervisor,
             &mut self.trading,
+            &worker_tick_config,
         );
 
         Ok(())
@@ -541,6 +549,9 @@ impl PloyDaemon {
         let tick_config = WorkerTickConfig {
             listen_addr: self.config.listen_addr.clone(),
             worker_heartbeat_stale_after_ms: self.config.worker_heartbeat_stale_after_ms,
+            runner_binary: self.config.runner_binary.clone(),
+            strategy_config_root: self.config.strategy_config_root.clone(),
+            working_directory: deployment_working_directory(&self.config),
         };
         tick_platform_workers(&mut self.control_plane, &mut self.supervisor, &tick_config);
     }
@@ -616,6 +627,20 @@ impl PloyDaemon {
     }
 }
 
+fn deployment_working_directory(config: &PlatformConfig) -> std::path::PathBuf {
+    if config.registry_file.is_absolute() {
+        let path = config.registry_file.as_path();
+        let parent = path.parent();
+        let grandparent = parent.and_then(|value| value.parent());
+        let root = grandparent.and_then(|value| value.parent());
+        if let Some(root) = root {
+            return root.to_path_buf();
+        }
+    }
+
+    std::env::current_dir().unwrap_or_else(|_| ".".into())
+}
+
 pub fn run_shared_forever(
     daemon: Arc<Mutex<PloyDaemon>>,
     events: Arc<EventBroker>,
@@ -657,7 +682,8 @@ mod tests {
     };
     use ploy_platform_runtime::live_reconcile_backoff_ms;
     use ploy_operator_contracts::{
-        DeploymentApplyRequest, DeploymentState, DesiredState, ObservedState,
+        DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState,
+        ObservedState,
     };
     use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
     use rust_decimal_macros::dec;
@@ -672,7 +698,23 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("duration")
             .as_nanos();
-        std::env::temp_dir().join(format!("ployd-{label}-{unique}"))
+        let root = std::env::temp_dir().join(format!("ployd-{label}-{unique}"));
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let runner = bin_dir.join("ploy-runner");
+        std::fs::write(
+            &runner,
+            "#!/bin/sh\nsleep 30\n",
+        )
+        .expect("write fake runner");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&runner).expect("runner metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&runner, perms).expect("set runner permissions");
+        }
+        root
     }
 
     #[derive(Debug, Default, Clone)]
@@ -1439,6 +1481,76 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
         assert!(error.to_string().contains("acct-paper"));
         assert!(error.to_string().contains("next_total=2.0"));
+    }
+
+    #[test]
+    fn daemon_pause_then_resume_restarts_paper_worker() {
+        let root = temp_dir("pause-resume-worker");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        daemon
+            .apply_deployment(DeploymentApplyRequest {
+                deployment_id: "example.paper".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: "paper".to_string(),
+                account_id: "acct-paper".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            })
+            .expect("apply deployment");
+
+        let initial_pid = daemon
+            .supervisor
+            .status("example.paper")
+            .and_then(|status| status.pid)
+            .expect("initial pid");
+
+        daemon
+            .control_deployment(
+                "example.paper",
+                DeploymentControlRequest {
+                    desired_state: Some(DesiredState::Paused),
+                    deployment_state: None,
+                },
+            )
+            .expect("pause deployment");
+        assert!(
+            daemon
+                .supervisor
+                .status("example.paper")
+                .and_then(|status| status.pid)
+                .is_none()
+        );
+
+        daemon
+            .control_deployment(
+                "example.paper",
+                DeploymentControlRequest {
+                    desired_state: Some(DesiredState::Running),
+                    deployment_state: None,
+                },
+            )
+            .expect("resume deployment");
+
+        let resumed = daemon.supervisor.status("example.paper").expect("resumed status");
+        assert!(matches!(
+            resumed.observed_state,
+            ObservedState::Starting | ObservedState::Running
+        ));
+        assert!(resumed.pid.is_some());
+        assert_ne!(resumed.pid, Some(initial_pid));
     }
 
     #[test]

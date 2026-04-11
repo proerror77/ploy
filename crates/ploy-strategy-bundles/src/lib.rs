@@ -21,6 +21,7 @@ pub use runtime::emit_intents;
 pub use signals::{MarketSignal, SignalConfig};
 pub use strategies::DirectionalStrategy;
 pub use strategies::BayesianDirectionalStrategy;
+pub use strategies::MeanReversionStrategy;
 pub use traits::{
     ExecutionReport, Executor, Feed, MarketUpdate, NullRecorder, Recorder, SignalRecord,
     StrategyDecision, StrategyLogic,

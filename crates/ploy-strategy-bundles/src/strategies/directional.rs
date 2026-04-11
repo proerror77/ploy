@@ -106,6 +106,24 @@ pub struct DirectionalConfig {
     #[serde(default = "default_min_edge")]
     pub min_edge: f64,
 
+    // Mean-reversion / V4 prototype parameters
+    #[serde(default = "default_min_deviation_pct")]
+    pub min_deviation_pct: f64,
+    #[serde(default = "default_min_reversal_consistency")]
+    pub min_reversal_consistency: f64,
+    #[serde(default = "default_take_profit_price_delta")]
+    pub take_profit_price_delta: f64,
+    #[serde(default = "default_stop_loss_price_delta")]
+    pub stop_loss_price_delta: f64,
+    #[serde(default = "default_max_hold_secs")]
+    pub max_hold_secs: u64,
+    #[serde(default = "default_reversal_bonus_cap")]
+    pub reversal_bonus_cap: f64,
+    #[serde(default = "default_use_multiscale_volatility")]
+    pub use_multiscale_volatility: bool,
+    #[serde(default = "default_use_price_structure_adjustment")]
+    pub use_price_structure_adjustment: bool,
+
     // Timing
     #[serde(default = "default_min_time")]
     pub min_time_remaining_secs: u64,
@@ -161,6 +179,30 @@ fn default_no_trade_max() -> f64 {
 }
 fn default_min_edge() -> f64 {
     0.02
+}
+fn default_min_deviation_pct() -> f64 {
+    0.005
+}
+fn default_min_reversal_consistency() -> f64 {
+    0.55
+}
+fn default_take_profit_price_delta() -> f64 {
+    0.10
+}
+fn default_stop_loss_price_delta() -> f64 {
+    0.05
+}
+fn default_max_hold_secs() -> u64 {
+    120
+}
+fn default_reversal_bonus_cap() -> f64 {
+    0.20
+}
+fn default_use_multiscale_volatility() -> bool {
+    true
+}
+fn default_use_price_structure_adjustment() -> bool {
+    true
 }
 fn default_min_time() -> u64 {
     60
@@ -477,18 +519,21 @@ impl DirectionalStrategy {
             .map(|state| state.ewma_var_per_sec)
             .unwrap_or(floor);
 
-        // Use the maximum of three estimators for a conservative sigma.
-        // - EWMA: smooth, adapts slowly, good for regime detection
-        // - Realized Var: direct measurement of recent tick-level volatility
-        // - Parkinson: range-based, 5x more efficient, captures intra-window extremes
-        let (rv, parkinson) = self
-            .return_buffers
-            .get(symbol)
-            .filter(|buf| buf.len() >= 5)
-            .map(|buf| (buf.realized_var_per_sec(), buf.parkinson_var_per_sec()))
-            .unwrap_or((0.0, 0.0));
-
-        let best_var = ewma.max(rv).max(parkinson).max(floor);
+        let best_var = if self.config.use_multiscale_volatility {
+            // Use the maximum of three estimators for a conservative sigma.
+            // - EWMA: smooth, adapts slowly, good for regime detection
+            // - Realized Var: direct measurement of recent tick-level volatility
+            // - Parkinson: range-based, 5x more efficient, captures intra-window extremes
+            let (rv, parkinson) = self
+                .return_buffers
+                .get(symbol)
+                .filter(|buf| buf.len() >= 5)
+                .map(|buf| (buf.realized_var_per_sec(), buf.parkinson_var_per_sec()))
+                .unwrap_or((0.0, 0.0));
+            ewma.max(rv).max(parkinson).max(floor)
+        } else {
+            ewma.max(floor)
+        };
         (best_var * secs).sqrt()
     }
 
@@ -777,67 +822,72 @@ impl DirectionalStrategy {
         // Gate 4: Price structure adjustment (Bayesian likelihood update)
         // Use drift speed, acceleration, and directional consistency from the
         // return buffer to adjust the base probability up or down.
-        let effective_p = if let Some(buf) = self.return_buffers.get(symbol) {
-            if buf.len() >= 10 {
-                let drift = buf.drift_speed();
-                let accel = buf.drift_acceleration();
-                let (consistency, dom_dir) = buf.directional_consistency();
+        let effective_p = if self.config.use_price_structure_adjustment {
+            if let Some(buf) = self.return_buffers.get(symbol) {
+                if buf.len() >= 10 {
+                    let drift = buf.drift_speed();
+                    let accel = buf.drift_acceleration();
+                    let (consistency, dom_dir) = buf.directional_consistency();
 
-                // Signal direction: +1 for Up, -1 for Down
-                let signal_dir = if direction == Direction::Up { 1.0 } else { -1.0 };
+                    // Signal direction: +1 for Up, -1 for Down
+                    let signal_dir = if direction == Direction::Up { 1.0 } else { -1.0 };
 
-                // Drift alignment: is the price moving in our signal direction?
-                // Positive = drift confirms signal, negative = drift opposes signal.
-                let drift_alignment = drift * signal_dir;
+                    // Drift alignment: is the price moving in our signal direction?
+                    // Positive = drift confirms signal, negative = drift opposes signal.
+                    let drift_alignment = drift * signal_dir;
 
-                // Acceleration alignment: is the drift accelerating in our direction?
-                let accel_alignment = accel * signal_dir;
+                    // Acceleration alignment: is the drift accelerating in our direction?
+                    let accel_alignment = accel * signal_dir;
 
-                // Consistency bonus: if >70% of ticks move in our direction, boost confidence.
-                // If dominant direction opposes our signal, penalize.
-                let consistency_factor = if dom_dir * signal_dir > 0.0 {
-                    // Ticks confirm our direction
-                    1.0 + (consistency - 0.5).max(0.0) * 0.3 // up to +15% boost
+                    // Consistency bonus: if >70% of ticks move in our direction, boost confidence.
+                    // If dominant direction opposes our signal, penalize.
+                    let consistency_factor = if dom_dir * signal_dir > 0.0 {
+                        // Ticks confirm our direction
+                        1.0 + (consistency - 0.5).max(0.0) * 0.3 // up to +15% boost
+                    } else {
+                        // Ticks oppose our direction
+                        1.0 - (consistency - 0.5).max(0.0) * 0.3 // up to -15% penalty
+                    };
+
+                    // Drift factor: strong drift in our direction boosts, against penalizes.
+                    // Normalize by sigma to make it scale-invariant.
+                    let drift_factor = if sigma_horizon > 0.0 {
+                        let normalized_drift =
+                            drift_alignment * secs_remaining.sqrt() / sigma_horizon;
+                        1.0 + normalized_drift.clamp(-0.3, 0.3) * 0.2
+                    } else {
+                        1.0
+                    };
+
+                    // Acceleration factor: accelerating in our direction is bullish.
+                    let accel_factor = if sigma_horizon > 0.0 {
+                        let normalized_accel = accel_alignment * secs_remaining / sigma_horizon;
+                        1.0 + normalized_accel.clamp(-0.5, 0.5) * 0.1
+                    } else {
+                        1.0
+                    };
+
+                    // Apply all factors to base probability (multiplicative on odds ratio)
+                    let combined_factor = consistency_factor * drift_factor * accel_factor;
+                    let odds = base_p / (1.0 - base_p).max(1e-9);
+                    let adjusted_odds = odds * combined_factor;
+                    let adjusted_p = adjusted_odds / (1.0 + adjusted_odds);
+
+                    debug!(
+                        symbol,
+                        event_id = %event.event_id,
+                        base_p = format!("{:.3}", base_p),
+                        adjusted_p = format!("{:.3}", adjusted_p),
+                        drift = format!("{:.6}", drift),
+                        accel = format!("{:.6}", accel),
+                        consistency = format!("{:.2}", consistency),
+                        "Gate 4: Price structure adjustment"
+                    );
+
+                    adjusted_p
                 } else {
-                    // Ticks oppose our direction
-                    1.0 - (consistency - 0.5).max(0.0) * 0.3 // up to -15% penalty
-                };
-
-                // Drift factor: strong drift in our direction boosts, against penalizes.
-                // Normalize by sigma to make it scale-invariant.
-                let drift_factor = if sigma_horizon > 0.0 {
-                    let normalized_drift = drift_alignment * secs_remaining.sqrt() / sigma_horizon;
-                    1.0 + normalized_drift.clamp(-0.3, 0.3) * 0.2
-                } else {
-                    1.0
-                };
-
-                // Acceleration factor: accelerating in our direction is bullish.
-                let accel_factor = if sigma_horizon > 0.0 {
-                    let normalized_accel = accel_alignment * secs_remaining / sigma_horizon;
-                    1.0 + normalized_accel.clamp(-0.5, 0.5) * 0.1
-                } else {
-                    1.0
-                };
-
-                // Apply all factors to base probability (multiplicative on odds ratio)
-                let combined_factor = consistency_factor * drift_factor * accel_factor;
-                let odds = base_p / (1.0 - base_p).max(1e-9);
-                let adjusted_odds = odds * combined_factor;
-                let adjusted_p = adjusted_odds / (1.0 + adjusted_odds);
-
-                debug!(
-                    symbol,
-                    event_id = %event.event_id,
-                    base_p = format!("{:.3}", base_p),
-                    adjusted_p = format!("{:.3}", adjusted_p),
-                    drift = format!("{:.6}", drift),
-                    accel = format!("{:.6}", accel),
-                    consistency = format!("{:.2}", consistency),
-                    "Gate 4: Price structure adjustment"
-                );
-
-                adjusted_p
+                    base_p
+                }
             } else {
                 base_p
             }
@@ -1149,6 +1199,8 @@ impl StrategyLogic for DirectionalStrategy {
                 vec![]
             }
 
+            MarketUpdate::AggTrade { .. } => vec![],
+
             MarketUpdate::EventDiscovered {
                 event_id,
                 symbol,
@@ -1337,6 +1389,14 @@ mod tests {
             no_trade_zone_min: 0.45,
             no_trade_zone_max: 0.55,
             min_edge: 0.02,
+            min_deviation_pct: 0.005,
+            min_reversal_consistency: 0.55,
+            take_profit_price_delta: 0.10,
+            stop_loss_price_delta: 0.05,
+            max_hold_secs: 120,
+            reversal_bonus_cap: 0.20,
+            use_multiscale_volatility: true,
+            use_price_structure_adjustment: true,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
             cooldown_secs: 0,

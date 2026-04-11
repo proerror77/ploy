@@ -1,3 +1,36 @@
+# Deployment Worker PID Identity Fix (2026-04-11)
+
+## Tasks
+
+- [x] Tighten inherited worker adoption so pid files are trusted only when the live process still matches the expected launch spec.
+- [x] Prevent pause/stop/restart from killing unrelated reused PIDs; clear stale pid ownership instead.
+- [x] Add regression tests for mismatched inherited pid handling and rerun deployment/platform/daemon verification.
+
+## Progress notes
+
+- 2026-04-11: `DeploymentRuntime` now validates inherited pid files against the expected launch spec by checking Linux `/proc/<pid>/cmdline` before adopting or killing a process.
+- 2026-04-11: Stale or mismatched inherited pids now clear runtime ownership instead of being treated as live workers, and `refresh_status()` surfaces that state as `Failed` so the next tick can restart cleanly.
+- 2026-04-11: Added regression coverage for mismatched inherited pid adoption and stale adopted pid refresh handling in `crates/ploy-deployments/src/runtime.rs`.
+- 2026-04-11: Fresh local verification passed:
+  - `cargo test -p ploy-deployments -- --nocapture`
+  - `cargo test -p ploy-platform-runtime -- --nocapture`
+  - `cargo test -p ploy-daemon-host daemon_pause_then_resume_restarts_paper_worker -- --nocapture`
+  - `cargo check -p new-ployd -p ployctl -p ploy-deployments -p ploy-platform-runtime -p ploy-daemon-host`
+  - `git diff --check`
+- 2026-04-11: Fresh remote verification passed after deploying the updated `ployd` binary:
+  - `systemctl is-active ployd` returned `active`
+  - `curl -fsS http://127.0.0.1:8081/health` returned healthy platform status
+  - `ployctl deployments list` showed `pm5d.v2.dryrun`, `pm5d.v3.dryrun`, and `pm5d.v4.dryrun` as `observed=Running`
+  - remote runner processes existed one-per-config after daemon restart
+  - `ployctl deployments pause pm5d.v2.dryrun` removed the runner process and `resume` started a new pid
+  - collector services remained active and legacy direct strategy services remained inactive
+
+## Review
+
+- The deployment worker now has identity-aware inherited pid adoption instead of the earlier `/proc/<pid>` existence check, which closes the daemon-restart control hole for pause/stop/restart.
+- The fix stays intentionally narrow: it does not broaden control-plane semantics or trading-state federation, it only hardens deployment process ownership.
+- Residual limitation: strong inherited-worker identity checks are Linux-specific because they rely on `/proc/<pid>/cmdline`; non-Linux behavior remains best-effort and is not part of the production deployment path.
+
 # RTDS Reference Foundation Implementation (2026-04-06)
 
 ## Goal
@@ -7536,3 +7569,58 @@ and runner-side market-data infrastructure.
 - `platform-runtime` now owns proposal state, deployment rules, state I/O, startup bootstrap, submit/cancel/replace order control, live fill reconciliation, live health transitions, and worker tick/source-health refresh.
 - `ploy-daemon-host` and `ploy-runner-host` now exist as real host crates, so old/new app binaries are thin wrappers instead of ownership centers.
 - The new architecture is now implemented end-to-end in code shape and validation shape: shared host crates own the real daemon/runner behavior, runtime crates own policy and orchestration behavior, market-data/client crates own their infra boundaries, and the default CI/documented path points at the new stack.
+
+# PM 5m Strategy Roadmap Implementation Slice (2026-04-11)
+
+## Goal
+Audit the V1/V2/V3/V4 roadmap against the refactored runtime, then implement the missing strategy/runtime/config pieces that are already actionable today.
+
+## File ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/`
+  - owner: PM 5m strategy variants and their tests
+- `crates/ploy-strategy-bundles/src/config.rs`
+  - owner: strategy variant config surface
+- `crates/ploy-strategy-runtime/src/lib.rs`
+  - owner: runtime variant selection / wiring
+- `config/strategies/02-pm5d*.toml`
+  - owner: runnable V1/V2/V3/V4 config family
+- `tasks/strategy-evolution-plan.md`
+  - owner: roadmap/design reference only
+
+## Tasks
+
+- [x] Confirm which roadmap versions are already implemented vs only planned.
+- [x] Add failing tests first for any new strategy behavior introduced in this slice.
+- [x] Implement the missing runnable PM 5m strategy variant(s) that do not depend on unavailable live data plumbing.
+- [x] Add explicit config files for the roadmap versions supported by the refactored runtime.
+- [x] Run targeted Rust verification and summarize remaining gaps, especially around live L2 / LOB ingestion.
+
+## Progress notes
+
+- 2026-04-11: Intake confirmed `directional.rs` already contains the roadmap's V3-style `ReturnBuffer`, multi-vol sigma selection, and price-structure adjustments.
+- 2026-04-11: Intake confirmed the runtime currently exposes only two strategy variants: `directional` and `directional_bayes`.
+- 2026-04-11: Intake confirmed `StrategyDecision::Exit` is supported, so a V4 prototype can use non-settlement exits if the strategy logic is added.
+- 2026-04-11: Intake confirmed live/dry-run wiring does not yet feed Binance L2 into the strategy runtime; current `MarketUpdate::L2` is historical/replay only.
+- 2026-04-11: Audit matrix against `tasks/strategy-evolution-plan.md`:
+  - `V1` baseline: **implemented as config-only behavior** on the `directional` runtime path; legacy configs exist, but the explicit unified `v1-*` roadmap config family does not yet exist.
+  - `V2` tightened: **implemented as config-only behavior** on the same `directional` strategy; `02-pm5d.unified.toml` already matches the tightened entry/price window profile, but the dedicated `v2-*` config files/services from the roadmap are still missing.
+  - `V3` multi-vol + price structure: **substantially implemented in `directional.rs`** via `ReturnBuffer`, realized/Parkinson volatility selection, and odds-ratio price-structure adjustment; however, there is still no dedicated roadmap-named variant/config family, and the local LOB-summary enhancement is not wired because the strategy code does not consume `MarketUpdate::L2`.
+  - `V4` mean reversion: **not implemented yet**; the runtime can support a prototype because `StrategyDecision::Exit` already works and historical loading can replay `MarketUpdate::L2`, but live/dry-run still lack Binance L2 ingestion and no mean-reversion entry logic exists today.
+- 2026-04-11: Added runtime alias normalization so `v1/v2/v3` route to `directional` and `v4` routes to the new `mean_reversion` prototype.
+- 2026-04-11: Added `MeanReversionStrategy` as a separate strategy file instead of folding V4 into `directional.rs`; the prototype uses currently-available spot/quote/event data plus return-buffer reversal signals and supports early exits via take-profit, stop-loss, and max-hold rules.
+- 2026-04-11: Added explicit roadmap config family files:
+  - `config/strategies/02-pm5d.v1-{dryrun,live}.toml`
+  - `config/strategies/02-pm5d.v2-{dryrun,live}.toml`
+  - `config/strategies/02-pm5d.v3-{dryrun,live}.toml`
+  - `config/strategies/02-pm5d.v4-{dryrun,live}.toml`
+- 2026-04-11: Verification passed with:
+  - `cargo test -p ploy-strategy-bundles --lib`
+  - `cargo test -p ploy-strategy-runtime --lib`
+  - `cargo check -p new-ploy-runner -p ploy-strategy-runtime -p ploy-strategy-bundles`
+
+## Review
+
+- The roadmap is now encoded directly in runtime/config surfaces: V1/V2/V3 are explicit aliases/config families over the existing directional engine, and V4 has a runnable prototype strategy with early-exit support.
+- The V4 slice intentionally stops short of LOB-aware confirmation because live/dry-run still do not ingest `MarketUpdate::L2`; the prototype stays grounded on data that already reaches the runtime today.
+- Remaining gap: full V3 LOB confirmation and full V4+LOB still require live Binance L2 ingestion plus the upstream LOB collector stability work described in `tasks/strategy-evolution-plan.md`.

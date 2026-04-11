@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use ploy_claimer::ensure_account_claimer_daemon;
 use ploy_market_data::feeds::{
-    spawn_chainlink_feed, spawn_db_spot_feed, spawn_pyth_reference_feed, spawn_spot_feed,
+    spawn_chainlink_feed, spawn_db_aggtrade_feed, spawn_db_l2_feed,
+    spawn_db_spot_feed, spawn_pyth_reference_feed, spawn_spot_feed,
 };
 use ploy_market_data::reference_prices::new_reference_price_registry;
 use ploy_market_data::scanner::spawn_market_scanner;
@@ -9,8 +10,8 @@ use ploy_market_data::sports_feed::spawn_sports_feed;
 use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::{
     BayesianDirectionalStrategy, ExecutionReport, Feed, FullConfig, HistoricalFeed, LiveFeed,
-    NullRecorder, RecordedFeed, Recorder, RecordingFeed, RuntimeMode, SignalRecord,
-    SimulatedExecutor, StrategyLogic, StrategyRuntime,
+    MeanReversionStrategy, NullRecorder, RecordedFeed, Recorder, RecordingFeed, RuntimeMode,
+    SignalRecord, SimulatedExecutor, StrategyLogic, StrategyRuntime,
 };
 use ploy_trading::{FillRecord, TradeSide, TradingIntent};
 use rust_decimal::prelude::FromPrimitive;
@@ -40,19 +41,7 @@ pub async fn run_strategy(config: FullConfig, config_path: &str, force_dry_run: 
     );
 
     let symbols = prepare_feed_symbols(runtime_config.mode, &config.strategy.symbols);
-
-    let strategy: Box<dyn StrategyLogic> = match config.runtime.strategy_variant.as_str() {
-        "directional_bayes" => {
-            info!("Using Bayesian directional strategy variant");
-            let json = serde_json::to_value(&config.strategy).expect("serialize DirectionalConfig");
-            let bayes_config: ploy_strategy_bundles::strategies::directional_bayes::BayesianDirectionalConfig =
-                serde_json::from_value(json).expect("deserialize BayesianDirectionalConfig");
-            Box::new(BayesianDirectionalStrategy::new(bayes_config))
-        }
-        _ => Box::new(ploy_strategy_bundles::DirectionalStrategy::new(
-            config.strategy.clone(),
-        )),
-    };
+    let strategy = build_strategy(&config);
 
     let (result, snapshot) = match runtime_config.mode {
         RuntimeMode::Backtest => run_backtest(&config, &symbols, strategy, runtime_config.clone()).await,
@@ -222,6 +211,16 @@ async fn run_live_or_dry_run(
     );
     let _db_spot_handle = if let Some(ref db) = db_pool {
         Some(spawn_db_spot_feed(tx.clone(), symbols.to_vec(), db.clone()))
+    } else {
+        None
+    };
+    let _db_aggtrade_handle = if let Some(ref db) = db_pool {
+        Some(spawn_db_aggtrade_feed(tx.clone(), symbols.to_vec(), db.clone()))
+    } else {
+        None
+    };
+    let _db_l2_handle = if let Some(ref db) = db_pool {
+        Some(spawn_db_l2_feed(tx.clone(), symbols.to_vec(), db.clone()))
     } else {
         None
     };
@@ -818,6 +817,53 @@ fn build_live_executor() -> LiveExecutor {
     LiveExecutor::new(gateway)
 }
 
+fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
+    let configured_variant = config.runtime.strategy_variant.trim();
+    let canonical_variant = config.runtime.canonical_strategy_variant();
+
+    match canonical_variant.as_str() {
+        "directional" => {
+            if configured_variant != "directional" {
+                info!(
+                    configured_variant = configured_variant,
+                    canonical_variant = canonical_variant.as_str(),
+                    "Using roadmap alias for directional strategy variant",
+                );
+            }
+
+            Box::new(ploy_strategy_bundles::DirectionalStrategy::new(
+                config.strategy.clone(),
+            ))
+        }
+        "directional_bayes" => {
+            info!(
+                configured_variant = configured_variant,
+                canonical_variant = canonical_variant.as_str(),
+                "Using Bayesian directional strategy variant",
+            );
+            let json = serde_json::to_value(&config.strategy).expect("serialize DirectionalConfig");
+            let bayes_config: ploy_strategy_bundles::strategies::directional_bayes::BayesianDirectionalConfig =
+                serde_json::from_value(json).expect("deserialize BayesianDirectionalConfig");
+            Box::new(BayesianDirectionalStrategy::new(bayes_config))
+        }
+        "mean_reversion" => {
+            info!(
+                configured_variant = configured_variant,
+                canonical_variant = canonical_variant.as_str(),
+                "Using mean-reversion strategy variant",
+            );
+            Box::new(MeanReversionStrategy::new(config.strategy.clone()))
+        }
+        _ => {
+            eprintln!(
+                "Unsupported strategy_variant `{configured_variant}` in config. \
+                 Supported runtime variants: directional, directional_bayes, mean_reversion, v1, v2, v3, v4."
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 fn prepare_feed_symbols(mode: RuntimeMode, strategy_symbols: &[String]) -> Vec<String> {
     match mode {
         RuntimeMode::Backtest | RuntimeMode::Replay => strategy_symbols.to_vec(),
@@ -831,8 +877,8 @@ fn database_unavailable_is_fatal(mode: RuntimeMode, database_url_present: bool) 
 
 #[cfg(test)]
 mod tests {
-    use super::{database_unavailable_is_fatal, prepare_feed_symbols};
-    use ploy_strategy_bundles::RuntimeMode;
+    use super::{build_strategy, database_unavailable_is_fatal, prepare_feed_symbols};
+    use ploy_strategy_bundles::{FullConfig, RuntimeMode};
 
     #[test]
     fn keeps_strategy_symbols_canonical_for_live_feeds() {
@@ -848,5 +894,29 @@ mod tests {
         assert!(!database_unavailable_is_fatal(RuntimeMode::Backtest, true));
         assert!(!database_unavailable_is_fatal(RuntimeMode::Replay, true));
         assert!(!database_unavailable_is_fatal(RuntimeMode::DryRun, false));
+    }
+
+    #[test]
+    fn roadmap_aliases_build_expected_strategy_variants() {
+        for (variant, expected_name) in [
+            ("v1", "pm_5m_directional"),
+            ("v2", "pm_5m_directional"),
+            ("v3", "pm_5m_directional"),
+            ("v4", "pm_5m_mean_reversion"),
+        ] {
+            let config = FullConfig::from_toml(&format!(
+                r#"
+[runtime]
+mode = "dryrun"
+strategy_variant = "{variant}"
+
+[strategy]
+"#
+            ))
+            .unwrap();
+
+            let strategy = build_strategy(&config);
+            assert_eq!(strategy.name(), expected_name);
+        }
     }
 }

@@ -9,6 +9,8 @@ pub struct PlatformConfig {
     pub sidecar_token: Option<SecretString>,
     pub auth_cookie_secret: SecretString,
     pub registry_file: PathBuf,
+    pub runner_binary: PathBuf,
+    pub strategy_config_root: PathBuf,
     pub runtime_root: PathBuf,
     pub status_file: PathBuf,
     pub deployment_status_file: PathBuf,
@@ -36,6 +38,8 @@ impl Default for PlatformConfig {
             sidecar_token: None,
             auth_cookie_secret: generate_cookie_secret(),
             registry_file: PathBuf::from("data/state/deployments.json"),
+            runner_binary: PathBuf::from("bin/ploy-runner"),
+            strategy_config_root: PathBuf::from("config/strategies"),
             status_file: runtime_root.join("system-status.json"),
             deployment_status_file: runtime_root.join("deployments.json"),
             trading_state_file: runtime_root.join("trading-state.json"),
@@ -122,6 +126,12 @@ impl PlatformConfig {
         }
         if let Ok(value) = std::env::var("PLOY_DEPLOYMENTS_FILE") {
             config.registry_file = PathBuf::from(value);
+        }
+        if let Ok(value) = std::env::var("PLOY_RUNNER_BINARY") {
+            config.runner_binary = PathBuf::from(value);
+        }
+        if let Ok(value) = std::env::var("PLOY_STRATEGY_CONFIG_ROOT") {
+            config.strategy_config_root = PathBuf::from(value);
         }
         if let Ok(value) = std::env::var("PLOY_RUNTIME_ROOT") {
             config.runtime_root = PathBuf::from(value);
@@ -232,6 +242,11 @@ mod tests {
         assert_eq!(
             config.registry_file.to_string_lossy(),
             "data/state/deployments.json"
+        );
+        assert_eq!(config.runner_binary.to_string_lossy(), "bin/ploy-runner");
+        assert_eq!(
+            config.strategy_config_root.to_string_lossy(),
+            "config/strategies"
         );
         assert_eq!(config.runtime_root.to_string_lossy(), "run/platform");
         assert_eq!(

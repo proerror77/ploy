@@ -21,6 +21,19 @@ Each manifest includes:
 - `runtime_mode`
 - `desired_state`
 
+Current bundle resolution rule:
+
+- if `bundle_id` ends with `.toml` or contains a path separator, the deployment
+  worker treats it as a config path (relative paths resolve from the platform
+  working directory)
+- otherwise the deployment worker resolves it as
+  `config/strategies/<bundle_id>.toml`
+
+Example:
+
+- `bundle_id: "02-pm5d.v3-dryrun"` resolves to
+  `config/strategies/02-pm5d.v3-dryrun.toml`
+
 The operator manages deployment resources. The platform manages the worker processes behind them.
 
 Do not point the dry-run drill at a real live manifest. The drill is meant to
