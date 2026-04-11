@@ -1,17 +1,16 @@
 [package]
-name = "ployctl"
+name = "ploy-control-client"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Ploy control-plane client workspace entry point"
+description = "Shared control-plane client for CLI and TUI operator surfaces"
 
 [dependencies]
-chrono.workspace = true
-ploy-control-client.workspace = true
 ploy-operator-contracts.workspace = true
-ploy-platform.workspace = true
-rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+rust_decimal.workspace = true

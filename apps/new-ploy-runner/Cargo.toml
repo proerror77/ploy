@@ -1,14 +1,11 @@
 [package]
-name = "ploy-runner"
+name = "new-ploy-runner"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Standalone strategy runner for ploy-strategy-bundles"
-
-[features]
-default = []
+description = "Bootstrap shell for the next-generation Ploy strategy runner"
 
 [dependencies]
 ploy-runner-host.workspace = true

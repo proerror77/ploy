@@ -3404,6 +3404,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "new-ploy-runner"
+version = "0.1.0"
+dependencies = [
+ "ploy-runner-host",
+ "tokio",
+]
+
+[[package]]
+name = "new-ployd"
+version = "0.1.0"
+dependencies = [
+ "ploy-daemon-host",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3944,12 +3959,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "ploy-control-client"
+version = "0.1.0"
+dependencies = [
+ "ploy-operator-contracts",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ploy-daemon-host"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hmac",
+ "ploy-connectivity",
+ "ploy-deployments",
+ "ploy-operator-contracts",
+ "ploy-platform",
+ "ploy-platform-runtime",
+ "ploy-trading",
+ "rand 0.8.5",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "secrecy 0.8.0",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ploy-deployments"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "ploy-operator-contracts",
  "serde",
+]
+
+[[package]]
+name = "ploy-market-data"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "ploy-strategy-bundles",
+ "polymarket-client-sdk",
+ "reqwest",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]
@@ -3975,6 +4040,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ploy-platform-runtime"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ploy-connectivity",
+ "ploy-deployments",
+ "ploy-operator-contracts",
+ "ploy-platform",
+ "ploy-trading",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ploy-research"
 version = "0.1.0"
 dependencies = [
@@ -3989,22 +4070,19 @@ dependencies = [
 name = "ploy-runner"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "ploy-claimer",
- "ploy-connectivity",
+ "ploy-runner-host",
+ "tokio",
+]
+
+[[package]]
+name = "ploy-runner-host"
+version = "0.1.0"
+dependencies = [
+ "ploy-market-data",
  "ploy-strategy-bundles",
- "ploy-trading",
- "polymarket-client-sdk",
- "reqwest",
- "rust_decimal",
- "rust_decimal_macros",
- "serde",
- "serde_json",
+ "ploy-strategy-runtime",
  "sqlx",
  "tokio",
- "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4030,6 +4108,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ploy-strategy-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ploy-claimer",
+ "ploy-connectivity",
+ "ploy-market-data",
+ "ploy-strategy-bundles",
+ "ploy-trading",
+ "rust_decimal",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ploy-trading"
 version = "0.1.0"
 dependencies = [
@@ -4046,6 +4142,7 @@ name = "ployctl"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ploy-control-client",
  "ploy-operator-contracts",
  "ploy-platform",
  "rust_decimal",
@@ -4057,20 +4154,7 @@ dependencies = [
 name = "ployd"
 version = "0.1.0"
 dependencies = [
- "chrono",
- "hmac",
- "ploy-connectivity",
- "ploy-deployments",
- "ploy-operator-contracts",
- "ploy-platform",
- "ploy-trading",
- "rand 0.8.5",
- "rust_decimal",
- "rust_decimal_macros",
- "secrecy 0.8.0",
- "serde",
- "serde_json",
- "sha2",
+ "ploy-daemon-host",
 ]
 
 [[package]]
@@ -4078,8 +4162,8 @@ name = "ploytui"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ploy-control-client",
  "ploy-operator-contracts",
- "ployctl",
 ]
 
 [[package]]

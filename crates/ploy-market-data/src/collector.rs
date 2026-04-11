@@ -835,7 +835,6 @@ async fn persist_book_update(
             token_id, side, best_bid, best_ask,
             received_at, source, domain
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT DO NOTHING
         "#,
         )
         .bind(token_id)

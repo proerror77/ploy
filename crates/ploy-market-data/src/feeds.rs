@@ -41,7 +41,7 @@ fn rtds_market_data_ws_config() -> PolymarketWsConfig {
 /// and publishes `MarketUpdate::SpotPrice` events in real-time.
 ///
 /// When `pool` is provided, each tick is also persisted to `binance_price_ticks`
-/// (deduplicated at second granularity) so that historical backtests can replay
+/// (at full tick resolution) so that historical backtests can replay
 /// the same spot-price stream.
 pub fn spawn_spot_feed(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
@@ -640,7 +640,7 @@ async fn persist_spot_price(
 }
 
 /// Persist a quote tick to `clob_quote_ticks` for backtest replay.
-/// Deduplicates at second granularity via the unique index added in migration 023.
+/// Every tick is stored at full resolution (no per-second dedup).
 async fn persist_quote(
     pool: &PgPool,
     token_id: &str,
@@ -652,7 +652,6 @@ async fn persist_quote(
         r#"
         INSERT INTO clob_quote_ticks (token_id, best_bid, best_ask, received_at, source)
         VALUES ($1, $2, $3, $4, 'ploy_runner_live')
-        ON CONFLICT (token_id, date_trunc('second', received_at AT TIME ZONE 'UTC')) DO NOTHING
         "#,
     )
     .bind(token_id)

@@ -818,9 +818,8 @@ fn build_deployment_diagnostics_report(
 ) -> io::Result<DeploymentDiagnosticsReport> {
     let system = daemon.control_plane.system.status();
     let deployments = daemon.control_plane.deployments.summaries();
-    let deployment = deployments
-        .iter()
-        .find(|item| item.deployment_id == deployment_id)
+    let deployment = daemon
+        .inspect_deployment(deployment_id)
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,

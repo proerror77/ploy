@@ -1,5 +1,5 @@
 use secrecy::SecretString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct PlatformConfig {
@@ -14,6 +14,8 @@ pub struct PlatformConfig {
     pub deployment_status_file: PathBuf,
     pub trading_state_file: PathBuf,
     pub audit_log_file: PathBuf,
+    pub agent_runs_file: PathBuf,
+    pub proposals_file: PathBuf,
     pub tick_interval_ms: u64,
     pub request_rate_limit_per_minute: u32,
     pub live_reconcile_backoff_base_ms: u64,
@@ -21,6 +23,7 @@ pub struct PlatformConfig {
     pub worker_heartbeat_stale_after_ms: u64,
     pub live_reconcile_stale_after_ms: u64,
     pub venue_stale_after_ms: u64,
+    pub circuit_breaker_enabled: bool,
 }
 
 impl Default for PlatformConfig {
@@ -37,6 +40,8 @@ impl Default for PlatformConfig {
             deployment_status_file: runtime_root.join("deployments.json"),
             trading_state_file: runtime_root.join("trading-state.json"),
             audit_log_file: runtime_root.join("audit-log.jsonl"),
+            agent_runs_file: PathBuf::from("run/sidecar/agent-runs.jsonl"),
+            proposals_file: runtime_root.join("proposals.json"),
             runtime_root,
             tick_interval_ms: 1_000,
             request_rate_limit_per_minute: 240,
@@ -45,11 +50,42 @@ impl Default for PlatformConfig {
             worker_heartbeat_stale_after_ms: 15_000,
             live_reconcile_stale_after_ms: 15_000,
             venue_stale_after_ms: 15_000,
+            circuit_breaker_enabled: false,
         }
     }
 }
 
 impl PlatformConfig {
+    fn path_uses_default(path: &Path, default: &str) -> bool {
+        path == Path::new(default)
+    }
+
+    pub fn normalize_derived_paths(&mut self) {
+        if Self::path_uses_default(&self.status_file, "run/platform/system-status.json") {
+            self.status_file = self.runtime_root.join("system-status.json");
+        }
+        if Self::path_uses_default(&self.deployment_status_file, "run/platform/deployments.json") {
+            self.deployment_status_file = self.runtime_root.join("deployments.json");
+        }
+        if Self::path_uses_default(&self.trading_state_file, "run/platform/trading-state.json") {
+            self.trading_state_file = self.runtime_root.join("trading-state.json");
+        }
+        if Self::path_uses_default(&self.audit_log_file, "run/platform/audit-log.jsonl") {
+            self.audit_log_file = self.runtime_root.join("audit-log.jsonl");
+        }
+        if Self::path_uses_default(&self.proposals_file, "run/platform/proposals.json") {
+            self.proposals_file = self.runtime_root.join("proposals.json");
+        }
+        if Self::path_uses_default(&self.agent_runs_file, "run/sidecar/agent-runs.jsonl") {
+            let parent = self
+                .runtime_root
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("run"));
+            self.agent_runs_file = parent.join("sidecar/agent-runs.jsonl");
+        }
+    }
+
     pub fn from_env() -> Self {
         let mut config = Self::default();
 
@@ -110,6 +146,14 @@ impl PlatformConfig {
         } else {
             config.audit_log_file = config.runtime_root.join("audit-log.jsonl");
         }
+        if let Ok(value) = std::env::var("PLOY_AGENT_RUNS_FILE") {
+            config.agent_runs_file = PathBuf::from(value);
+        }
+        if let Ok(value) = std::env::var("PLOY_PROPOSALS_FILE") {
+            config.proposals_file = PathBuf::from(value);
+        } else {
+            config.proposals_file = config.runtime_root.join("proposals.json");
+        }
         if let Ok(value) = std::env::var("PLOY_TICK_INTERVAL_MS") {
             if let Ok(parsed) = value.parse() {
                 config.tick_interval_ms = parsed;
@@ -145,7 +189,11 @@ impl PlatformConfig {
                 config.venue_stale_after_ms = parsed;
             }
         }
+        if let Ok(value) = std::env::var("PLOY_CIRCUIT_BREAKER_ENABLED") {
+            config.circuit_breaker_enabled = matches!(value.as_str(), "1" | "true" | "TRUE" | "True");
+        }
 
+        config.normalize_derived_paths();
         config
     }
 }
@@ -202,6 +250,14 @@ mod tests {
             config.audit_log_file.to_string_lossy(),
             "run/platform/audit-log.jsonl"
         );
+        assert_eq!(
+            config.agent_runs_file.to_string_lossy(),
+            "run/sidecar/agent-runs.jsonl"
+        );
+        assert_eq!(
+            config.proposals_file.to_string_lossy(),
+            "run/platform/proposals.json"
+        );
         assert_eq!(config.tick_interval_ms, 1_000);
         assert_eq!(config.request_rate_limit_per_minute, 240);
         assert_eq!(config.live_reconcile_backoff_base_ms, 1_000);
@@ -209,5 +265,6 @@ mod tests {
         assert_eq!(config.worker_heartbeat_stale_after_ms, 15_000);
         assert_eq!(config.live_reconcile_stale_after_ms, 15_000);
         assert_eq!(config.venue_stale_after_ms, 15_000);
+        assert!(!config.circuit_breaker_enabled);
     }
 }

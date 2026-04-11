@@ -1,17 +1,40 @@
 [workspace]
 members = [
     ".",
+    "apps/new-ployd",
+    "apps/new-ploy-runner",
     "apps/ployctl",
     "apps/ployd",
     "apps/ploy-runner",
     "apps/ploytui",
+    "crates/ploy-control-client",
     "crates/ploy-connectivity",
     "crates/ploy-claimer",
+    "crates/ploy-daemon-host",
     "crates/ploy-deployments",
+    "crates/ploy-market-data",
     "crates/ploy-operator-contracts",
     "crates/ploy-platform",
+    "crates/ploy-platform-runtime",
     "crates/ploy-research",
+    "crates/ploy-runner-host",
+    "crates/ploy-strategy-runtime",
     "crates/ploy-strategy-bundles",
+    "crates/ploy-trading",
+]
+default-members = [
+    ".",
+    "apps/new-ployd",
+    "apps/ployctl",
+    "apps/ployd",
+    "apps/ploytui",
+    "crates/ploy-control-client",
+    "crates/ploy-deployments",
+    "crates/ploy-daemon-host",
+    "crates/ploy-operator-contracts",
+    "crates/ploy-platform",
+    "crates/ploy-platform-runtime",
+    "crates/ploy-runner-host",
     "crates/ploy-trading",
 ]
 resolver = "2"
@@ -27,11 +50,17 @@ repository = "https://github.com/proerror77/ploy"
 chrono = { version = "0.4", features = ["serde"] }
 hmac = "0.12"
 ploy-claimer = { path = "crates/ploy-claimer" }
+ploy-control-client = { path = "crates/ploy-control-client" }
 ploy-connectivity = { path = "crates/ploy-connectivity" }
 ploy-deployments = { path = "crates/ploy-deployments" }
+ploy-daemon-host = { path = "crates/ploy-daemon-host" }
+ploy-market-data = { path = "crates/ploy-market-data" }
 ploy-operator-contracts = { path = "crates/ploy-operator-contracts" }
 ploy-platform = { path = "crates/ploy-platform" }
+ploy-platform-runtime = { path = "crates/ploy-platform-runtime" }
 ploy-research = { path = "crates/ploy-research" }
+ploy-runner-host = { path = "crates/ploy-runner-host" }
+ploy-strategy-runtime = { path = "crates/ploy-strategy-runtime" }
 ploy-strategy-bundles = { path = "crates/ploy-strategy-bundles" }
 ploy-trading = { path = "crates/ploy-trading" }
 rand = "0.8"

@@ -7,8 +7,16 @@ A high-performance Polymarket trading bot focused on crypto and sports predictio
 The workspace now also includes the platform-refactor spine:
 
 - `ployd`: daemon entrypoint
+- `new-ployd`: next-generation daemon entrypoint
 - `ployctl`: operator client entrypoint
 - `ploytui`: thin terminal operator console
+- `new-ploy-runner`: next-generation strategy runner entrypoint
+- `crates/ploy-daemon-host`: daemon host/bootstrap crate
+- `crates/ploy-runner-host`: runner CLI host crate
+- `crates/ploy-control-client`: shared operator client transport
+- `crates/ploy-market-data`: collector/feed/scanner/discovery infrastructure
+- `crates/ploy-platform-runtime`: control-plane runtime ownership boundary
+- `crates/ploy-strategy-runtime`: strategy runtime ownership boundary
 - `crates/ploy-platform`: control-plane core
 - `crates/ploy-trading`: canonical trading lifecycle
 - `crates/ploy-deployments`: worker protocol and supervisor
@@ -19,7 +27,7 @@ The workspace now also includes the platform-refactor spine:
 Current smoke path:
 
 ```bash
-cargo run -p ployd
+cargo run -p new-ployd
 cargo run -p ployctl -- system status
 cargo run -p ployctl -- system audit
 cargo run -p ployctl -- trading status
@@ -28,6 +36,7 @@ cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
 cargo run -p ployctl -- trading cancel example.live <order-id>
 cargo run -p ploytui
+cargo run -p new-ploy-runner -- run --config config/strategies/02-pm5d.unified.toml --dry-run
 # realtime operator stream
 curl -N http://127.0.0.1:8081/api/events/stream
 rtk cargo test --test platform_smoke -- --nocapture
@@ -67,7 +76,8 @@ Remote live-host acceptance path:
 
 Compatibility note:
 
-- `ployd`, `ployctl`, and `ploytui` are the default workspace entrypoints for the trading platform spine.
+- `new-ployd`, `new-ploy-runner`, `ployctl`, and `ploytui` are the default workspace entrypoints for the trading platform spine.
+- `ployd` and `ploy-runner` remain compatibility wrappers over the shared host crates.
 - The old root runtime tree has been retired from the compiled workspace.
 - Remaining `ploy ...` examples below are historical reference only and are not runnable entrypoints in this branch.
 - Current sports scope in this branch is `discovery + live-state data capture + replay/backtest support`.
@@ -453,14 +463,23 @@ Strategies run independently and can be managed as daemons (start/stop/status). 
 
 ```
 apps/
-  ployd/         Trading platform daemon entrypoint
+  new-ployd/     Next-generation daemon entrypoint
+  ployd/         Compatibility daemon wrapper
+  new-ploy-runner/ Next-generation runner entrypoint
+  ploy-runner/   Compatibility runner wrapper
   ployctl/       Operator client entrypoint
   ploytui/       Thin terminal operator console
 crates/
+  ploy-daemon-host/ Daemon host/bootstrap crate
+  ploy-runner-host/ Runner CLI host crate
+  ploy-control-client/ Shared operator client transport
+  ploy-market-data/ Collector/feed/scanner/discovery
   ploy-platform/ Control-plane core
+  ploy-platform-runtime/ Runtime orchestration ownership
   ploy-trading/  Canonical trading lifecycle
   ploy-deployments/ Deployment worker protocol + supervisor
   ploy-operator-contracts/ Shared API and event contracts
+  ploy-strategy-runtime/ Strategy runtime ownership
   ploy-strategy-bundles/ Signal-to-intent runtime
   ploy-research/ Replay and backtest consumers
 ploy-frontend/   Web operator console
@@ -472,21 +491,24 @@ docs/            Design docs, runbooks, and migration notes
 ## Development
 
 ```bash
-cargo run -p ployd                   # Boot the platform daemon
+cargo run -p new-ployd               # Boot the platform daemon
 cargo run -p ployctl -- system status
 cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
 cargo run -p ploytui
+cargo run -p new-ploy-runner -- run --config config/strategies/02-pm5d.unified.toml --dry-run
 curl -N http://127.0.0.1:8081/api/events/stream
-rtk cargo check -p ployd             # Fast daemon type-check loop
+rtk cargo check -p new-ployd         # Fast daemon type-check loop
+rtk cargo check -p new-ploy-runner   # Fast runner type-check loop
 rtk cargo check -p ployctl           # Fast client type-check loop
 rtk cargo check -p ploytui           # Fast terminal console type-check loop
 rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture
 cargo fmt --check                    # Check formatting
 cargo clippy -- -D warnings          # Lint
-rtk cargo build -p ployd             # Build the daemon binary
+rtk cargo build -p new-ployd         # Build the daemon binary
+rtk cargo build -p new-ploy-runner   # Build the runner binary
 rtk cargo build -p ployctl           # Build the operator client binary
 rtk cargo build -p ploytui           # Build the terminal console binary
 ```

@@ -1,4 +1,5 @@
 use crate::deployments::DeploymentSummary;
+use crate::diagnostics::{OversightSnapshotEvent, ProposalSnapshotEvent};
 use crate::system::{ActiveAlert, PlatformMetrics, SystemStatus};
 use crate::trading::{MarketData, PositionResponse, TradeResponse, TradingStateSnapshot};
 use chrono::{DateTime, Utc};
@@ -66,6 +67,10 @@ pub enum OperatorEvent {
     MetricsSnapshot(MetricsSnapshotEvent),
     #[serde(rename = "alert_snapshot")]
     AlertSnapshot(AlertSnapshotEvent),
+    #[serde(rename = "oversight_snapshot")]
+    OversightSnapshot(OversightSnapshotEvent),
+    #[serde(rename = "proposal_snapshot")]
+    ProposalSnapshot(ProposalSnapshotEvent),
 }
 
 pub type WsMessage = OperatorEvent;

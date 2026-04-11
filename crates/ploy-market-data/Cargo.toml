@@ -1,0 +1,28 @@
+[package]
+name = "ploy-market-data"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Market-data collection, discovery, and scanning infrastructure for Ploy"
+
+[dependencies]
+chrono.workspace = true
+futures = "0.3"
+ploy-strategy-bundles.workspace = true
+polymarket-client-sdk = { path = "../../vendor/polymarket-client-sdk", features = ["clob", "gamma", "rtds", "tracing", "ws"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rust_decimal.workspace = true
+rust_decimal_macros.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "rust_decimal", "json"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
+tracing.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+rust_decimal_macros.workspace = true
+serde_json.workspace = true

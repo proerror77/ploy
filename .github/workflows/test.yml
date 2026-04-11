@@ -122,14 +122,23 @@ jobs:
           SCCACHE_CACHE_SIZE: 10G
         run: |
           cargo build --locked \
+            -p ploy-daemon-host \
+            -p new-ployd \
+            -p new-ploy-runner \
             -p ployd \
             -p ployctl \
+            -p ploy-control-client \
             -p ploytui \
             -p ploy-connectivity \
             -p ploy-deployments \
+            -p ploy-market-data \
             -p ploy-operator-contracts \
             -p ploy-platform \
+            -p ploy-platform-runtime \
             -p ploy-research \
+            -p ploy-runner \
+            -p ploy-runner-host \
+            -p ploy-strategy-runtime \
             -p ploy-strategy-bundles \
             -p ploy-trading
 
@@ -140,14 +149,23 @@ jobs:
           SCCACHE_CACHE_SIZE: 10G
         run: |
           cargo test --locked \
+            -p ploy-daemon-host \
+            -p new-ployd \
+            -p new-ploy-runner \
             -p ployd \
             -p ployctl \
+            -p ploy-control-client \
             -p ploytui \
             -p ploy-connectivity \
             -p ploy-deployments \
+            -p ploy-market-data \
             -p ploy-operator-contracts \
             -p ploy-platform \
+            -p ploy-platform-runtime \
             -p ploy-research \
+            -p ploy-runner \
+            -p ploy-runner-host \
+            -p ploy-strategy-runtime \
             -p ploy-strategy-bundles \
             -p ploy-trading
           cargo test --locked -p ploy --test platform_release_workflow

@@ -79,6 +79,16 @@ impl DeploymentRegistry {
         Some(record)
     }
 
+    pub fn set_max_gross_exposure(
+        &mut self,
+        deployment_id: &str,
+        max_gross_exposure: Option<Decimal>,
+    ) -> Option<&DeploymentRecord> {
+        let record = self.deployments.get_mut(deployment_id)?;
+        record.max_gross_exposure = max_gross_exposure;
+        Some(record)
+    }
+
     pub fn get(&self, deployment_id: &str) -> Option<&DeploymentRecord> {
         self.deployments.get(deployment_id)
     }

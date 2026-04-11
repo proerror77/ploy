@@ -1,0 +1,18 @@
+[package]
+name = "ploy-runner-host"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI host crate for the Ploy strategy runner"
+
+[dependencies]
+ploy-market-data.workspace = true
+ploy-strategy-bundles.workspace = true
+ploy-strategy-runtime.workspace = true
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

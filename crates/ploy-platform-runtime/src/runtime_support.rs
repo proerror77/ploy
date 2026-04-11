@@ -1,0 +1,384 @@
+use ploy_connectivity::ExecutionError;
+use ploy_operator_contracts::{
+    DeploymentState, DesiredState, FillSnapshot, IntentPurpose, ObservedState,
+    OrderControlResponse, OrderSnapshot, PnlSnapshotResponse, PositionSnapshotResponse,
+    RiskSnapshotResponse, TradingIntentSnapshot, TradingStateSnapshot,
+};
+use ploy_platform::DeploymentRecord;
+use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
+use serde::Serialize;
+use std::fs;
+use std::io;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileStatus {
+    Applied(usize),
+    Noop,
+    BackoffActive,
+}
+
+pub fn next_proposal_id(target_deployment_id: &str) -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_millis();
+    let target = target_deployment_id.replace('.', "-");
+    format!("proposal-{target}-{millis}")
+}
+
+pub fn build_trading_state_snapshot(
+    record: DeploymentRecord,
+    snapshot: TradingRuntimeSnapshot,
+) -> TradingStateSnapshot {
+    TradingStateSnapshot {
+        deployment_id: record.deployment_id,
+        runtime_mode: record.runtime_mode,
+        intents: snapshot
+            .intents
+            .into_iter()
+            .map(|intent| TradingIntentSnapshot {
+                intent_id: intent.intent_id,
+                market_id: intent.market_id,
+                token_id: intent.token_id,
+                side: trade_side_wire(intent.side),
+                quantity: intent.quantity,
+                limit_price: intent.limit_price,
+                purpose: intent_purpose_wire(intent.purpose),
+                created_at: intent.created_at,
+            })
+            .collect(),
+        orders: snapshot
+            .orders
+            .into_iter()
+            .map(|order| OrderSnapshot {
+                order_id: order.order_id,
+                intent_id: order.intent_id,
+                token_id: order.token_id,
+                requested_qty: order.requested_qty,
+                limit_price: order.limit_price,
+                venue_order_id: order.venue_order_id,
+                venue_order_history: order.venue_order_history,
+                revision: order.revision,
+                state: order_state_wire(order.state),
+                filled_qty: order.filled_qty,
+                rejection_reason: order.rejection_reason,
+                last_error: order.last_error,
+            })
+            .collect(),
+        fills: snapshot
+            .fills
+            .into_iter()
+            .map(|fill| FillSnapshot {
+                fill_id: fill.fill_id,
+                order_id: fill.order_id,
+                token_id: fill.token_id,
+                side: trade_side_wire(fill.side),
+                quantity: fill.quantity,
+                price: fill.price,
+                fee: fill.fee,
+                timestamp: fill.timestamp,
+            })
+            .collect(),
+        positions: snapshot
+            .positions
+            .into_iter()
+            .map(|position| PositionSnapshotResponse {
+                token_id: position.token_id,
+                net_qty: position.net_qty,
+                avg_entry_price: position.avg_entry_price,
+                realized_pnl: position.realized_pnl,
+            })
+            .collect(),
+        pnl: PnlSnapshotResponse {
+            realized_pnl: snapshot.pnl.realized_pnl,
+            unrealized_pnl: snapshot.pnl.unrealized_pnl,
+            total_fees: snapshot.pnl.total_fees,
+            net_pnl: snapshot.pnl.net_pnl(),
+        },
+        risk: RiskSnapshotResponse {
+            pending_intents: snapshot.risk.pending_intents,
+            active_orders: snapshot.risk.active_orders,
+            open_positions: snapshot.risk.open_positions,
+            gross_exposure: snapshot.risk.gross_exposure,
+            reserved_order_exposure: snapshot.risk.reserved_order_exposure,
+            total_gross_exposure: snapshot.risk.total_gross_exposure,
+        },
+    }
+}
+
+pub fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<TradingRuntime> {
+    let deployment_id = snapshot.deployment_id.clone();
+    let intents = snapshot
+        .intents
+        .into_iter()
+        .map(|intent| {
+            Ok(TradingIntent {
+                intent_id: intent.intent_id,
+                deployment_id: deployment_id.clone(),
+                market_id: intent.market_id,
+                token_id: intent.token_id,
+                side: trade_side_from_wire(&intent.side)?,
+                quantity: intent.quantity,
+                limit_price: intent.limit_price,
+                purpose: intent_purpose_from_contract(intent.purpose),
+                created_at: intent.created_at,
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let orders = snapshot
+        .orders
+        .into_iter()
+        .map(|order| {
+            Ok(ploy_trading::OrderRecord {
+                order_id: order.order_id,
+                intent_id: order.intent_id,
+                deployment_id: deployment_id.clone(),
+                token_id: order.token_id,
+                requested_qty: order.requested_qty,
+                limit_price: order.limit_price,
+                venue_order_id: order.venue_order_id,
+                venue_order_history: order.venue_order_history,
+                revision: order.revision,
+                state: order_state_from_wire(&order.state)?,
+                filled_qty: order.filled_qty,
+                rejection_reason: order.rejection_reason,
+                last_error: order.last_error,
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let fills = snapshot
+        .fills
+        .into_iter()
+        .map(|fill| {
+            Ok(ploy_trading::FillRecord {
+                fill_id: fill.fill_id,
+                order_id: fill.order_id,
+                token_id: fill.token_id,
+                side: trade_side_from_wire(&fill.side)?,
+                quantity: fill.quantity,
+                price: fill.price,
+                fee: fill.fee,
+                timestamp: fill.timestamp,
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+
+    Ok(TradingRuntime::restore(TradingRuntimeSnapshot {
+        intents,
+        orders,
+        fills,
+        positions: Vec::new(),
+        pnl: Default::default(),
+        risk: Default::default(),
+    }))
+}
+
+pub fn build_order_control_response(
+    deployment_id: String,
+    order: &ploy_trading::OrderRecord,
+) -> OrderControlResponse {
+    OrderControlResponse {
+        deployment_id,
+        order_id: order.order_id.clone(),
+        state: order_state_wire(order.state),
+        venue_order_id: order.venue_order_id.clone(),
+        venue_order_history: order.venue_order_history.clone(),
+        revision: order.revision,
+        requested_qty: order.requested_qty,
+        limit_price: order.limit_price,
+        rejection_reason: order.rejection_reason.clone(),
+        last_error: order.last_error.clone(),
+        filled_qty: order.filled_qty,
+    }
+}
+
+pub fn trade_side_wire(side: TradeSide) -> String {
+    match side {
+        TradeSide::Buy => "buy".to_string(),
+        TradeSide::Sell => "sell".to_string(),
+    }
+}
+
+pub fn trade_side_from_wire(side: &str) -> io::Result<TradeSide> {
+    match side {
+        "buy" => Ok(TradeSide::Buy),
+        "sell" => Ok(TradeSide::Sell),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported trade side `{other}`"),
+        )),
+    }
+}
+
+pub fn order_state_wire(state: OrderState) -> String {
+    match state {
+        OrderState::Pending => "pending".to_string(),
+        OrderState::Acknowledged => "acknowledged".to_string(),
+        OrderState::PartiallyFilled => "partially_filled".to_string(),
+        OrderState::Filled => "filled".to_string(),
+        OrderState::Canceled => "canceled".to_string(),
+        OrderState::Rejected => "rejected".to_string(),
+    }
+}
+
+pub fn order_state_from_wire(state: &str) -> io::Result<OrderState> {
+    match state {
+        "pending" => Ok(OrderState::Pending),
+        "acknowledged" => Ok(OrderState::Acknowledged),
+        "partially_filled" => Ok(OrderState::PartiallyFilled),
+        "filled" => Ok(OrderState::Filled),
+        "canceled" => Ok(OrderState::Canceled),
+        "rejected" => Ok(OrderState::Rejected),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported order state `{other}`"),
+        )),
+    }
+}
+
+pub fn intent_purpose_wire(purpose: ploy_trading::IntentPurpose) -> IntentPurpose {
+    match purpose {
+        ploy_trading::IntentPurpose::Entry => IntentPurpose::Entry,
+        ploy_trading::IntentPurpose::Exit => IntentPurpose::Exit,
+        ploy_trading::IntentPurpose::Reduce => IntentPurpose::Reduce,
+        ploy_trading::IntentPurpose::Hedge => IntentPurpose::Hedge,
+        ploy_trading::IntentPurpose::Cancel => IntentPurpose::Cancel,
+    }
+}
+
+pub fn intent_purpose_from_contract(purpose: IntentPurpose) -> ploy_trading::IntentPurpose {
+    match purpose {
+        IntentPurpose::Entry => ploy_trading::IntentPurpose::Entry,
+        IntentPurpose::Exit => ploy_trading::IntentPurpose::Exit,
+        IntentPurpose::Reduce => ploy_trading::IntentPurpose::Reduce,
+        IntentPurpose::Hedge => ploy_trading::IntentPurpose::Hedge,
+        IntentPurpose::Cancel => ploy_trading::IntentPurpose::Cancel,
+    }
+}
+
+pub fn deployment_state_wire(state: DeploymentState) -> &'static str {
+    match state {
+        DeploymentState::Enabled => "enabled",
+        DeploymentState::Draining => "draining",
+        DeploymentState::Disabled => "disabled",
+        DeploymentState::Archived => "archived",
+    }
+}
+
+pub fn intent_counts_toward_exposure(purpose: ploy_trading::IntentPurpose) -> bool {
+    matches!(
+        purpose,
+        ploy_trading::IntentPurpose::Entry | ploy_trading::IntentPurpose::Hedge
+    )
+}
+
+pub fn intent_allowed_while_draining(purpose: ploy_trading::IntentPurpose) -> bool {
+    !matches!(purpose, ploy_trading::IntentPurpose::Entry)
+}
+
+pub fn observed_state_for_desired(desired_state: DesiredState) -> ObservedState {
+    match desired_state {
+        DesiredState::Running => ObservedState::Starting,
+        DesiredState::Paused => ObservedState::Paused,
+        DesiredState::Stopped => ObservedState::Stopped,
+    }
+}
+
+pub fn live_reconcile_backoff_ms(failures: u32, base_ms: u64, max_ms: u64) -> u64 {
+    if failures == 0 {
+        return 0;
+    }
+    let exponent = failures.saturating_sub(1).min(10);
+    let scaled = base_ms.saturating_mul(2_u64.saturating_pow(exponent));
+    scaled.min(max_ms.max(base_ms))
+}
+
+pub fn io_error_from_execution_error(err: ExecutionError) -> io::Error {
+    match err {
+        ExecutionError::Validation(message) => io::Error::new(io::ErrorKind::InvalidInput, message),
+        ExecutionError::Configuration(message) => {
+            io::Error::new(io::ErrorKind::InvalidData, message)
+        }
+        ExecutionError::Transport(message) => {
+            io::Error::new(io::ErrorKind::ConnectionAborted, message)
+        }
+    }
+}
+
+pub fn next_paper_intent_id(deployment_id: &str) -> String {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_millis();
+    format!("{deployment_id}-{unique}")
+}
+
+pub fn write_json<T>(path: &Path, value: &T) -> io::Result<()>
+where
+    T: Serialize,
+{
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let body = serde_json::to_vec_pretty(value)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, &body)?;
+    fs::rename(&tmp_path, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_order_control_response, live_reconcile_backoff_ms, observed_state_for_desired,
+        order_state_from_wire, order_state_wire, trade_side_from_wire, trade_side_wire,
+    };
+    use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
+    use ploy_trading::{OrderRecord, OrderState, TradeSide};
+    use rust_decimal::Decimal;
+
+    #[test]
+    fn state_and_side_wire_formats_round_trip() {
+        assert_eq!(trade_side_wire(TradeSide::Buy), "buy");
+        assert_eq!(trade_side_from_wire("sell").unwrap(), TradeSide::Sell);
+        assert_eq!(order_state_wire(OrderState::PartiallyFilled), "partially_filled");
+        assert_eq!(order_state_from_wire("acknowledged").unwrap(), OrderState::Acknowledged);
+        assert_eq!(observed_state_for_desired(DesiredState::Running), ObservedState::Starting);
+        assert_eq!(DeploymentState::Enabled, DeploymentState::Enabled);
+    }
+
+    #[test]
+    fn backoff_scales_and_caps() {
+        assert_eq!(live_reconcile_backoff_ms(0, 500, 8_000), 0);
+        assert_eq!(live_reconcile_backoff_ms(1, 500, 8_000), 500);
+        assert_eq!(live_reconcile_backoff_ms(2, 500, 8_000), 1_000);
+        assert_eq!(live_reconcile_backoff_ms(10, 500, 8_000), 8_000);
+    }
+
+    #[test]
+    fn order_control_response_preserves_fields() {
+        let order = OrderRecord {
+            order_id: "order-1".to_string(),
+            intent_id: "intent-1".to_string(),
+            deployment_id: "dep-1".to_string(),
+            token_id: "123".to_string(),
+            requested_qty: Decimal::new(100, 0),
+            limit_price: Some(Decimal::new(55, 2)),
+            venue_order_id: Some("venue-1".to_string()),
+            venue_order_history: vec!["venue-0".to_string()],
+            revision: 2,
+            state: OrderState::Acknowledged,
+            filled_qty: Decimal::new(25, 0),
+            rejection_reason: None,
+            last_error: None,
+        };
+
+        let response = build_order_control_response("dep-1".to_string(), &order);
+        assert_eq!(response.deployment_id, "dep-1");
+        assert_eq!(response.state, "acknowledged");
+        assert_eq!(response.venue_order_id.as_deref(), Some("venue-1"));
+    }
+}

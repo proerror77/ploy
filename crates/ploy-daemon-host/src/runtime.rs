@@ -2,6 +2,29 @@ use crate::config::PlatformConfig;
 use crate::events::EventBroker;
 use crate::http::publish_snapshot_events;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use ploy_platform_runtime::{
+    apply_loaded_registry_state,
+    apply_deployment as apply_deployment_record, control_deployment as control_deployment_record,
+    LiveHealthConfig, mark_live_runtime_degraded as mark_runtime_degraded_state,
+    mark_runtime_healthy as mark_runtime_healthy_state,
+    next_live_reconcile_at as next_reconcile_attempt_at,
+    WorkerTickConfig, refresh_source_health as refresh_platform_source_health,
+    tick_workers as tick_platform_workers,
+    reconcile_live_fills as reconcile_runtime_live_fills,
+    cancel_order as cancel_runtime_order, replace_order as replace_runtime_order,
+    enforce_exposure_limit as enforce_intent_exposure_limit,
+    enforce_order_replacement_exposure as enforce_replace_exposure_limit,
+    ensure_intent_allowed, set_deployment_max_gross_exposure as set_record_max_gross_exposure,
+    load_proposal_store, load_registry_records, load_trading_runtimes,
+    ProposalStore,
+    submit_live_intent as submit_live_runtime_intent,
+    ReconcileStatus, build_order_control_response, build_trading_state_snapshot,
+    deployment_state_wire, intent_allowed_while_draining, intent_counts_toward_exposure,
+    intent_purpose_from_contract, intent_purpose_wire, io_error_from_execution_error,
+    live_reconcile_backoff_ms, next_proposal_id, observed_state_for_desired,
+    order_state_from_wire, order_state_wire, restore_trading_runtime, trade_side_from_wire,
+    submit_paper_intent as submit_paper_runtime_intent, trade_side_wire, write_json,
+};
 use ploy_connectivity::{
     CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome, ExecutionRequest,
     LiveExecutionGateway, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, TrackedOrder,
@@ -22,13 +45,14 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub use ploy_platform_runtime::next_paper_intent_id;
 
 pub fn request_shutdown() {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
@@ -41,20 +65,13 @@ fn shutdown_requested() -> bool {
 #[cfg(test)]
 use ploy_trading::FillRecord;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReconcileStatus {
-    Applied(usize),
-    Noop,
-    BackoffActive,
-}
-
 #[derive(Debug)]
 pub struct PloyDaemon {
     pub config: PlatformConfig,
     pub control_plane: ControlPlane,
     pub supervisor: WorkerSupervisor,
     pub trading: BTreeMap<String, TradingRuntime>,
-    proposals: Vec<SafetyProposal>,
+    proposals: ProposalStore,
     live_execution: Box<dyn LiveExecutionGateway>,
     live_reconcile_failures: u32,
     next_live_reconcile_at: Option<DateTime<Utc>>,
@@ -70,17 +87,19 @@ impl PloyDaemon {
         config: &PlatformConfig,
         live_execution: Box<dyn LiveExecutionGateway>,
     ) -> io::Result<Self> {
+        let mut normalized_config = config.clone();
+        normalized_config.normalize_derived_paths();
         let mut control_plane = ControlPlane::default();
         control_plane
             .system
-            .set_status(format!("starting@{}", config.listen_addr));
+            .set_status(format!("starting@{}", normalized_config.listen_addr));
 
         let mut daemon = Self {
-            config: config.clone(),
+            config: normalized_config,
             control_plane,
             supervisor: WorkerSupervisor::default(),
             trading: BTreeMap::new(),
-            proposals: Vec::new(),
+            proposals: ProposalStore::default(),
             live_execution,
             live_reconcile_failures: 0,
             next_live_reconcile_at: None,
@@ -143,7 +162,7 @@ impl PloyDaemon {
             &self.control_plane.deployments.summaries(),
         )?;
         write_json(&self.config.trading_state_file, &self.trading_state())?;
-        write_json(&self.config.proposals_file, &self.proposals)?;
+        write_json(&self.config.proposals_file, &self.proposals.all())?;
         Ok(())
     }
 
@@ -172,7 +191,7 @@ impl PloyDaemon {
     }
 
     pub fn proposals(&self) -> Vec<SafetyProposal> {
-        self.proposals.clone()
+        self.proposals.all()
     }
 
     pub fn trading_state(&self) -> Vec<TradingStateSnapshot> {
@@ -195,25 +214,10 @@ impl PloyDaemon {
         &mut self,
         request: DeploymentApplyRequest,
     ) -> io::Result<DeploymentRecord> {
-        let record = DeploymentRecord {
-            deployment_id: request.deployment_id,
-            bundle_id: request.bundle_id,
-            runtime_mode: request.runtime_mode,
-            account_id: request.account_id,
-            max_gross_exposure: request.max_gross_exposure,
-            deployment_state: request.deployment_state,
-            desired_state: request.desired_state,
-            observed_state: observed_state_for_desired(request.desired_state),
-        };
-        self.control_plane.deployments.upsert(record.clone());
+        let record = apply_deployment_record(&mut self.control_plane.deployments, request);
         self.persist_registry()?;
         self.write_runtime_snapshots()?;
-        Ok(self
-            .control_plane
-            .deployments
-            .get(&record.deployment_id)
-            .cloned()
-            .expect("deployment persisted"))
+        Ok(record)
     }
 
     pub fn create_proposal(
@@ -235,32 +239,7 @@ impl PloyDaemon {
             ));
         }
 
-        if matches!(
-            request.action_kind,
-            ProposalActionKind::ReduceMaxExposure
-        ) && request.proposed_max_gross_exposure.is_none()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "reduce_max_exposure proposals require proposed_max_gross_exposure",
-            ));
-        }
-
-        let proposal = SafetyProposal {
-            proposal_id: next_proposal_id(&request.target_deployment_id),
-            action_kind: request.action_kind,
-            target_deployment_id: request.target_deployment_id,
-            status: ProposalStatus::Pending,
-            rationale: request.rationale,
-            evidence: request.evidence,
-            source_run_id: request.source_run_id,
-            proposed_max_gross_exposure: request.proposed_max_gross_exposure,
-            created_at: Utc::now(),
-            decided_at: None,
-            decision_note: None,
-        };
-        self.proposals.push(proposal.clone());
-        Ok(proposal)
+        self.proposals.create(request)
     }
 
     pub fn approve_proposal(
@@ -268,73 +247,47 @@ impl PloyDaemon {
         proposal_id: &str,
         request: ProposalDecisionRequest,
     ) -> io::Result<Option<SafetyProposal>> {
-        let index = match self
-            .proposals
-            .iter()
-            .position(|proposal| proposal.proposal_id == proposal_id)
-        {
-            Some(index) => index,
-            None => return Ok(None),
+        let Some(plan) = self.proposals.prepare_approval(proposal_id, request)? else {
+            return Ok(None);
         };
 
-        if self.proposals[index].status != ProposalStatus::Pending {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("proposal `{proposal_id}` is no longer pending"),
-            ));
-        }
-
-        let action_kind = self.proposals[index].action_kind;
-        let target_deployment_id = self.proposals[index].target_deployment_id.clone();
-        let proposed_max_gross_exposure = self.proposals[index].proposed_max_gross_exposure;
-        let decision_note = request
-            .decision_note
-            .clone()
-            .or_else(|| Some("approved by operator".to_string()));
-
-        let action_result = match action_kind {
+        let action_result = match plan.action_kind {
             ProposalActionKind::PauseDeployment => self.control_deployment(
-                &target_deployment_id,
+                &plan.target_deployment_id,
                 DeploymentControlRequest {
                     desired_state: Some(DesiredState::Paused),
                     deployment_state: None,
                 },
             ),
             ProposalActionKind::DrainDeployment => self.control_deployment(
-                &target_deployment_id,
+                &plan.target_deployment_id,
                 DeploymentControlRequest {
                     desired_state: None,
                     deployment_state: Some(DeploymentState::Draining),
                 },
             ),
             ProposalActionKind::ReduceMaxExposure => {
-                let max_gross_exposure = proposed_max_gross_exposure.ok_or_else(|| {
+                let max_gross_exposure = plan.proposed_max_gross_exposure.ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "proposal missing proposed_max_gross_exposure",
                     )
                 })?;
                 self.set_deployment_max_gross_exposure(
-                    &target_deployment_id,
+                    &plan.target_deployment_id,
                     Some(max_gross_exposure),
                 )?;
-                Ok(self.inspect_deployment(&target_deployment_id))
+                Ok(self.inspect_deployment(&plan.target_deployment_id))
             }
         };
 
         match action_result {
-            Ok(_) => {
-                let proposal = &mut self.proposals[index];
-                proposal.status = ProposalStatus::Approved;
-                proposal.decided_at = Some(Utc::now());
-                proposal.decision_note = decision_note;
-                Ok(Some(proposal.clone()))
-            }
+            Ok(_) => Ok(Some(
+                self.proposals
+                    .mark_approved(proposal_id, plan.decision_note)?,
+            )),
             Err(err) => {
-                let proposal = &mut self.proposals[index];
-                proposal.status = ProposalStatus::Failed;
-                proposal.decided_at = Some(Utc::now());
-                proposal.decision_note = Some(err.to_string());
+                self.proposals.mark_failed(proposal_id, &err)?;
                 Err(err)
             }
         }
@@ -345,27 +298,7 @@ impl PloyDaemon {
         proposal_id: &str,
         request: ProposalDecisionRequest,
     ) -> io::Result<Option<SafetyProposal>> {
-        let Some(proposal) = self
-            .proposals
-            .iter_mut()
-            .find(|proposal| proposal.proposal_id == proposal_id)
-        else {
-            return Ok(None);
-        };
-
-        if proposal.status != ProposalStatus::Pending {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("proposal `{proposal_id}` is no longer pending"),
-            ));
-        }
-
-        proposal.status = ProposalStatus::Rejected;
-        proposal.decided_at = Some(Utc::now());
-        proposal.decision_note = request
-            .decision_note
-            .or_else(|| Some("rejected by operator".to_string()));
-        Ok(Some(proposal.clone()))
+        self.proposals.reject(proposal_id, request)
     }
 
     pub fn control_deployment(
@@ -373,39 +306,11 @@ impl PloyDaemon {
         deployment_id: &str,
         request: DeploymentControlRequest,
     ) -> io::Result<Option<DeploymentRecord>> {
-        let Some(existing) = self.control_plane.deployments.get(deployment_id).cloned() else {
-            return Ok(None);
-        };
-
-        if let Some(deployment_state) = request.deployment_state {
-            self.control_plane
-                .deployments
-                .set_deployment_state(deployment_id, deployment_state);
-        }
-        if let Some(desired_state) = request.desired_state {
-            self.control_plane
-                .deployments
-                .set_desired_state(deployment_id, desired_state);
-            self.control_plane
-                .deployments
-                .set_observed_state(deployment_id, observed_state_for_desired(desired_state));
-        }
-
-        if request.deployment_state.is_none() && request.desired_state.is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("deployment `{deployment_id}` control request was empty"),
-            ));
-        }
-
+        let record =
+            control_deployment_record(&mut self.control_plane.deployments, deployment_id, request)?;
         self.persist_registry()?;
         self.write_runtime_snapshots()?;
-        Ok(self
-            .control_plane
-            .deployments
-            .get(deployment_id)
-            .cloned()
-            .or(Some(existing)))
+        Ok(record)
     }
 
     pub fn submit_intent(&mut self, intent: TradingIntent) -> io::Result<PaperIntentResponse> {
@@ -415,36 +320,12 @@ impl PloyDaemon {
             .get(&intent.deployment_id)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "deployment not found"))?;
-
-        if deployment.deployment_state == DeploymentState::Disabled
-            || deployment.deployment_state == DeploymentState::Archived
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "deployment is {} and cannot accept intents",
-                    deployment_state_wire(deployment.deployment_state)
-                ),
-            ));
-        }
-
-        if deployment.deployment_state == DeploymentState::Draining
-            && !intent_allowed_while_draining(intent.purpose)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "deployment is draining and only exit/reduce/hedge/cancel intents are allowed",
-            ));
-        }
-
-        if deployment.desired_state != DesiredState::Running {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "deployment must be running before it can accept intents",
-            ));
-        }
-
-        self.enforce_exposure_limit(&deployment, &intent)?;
+        ensure_intent_allowed(&deployment, &intent)?;
+        enforce_intent_exposure_limit(
+            &deployment,
+            &intent,
+            self.account_total_exposure(&deployment.account_id),
+        )?;
 
         match deployment.runtime_mode.as_str() {
             "paper" => self.submit_paper_intent(intent),
@@ -479,25 +360,11 @@ impl PloyDaemon {
             ));
         }
 
-        let order_id = format!("order-{}", intent.intent_id);
-        let venue_order_id = format!("paper-{}", intent.intent_id);
         let runtime = self
             .trading
             .entry(intent.deployment_id.clone())
             .or_default();
-        let deployment_id = intent.deployment_id.clone();
-        let intent_id = intent.intent_id.clone();
-        runtime.submit_intent(intent, order_id.clone());
-        runtime.acknowledge_order(&order_id, venue_order_id.clone());
-        Ok(PaperIntentResponse {
-            deployment_id,
-            intent_id,
-            order_id,
-            state: "acknowledged".to_string(),
-            venue_order_id: Some(venue_order_id),
-            rejection_reason: None,
-            last_error: None,
-        })
+        submit_paper_runtime_intent(runtime, deployment, intent)
     }
 
     pub fn cancel_order(
@@ -514,52 +381,13 @@ impl PloyDaemon {
         let runtime = self.trading.get_mut(deployment_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "deployment has no trading state")
         })?;
-        let order = runtime
-            .order(order_id)
-            .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
-
-        if !matches!(
-            order.state,
-            OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
-        ) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "order `{order_id}` is not cancelable from state `{}`",
-                    order_state_wire(order.state)
-                ),
-            ));
-        }
-
-        if deployment.runtime_mode == "live" {
-            if let Some(venue_order_id) = order.venue_order_id.clone() {
-                let cancel_result = self.live_execution.cancel(&CancellationRequest {
-                    order_id: order_id.to_string(),
-                    venue_order_id,
-                });
-                match cancel_result {
-                    Ok(CancellationOutcome::Canceled) => {}
-                    Ok(CancellationOutcome::Rejected { reason }) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("live cancel rejected: {reason}"),
-                        ));
-                    }
-                    Err(err) => {
-                        return Err(io_error_from_execution_error(err));
-                    }
-                }
-            }
-        }
-
-        let updated = runtime
-            .cancel_order(order_id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
-        Ok(build_order_control_response(
-            deployment_id.to_string(),
-            updated,
-        ))
+        cancel_runtime_order(
+            runtime,
+            self.live_execution.as_ref(),
+            &deployment,
+            deployment_id,
+            order_id,
+        )
     }
 
     pub fn replace_order(
@@ -574,175 +402,27 @@ impl PloyDaemon {
             .get(deployment_id)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "deployment not found"))?;
-        let runtime = self.trading.get(deployment_id).ok_or_else(|| {
+        let current_total_exposure = self.account_total_exposure(&deployment.account_id);
+        let runtime = self.trading.get_mut(deployment_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "deployment has no trading state")
         })?;
-        let order = runtime
-            .order(order_id)
-            .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
-
-        if !matches!(
-            order.state,
-            OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
-        ) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "order `{order_id}` is not replaceable from state `{}`",
-                    order_state_wire(order.state)
-                ),
-            ));
-        }
-
-        if request.quantity < order.filled_qty {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "replacement quantity {} cannot be below filled quantity {}",
-                    request.quantity, order.filled_qty
-                ),
-            ));
-        }
-
-        self.enforce_order_replacement_exposure(&deployment, &order, &request)?;
-
-        if deployment.runtime_mode == "live" {
-            let venue_order_id = order.venue_order_id.clone().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("order `{order_id}` has no live venue order to replace"),
-                )
-            })?;
-            let side = runtime
-                .intent(&order.intent_id)
-                .map(|intent| intent.side)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!(
-                            "intent `{}` for order `{order_id}` was not found",
-                            order.intent_id
-                        ),
-                    )
-                })?;
-
-            match self.live_execution.replace(&ReplaceRequest {
-                order_id: order_id.to_string(),
-                venue_order_id,
-                token_id: order.token_id.clone(),
-                side,
-                quantity: request.quantity,
-                limit_price: request.limit_price,
-            }) {
-                Ok(ReplaceOutcome::Replaced { venue_order_id }) => {
-                    let runtime = self.trading.get_mut(deployment_id).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::NotFound, "deployment has no trading state")
-                    })?;
-                    let updated = runtime
-                        .replace_order(
-                            order_id,
-                            request.quantity,
-                            request.limit_price,
-                            venue_order_id,
-                        )
-                        .ok_or_else(|| {
-                            io::Error::new(io::ErrorKind::NotFound, "order not found")
-                        })?;
-                    Ok(build_order_control_response(
-                        deployment_id.to_string(),
-                        updated,
-                    ))
-                }
-                Ok(ReplaceOutcome::Rejected { reason }) => Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("live replace rejected: {reason}"),
-                )),
-                Err(err) => {
-                    if let Some(runtime) = self.trading.get_mut(deployment_id) {
-                        let _ = runtime.record_order_error(order_id, err.to_string());
-                    }
-                    Err(io_error_from_execution_error(err))
-                }
-            }
-        } else {
-            let next_revision = order.revision + 1;
-            let venue_order_id = format!("paper-{order_id}-r{next_revision}");
-            let runtime = self.trading.get_mut(deployment_id).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "deployment has no trading state")
-            })?;
-            let updated = runtime
-                .replace_order(
-                    order_id,
-                    request.quantity,
-                    request.limit_price,
-                    venue_order_id,
-                )
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
-            Ok(build_order_control_response(
-                deployment_id.to_string(),
-                updated,
-            ))
-        }
+        replace_runtime_order(
+            runtime,
+            self.live_execution.as_ref(),
+            &deployment,
+            deployment_id,
+            order_id,
+            request,
+            current_total_exposure,
+        )
     }
 
     fn submit_live_intent(&mut self, intent: TradingIntent) -> io::Result<PaperIntentResponse> {
-        let order_id = format!("order-{}", intent.intent_id);
-        self.trading
+        let runtime = self
+            .trading
             .entry(intent.deployment_id.clone())
-            .or_default()
-            .submit_intent(intent.clone(), order_id.clone());
-
-        let outcome = self.live_execution.submit(&ExecutionRequest {
-            order_id: order_id.clone(),
-            token_id: intent.token_id.clone(),
-            side: intent.side,
-            quantity: intent.quantity,
-            limit_price: intent.limit_price,
-            order_type: ploy_connectivity::OrderExecutionType::GTC,
-            aggressive_ticks: 0,
-        });
-
-        match outcome {
-            Ok(ExecutionOutcome::Acknowledged { venue_order_id }) => {
-                self.trading
-                    .entry(intent.deployment_id.clone())
-                    .or_default()
-                    .acknowledge_order(&order_id, venue_order_id.clone());
-                Ok(PaperIntentResponse {
-                    deployment_id: intent.deployment_id,
-                    intent_id: intent.intent_id,
-                    order_id,
-                    state: "acknowledged".to_string(),
-                    venue_order_id: Some(venue_order_id),
-                    rejection_reason: None,
-                    last_error: None,
-                })
-            }
-            Ok(ExecutionOutcome::Rejected { reason }) => {
-                self.trading
-                    .entry(intent.deployment_id.clone())
-                    .or_default()
-                    .reject_order(&order_id, reason.clone());
-                Ok(PaperIntentResponse {
-                    deployment_id: intent.deployment_id,
-                    intent_id: intent.intent_id,
-                    order_id,
-                    state: "rejected".to_string(),
-                    venue_order_id: None,
-                    rejection_reason: Some(reason.clone()),
-                    last_error: Some(reason),
-                })
-            }
-            Err(err) => {
-                let reason = err.to_string();
-                self.trading
-                    .entry(intent.deployment_id.clone())
-                    .or_default()
-                    .record_order_error(&order_id, reason);
-                Err(io_error_from_execution_error(err))
-            }
-        }
+            .or_default();
+        submit_live_runtime_intent(runtime, self.live_execution.as_ref(), intent)
     }
 
     pub fn reconcile_live_fills(&mut self) -> io::Result<ReconcileStatus> {
@@ -752,44 +432,13 @@ impl PloyDaemon {
             }
         }
 
-        let mut tracked_orders = Vec::new();
-        let mut order_deployments = BTreeMap::new();
+        let result = reconcile_runtime_live_fills(
+            self.live_execution.as_ref(),
+            &self.control_plane.deployments.records(),
+            &mut self.trading,
+        )?;
 
-        for record in self.control_plane.deployments.records() {
-            if record.runtime_mode != "live" || record.deployment_state == DeploymentState::Archived
-            {
-                continue;
-            }
-
-            let Some(runtime) = self.trading.get(&record.deployment_id) else {
-                continue;
-            };
-
-            for order in runtime
-                .snapshot(&BTreeMap::new())
-                .orders
-                .into_iter()
-                .filter(|order| {
-                    order.venue_order_id.is_some()
-                        && matches!(
-                            order.state,
-                            OrderState::Acknowledged | OrderState::PartiallyFilled
-                        )
-                })
-            {
-                let Some(venue_order_id) = order.venue_order_id.clone() else {
-                    continue;
-                };
-                order_deployments.insert(order.order_id.clone(), record.deployment_id.clone());
-                tracked_orders.push(TrackedOrder {
-                    order_id: order.order_id,
-                    venue_order_id,
-                    token_id: order.token_id,
-                });
-            }
-        }
-
-        if tracked_orders.is_empty() {
+        if matches!(result, ReconcileStatus::Noop) {
             self.live_reconcile_failures = 0;
             self.next_live_reconcile_at = None;
             self.last_live_reconcile_error = None;
@@ -797,30 +446,12 @@ impl PloyDaemon {
             return Ok(ReconcileStatus::Noop);
         }
 
-        let fills = self
-            .live_execution
-            .reconcile_fills(&tracked_orders)
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
-
-        let mut recorded = 0;
-        for fill in fills {
-            let Some(deployment_id) = order_deployments.get(&fill.order_id) else {
-                continue;
-            };
-            let Some(runtime) = self.trading.get_mut(deployment_id) else {
-                continue;
-            };
-            if runtime.record_fill(fill) {
-                recorded += 1;
-            }
-        }
-
         self.live_reconcile_failures = 0;
         self.next_live_reconcile_at = None;
         self.last_live_reconcile_error = None;
         self.control_plane.system.note_live_reconcile_healthy();
 
-        Ok(ReconcileStatus::Applied(recorded))
+        Ok(result)
     }
 
     fn latest_trade_time(&self) -> Option<DateTime<Utc>> {
@@ -831,103 +462,45 @@ impl PloyDaemon {
     }
 
     fn mark_runtime_healthy(&mut self) {
-        self.control_plane.system.note_live_reconcile_healthy();
-        self.control_plane.system.note_source_heartbeat(
-            "live_reconcile",
-            "live_reconcile",
-            ChronoDuration::milliseconds(self.config.live_reconcile_stale_after_ms as i64),
+        let health_config = self.live_health_config();
+        let latest_trade_time = self.latest_trade_time();
+        mark_runtime_healthy_state(
+            &mut self.control_plane,
+            &health_config,
+            latest_trade_time,
         );
-        self.control_plane.system.note_source_heartbeat(
-            "venue:polymarket",
-            "venue",
-            ChronoDuration::milliseconds(self.config.venue_stale_after_ms as i64),
-        );
-        self.control_plane
-            .system
-            .note_trade(self.latest_trade_time());
-        if self.control_plane.system.is_degraded() {
-            self.control_plane
-                .system
-                .mark_recovering(&self.config.listen_addr);
-        } else if self
-            .control_plane
-            .system
-            .status()
-            .status
-            .starts_with("recovering")
-        {
-            self.control_plane
-                .system
-                .mark_running(&self.config.listen_addr);
-        } else {
-            self.control_plane
-                .system
-                .mark_running(&self.config.listen_addr);
-        }
-
-        for record in self.control_plane.deployments.records() {
-            if record.runtime_mode == "live"
-                && record.desired_state == DesiredState::Running
-                && record.observed_state == ObservedState::Degraded
-            {
-                self.control_plane
-                    .deployments
-                    .set_observed_state(&record.deployment_id, ObservedState::Running);
-            }
-        }
     }
 
     fn mark_live_runtime_degraded(&mut self, err: io::Error) {
-        self.control_plane
-            .system
-            .mark_degraded(&self.config.listen_addr);
-        self.control_plane.system.note_source_failure(
-            "live_reconcile",
-            "live_reconcile",
-            ChronoDuration::milliseconds(self.config.live_reconcile_stale_after_ms as i64),
-            err.to_string(),
+        let health_config = self.live_health_config();
+        mark_runtime_degraded_state(
+            &mut self.control_plane,
+            &health_config,
+            &mut self.live_reconcile_failures,
+            &mut self.next_live_reconcile_at,
+            &mut self.last_live_reconcile_error,
+            &err,
         );
-        self.control_plane.system.note_source_failure(
-            "venue:polymarket",
-            "venue",
-            ChronoDuration::milliseconds(self.config.venue_stale_after_ms as i64),
-            err.to_string(),
-        );
-        self.record_live_reconcile_failure(&err);
-
-        for record in self.control_plane.deployments.records() {
-            if record.runtime_mode != "live"
-                || record.deployment_state == DeploymentState::Archived
-                || record.desired_state != DesiredState::Running
-            {
-                continue;
-            }
-
-            self.control_plane
-                .deployments
-                .set_observed_state(&record.deployment_id, ObservedState::Degraded);
-        }
     }
 
-    fn record_live_reconcile_failure(&mut self, err: &io::Error) {
-        let failures = self.live_reconcile_failures.saturating_add(1);
-        self.live_reconcile_failures = failures;
-        let next_attempt_at = self.next_live_reconcile_at(failures);
-        let reason = err.to_string();
-        self.next_live_reconcile_at = Some(next_attempt_at);
-        self.last_live_reconcile_error = Some(reason.clone());
-        self.control_plane
-            .system
-            .note_live_reconcile_failure(failures, next_attempt_at, reason);
+    fn evaluate_circuit_breakers(&mut self) {
+        // Placeholder until circuit-breaker policy is fully reintroduced on the
+        // new platform-runtime path. Keeping this as a no-op preserves the
+        // current compile contract without inventing behavior.
     }
 
     fn next_live_reconcile_at(&self, failures: u32) -> DateTime<Utc> {
-        let backoff_ms = live_reconcile_backoff_ms(
-            failures,
-            self.config.live_reconcile_backoff_base_ms,
-            self.config.live_reconcile_backoff_max_ms,
-        );
-        Utc::now() + chrono::Duration::milliseconds(backoff_ms as i64)
+        next_reconcile_attempt_at(&self.live_health_config(), failures)
+    }
+
+    fn live_health_config(&self) -> LiveHealthConfig {
+        LiveHealthConfig {
+            listen_addr: self.config.listen_addr.clone(),
+            live_reconcile_stale_after_ms: self.config.live_reconcile_stale_after_ms,
+            venue_stale_after_ms: self.config.venue_stale_after_ms,
+            live_reconcile_backoff_base_ms: self.config.live_reconcile_backoff_base_ms,
+            live_reconcile_backoff_max_ms: self.config.live_reconcile_backoff_max_ms,
+        }
     }
 
     #[cfg(test)]
@@ -935,83 +508,6 @@ impl PloyDaemon {
         if let Some(runtime) = self.trading.get_mut(deployment_id) {
             runtime.record_fill(fill);
         }
-    }
-
-    fn enforce_exposure_limit(
-        &self,
-        deployment: &DeploymentRecord,
-        intent: &TradingIntent,
-    ) -> io::Result<()> {
-        let Some(max_gross_exposure) = deployment.max_gross_exposure else {
-            return Ok(());
-        };
-        if !intent_counts_toward_exposure(intent.purpose) {
-            return Ok(());
-        }
-
-        let current_total_exposure = self.account_total_exposure(&deployment.account_id);
-        let requested_exposure = intent.quantity * intent.limit_price.unwrap_or(Decimal::ONE);
-
-        if current_total_exposure + requested_exposure > max_gross_exposure {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "deployment `{}` would exceed max_gross_exposure {} on account `{}` (current_total={} requested={})",
-                    deployment.deployment_id,
-                    max_gross_exposure,
-                    deployment.account_id,
-                    current_total_exposure,
-                    requested_exposure
-                ),
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn enforce_order_replacement_exposure(
-        &self,
-        deployment: &DeploymentRecord,
-        order: &ploy_trading::OrderRecord,
-        request: &OrderReplaceRequest,
-    ) -> io::Result<()> {
-        let Some(max_gross_exposure) = deployment.max_gross_exposure else {
-            return Ok(());
-        };
-        let Some(runtime) = self.trading.get(&deployment.deployment_id) else {
-            return Ok(());
-        };
-        let Some(intent) = runtime.intent(&order.intent_id) else {
-            return Ok(());
-        };
-        if !intent_counts_toward_exposure(intent.purpose) {
-            return Ok(());
-        }
-
-        let current_total_exposure = self.account_total_exposure(&deployment.account_id);
-        let current_reservation = (order.requested_qty - order.filled_qty).max(Decimal::ZERO)
-            * order.limit_price.unwrap_or(Decimal::ONE);
-        let replacement_reservation = (request.quantity - order.filled_qty).max(Decimal::ZERO)
-            * request
-                .limit_price
-                .unwrap_or(order.limit_price.unwrap_or(Decimal::ONE));
-        let next_total_exposure =
-            current_total_exposure - current_reservation + replacement_reservation;
-
-        if next_total_exposure > max_gross_exposure {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "replacement would exceed max_gross_exposure {} on account `{}` (current_total={} next_total={})",
-                    max_gross_exposure,
-                    deployment.account_id,
-                    current_total_exposure,
-                    next_total_exposure
-                ),
-            ));
-        }
-
-        Ok(())
     }
 
     fn account_total_exposure(&self, account_id: &str) -> Decimal {
@@ -1030,197 +526,40 @@ impl PloyDaemon {
     }
 
     fn load_registry(&mut self) -> io::Result<()> {
-        if !self.config.registry_file.exists() {
-            return Ok(());
-        }
-
-        let raw = fs::read_to_string(&self.config.registry_file)?;
-        if raw.trim().is_empty() {
-            return Ok(());
-        }
-
-        let records: Vec<DeploymentRecord> = serde_json::from_str(&raw)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-
-        for record in records {
-            let deployment_id = record.deployment_id.clone();
-            let desired_state = record.desired_state;
-            let bundle_id = record.bundle_id.clone();
-            let runtime_mode = record.runtime_mode.clone();
-            self.control_plane.deployments.upsert(record);
-            self.trading.entry(deployment_id.clone()).or_default();
-
-            if desired_state == DesiredState::Running {
-                self.supervisor.start(WorkerLaunchSpec {
-                    deployment_id: deployment_id.clone(),
-                    bundle_id,
-                    runtime_mode,
-                    desired_state,
-                });
-                if let Some(status) = self.supervisor.heartbeat(&deployment_id) {
-                    self.control_plane
-                        .deployments
-                        .set_observed_state(&deployment_id, status.observed_state);
-                }
-            }
-        }
+        let records = load_registry_records(&self.config.registry_file)?;
+        apply_loaded_registry_state(
+            records,
+            &mut self.control_plane.deployments,
+            &mut self.supervisor,
+            &mut self.trading,
+        );
 
         Ok(())
     }
 
     fn load_trading_snapshots(&mut self) -> io::Result<()> {
-        if !self.config.trading_state_file.exists() {
-            return Ok(());
-        }
-
-        let raw = fs::read_to_string(&self.config.trading_state_file)?;
-        if raw.trim().is_empty() {
-            return Ok(());
-        }
-
-        let snapshots: Vec<TradingStateSnapshot> = serde_json::from_str(&raw)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-
-        for snapshot in snapshots {
-            if self
-                .control_plane
-                .deployments
-                .get(&snapshot.deployment_id)
-                .is_none()
-            {
-                continue;
-            }
-
-            let deployment_id = snapshot.deployment_id.clone();
-            self.trading
-                .insert(deployment_id, restore_trading_runtime(snapshot)?);
-        }
-
+        let runtimes = load_trading_runtimes(&self.config.trading_state_file, |deployment_id| {
+            self.control_plane.deployments.get(deployment_id).is_some()
+        })?;
+        self.trading.extend(runtimes);
         Ok(())
     }
 
     fn load_proposals(&mut self) -> io::Result<()> {
-        if !self.config.proposals_file.exists() {
-            return Ok(());
-        }
-
-        let raw = fs::read_to_string(&self.config.proposals_file)?;
-        if raw.trim().is_empty() {
-            return Ok(());
-        }
-
-        self.proposals = serde_json::from_str(&raw)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        self.proposals = load_proposal_store(&self.config.proposals_file)?;
         Ok(())
     }
 
     fn tick(&mut self) {
-        let records = self.control_plane.deployments.records();
-
-        for record in records {
-            match record.desired_state {
-                DesiredState::Running => {
-                    if self.supervisor.status(&record.deployment_id).is_none() {
-                        self.supervisor.start(WorkerLaunchSpec {
-                            deployment_id: record.deployment_id.clone(),
-                            bundle_id: record.bundle_id.clone(),
-                            runtime_mode: record.runtime_mode.clone(),
-                            desired_state: record.desired_state,
-                        });
-                    }
-                    if let Some(status) = self.supervisor.heartbeat(&record.deployment_id) {
-                        self.control_plane
-                            .deployments
-                            .set_observed_state(&record.deployment_id, status.observed_state);
-                        self.control_plane.system.note_source_heartbeat(
-                            format!("worker:{}", record.deployment_id),
-                            "worker",
-                            ChronoDuration::milliseconds(
-                                self.config.worker_heartbeat_stale_after_ms as i64,
-                            ),
-                        );
-                    }
-                }
-                DesiredState::Paused => {
-                    self.control_plane
-                        .system
-                        .clear_source(&format!("worker:{}", record.deployment_id));
-                    if let Some(status) = self.supervisor.pause(&record.deployment_id) {
-                        self.control_plane
-                            .deployments
-                            .set_observed_state(&record.deployment_id, status.observed_state);
-                    } else {
-                        self.control_plane
-                            .deployments
-                            .set_observed_state(&record.deployment_id, ObservedState::Paused);
-                    }
-                }
-                DesiredState::Stopped => {
-                    self.control_plane
-                        .system
-                        .clear_source(&format!("worker:{}", record.deployment_id));
-                    if let Some(status) = self.supervisor.stop(&record.deployment_id) {
-                        self.control_plane
-                            .deployments
-                            .set_observed_state(&record.deployment_id, status.observed_state);
-                    } else {
-                        self.control_plane
-                            .deployments
-                            .set_observed_state(&record.deployment_id, ObservedState::Stopped);
-                    }
-                }
-            }
-        }
+        let tick_config = WorkerTickConfig {
+            listen_addr: self.config.listen_addr.clone(),
+            worker_heartbeat_stale_after_ms: self.config.worker_heartbeat_stale_after_ms,
+        };
+        tick_platform_workers(&mut self.control_plane, &mut self.supervisor, &tick_config);
     }
 
     fn refresh_source_health(&mut self) {
-        let stale_sources = self.control_plane.system.refresh_source_health();
-        let records = self.control_plane.deployments.records();
-
-        for record in records {
-            if record.desired_state != DesiredState::Running {
-                continue;
-            }
-            let worker_stale = self
-                .control_plane
-                .system
-                .source_is_stale(&format!("worker:{}", record.deployment_id));
-            let live_source_stale = record.runtime_mode == "live"
-                && (self.control_plane.system.source_is_stale("live_reconcile")
-                    || self
-                        .control_plane
-                        .system
-                        .source_is_stale("venue:polymarket"));
-
-            if worker_stale || live_source_stale {
-                self.control_plane
-                    .deployments
-                    .set_observed_state(&record.deployment_id, ObservedState::Degraded);
-            }
-        }
-
-        if stale_sources > 0 {
-            self.control_plane
-                .system
-                .mark_degraded(&self.config.listen_addr);
-            return;
-        }
-
-        if self.control_plane.system.is_degraded() {
-            self.control_plane
-                .system
-                .mark_recovering(&self.config.listen_addr);
-        }
-
-        for record in self.control_plane.deployments.records() {
-            if record.desired_state == DesiredState::Running
-                && record.observed_state == ObservedState::Degraded
-            {
-                self.control_plane
-                    .deployments
-                    .set_observed_state(&record.deployment_id, ObservedState::Running);
-            }
-        }
+        refresh_platform_source_health(&mut self.control_plane, &self.config.listen_addr);
     }
 
     fn persist_registry(&self) -> io::Result<()> {
@@ -1252,17 +591,14 @@ impl PloyDaemon {
             }
         }
 
-        let record = self
-            .control_plane
-            .deployments
-            .set_max_gross_exposure(deployment_id, max_gross_exposure)
-            .cloned()
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("deployment `{deployment_id}` was not found"),
-                )
-            })?;
+        let record = set_record_max_gross_exposure(
+            &mut self.control_plane.deployments,
+            deployment_id,
+            max_gross_exposure,
+            self.trading
+                .get(deployment_id)
+                .map(|runtime| runtime.snapshot(&BTreeMap::new()).risk.total_gross_exposure),
+        )?;
 
         self.persist_registry()?;
 
@@ -1293,302 +629,6 @@ impl PloyDaemon {
     }
 }
 
-fn next_proposal_id(target_deployment_id: &str) -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_millis();
-    let target = target_deployment_id.replace('.', "-");
-    format!("proposal-{target}-{millis}")
-}
-
-fn build_trading_state_snapshot(
-    record: DeploymentRecord,
-    snapshot: TradingRuntimeSnapshot,
-) -> TradingStateSnapshot {
-    TradingStateSnapshot {
-        deployment_id: record.deployment_id,
-        runtime_mode: record.runtime_mode,
-        intents: snapshot
-            .intents
-            .into_iter()
-            .map(|intent| TradingIntentSnapshot {
-                intent_id: intent.intent_id,
-                market_id: intent.market_id,
-                token_id: intent.token_id,
-                side: trade_side_wire(intent.side),
-                quantity: intent.quantity,
-                limit_price: intent.limit_price,
-                purpose: intent_purpose_wire(intent.purpose),
-                created_at: intent.created_at,
-            })
-            .collect(),
-        orders: snapshot
-            .orders
-            .into_iter()
-            .map(|order| OrderSnapshot {
-                order_id: order.order_id,
-                intent_id: order.intent_id,
-                token_id: order.token_id,
-                requested_qty: order.requested_qty,
-                limit_price: order.limit_price,
-                venue_order_id: order.venue_order_id,
-                venue_order_history: order.venue_order_history,
-                revision: order.revision,
-                state: order_state_wire(order.state),
-                filled_qty: order.filled_qty,
-                rejection_reason: order.rejection_reason,
-                last_error: order.last_error,
-            })
-            .collect(),
-        fills: snapshot
-            .fills
-            .into_iter()
-            .map(|fill| FillSnapshot {
-                fill_id: fill.fill_id,
-                order_id: fill.order_id,
-                token_id: fill.token_id,
-                side: trade_side_wire(fill.side),
-                quantity: fill.quantity,
-                price: fill.price,
-                fee: fill.fee,
-                timestamp: fill.timestamp,
-            })
-            .collect(),
-        positions: snapshot
-            .positions
-            .into_iter()
-            .map(|position| PositionSnapshotResponse {
-                token_id: position.token_id,
-                net_qty: position.net_qty,
-                avg_entry_price: position.avg_entry_price,
-                realized_pnl: position.realized_pnl,
-            })
-            .collect(),
-        pnl: PnlSnapshotResponse {
-            realized_pnl: snapshot.pnl.realized_pnl,
-            unrealized_pnl: snapshot.pnl.unrealized_pnl,
-            total_fees: snapshot.pnl.total_fees,
-            net_pnl: snapshot.pnl.net_pnl(),
-        },
-        risk: RiskSnapshotResponse {
-            pending_intents: snapshot.risk.pending_intents,
-            active_orders: snapshot.risk.active_orders,
-            open_positions: snapshot.risk.open_positions,
-            gross_exposure: snapshot.risk.gross_exposure,
-            reserved_order_exposure: snapshot.risk.reserved_order_exposure,
-            total_gross_exposure: snapshot.risk.total_gross_exposure,
-        },
-    }
-}
-
-fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<TradingRuntime> {
-    let deployment_id = snapshot.deployment_id.clone();
-    let intents = snapshot
-        .intents
-        .into_iter()
-        .map(|intent| {
-            Ok(TradingIntent {
-                intent_id: intent.intent_id,
-                deployment_id: deployment_id.clone(),
-                market_id: intent.market_id,
-                token_id: intent.token_id,
-                side: trade_side_from_wire(&intent.side)?,
-                quantity: intent.quantity,
-                limit_price: intent.limit_price,
-                purpose: intent_purpose_from_contract(intent.purpose),
-                created_at: intent.created_at,
-            })
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    let orders = snapshot
-        .orders
-        .into_iter()
-        .map(|order| {
-            Ok(ploy_trading::OrderRecord {
-                order_id: order.order_id,
-                intent_id: order.intent_id,
-                deployment_id: deployment_id.clone(),
-                token_id: order.token_id,
-                requested_qty: order.requested_qty,
-                limit_price: order.limit_price,
-                venue_order_id: order.venue_order_id,
-                venue_order_history: order.venue_order_history,
-                revision: order.revision,
-                state: order_state_from_wire(&order.state)?,
-                filled_qty: order.filled_qty,
-                rejection_reason: order.rejection_reason,
-                last_error: order.last_error,
-            })
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    let fills = snapshot
-        .fills
-        .into_iter()
-        .map(|fill| {
-            Ok(ploy_trading::FillRecord {
-                fill_id: fill.fill_id,
-                order_id: fill.order_id,
-                token_id: fill.token_id,
-                side: trade_side_from_wire(&fill.side)?,
-                quantity: fill.quantity,
-                price: fill.price,
-                fee: fill.fee,
-                timestamp: fill.timestamp,
-            })
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-
-    Ok(TradingRuntime::restore(TradingRuntimeSnapshot {
-        intents,
-        orders,
-        fills,
-        positions: Vec::new(),
-        pnl: Default::default(),
-        risk: Default::default(),
-    }))
-}
-
-fn build_order_control_response(
-    deployment_id: String,
-    order: &ploy_trading::OrderRecord,
-) -> OrderControlResponse {
-    OrderControlResponse {
-        deployment_id,
-        order_id: order.order_id.clone(),
-        state: order_state_wire(order.state),
-        venue_order_id: order.venue_order_id.clone(),
-        venue_order_history: order.venue_order_history.clone(),
-        revision: order.revision,
-        requested_qty: order.requested_qty,
-        limit_price: order.limit_price,
-        rejection_reason: order.rejection_reason.clone(),
-        last_error: order.last_error.clone(),
-        filled_qty: order.filled_qty,
-    }
-}
-
-fn trade_side_wire(side: TradeSide) -> String {
-    match side {
-        TradeSide::Buy => "buy".to_string(),
-        TradeSide::Sell => "sell".to_string(),
-    }
-}
-
-fn trade_side_from_wire(side: &str) -> io::Result<TradeSide> {
-    match side {
-        "buy" => Ok(TradeSide::Buy),
-        "sell" => Ok(TradeSide::Sell),
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unsupported trade side `{other}`"),
-        )),
-    }
-}
-
-fn order_state_wire(state: OrderState) -> String {
-    match state {
-        OrderState::Pending => "pending".to_string(),
-        OrderState::Acknowledged => "acknowledged".to_string(),
-        OrderState::PartiallyFilled => "partially_filled".to_string(),
-        OrderState::Filled => "filled".to_string(),
-        OrderState::Canceled => "canceled".to_string(),
-        OrderState::Rejected => "rejected".to_string(),
-    }
-}
-
-fn order_state_from_wire(state: &str) -> io::Result<OrderState> {
-    match state {
-        "pending" => Ok(OrderState::Pending),
-        "acknowledged" => Ok(OrderState::Acknowledged),
-        "partially_filled" => Ok(OrderState::PartiallyFilled),
-        "filled" => Ok(OrderState::Filled),
-        "canceled" => Ok(OrderState::Canceled),
-        "rejected" => Ok(OrderState::Rejected),
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unsupported order state `{other}`"),
-        )),
-    }
-}
-
-fn intent_purpose_wire(purpose: ploy_trading::IntentPurpose) -> IntentPurpose {
-    match purpose {
-        ploy_trading::IntentPurpose::Entry => IntentPurpose::Entry,
-        ploy_trading::IntentPurpose::Exit => IntentPurpose::Exit,
-        ploy_trading::IntentPurpose::Reduce => IntentPurpose::Reduce,
-        ploy_trading::IntentPurpose::Hedge => IntentPurpose::Hedge,
-        ploy_trading::IntentPurpose::Cancel => IntentPurpose::Cancel,
-    }
-}
-
-fn intent_purpose_from_contract(purpose: IntentPurpose) -> ploy_trading::IntentPurpose {
-    match purpose {
-        IntentPurpose::Entry => ploy_trading::IntentPurpose::Entry,
-        IntentPurpose::Exit => ploy_trading::IntentPurpose::Exit,
-        IntentPurpose::Reduce => ploy_trading::IntentPurpose::Reduce,
-        IntentPurpose::Hedge => ploy_trading::IntentPurpose::Hedge,
-        IntentPurpose::Cancel => ploy_trading::IntentPurpose::Cancel,
-    }
-}
-
-fn deployment_state_wire(state: DeploymentState) -> &'static str {
-    match state {
-        DeploymentState::Enabled => "enabled",
-        DeploymentState::Draining => "draining",
-        DeploymentState::Disabled => "disabled",
-        DeploymentState::Archived => "archived",
-    }
-}
-
-fn intent_counts_toward_exposure(purpose: ploy_trading::IntentPurpose) -> bool {
-    matches!(
-        purpose,
-        ploy_trading::IntentPurpose::Entry | ploy_trading::IntentPurpose::Hedge
-    )
-}
-
-fn intent_allowed_while_draining(purpose: ploy_trading::IntentPurpose) -> bool {
-    !matches!(purpose, ploy_trading::IntentPurpose::Entry)
-}
-
-fn observed_state_for_desired(desired_state: DesiredState) -> ObservedState {
-    match desired_state {
-        DesiredState::Running => ObservedState::Starting,
-        DesiredState::Paused => ObservedState::Paused,
-        DesiredState::Stopped => ObservedState::Stopped,
-    }
-}
-
-fn live_reconcile_backoff_ms(failures: u32, base_ms: u64, max_ms: u64) -> u64 {
-    if failures == 0 {
-        return 0;
-    }
-    let exponent = failures.saturating_sub(1).min(10);
-    let scaled = base_ms.saturating_mul(2_u64.saturating_pow(exponent));
-    scaled.min(max_ms.max(base_ms))
-}
-
-fn io_error_from_execution_error(err: ExecutionError) -> io::Error {
-    match err {
-        ExecutionError::Validation(message) => io::Error::new(io::ErrorKind::InvalidInput, message),
-        ExecutionError::Configuration(message) => {
-            io::Error::new(io::ErrorKind::InvalidData, message)
-        }
-        ExecutionError::Transport(message) => {
-            io::Error::new(io::ErrorKind::ConnectionAborted, message)
-        }
-    }
-}
-
-pub fn next_paper_intent_id(deployment_id: &str) -> String {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time")
-        .as_millis();
-    format!("{deployment_id}-{unique}")
-}
-
 pub fn run_shared_forever(
     daemon: Arc<Mutex<PloyDaemon>>,
     events: Arc<EventBroker>,
@@ -1617,21 +657,6 @@ pub fn run_shared_forever(
         };
         thread::sleep(Duration::from_millis(tick_interval_ms));
     }
-}
-
-fn write_json<T>(path: &Path, value: &T) -> io::Result<()>
-where
-    T: Serialize,
-{
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    let body = serde_json::to_vec_pretty(value)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    let tmp_path = path.with_extension("tmp");
-    fs::write(&tmp_path, &body)?;
-    fs::rename(&tmp_path, path)
 }
 
 #[cfg(test)]

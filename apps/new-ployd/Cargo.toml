@@ -1,14 +1,11 @@
 [package]
-name = "ployd"
+name = "new-ployd"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Ploy platform daemon workspace entry point"
+description = "Bootstrap shell for the next-generation Ploy daemon"
 
 [dependencies]
-ploy-daemon-host.workspace = true
-
-[dev-dependencies]
 ploy-daemon-host.workspace = true

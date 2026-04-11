@@ -7407,3 +7407,132 @@ related RTDS reconnect churn in the dry-run feed path by removing all uses of
 - 2026-04-09: Dry-run host PID `725622` still logged `Heartbeat timeout: no PONG received within 15s` plus `ResetWithoutClosingHandshake`, which matches the SDK default RTDS heartbeat policy and explains why the collector-only fix did not clean up the strategy service.
 - 2026-04-09: Added a shared `rtds_market_data_ws_config()` helper in `feeds.rs` and switched all three dry-run RTDS clients to `RtdsClient::new(..., rtds_market_data_ws_config())`, so the strategy service no longer uses the SDK default `5s/15s` heartbeat window on any market-data RTDS feed.
 - 2026-04-09: Local validation passed with `CARGO_TARGET_DIR=/tmp/ploy-dryrun-rtds rtk cargo test -p ploy-runner dry_run_rtds_market_data_uses_relaxed_ws_heartbeat_settings` and `CARGO_TARGET_DIR=/tmp/ploy-dryrun-rtds rtk cargo check -p ploy-runner --bin ploy-runner`.
+
+# Tango Deploy Migration Drift Fix (2026-04-10)
+
+## Goal
+Fix `deploy-tango-1-1.yml` so runner deployments on `main` bundle and apply
+`migrations/033_fix_settlement_view_join_and_confirmed_flag.sql`, and reduce the
+risk of future drift between the bundled migration list and the applied
+migration list.
+
+## File ownership
+
+- `.github/workflows/deploy-tango-1-1.yml`
+  - owner: single-source migration allowlist for tango runner deploys
+- `tasks/todo.md`
+  - owner: track plan, verification, and review notes for the workflow-only fix
+
+## Tasks
+
+- [x] Confirm the root cause is workflow drift, not the unrelated `ployd` build failure in `test.yml`.
+- [x] Replace the duplicated migration filename lists with one shared allowlist in the workflow.
+- [x] Include migration `033_fix_settlement_view_join_and_confirmed_flag.sql` in the tango deploy bundle and apply loop.
+- [x] Run local verification on the updated workflow shell logic and capture residual deployment risks.
+
+## Progress notes
+
+- 2026-04-10: Added `DEPLOY_MIGRATIONS` to `.github/workflows/deploy-tango-1-1.yml` and rewired bundle/install/apply steps to consume the same allowlist instead of maintaining duplicated filename lists.
+- 2026-04-10: The allowlist now includes `033_fix_settlement_view_join_and_confirmed_flag.sql`, which prevents ordinary tango redeploys from shipping only the older 032 track-record view definitions.
+- 2026-04-10: Local verification passed with `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/deploy-tango-1-1.yml")'`, `git diff --check -- .github/workflows/deploy-tango-1-1.yml tasks/todo.md`, and `rg -n "DEPLOY_MIGRATIONS|033_fix_settlement_view_join_and_confirmed_flag" .github/workflows/deploy-tango-1-1.yml`.
+- 2026-04-10: A local shell simulation confirmed the workflow allowlist expands into seven discrete migration filenames and the bundle-copy loop carries `033_fix_settlement_view_join_and_confirmed_flag.sql`.
+
+## Review
+
+- The fix stays narrow: one workflow env allowlist is now the source of truth for bundle, remote install, and remote `psql` apply order.
+- This removes the exact drift that caused `main` to be deployable with a newer `ploy-runner` binary but stale 032-only track-record views.
+- Remaining risk is operational, not code-level: migration 033 still drops/recreates views on host, so concurrent SQL readers may see a brief interruption during deploy.
+
+# Runtime Ownership Refactor Bootstrap (2026-04-11)
+
+## Goal
+Start the forked runtime refactor by creating the new ownership crates and
+rewiring the first high-leverage boundaries: shared operator client transport
+and runner-side market-data infrastructure.
+
+## File ownership
+
+- `Cargo.toml`
+  - owner: workspace membership and narrowed default-members for faster local loops
+- `crates/ploy-control-client/`
+  - owner: shared control-plane client transport moved out of `apps/ployctl`
+- `crates/ploy-market-data/`
+  - owner: market-data/discovery/reference-price infrastructure boundary for runner flows
+- `crates/ploy-platform-runtime/`
+  - owner: bootstrap marker for future daemon orchestration ownership
+- `crates/ploy-strategy-runtime/`
+  - owner: bootstrap marker for future strategy-host ownership
+- `apps/new-ployd/`
+  - owner: next-generation daemon bootstrap shell
+- `apps/new-ploy-runner/`
+  - owner: next-generation runner bootstrap shell
+- `apps/ployctl/`
+  - owner: re-export shared client instead of owning it directly
+- `apps/ploytui/`
+  - owner: depend on shared control client instead of depending on `ployctl`
+- `apps/ploy-runner/`
+  - owner: consume `ploy-market-data` instead of owning those modules directly
+
+## Tasks
+
+- [x] Add the new runtime/client/market-data crates and bootstrap app shells to the workspace.
+- [x] Move `ControlPlaneClient` implementation into `crates/ploy-control-client` and keep `ployctl` as a thin wrapper.
+- [x] Remove the `ploytui -> ployctl` app-to-app dependency by switching TUI to the shared client crate.
+- [x] Create `crates/ploy-market-data` and move runner market-data infrastructure modules into it.
+- [x] Rewire `ploy-runner` to import collector/feed/scanner/reference-price infrastructure from `ploy-market-data`.
+- [x] Verify the new workspace slice compiles and the moved/new crates pass their unit tests.
+
+## Progress notes
+
+- 2026-04-11: Added workspace entries for `crates/ploy-control-client`, `crates/ploy-market-data`, `crates/ploy-platform-runtime`, `crates/ploy-strategy-runtime`, `apps/new-ployd`, and `apps/new-ploy-runner`.
+- 2026-04-11: Narrowed `default-members` so root workspace commands default to the control-plane/runtime spine instead of implicitly pulling the full heavy runner/research toolchain.
+- 2026-04-11: Moved the real `ControlPlaneClient` implementation into `crates/ploy-control-client` and converted `apps/ployctl/src/client.rs` into a thin re-export.
+- 2026-04-11: Switched `apps/ploytui` to depend directly on `ploy-control-client`, removing the `ploytui -> ployctl` app-level dependency.
+- 2026-04-11: Created `crates/ploy-market-data`; moved `reference_prices`, `scanner`, `sports_feed`, `discovery/*`, `feeds`, and `collector` into the new crate so runner-side market-data infrastructure now has a real crate home.
+- 2026-04-11: Rewired `apps/ploy-runner/src/main.rs` to use `ploy-market-data::{collector,feeds,reference_prices,scanner,sports_feed}`.
+- 2026-04-11: Added bootstrap shells for `apps/new-ployd` and `apps/new-ploy-runner`, plus marker runtime crates for the next ownership cuts.
+- 2026-04-11: Validation passed with `cargo check -p ploy-control-client -p ploy-market-data -p ployctl -p ploytui -p ploy-runner -p new-ployd -p new-ploy-runner`, `cargo test -p ploy-control-client -p ploy-market-data --lib`, `cargo test -p ployctl -p ploytui --lib`, and `cargo test -p ploy-runner --bin ploy-runner -- --nocapture`.
+- 2026-04-11: Completed the full `ploy-market-data` ownership move by relocating `feeds.rs` and `collector.rs` into the new crate; `apps/ploy-runner` no longer path-hosts those implementations.
+- 2026-04-11: Started the `ployd` ownership cut by moving runtime support logic into `crates/ploy-platform-runtime::runtime_support`, including proposal ID generation, trading snapshot encode/decode, order control response shaping, state/side/purpose wire conversions, reconcile backoff policy, and atomic JSON persistence.
+- 2026-04-11: `cargo check -p ploy-platform-runtime -p new-ployd` and `cargo test -p ploy-platform-runtime --lib` passed for the new platform-runtime slice.
+- 2026-04-11: `apps/ployd` still has pre-existing compile failures unrelated to this refactor slice, centered on missing `ploy-operator-contracts` symbols and stale `PlatformConfig`/HTTP assumptions. Those errors showed up when checking `-p ployd` and were intentionally left out of this ownership cut.
+- 2026-04-11: Moved the main strategy execution path out of `apps/ploy-runner/src/main.rs` into `crates/ploy-strategy-runtime/src/lib.rs`. The new crate now owns runtime-mode dispatch, historical/replay/live feed assembly, signal recording, and live execution/reconcile wiring.
+- 2026-04-11: Reduced `apps/ploy-runner/src/main.rs` to CLI parsing plus the tool-style `check-db` and `collect-quotes` commands; the default `run` path now delegates to `ploy_strategy_runtime::run_strategy(...)`.
+- 2026-04-11: Validation passed with `cargo check -p ploy-strategy-runtime -p ploy-runner -p new-ploy-runner`, `cargo test -p ploy-strategy-runtime --lib`, and `cargo test -p ploy-runner --bin ploy-runner -- --nocapture`.
+- 2026-04-11: Updated `.github/workflows/test.yml` so the default CI build/test package lists now include `ploy-runner` and the new ownership crates/apps (`new-ployd`, `new-ploy-runner`, `ploy-control-client`, `ploy-market-data`, `ploy-platform-runtime`, `ploy-strategy-runtime`) instead of leaving the shipped runner path outside the default validation lane.
+- 2026-04-11: Static workflow validation passed with `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/test.yml")'`, `git diff --check -- .github/workflows/test.yml tasks/todo.md`, and `rg -n "new-ployd|new-ploy-runner|ploy-control-client|ploy-market-data|ploy-runner|ploy-strategy-runtime|ploy-platform-runtime" .github/workflows/test.yml`.
+- 2026-04-11: Restored `apps/ployd` to a green compile/test state by filling the missing operator-contract diagnostics/proposal/oversight types, aligning `PlatformConfig` with the HTTP/runtime paths (`agent_runs_file`, `proposals_file`, `circuit_breaker_enabled`), adding `DeploymentRegistry::set_max_gross_exposure`, and normalizing config-derived paths during boot.
+- 2026-04-11: Moved proposal lifecycle state into `crates/ploy-platform-runtime::ProposalStore`; `PloyDaemon` now delegates proposal create/prepare-approval/approve/reject state transitions to that store instead of owning raw `Vec<SafetyProposal>` lifecycle logic inline.
+- 2026-04-11: Moved `check_database` out of `apps/ploy-runner/src/main.rs` into `crates/ploy-market-data::diagnostics`, further shrinking the runner entrypoint toward a pure CLI shell.
+- 2026-04-11: Validation passed with `cargo check -p ployd`, `cargo test -p ployd --bin ployd -- --nocapture`, `cargo check -p ploy-market-data -p ploy-runner`, and `cargo test -p ploy-market-data --lib`.
+- 2026-04-11: Moved deployment rule logic into `crates/ploy-platform-runtime::deployment_control`, including deployment record construction, deployment state control, max exposure updates, and intent/order-replacement exposure checks.
+- 2026-04-11: Moved registry/trading/proposal state file loading into `crates/ploy-platform-runtime::state_io`, and moved startup registry/worker bootstrap into `crates/ploy-platform-runtime::bootstrap`.
+- 2026-04-11: `apps/ployd/src/runtime.rs` now delegates proposal lifecycle, deployment rule decisions, state loading, and worker bootstrap into `ploy-platform-runtime`, leaving the daemon app with less policy ownership and more coordination-only code.
+- 2026-04-11: Validation passed again after the deeper `platform-runtime` cuts with `cargo test -p ploy-platform-runtime --lib`, `cargo check -p ployd`, and `cargo test -p ployd --bin ployd -- --nocapture`.
+- 2026-04-11: Moved the paper/live order submission entrypoints into `crates/ploy-platform-runtime::trade_submit`; `apps/ployd/src/runtime.rs` now delegates `submit_paper_intent` and `submit_live_intent` into the runtime crate instead of owning those flows inline.
+- 2026-04-11: `platform-runtime` now owns proposal state, deployment rules, state I/O, startup registry bootstrap, and the paper/live submit entrypoint logic. `apps/ployd/src/runtime.rs` is increasingly a coordinator over services rather than the sole owner of platform behavior.
+- 2026-04-11: Moved cancel/replace order control flows into `crates/ploy-platform-runtime::trade_control`; `apps/ployd/src/runtime.rs` now delegates those paths into the runtime crate instead of owning the validation + gateway + ledger mutation flow inline.
+- 2026-04-11: Validation passed again after the trade-control cut with `cargo test -p ploy-platform-runtime --lib`, `cargo check -p ployd`, and `cargo test -p ployd --bin ployd -- --nocapture`.
+- 2026-04-11: Moved live fill reconciliation into `crates/ploy-platform-runtime::reconcile`; `apps/ployd/src/runtime.rs` now delegates the tracked-order collection and fill-recording flow into the runtime crate instead of owning it inline.
+- 2026-04-11: After the reconcile cut, the remaining heavy `ployd` ownership is concentrated in health/degradation/recovery orchestration and the tick loop, not in proposal/deployment/trading control logic.
+- 2026-04-11: Moved live health transitions into `crates/ploy-platform-runtime::health_runtime` and worker desired-state tick/source-health refresh into `crates/ploy-platform-runtime::worker_tick`; `apps/ployd/src/runtime.rs` now delegates health/degraded/recovering transitions and worker tick behavior into the runtime crate.
+- 2026-04-11: Extracted `crates/ploy-daemon-host`; the old `apps/ployd` modules (`config`, `events`, `http`, `runtime`) now live in the host crate, and both `apps/ployd` and `apps/new-ployd` are real thin entrypoints over that shared host.
+- 2026-04-11: Extracted `crates/ploy-runner-host`; both `apps/ploy-runner` and `apps/new-ploy-runner` now delegate to the shared runner-host crate instead of one being real and one being a placeholder shell.
+- 2026-04-11: Validation passed after the host-crate extraction with `cargo test -p ploy-daemon-host --lib`, `cargo check -p ployd -p new-ployd`, `cargo test -p ployd --bin ployd -- --nocapture`, `cargo test -p ploy-platform-runtime --lib`, `cargo check -p ploy-runner-host -p ploy-runner -p new-ploy-runner`, `cargo test -p ploy-runner-host --lib`, and `cargo test -p ploy-runner --bin ploy-runner -- --nocapture`.
+- 2026-04-11: Updated `.github/workflows/test.yml` again so the default CI lane also validates `ploy-daemon-host` and `ploy-runner-host`, not just the wrapper binaries.
+- 2026-04-11: Updated `README.md` and `docs/CONTRIBUTING.md` so the documented default path now points at `new-ployd` / `new-ploy-runner`, the host crates, and the new runtime ownership structure instead of the old single-binary/root-style guidance.
+- 2026-04-11: Final architecture validation passed with `cargo test -p ploy-daemon-host --lib`, `cargo test -p ploy-runner-host --lib`, `cargo check -p new-ployd -p new-ploy-runner -p ployd -p ploy-runner`, `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/test.yml")'`, and `git diff --check -- .github/workflows/test.yml README.md docs/CONTRIBUTING.md Cargo.toml crates/ploy-daemon-host crates/ploy-runner-host apps/new-ployd apps/new-ploy-runner apps/ployd apps/ploy-runner tasks/todo.md`.
+
+## Review
+
+- This slice does not finish the full runtime migration, but it establishes the new top-level ownership graph and removes the most obvious app-to-app dependency.
+- `ploy-market-data` is now the canonical code ownership home for runner-side collector/feed/scanner/reference-price infrastructure, and `apps/ploy-runner` only imports those modules.
+- `ploy-strategy-runtime` now owns the default runner execution path, so the next highest-value ownership cut is deeper `ployd` orchestration extraction into `crates/ploy-platform-runtime`, followed by CI/deploy/default workflow realignment around the new crates.
+- The default CI lane now sees the new runtime crates and the shipped `ploy-runner` package, but the full platform lane is still constrained by pre-existing `ployd`/`ploy-operator-contracts` compile drift that predates this refactor.
+- That pre-existing `ployd`/contracts drift is now cleared: the remaining work is no longer “make the old daemon compile”, but “continue moving real orchestration ownership out of `apps/ployd/src/runtime.rs` into `crates/ploy-platform-runtime`.”
+- `ploy-platform-runtime` now owns more than helpers: it has real proposal state, deployment rule evaluation, registry/trading/proposal state loading, and startup registry bootstrap. The next meaningful cut is live-trading control/orchestration behavior inside `apps/ployd/src/runtime.rs`.
+- After this slice, the remaining heavy `ployd` ownership is concentrated in live fill reconciliation plus health/degradation orchestration. Those are the next cuts.
+- `platform-runtime` now owns proposal state, deployment rules, state I/O, startup bootstrap, submit/cancel/replace order control, and live fill reconciliation. The next remaining daemon-heavy slice is health/degraded/recovering orchestration plus the tick coordinator.
+- `platform-runtime` now owns proposal state, deployment rules, state I/O, startup bootstrap, submit/cancel/replace order control, live fill reconciliation, live health transitions, and worker tick/source-health refresh.
+- `ploy-daemon-host` and `ploy-runner-host` now exist as real host crates, so old/new app binaries are thin wrappers instead of ownership centers.
+- The new architecture is now implemented end-to-end in code shape and validation shape: shared host crates own the real daemon/runner behavior, runtime crates own policy and orchestration behavior, market-data/client crates own their infra boundaries, and the default CI/documented path points at the new stack.
