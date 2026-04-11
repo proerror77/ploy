@@ -201,6 +201,25 @@ jobs:
               fi
             }
 
+            wait_for_recent_rows() {
+              local sql="\$1"
+              local message="\$2"
+              local attempts="\${3:-20}"
+              local sleep_secs="\${4:-3}"
+              local result
+
+              for _ in \$(seq 1 "\${attempts}"); do
+                result=\$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc "\${sql}")
+                if [ "\${result}" = "t" ]; then
+                  return 0
+                fi
+                sleep "\${sleep_secs}"
+              done
+
+              echo "\${message}" >&2
+              exit 1
+            }
+
             assert_no_recent_logs() {
               local unit="\$1"
               local pattern="\$2"
@@ -321,23 +340,29 @@ jobs:
               require_service_guardrails ploy-strategy-directional-live.service
             fi
 
-            if [ "$(PGPASSWORD=postgres psql -U postgres -d ploy -Atqc \
-              "SELECT EXISTS (SELECT 1 FROM binance_agg_trade_ticks WHERE trade_time >= NOW() - INTERVAL '10 minutes')")" != "t" ]; then
-              echo "binance_agg_trade_ticks is not fresh after deploy" >&2
-              exit 1
-            fi
-            assert_recent_rows \
+            wait_for_recent_rows \
+              "SELECT EXISTS (SELECT 1 FROM binance_agg_trade_ticks WHERE trade_time >= NOW() - INTERVAL '10 minutes')" \
+              "binance_agg_trade_ticks is not fresh after deploy" \
+              20 \
+              3
+            wait_for_recent_rows \
               "SELECT EXISTS (SELECT 1 FROM binance_lob_ticks WHERE event_time >= NOW() - INTERVAL '10 minutes')" \
-              "binance_lob_ticks is not fresh after deploy"
+              "binance_lob_ticks is not fresh after deploy" \
+              20 \
+              3
             if service_exists ploy-binance-price-collector.service; then
-              assert_recent_rows \
+              wait_for_recent_rows \
                 "SELECT EXISTS (SELECT 1 FROM binance_price_ticks WHERE trade_time >= NOW() - INTERVAL '10 minutes')" \
-                "binance_price_ticks is not fresh after deploy"
+                "binance_price_ticks is not fresh after deploy" \
+                20 \
+                3
             fi
             if service_exists ploy-deribit-iv-collector.service; then
-              assert_recent_rows \
+              wait_for_recent_rows \
                 "SELECT EXISTS (SELECT 1 FROM deribit_iv_ticks WHERE fetched_at >= NOW() - INTERVAL '15 minutes')" \
-                "deribit_iv_ticks is not fresh after deploy"
+                "deribit_iv_ticks is not fresh after deploy" \
+                20 \
+                3
             fi
 
             assert_no_recent_logs \
