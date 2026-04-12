@@ -204,6 +204,7 @@ fn main() {
             (
                 DirectionalConfig {
                     symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
+                    symbol_profiles: std::collections::HashMap::new(),
                     vol_floor: 0.001,
                     min_probability: 0.62,
                     min_z_score: 0.35,

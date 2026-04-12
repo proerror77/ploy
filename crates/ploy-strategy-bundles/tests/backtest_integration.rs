@@ -157,6 +157,7 @@ fn build_scenario_with_reference_data() -> Vec<MarketUpdate> {
 async fn backtest_full_loop_produces_entry() {
     let config = DirectionalConfig {
         symbols: vec!["BTCUSDT".into()],
+        symbol_profiles: std::collections::HashMap::new(),
         vol_floor: 0.001,
         min_probability: 0.55,
         min_z_score: 0.35,
@@ -167,6 +168,8 @@ async fn backtest_full_loop_produces_entry() {
         min_edge: 0.02,
         min_deviation_pct: 0.005,
         min_reversal_consistency: 0.55,
+        min_trend_consistency: 0.50,
+        min_trend_persistence_secs: 0,
         take_profit_price_delta: 0.10,
         stop_loss_price_delta: 0.05,
         max_hold_secs: 120,
@@ -268,6 +271,7 @@ enable_market_impact = false
 async fn empty_feed_produces_zero_trades() {
     let config = DirectionalConfig {
         symbols: vec!["BTCUSDT".into()],
+        symbol_profiles: std::collections::HashMap::new(),
         vol_floor: 0.001,
         min_probability: 0.55,
         min_z_score: 0.35,
@@ -278,6 +282,8 @@ async fn empty_feed_produces_zero_trades() {
         min_edge: 0.02,
         min_deviation_pct: 0.005,
         min_reversal_consistency: 0.55,
+        min_trend_consistency: 0.50,
+        min_trend_persistence_secs: 0,
         take_profit_price_delta: 0.10,
         stop_loss_price_delta: 0.05,
         max_hold_secs: 120,
@@ -317,6 +323,7 @@ async fn empty_feed_produces_zero_trades() {
 async fn recorded_updates_replay_to_the_same_runtime_result() {
     let config = DirectionalConfig {
         symbols: vec!["BTCUSDT".into()],
+        symbol_profiles: std::collections::HashMap::new(),
         vol_floor: 0.001,
         min_probability: 0.55,
         min_z_score: 0.35,
@@ -327,6 +334,8 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         min_edge: 0.02,
         min_deviation_pct: 0.005,
         min_reversal_consistency: 0.55,
+        min_trend_consistency: 0.50,
+        min_trend_persistence_secs: 0,
         take_profit_price_delta: 0.10,
         stop_loss_price_delta: 0.05,
         max_hold_secs: 120,
@@ -415,6 +424,7 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
 async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
     let config = DirectionalConfig {
         symbols: vec!["BTCUSDT".into()],
+        symbol_profiles: std::collections::HashMap::new(),
         vol_floor: 0.001,
         min_probability: 0.55,
         min_z_score: 0.35,
@@ -425,6 +435,8 @@ async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
         min_edge: 0.02,
         min_deviation_pct: 0.005,
         min_reversal_consistency: 0.55,
+        min_trend_consistency: 0.50,
+        min_trend_persistence_secs: 0,
         take_profit_price_delta: 0.10,
         stop_loss_price_delta: 0.05,
         max_hold_secs: 120,
@@ -506,6 +518,7 @@ async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
 async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior() {
     let config = DirectionalConfig {
         symbols: vec!["BTCUSDT".into()],
+        symbol_profiles: std::collections::HashMap::new(),
         vol_floor: 0.001,
         min_probability: 0.55,
         min_z_score: 0.35,
@@ -516,6 +529,8 @@ async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior()
         min_edge: 0.02,
         min_deviation_pct: 0.005,
         min_reversal_consistency: 0.55,
+        min_trend_consistency: 0.50,
+        min_trend_persistence_secs: 0,
         take_profit_price_delta: 0.10,
         stop_loss_price_delta: 0.05,
         max_hold_secs: 120,

@@ -1008,6 +1008,7 @@ mod tests {
     fn default_config() -> DirectionalConfig {
         DirectionalConfig {
             symbols: vec!["BTCUSDT".into()],
+            symbol_profiles: HashMap::new(),
             vol_floor: 0.001,
             min_probability: 0.45,
             min_z_score: 0.35,
@@ -1018,6 +1019,8 @@ mod tests {
             min_edge: 0.03,
             min_deviation_pct: 0.005,
             min_reversal_consistency: 0.50,
+            min_trend_consistency: 0.50,
+            min_trend_persistence_secs: 0,
             take_profit_price_delta: 0.10,
             stop_loss_price_delta: 0.05,
             max_hold_secs: 120,

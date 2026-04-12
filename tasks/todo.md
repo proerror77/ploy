@@ -17,6 +17,8 @@
 - [ ] Audit recent `pm_token_settlements` history against the official API and quantify any stale false positives.
 - [ ] Re-run PM5D backtests on official-only / quote-valid windows before making further strategy changes.
 - [ ] Review PM5D entry logic and order-management assumptions against live-mode behavior and propose the next optimization slice.
+- [ ] Land and verify the tango runner deploy workflow fixes so remote quote-collector updates no longer require manual artifact promotion.
+- [ ] Add a reusable microstructure feature layer to PM5D so `AggTrade` and `L2/OBI` affect directional entry decisions.
 
 ## Progress notes
 
@@ -30,6 +32,58 @@
 - 2026-04-12: Fresh official-only backtest samples on `2026-04-10 00:00 → 02:00 UTC`:
   - `V2` non-BTC: `0` intents, `0` PnL
   - `V3` BTC-only: `26` intents, net `-65.66658749577348708750`
+- 2026-04-12: Small BTC-only official-only sensitivity scan on `2026-04-10 00:00 → 02:00 UTC`:
+  - `max_entry_price 0.85/0.70`: `26` intents, net `-65.66658749577348708750`
+  - `max_entry_price 0.55`: `20` intents, net `-59.30898628039399542500`
+  - `min_edge 0.0367 → 0.08` with `max_entry_price=0.55`: no material change
+  - `time window 90-180` with `max_entry_price=0.55`: `14` intents, net `-72.33423359376030416250`
+  - current read: trimming high-price entries helps more than tightening time window or raising `min_edge`
+- 2026-04-12: Fresh multi-asset data review changed the optimization direction:
+  - `ETH` has the strongest recent Binance LOB coverage
+  - `ETH/SOL/XRP` have the best PM quote alignment
+  - `AggTrade` and `L2` already reach the historical/live feed, but `DirectionalStrategy` still ignores them
+  - next slice should connect `AggTrade imbalance` and `OBI delta/flip` into the strategy instead of staying price-only
+- 2026-04-12: Patched `.github/workflows/deploy-tango-1-1.yml` and `.github/workflows/healthcheck-tango-1-1.yml` to target `/opt/ploy` and `ployd`/managed deployments instead of the removed direct dry-run systemd unit.
+- 2026-04-12: First deploy run (`24296421062`) proved the old workflow mismatch:
+  - runner bundle installed into `/root/ploy`, while live services use `/opt/ploy`
+  - deploy step still restarted missing `ploy-strategy-directional-dryrun.service`
+- 2026-04-12: Workflow fix committed in `3ac1a427` and redeploy triggered as GitHub Actions run `24297241762` (still in progress at note time).
+- 2026-04-12: Deploy run `24297241762` completed successfully; remote `ploy-quote-collector.service` is back to `enabled` + `active` on the repaired `/opt/ploy` binary path.
+- 2026-04-12: Deploy run `24297241762` completed successfully after workflow fixes; remote `ploy-quote-collector.service` is now `enabled` + `active` on the repaired `/opt/ploy` runner path.
+- 2026-04-12: Fresh `official-only` BTC-only V3 result on `2026-04-10 00:00 → 02:00 UTC` with `min_probability=0.55`, `max_entry_price=0.55`:
+  - `14` intents
+  - net `-47.87002041110071997500`
+  - better than the earlier `20` intents / `-59.30898628039399542500` baseline
+- 2026-04-12: Added first-pass microstructure feature state into `DirectionalStrategy` so `AggTrade` and `L2` are no longer ignored:
+  - `AggTrade` -> signed aggressor imbalance
+  - `L2` -> `OBI`, `OBI delta`, `spread_bps`
+  - these now feed the Gate 4 probability adjustment
+- 2026-04-12: Added `symbol_profiles` support to `DirectionalConfig` so per-symbol overrides can now tune:
+  - `min_probability`
+  - `max_entry_price`
+  - `min_edge`
+  - `min/max_time_remaining_secs`
+  This removes the old requirement that one threshold set fit every crypto symbol.
+- 2026-04-12: Fresh clean-window multi-asset check on `ETH/BTC/SOL/XRP`, `official-only`, `2026-04-10 00:00 → 02:00 UTC`, `min_probability=0.55`, `max_entry_price=0.55`:
+  - `14` intents
+  - net `-47.87002041110071997500`
+  - same as BTC-only result, implying the current triggers in that window still come from BTC and the next debugging slice should add per-symbol signal attribution
+- 2026-04-12: Corrected the market-selection method for 5-minute crypto PM research:
+  - use `end_time - start_time = 300s` instead of relying on the nullable `horizon` column
+  - on `2026-04-10 08:00 → 10:00 UTC`, all 6 core symbols (`BTC, ETH, SOL, XRP, BNB, DOGE`) have synchronized 5m events
+- 2026-04-12: Fresh per-symbol results on that clean 6-symbol 5m window (`official-only`, `min_probability=0.55`, `max_entry_price=0.55`):
+  - `BTC`: `+132.95`
+  - `DOGE`: `+50.30`
+  - `BNB`: `-18.90`
+  - `XRP`: `-87.36`
+  - `ETH`: `-121.64`
+  - `SOL`: `-152.04`
+- 2026-04-12: Fresh universe combinations on the same clean window:
+  - `BTC + DOGE`: `+183.24`
+  - `BTC + DOGE + BNB`: `+149.17`
+  - `BTC + DOGE + BNB + XRP`: `+46.59`
+  - `all6`: `-242.27`
+  - current read: static all-symbol universe is too blunt; subset selection and symbol-specific profiles are the next high-leverage path
 - 2026-04-12: Local verification passed:
   - `cargo test -p ploy-market-data parse_official_market_settlements -- --nocapture`
   - `cargo test -p ploy-strategy-bundles official_only_backtest_skips_unresolved_events -- --nocapture`
