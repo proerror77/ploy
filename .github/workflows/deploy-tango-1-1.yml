@@ -20,6 +20,7 @@ env:
   RUST_BACKTRACE: 1
   PLATFORM_TARGET: x86_64-unknown-linux-gnu
   DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
+  DEPLOY_ROOT: ${{ vars.PLOY_DEPLOY_ROOT || '/opt/ploy' }}
   DEPLOY_OSS_REGION: ${{ vars.ALIYUN_REGION || 'ap-northeast-1' }}
   DEPLOY_OSS_PREFIX: deploy/tango-1-1
   DEPLOY_BUNDLE_NAME: ploy-runner-tango-1-1.tar.gz
@@ -156,14 +157,14 @@ jobs:
 
       - name: Prepare remote directories
         run: |
-          ssh tango-1-1 'mkdir -p /root/ploy/bin /root/ploy/config/strategies /root/ploy/migrations /root/ploy/scripts /root/ploy/tmp'
+          ssh tango-1-1 "mkdir -p ${DEPLOY_ROOT}/bin ${DEPLOY_ROOT}/config/strategies ${DEPLOY_ROOT}/migrations ${DEPLOY_ROOT}/scripts ${DEPLOY_ROOT}/tmp"
 
       - name: Pull bundle from OSS and restart services
         run: |
           ssh tango-1-1 /bin/bash <<EOF
             set -euo pipefail
             DEPLOY_STARTED_AT=\$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            WORKDIR=/root/ploy/tmp/deploy-${GITHUB_SHA}
+            WORKDIR=${DEPLOY_ROOT}/tmp/deploy-${GITHUB_SHA}
             rm -rf "\${WORKDIR}"
             mkdir -p "\${WORKDIR}"
 
@@ -268,41 +269,39 @@ jobs:
             sha256sum -c "${DEPLOY_BUNDLE_NAME}.sha256"
             tar -xzf "${DEPLOY_BUNDLE_NAME}"
 
-            # Make binary executable
-            install -m 0755 ./bin/ploy-runner /root/ploy/bin/ploy-runner
-            install -m 0644 ./config/strategies/02-pm5d.unified.toml /root/ploy/config/strategies/02-pm5d.unified.toml
-            install -m 0644 ./config/strategies/02-pm5d.live.toml /root/ploy/config/strategies/02-pm5d.live.toml
-            install -m 0755 ./scripts/binance_aggtrade_collector.py /root/ploy/scripts/binance_aggtrade_collector.py
-            install -m 0755 ./scripts/binance_price_collector.py /root/ploy/scripts/binance_price_collector.py
-            install -m 0755 ./scripts/binance_lob_collector.py /root/ploy/scripts/binance_lob_collector.py
-            install -m 0644 ./scripts/fix_binance_lob_partitions.sql /root/ploy/scripts/fix_binance_lob_partitions.sql
-            install -m 0644 ./scripts/fix_deribit_partitions.sql /root/ploy/scripts/fix_deribit_partitions.sql
+            # Install artifacts into the live runtime root used by systemd.
+            install -m 0755 ./bin/ploy-runner ${DEPLOY_ROOT}/bin/ploy-runner
+            install -m 0644 ./config/strategies/02-pm5d.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.unified.toml
+            install -m 0644 ./config/strategies/02-pm5d.live.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.live.toml
+            install -m 0755 ./scripts/binance_aggtrade_collector.py ${DEPLOY_ROOT}/scripts/binance_aggtrade_collector.py
+            install -m 0755 ./scripts/binance_price_collector.py ${DEPLOY_ROOT}/scripts/binance_price_collector.py
+            install -m 0755 ./scripts/binance_lob_collector.py ${DEPLOY_ROOT}/scripts/binance_lob_collector.py
+            install -m 0644 ./scripts/fix_binance_lob_partitions.sql ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
+            install -m 0644 ./scripts/fix_deribit_partitions.sql ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
             for migration in ${DEPLOY_MIGRATIONS}; do
               migration="$(printf '%s' "\${migration}" | xargs)"
               [ -n "\${migration}" ] || continue
-              install -m 0644 "./migrations/\${migration}" "/root/ploy/migrations/\${migration}"
+              install -m 0644 "./migrations/\${migration}" "${DEPLOY_ROOT}/migrations/\${migration}"
             done
 
-            install -d /etc/systemd/system/ploy-strategy-directional-dryrun.service.d
             install -d /etc/systemd/system/ploy-quote-collector.service.d
             install -m 0644 ./deployment/systemd/ploy-binance-aggtrade-collector.service /etc/systemd/system/ploy-binance-aggtrade-collector.service
             install -m 0644 ./deployment/systemd/ploy-binance-lob-collector.service /etc/systemd/system/ploy-binance-lob-collector.service
-            install -m 0644 ./deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf /etc/systemd/system/ploy-strategy-directional-dryrun.service.d/hardening.conf
             install -m 0644 ./deployment/systemd/ploy-quote-collector.hardening.conf /etc/systemd/system/ploy-quote-collector.service.d/hardening.conf
             systemctl daemon-reload
 
             # Apply additive runner migrations before restarting services.
-            mkdir -p /root/ploy/migrations
+            mkdir -p ${DEPLOY_ROOT}/migrations
             for migration in ${DEPLOY_MIGRATIONS}; do
               migration="$(printf '%s' "\${migration}" | xargs)"
               [ -n "\${migration}" ] || continue
-              migration="/root/ploy/migrations/\${migration}"
+              migration="${DEPLOY_ROOT}/migrations/\${migration}"
               if [ -f "\${migration}" ]; then
                 PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f "\${migration}"
               fi
             done
-            PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f /root/ploy/scripts/fix_binance_lob_partitions.sql
-            PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f /root/ploy/scripts/fix_deribit_partitions.sql
+            PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
+            PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
 
             require_postgres
 
@@ -314,30 +313,33 @@ jobs:
             if service_exists ploy-deribit-iv-collector.service; then
               systemctl restart ploy-deribit-iv-collector.service
             fi
-            systemctl restart ploy-strategy-directional-dryrun.service
-            systemctl restart ploy-quote-collector.service
-            if service_exists ploy-strategy-directional-live.service; then
-              systemctl restart ploy-strategy-directional-live.service
+            if service_exists ploy-quote-collector.service; then
+              systemctl enable --now ploy-quote-collector.service
+              systemctl restart ploy-quote-collector.service
+            fi
+            if service_exists ployd.service; then
+              systemctl restart ployd.service
             fi
 
             sleep 5
             require_postgres
             systemctl is-active --quiet ploy-binance-aggtrade-collector.service
             systemctl is-active --quiet ploy-binance-lob-collector.service
-            systemctl is-active --quiet ploy-strategy-directional-dryrun.service
-            systemctl is-active --quiet ploy-quote-collector.service
             require_service_guardrails ploy-binance-lob-collector.service
-            require_service_guardrails ploy-strategy-directional-dryrun.service
-            require_service_guardrails ploy-quote-collector.service
+            if service_exists ploy-quote-collector.service; then
+              systemctl is-active --quiet ploy-quote-collector.service
+              require_service_guardrails ploy-quote-collector.service
+            fi
             if service_exists ploy-binance-price-collector.service; then
               systemctl is-active --quiet ploy-binance-price-collector.service
             fi
             if service_exists ploy-deribit-iv-collector.service; then
               systemctl is-active --quiet ploy-deribit-iv-collector.service
             fi
-            if service_exists ploy-strategy-directional-live.service; then
-              systemctl is-active --quiet ploy-strategy-directional-live.service
-              require_service_guardrails ploy-strategy-directional-live.service
+            if service_exists ployd.service; then
+              systemctl is-active --quiet ployd.service
+              curl -fsS http://127.0.0.1:8081/health
+              ${DEPLOY_ROOT}/bin/ployctl deployments list
             fi
 
             wait_for_recent_rows \
@@ -365,10 +367,12 @@ jobs:
                 3
             fi
 
-            assert_no_recent_logs \
-              "ploy-strategy-directional-dryrun.service" \
-              "DB connection failed|running without persistence|Signal recorder disabled" \
-              "ploy-strategy-directional-dryrun started in degraded persistence mode"
+            if service_exists ployd.service; then
+              assert_no_recent_logs \
+                "ployd.service" \
+                "DB connection failed|running without persistence|Signal recorder disabled" \
+                "ployd restarted in degraded persistence mode"
+            fi
             if service_exists ploy-binance-price-collector.service; then
               assert_no_recent_logs \
                 "ploy-binance-price-collector.service" \
@@ -391,10 +395,11 @@ jobs:
             if service_exists ploy-deribit-iv-collector.service; then
               systemctl status ploy-deribit-iv-collector.service --no-pager
             fi
-            systemctl status ploy-strategy-directional-dryrun.service --no-pager
-            systemctl status ploy-quote-collector.service --no-pager
-            if service_exists ploy-strategy-directional-live.service; then
-              systemctl status ploy-strategy-directional-live.service --no-pager
+            if service_exists ployd.service; then
+              systemctl status ployd.service --no-pager
+            fi
+            if service_exists ploy-quote-collector.service; then
+              systemctl status ploy-quote-collector.service --no-pager
             fi
 
             # Show recent logs
@@ -406,10 +411,11 @@ jobs:
             if service_exists ploy-deribit-iv-collector.service; then
               journalctl -u ploy-deribit-iv-collector.service -n 20 --no-pager
             fi
-            journalctl -u ploy-strategy-directional-dryrun.service -n 20 --no-pager
-            journalctl -u ploy-quote-collector.service -n 20 --no-pager
-            if service_exists ploy-strategy-directional-live.service; then
-              journalctl -u ploy-strategy-directional-live.service -n 20 --no-pager
+            if service_exists ployd.service; then
+              journalctl -u ployd.service -n 20 --no-pager
+            fi
+            if service_exists ploy-quote-collector.service; then
+              journalctl -u ploy-quote-collector.service -n 20 --no-pager
             fi
           EOF
 
@@ -420,7 +426,7 @@ jobs:
           echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Transport: \`GitHub Actions -> OSS -> ECS\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- OSS object: \`${{ steps.upload_bundle_to_oss.outputs.bundle_object }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Services: \`ploy-binance-aggtrade-collector\`, \`ploy-binance-price-collector\`, \`ploy-binance-lob-collector\`, \`ploy-deribit-iv-collector\`, \`ploy-strategy-directional-dryrun\`, \`ploy-quote-collector\`, \`ploy-strategy-directional-live\` (if installed)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Services: \`ployd\` (if installed), \`ploy-binance-aggtrade-collector\`, \`ploy-binance-price-collector\`, \`ploy-binance-lob-collector\`, \`ploy-deribit-iv-collector\`, \`ploy-quote-collector\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Migrations: \`${DEPLOY_MIGRATIONS}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Postgres pre/postflight: required" >> "$GITHUB_STEP_SUMMARY"
