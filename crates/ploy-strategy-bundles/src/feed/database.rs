@@ -45,6 +45,7 @@ pub struct HistoricalLoadOptions {
     pub include_reference_prices: bool,
     pub reference_symbols: Vec<String>,
     pub include_sports_state: bool,
+    pub require_official_settlement: bool,
 }
 
 impl HistoricalLoadOptions {
@@ -141,7 +142,15 @@ pub async fn load_from_database_with_options(
     //    Quotes for a token can arrive before the event's official start_time
     //    (Polymarket tokens are continuous; ~90% of quotes precede start_time).
     //    Loading events before quotes ensures token_symbol mappings exist.
-    load_events(pool, symbols, from, to, &mut updates).await?;
+    load_events(
+        pool,
+        symbols,
+        from,
+        to,
+        options.require_official_settlement,
+        &mut updates,
+    )
+    .await?;
 
     // 3. Polymarket quotes — try clob_quote_ticks first, fall back to orderbook snapshots
     let token_map = load_token_mappings(pool, symbols, from, to).await?;
@@ -734,6 +743,7 @@ async fn load_events(
     symbols: &[String],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+    require_official_settlement: bool,
     updates: &mut Vec<MarketUpdate>,
 ) -> Result<(), sqlx::Error> {
     // Extract token IDs from JSONB: raw_market->'markets'->0->>'clobTokenIds'
@@ -768,7 +778,11 @@ async fn load_events(
     let settlement_prices = load_event_settlement_prices(pool, &event_ids).await?;
 
     info!(count = rows.len(), "Loaded events from pm_market_metadata");
-    updates.extend(build_event_updates(rows, &settlement_prices));
+    updates.extend(build_event_updates(
+        rows,
+        &settlement_prices,
+        require_official_settlement,
+    ));
 
     Ok(())
 }
@@ -776,6 +790,7 @@ async fn load_events(
 fn build_event_updates(
     rows: Vec<EventMetadataRow>,
     settlement_prices: &HashMap<(String, String), Decimal>,
+    require_official_settlement: bool,
 ) -> Vec<MarketUpdate> {
     let mut updates = Vec::new();
 
@@ -798,6 +813,9 @@ fn build_event_updates(
             &up_token,
             &down_token,
         );
+        if require_official_settlement && resolved_up_won.is_none() {
+            continue;
+        }
         let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
 
         if symbol.is_empty() || up_token.is_empty() || down_token.is_empty() {
@@ -925,7 +943,7 @@ mod tests {
             price_to_beat: Some(dec!(100000)),
         };
 
-        let initial = build_event_updates(vec![row.clone()], &HashMap::new());
+        let initial = build_event_updates(vec![row.clone()], &HashMap::new(), false);
         assert!(matches!(
             initial.last(),
             Some(MarketUpdate::EventExpired {
@@ -938,7 +956,7 @@ mod tests {
         settlement_prices.insert(("evt-1".to_string(), "up-1".to_string()), dec!(1));
         settlement_prices.insert(("evt-1".to_string(), "down-1".to_string()), dec!(0));
 
-        let repaired = build_event_updates(vec![row], &settlement_prices);
+        let repaired = build_event_updates(vec![row], &settlement_prices, false);
         assert!(matches!(
             repaired.last(),
             Some(MarketUpdate::EventExpired {
@@ -946,5 +964,25 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn official_only_backtest_skips_unresolved_events() {
+        let now = Utc::now();
+        let row = EventMetadataRow {
+            market_slug: "evt-1".into(),
+            symbol: Some("BTCUSDT".into()),
+            end_time: Some(now + Duration::minutes(5)),
+            start_time: Some(now),
+            up_token_id: Some("up-1".into()),
+            down_token_id: Some("down-1".into()),
+            price_to_beat: Some(dec!(100000)),
+        };
+
+        let updates = build_event_updates(vec![row], &HashMap::new(), true);
+        assert!(
+            updates.is_empty(),
+            "official-only mode should skip unresolved events"
+        );
     }
 }

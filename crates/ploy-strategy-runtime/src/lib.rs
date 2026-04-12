@@ -120,6 +120,7 @@ async fn run_backtest(
             .backtest_data
             .reference_symbols(&config.reference_data),
         include_sports_state: config.backtest_data.include_sports_state,
+        require_official_settlement: config.backtest_data.require_official_settlement,
     };
 
     let updates = load_from_database_with_options(&pool, symbols, from, to, &backtest_options)

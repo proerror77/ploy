@@ -18,7 +18,7 @@ use polymarket_client_sdk::clob::ws::{BookUpdate, Client as ClobWsClient};
 use polymarket_client_sdk::rtds::Client as RtdsClient;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
@@ -87,8 +87,36 @@ struct PersistResult {
     quote_inserted: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct OfficialMarketSettlementPayload {
+    closed: Option<bool>,
+    #[serde(rename = "resolvedBy")]
+    resolved_by: Option<String>,
+    #[serde(rename = "umaResolutionStatus")]
+    uma_resolution_status: Option<String>,
+    outcomes: Option<String>,
+    #[serde(rename = "outcomePrices")]
+    outcome_prices: Option<String>,
+    #[serde(rename = "clobTokenIds")]
+    clob_token_ids: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OfficialTokenSettlement {
+    token_id: String,
+    outcome: &'static str,
+    settled_price: Decimal,
+}
+
+enum OfficialMarketSettlementStatus {
+    Closed(Vec<OfficialTokenSettlement>),
+    Open,
+    Unknown,
+}
+
 const POLYMARKET_CLOB_WS_ENDPOINT: &str = "wss://ws-subscriptions-clob.polymarket.com";
 const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
+const POLYMARKET_GAMMA_MARKET_BY_ID_ENDPOINT: &str = "https://gamma-api.polymarket.com/markets";
 
 fn is_tradeable_price(price: Decimal) -> bool {
     price > rust_decimal_macros::dec!(0.02) && price < rust_decimal_macros::dec!(0.98)
@@ -124,6 +152,137 @@ fn serialize_orderbook_levels(levels: &[OrderBookLevel]) -> String {
         .collect::<Vec<_>>();
 
     serde_json::to_string(&levels).expect("serializing persisted orderbook levels cannot fail")
+}
+
+fn parse_json_string_array(raw: &str) -> Option<Vec<String>> {
+    serde_json::from_str(raw).ok()
+}
+
+fn parse_json_decimal_array(raw: &str) -> Option<Vec<Decimal>> {
+    let values: Vec<serde_json::Value> = serde_json::from_str(raw).ok()?;
+    values
+        .into_iter()
+        .map(|value| match value {
+            serde_json::Value::String(s) => s.parse::<Decimal>().ok(),
+            serde_json::Value::Number(n) => n.to_string().parse::<Decimal>().ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn parse_official_market_settlements(
+    payload: &OfficialMarketSettlementPayload,
+) -> Option<Vec<OfficialTokenSettlement>> {
+    if !payload.closed.unwrap_or(false) {
+        return None;
+    }
+
+    let token_ids = parse_json_string_array(payload.clob_token_ids.as_deref()?)?;
+    let prices = parse_json_decimal_array(payload.outcome_prices.as_deref()?)?;
+    let outcomes = payload
+        .outcomes
+        .as_deref()
+        .and_then(parse_json_string_array)
+        .unwrap_or_default();
+
+    if token_ids.len() != prices.len() || token_ids.is_empty() {
+        return None;
+    }
+
+    let mut settlements = Vec::with_capacity(token_ids.len());
+    let mut winners = 0usize;
+    let mut losers = 0usize;
+
+    for (idx, (token_id, price)) in token_ids.into_iter().zip(prices.into_iter()).enumerate() {
+        let normalized_token_id = normalize_token_id(&token_id);
+        let outcome_name = outcomes
+            .get(idx)
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_default();
+
+        let (outcome, settled_price) = if price >= rust_decimal_macros::dec!(0.95) {
+            winners += 1;
+            ("winner", rust_decimal_macros::dec!(1.0))
+        } else if price <= rust_decimal_macros::dec!(0.05) {
+            losers += 1;
+            ("loser", rust_decimal_macros::dec!(0.0))
+        } else {
+            return None;
+        };
+
+        if outcome_name.contains("down") || outcome_name.contains("no") {
+            settlements.push(OfficialTokenSettlement {
+                token_id: normalized_token_id,
+                outcome,
+                settled_price,
+            });
+        } else {
+            settlements.push(OfficialTokenSettlement {
+                token_id: normalized_token_id,
+                outcome,
+                settled_price,
+            });
+        }
+    }
+
+    if winners == 1 && losers == settlements.len().saturating_sub(1) {
+        Some(settlements)
+    } else {
+        None
+    }
+}
+
+async fn fetch_official_market_settlements(
+    http: &reqwest::Client,
+    market_id: &str,
+) -> OfficialMarketSettlementStatus {
+    let url = format!("{POLYMARKET_GAMMA_MARKET_BY_ID_ENDPOINT}/{market_id}");
+    let response = match http
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "ploy-market-data/official-settlement")
+        .timeout(StdDuration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return OfficialMarketSettlementStatus::Unknown,
+    };
+
+    let payload = match response.json::<OfficialMarketSettlementPayload>().await {
+        Ok(payload) => payload,
+        Err(_) => return OfficialMarketSettlementStatus::Unknown,
+    };
+
+    if !payload.closed.unwrap_or(false) {
+        return OfficialMarketSettlementStatus::Open;
+    }
+
+    match parse_official_market_settlements(&payload) {
+        Some(settlements) => OfficialMarketSettlementStatus::Closed(settlements),
+        None => OfficialMarketSettlementStatus::Unknown,
+    }
+}
+
+async fn clear_unofficial_market_settlements(
+    pool: &PgPool,
+    market_id: &str,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE pm_token_settlements
+        SET settled_price = NULL,
+            outcome = NULL,
+            resolved = FALSE,
+            resolved_at = NULL,
+            fetched_at = NOW()
+        WHERE market_slug = $1
+          AND resolved = TRUE
+        "#,
+    )
+    .bind(market_id)
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected())
 }
 
 fn snapshot_context(meta: &TokenMetadata, timeframe: &str) -> String {
@@ -459,21 +618,16 @@ impl QuoteCollector {
                 // Query tokens from events that expired in the last 2 hours
                 // but don't yet have settlement data. This catches all recently
                 // expired events regardless of whether they were in the active list.
-                let rows: Vec<(String, String)> = sqlx::query_as(
+                let rows: Vec<(String, String, String)> = sqlx::query_as(
                     r#"
-                    SELECT DISTINCT
-                        trim(both '"' from jsonb_array_elements_text(
-                            (raw_market->'markets'->0->>'clobTokenIds')::jsonb
-                        )) as token_id,
-                        market_slug
+                    SELECT
+                        market_slug,
+                        trim(both '"' from ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->>0)) as up_token,
+                        trim(both '"' from ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->>1)) as down_token
                     FROM pm_market_metadata
                     WHERE end_time >= NOW() - INTERVAL '2 hours'
                       AND end_time < NOW()
                       AND raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
-                      AND market_slug NOT IN (
-                          SELECT DISTINCT market_slug FROM pm_token_settlements
-                          WHERE resolved = TRUE AND market_slug IS NOT NULL
-                      )
                     LIMIT 200
                     "#,
                 )
@@ -490,85 +644,81 @@ impl QuoteCollector {
                     "Settlement collector checking expired events"
                 );
 
-                for (token_id, slug) in &rows {
-                    // Use /last-trade-price — works for both active and settled tokens.
-                    // /midpoint returns error for settled tokens; last-trade-price returns
-                    // the final settlement price (0.99 for winner, 0.01 for loser).
-                    let url = format!(
-                        "https://clob.polymarket.com/last-trade-price?token_id={}",
-                        token_id
-                    );
-
-                    let price = match http
-                        .get(&url)
-                        .timeout(StdDuration::from_secs(5))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) => {
-                            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                                body["price"].as_str().and_then(|s| s.parse::<f64>().ok())
-                            } else {
-                                None
+                for (market_id, up_token, down_token) in &rows {
+                    let settlements = match fetch_official_market_settlements(&http, market_id).await {
+                        OfficialMarketSettlementStatus::Closed(settlements) => settlements,
+                        OfficialMarketSettlementStatus::Open => {
+                            match clear_unofficial_market_settlements(&pool, market_id).await {
+                                Ok(rows) if rows > 0 => {
+                                    warn!(
+                                        market_id = %market_id,
+                                        cleared_rows = rows,
+                                        "Cleared previously resolved settlement rows for market still open in official API"
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(e) => warn!(error = %e, market_id = %market_id, "Failed to clear stale settlement rows"),
                             }
+                            continue;
                         }
-                        Err(_) => None,
+                        OfficialMarketSettlementStatus::Unknown => {
+                            warn!(
+                                market_id = %market_id,
+                                "Official settlement API unavailable or malformed; leaving existing settlement rows unchanged"
+                            );
+                            continue;
+                        }
                     };
 
-                    let Some(price) = price else { continue };
-
-                    // Settled: winner ≥ 0.95, loser ≤ 0.05
-                    let is_winner = price >= 0.95;
-                    let is_loser = price <= 0.05;
-
-                    if !is_winner && !is_loser {
-                        continue; // Still active or ambiguous
-                    }
-
-                    let settled_price = if is_winner {
-                        rust_decimal_macros::dec!(1.0)
-                    } else {
-                        rust_decimal_macros::dec!(0.0)
-                    };
-
-                    let result = sqlx::query(
-                        r#"
-                        INSERT INTO pm_token_settlements (
-                            token_id, market_slug, outcome,
-                            settled_price, resolved, resolved_at, fetched_at
-                        ) VALUES ($1, $2, $3, $4, true, NOW(), NOW())
-                        ON CONFLICT (token_id) DO UPDATE SET
-                            settled_price = EXCLUDED.settled_price,
-                            resolved = true,
-                            resolved_at = COALESCE(pm_token_settlements.resolved_at, NOW()),
-                            fetched_at = NOW()
-                        WHERE pm_token_settlements.resolved = false
-                        "#,
-                    )
-                    .bind(token_id)
-                    .bind(slug)
-                    .bind(if is_winner { "winner" } else { "loser" })
-                    .bind(settled_price)
-                    .execute(&pool)
-                    .await;
-
-                    match result {
-                        Ok(r) if r.rows_affected() > 0 => {
-                            settled_count += 1;
-                            if settled_count % 10 == 0 || settled_count <= 5 {
-                                info!(
-                                    token = %&token_id[..12.min(token_id.len())],
-                                    slug = %slug,
-                                    price,
-                                    winner = is_winner,
-                                    total = settled_count,
-                                    "Settlement recorded"
-                                );
-                            }
+                    for settlement in settlements {
+                        if settlement.token_id != normalize_token_id(up_token)
+                            && settlement.token_id != normalize_token_id(down_token)
+                        {
+                            continue;
                         }
-                        Ok(_) => {}
-                        Err(e) => {
-                            warn!(error = %e, "Failed to record settlement");
+
+                        let result = sqlx::query(
+                            r#"
+                            INSERT INTO pm_token_settlements (
+                                token_id, market_slug, outcome,
+                                settled_price, resolved, resolved_at, fetched_at
+                            ) VALUES ($1, $2, $3, $4, true, NOW(), NOW())
+                            ON CONFLICT (token_id) DO UPDATE SET
+                                settled_price = EXCLUDED.settled_price,
+                                outcome = EXCLUDED.outcome,
+                                resolved = true,
+                                resolved_at = COALESCE(pm_token_settlements.resolved_at, NOW()),
+                                fetched_at = NOW()
+                            WHERE pm_token_settlements.resolved = false
+                               OR pm_token_settlements.settled_price IS DISTINCT FROM EXCLUDED.settled_price
+                               OR pm_token_settlements.outcome IS DISTINCT FROM EXCLUDED.outcome
+                            "#,
+                        )
+                        .bind(&settlement.token_id)
+                        .bind(market_id)
+                        .bind(settlement.outcome)
+                        .bind(settlement.settled_price)
+                        .execute(&pool)
+                        .await;
+
+                        match result {
+                            Ok(r) if r.rows_affected() > 0 => {
+                                settled_count += 1;
+                                if settled_count % 10 == 0 || settled_count <= 5 {
+                                    info!(
+                                        token = %&settlement.token_id[..12.min(settlement.token_id.len())],
+                                        market_id = %market_id,
+                                        outcome = settlement.outcome,
+                                        settled_price = %settlement.settled_price,
+                                        total = settled_count,
+                                        "Official settlement recorded"
+                                    );
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                warn!(error = %e, market_id = %market_id, "Failed to record official settlement");
+                            }
                         }
                     }
 
@@ -922,7 +1072,8 @@ fn hex_to_decimal_string(hex: &str) -> Option<String> {
 mod tests {
     use super::{
         best_tradeable_ask, best_tradeable_bid, book_timestamp, collector_market_data_ws_config,
-        hex_to_decimal_string, normalize_token_id, serialize_orderbook_levels, snapshot_context,
+        hex_to_decimal_string, normalize_token_id, parse_official_market_settlements,
+        serialize_orderbook_levels, snapshot_context, OfficialMarketSettlementPayload,
         OrderBookLevel, TokenMetadata,
     };
     use chrono::{TimeZone, Utc};
@@ -1015,5 +1166,40 @@ mod tests {
         assert_eq!(config.heartbeat_interval, Duration::from_secs(15));
         assert_eq!(config.heartbeat_timeout, Duration::from_secs(45));
         assert!(config.reconnect.max_attempts.is_none());
+    }
+
+    #[test]
+    fn parse_official_market_settlements_returns_binary_winner_and_loser() {
+        let payload = OfficialMarketSettlementPayload {
+            closed: Some(true),
+            resolved_by: Some("oracle".to_string()),
+            uma_resolution_status: Some("resolved".to_string()),
+            outcomes: Some(r#"["Up","Down"]"#.to_string()),
+            outcome_prices: Some(r#"["1","0"]"#.to_string()),
+            clob_token_ids: Some(r#"["123","456"]"#.to_string()),
+        };
+
+        let settlements = parse_official_market_settlements(&payload).expect("official settlement");
+        assert_eq!(settlements.len(), 2);
+        assert_eq!(settlements[0].token_id, "123");
+        assert_eq!(settlements[0].outcome, "winner");
+        assert_eq!(settlements[0].settled_price, dec!(1.0));
+        assert_eq!(settlements[1].token_id, "456");
+        assert_eq!(settlements[1].outcome, "loser");
+        assert_eq!(settlements[1].settled_price, dec!(0.0));
+    }
+
+    #[test]
+    fn parse_official_market_settlements_rejects_open_markets() {
+        let payload = OfficialMarketSettlementPayload {
+            closed: Some(false),
+            resolved_by: None,
+            uma_resolution_status: None,
+            outcomes: Some(r#"["Up","Down"]"#.to_string()),
+            outcome_prices: Some(r#"["0.5","0.5"]"#.to_string()),
+            clob_token_ids: Some(r#"["123","456"]"#.to_string()),
+        };
+
+        assert!(parse_official_market_settlements(&payload).is_none());
     }
 }

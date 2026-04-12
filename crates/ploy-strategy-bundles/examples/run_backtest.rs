@@ -196,6 +196,7 @@ fn main() {
                     .backtest_data
                     .reference_symbols(&config.reference_data),
                 include_sports_state: config.backtest_data.include_sports_state,
+                require_official_settlement: config.backtest_data.require_official_settlement,
             };
             (config.strategy, sim, rt, backtest_options)
         } else {
@@ -211,6 +212,16 @@ fn main() {
                     no_trade_zone_min: 0.45,
                     no_trade_zone_max: 0.55,
                     min_edge: 0.05,
+                    min_deviation_pct: 0.005,
+                    min_reversal_consistency: 0.55,
+                    min_trend_consistency: 0.50,
+                    min_trend_persistence_secs: 0,
+                    take_profit_price_delta: 0.10,
+                    stop_loss_price_delta: 0.05,
+                    max_hold_secs: 120,
+                    reversal_bonus_cap: 0.20,
+                    use_multiscale_volatility: true,
+                    use_price_structure_adjustment: true,
                     min_time_remaining_secs: 60,
                     max_time_remaining_secs: 300,
                     cooldown_secs: 60,
@@ -218,6 +229,7 @@ fn main() {
                     max_positions: 3,
                     max_daily_trades: 1000,
                     max_daily_loss_usd: None,
+                    allowed_window_secs: vec![300, 900],
                 },
                 SimulatedExecutorConfig {
                     use_spread: true,

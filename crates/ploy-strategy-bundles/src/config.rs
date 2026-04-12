@@ -91,6 +91,9 @@ pub struct BacktestDataSection {
     /// Load additive sports-state updates into historical backtests.
     #[serde(default)]
     pub include_sports_state: bool,
+    /// When true, historical backtests skip markets without official settlement rows.
+    #[serde(default)]
+    pub require_official_settlement: bool,
     /// Optional symbol override for reference-price backtests.
     ///
     /// When empty, the historical loader falls back to `reference_data.pyth_symbols`.
@@ -331,6 +334,7 @@ enable_market_impact = true
         assert!(config.reference_data.capture_sports_state);
         assert!(config.backtest_data.include_reference_prices);
         assert!(config.backtest_data.include_sports_state);
+        assert!(!config.backtest_data.require_official_settlement);
         assert!((config.strategy.min_edge - 0.02).abs() < 1e-10);
         assert_eq!(config.strategy.stake_usd, Decimal::new(25, 0));
         assert_eq!(config.strategy.max_positions, 1000);
@@ -391,6 +395,7 @@ mode = "dryrun"
         assert!(!config.reference_data.capture_sports_state);
         assert!(!config.backtest_data.include_reference_prices);
         assert!(!config.backtest_data.include_sports_state);
+        assert!(!config.backtest_data.require_official_settlement);
         assert!((config.strategy.min_edge - 0.02).abs() < 1e-10);
         assert!(!config.execution.use_spread);
     }

@@ -1,3 +1,90 @@
+# PM5D Settlement + Strategy Audit (2026-04-12)
+
+## Files
+
+- `.omx/context/pm5d-settlement-strategy-audit-20260412T091000Z.md`
+- `crates/ploy-market-data/src/collector.rs`
+- `scripts/backfill_settlements.py`
+- `crates/ploy-strategy-bundles/src/feed/database.rs`
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+
+## Tasks
+
+- [x] Verify whether recent PM settlement rows match official market state semantics.
+- [x] Replace heuristic settlement ingestion with official market-status based ingestion for new writes.
+- [x] Ensure reconciliation/backfill can overwrite previously wrong resolved rows instead of skipping them.
+- [ ] Audit recent `pm_token_settlements` history against the official API and quantify any stale false positives.
+- [ ] Re-run PM5D backtests on official-only / quote-valid windows before making further strategy changes.
+- [ ] Review PM5D entry logic and order-management assumptions against live-mode behavior and propose the next optimization slice.
+
+## Progress notes
+
+- 2026-04-12: Verified that recent non-BTC quote coverage is window-sensitive; `2026-04-09` had severe non-BTC quote misalignment while `2026-04-10` coverage recovered.
+- 2026-04-12: Verified that official market APIs expose settlement-capable fields (`closed`, `outcomePrices`, token ids) that are stronger than the old `last-trade-price` heuristic.
+- 2026-04-12: Updated `crates/ploy-market-data/src/collector.rs` and `scripts/backfill_settlements.py` so settlement ingestion now requires official market closure + binary `outcomePrices`, and can overwrite previously wrong resolved rows instead of skipping them.
+- 2026-04-12: Hardened the reconciliation safety rule so API/network/parse failures no longer clear settlement rows; only explicit `closed=false` responses trigger a rollback to unresolved.
+- 2026-04-12: Added `backtest_data.require_official_settlement` to the historical loader/config/runtime path so research backtests can skip unresolved markets entirely.
+- 2026-04-12: Disabled the remote `ploy-quote-collector.service` to stop new heuristic settlement pollution while the fixed collector is pending deployment.
+- 2026-04-12: Fresh remote settlement audit after targeted reconciliation showed the most recent 40 resolved markets all align with official market state (`open_markets = 0`).
+- 2026-04-12: Fresh official-only backtest samples on `2026-04-10 00:00 → 02:00 UTC`:
+  - `V2` non-BTC: `0` intents, `0` PnL
+  - `V3` BTC-only: `26` intents, net `-65.66658749577348708750`
+- 2026-04-12: Local verification passed:
+  - `cargo test -p ploy-market-data parse_official_market_settlements -- --nocapture`
+  - `cargo test -p ploy-strategy-bundles official_only_backtest_skips_unresolved_events -- --nocapture`
+  - `cargo check -p ploy-market-data --all-targets`
+  - `cargo check -p ploy-strategy-runtime -p ploy-strategy-bundles --all-targets`
+  - `python3 -m py_compile scripts/backfill_settlements.py`
+
+# PM5D V3.1 Signal Strengthening (2026-04-11)
+
+## Files
+
+- `docs/plans/2026-04-11-pm5d-v3-1-signal-strengthening-design.md`
+- `docs/plans/2026-04-11-pm5d-v3-1-signal-strengthening-implementation-plan.md`
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+- `crates/ploy-strategy-bundles/src/strategies/mean_reversion.rs`
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+- `crates/ploy-strategy-bundles/tests/backtest_integration.rs`
+- `config/strategies/02-pm5d.v3-{dryrun,live}.toml`
+
+## Tasks
+
+- [x] Add failing tests for weak-signal and low-persistence V3 entry rejection.
+- [x] Add the minimal V3-only config/strategy fields to support those tests.
+- [x] Tighten the V3 configs with the new thresholds and keep non-V3 behavior unchanged.
+- [x] Run targeted verification plus one local V2/V3 comparison check.
+
+## Progress notes
+
+- 2026-04-11: Added additive `DirectionalConfig` fields `min_trend_consistency` and `min_trend_persistence_secs` with compatibility defaults so only V3 opts into stronger structure gates.
+- 2026-04-11: Split V3 structure logic into two layers inside `directional.rs`:
+  - hard filter on aligned consistency + trailing persistence
+  - existing odds-ratio probability adjustment remains, but still only applies when enough history exists for that calculation
+- 2026-04-11: Added targeted regression coverage in `directional.rs` for:
+  - weak aligned consistency rejection
+  - short trailing persistence rejection
+  - preserved entry for strong persistent trends
+- 2026-04-11: Updated V3 dry-run/live TOMLs to set:
+  - `min_trend_consistency = 0.62`
+  - `min_trend_persistence_secs = 20`
+- 2026-04-11: Verification passed:
+  - `cargo test -p ploy-strategy-bundles trend -- --nocapture`
+  - `cargo test -p ploy-strategy-bundles -- --nocapture`
+  - `cargo check -p ploy-strategy-bundles --all-targets`
+- 2026-04-11: Local synthetic comparison using temporary V2/V3 backtest configs on the same `run_backtest` example window showed no delta:
+  - V2: `12` trades, net `124.64592955159371414970971429`
+  - V3.1: `12` trades, net `124.64592955159371414970971429`
+  - interpretation: the new gate catches noisy edge cases, but the example's clean synthetic trends are not bottlenecked by the old V3 structure logic
+
+## Review
+
+- This slice stays narrow: no new feeds, no runtime changes, no deployment changes.
+- The main correctness fix during implementation was separating the new hard structure filter from the old `buf.len() >= 10` adjustment gate, so V3 does not silently flatline on lower-frequency replay/example paths.
+- Remaining risk: the checked-in synthetic comparison is too clean to prove that the new V3 thresholds improve selection on realistic PM windows. The next useful validation is a DB/replay comparison over real ETH/SOL/XRP windows rather than the bundled synthetic feed.
+
 # Deployment Worker PID Identity Fix (2026-04-11)
 
 ## Tasks
