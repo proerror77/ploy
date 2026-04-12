@@ -51,7 +51,8 @@ async def main():
                 resp.raise_for_status()
                 data = resp.json()
 
-                if not data.get('closed'):
+                closed = data.get('closed')
+                if closed is False:
                     await conn.execute("""
                         UPDATE pm_token_settlements
                         SET settled_price = NULL,
@@ -62,6 +63,9 @@ async def main():
                         WHERE market_slug = $1
                           AND resolved = TRUE
                     """, market_id)
+                    skipped += 1
+                    continue
+                if closed is not True:
                     skipped += 1
                     continue
 
