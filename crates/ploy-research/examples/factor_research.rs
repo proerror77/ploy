@@ -173,40 +173,93 @@ async fn main() {
         }]
     };
 
+    // Compute global time range covering all windows for bulk load.
+    let global_start = windows
+        .iter()
+        .map(|w| w.start_time)
+        .min()
+        .unwrap_or(start);
+    let global_end = windows
+        .iter()
+        .map(|w| w.end_time)
+        .max()
+        .unwrap_or(end);
+
+    // Collect all unique symbols across windows.
+    let bulk_symbols: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        windows
+            .iter()
+            .filter(|w| seen.insert(w.symbol.clone()))
+            .map(|w| w.symbol.clone())
+            .collect()
+    };
+
+    eprintln!(
+        "\nbulk loading {} -> {} for {:?}",
+        global_start, global_end, bulk_symbols
+    );
+
+    let all_updates = load_from_database_with_options(
+        &pool,
+        &bulk_symbols,
+        global_start,
+        global_end,
+        &HistoricalLoadOptions {
+            require_official_settlement: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("bulk historical load failed");
+
+    let all_lob_snapshots = load_research_lob_snapshots(
+        &pool,
+        &bulk_symbols,
+        global_start,
+        global_end,
+    )
+    .await
+    .expect("bulk lob snapshot load failed");
+
+    eprintln!(
+        "bulk loaded {} updates, {} lob snapshots",
+        all_updates.len(),
+        all_lob_snapshots.len()
+    );
+
     let mut all_metrics = Vec::new();
     let mut total_observations = 0usize;
     let mut total_event_rows = 0usize;
 
     for window in &windows {
-        let window_symbols = vec![window.symbol.clone()];
-        let updates = load_from_database_with_options(
-            &pool,
-            &window_symbols,
+        let updates_slice: Vec<MarketUpdate> = slice_by_time(
+            &all_updates,
             window.start_time,
             window.end_time,
-            &HistoricalLoadOptions {
-                require_official_settlement: true,
-                ..Default::default()
-            },
+            market_update_ts,
         )
-        .await
-        .expect("historical load failed");
+        .to_vec();
+
+        let lob_slice: Vec<_> = slice_by_time(
+            &all_lob_snapshots,
+            window.start_time,
+            window.end_time,
+            |s| s.ts,
+        )
+        .to_vec();
 
         eprintln!(
-            "\nwindow {} {} -> {} loaded {} updates",
-            window.symbol, window.start_time, window.end_time, updates.len()
-        );
-
-        let lob_snapshots = load_research_lob_snapshots(
-            &pool,
-            &window_symbols,
+            "\nwindow {} {} -> {} updates={} lob={}",
+            window.symbol,
             window.start_time,
             window.end_time,
-        )
-        .await
-        .expect("lob snapshot load failed");
+            updates_slice.len(),
+            lob_slice.len(),
+        );
+
         let observations =
-            build_factor_observations_with_lob(&updates, &lob_snapshots, max_quote_age_secs);
+            build_factor_observations_with_lob(&updates_slice, &lob_slice, max_quote_age_secs);
         let event_rows = build_event_summaries(&observations);
         let metrics = factor_metrics(&observations, &event_rows);
 
