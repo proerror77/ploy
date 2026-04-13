@@ -110,6 +110,8 @@ pub struct ResearchLobSnapshot {
     pub ask_depth_near: f64,
     pub bid_depth_far: f64,
     pub ask_depth_far: f64,
+    pub bid_depth_inner: f64,
+    pub ask_depth_inner: f64,
 }
 
 #[derive(Clone, Default)]
@@ -126,7 +128,7 @@ struct EventState {
 #[derive(Clone, Default)]
 struct LobState {
     obi: f64,
-    spread_bps: u32,
+    spread_bps: f64,
     mid_price: f64,
     best_bid: f64,
     best_ask: f64,
@@ -134,6 +136,8 @@ struct LobState {
     ask_depth_near: f64,
     bid_depth_far: f64,
     ask_depth_far: f64,
+    bid_depth_inner: f64,
+    ask_depth_inner: f64,
     obi_10: f64,
 }
 
@@ -323,6 +327,11 @@ pub async fn load_research_lob_snapshots_sampled(
                     depth_band(&bids, &asks, mid_price, 0.001);
                 let (bid_depth_far, ask_depth_far) =
                     depth_band(&bids, &asks, mid_price, 0.005);
+                // Inner band: much tighter than near, so depth_acceleration
+                // (inner_ratio - near_ratio) has variance even when the book
+                // is very tight (e.g. BTC where all 20 levels sit within 0.007% of mid).
+                let (bid_depth_inner, ask_depth_inner) =
+                    depth_band(&bids, &asks, mid_price, 0.00003);
 
                 ResearchLobSnapshot {
                     symbol,
@@ -337,6 +346,8 @@ pub async fn load_research_lob_snapshots_sampled(
                     ask_depth_near,
                     bid_depth_far,
                     ask_depth_far,
+                    bid_depth_inner,
+                    ask_depth_inner,
                 }
             },
         )
@@ -492,7 +503,7 @@ pub fn build_factor_observations_with_lob(
             } => {
                 let state = lob.entry(symbol.clone()).or_default();
                 state.obi = *obi;
-                state.spread_bps = *spread_bps;
+                state.spread_bps = *spread_bps as f64;
                 state.obi_10 = *obi;
             }
             MarketUpdate::L2Depth {
@@ -507,7 +518,7 @@ pub fn build_factor_observations_with_lob(
                     symbol.clone(),
                     LobState {
                         obi: *obi,
-                        spread_bps: *spread_bps,
+                        spread_bps: *spread_bps as f64,
                         mid_price: f64::NAN,
                         best_bid: f64::NAN,
                         best_ask: f64::NAN,
@@ -515,6 +526,8 @@ pub fn build_factor_observations_with_lob(
                         ask_depth_near: *ask_depth_near,
                         bid_depth_far: *bid_depth_near,
                         ask_depth_far: *ask_depth_near,
+                        bid_depth_inner: *bid_depth_near,
+                        ask_depth_inner: *ask_depth_near,
                         obi_10: *obi,
                     },
                 );
@@ -587,7 +600,7 @@ pub fn build_factor_observations_with_lob(
                             symbol.clone(),
                             LobState {
                                 obi: snapshot.obi,
-                                spread_bps: snapshot.spread_bps.round() as u32,
+                                spread_bps: snapshot.spread_bps,
                                 mid_price: snapshot.mid_price,
                                 best_bid: snapshot.best_bid,
                                 best_ask: snapshot.best_ask,
@@ -595,6 +608,8 @@ pub fn build_factor_observations_with_lob(
                                 ask_depth_near: snapshot.ask_depth_near,
                                 bid_depth_far: snapshot.bid_depth_far,
                                 ask_depth_far: snapshot.ask_depth_far,
+                                bid_depth_inner: snapshot.bid_depth_inner,
+                                ask_depth_inner: snapshot.ask_depth_inner,
                                 obi_10: snapshot.obi_10,
                             },
                         );
@@ -652,8 +667,16 @@ pub fn build_factor_observations_with_lob(
                     } else {
                         f64::NAN
                     };
-                    let depth_acceleration = if depth_ratio.is_finite() && depth_far_ratio.is_finite() {
-                        depth_ratio - depth_far_ratio
+                    let depth_inner_ratio = if lob_state.ask_depth_inner > 0.0 {
+                        lob_state.bid_depth_inner / lob_state.ask_depth_inner
+                    } else {
+                        f64::NAN
+                    };
+                    // depth_acceleration: difference between inner-book and full-book
+                    // depth imbalance. Uses the 0.003% inner band vs 0.1% near band
+                    // so that even very tight books (BTC) produce non-zero variance.
+                    let depth_acceleration = if depth_inner_ratio.is_finite() && depth_ratio.is_finite() {
+                        depth_inner_ratio - depth_ratio
                     } else {
                         f64::NAN
                     };
@@ -713,7 +736,7 @@ pub fn build_factor_observations_with_lob(
                         model_prob_up,
                         model_edge_up,
                         obi: lob_state.obi,
-                        spread_bps: lob_state.spread_bps as f64,
+                        spread_bps: lob_state.spread_bps,
                         microprice_offset_bps,
                         bid_depth_near: lob_state.bid_depth_near,
                         ask_depth_near: lob_state.ask_depth_near,
