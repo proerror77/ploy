@@ -233,21 +233,19 @@ async fn main() {
     let mut total_event_rows = 0usize;
 
     for window in &windows {
-        let updates_slice: Vec<MarketUpdate> = slice_by_time(
+        let updates_slice = slice_by_time(
             &all_updates,
             window.start_time,
             window.end_time,
             market_update_ts,
-        )
-        .to_vec();
+        );
 
-        let lob_slice: Vec<_> = slice_by_time(
+        let lob_slice = slice_by_time(
             &all_lob_snapshots,
             window.start_time,
             window.end_time,
             |s| s.ts,
-        )
-        .to_vec();
+        );
 
         eprintln!(
             "\nwindow {} {} -> {} updates={} lob={}",
@@ -258,6 +256,8 @@ async fn main() {
             lob_slice.len(),
         );
 
+        // Multi-symbol data in the slice is safe: the function maintains per-symbol
+        // state internally, so updates from other symbols do not affect this window's factors.
         let observations =
             build_factor_observations_with_lob(&updates_slice, &lob_slice, max_quote_age_secs);
         let event_rows = build_event_summaries(&observations);
