@@ -94,6 +94,8 @@ fn market_update_ts(u: &MarketUpdate) -> DateTime<Utc> {
         | MarketUpdate::ReferencePrice { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
         MarketUpdate::EventDiscovered { end_time, window_secs, .. } => {
+            // Mirrors database.rs update_ts: subtract window + 1h buffer so EventDiscovered
+            // sorts before all quotes for the same event (quotes can arrive before start_time).
             *end_time
                 - chrono::Duration::seconds(*window_secs as i64)
                 - chrono::Duration::hours(1)
@@ -102,6 +104,8 @@ fn market_update_ts(u: &MarketUpdate) -> DateTime<Utc> {
     }
 }
 
+/// Slices a sorted slice to items whose timestamp falls in `[start, end]`.
+/// Precondition: `items` must be sorted by `ts_fn` in ascending order.
 fn slice_by_time<'a, T>(
     items: &'a [T],
     start: DateTime<Utc>,
