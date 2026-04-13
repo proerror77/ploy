@@ -243,9 +243,13 @@ async fn main() {
     let mut total_event_rows = 0usize;
 
     for window in &windows {
+        // EventDiscovered sort-ts is end_time - window_secs - 1h (see market_update_ts).
+        // Extend the lower bound by that same offset so EventDiscovered items are included.
+        let updates_slice_start =
+            window.start_time - chrono::Duration::hours(1) - chrono::Duration::seconds(300);
         let updates_slice = slice_by_time(
             &all_updates,
-            window.start_time,
+            updates_slice_start,
             window.end_time,
             market_update_ts,
         );
