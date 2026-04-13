@@ -35,6 +35,12 @@ fn parse_date_end(raw: &str) -> DateTime<Utc> {
     Utc.from_utc_datetime(&date.and_hms_opt(23, 59, 59).expect("valid end timestamp"))
 }
 
+fn parse_timestamp(raw: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(raw)
+        .unwrap_or_else(|_| panic!("invalid timestamp: {raw}"))
+        .with_timezone(&Utc)
+}
+
 struct DriftBuffer {
     entries: VecDeque<(DateTime<Utc>, f64)>,
     window_secs: f64,
@@ -95,9 +101,14 @@ struct LobState {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let db_url = flag_value(&args, "--db-url").expect("--db-url required");
-    let start =
-        parse_date_start(&flag_value(&args, "--start-date").expect("--start-date required"));
-    let end = parse_date_end(&flag_value(&args, "--end-date").expect("--end-date required"));
+    let start = flag_value(&args, "--start-ts")
+        .map(|raw| parse_timestamp(&raw))
+        .unwrap_or_else(|| {
+            parse_date_start(&flag_value(&args, "--start-date").expect("--start-date required"))
+        });
+    let end = flag_value(&args, "--end-ts")
+        .map(|raw| parse_timestamp(&raw))
+        .unwrap_or_else(|| parse_date_end(&flag_value(&args, "--end-date").expect("--end-date required")));
     let symbols_csv =
         flag_value(&args, "--symbols").unwrap_or_else(|| "BTCUSDT,DOGEUSDT".to_string());
     let output_path =
@@ -108,6 +119,8 @@ async fn main() {
         .filter(|symbol| !symbol.is_empty())
         .map(ToOwned::to_owned)
         .collect();
+
+    eprintln!("loading attribution window {start} -> {end} for {:?}", symbols);
 
     let pool = PgPoolOptions::new()
         .max_connections(3)

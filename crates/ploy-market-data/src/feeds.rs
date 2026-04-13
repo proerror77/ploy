@@ -327,18 +327,16 @@ pub fn spawn_db_l2_feed(
                 rust_decimal::Decimal,
                 i32,
                 rust_decimal::Decimal,
-                Option<Value>,
-                Option<Value>,
+                rust_decimal::Decimal,
                 chrono::DateTime<chrono::Utc>,
             )> = match sqlx::query_as(
                 r#"
                     SELECT symbol,
                            COALESCE(update_id, 0) AS update_id,
-                           obi_5,
+                    COALESCE(obi_5, 0) AS obi_5,
                            COALESCE(spread_bps, 0)::int AS spread_bps,
-                           COALESCE(mid_price, 0) AS mid_price,
-                           bids,
-                           asks,
+                           COALESCE(bid_volume_5, 0) AS bid_volume_5,
+                           COALESCE(ask_volume_5, 0) AS ask_volume_5,
                            event_time
                     FROM binance_lob_ticks
                     WHERE symbol = ANY($1)
@@ -357,7 +355,7 @@ pub fn spawn_db_l2_feed(
                 }
             };
 
-            for (symbol, update_id, obi, spread_bps, mid_price, bids, asks, ts) in rows {
+            for (symbol, update_id, obi, spread_bps, bid_volume_5, ask_volume_5, ts) in rows {
                 let should_emit = match last_seen.get(&symbol).copied() {
                     Some((last_ts, last_id)) => {
                         ts > last_ts || (ts == last_ts && update_id > last_id)
@@ -369,13 +367,12 @@ pub fn spawn_db_l2_feed(
                 }
 
                 last_seen.insert(symbol.clone(), (ts, update_id));
-                for update in l2_updates_from_book(
+                for update in l2_updates_from_depth_totals(
                     &symbol,
                     obi.to_f64().unwrap_or_default(),
                     spread_bps as u32,
-                    mid_price,
-                    bids.as_ref(),
-                    asks.as_ref(),
+                    bid_volume_5,
+                    ask_volume_5,
                     ts,
                 ) {
                     if tx.send(update).is_err() {
@@ -391,6 +388,37 @@ pub fn spawn_db_l2_feed(
     })
 }
 
+fn l2_updates_from_depth_totals(
+    symbol: &str,
+    obi: f64,
+    spread_bps: u32,
+    bid_depth_near: Decimal,
+    ask_depth_near: Decimal,
+    ts: DateTime<Utc>,
+) -> Vec<MarketUpdate> {
+    let mut updates = vec![MarketUpdate::L2 {
+        symbol: symbol.to_string(),
+        obi,
+        spread_bps,
+        ts,
+    }];
+
+    let bid_depth_near = bid_depth_near.to_f64().unwrap_or(0.0);
+    let ask_depth_near = ask_depth_near.to_f64().unwrap_or(0.0);
+
+    updates.push(MarketUpdate::L2Depth {
+        symbol: symbol.to_string(),
+        obi,
+        spread_bps,
+        bid_depth_near,
+        ask_depth_near,
+        ts,
+    });
+
+    updates
+}
+
+#[cfg(test)]
 fn l2_updates_from_book(
     symbol: &str,
     obi: f64,

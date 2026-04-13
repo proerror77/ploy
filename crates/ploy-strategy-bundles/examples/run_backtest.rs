@@ -1,4 +1,4 @@
-//! Runnable backtest example for pm_5m_directional.
+//! Runnable backtest example for PM5D strategy variants.
 //!
 //! Usage (synthetic):
 //!   cargo run -p ploy-strategy-bundles --example run_backtest -- [config.toml]
@@ -15,8 +15,9 @@
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, RuntimeConfig, RuntimeMode,
-    SimulatedExecutor, SimulatedExecutorConfig, StrategyRuntime,
+    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
+    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
+    StrategyRuntime,
     config::FullConfig,
     feed::{HistoricalLoadOptions, load_from_database_with_options},
 };
@@ -186,11 +187,12 @@ fn main() {
     let start_date = flag_value(&args, "--start-date");
     let end_date = flag_value(&args, "--end-date");
 
-    let (strategy_config, sim_config, runtime_config, backtest_options) =
+    let (strategy_variant, strategy_config, sim_config, runtime_config, backtest_options) =
         if let Some(ref path) = config_path {
             let config = FullConfig::from_file(path).expect("Failed to parse config");
             let sim = config.sim_executor_config();
             let rt = config.runtime_config();
+            let strategy_variant = config.runtime.canonical_strategy_variant();
             let backtest_options = HistoricalLoadOptions {
                 include_reference_prices: config.backtest_data.include_reference_prices,
                 reference_symbols: config
@@ -199,10 +201,11 @@ fn main() {
                 include_sports_state: config.backtest_data.include_sports_state,
                 require_official_settlement: config.backtest_data.require_official_settlement,
             };
-            (config.strategy, sim, rt, backtest_options)
+            (strategy_variant, config.strategy, sim, rt, backtest_options)
         } else {
             eprintln!("No config file provided, using built-in defaults\n");
             (
+                "directional".to_string(),
                 DirectionalConfig {
                     symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
                     symbol_profiles: std::collections::HashMap::new(),
@@ -260,8 +263,9 @@ fn main() {
             )
         };
 
-    eprintln!("=== pm_5m_directional Backtest ===");
+    eprintln!("=== PM5D Backtest ===");
     eprintln!("Mode:    {:?}", runtime_config.mode);
+    eprintln!("Variant: {strategy_variant}");
     eprintln!("Symbols: {:?}", strategy_config.symbols);
     eprintln!(
         "Params:  min_edge={:.0}% min_p={:.0}% cooldown={}s",
@@ -344,7 +348,11 @@ fn main() {
     };
 
     let stake_usd = strategy_config.stake_usd;
-    let strategy = DirectionalStrategy::new(strategy_config);
+    let strategy: Box<dyn StrategyLogic> = match strategy_variant.as_str() {
+        "directional" => Box::new(DirectionalStrategy::new(strategy_config)),
+        "reversal" => Box::new(ReversalStrategy::new(strategy_config.into())),
+        other => panic!("unsupported strategy_variant in run_backtest example: {other}"),
+    };
     let feed = HistoricalFeed::new(data);
     let executor = SimulatedExecutor::new(sim_config);
     let recorder = Box::new(NullRecorder);

@@ -711,22 +711,13 @@ async fn load_l2_data(
     to: DateTime<Utc>,
     updates: &mut Vec<MarketUpdate>,
 ) -> Result<(), sqlx::Error> {
-    let rows: Vec<(
-        DateTime<Utc>,
-        String,
-        f64,
-        i32,
-        Decimal,
-        Option<Value>,
-        Option<Value>,
-    )> = sqlx::query_as(
+    let rows: Vec<(DateTime<Utc>, String, Decimal, i32, Decimal, Decimal)> = match sqlx::query_as(
         r#"
         SELECT event_time, symbol,
                COALESCE(obi_5, 0.0) as obi,
                COALESCE(spread_bps, 0)::int as spread_bps,
-               COALESCE(mid_price, 0) as mid_price,
-               bids,
-               asks
+               COALESCE(bid_volume_5, 0) as bid_volume_5,
+               COALESCE(ask_volume_5, 0) as ask_volume_5
         FROM binance_lob_ticks
         WHERE symbol = ANY($1)
           AND event_time >= $2
@@ -739,17 +730,22 @@ async fn load_l2_data(
     .bind(to)
     .fetch_all(pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "Failed to load L2 data from binance_lob_ticks");
+            Vec::new()
+        }
+    };
 
     info!(count = rows.len(), "Loaded L2 data from binance_lob_ticks");
-    for (ts, symbol, obi, spread_bps, mid_price, bids, asks) in rows {
-        updates.extend(l2_updates_from_book(
+    for (ts, symbol, obi, spread_bps, bid_volume_5, ask_volume_5) in rows {
+        updates.extend(l2_updates_from_depth_totals(
             &symbol,
-            obi,
+            obi.to_f64().unwrap_or_default(),
             spread_bps as u32,
-            mid_price,
-            bids.as_ref(),
-            asks.as_ref(),
+            bid_volume_5,
+            ask_volume_5,
             ts,
         ));
     }
@@ -757,6 +753,37 @@ async fn load_l2_data(
     Ok(())
 }
 
+fn l2_updates_from_depth_totals(
+    symbol: &str,
+    obi: f64,
+    spread_bps: u32,
+    bid_depth_near: Decimal,
+    ask_depth_near: Decimal,
+    ts: DateTime<Utc>,
+) -> Vec<MarketUpdate> {
+    let mut updates = vec![MarketUpdate::L2 {
+        symbol: symbol.to_string(),
+        obi,
+        spread_bps,
+        ts,
+    }];
+
+    let bid_depth_near = bid_depth_near.to_f64().unwrap_or(0.0);
+    let ask_depth_near = ask_depth_near.to_f64().unwrap_or(0.0);
+
+    updates.push(MarketUpdate::L2Depth {
+        symbol: symbol.to_string(),
+        obi,
+        spread_bps,
+        bid_depth_near,
+        ask_depth_near,
+        ts,
+    });
+
+    updates
+}
+
+#[cfg(test)]
 fn l2_updates_from_book(
     symbol: &str,
     obi: f64,
