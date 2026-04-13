@@ -7838,3 +7838,43 @@ Implement the committed reversal-strategy plan as a runnable strategy/runtime sl
 - The feed side was implemented additively: old `L2` consumers keep working while reversal/research can consume `L2Depth`.
 - The config choice intentionally favors repo fit over purity: reversal uses a dedicated runtime strategy plus `ReversalConfig`, but the TOML surface still flows through the existing unified `[strategy]` section via reversal-prefixed fields on `DirectionalConfig`.
 - Remaining gap: the research/backtest tasks from the plan were not executed end-to-end because this session did not have a validated database-backed backtest run to point at. The config/runtime path is ready, but empirical threshold tuning and strategy-vs-baseline comparison still need a real DB window.
+
+# Binary Options Factor Research Slice (2026-04-13)
+
+## Goal
+Build a Rust-native factor research workflow for binary-options trading that separates settlement-strategy labels from PM-lag-arbitrage labels and uses reusable libraries first, favoring Polars for large observation sets.
+
+## File ownership
+
+- `Cargo.toml`
+  - owner: workspace dependency wiring for Polars
+- `crates/ploy-research/Cargo.toml`
+  - owner: research-crate dependency surface
+- `crates/ploy-research/src/{lib.rs,factors.rs}`
+  - owner: factor observation model, statistics, Polars frame export
+- `crates/ploy-research/examples/factor_research.rs`
+  - owner: runnable Rust research entrypoint
+
+## Progress notes
+
+- 2026-04-13: Confirmed the right home for this workflow is `crates/ploy-research`, not more ad hoc logic under `ploy-strategy-bundles/examples`.
+- 2026-04-13: Added Polars to the workspace and wired it into `ploy-research`.
+- 2026-04-13: Added a first Rust-native factor observation pipeline that computes:
+  - binary-option distance-to-beat features
+  - drift / flip features
+  - LOB / spread / depth-ratio features
+  - volatility-aware features (`sigma_horizon`, `distance_over_sigma`, `model_prob_up`, `model_edge_up`)
+  - settlement and PM-lag labels
+- 2026-04-13: First remote factor research run on `BTCUSDT`, `2026-04-11T10:45:00Z -> 11:30:00Z` produced:
+  - `loaded 63069 updates`
+  - `observation_rows=33630`
+  - `event_rows=14`
+  - settlement top factors by |Spearman IC|: `spread_bps`, `sigma_horizon`, `flip_age_secs`
+  - PM lag top factors by |Spearman IC|: `signed_distance_to_beat`, `abs_distance_to_beat`, `model_prob_up`, `distance_over_sigma`
+- 2026-04-13: Added coarse reversal optimization support and verified that profitable reversal behavior exists on remote L2 windows, but validation quality still depends on choosing windows that contain both events and L2 coverage.
+
+## Review
+
+- This slice changes the research direction from gate-tuning-first to factor-validity-first.
+- The new tool is intentionally research-focused, not yet a production alpha model.
+- Remaining gap: the first `factor_research` version reports IC / Spearman / limited ICIR, but still needs richer bucket outputs, combo-factor ranking, and more robust missing-value handling (`null` instead of `NaN`) before it should be treated as the final research surface.

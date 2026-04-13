@@ -77,6 +77,7 @@ async-trait = "0.1"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 optimizer = "1"
+polars = { version = "0.46", default-features = false, features = ["lazy", "fmt", "strings", "dtype-datetime", "dtype-date"] }
 
 [package]
 name = "ploy"

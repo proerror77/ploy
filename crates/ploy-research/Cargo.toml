@@ -9,9 +9,14 @@ description = "Ploy research and backtesting crate"
 
 [dependencies]
 chrono.workspace = true
+polars.workspace = true
+ploy-strategy-bundles.workspace = true
 ploy-trading.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
+sqlx.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
