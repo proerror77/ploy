@@ -10,8 +10,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use tracing::{debug, info, warn};
 
@@ -299,9 +299,9 @@ impl MeanReversionStrategy {
     }
 
     fn in_cooldown(&self, symbol: &str, now: DateTime<Utc>) -> bool {
-        self.cooldowns.get(symbol).is_some_and(|last| {
-            (now - *last).num_seconds() < self.config.cooldown_secs as i64
-        })
+        self.cooldowns
+            .get(symbol)
+            .is_some_and(|last| (now - *last).num_seconds() < self.config.cooldown_secs as i64)
     }
 
     fn shares_for_entry_price(&self, entry_price: Decimal) -> Decimal {
@@ -491,10 +491,8 @@ impl MeanReversionStrategy {
 
                 let timed_out =
                     (now - entry.entry_time).num_seconds() >= self.config.max_hold_secs as i64;
-                let take_profit_hit =
-                    bid_f >= entry_f + self.config.take_profit_price_delta;
-                let stop_loss_hit =
-                    bid_f <= entry_f - self.config.stop_loss_price_delta;
+                let take_profit_hit = bid_f >= entry_f + self.config.take_profit_price_delta;
+                let stop_loss_hit = bid_f <= entry_f - self.config.stop_loss_price_delta;
 
                 if !(take_profit_hit || stop_loss_hit || timed_out) {
                     continue;
@@ -547,7 +545,11 @@ impl MeanReversionStrategy {
         };
 
         let (token_id, entry_price, directional_p) = match direction {
-            Direction::Up => (&event.up_token, self.quotes.get(&event.up_token)?.ask?, p_up),
+            Direction::Up => (
+                &event.up_token,
+                self.quotes.get(&event.up_token)?.ask?,
+                p_up,
+            ),
             Direction::Down => (
                 &event.down_token,
                 self.quotes.get(&event.down_token)?.ask?,
@@ -567,7 +569,12 @@ impl MeanReversionStrategy {
             || (entry_f >= self.config.no_trade_zone_min
                 && entry_f <= self.config.no_trade_zone_max)
         {
-            debug!(symbol, token_id, entry_price = entry_f, "mean-reversion price filter");
+            debug!(
+                symbol,
+                token_id,
+                entry_price = entry_f,
+                "mean-reversion price filter"
+            );
             return None;
         }
 
@@ -576,7 +583,11 @@ impl MeanReversionStrategy {
             return None;
         }
 
-        let target_dir = if direction == Direction::Up { 1.0 } else { -1.0 };
+        let target_dir = if direction == Direction::Up {
+            1.0
+        } else {
+            -1.0
+        };
         let drift_alignment = buf.drift_speed() * target_dir;
         let accel_alignment = buf.drift_acceleration() * target_dir;
         let (consistency, dominant_dir) = buf.directional_consistency();
@@ -594,11 +605,11 @@ impl MeanReversionStrategy {
         reversal_bonus += accel_alignment.clamp(0.0, 0.20).min(0.08);
 
         if dominant_dir * target_dir > 0.0 {
-            reversal_bonus += ((consistency - 0.5).max(0.0) * 0.30)
-                .min(self.config.reversal_bonus_cap / 2.0);
+            reversal_bonus +=
+                ((consistency - 0.5).max(0.0) * 0.30).min(self.config.reversal_bonus_cap / 2.0);
         } else if consistency >= self.config.min_reversal_consistency {
-            reversal_bonus -= ((consistency - 0.5) * 0.30)
-                .min(self.config.reversal_bonus_cap / 2.0);
+            reversal_bonus -=
+                ((consistency - 0.5) * 0.30).min(self.config.reversal_bonus_cap / 2.0);
         }
 
         let mispricing_bonus = (base_p - entry_f)
@@ -786,7 +797,8 @@ impl StrategyLogic for MeanReversionStrategy {
                     }
                 }
 
-                let settlement_exits = self.settle_expired_events_for_symbol(symbol, positions, *ts);
+                let settlement_exits =
+                    self.settle_expired_events_for_symbol(symbol, positions, *ts);
                 if !settlement_exits.is_empty() {
                     return settlement_exits;
                 }
@@ -797,7 +809,9 @@ impl StrategyLogic for MeanReversionStrategy {
                 }
 
                 self.reset_daily_counter(*ts);
-                if self.daily_trades >= self.config.max_daily_trades || self.in_cooldown(symbol, *ts) {
+                if self.daily_trades >= self.config.max_daily_trades
+                    || self.in_cooldown(symbol, *ts)
+                {
                     return Vec::new();
                 }
 
@@ -864,7 +878,8 @@ impl StrategyLogic for MeanReversionStrategy {
                 self.token_symbol.insert(up_token.clone(), symbol.clone());
                 self.token_symbol.insert(down_token.clone(), symbol.clone());
                 self.token_event.insert(up_token.clone(), event_id.clone());
-                self.token_event.insert(down_token.clone(), event_id.clone());
+                self.token_event
+                    .insert(down_token.clone(), event_id.clone());
 
                 events.push(EventWindow {
                     event_id: event_id.clone(),
@@ -872,7 +887,8 @@ impl StrategyLogic for MeanReversionStrategy {
                     up_token: up_token.clone(),
                     down_token: down_token.clone(),
                     end_time: *end_time,
-                    open_price: price_to_beat.or_else(|| self.spot.get(symbol).map(|state| state.price)),
+                    open_price: price_to_beat
+                        .or_else(|| self.spot.get(symbol).map(|state| state.price)),
                 });
 
                 if self.config.symbols.contains(symbol)
@@ -906,7 +922,8 @@ impl StrategyLogic for MeanReversionStrategy {
                         continue;
                     }
 
-                    let Some(up_won) = self.resolve_expired_event_outcome(&event, *settlement) else {
+                    let Some(up_won) = self.resolve_expired_event_outcome(&event, *settlement)
+                    else {
                         warn!(event_id = %event_id, "mean-reversion settlement pending");
                         remove = false;
                         continue;
@@ -1027,6 +1044,15 @@ mod tests {
             reversal_bonus_cap: 0.20,
             use_multiscale_volatility: true,
             use_price_structure_adjustment: true,
+            reversal_max_distance_pct: 0.015,
+            reversal_max_drift_flip_age_secs: 20,
+            reversal_min_post_flip_drift: 0.0001,
+            reversal_lob_depth_pct: 0.001,
+            reversal_min_lob_depth_ratio: 1.3,
+            reversal_max_ask_for_reversal: 0.25,
+            reversal_max_pm_lag_secs: 30,
+            reversal_take_profit_ask: 0.65,
+            reversal_stop_distance_pct: 0.025,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
             cooldown_secs: 0,
@@ -1225,7 +1251,10 @@ mod tests {
             &orders,
         );
 
-        assert!(decisions.is_empty(), "event should be retired after early exit");
+        assert!(
+            decisions.is_empty(),
+            "event should be retired after early exit"
+        );
     }
 
     #[test]

@@ -333,6 +333,7 @@ where
             | MarketUpdate::AggTrade { ts, .. }
             | MarketUpdate::Quote { ts, .. }
             | MarketUpdate::L2 { ts, .. }
+            | MarketUpdate::L2Depth { ts, .. }
             | MarketUpdate::SportsState { ts, .. }
             | MarketUpdate::ReferencePrice { ts, .. }
             | MarketUpdate::Kline { ts, .. } => Some(*ts),
@@ -754,7 +755,10 @@ mod tests {
         let snapshot = runtime.trading().snapshot(&BTreeMap::new());
 
         assert_eq!(snapshot.orders.len(), 1);
-        assert_eq!(snapshot.orders[0].state, ploy_trading::OrderState::Acknowledged);
+        assert_eq!(
+            snapshot.orders[0].state,
+            ploy_trading::OrderState::Acknowledged
+        );
         assert_eq!(
             snapshot.orders[0].venue_order_id.as_deref(),
             Some("venue-order-1")

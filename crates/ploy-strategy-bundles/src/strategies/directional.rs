@@ -12,8 +12,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -130,6 +130,26 @@ pub struct DirectionalConfig {
     #[serde(default = "default_use_price_structure_adjustment")]
     pub use_price_structure_adjustment: bool,
 
+    // Reversal / V5 prototype parameters
+    #[serde(default = "default_reversal_max_distance_pct")]
+    pub reversal_max_distance_pct: f64,
+    #[serde(default = "default_reversal_max_drift_flip_age_secs")]
+    pub reversal_max_drift_flip_age_secs: u64,
+    #[serde(default = "default_reversal_min_post_flip_drift")]
+    pub reversal_min_post_flip_drift: f64,
+    #[serde(default = "default_reversal_lob_depth_pct")]
+    pub reversal_lob_depth_pct: f64,
+    #[serde(default = "default_reversal_min_lob_depth_ratio")]
+    pub reversal_min_lob_depth_ratio: f64,
+    #[serde(default = "default_reversal_max_ask_for_reversal")]
+    pub reversal_max_ask_for_reversal: f64,
+    #[serde(default = "default_reversal_max_pm_lag_secs")]
+    pub reversal_max_pm_lag_secs: u64,
+    #[serde(default = "default_reversal_take_profit_ask")]
+    pub reversal_take_profit_ask: f64,
+    #[serde(default = "default_reversal_stop_distance_pct")]
+    pub reversal_stop_distance_pct: f64,
+
     // Timing
     #[serde(default = "default_min_time")]
     pub min_time_remaining_secs: u64,
@@ -229,6 +249,33 @@ fn default_use_multiscale_volatility() -> bool {
 }
 fn default_use_price_structure_adjustment() -> bool {
     true
+}
+fn default_reversal_max_distance_pct() -> f64 {
+    0.015
+}
+fn default_reversal_max_drift_flip_age_secs() -> u64 {
+    20
+}
+fn default_reversal_min_post_flip_drift() -> f64 {
+    0.0001
+}
+fn default_reversal_lob_depth_pct() -> f64 {
+    0.001
+}
+fn default_reversal_min_lob_depth_ratio() -> f64 {
+    1.3
+}
+fn default_reversal_max_ask_for_reversal() -> f64 {
+    0.25
+}
+fn default_reversal_max_pm_lag_secs() -> u64 {
+    30
+}
+fn default_reversal_take_profit_ask() -> f64 {
+    0.65
+}
+fn default_reversal_stop_distance_pct() -> f64 {
+    0.025
 }
 fn default_min_time() -> u64 {
     60
@@ -416,12 +463,7 @@ struct MicrostructureState {
 }
 
 impl MicrostructureState {
-    fn apply_aggtrade(
-        &mut self,
-        quantity: Decimal,
-        is_buyer_maker: bool,
-        ts: DateTime<Utc>,
-    ) {
+    fn apply_aggtrade(&mut self, quantity: Decimal, is_buyer_maker: bool, ts: DateTime<Utc>) {
         let qty = quantity.to_f64().unwrap_or(0.0);
         if qty <= 0.0 {
             return;
@@ -973,7 +1015,11 @@ impl DirectionalStrategy {
             if let Some(buf) = self.return_buffers.get(symbol) {
                 let requires_structure_history = self.config.min_trend_consistency > 0.5
                     || self.config.min_trend_persistence_secs > 0;
-                let signal_dir = if direction == Direction::Up { 1.0 } else { -1.0 };
+                let signal_dir = if direction == Direction::Up {
+                    1.0
+                } else {
+                    -1.0
+                };
 
                 if requires_structure_history {
                     if buf.len() < 3 {
@@ -1397,7 +1443,10 @@ impl StrategyLogic for DirectionalStrategy {
                         self.reset_daily_counter(*ts);
                         if self.daily_trades < self.config.max_daily_trades
                             && !self.in_cooldown(&symbol, *ts)
-                            && self.config.max_daily_loss_usd.map_or(true, |limit| self.daily_realized_pnl > -limit)
+                            && self
+                                .config
+                                .max_daily_loss_usd
+                                .map_or(true, |limit| self.daily_realized_pnl > -limit)
                         {
                             return self.try_entry(&symbol, positions, orders, *ts);
                         }
@@ -1538,7 +1587,8 @@ impl StrategyLogic for DirectionalStrategy {
                         continue;
                     }
 
-                    let Some(up_won) = self.resolve_expired_event_outcome(&event, *settlement) else {
+                    let Some(up_won) = self.resolve_expired_event_outcome(&event, *settlement)
+                    else {
                         warn!(
                             event_id = %event_id,
                             symbol = %event.symbol,
@@ -1572,8 +1622,7 @@ impl StrategyLogic for DirectionalStrategy {
         // Track entry prices and realized PnL for circuit breaker.
         match fill.side {
             ploy_trading::TradeSide::Buy => {
-                self.entry_prices
-                    .insert(fill.token_id.clone(), fill.price);
+                self.entry_prices.insert(fill.token_id.clone(), fill.price);
             }
             ploy_trading::TradeSide::Sell => {
                 if let Some(entry_price) = self.entry_prices.remove(&fill.token_id) {
@@ -1603,11 +1652,7 @@ impl StrategyLogic for DirectionalStrategy {
         // arm the per-symbol cooldown so the same event isn't retried on every tick.
         if let Some(symbol) = self.token_symbol.get(&intent.token_id).cloned() {
             self.cooldowns.insert(symbol.clone(), now);
-            debug!(
-                symbol,
-                reason,
-                "Rejection cooldown armed"
-            );
+            debug!(symbol, reason, "Rejection cooldown armed");
         }
     }
 
@@ -1644,6 +1689,15 @@ mod tests {
             reversal_bonus_cap: 0.20,
             use_multiscale_volatility: true,
             use_price_structure_adjustment: true,
+            reversal_max_distance_pct: 0.015,
+            reversal_max_drift_flip_age_secs: 20,
+            reversal_min_post_flip_drift: 0.0001,
+            reversal_lob_depth_pct: 0.001,
+            reversal_min_lob_depth_ratio: 1.3,
+            reversal_max_ask_for_reversal: 0.25,
+            reversal_max_pm_lag_secs: 30,
+            reversal_take_profit_ask: 0.65,
+            reversal_stop_distance_pct: 0.025,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
             cooldown_secs: 0,
@@ -1964,7 +2018,9 @@ mod tests {
             &mut strat,
             &positions,
             now,
-            &[99950, 99900, 99850, 99800, 100150, 100500, 100900, 101300, 101700, 102000],
+            &[
+                99950, 99900, 99850, 99800, 100150, 100500, 100900, 101300, 101700, 102000,
+            ],
         );
 
         assert!(
@@ -1986,7 +2042,9 @@ mod tests {
             &mut strat,
             &positions,
             now,
-            &[100200, 100420, 100650, 100900, 101120, 101350, 101280, 101520, 101760, 102000],
+            &[
+                100200, 100420, 100650, 100900, 101120, 101350, 101280, 101520, 101760, 102000,
+            ],
         );
 
         assert!(
@@ -2008,10 +2066,16 @@ mod tests {
             &mut strat,
             &positions,
             now,
-            &[99980, 100180, 100380, 100320, 100620, 100920, 101220, 101520, 101760, 102000],
+            &[
+                99980, 100180, 100380, 100320, 100620, 100920, 101220, 101520, 101760, 102000,
+            ],
         );
 
-        assert_eq!(decisions.len(), 1, "strong persistent structure should still enter");
+        assert_eq!(
+            decisions.len(),
+            1,
+            "strong persistent structure should still enter"
+        );
         match &decisions[0] {
             StrategyDecision::Enter { intent, .. } => assert_eq!(intent.token_id, "up-structure"),
             other => panic!("Expected Enter, got {:?}", other),
@@ -2229,7 +2293,11 @@ mod tests {
         strat.events.get_mut("BTCUSDT").unwrap()[1].open_price = Some(dec!(100000));
 
         for token_id in ["up-near", "dn-near", "up-far", "dn-far"] {
-            let ask = if token_id.starts_with("up") { dec!(0.30) } else { dec!(0.70) };
+            let ask = if token_id.starts_with("up") {
+                dec!(0.30)
+            } else {
+                dec!(0.70)
+            };
             let bid = ask - dec!(0.01);
             strat.on_update(
                 &MarketUpdate::Quote {
@@ -2380,7 +2448,11 @@ mod tests {
             pending.is_empty(),
             "unresolved expiry should stay pending until settlement can be determined"
         );
-        assert_eq!(strat.events["BTCUSDT"].len(), 1, "event should remain tracked");
+        assert_eq!(
+            strat.events["BTCUSDT"].len(),
+            1,
+            "event should remain tracked"
+        );
 
         let decisions = strat.on_update(
             &MarketUpdate::SpotPrice {
@@ -2398,7 +2470,8 @@ mod tests {
             other => panic!("Expected Exit, got {:?}", other),
         }
         assert!(
-            strat.events
+            strat
+                .events
                 .get("BTCUSDT")
                 .map(|events| events.is_empty())
                 .unwrap_or(true),

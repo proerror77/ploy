@@ -15,12 +15,12 @@
 
 use chrono::{NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
-use ploy_strategy_bundles::{
-    feed::{load_from_database_with_options, HistoricalLoadOptions},
-    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder,
-    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyRuntime,
-};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
+use ploy_strategy_bundles::{
+    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, RuntimeConfig, RuntimeMode,
+    SimulatedExecutor, SimulatedExecutorConfig, StrategyRuntime,
+    feed::{HistoricalLoadOptions, load_from_database_with_options},
+};
 use ploy_trading::TradeSide;
 use rust_decimal_macros::dec;
 use sqlx::postgres::PgPoolOptions;
@@ -28,9 +28,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2)
-        .find(|w| w[0] == flag)
-        .map(|w| w[1].clone())
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
 fn parse_date_start(s: &str) -> chrono::DateTime<Utc> {
@@ -98,7 +96,11 @@ fn run_backtest(config: DirectionalConfig, data: &[MarketUpdate]) -> (f64, usize
     } else {
         let n = per_trade_pnl.len() as f64;
         let mean = per_trade_pnl.iter().sum::<f64>() / n;
-        let variance = per_trade_pnl.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        let variance = per_trade_pnl
+            .iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>()
+            / n;
         let std_dev = variance.sqrt();
         if std_dev < 1e-9 {
             0.0
@@ -141,6 +143,15 @@ fn make_config(
         reversal_bonus_cap: 0.20,
         use_multiscale_volatility: true,
         use_price_structure_adjustment: true,
+        reversal_max_distance_pct: 0.015,
+        reversal_max_drift_flip_age_secs: 20,
+        reversal_min_post_flip_drift: 0.0001,
+        reversal_lob_depth_pct: 0.001,
+        reversal_min_lob_depth_ratio: 1.3,
+        reversal_max_ask_for_reversal: 0.25,
+        reversal_max_pm_lag_secs: 30,
+        reversal_take_profit_ask: 0.65,
+        reversal_stop_distance_pct: 0.025,
         min_time_remaining_secs: min_time as u64,
         max_time_remaining_secs: max_time as u64,
         cooldown_secs: cooldown_secs as u64,
@@ -157,13 +168,14 @@ fn main() {
 
     let db_url = flag_value(&args, "--db-url").expect("--db-url required");
     let train_start = flag_value(&args, "--train-start").unwrap_or_else(|| "2026-04-01".into());
-    let train_end   = flag_value(&args, "--train-end").unwrap_or_else(|| "2026-04-03".into());
-    let val_start   = flag_value(&args, "--val-start").unwrap_or_else(|| "2026-04-04".into());
-    let val_end     = flag_value(&args, "--val-end").unwrap_or_else(|| "2026-04-04".into());
-    let symbols_arg = flag_value(&args, "--symbols").unwrap_or_else(|| {
-        "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT".into()
-    });
-    let require_official_settlement = args.iter().any(|arg| arg == "--require-official-settlement");
+    let train_end = flag_value(&args, "--train-end").unwrap_or_else(|| "2026-04-03".into());
+    let val_start = flag_value(&args, "--val-start").unwrap_or_else(|| "2026-04-04".into());
+    let val_end = flag_value(&args, "--val-end").unwrap_or_else(|| "2026-04-04".into());
+    let symbols_arg = flag_value(&args, "--symbols")
+        .unwrap_or_else(|| "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT".into());
+    let require_official_settlement = args
+        .iter()
+        .any(|arg| arg == "--require-official-settlement");
     let n_trials: usize = flag_value(&args, "--trials")
         .and_then(|s| s.parse().ok())
         .unwrap_or(200);
@@ -187,13 +199,13 @@ fn main() {
         .build()
         .unwrap();
 
-    let pool = rt.block_on(
-        PgPoolOptions::new().max_connections(3).connect(&db_url)
-    ).expect("DB connection failed");
+    let pool = rt
+        .block_on(PgPoolOptions::new().max_connections(3).connect(&db_url))
+        .expect("DB connection failed");
 
     eprintln!("Loading training data ({} → {})...", train_start, train_end);
-    let train_data = rt.block_on(
-        load_from_database_with_options(
+    let train_data = rt
+        .block_on(load_from_database_with_options(
             &pool,
             &symbols,
             parse_date_start(&train_start),
@@ -202,13 +214,13 @@ fn main() {
                 require_official_settlement,
                 ..HistoricalLoadOptions::default()
             },
-        )
-    ).expect("Failed to load training data");
+        ))
+        .expect("Failed to load training data");
     eprintln!("  {} updates loaded", train_data.len());
 
     eprintln!("Loading validation data ({} → {})...", val_start, val_end);
-    let val_data = rt.block_on(
-        load_from_database_with_options(
+    let val_data = rt
+        .block_on(load_from_database_with_options(
             &pool,
             &symbols,
             parse_date_start(&val_start),
@@ -217,8 +229,8 @@ fn main() {
                 require_official_settlement,
                 ..HistoricalLoadOptions::default()
             },
-        )
-    ).expect("Failed to load validation data");
+        ))
+        .expect("Failed to load validation data");
     eprintln!("  {} updates loaded\n", val_data.len());
 
     let train_data = Arc::new(train_data);
@@ -331,12 +343,19 @@ fn main() {
 
     // Top 10 trials
     let mut all_trials = study.trials();
-    all_trials.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap_or(std::cmp::Ordering::Equal));
+    all_trials.sort_by(|a, b| {
+        b.value
+            .partial_cmp(&a.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     eprintln!("\n=== Top 10 Trials ===");
-    eprintln!("{:<6} {:<8} {:<8} {:<8} {:<8} {:<10} {:<10}",
-        "Trial", "Sharpe", "p_min", "edge", "max_px", "cooldown", "min_time");
+    eprintln!(
+        "{:<6} {:<8} {:<8} {:<8} {:<8} {:<10} {:<10}",
+        "Trial", "Sharpe", "p_min", "edge", "max_px", "cooldown", "min_time"
+    );
     for t in all_trials.iter().take(10) {
-        eprintln!("{:<6} {:<8.3} {:<8.3} {:<8.4} {:<8.3} {:<10} {:<10}",
+        eprintln!(
+            "{:<6} {:<8.3} {:<8.3} {:<8.4} {:<8.3} {:<10} {:<10}",
             t.id,
             t.value,
             t.get(&p_min_prob).unwrap_or(0.0),

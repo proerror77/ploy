@@ -55,10 +55,12 @@ pub struct RuntimeSection {
     /// - `"directional"` — current PM5D directional engine
     /// - `"directional_bayes"` — experimental Bayesian directional engine
     /// - `"mean_reversion"` — V4 prototype mean-reversion engine
+    /// - `"reversal"` — PM5D reversal engine with L2-depth confirmation
     ///
     /// Roadmap aliases normalize onto those canonical variants:
     /// - `"v1"`, `"v2"`, `"v3"` => `"directional"`
     /// - `"v4"` => `"mean_reversion"`
+    /// - `"reversal"`, `"pm5d_reversal"` => `"reversal"`
     #[serde(default = "default_strategy_variant")]
     pub strategy_variant: String,
     /// Backtest start time (ISO 8601 format, e.g., "2026-04-01T00:00:00Z")
@@ -136,9 +138,8 @@ impl RuntimeSection {
             "directional_bayes" | "directional-bayes" | "pm5d_bayes" => {
                 "directional_bayes".to_string()
             }
-            "mean_reversion" | "mean-reversion" | "pm5d_v4" | "v4" => {
-                "mean_reversion".to_string()
-            }
+            "mean_reversion" | "mean-reversion" | "pm5d_v4" | "v4" => "mean_reversion".to_string(),
+            "reversal" | "pm5d_reversal" | "pm-5m-reversal" => "reversal".to_string(),
             other => other.to_string(),
         }
     }
@@ -459,6 +460,8 @@ quantity = 25.0
             ("directional_bayes", "directional_bayes"),
             ("v4", "mean_reversion"),
             ("pm5d_v4", "mean_reversion"),
+            ("reversal", "reversal"),
+            ("pm5d_reversal", "reversal"),
         ] {
             let config = FullConfig::from_toml(&format!(
                 r#"
@@ -488,6 +491,8 @@ strategy_variant = "{raw}"
             "02-pm5d.v3-live.toml",
             "02-pm5d.v4-dryrun.toml",
             "02-pm5d.v4-live.toml",
+            "05-reversal.dryrun.toml",
+            "05-reversal.backtest.toml",
         ] {
             let path = config_dir.join(file);
             let config = FullConfig::from_file(path.to_str().unwrap()).unwrap();

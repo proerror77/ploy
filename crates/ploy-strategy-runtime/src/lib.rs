@@ -1,21 +1,21 @@
 use async_trait::async_trait;
 use ploy_claimer::ensure_account_claimer_daemon;
 use ploy_market_data::feeds::{
-    spawn_chainlink_feed, spawn_db_aggtrade_feed, spawn_db_l2_feed,
-    spawn_db_spot_feed, spawn_pyth_reference_feed, spawn_spot_feed,
+    spawn_chainlink_feed, spawn_db_aggtrade_feed, spawn_db_l2_feed, spawn_db_spot_feed,
+    spawn_pyth_reference_feed, spawn_spot_feed,
 };
 use ploy_market_data::reference_prices::new_reference_price_registry;
 use ploy_market_data::scanner::spawn_market_scanner;
 use ploy_market_data::sports_feed::spawn_sports_feed;
-use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_strategy_bundles::feed::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_strategy_bundles::{
     BayesianDirectionalStrategy, ExecutionReport, Feed, FullConfig, HistoricalFeed, LiveFeed,
-    MeanReversionStrategy, NullRecorder, RecordedFeed, Recorder, RecordingFeed, RuntimeMode,
-    SignalRecord, SimulatedExecutor, StrategyLogic, StrategyRuntime,
+    MeanReversionStrategy, NullRecorder, RecordedFeed, Recorder, RecordingFeed, ReversalStrategy,
+    RuntimeMode, SignalRecord, SimulatedExecutor, StrategyLogic, StrategyRuntime,
 };
 use ploy_trading::{FillRecord, TradeSide, TradingIntent};
-use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::{BTreeMap, HashMap};
@@ -44,7 +44,9 @@ pub async fn run_strategy(config: FullConfig, config_path: &str, force_dry_run: 
     let strategy = build_strategy(&config);
 
     let (result, snapshot) = match runtime_config.mode {
-        RuntimeMode::Backtest => run_backtest(&config, &symbols, strategy, runtime_config.clone()).await,
+        RuntimeMode::Backtest => {
+            run_backtest(&config, &symbols, strategy, runtime_config.clone()).await
+        }
         RuntimeMode::Replay => run_replay(&config, strategy, runtime_config.clone()).await,
         RuntimeMode::Live | RuntimeMode::DryRun => {
             run_live_or_dry_run(&config, &symbols, strategy, runtime_config.clone()).await
@@ -87,7 +89,10 @@ async fn run_backtest(
     symbols: &[String],
     strategy: Box<dyn StrategyLogic>,
     runtime_config: RuntimeModeConfig,
-) -> (ploy_strategy_bundles::RuntimeResult, ploy_trading::TradingRuntimeSnapshot) {
+) -> (
+    ploy_strategy_bundles::RuntimeResult,
+    ploy_trading::TradingRuntimeSnapshot,
+) {
     let db_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/ploy".to_string());
 
@@ -142,7 +147,10 @@ async fn run_replay(
     config: &FullConfig,
     strategy: Box<dyn StrategyLogic>,
     runtime_config: RuntimeModeConfig,
-) -> (ploy_strategy_bundles::RuntimeResult, ploy_trading::TradingRuntimeSnapshot) {
+) -> (
+    ploy_strategy_bundles::RuntimeResult,
+    ploy_trading::TradingRuntimeSnapshot,
+) {
     let replay_path = config.replay_market_updates_path().unwrap_or_else(|| {
         eprintln!("Replay mode requires [runtime].replay_market_updates_from in the config");
         std::process::exit(1);
@@ -173,7 +181,10 @@ async fn run_live_or_dry_run(
     symbols: &[String],
     strategy: Box<dyn StrategyLogic>,
     runtime_config: RuntimeModeConfig,
-) -> (ploy_strategy_bundles::RuntimeResult, ploy_trading::TradingRuntimeSnapshot) {
+) -> (
+    ploy_strategy_bundles::RuntimeResult,
+    ploy_trading::TradingRuntimeSnapshot,
+) {
     let db_url = env::var("DATABASE_URL").ok();
     let db_pool: Option<sqlx::PgPool> = match db_url.as_deref() {
         Some(url) => match PgPoolOptions::new().max_connections(5).connect(url).await {
@@ -216,7 +227,11 @@ async fn run_live_or_dry_run(
         None
     };
     let _db_aggtrade_handle = if let Some(ref db) = db_pool {
-        Some(spawn_db_aggtrade_feed(tx.clone(), symbols.to_vec(), db.clone()))
+        Some(spawn_db_aggtrade_feed(
+            tx.clone(),
+            symbols.to_vec(),
+            db.clone(),
+        ))
     } else {
         None
     };
@@ -855,10 +870,18 @@ fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
             );
             Box::new(MeanReversionStrategy::new(config.strategy.clone()))
         }
+        "reversal" => {
+            info!(
+                configured_variant = configured_variant,
+                canonical_variant = canonical_variant.as_str(),
+                "Using reversal strategy variant",
+            );
+            Box::new(ReversalStrategy::new(config.strategy.clone().into()))
+        }
         _ => {
             eprintln!(
                 "Unsupported strategy_variant `{configured_variant}` in config. \
-                 Supported runtime variants: directional, directional_bayes, mean_reversion, v1, v2, v3, v4."
+                 Supported runtime variants: directional, directional_bayes, mean_reversion, reversal, v1, v2, v3, v4."
             );
             std::process::exit(1);
         }
@@ -904,6 +927,7 @@ mod tests {
             ("v2", "pm_5m_directional"),
             ("v3", "pm_5m_directional"),
             ("v4", "pm_5m_mean_reversion"),
+            ("reversal", "pm_5m_reversal"),
         ] {
             let config = FullConfig::from_toml(&format!(
                 r#"

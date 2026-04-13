@@ -161,6 +161,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
         | MarketUpdate::AggTrade { ts, .. }
         | MarketUpdate::Quote { ts, .. }
         | MarketUpdate::L2 { ts, .. }
+        | MarketUpdate::L2Depth { ts, .. }
         | MarketUpdate::SportsState { ts, .. }
         | MarketUpdate::ReferencePrice { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
@@ -223,6 +224,15 @@ fn main() {
                     reversal_bonus_cap: 0.20,
                     use_multiscale_volatility: true,
                     use_price_structure_adjustment: true,
+                    reversal_max_distance_pct: 0.015,
+                    reversal_max_drift_flip_age_secs: 20,
+                    reversal_min_post_flip_drift: 0.0001,
+                    reversal_lob_depth_pct: 0.001,
+                    reversal_min_lob_depth_ratio: 1.3,
+                    reversal_max_ask_for_reversal: 0.25,
+                    reversal_max_pm_lag_secs: 30,
+                    reversal_take_profit_ask: 0.65,
+                    reversal_stop_distance_pct: 0.025,
                     min_time_remaining_secs: 60,
                     max_time_remaining_secs: 300,
                     cooldown_secs: 60,
@@ -313,6 +323,7 @@ fn main() {
                 MarketUpdate::EventDiscovered { .. } => event_discovered += 1,
                 MarketUpdate::EventExpired { .. } => event_expired += 1,
                 MarketUpdate::L2 { .. } => l2_count += 1,
+                MarketUpdate::L2Depth { .. } => l2_count += 1,
                 MarketUpdate::SportsState { .. } => {}
                 MarketUpdate::ReferencePrice { .. } => {}
                 MarketUpdate::Kline { .. } => kline_count += 1,

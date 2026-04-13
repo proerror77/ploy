@@ -13,20 +13,22 @@ use ploy_strategy_bundles::MarketUpdate;
 use polymarket_client_sdk::rtds::{Client as RtdsClient, EquityPriceMessage};
 use polymarket_client_sdk::types::U256;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
+use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, warn};
 
 use crate::reference_prices::{
-    infer_pyth_asset_class, market_symbol_to_binance_symbol, normalize_reference_symbol,
-    pyth_symbol, upsert_reference_price, ReferenceAssetClass, ReferencePriceKey,
-    ReferencePriceRegistry, ReferencePriceSnapshot, ReferencePriceSource,
+    ReferenceAssetClass, ReferencePriceKey, ReferencePriceRegistry, ReferencePriceSnapshot,
+    ReferencePriceSource, infer_pyth_asset_class, market_symbol_to_binance_symbol,
+    normalize_reference_symbol, pyth_symbol, upsert_reference_price,
 };
 
 const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
+const NEAR_DEPTH_PCT_RANGE: f64 = 0.001;
 
 fn rtds_market_data_ws_config() -> PolymarketWsConfig {
     let mut config = PolymarketWsConfig::default();
@@ -272,7 +274,9 @@ pub fn spawn_db_aggtrade_feed(
 
             for (symbol, agg_trade_id, price, quantity, is_buyer_maker, ts) in rows {
                 let should_emit = match last_seen.get(&symbol).copied() {
-                    Some((last_ts, last_id)) => ts > last_ts || (ts == last_ts && agg_trade_id > last_id),
+                    Some((last_ts, last_id)) => {
+                        ts > last_ts || (ts == last_ts && agg_trade_id > last_id)
+                    }
                     None => true,
                 };
                 if !should_emit {
@@ -301,7 +305,7 @@ pub fn spawn_db_aggtrade_feed(
 }
 
 /// Spawn a task that polls `binance_lob_ticks` and publishes
-/// `MarketUpdate::L2` events for live/dry-run strategies.
+/// `MarketUpdate::L2` and `MarketUpdate::L2Depth` events for live/dry-run strategies.
 pub fn spawn_db_l2_feed(
     tx: Arc<broadcast::Sender<MarketUpdate>>,
     symbols: Vec<String>,
@@ -317,30 +321,47 @@ pub fn spawn_db_l2_feed(
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-            let rows: Vec<(String, i64, rust_decimal::Decimal, i32, chrono::DateTime<chrono::Utc>)> =
-                match sqlx::query_as(
-                    r#"
-                    SELECT symbol, COALESCE(update_id, 0) AS update_id, obi_5, spread_bps, event_time
+            let rows: Vec<(
+                String,
+                i64,
+                rust_decimal::Decimal,
+                i32,
+                rust_decimal::Decimal,
+                Option<Value>,
+                Option<Value>,
+                chrono::DateTime<chrono::Utc>,
+            )> = match sqlx::query_as(
+                r#"
+                    SELECT symbol,
+                           COALESCE(update_id, 0) AS update_id,
+                           obi_5,
+                           COALESCE(spread_bps, 0)::int AS spread_bps,
+                           COALESCE(mid_price, 0) AS mid_price,
+                           bids,
+                           asks,
+                           event_time
                     FROM binance_lob_ticks
                     WHERE symbol = ANY($1)
                       AND event_time > NOW() - INTERVAL '30 seconds'
                     ORDER BY event_time ASC, update_id ASC
                     "#,
-                )
-                .bind(&symbols_upper)
-                .fetch_all(&pool)
-                .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(error = %e, "DB L2 feed query failed");
-                        continue;
-                    }
-                };
+            )
+            .bind(&symbols_upper)
+            .fetch_all(&pool)
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(error = %e, "DB L2 feed query failed");
+                    continue;
+                }
+            };
 
-            for (symbol, update_id, obi, spread_bps, ts) in rows {
+            for (symbol, update_id, obi, spread_bps, mid_price, bids, asks, ts) in rows {
                 let should_emit = match last_seen.get(&symbol).copied() {
-                    Some((last_ts, last_id)) => ts > last_ts || (ts == last_ts && update_id > last_id),
+                    Some((last_ts, last_id)) => {
+                        ts > last_ts || (ts == last_ts && update_id > last_id)
+                    }
                     None => true,
                 };
                 if !should_emit {
@@ -348,14 +369,18 @@ pub fn spawn_db_l2_feed(
                 }
 
                 last_seen.insert(symbol.clone(), (ts, update_id));
-                let update = MarketUpdate::L2 {
-                    symbol,
-                    obi: obi.to_f64().unwrap_or_default(),
-                    spread_bps: spread_bps as u32,
+                for update in l2_updates_from_book(
+                    &symbol,
+                    obi.to_f64().unwrap_or_default(),
+                    spread_bps as u32,
+                    mid_price,
+                    bids.as_ref(),
+                    asks.as_ref(),
                     ts,
-                };
-                if tx.send(update).is_err() {
-                    return;
+                ) {
+                    if tx.send(update).is_err() {
+                        return;
+                    }
                 }
                 l2_count += 1;
                 if l2_count % 100 == 0 {
@@ -364,6 +389,99 @@ pub fn spawn_db_l2_feed(
             }
         }
     })
+}
+
+fn l2_updates_from_book(
+    symbol: &str,
+    obi: f64,
+    spread_bps: u32,
+    mid_price: Decimal,
+    bids: Option<&Value>,
+    asks: Option<&Value>,
+    ts: DateTime<Utc>,
+) -> Vec<MarketUpdate> {
+    let mut updates = vec![MarketUpdate::L2 {
+        symbol: symbol.to_string(),
+        obi,
+        spread_bps,
+        ts,
+    }];
+
+    if bids.is_none() && asks.is_none() {
+        return updates;
+    }
+
+    let Some(mid_price) = mid_price.to_f64() else {
+        return updates;
+    };
+    if !mid_price.is_finite() || mid_price <= 0.0 {
+        return updates;
+    }
+
+    let empty = Value::Null;
+    let (bid_depth_near, ask_depth_near) = near_depth(
+        bids.unwrap_or(&empty),
+        asks.unwrap_or(&empty),
+        mid_price,
+        NEAR_DEPTH_PCT_RANGE,
+    );
+
+    updates.push(MarketUpdate::L2Depth {
+        symbol: symbol.to_string(),
+        obi,
+        spread_bps,
+        bid_depth_near,
+        ask_depth_near,
+        ts,
+    });
+
+    updates
+}
+
+fn near_depth(bids: &Value, asks: &Value, mid_price: f64, pct_range: f64) -> (f64, f64) {
+    if !mid_price.is_finite() || mid_price <= 0.0 || !pct_range.is_finite() || pct_range < 0.0 {
+        return (0.0, 0.0);
+    }
+
+    let bid_min = mid_price * (1.0 - pct_range);
+    let ask_max = mid_price * (1.0 + pct_range);
+
+    (
+        sum_depth_in_range(bids, bid_min, mid_price),
+        sum_depth_in_range(asks, mid_price, ask_max),
+    )
+}
+
+fn sum_depth_in_range(levels: &Value, min_price: f64, max_price: f64) -> f64 {
+    levels
+        .as_array()
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(parse_depth_level)
+                .filter(|(price, _)| *price >= min_price && *price <= max_price)
+                .map(|(_, size)| size)
+                .sum()
+        })
+        .unwrap_or(0.0)
+}
+
+fn parse_depth_level(level: &Value) -> Option<(f64, f64)> {
+    match level {
+        Value::Array(items) if items.len() >= 2 => {
+            Some((json_f64(&items[0])?, json_f64(&items[1])?))
+        }
+        Value::Object(map) => Some((json_f64(map.get("price")?)?, json_f64(map.get("size")?)?)),
+        _ => None,
+    }
+}
+
+fn json_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.parse().ok(),
+        _ => None,
+    }
 }
 
 /// Spawn a task that polls the Polymarket CLOB REST API for orderbook data
@@ -878,7 +996,11 @@ fn reference_price_update(snapshot: &ReferencePriceSnapshot) -> MarketUpdate {
 
 #[cfg(test)]
 mod tests {
-    use super::rtds_market_data_ws_config;
+    use super::{l2_updates_from_book, rtds_market_data_ws_config};
+    use chrono::Utc;
+    use ploy_strategy_bundles::MarketUpdate;
+    use rust_decimal_macros::dec;
+    use serde_json::json;
     use std::time::Duration;
 
     #[test]
@@ -887,5 +1009,42 @@ mod tests {
         assert_eq!(config.heartbeat_interval, Duration::from_secs(15));
         assert_eq!(config.heartbeat_timeout, Duration::from_secs(45));
         assert!(config.reconnect.max_attempts.is_none());
+    }
+
+    #[test]
+    fn db_l2_feed_builds_depth_variant_from_pair_levels() {
+        let ts = Utc::now();
+        let updates = l2_updates_from_book(
+            "BTCUSDT",
+            0.2,
+            11,
+            dec!(100.0),
+            Some(&json!([
+                ["100.0", "2.0"],
+                ["99.92", "3.5"],
+                ["99.6", "9.0"]
+            ])),
+            Some(&json!([
+                ["100.02", "1.5"],
+                ["100.08", "4.0"],
+                ["100.4", "8.0"]
+            ])),
+            ts,
+        );
+
+        assert!(
+            matches!(updates.first(), Some(MarketUpdate::L2 { symbol, .. }) if symbol == "BTCUSDT")
+        );
+        assert!(matches!(
+            updates.get(1),
+            Some(MarketUpdate::L2Depth {
+                bid_depth_near,
+                ask_depth_near,
+                spread_bps,
+                ..
+            }) if (bid_depth_near - 5.5).abs() < 1e-9
+                && (ask_depth_near - 5.5).abs() < 1e-9
+                && *spread_bps == 11
+        ));
     }
 }

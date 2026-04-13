@@ -54,6 +54,16 @@ pub enum MarketUpdate {
         ts: DateTime<Utc>,
     },
 
+    /// CEX L2 orderbook summary with near-mid depth totals.
+    L2Depth {
+        symbol: String,
+        obi: f64,
+        spread_bps: u32,
+        bid_depth_near: f64,
+        ask_depth_near: f64,
+        ts: DateTime<Utc>,
+    },
+
     /// New binary-option event window discovered.
     EventDiscovered {
         event_id: String,
@@ -169,10 +179,7 @@ pub trait Executor: Send {
     async fn cancel(&mut self, order_id: &str) -> bool;
 
     /// Reconcile fills for active venue orders. Default executors can ignore this.
-    async fn reconcile_fills(
-        &mut self,
-        _orders: &OrderLedger,
-    ) -> Result<Vec<FillRecord>, String> {
+    async fn reconcile_fills(&mut self, _orders: &OrderLedger) -> Result<Vec<FillRecord>, String> {
         Ok(Vec::new())
     }
 }

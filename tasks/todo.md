@@ -84,6 +84,16 @@
   - `BTC + DOGE + BNB + XRP`: `+46.59`
   - `all6`: `-242.27`
   - current read: static all-symbol universe is too blunt; subset selection and symbol-specific profiles are the next high-leverage path
+- 2026-04-12: Foreground `codex-autoresearch` is now running in a dedicated worktree. Current retained findings:
+  - `all6` objective was pivoted away after 4 consecutive discards
+  - `BTC + DOGE + BNB` objective improved from `-1.081560094274` to `+29.320957453216`
+  - `BTC + DOGE` objective baseline is `+44.551957382138`, which is stronger than the 3-asset subset
+  - tightening `DOGE.max_entry_price` below `0.50` did not improve the BTC+DOGE core objective
+  - next research slice should use feature attribution rather than more blind threshold tightening
+- 2026-04-12: Current PM5D research direction is now:
+  - retain `BTC + DOGE` as the strongest clean `official-only` core subset objective
+  - stop spending iterations on static threshold-only tuning that keeps returning zero delta
+  - move the next slice to per-entry/per-event feature attribution for `aggTrade imbalance`, `OBI`, `OBI delta`, and `spread`
 - 2026-04-12: Local verification passed:
   - `cargo test -p ploy-market-data parse_official_market_settlements -- --nocapture`
   - `cargo test -p ploy-strategy-bundles official_only_backtest_skips_unresolved_events -- --nocapture`
@@ -7765,3 +7775,66 @@ Audit the V1/V2/V3/V4 roadmap against the refactored runtime, then implement the
 - The roadmap is now encoded directly in runtime/config surfaces: V1/V2/V3 are explicit aliases/config families over the existing directional engine, and V4 has a runnable prototype strategy with early-exit support.
 - The V4 slice intentionally stops short of LOB-aware confirmation because live/dry-run still do not ingest `MarketUpdate::L2`; the prototype stays grounded on data that already reaches the runtime today.
 - Remaining gap: full V3 LOB confirmation and full V4+LOB still require live Binance L2 ingestion plus the upstream LOB collector stability work described in `tasks/strategy-evolution-plan.md`.
+
+# PM5D Reversal Strategy Slice (2026-04-13)
+
+## Goal
+Implement the committed reversal-strategy plan as a runnable strategy/runtime slice, including near-depth L2 plumbing, attribution tooling, strategy/runtime wiring, and reversal configs.
+
+## File ownership
+
+- `crates/ploy-strategy-bundles/src/traits.rs`
+  - owner: new `MarketUpdate::L2Depth` variant
+- `crates/ploy-strategy-bundles/src/feed/database.rs`
+  - owner: historical L2Depth loader + helper tests
+- `crates/ploy-market-data/src/feeds.rs`
+  - owner: live/dry-run DB L2Depth forwarding parity
+- `crates/ploy-strategy-bundles/examples/signal_attribution.rs`
+  - owner: research CSV export example
+- `crates/ploy-strategy-bundles/src/strategies/reversal.rs`
+  - owner: `ReversalStrategy` logic + tests
+- `crates/ploy-strategy-bundles/src/{strategies/mod.rs,lib.rs,config.rs}`
+  - owner: export/config surface for reversal runtime
+- `crates/ploy-strategy-runtime/src/lib.rs`
+  - owner: runtime variant selection for reversal
+- `config/strategies/05-reversal*.toml`
+  - owner: runnable dry-run/backtest config family
+
+## Tasks
+
+- [ ] Add `MarketUpdate::L2Depth` plus near-depth parsing in historical/live L2 feeds.
+- [ ] Add `signal_attribution` example and verify it builds.
+- [ ] Implement `ReversalStrategy` with entry/exit tests first and repo-fit settlement behavior.
+- [ ] Wire reversal strategy selection through config/runtime without breaking existing directional variants.
+- [ ] Add `05-reversal` config files and run targeted verification commands.
+
+## Progress notes
+
+- 2026-04-13: Intake confirmed the repo already has `MeanReversionStrategy`; the new reversal slice must stay independent instead of mutating the V4 prototype.
+- 2026-04-13: Intake confirmed `FullConfig` still hard-binds `[strategy]` to `DirectionalConfig`, so reversal runtime wiring must either reuse/translate that config surface or generalize it without breaking existing configs.
+- 2026-04-13: Intake confirmed live/dry-run already poll `binance_lob_ticks` via `spawn_db_l2_feed`, so a runnable reversal dry-run path requires `L2Depth` parity there, not only in the historical loader.
+- 2026-04-13: Added additive `MarketUpdate::L2Depth` plus near-depth extraction in both historical DB loading and live/dry-run DB L2 polling; existing `L2` updates remain intact for backward compatibility.
+- 2026-04-13: Added `crates/ploy-strategy-bundles/examples/signal_attribution.rs` and verified it builds.
+- 2026-04-13: Added `ReversalStrategy` as a separate strategy implementation with:
+  - drift-flip entry gating near `price_to_beat`
+  - L2 depth ratio confirmation
+  - PM quote freshness / ask cap gating
+  - take-profit, stop-loss, time-stop, and settlement exits
+- 2026-04-13: Reused the existing unified config surface by adding reversal-prefixed fields to `DirectionalConfig` and translating them into a dedicated `ReversalConfig` at runtime, avoiding a wider config-schema rewrite.
+- 2026-04-13: Added `reversal` / `pm5d_reversal` runtime variant normalization and runnable `05-reversal.{dryrun,backtest}.toml` configs.
+- 2026-04-13: Local verification passed:
+  - `rtk cargo test -p ploy-strategy-bundles reversal -- --nocapture`
+  - `rtk cargo test -p ploy-strategy-bundles near_depth -- --nocapture`
+  - `cargo test -p ploy-market-data db_l2_feed_builds_depth_variant_from_pair_levels -- --nocapture`
+  - `cargo build -p ploy-strategy-bundles --example signal_attribution`
+  - `rtk cargo test -p ploy-strategy-bundles roadmap_config_family_parses -- --nocapture`
+  - `cargo test -p ploy-strategy-runtime roadmap_aliases_build_expected_strategy_variants -- --nocapture`
+  - `cargo check -p ploy-strategy-bundles --all-targets`
+  - `cargo check -p ploy-market-data -p ploy-strategy-runtime`
+
+## Review
+
+- The reversal slice now exists as a real selectable strategy/runtime path instead of only a plan doc.
+- The feed side was implemented additively: old `L2` consumers keep working while reversal/research can consume `L2Depth`.
+- The config choice intentionally favors repo fit over purity: reversal uses a dedicated runtime strategy plus `ReversalConfig`, but the TOML surface still flows through the existing unified `[strategy]` section via reversal-prefixed fields on `DirectionalConfig`.
+- Remaining gap: the research/backtest tasks from the plan were not executed end-to-end because this session did not have a validated database-backed backtest run to point at. The config/runtime path is ready, but empirical threshold tuning and strategy-vs-baseline comparison still need a real DB window.
