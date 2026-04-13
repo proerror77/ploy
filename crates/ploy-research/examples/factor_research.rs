@@ -230,7 +230,7 @@ async fn main() {
     )
     .await
     .expect("bulk lob snapshot load failed");
-    eprintln!("load_research_lob_snapshots: {:?}", t1.elapsed());
+    eprintln!("load_research_lob_snapshots_sampled (sample_secs={}): {:?}", lob_sample_secs, t1.elapsed());
 
     eprintln!(
         "bulk loaded {} updates, {} lob snapshots",

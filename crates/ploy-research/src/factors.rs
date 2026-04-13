@@ -245,6 +245,15 @@ pub async fn load_research_lob_snapshots(
     load_research_lob_snapshots_sampled(pool, symbols, start, end, 5).await
 }
 
+/// Loads LOB snapshots from `binance_lob_ticks`, keeping only ticks whose Unix epoch
+/// timestamp is divisible by `sample_every_secs`. This reduces data transfer for
+/// research runs at the cost of temporal resolution.
+///
+/// Note: sampling is epoch-modulo based (`epoch % N = 0`), not uniform wall-clock
+/// spacing. For odd values of N (e.g. 7), sampled timestamps will not be evenly
+/// spaced. For most research use cases (N=5 or N=10), this is not a concern.
+///
+/// `sample_every_secs` is clamped to a minimum of 1 (no divide-by-zero).
 pub async fn load_research_lob_snapshots_sampled(
     pool: &PgPool,
     symbols: &[String],
