@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use ploy_research::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations_with_lob,
-    factor_metrics, load_research_lob_snapshots,
+    factor_metrics, load_research_lob_snapshots_sampled,
 };
 use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::traits::MarketUpdate;
@@ -145,6 +145,11 @@ async fn main() {
     let max_quote_age_secs: i64 = flag_value(&args, "--max-quote-age-secs")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(30);
+    // Downsample LOB snapshots: keep 1 tick per N seconds (default 5).
+    // Reduces JSONB transfer ~Nx with minimal research quality loss.
+    let lob_sample_secs: i32 = flag_value(&args, "--lob-sample-secs")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(5);
 
     eprintln!("loading factor research range {start} -> {end} for {:?}", symbols);
 
@@ -200,6 +205,7 @@ async fn main() {
         global_start, global_end, bulk_symbols
     );
 
+    let t0 = std::time::Instant::now();
     let all_updates = load_from_database_with_options(
         &pool,
         &bulk_symbols,
@@ -212,15 +218,19 @@ async fn main() {
     )
     .await
     .expect("bulk historical load failed");
+    eprintln!("load_from_database_with_options: {:?}", t0.elapsed());
 
-    let all_lob_snapshots = load_research_lob_snapshots(
+    let t1 = std::time::Instant::now();
+    let all_lob_snapshots = load_research_lob_snapshots_sampled(
         &pool,
         &bulk_symbols,
         global_start,
         global_end,
+        lob_sample_secs,
     )
     .await
     .expect("bulk lob snapshot load failed");
+    eprintln!("load_research_lob_snapshots: {:?}", t1.elapsed());
 
     eprintln!(
         "bulk loaded {} updates, {} lob snapshots",

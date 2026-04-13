@@ -4,8 +4,10 @@ pub mod replay;
 
 pub use backtesting::{run_backtest, BacktestReport};
 pub use factors::{
-    build_event_summaries, build_factor_observations, factor_metrics, observations_to_frame,
-    EventFactorSummary, FactorMetric, FactorObservation,
+    aggregate_factor_metrics, build_event_summaries, build_factor_observations,
+    build_factor_observations_with_lob, factor_metrics, load_research_lob_snapshots,
+    load_research_lob_snapshots_sampled, observations_to_frame, AggregatedFactorMetric,
+    EventFactorSummary, FactorMetric, FactorObservation, ResearchLobSnapshot,
 };
 pub use replay::replay_fills;
 
