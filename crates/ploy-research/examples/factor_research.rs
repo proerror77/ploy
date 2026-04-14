@@ -44,6 +44,36 @@ async fn discover_valid_windows(
     end: DateTime<Utc>,
     max_windows: i64,
 ) -> Vec<ValidWindowRow> {
+    // Try the pre-computed materialized view first (fast path).
+    // Falls back to the raw 3-way join if the matview doesn't exist yet.
+    let matview_result: Result<Vec<ValidWindowRow>, _> = sqlx::query_as(
+        r#"
+        SELECT
+            symbol,
+            start_time,
+            end_time,
+            1::bigint AS event_count
+        FROM research_valid_windows
+        WHERE symbol = ANY($1)
+          AND start_time >= $2
+          AND end_time <= $3
+        ORDER BY start_time
+        LIMIT $4
+        "#,
+    )
+    .bind(symbols)
+    .bind(start)
+    .bind(end)
+    .bind(max_windows)
+    .fetch_all(pool)
+    .await;
+
+    if let Ok(rows) = matview_result {
+        eprintln!("discover_valid_windows: used matview ({} rows)", rows.len());
+        return rows;
+    }
+
+    eprintln!("discover_valid_windows: matview not available, using raw query");
     sqlx::query_as(
         r#"
         SELECT

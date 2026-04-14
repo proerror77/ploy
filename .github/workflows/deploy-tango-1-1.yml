@@ -34,6 +34,7 @@ env:
     033_fix_settlement_view_join_and_confirmed_flag.sql
     034_clob_quote_ticks_full_resolution.sql
     035_binance_agg_trade_ticks.sql
+    036_research_valid_windows_matview.sql
 
 jobs:
   build-and-deploy:
@@ -66,11 +67,19 @@ jobs:
             -p new-ploy-runner
           strip "target/${PLATFORM_TARGET}/release/new-ploy-runner" || true
 
+      - name: Build factor-research
+        run: |
+          cargo build --release --locked \
+            --target "${PLATFORM_TARGET}" \
+            -p ploy-research --example factor_research
+          strip "target/${PLATFORM_TARGET}/release/examples/factor_research" || true
+
       - name: Build deploy bundle
         run: |
           rm -rf dist
           mkdir -p dist/bin dist/config/strategies dist/migrations dist/deployment/systemd dist/scripts
           cp target/${PLATFORM_TARGET}/release/new-ploy-runner dist/bin/ploy-runner
+          cp target/${PLATFORM_TARGET}/release/examples/factor_research dist/bin/factor-research
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
           cp config/strategies/02-pm5d.live.toml dist/config/strategies/02-pm5d.live.toml
           cp scripts/binance_aggtrade_collector.py dist/scripts/binance_aggtrade_collector.py
@@ -271,6 +280,7 @@ jobs:
 
             # Install artifacts into the live runtime root used by systemd.
             install -m 0755 ./bin/ploy-runner ${DEPLOY_ROOT}/bin/ploy-runner
+            install -m 0755 ./bin/factor-research ${DEPLOY_ROOT}/bin/factor-research
             install -m 0644 ./config/strategies/02-pm5d.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.unified.toml
             install -m 0644 ./config/strategies/02-pm5d.live.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.live.toml
             install -m 0755 ./scripts/binance_aggtrade_collector.py ${DEPLOY_ROOT}/scripts/binance_aggtrade_collector.py

@@ -97,6 +97,11 @@ fi
 
 echo "==> DB retention"
 "${PSQL[@]}" <<SQL
+-- Refresh research valid windows materialized view (if it exists).
+-- CONCURRENTLY avoids locking reads during refresh; requires the UNIQUE index.
+SELECT 'REFRESH MATERIALIZED VIEW CONCURRENTLY research_valid_windows;'
+WHERE to_regclass('public.research_valid_windows') IS NOT NULL \\gexec
+
 DO \$\$
 DECLARE
   partition_day date := current_date - ${DERIBIT_PARTITION_LOOKBACK_DAYS};
