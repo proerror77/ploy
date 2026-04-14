@@ -6,6 +6,7 @@ use ploy_research::{
 use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::traits::MarketUpdate;
 use sqlx::postgres::PgPoolOptions;
+use std::time::Duration;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct ValidWindowRow {
@@ -184,7 +185,8 @@ async fn main() {
     eprintln!("loading factor research range {start} -> {end} for {:?}", symbols);
 
     let pool = PgPoolOptions::new()
-        .max_connections(3)
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(120))
         .connect(&db_url)
         .await
         .expect("database connection failed");
