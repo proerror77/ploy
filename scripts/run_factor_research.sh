@@ -8,6 +8,8 @@ set -euo pipefail
 #   ./scripts/run_factor_research.sh \
 #     --start-date 2026-04-01 --end-date 2026-04-13 \
 #     --symbols BTCUSDT,ETHUSDT --max-windows 20
+#   # Optional first step when the materialized view exists:
+#   ./scripts/refresh_research_valid_windows.sh
 #
 # The binary connects to localhost:5432 on the remote host (no SSH tunnel needed).
 # stderr streams back in real time. Pipe through `tee` to save locally:
@@ -21,6 +23,6 @@ exec ssh "${HOST}" systemd-run --scope --quiet \
   -p MemoryMax=768M \
   -p MemoryHigh=512M \
   "${BINARY}" \
-  --db-url "'${DB_URL}'" \
+  --db-url "${DB_URL}" \
   --discover-valid-5m-windows \
   "$@"

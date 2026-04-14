@@ -6,6 +6,7 @@ use ploy_research::{
 use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::traits::MarketUpdate;
 use sqlx::postgres::PgPoolOptions;
+use std::time::Duration;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct ValidWindowRow {
@@ -184,7 +185,8 @@ async fn main() {
     eprintln!("loading factor research range {start} -> {end} for {:?}", symbols);
 
     let pool = PgPoolOptions::new()
-        .max_connections(3)
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(120))
         .connect(&db_url)
         .await
         .expect("database connection failed");
@@ -269,6 +271,7 @@ async fn main() {
     );
 
     let mut all_metrics = Vec::new();
+    let mut all_observations = Vec::new();
     let mut total_observations = 0usize;
     let mut total_event_rows = 0usize;
 
@@ -309,6 +312,7 @@ async fn main() {
 
         total_observations += observations.len();
         total_event_rows += event_rows.len();
+        all_observations.push(observations);
         all_metrics.push(metrics);
     }
 
@@ -316,6 +320,93 @@ async fn main() {
 
     eprintln!("\nobservation_rows={}", total_observations);
     eprintln!("event_rows={}", total_event_rows);
+
+    // === Simple P&L Simulation ===
+    // For each event, simulate a trade at the last observation before settlement.
+    // Entry: buy UP if model_prob_up > pm_up_ask + fee, buy DOWN if (1-model_prob_up) > pm_down_ask + fee
+    // Exit: hold to settlement ($1 win, $0 loss)
+    let mut total_trades = 0u32;
+    let mut wins = 0u32;
+    let mut total_pnl = 0.0f64;
+    let mut total_stake = 0.0f64;
+    let stake_per_trade = 25.0; // $25 per trade
+
+    for observations in &all_observations {
+        // Group by event_id, take last observation per event
+        let mut last_obs: std::collections::HashMap<&str, &ploy_research::FactorObservation> =
+            std::collections::HashMap::new();
+        for obs in observations.iter() {
+            let entry = last_obs.entry(obs.event_id.as_str()).or_insert(obs);
+            if obs.tick_ts > entry.tick_ts {
+                *entry = obs;
+            }
+        }
+
+        for obs in last_obs.values() {
+            if !obs.pm_up_ask.is_finite() || !obs.model_prob_up.is_finite() {
+                continue;
+            }
+            let fee_up = 0.02 * obs.pm_up_ask * (1.0 - obs.pm_up_ask);
+            let fee_down = if obs.pm_down_ask.is_finite() {
+                0.02 * obs.pm_down_ask * (1.0 - obs.pm_down_ask)
+            } else {
+                continue;
+            };
+
+            let edge_up = obs.model_prob_up - obs.pm_up_ask - fee_up;
+            let edge_down = (1.0 - obs.model_prob_up) - obs.pm_down_ask - fee_down;
+
+            // Pick the side with more edge, if any exceeds min_edge
+            let min_edge = 0.02;
+            let (took_trade, won) = if edge_up >= min_edge && edge_up >= edge_down {
+                // Buy UP
+                let pnl = if obs.settlement_up == 1.0 {
+                    stake_per_trade * (1.0 / obs.pm_up_ask - 1.0) - stake_per_trade * fee_up / obs.pm_up_ask
+                } else {
+                    -stake_per_trade - stake_per_trade * fee_up / obs.pm_up_ask
+                };
+                total_pnl += pnl;
+                total_stake += stake_per_trade;
+                (true, obs.settlement_up == 1.0)
+            } else if edge_down >= min_edge {
+                // Buy DOWN
+                let pnl = if obs.settlement_up == 0.0 {
+                    stake_per_trade * (1.0 / obs.pm_down_ask - 1.0) - stake_per_trade * fee_down / obs.pm_down_ask
+                } else {
+                    -stake_per_trade - stake_per_trade * fee_down / obs.pm_down_ask
+                };
+                total_pnl += pnl;
+                total_stake += stake_per_trade;
+                (true, obs.settlement_up == 0.0)
+            } else {
+                (false, false)
+            };
+
+            if took_trade {
+                total_trades += 1;
+                if won {
+                    wins += 1;
+                }
+            }
+        }
+    }
+
+    let win_rate = if total_trades > 0 {
+        wins as f64 / total_trades as f64 * 100.0
+    } else {
+        0.0
+    };
+    let roi = if total_stake > 0.0 {
+        total_pnl / total_stake * 100.0
+    } else {
+        0.0
+    };
+
+    eprintln!("\n=== P&L Simulation (last-tick entry, min_edge=2%) ===");
+    eprintln!(
+        "trades={} wins={} win_rate={:.1}% pnl=${:.2} stake=${:.0} roi={:.2}%",
+        total_trades, wins, win_rate, total_pnl, total_stake, roi
+    );
 
     let mut settlement_metrics: Vec<_> = aggregated
         .iter()
