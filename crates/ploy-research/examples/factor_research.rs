@@ -489,213 +489,151 @@ async fn main() {
         }
     }
 
-    let mut baseline = SimStats::default();
-    let mut contrarian = SimStats::default();
-    let mut lob_only = SimStats::default();
-    let mut combined = SimStats::default();
-    let mut calibrated = SimStats::default();
-    let mut cal_lob = SimStats::default();
-    let mut mf_stats = SimStats::default();
-    let mut mf_lob_stats = SimStats::default();
+    // Entry time targets: test entering at different points in the 5-minute window.
+    // time_remaining_target = seconds before settlement when we enter.
+    let entry_targets: Vec<(&str, i64)> = vec![
+        ("@4m", 240), ("@3m", 180), ("@2m", 120), ("@1m", 60), ("@last", 0),
+    ];
 
     let stake_per_trade = 25.0f64;
     let min_edge = 0.02f64;
-    let min_cal_obs = 200usize; // cold-start: need ≥200 obs before using calibration
+    let min_cal_obs = 200usize;
     let n_cal_buckets = 20usize;
 
-    // Expanding-window calibration accumulator
+    // Expanding-window accumulators (shared across entry targets)
     let mut cal_data: Vec<(f64, f64)> = Vec::new();
-    let mut cal_windows_skipped = 0u32;
-    let mut cal_windows_traded = 0u32;
     let mut mf_model = MultiFactorModel::new();
 
+    // Per-entry-time stats: (label, D.Combined, G.MultiFactor, H.MF+LOB)
+    struct EntryStats {
+        combined: SimStats,
+        mf: SimStats,
+        mf_lob: SimStats,
+    }
+    let mut entry_results: Vec<(&str, EntryStats)> = entry_targets
+        .iter()
+        .map(|(label, _)| (*label, EntryStats {
+            combined: SimStats::default(),
+            mf: SimStats::default(),
+            mf_lob: SimStats::default(),
+        }))
+        .collect();
+
     for observations in &all_observations {
-        // Build calibration table from all PRIOR windows' data (no look-ahead)
         let cal_table = if cal_data.len() >= min_cal_obs {
             Some(CalibrationTable::build(&cal_data, n_cal_buckets))
         } else {
             None
         };
-
-        // Fit multi-factor model from all PRIOR windows' data
         let mf_fit = mf_model.fit();
 
-        // Group by event_id, take last observation per event.
-        let mut last_obs: std::collections::HashMap<&str, &ploy_research::FactorObservation> =
+        // Group observations by event_id
+        let mut by_event: std::collections::HashMap<&str, Vec<&ploy_research::FactorObservation>> =
             std::collections::HashMap::new();
         for obs in observations.iter() {
-            let entry = last_obs.entry(obs.event_id.as_str()).or_insert(obs);
-            if obs.tick_ts > entry.tick_ts {
-                *entry = obs;
-            }
+            by_event.entry(obs.event_id.as_str()).or_default().push(obs);
         }
 
-        if cal_table.is_none() {
-            cal_windows_skipped += 1;
-        } else {
-            cal_windows_traded += 1;
-        }
-
-        for obs in last_obs.values() {
-            if !obs.pm_up_ask.is_finite()
-                || !obs.pm_down_ask.is_finite()
-                || !obs.model_prob_up.is_finite()
-            {
-                continue;
-            }
-
-            let fee_up = 0.02 * obs.pm_up_ask * (1.0 - obs.pm_up_ask);
-            let fee_down = 0.02 * obs.pm_down_ask * (1.0 - obs.pm_down_ask);
-
-            let pnl_up = |won: bool| -> (f64, bool) {
-                let p = if won {
-                    stake_per_trade * (1.0 / obs.pm_up_ask - 1.0)
-                        - stake_per_trade * fee_up / obs.pm_up_ask
+        // For each entry time target, find the best observation per event
+        for (target_idx, (_label, target_secs)) in entry_targets.iter().enumerate() {
+            for event_obs in by_event.values() {
+                // Find observation closest to target time_remaining
+                // For @last (target=0), take the last observation
+                let obs = if *target_secs == 0 {
+                    event_obs.iter().max_by_key(|o| o.tick_ts)
                 } else {
-                    -stake_per_trade - stake_per_trade * fee_up / obs.pm_up_ask
+                    // Find obs with time_remaining closest to target
+                    event_obs.iter().min_by_key(|o| (o.time_remaining_secs - target_secs).abs())
                 };
-                (p, won)
-            };
-            let pnl_down = |won: bool| -> (f64, bool) {
-                let p = if won {
-                    stake_per_trade * (1.0 / obs.pm_down_ask - 1.0)
-                        - stake_per_trade * fee_down / obs.pm_down_ask
-                } else {
-                    -stake_per_trade - stake_per_trade * fee_down / obs.pm_down_ask
+                let Some(obs) = obs else { continue };
+
+                // Skip if too far from target (>30s tolerance, except @last)
+                if *target_secs > 0 && (obs.time_remaining_secs - target_secs).abs() > 30 {
+                    continue;
+                }
+
+                if !obs.pm_up_ask.is_finite()
+                    || !obs.pm_down_ask.is_finite()
+                    || !obs.model_prob_up.is_finite()
+                {
+                    continue;
+                }
+
+                let fee_up = 0.02 * obs.pm_up_ask * (1.0 - obs.pm_up_ask);
+                let fee_down = 0.02 * obs.pm_down_ask * (1.0 - obs.pm_down_ask);
+
+                let pnl_up = |won: bool| -> (f64, bool) {
+                    let p = if won {
+                        stake_per_trade * (1.0 / obs.pm_up_ask - 1.0)
+                            - stake_per_trade * fee_up / obs.pm_up_ask
+                    } else {
+                        -stake_per_trade - stake_per_trade * fee_up / obs.pm_up_ask
+                    };
+                    (p, won)
                 };
-                (p, won)
-            };
+                let pnl_down = |won: bool| -> (f64, bool) {
+                    let p = if won {
+                        stake_per_trade * (1.0 / obs.pm_down_ask - 1.0)
+                            - stake_per_trade * fee_down / obs.pm_down_ask
+                    } else {
+                        -stake_per_trade - stake_per_trade * fee_down / obs.pm_down_ask
+                    };
+                    (p, won)
+                };
 
-            // --- A. Baseline ---
-            {
-                let edge_up = obs.model_prob_up - obs.pm_up_ask - fee_up;
-                let edge_down = (1.0 - obs.model_prob_up) - obs.pm_down_ask - fee_down;
-                if edge_up >= min_edge && edge_up >= edge_down {
-                    let (p, w) = pnl_up(obs.settlement_up == 1.0);
-                    baseline.record(w, p, stake_per_trade);
-                } else if edge_down >= min_edge {
-                    let (p, w) = pnl_down(obs.settlement_up == 0.0);
-                    baseline.record(w, p, stake_per_trade);
-                }
-            }
+                let stats = &mut entry_results[target_idx].1;
 
-            // --- B. Contrarian ---
-            {
-                let cp = 1.0 - obs.model_prob_up;
-                let edge_up = cp - obs.pm_up_ask - fee_up;
-                let edge_down = (1.0 - cp) - obs.pm_down_ask - fee_down;
-                if edge_up >= min_edge && edge_up >= edge_down {
-                    let (p, w) = pnl_up(obs.settlement_up == 1.0);
-                    contrarian.record(w, p, stake_per_trade);
-                } else if edge_down >= min_edge {
-                    let (p, w) = pnl_down(obs.settlement_up == 0.0);
-                    contrarian.record(w, p, stake_per_trade);
-                }
-            }
-
-            // --- C. LOB-only ---
-            {
-                let lob_score = obs.obi_10 + obs.depth_imbalance
-                    - 0.5 * obs.microprice_offset_bps.signum();
-                if lob_score > 0.1 {
-                    let edge_up = 0.5 - obs.pm_up_ask - fee_up;
-                    if edge_up >= min_edge {
-                        let (p, w) = pnl_up(obs.settlement_up == 1.0);
-                        lob_only.record(w, p, stake_per_trade);
-                    }
-                } else if lob_score < -0.1 {
-                    let edge_down = 0.5 - obs.pm_down_ask - fee_down;
-                    if edge_down >= min_edge {
-                        let (p, w) = pnl_down(obs.settlement_up == 0.0);
-                        lob_only.record(w, p, stake_per_trade);
-                    }
-                }
-            }
-
-            // --- D. Combined (contrarian + LOB) ---
-            {
-                let cp = 1.0 - obs.model_prob_up;
-                let edge_up = cp - obs.pm_up_ask - fee_up;
-                let edge_down = (1.0 - cp) - obs.pm_down_ask - fee_down;
-                let lob_score = obs.obi_10 + obs.depth_imbalance
-                    - 0.5 * obs.microprice_offset_bps.signum();
-                if edge_up >= min_edge && edge_up >= edge_down && lob_score > 0.0 {
-                    let (p, w) = pnl_up(obs.settlement_up == 1.0);
-                    combined.record(w, p, stake_per_trade);
-                } else if edge_down >= min_edge && lob_score < 0.0 {
-                    let (p, w) = pnl_down(obs.settlement_up == 0.0);
-                    combined.record(w, p, stake_per_trade);
-                }
-            }
-
-            // --- E. Calibrated (empirical P(up) from expanding window) ---
-            if let Some(ref ct) = cal_table {
-                if obs.distance_over_sigma.is_finite() {
-                    let cal_p = ct.lookup(obs.distance_over_sigma);
-                    let edge_up = cal_p - obs.pm_up_ask - fee_up;
-                    let edge_down = (1.0 - cal_p) - obs.pm_down_ask - fee_down;
-                    if edge_up >= min_edge && edge_up >= edge_down {
-                        let (p, w) = pnl_up(obs.settlement_up == 1.0);
-                        calibrated.record(w, p, stake_per_trade);
-                    } else if edge_down >= min_edge {
-                        let (p, w) = pnl_down(obs.settlement_up == 0.0);
-                        calibrated.record(w, p, stake_per_trade);
-                    }
-                }
-            }
-
-            // --- F. Calibrated + LOB filter ---
-            if let Some(ref ct) = cal_table {
-                if obs.distance_over_sigma.is_finite() {
-                    let cal_p = ct.lookup(obs.distance_over_sigma);
-                    let edge_up = cal_p - obs.pm_up_ask - fee_up;
-                    let edge_down = (1.0 - cal_p) - obs.pm_down_ask - fee_down;
+                // --- D. Combined (contrarian + LOB) ---
+                {
+                    let cp = 1.0 - obs.model_prob_up;
+                    let edge_up = cp - obs.pm_up_ask - fee_up;
+                    let edge_down = (1.0 - cp) - obs.pm_down_ask - fee_down;
                     let lob_score = obs.obi_10 + obs.depth_imbalance
                         - 0.5 * obs.microprice_offset_bps.signum();
                     if edge_up >= min_edge && edge_up >= edge_down && lob_score > 0.0 {
                         let (p, w) = pnl_up(obs.settlement_up == 1.0);
-                        cal_lob.record(w, p, stake_per_trade);
+                        stats.combined.record(w, p, stake_per_trade);
                     } else if edge_down >= min_edge && lob_score < 0.0 {
                         let (p, w) = pnl_down(obs.settlement_up == 0.0);
-                        cal_lob.record(w, p, stake_per_trade);
+                        stats.combined.record(w, p, stake_per_trade);
                     }
                 }
-            }
 
-            // --- G. MultiFactor (IC-weighted composite → sigmoid → probability) ---
-            if let Some((ref weights, ref means, ref stds)) = mf_fit {
-                let fv = extract_factors(obs);
-                let mf_p = mf_model.predict(&fv, weights, means, stds);
-                let edge_up = mf_p - obs.pm_up_ask - fee_up;
-                let edge_down = (1.0 - mf_p) - obs.pm_down_ask - fee_down;
-                if edge_up >= min_edge && edge_up >= edge_down {
-                    let (p, w) = pnl_up(obs.settlement_up == 1.0);
-                    mf_stats.record(w, p, stake_per_trade);
-                } else if edge_down >= min_edge {
-                    let (p, w) = pnl_down(obs.settlement_up == 0.0);
-                    mf_stats.record(w, p, stake_per_trade);
+                // --- G. MultiFactor ---
+                if let Some((ref weights, ref means, ref stds)) = mf_fit {
+                    let fv = extract_factors(obs);
+                    let mf_p = mf_model.predict(&fv, weights, means, stds);
+                    let edge_up = mf_p - obs.pm_up_ask - fee_up;
+                    let edge_down = (1.0 - mf_p) - obs.pm_down_ask - fee_down;
+                    if edge_up >= min_edge && edge_up >= edge_down {
+                        let (p, w) = pnl_up(obs.settlement_up == 1.0);
+                        stats.mf.record(w, p, stake_per_trade);
+                    } else if edge_down >= min_edge {
+                        let (p, w) = pnl_down(obs.settlement_up == 0.0);
+                        stats.mf.record(w, p, stake_per_trade);
+                    }
                 }
-            }
 
-            // --- H. MultiFactor + LOB filter ---
-            if let Some((ref weights, ref means, ref stds)) = mf_fit {
-                let fv = extract_factors(obs);
-                let mf_p = mf_model.predict(&fv, weights, means, stds);
-                let edge_up = mf_p - obs.pm_up_ask - fee_up;
-                let edge_down = (1.0 - mf_p) - obs.pm_down_ask - fee_down;
-                let lob_score = obs.obi_10 + obs.depth_imbalance
-                    - 0.5 * obs.microprice_offset_bps.signum();
-                if edge_up >= min_edge && edge_up >= edge_down && lob_score > 0.0 {
-                    let (p, w) = pnl_up(obs.settlement_up == 1.0);
-                    mf_lob_stats.record(w, p, stake_per_trade);
-                } else if edge_down >= min_edge && lob_score < 0.0 {
-                    let (p, w) = pnl_down(obs.settlement_up == 0.0);
-                    mf_lob_stats.record(w, p, stake_per_trade);
+                // --- H. MF+LOB ---
+                if let Some((ref weights, ref means, ref stds)) = mf_fit {
+                    let fv = extract_factors(obs);
+                    let mf_p = mf_model.predict(&fv, weights, means, stds);
+                    let edge_up = mf_p - obs.pm_up_ask - fee_up;
+                    let edge_down = (1.0 - mf_p) - obs.pm_down_ask - fee_down;
+                    let lob_score = obs.obi_10 + obs.depth_imbalance
+                        - 0.5 * obs.microprice_offset_bps.signum();
+                    if edge_up >= min_edge && edge_up >= edge_down && lob_score > 0.0 {
+                        let (p, w) = pnl_up(obs.settlement_up == 1.0);
+                        stats.mf_lob.record(w, p, stake_per_trade);
+                    } else if edge_down >= min_edge && lob_score < 0.0 {
+                        let (p, w) = pnl_down(obs.settlement_up == 0.0);
+                        stats.mf_lob.record(w, p, stake_per_trade);
+                    }
                 }
             }
         }
 
-        // Accumulate this window's data for future calibration + multi-factor model
+        // Accumulate for expanding-window models
         for obs in observations.iter() {
             if obs.distance_over_sigma.is_finite()
                 && (obs.settlement_up == 0.0 || obs.settlement_up == 1.0)
@@ -712,19 +650,17 @@ async fn main() {
             name, s.trades, s.wins, s.win_rate(), s.pnl, s.stake, s.roi()
         );
     };
-    eprintln!("\n=== P&L Simulation (last-tick entry, min_edge=2%, stake=$25) ===");
-    fmt("A.Baseline", &baseline);
-    fmt("B.Contrarian", &contrarian);
-    fmt("C.LOB-only", &lob_only);
-    fmt("D.Combined", &combined);
-    fmt("E.Calibrated", &calibrated);
-    fmt("F.Cal+LOB", &cal_lob);
-    fmt("G.MultiFactor", &mf_stats);
-    fmt("H.MF+LOB", &mf_lob_stats);
-    eprintln!(
-        "calibration: skipped {} windows ({} obs cold-start), traded {} windows ({} obs total)",
-        cal_windows_skipped, min_cal_obs, cal_windows_traded, cal_data.len()
-    );
+    eprintln!("\n=== P&L by Entry Time (min_edge=2%, stake=$25) ===");
+    eprintln!("{:<8} {:<50} {:<50} {:<50}", "entry", "D.Combined", "G.MultiFactor", "H.MF+LOB");
+    for (label, stats) in &entry_results {
+        eprintln!(
+            "{:<8} t={:<4} w={:<4} wr={:>5.1}% roi={:>7.2}%  |  t={:<4} w={:<4} wr={:>5.1}% roi={:>7.2}%  |  t={:<4} w={:<4} wr={:>5.1}% roi={:>7.2}%",
+            label,
+            stats.combined.trades, stats.combined.wins, stats.combined.win_rate(), stats.combined.roi(),
+            stats.mf.trades, stats.mf.wins, stats.mf.win_rate(), stats.mf.roi(),
+            stats.mf_lob.trades, stats.mf_lob.wins, stats.mf_lob.win_rate(), stats.mf_lob.roi(),
+        );
+    }
 
     // Print final multi-factor weights
     if let Some((weights, _, _)) = mf_model.fit() {
@@ -733,11 +669,12 @@ async fn main() {
             "cum_obi_d5m", "cum_dep_d5m", "cum_mp_d5m", "cum_trd_i5m",
             "drift_10s", "drift_30s", "pm_lag_secs",
         ];
-        eprintln!("\n=== Multi-Factor Weights (Pearson IC vs settlement_up, {} obs) ===", mf_model.data.len());
+        eprintln!("\n=== Multi-Factor Weights (IC vs settlement, {} obs) ===", mf_model.data.len());
         for (i, name) in names.iter().enumerate() {
             eprintln!("  {:<14} w={:>7.4}", name, weights[i]);
         }
     }
+    eprintln!("mf_model obs={}", mf_model.data.len());
 
     // === Calibration Statistics (full hindsight, for diagnostic only) ===
     {
