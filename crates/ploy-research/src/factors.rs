@@ -42,6 +42,10 @@ pub struct FactorObservation {
     pub settlement_up: f64,
     pub future_up_ask_change_30s: Option<f64>,
     pub future_up_ask_change_60s: Option<f64>,
+    pub cum_obi_delta_5m: f64,
+    pub cum_depth_delta_5m: f64,
+    pub cum_mprice_drift_5m: f64,
+    pub cum_trade_imbalance_5m: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +77,10 @@ pub struct EventFactorSummary {
     pub pm_up_ask: f64,
     pub pm_down_ask: f64,
     pub pm_lag_secs: f64,
+    pub cum_obi_delta_5m: f64,
+    pub cum_depth_delta_5m: f64,
+    pub cum_mprice_drift_5m: f64,
+    pub cum_trade_imbalance_5m: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +241,81 @@ impl ReturnBuffer {
         }
         let log_hl = (self.high / self.low).ln();
         log_hl * log_hl / (4.0 * std::f64::consts::LN_2 * self.total_secs)
+    }
+}
+
+/// Load LOB snapshots for research, downsampled to one tick per `sample_every_secs` seconds.
+
+/// Rolling accumulator for LOB flow signals over a time window.
+struct LobFlowAccumulator {
+    entries: VecDeque<(DateTime<Utc>, f64, f64, f64)>, // (ts, obi, depth_imbalance, microprice_offset_bps)
+    window_secs: f64,
+}
+
+impl LobFlowAccumulator {
+    fn new(window_secs: f64) -> Self {
+        Self { entries: VecDeque::new(), window_secs }
+    }
+
+    fn push(&mut self, ts: DateTime<Utc>, obi: f64, depth_imbalance: f64, microprice_offset_bps: f64) {
+        self.entries.push_back((ts, obi, depth_imbalance, microprice_offset_bps));
+        while self.entries.len() > 1 {
+            let oldest = self.entries.front().unwrap().0;
+            if (ts - oldest).num_milliseconds() as f64 / 1000.0 > self.window_secs {
+                self.entries.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Sum of consecutive OBI differences within the window.
+    fn cum_obi_delta(&self) -> f64 {
+        if self.entries.len() < 2 { return 0.0; }
+        self.entries.iter().zip(self.entries.iter().skip(1))
+            .map(|(a, b)| b.1 - a.1)
+            .sum()
+    }
+
+    /// Sum of consecutive depth_imbalance differences within the window.
+    fn cum_depth_delta(&self) -> f64 {
+        if self.entries.len() < 2 { return 0.0; }
+        self.entries.iter().zip(self.entries.iter().skip(1))
+            .map(|(a, b)| b.2 - a.2)
+            .sum()
+    }
+
+    /// Sum of microprice_offset_bps within the window (level, not delta).
+    fn cum_mprice_drift(&self) -> f64 {
+        self.entries.iter().map(|e| e.3).sum()
+    }
+}
+
+/// Rolling accumulator for signed trade flow over a time window.
+struct TradeFlowAccumulator {
+    entries: VecDeque<(DateTime<Utc>, f64)>, // (ts, signed_qty)
+    window_secs: f64,
+}
+
+impl TradeFlowAccumulator {
+    fn new(window_secs: f64) -> Self {
+        Self { entries: VecDeque::new(), window_secs }
+    }
+
+    fn push(&mut self, ts: DateTime<Utc>, signed_qty: f64) {
+        self.entries.push_back((ts, signed_qty));
+        while self.entries.len() > 1 {
+            let oldest = self.entries.front().unwrap().0;
+            if (ts - oldest).num_milliseconds() as f64 / 1000.0 > self.window_secs {
+                self.entries.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn cum_imbalance(&self) -> f64 {
+        self.entries.iter().map(|e| e.1).sum()
     }
 }
 
@@ -439,6 +522,8 @@ pub fn build_factor_observations_with_lob(
     let mut quotes: HashMap<String, (DateTime<Utc>, f64)> = HashMap::new();
     let mut lob: HashMap<String, LobState> = HashMap::new();
     let mut lob_by_symbol: HashMap<String, Vec<&ResearchLobSnapshot>> = HashMap::new();
+    let mut lob_flow: HashMap<String, LobFlowAccumulator> = HashMap::new();
+    let mut trade_flow: HashMap<String, TradeFlowAccumulator> = HashMap::new();
     let mut rows = Vec::new();
 
     for snapshot in lob_snapshots {
@@ -596,6 +681,32 @@ pub fn build_factor_observations_with_lob(
                         .rev()
                         .find(|snapshot| snapshot.ts <= *ts)
                     {
+                        // Compute microprice offset for flow accumulator
+                        let snap_mprice_bps = if snapshot.mid_price > 0.0
+                            && snapshot.best_bid > 0.0
+                            && snapshot.best_ask > 0.0
+                            && snapshot.bid_depth_near > 0.0
+                            && snapshot.ask_depth_near > 0.0
+                        {
+                            let mp = (snapshot.best_ask * snapshot.bid_depth_near
+                                + snapshot.best_bid * snapshot.ask_depth_near)
+                                / (snapshot.bid_depth_near + snapshot.ask_depth_near);
+                            ((mp - snapshot.mid_price) / snapshot.mid_price) * 10_000.0
+                        } else {
+                            0.0
+                        };
+                        let snap_di = if snapshot.bid_depth_near + snapshot.ask_depth_near > 0.0 {
+                            (snapshot.bid_depth_near - snapshot.ask_depth_near)
+                                / (snapshot.bid_depth_near + snapshot.ask_depth_near)
+                        } else {
+                            0.0
+                        };
+
+                        lob_flow
+                            .entry(symbol.clone())
+                            .or_insert_with(|| LobFlowAccumulator::new(300.0))
+                            .push(snapshot.ts, snapshot.obi, snap_di, snap_mprice_bps);
+
                         lob.insert(
                             symbol.clone(),
                             LobState {
@@ -751,7 +862,31 @@ pub fn build_factor_observations_with_lob(
                         settlement_up: if resolved_up_won { 1.0 } else { 0.0 },
                         future_up_ask_change_30s: None,
                         future_up_ask_change_60s: None,
+                        cum_obi_delta_5m: lob_flow.get(symbol)
+                            .map(|f| f.cum_obi_delta()).unwrap_or(0.0),
+                        cum_depth_delta_5m: lob_flow.get(symbol)
+                            .map(|f| f.cum_depth_delta()).unwrap_or(0.0),
+                        cum_mprice_drift_5m: lob_flow.get(symbol)
+                            .map(|f| f.cum_mprice_drift()).unwrap_or(0.0),
+                        cum_trade_imbalance_5m: trade_flow.get(symbol)
+                            .map(|f| f.cum_imbalance()).unwrap_or(0.0),
                     });
+                }
+            }
+            MarketUpdate::AggTrade {
+                symbol,
+                quantity,
+                is_buyer_maker,
+                ts,
+                ..
+            } => {
+                if let Some(qty) = quantity.to_f64() {
+                    // buyer_maker=false → buyer aggressor (bullish); true → seller aggressor
+                    let signed_qty = if *is_buyer_maker { -qty } else { qty };
+                    trade_flow
+                        .entry(symbol.clone())
+                        .or_insert_with(|| TradeFlowAccumulator::new(300.0))
+                        .push(*ts, signed_qty);
                 }
             }
             _ => {}
@@ -850,6 +985,10 @@ pub fn build_event_summaries(rows: &[FactorObservation]) -> Vec<EventFactorSumma
                 pm_up_ask: mean(rows.iter().map(|row| row.pm_up_ask)),
                 pm_down_ask: mean(rows.iter().map(|row| row.pm_down_ask)),
                 pm_lag_secs: mean(rows.iter().map(|row| row.pm_lag_secs)),
+                cum_obi_delta_5m: mean(rows.iter().map(|row| row.cum_obi_delta_5m)),
+                cum_depth_delta_5m: mean(rows.iter().map(|row| row.cum_depth_delta_5m)),
+                cum_mprice_drift_5m: mean(rows.iter().map(|row| row.cum_mprice_drift_5m)),
+                cum_trade_imbalance_5m: mean(rows.iter().map(|row| row.cum_trade_imbalance_5m)),
             })
         })
         .collect()
@@ -1052,6 +1191,10 @@ fn row_factor_accessors() -> Vec<(&'static str, fn(&FactorObservation) -> f64)> 
         ("obi_10", |row| row.obi_10),
         ("pm_up_ask", |row| row.pm_up_ask),
         ("pm_lag_secs", |row| row.pm_lag_secs),
+        ("cum_obi_delta_5m", |row| row.cum_obi_delta_5m),
+        ("cum_depth_delta_5m", |row| row.cum_depth_delta_5m),
+        ("cum_mprice_drift_5m", |row| row.cum_mprice_drift_5m),
+        ("cum_trade_imbalance_5m", |row| row.cum_trade_imbalance_5m),
     ]
 }
 
@@ -1077,10 +1220,12 @@ fn event_factor_accessors() -> Vec<(&'static str, fn(&EventFactorSummary) -> f64
         ("obi_10", |row| row.obi_10),
         ("pm_up_ask", |row| row.pm_up_ask),
         ("pm_lag_secs", |row| row.pm_lag_secs),
+        ("cum_obi_delta_5m", |row| row.cum_obi_delta_5m),
+        ("cum_depth_delta_5m", |row| row.cum_depth_delta_5m),
+        ("cum_mprice_drift_5m", |row| row.cum_mprice_drift_5m),
+        ("cum_trade_imbalance_5m", |row| row.cum_trade_imbalance_5m),
     ]
-}
-
-fn mean(values: impl Iterator<Item = f64>) -> f64 {
+}fn mean(values: impl Iterator<Item = f64>) -> f64 {
     let vals: Vec<f64> = values.filter(|value| value.is_finite()).collect();
     if vals.is_empty() {
         f64::NAN
@@ -1303,6 +1448,10 @@ mod tests {
                     settlement_up: 1.0,
                     future_up_ask_change_30s: None,
                     future_up_ask_change_60s: None,
+                    cum_obi_delta_5m: 0.0,
+                    cum_depth_delta_5m: 0.0,
+                    cum_mprice_drift_5m: 0.0,
+                    cum_trade_imbalance_5m: 0.0,
                 },
                 FactorObservation {
                     event_id: "evt".into(),
@@ -1335,6 +1484,10 @@ mod tests {
                     settlement_up: 1.0,
                     future_up_ask_change_30s: None,
                     future_up_ask_change_60s: None,
+                    cum_obi_delta_5m: 0.0,
+                    cum_depth_delta_5m: 0.0,
+                    cum_mprice_drift_5m: 0.0,
+                    cum_trade_imbalance_5m: 0.0,
                 },
                 FactorObservation {
                     event_id: "evt".into(),
@@ -1367,6 +1520,10 @@ mod tests {
                     settlement_up: 1.0,
                     future_up_ask_change_30s: None,
                     future_up_ask_change_60s: None,
+                    cum_obi_delta_5m: 0.0,
+                    cum_depth_delta_5m: 0.0,
+                    cum_mprice_drift_5m: 0.0,
+                    cum_trade_imbalance_5m: 0.0,
                 },
             ]
         };
