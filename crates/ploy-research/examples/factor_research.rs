@@ -332,6 +332,8 @@ async fn main() {
     //   D. Combined    – contrarian model + LOB direction filter must agree
     //   E. Calibrated  – empirical P(up|d/σ) from expanding window replaces log-normal CDF
     //   F. Cal+LOB     – calibrated probability + LOB direction filter must agree
+    //   G. MultiFactor – IC-weighted multi-factor composite → sigmoid → probability
+    //   H. MF+LOB     – multi-factor composite + LOB direction filter must agree
 
     #[derive(Default)]
     struct SimStats {
@@ -395,12 +397,106 @@ async fn main() {
         }
     }
 
+    // --- Multi-factor IC-weighted model ---
+    // Factors: obi_10, depth_imbalance, depth_acceleration, spread_bps,
+    //          cum_obi_delta_5m, cum_depth_delta_5m, cum_mprice_drift_5m,
+    //          cum_trade_imbalance_5m, drift_10s, drift_30s, pm_lag_secs
+    const MF_N: usize = 11;
+
+    fn extract_factors(obs: &ploy_research::FactorObservation) -> [f64; MF_N] {
+        [
+            obs.obi_10,
+            obs.depth_imbalance,
+            obs.depth_acceleration,
+            obs.spread_bps,
+            obs.cum_obi_delta_5m,
+            obs.cum_depth_delta_5m,
+            obs.cum_mprice_drift_5m,
+            obs.cum_trade_imbalance_5m,
+            obs.drift_10s,
+            obs.drift_30s,
+            obs.pm_lag_secs,
+        ]
+    }
+
+    struct MultiFactorModel {
+        // Accumulated: (factor_values, settlement_up)
+        data: Vec<([f64; MF_N], f64)>,
+    }
+
+    impl MultiFactorModel {
+        fn new() -> Self { Self { data: Vec::new() } }
+
+        fn push(&mut self, factors: [f64; MF_N], settlement: f64) {
+            if factors.iter().all(|f| f.is_finite()) && (settlement == 0.0 || settlement == 1.0) {
+                self.data.push((factors, settlement));
+            }
+        }
+
+        /// Compute IC weights and factor statistics from accumulated data.
+        /// Returns (weights, means, stds) or None if insufficient data.
+        fn fit(&self) -> Option<([f64; MF_N], [f64; MF_N], [f64; MF_N])> {
+            let n = self.data.len();
+            if n < 100 { return None; }
+
+            let mut means = [0.0f64; MF_N];
+            let mut y_mean = 0.0f64;
+            for (x, y) in &self.data {
+                for i in 0..MF_N { means[i] += x[i]; }
+                y_mean += y;
+            }
+            for i in 0..MF_N { means[i] /= n as f64; }
+            y_mean /= n as f64;
+
+            let mut stds = [0.0f64; MF_N];
+            let mut y_var = 0.0f64;
+            let mut cov = [0.0f64; MF_N];
+            for (x, y) in &self.data {
+                let dy = y - y_mean;
+                y_var += dy * dy;
+                for i in 0..MF_N {
+                    let dx = x[i] - means[i];
+                    stds[i] += dx * dx;
+                    cov[i] += dx * dy;
+                }
+            }
+            for i in 0..MF_N { stds[i] = (stds[i] / n as f64).sqrt(); }
+            y_var = (y_var / n as f64).sqrt();
+
+            // Pearson correlation as weight
+            let mut weights = [0.0f64; MF_N];
+            for i in 0..MF_N {
+                if stds[i] > 1e-12 && y_var > 1e-12 {
+                    weights[i] = cov[i] / (n as f64 * stds[i] * y_var);
+                }
+            }
+
+            Some((weights, means, stds))
+        }
+
+        /// Predict P(up) for a new observation using IC-weighted z-scores + sigmoid.
+        fn predict(&self, factors: &[f64; MF_N], weights: &[f64; MF_N], means: &[f64; MF_N], stds: &[f64; MF_N]) -> f64 {
+            let mut composite = 0.0f64;
+            for i in 0..MF_N {
+                if stds[i] > 1e-12 && factors[i].is_finite() {
+                    let z = (factors[i] - means[i]) / stds[i];
+                    composite += weights[i] * z;
+                }
+            }
+            // Sigmoid: map composite to [0, 1]
+            // Scale factor 2.0 so that composite=±1 maps to ~0.88/0.12
+            1.0 / (1.0 + (-2.0 * composite).exp())
+        }
+    }
+
     let mut baseline = SimStats::default();
     let mut contrarian = SimStats::default();
     let mut lob_only = SimStats::default();
     let mut combined = SimStats::default();
     let mut calibrated = SimStats::default();
     let mut cal_lob = SimStats::default();
+    let mut mf_stats = SimStats::default();
+    let mut mf_lob_stats = SimStats::default();
 
     let stake_per_trade = 25.0f64;
     let min_edge = 0.02f64;
@@ -411,6 +507,7 @@ async fn main() {
     let mut cal_data: Vec<(f64, f64)> = Vec::new();
     let mut cal_windows_skipped = 0u32;
     let mut cal_windows_traded = 0u32;
+    let mut mf_model = MultiFactorModel::new();
 
     for observations in &all_observations {
         // Build calibration table from all PRIOR windows' data (no look-ahead)
@@ -419,6 +516,9 @@ async fn main() {
         } else {
             None
         };
+
+        // Fit multi-factor model from all PRIOR windows' data
+        let mf_fit = mf_model.fit();
 
         // Group by event_id, take last observation per event.
         let mut last_obs: std::collections::HashMap<&str, &ploy_research::FactorObservation> =
@@ -561,15 +661,48 @@ async fn main() {
                     }
                 }
             }
+
+            // --- G. MultiFactor (IC-weighted composite → sigmoid → probability) ---
+            if let Some((ref weights, ref means, ref stds)) = mf_fit {
+                let fv = extract_factors(obs);
+                let mf_p = mf_model.predict(&fv, weights, means, stds);
+                let edge_up = mf_p - obs.pm_up_ask - fee_up;
+                let edge_down = (1.0 - mf_p) - obs.pm_down_ask - fee_down;
+                if edge_up >= min_edge && edge_up >= edge_down {
+                    let (p, w) = pnl_up(obs.settlement_up == 1.0);
+                    mf_stats.record(w, p, stake_per_trade);
+                } else if edge_down >= min_edge {
+                    let (p, w) = pnl_down(obs.settlement_up == 0.0);
+                    mf_stats.record(w, p, stake_per_trade);
+                }
+            }
+
+            // --- H. MultiFactor + LOB filter ---
+            if let Some((ref weights, ref means, ref stds)) = mf_fit {
+                let fv = extract_factors(obs);
+                let mf_p = mf_model.predict(&fv, weights, means, stds);
+                let edge_up = mf_p - obs.pm_up_ask - fee_up;
+                let edge_down = (1.0 - mf_p) - obs.pm_down_ask - fee_down;
+                let lob_score = obs.obi_10 + obs.depth_imbalance
+                    - 0.5 * obs.microprice_offset_bps.signum();
+                if edge_up >= min_edge && edge_up >= edge_down && lob_score > 0.0 {
+                    let (p, w) = pnl_up(obs.settlement_up == 1.0);
+                    mf_lob_stats.record(w, p, stake_per_trade);
+                } else if edge_down >= min_edge && lob_score < 0.0 {
+                    let (p, w) = pnl_down(obs.settlement_up == 0.0);
+                    mf_lob_stats.record(w, p, stake_per_trade);
+                }
+            }
         }
 
-        // Accumulate this window's data for future calibration
+        // Accumulate this window's data for future calibration + multi-factor model
         for obs in observations.iter() {
             if obs.distance_over_sigma.is_finite()
                 && (obs.settlement_up == 0.0 || obs.settlement_up == 1.0)
             {
                 cal_data.push((obs.distance_over_sigma, obs.settlement_up));
             }
+            mf_model.push(extract_factors(obs), obs.settlement_up);
         }
     }
 
@@ -586,10 +719,25 @@ async fn main() {
     fmt("D.Combined", &combined);
     fmt("E.Calibrated", &calibrated);
     fmt("F.Cal+LOB", &cal_lob);
+    fmt("G.MultiFactor", &mf_stats);
+    fmt("H.MF+LOB", &mf_lob_stats);
     eprintln!(
         "calibration: skipped {} windows ({} obs cold-start), traded {} windows ({} obs total)",
         cal_windows_skipped, min_cal_obs, cal_windows_traded, cal_data.len()
     );
+
+    // Print final multi-factor weights
+    if let Some((weights, _, _)) = mf_model.fit() {
+        let names = [
+            "obi_10", "depth_imbal", "depth_accel", "spread_bps",
+            "cum_obi_d5m", "cum_dep_d5m", "cum_mp_d5m", "cum_trd_i5m",
+            "drift_10s", "drift_30s", "pm_lag_secs",
+        ];
+        eprintln!("\n=== Multi-Factor Weights (Pearson IC vs settlement_up, {} obs) ===", mf_model.data.len());
+        for (i, name) in names.iter().enumerate() {
+            eprintln!("  {:<14} w={:>7.4}", name, weights[i]);
+        }
+    }
 
     // === Calibration Statistics (full hindsight, for diagnostic only) ===
     {
