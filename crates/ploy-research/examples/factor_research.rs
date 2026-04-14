@@ -502,6 +502,56 @@ async fn main() {
         combined.pnl, combined.stake, combined.roi()
     );
 
+    // === Calibration Statistics: distance_over_sigma bucketed win rates ===
+    // Bucket all observations by distance_over_sigma to see empirical P(settle_up)
+    // per bucket. This reveals whether the log-normal model is well-calibrated.
+    {
+        const N_BUCKETS: usize = 20;
+        // Collect all valid (distance_over_sigma, settlement_up) pairs.
+        let mut pairs: Vec<(f64, f64)> = Vec::new();
+        for observations in &all_observations {
+            for obs in observations.iter() {
+                if obs.distance_over_sigma.is_finite() && (obs.settlement_up == 0.0 || obs.settlement_up == 1.0) {
+                    pairs.push((obs.distance_over_sigma, obs.settlement_up));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        if pairs.is_empty() {
+            eprintln!("\n=== Calibration: no valid (distance_over_sigma, settlement_up) pairs ===");
+        } else {
+            let bucket_size = pairs.len() / N_BUCKETS;
+            eprintln!("\n=== Calibration: distance_over_sigma → empirical P(up) ({} obs, {} per bucket) ===", pairs.len(), bucket_size.max(1));
+            eprintln!("{:<12} {:<12} {:<8} {:<12} {:<12}", "d/σ_lo", "d/σ_hi", "n", "emp_win%", "model_cdf%");
+
+            let chunks: Vec<&[(f64, f64)]> = if bucket_size > 0 {
+                pairs.chunks(bucket_size).collect()
+            } else {
+                vec![&pairs[..]]
+            };
+            for chunk in &chunks {
+                if chunk.is_empty() { continue; }
+                let lo = chunk.first().unwrap().0;
+                let hi = chunk.last().unwrap().0;
+                let n = chunk.len();
+                let wins: f64 = chunk.iter().map(|(_, s)| s).sum();
+                let emp_rate = wins / n as f64 * 100.0;
+                // Model prediction: normal_cdf(mid_z) where mid_z = (lo+hi)/2
+                let mid_z = (lo + hi) / 2.0;
+                // Abramowitz & Stegun normal CDF approximation (same as factors.rs)
+                let model_cdf = {
+                    let sign = if mid_z < 0.0 { -1.0 } else { 1.0 };
+                    let x = mid_z.abs();
+                    let t = 1.0 / (1.0 + 0.3275911 * x);
+                    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+                    0.5 * (1.0 + sign * (1.0 - poly * (-x * x / 2.0).exp()))
+                };
+                eprintln!("{:<12.4} {:<12.4} {:<8} {:<12.1} {:<12.1}", lo, hi, n, emp_rate, model_cdf * 100.0);
+            }
+        }
+    }
+
     let mut settlement_metrics: Vec<_> = aggregated
         .iter()
         .filter(|metric| metric.label == "settlement_up")
