@@ -321,7 +321,7 @@ async fn main() {
     eprintln!("\nobservation_rows={}", total_observations);
     eprintln!("event_rows={}", total_event_rows);
 
-    // === P&L Simulation (4 strategy variants) ===
+    // === P&L Simulation (6 strategy variants, expanding-window calibration) ===
     // For each event, simulate a trade at the last observation before settlement.
     // Exit: hold to settlement ($1 win, $0 loss)
     //
@@ -330,6 +330,8 @@ async fn main() {
     //   B. Contrarian  – flip model direction (IC=-0.27 suggests model is systematically wrong)
     //   C. LOB-only    – trade only when obi_10 + depth_imbalance agree on direction
     //   D. Combined    – contrarian model + LOB direction filter must agree
+    //   E. Calibrated  – empirical P(up|d/σ) from expanding window replaces log-normal CDF
+    //   F. Cal+LOB     – calibrated probability + LOB direction filter must agree
 
     #[derive(Default)]
     struct SimStats {
@@ -354,15 +356,70 @@ async fn main() {
         }
     }
 
+    // --- Calibration table: maps distance_over_sigma → empirical P(up) ---
+    struct CalibrationTable {
+        // Sorted by d_sigma midpoint: (upper_bound, empirical_p_up)
+        buckets: Vec<(f64, f64)>,
+    }
+
+    impl CalibrationTable {
+        fn build(data: &[(f64, f64)], n_buckets: usize) -> Self {
+            let mut sorted: Vec<(f64, f64)> = data.to_vec();
+            sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let bucket_size = (sorted.len() / n_buckets).max(1);
+            let mut buckets = Vec::new();
+            for chunk in sorted.chunks(bucket_size) {
+                let upper = chunk.last().unwrap().0;
+                let wins: f64 = chunk.iter().map(|(_, s)| *s).sum();
+                let p_up = wins / chunk.len() as f64;
+                buckets.push((upper, p_up));
+            }
+            CalibrationTable { buckets }
+        }
+
+        fn lookup(&self, d_sigma: f64) -> f64 {
+            if self.buckets.is_empty() { return 0.5; }
+            // Binary search for the first bucket whose upper bound >= d_sigma
+            match self.buckets.binary_search_by(|b| {
+                b.0.partial_cmp(&d_sigma).unwrap_or(std::cmp::Ordering::Equal)
+            }) {
+                Ok(i) => self.buckets[i].1,
+                Err(i) => {
+                    if i >= self.buckets.len() {
+                        self.buckets.last().unwrap().1
+                    } else {
+                        self.buckets[i].1
+                    }
+                }
+            }
+        }
+    }
+
     let mut baseline = SimStats::default();
     let mut contrarian = SimStats::default();
     let mut lob_only = SimStats::default();
     let mut combined = SimStats::default();
+    let mut calibrated = SimStats::default();
+    let mut cal_lob = SimStats::default();
 
     let stake_per_trade = 25.0f64;
     let min_edge = 0.02f64;
+    let min_cal_obs = 200usize; // cold-start: need ≥200 obs before using calibration
+    let n_cal_buckets = 20usize;
+
+    // Expanding-window calibration accumulator
+    let mut cal_data: Vec<(f64, f64)> = Vec::new();
+    let mut cal_windows_skipped = 0u32;
+    let mut cal_windows_traded = 0u32;
 
     for observations in &all_observations {
+        // Build calibration table from all PRIOR windows' data (no look-ahead)
+        let cal_table = if cal_data.len() >= min_cal_obs {
+            Some(CalibrationTable::build(&cal_data, n_cal_buckets))
+        } else {
+            None
+        };
+
         // Group by event_id, take last observation per event.
         let mut last_obs: std::collections::HashMap<&str, &ploy_research::FactorObservation> =
             std::collections::HashMap::new();
@@ -371,6 +428,12 @@ async fn main() {
             if obs.tick_ts > entry.tick_ts {
                 *entry = obs;
             }
+        }
+
+        if cal_table.is_none() {
+            cal_windows_skipped += 1;
+        } else {
+            cal_windows_traded += 1;
         }
 
         for obs in last_obs.values() {
@@ -384,7 +447,6 @@ async fn main() {
             let fee_up = 0.02 * obs.pm_up_ask * (1.0 - obs.pm_up_ask);
             let fee_down = 0.02 * obs.pm_down_ask * (1.0 - obs.pm_down_ask);
 
-            // Payout helpers: returns (pnl, won) for a given side.
             let pnl_up = |won: bool| -> (f64, bool) {
                 let p = if won {
                     stake_per_trade * (1.0 / obs.pm_up_ask - 1.0)
@@ -404,7 +466,7 @@ async fn main() {
                 (p, won)
             };
 
-            // --- A. Baseline (original model) ---
+            // --- A. Baseline ---
             {
                 let edge_up = obs.model_prob_up - obs.pm_up_ask - fee_up;
                 let edge_down = (1.0 - obs.model_prob_up) - obs.pm_down_ask - fee_down;
@@ -417,13 +479,11 @@ async fn main() {
                 }
             }
 
-            // --- B. Contrarian (flip model direction) ---
-            // If model says UP with edge, we bet DOWN (and vice versa).
-            // Rationale: model_prob_up IC = -0.27 means the model is systematically wrong.
+            // --- B. Contrarian ---
             {
-                let contrarian_prob_up = 1.0 - obs.model_prob_up;
-                let edge_up = contrarian_prob_up - obs.pm_up_ask - fee_up;
-                let edge_down = (1.0 - contrarian_prob_up) - obs.pm_down_ask - fee_down;
+                let cp = 1.0 - obs.model_prob_up;
+                let edge_up = cp - obs.pm_up_ask - fee_up;
+                let edge_down = (1.0 - cp) - obs.pm_down_ask - fee_down;
                 if edge_up >= min_edge && edge_up >= edge_down {
                     let (p, w) = pnl_up(obs.settlement_up == 1.0);
                     contrarian.record(w, p, stake_per_trade);
@@ -433,23 +493,17 @@ async fn main() {
                 }
             }
 
-            // --- C. LOB-only (ignore model, use LOB direction signal) ---
-            // lob_direction = obi_10 + depth_imbalance (both have IC ~0.09-0.10)
-            // microprice_offset_bps has IC=-0.09 so we subtract it (positive offset = sell pressure)
+            // --- C. LOB-only ---
             {
                 let lob_score = obs.obi_10 + obs.depth_imbalance
                     - 0.5 * obs.microprice_offset_bps.signum();
-                let lob_bullish = lob_score > 0.1;
-                let lob_bearish = lob_score < -0.1;
-
-                if lob_bullish {
-                    // LOB says UP: buy UP if there's any positive expected value
-                    let edge_up = 0.5 - obs.pm_up_ask - fee_up; // neutral prior, LOB provides direction
+                if lob_score > 0.1 {
+                    let edge_up = 0.5 - obs.pm_up_ask - fee_up;
                     if edge_up >= min_edge {
                         let (p, w) = pnl_up(obs.settlement_up == 1.0);
                         lob_only.record(w, p, stake_per_trade);
                     }
-                } else if lob_bearish {
+                } else if lob_score < -0.1 {
                     let edge_down = 0.5 - obs.pm_down_ask - fee_down;
                     if edge_down >= min_edge {
                         let (p, w) = pnl_down(obs.settlement_up == 0.0);
@@ -458,88 +512,105 @@ async fn main() {
                 }
             }
 
-            // --- D. Combined (contrarian model + LOB filter must agree) ---
+            // --- D. Combined (contrarian + LOB) ---
             {
-                let contrarian_prob_up = 1.0 - obs.model_prob_up;
-                let edge_up = contrarian_prob_up - obs.pm_up_ask - fee_up;
-                let edge_down = (1.0 - contrarian_prob_up) - obs.pm_down_ask - fee_down;
-
+                let cp = 1.0 - obs.model_prob_up;
+                let edge_up = cp - obs.pm_up_ask - fee_up;
+                let edge_down = (1.0 - cp) - obs.pm_down_ask - fee_down;
                 let lob_score = obs.obi_10 + obs.depth_imbalance
                     - 0.5 * obs.microprice_offset_bps.signum();
-                let lob_bullish = lob_score > 0.0;
-                let lob_bearish = lob_score < 0.0;
-
-                if edge_up >= min_edge && edge_up >= edge_down && lob_bullish {
+                if edge_up >= min_edge && edge_up >= edge_down && lob_score > 0.0 {
                     let (p, w) = pnl_up(obs.settlement_up == 1.0);
                     combined.record(w, p, stake_per_trade);
-                } else if edge_down >= min_edge && lob_bearish {
+                } else if edge_down >= min_edge && lob_score < 0.0 {
                     let (p, w) = pnl_down(obs.settlement_up == 0.0);
                     combined.record(w, p, stake_per_trade);
                 }
             }
-        }
-    }
 
-    eprintln!("\n=== P&L Simulation (last-tick entry, min_edge=2%, stake=$25) ===");
-    eprintln!(
-        "{:<14} trades={:<6} wins={:<6} win_rate={:>5.1}%  pnl=${:>8.2}  stake=${:>8.0}  roi={:>7.2}%",
-        "A.Baseline", baseline.trades, baseline.wins, baseline.win_rate(),
-        baseline.pnl, baseline.stake, baseline.roi()
-    );
-    eprintln!(
-        "{:<14} trades={:<6} wins={:<6} win_rate={:>5.1}%  pnl=${:>8.2}  stake=${:>8.0}  roi={:>7.2}%",
-        "B.Contrarian", contrarian.trades, contrarian.wins, contrarian.win_rate(),
-        contrarian.pnl, contrarian.stake, contrarian.roi()
-    );
-    eprintln!(
-        "{:<14} trades={:<6} wins={:<6} win_rate={:>5.1}%  pnl=${:>8.2}  stake=${:>8.0}  roi={:>7.2}%",
-        "C.LOB-only", lob_only.trades, lob_only.wins, lob_only.win_rate(),
-        lob_only.pnl, lob_only.stake, lob_only.roi()
-    );
-    eprintln!(
-        "{:<14} trades={:<6} wins={:<6} win_rate={:>5.1}%  pnl=${:>8.2}  stake=${:>8.0}  roi={:>7.2}%",
-        "D.Combined", combined.trades, combined.wins, combined.win_rate(),
-        combined.pnl, combined.stake, combined.roi()
-    );
+            // --- E. Calibrated (empirical P(up) from expanding window) ---
+            if let Some(ref ct) = cal_table {
+                if obs.distance_over_sigma.is_finite() {
+                    let cal_p = ct.lookup(obs.distance_over_sigma);
+                    let edge_up = cal_p - obs.pm_up_ask - fee_up;
+                    let edge_down = (1.0 - cal_p) - obs.pm_down_ask - fee_down;
+                    if edge_up >= min_edge && edge_up >= edge_down {
+                        let (p, w) = pnl_up(obs.settlement_up == 1.0);
+                        calibrated.record(w, p, stake_per_trade);
+                    } else if edge_down >= min_edge {
+                        let (p, w) = pnl_down(obs.settlement_up == 0.0);
+                        calibrated.record(w, p, stake_per_trade);
+                    }
+                }
+            }
 
-    // === Calibration Statistics: distance_over_sigma bucketed win rates ===
-    // Bucket all observations by distance_over_sigma to see empirical P(settle_up)
-    // per bucket. This reveals whether the log-normal model is well-calibrated.
-    {
-        const N_BUCKETS: usize = 20;
-        // Collect all valid (distance_over_sigma, settlement_up) pairs.
-        let mut pairs: Vec<(f64, f64)> = Vec::new();
-        for observations in &all_observations {
-            for obs in observations.iter() {
-                if obs.distance_over_sigma.is_finite() && (obs.settlement_up == 0.0 || obs.settlement_up == 1.0) {
-                    pairs.push((obs.distance_over_sigma, obs.settlement_up));
+            // --- F. Calibrated + LOB filter ---
+            if let Some(ref ct) = cal_table {
+                if obs.distance_over_sigma.is_finite() {
+                    let cal_p = ct.lookup(obs.distance_over_sigma);
+                    let edge_up = cal_p - obs.pm_up_ask - fee_up;
+                    let edge_down = (1.0 - cal_p) - obs.pm_down_ask - fee_down;
+                    let lob_score = obs.obi_10 + obs.depth_imbalance
+                        - 0.5 * obs.microprice_offset_bps.signum();
+                    if edge_up >= min_edge && edge_up >= edge_down && lob_score > 0.0 {
+                        let (p, w) = pnl_up(obs.settlement_up == 1.0);
+                        cal_lob.record(w, p, stake_per_trade);
+                    } else if edge_down >= min_edge && lob_score < 0.0 {
+                        let (p, w) = pnl_down(obs.settlement_up == 0.0);
+                        cal_lob.record(w, p, stake_per_trade);
+                    }
                 }
             }
         }
+
+        // Accumulate this window's data for future calibration
+        for obs in observations.iter() {
+            if obs.distance_over_sigma.is_finite()
+                && (obs.settlement_up == 0.0 || obs.settlement_up == 1.0)
+            {
+                cal_data.push((obs.distance_over_sigma, obs.settlement_up));
+            }
+        }
+    }
+
+    let fmt = |name: &str, s: &SimStats| {
+        eprintln!(
+            "{:<14} trades={:<6} wins={:<6} win_rate={:>5.1}%  pnl=${:>8.2}  stake=${:>8.0}  roi={:>7.2}%",
+            name, s.trades, s.wins, s.win_rate(), s.pnl, s.stake, s.roi()
+        );
+    };
+    eprintln!("\n=== P&L Simulation (last-tick entry, min_edge=2%, stake=$25) ===");
+    fmt("A.Baseline", &baseline);
+    fmt("B.Contrarian", &contrarian);
+    fmt("C.LOB-only", &lob_only);
+    fmt("D.Combined", &combined);
+    fmt("E.Calibrated", &calibrated);
+    fmt("F.Cal+LOB", &cal_lob);
+    eprintln!(
+        "calibration: skipped {} windows ({} obs cold-start), traded {} windows ({} obs total)",
+        cal_windows_skipped, min_cal_obs, cal_windows_traded, cal_data.len()
+    );
+
+    // === Calibration Statistics (full hindsight, for diagnostic only) ===
+    {
+        const N_BUCKETS: usize = 20;
+        let mut pairs: Vec<(f64, f64)> = cal_data.clone();
         pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        if pairs.is_empty() {
-            eprintln!("\n=== Calibration: no valid (distance_over_sigma, settlement_up) pairs ===");
-        } else {
-            let bucket_size = pairs.len() / N_BUCKETS;
-            eprintln!("\n=== Calibration: distance_over_sigma → empirical P(up) ({} obs, {} per bucket) ===", pairs.len(), bucket_size.max(1));
+        if !pairs.is_empty() {
+            let bucket_size = (pairs.len() / N_BUCKETS).max(1);
+            eprintln!(
+                "\n=== Calibration: d/σ → P(up) ({} obs, {} per bucket) ===",
+                pairs.len(), bucket_size
+            );
             eprintln!("{:<12} {:<12} {:<8} {:<12} {:<12}", "d/σ_lo", "d/σ_hi", "n", "emp_win%", "model_cdf%");
-
-            let chunks: Vec<&[(f64, f64)]> = if bucket_size > 0 {
-                pairs.chunks(bucket_size).collect()
-            } else {
-                vec![&pairs[..]]
-            };
-            for chunk in &chunks {
+            for chunk in pairs.chunks(bucket_size) {
                 if chunk.is_empty() { continue; }
                 let lo = chunk.first().unwrap().0;
                 let hi = chunk.last().unwrap().0;
                 let n = chunk.len();
                 let wins: f64 = chunk.iter().map(|(_, s)| s).sum();
                 let emp_rate = wins / n as f64 * 100.0;
-                // Model prediction: normal_cdf(mid_z) where mid_z = (lo+hi)/2
                 let mid_z = (lo + hi) / 2.0;
-                // Abramowitz & Stegun normal CDF approximation (same as factors.rs)
                 let model_cdf = {
                     let sign = if mid_z < 0.0 { -1.0 } else { 1.0 };
                     let x = mid_z.abs();
