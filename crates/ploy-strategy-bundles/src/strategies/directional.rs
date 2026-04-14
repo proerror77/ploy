@@ -12,8 +12,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -81,6 +81,8 @@ pub struct DirectionalConfig {
     // Symbols
     #[serde(default = "default_symbols")]
     pub symbols: Vec<String>,
+    #[serde(default)]
+    pub symbol_profiles: HashMap<String, DirectionalSymbolProfile>,
 
     // Probability gates
     #[serde(default = "default_vol_floor")]
@@ -105,6 +107,48 @@ pub struct DirectionalConfig {
     // Edge
     #[serde(default = "default_min_edge")]
     pub min_edge: f64,
+
+    // Mean-reversion / V4 prototype parameters
+    #[serde(default = "default_min_deviation_pct")]
+    pub min_deviation_pct: f64,
+    #[serde(default = "default_min_reversal_consistency")]
+    pub min_reversal_consistency: f64,
+    #[serde(default = "default_min_trend_consistency")]
+    pub min_trend_consistency: f64,
+    #[serde(default = "default_min_trend_persistence_secs")]
+    pub min_trend_persistence_secs: u64,
+    #[serde(default = "default_take_profit_price_delta")]
+    pub take_profit_price_delta: f64,
+    #[serde(default = "default_stop_loss_price_delta")]
+    pub stop_loss_price_delta: f64,
+    #[serde(default = "default_max_hold_secs")]
+    pub max_hold_secs: u64,
+    #[serde(default = "default_reversal_bonus_cap")]
+    pub reversal_bonus_cap: f64,
+    #[serde(default = "default_use_multiscale_volatility")]
+    pub use_multiscale_volatility: bool,
+    #[serde(default = "default_use_price_structure_adjustment")]
+    pub use_price_structure_adjustment: bool,
+
+    // Reversal / V5 prototype parameters
+    #[serde(default = "default_reversal_max_distance_pct")]
+    pub reversal_max_distance_pct: f64,
+    #[serde(default = "default_reversal_max_drift_flip_age_secs")]
+    pub reversal_max_drift_flip_age_secs: u64,
+    #[serde(default = "default_reversal_min_post_flip_drift")]
+    pub reversal_min_post_flip_drift: f64,
+    #[serde(default = "default_reversal_lob_depth_pct")]
+    pub reversal_lob_depth_pct: f64,
+    #[serde(default = "default_reversal_min_lob_depth_ratio")]
+    pub reversal_min_lob_depth_ratio: f64,
+    #[serde(default = "default_reversal_max_ask_for_reversal")]
+    pub reversal_max_ask_for_reversal: f64,
+    #[serde(default = "default_reversal_max_pm_lag_secs")]
+    pub reversal_max_pm_lag_secs: u64,
+    #[serde(default = "default_reversal_take_profit_ask")]
+    pub reversal_take_profit_ask: f64,
+    #[serde(default = "default_reversal_stop_distance_pct")]
+    pub reversal_stop_distance_pct: f64,
 
     // Timing
     #[serde(default = "default_min_time")]
@@ -135,6 +179,20 @@ pub struct DirectionalConfig {
     pub allowed_window_secs: Vec<u64>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct DirectionalSymbolProfile {
+    #[serde(default)]
+    pub min_probability: Option<f64>,
+    #[serde(default)]
+    pub max_entry_price: Option<f64>,
+    #[serde(default)]
+    pub min_edge: Option<f64>,
+    #[serde(default)]
+    pub min_time_remaining_secs: Option<u64>,
+    #[serde(default)]
+    pub max_time_remaining_secs: Option<u64>,
+}
+
 fn default_symbols() -> Vec<String> {
     vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()]
 }
@@ -161,6 +219,63 @@ fn default_no_trade_max() -> f64 {
 }
 fn default_min_edge() -> f64 {
     0.02
+}
+fn default_min_deviation_pct() -> f64 {
+    0.005
+}
+fn default_min_reversal_consistency() -> f64 {
+    0.55
+}
+fn default_min_trend_consistency() -> f64 {
+    0.50
+}
+fn default_min_trend_persistence_secs() -> u64 {
+    0
+}
+fn default_take_profit_price_delta() -> f64 {
+    0.10
+}
+fn default_stop_loss_price_delta() -> f64 {
+    0.05
+}
+fn default_max_hold_secs() -> u64 {
+    120
+}
+fn default_reversal_bonus_cap() -> f64 {
+    0.20
+}
+fn default_use_multiscale_volatility() -> bool {
+    true
+}
+fn default_use_price_structure_adjustment() -> bool {
+    true
+}
+fn default_reversal_max_distance_pct() -> f64 {
+    0.015
+}
+fn default_reversal_max_drift_flip_age_secs() -> u64 {
+    20
+}
+fn default_reversal_min_post_flip_drift() -> f64 {
+    0.0001
+}
+fn default_reversal_lob_depth_pct() -> f64 {
+    0.001
+}
+fn default_reversal_min_lob_depth_ratio() -> f64 {
+    1.3
+}
+fn default_reversal_max_ask_for_reversal() -> f64 {
+    0.25
+}
+fn default_reversal_max_pm_lag_secs() -> u64 {
+    30
+}
+fn default_reversal_take_profit_ask() -> f64 {
+    0.65
+}
+fn default_reversal_stop_distance_pct() -> f64 {
+    0.025
 }
 fn default_min_time() -> u64 {
     60
@@ -294,6 +409,27 @@ impl ReturnBuffer {
         new_speed - old_speed
     }
 
+    fn aligned_consistency(&self, signal_dir: f64) -> f64 {
+        let (consistency, dominant_dir) = self.directional_consistency();
+        if dominant_dir * signal_dir > 0.0 {
+            consistency
+        } else {
+            1.0 - consistency
+        }
+    }
+
+    fn trailing_persistence_secs(&self, signal_dir: f64) -> f64 {
+        let mut secs = 0.0;
+        for (ret, dt_secs) in self.entries.iter().rev() {
+            if ret * signal_dir > 0.0 {
+                secs += *dt_secs;
+            } else {
+                break;
+            }
+        }
+        secs
+    }
+
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -316,6 +452,61 @@ struct QuoteState {
     ask: Option<Decimal>,
 }
 
+#[derive(Default)]
+struct MicrostructureState {
+    signed_trade_imbalance: f64,
+    last_aggtrade_ts: Option<DateTime<Utc>>,
+    last_obi: Option<f64>,
+    obi_delta: f64,
+    last_l2_ts: Option<DateTime<Utc>>,
+    spread_bps: Option<u32>,
+}
+
+impl MicrostructureState {
+    fn apply_aggtrade(&mut self, quantity: Decimal, is_buyer_maker: bool, ts: DateTime<Utc>) {
+        let qty = quantity.to_f64().unwrap_or(0.0);
+        if qty <= 0.0 {
+            return;
+        }
+
+        let seconds = self
+            .last_aggtrade_ts
+            .map(|last| (ts - last).num_milliseconds() as f64 / 1000.0)
+            .unwrap_or(0.0)
+            .max(0.0);
+        let decay = if seconds > 0.0 {
+            (-seconds / 30.0).exp()
+        } else {
+            1.0
+        };
+
+        // Binance aggTrade semantics: buyer_maker=true means seller aggression.
+        let signed_qty = if is_buyer_maker { -qty } else { qty };
+        self.signed_trade_imbalance = self.signed_trade_imbalance * decay + signed_qty;
+        self.last_aggtrade_ts = Some(ts);
+    }
+
+    fn apply_l2(&mut self, obi: f64, spread_bps: u32, ts: DateTime<Utc>) {
+        self.obi_delta = self.last_obi.map(|last| obi - last).unwrap_or(0.0);
+        self.last_obi = Some(obi);
+        self.spread_bps = Some(spread_bps);
+        self.last_l2_ts = Some(ts);
+    }
+
+    fn directional_score(&self, signal_dir: f64) -> f64 {
+        let trade_score = (self.signed_trade_imbalance / 50.0).clamp(-1.0, 1.0) * 0.35;
+        let obi_score = self.last_obi.unwrap_or(0.0).clamp(-1.0, 1.0) * 0.20;
+        let obi_delta_score = self.obi_delta.clamp(-1.0, 1.0) * 0.35;
+        let spread_score = match self.spread_bps.unwrap_or(0) {
+            0..=6 => 0.10,
+            7..=15 => 0.0,
+            _ => -0.10,
+        };
+
+        signal_dir * (trade_score + obi_score + obi_delta_score) + spread_score
+    }
+}
+
 /// Rolling window for return buffer (seconds).
 const RETURN_BUFFER_WINDOW_SECS: f64 = 300.0;
 
@@ -332,6 +523,7 @@ pub struct DirectionalStrategy {
     spot: HashMap<String, SpotState>,
     volatility: HashMap<String, VolatilityState>,
     return_buffers: HashMap<String, ReturnBuffer>,
+    microstructure: HashMap<String, MicrostructureState>,
     events: HashMap<String, Vec<EventWindow>>,
     quotes: HashMap<String, QuoteState>,
     // Gating state
@@ -358,6 +550,7 @@ impl DirectionalStrategy {
             spot: HashMap::new(),
             volatility: HashMap::new(),
             return_buffers: HashMap::new(),
+            microstructure: HashMap::new(),
             events: HashMap::new(),
             quotes: HashMap::new(),
             cooldowns: HashMap::new(),
@@ -371,6 +564,40 @@ impl DirectionalStrategy {
         }
     }
 
+    fn symbol_profile(&self, symbol: &str) -> Option<&DirectionalSymbolProfile> {
+        self.config.symbol_profiles.get(symbol)
+    }
+
+    fn effective_min_probability(&self, symbol: &str) -> f64 {
+        self.symbol_profile(symbol)
+            .and_then(|profile| profile.min_probability)
+            .unwrap_or(self.config.min_probability)
+    }
+
+    fn effective_max_entry_price(&self, symbol: &str) -> f64 {
+        self.symbol_profile(symbol)
+            .and_then(|profile| profile.max_entry_price)
+            .unwrap_or(self.config.max_entry_price)
+    }
+
+    fn effective_min_edge(&self, symbol: &str) -> f64 {
+        self.symbol_profile(symbol)
+            .and_then(|profile| profile.min_edge)
+            .unwrap_or(self.config.min_edge)
+    }
+
+    fn effective_min_time_remaining_secs(&self, symbol: &str) -> u64 {
+        self.symbol_profile(symbol)
+            .and_then(|profile| profile.min_time_remaining_secs)
+            .unwrap_or(self.config.min_time_remaining_secs)
+    }
+
+    fn effective_max_time_remaining_secs(&self, symbol: &str) -> u64 {
+        self.symbol_profile(symbol)
+            .and_then(|profile| profile.max_time_remaining_secs)
+            .unwrap_or(self.config.max_time_remaining_secs)
+    }
+
     /// Pick the nearest event within the valid time window.
     fn pick_event(&self, symbol: &str, now: DateTime<Utc>) -> Option<EventWindow> {
         self.events
@@ -378,14 +605,16 @@ impl DirectionalStrategy {
             .iter()
             .filter(|e| {
                 let rem = (e.end_time - now).num_seconds();
-                rem >= self.config.min_time_remaining_secs as i64
-                    && rem <= self.config.max_time_remaining_secs as i64
+                rem >= self.effective_min_time_remaining_secs(symbol) as i64
+                    && rem <= self.effective_max_time_remaining_secs(symbol) as i64
             })
             .min_by_key(|e| e.end_time)
             .cloned()
     }
 
     fn candidate_events(&self, symbol: &str, now: DateTime<Utc>) -> Vec<EventWindow> {
+        let min_time = self.effective_min_time_remaining_secs(symbol) as i64;
+        let max_time = self.effective_max_time_remaining_secs(symbol) as i64;
         self.events
             .get(symbol)
             .map(|events| {
@@ -393,8 +622,7 @@ impl DirectionalStrategy {
                     .iter()
                     .filter(|event| {
                         let rem = (event.end_time - now).num_seconds();
-                        rem >= self.config.min_time_remaining_secs as i64
-                            && rem <= self.config.max_time_remaining_secs as i64
+                        rem >= min_time && rem <= max_time
                     })
                     .cloned()
                     .collect();
@@ -477,18 +705,21 @@ impl DirectionalStrategy {
             .map(|state| state.ewma_var_per_sec)
             .unwrap_or(floor);
 
-        // Use the maximum of three estimators for a conservative sigma.
-        // - EWMA: smooth, adapts slowly, good for regime detection
-        // - Realized Var: direct measurement of recent tick-level volatility
-        // - Parkinson: range-based, 5x more efficient, captures intra-window extremes
-        let (rv, parkinson) = self
-            .return_buffers
-            .get(symbol)
-            .filter(|buf| buf.len() >= 5)
-            .map(|buf| (buf.realized_var_per_sec(), buf.parkinson_var_per_sec()))
-            .unwrap_or((0.0, 0.0));
-
-        let best_var = ewma.max(rv).max(parkinson).max(floor);
+        let best_var = if self.config.use_multiscale_volatility {
+            // Use the maximum of three estimators for a conservative sigma.
+            // - EWMA: smooth, adapts slowly, good for regime detection
+            // - Realized Var: direct measurement of recent tick-level volatility
+            // - Parkinson: range-based, 5x more efficient, captures intra-window extremes
+            let (rv, parkinson) = self
+                .return_buffers
+                .get(symbol)
+                .filter(|buf| buf.len() >= 5)
+                .map(|buf| (buf.realized_var_per_sec(), buf.parkinson_var_per_sec()))
+                .unwrap_or((0.0, 0.0));
+            ewma.max(rv).max(parkinson).max(floor)
+        } else {
+            ewma.max(floor)
+        };
         (best_var * secs).sqrt()
     }
 
@@ -689,6 +920,9 @@ impl DirectionalStrategy {
         let st = spot_price.to_f64()?;
         let secs_remaining = (event.end_time - now).num_seconds().max(0) as f64;
         let sigma_horizon = self.sigma_horizon(symbol, secs_remaining);
+        let min_probability = self.effective_min_probability(symbol);
+        let max_entry_price = self.effective_max_entry_price(symbol);
+        let min_edge = self.effective_min_edge(symbol);
 
         // Probability estimation (log-normal model)
         let p_hat = estimate_probability(s0, st, sigma_horizon);
@@ -744,7 +978,7 @@ impl DirectionalStrategy {
 
         // Gate 2: Price filter (bounds + no-trade zone)
         if entry_f < self.config.min_entry_price
-            || entry_f > self.config.max_entry_price
+            || entry_f > max_entry_price
             || (entry_f >= self.config.no_trade_zone_min
                 && entry_f <= self.config.no_trade_zone_max)
         {
@@ -763,12 +997,12 @@ impl DirectionalStrategy {
         } else {
             1.0 - p_hat
         };
-        if base_p < self.config.min_probability {
+        if base_p < min_probability {
             debug!(
                 symbol,
                 event_id = %event.event_id,
                 effective_p = base_p,
-                threshold = self.config.min_probability,
+                threshold = min_probability,
                 "Gate 3: Probability too low"
             );
             return None;
@@ -777,68 +1011,137 @@ impl DirectionalStrategy {
         // Gate 4: Price structure adjustment (Bayesian likelihood update)
         // Use drift speed, acceleration, and directional consistency from the
         // return buffer to adjust the base probability up or down.
-        let effective_p = if let Some(buf) = self.return_buffers.get(symbol) {
-            if buf.len() >= 10 {
-                let drift = buf.drift_speed();
-                let accel = buf.drift_acceleration();
-                let (consistency, dom_dir) = buf.directional_consistency();
-
-                // Signal direction: +1 for Up, -1 for Down
-                let signal_dir = if direction == Direction::Up { 1.0 } else { -1.0 };
-
-                // Drift alignment: is the price moving in our signal direction?
-                // Positive = drift confirms signal, negative = drift opposes signal.
-                let drift_alignment = drift * signal_dir;
-
-                // Acceleration alignment: is the drift accelerating in our direction?
-                let accel_alignment = accel * signal_dir;
-
-                // Consistency bonus: if >70% of ticks move in our direction, boost confidence.
-                // If dominant direction opposes our signal, penalize.
-                let consistency_factor = if dom_dir * signal_dir > 0.0 {
-                    // Ticks confirm our direction
-                    1.0 + (consistency - 0.5).max(0.0) * 0.3 // up to +15% boost
-                } else {
-                    // Ticks oppose our direction
-                    1.0 - (consistency - 0.5).max(0.0) * 0.3 // up to -15% penalty
-                };
-
-                // Drift factor: strong drift in our direction boosts, against penalizes.
-                // Normalize by sigma to make it scale-invariant.
-                let drift_factor = if sigma_horizon > 0.0 {
-                    let normalized_drift = drift_alignment * secs_remaining.sqrt() / sigma_horizon;
-                    1.0 + normalized_drift.clamp(-0.3, 0.3) * 0.2
-                } else {
+        let effective_p = if self.config.use_price_structure_adjustment {
+            if let Some(buf) = self.return_buffers.get(symbol) {
+                let requires_structure_history = self.config.min_trend_consistency > 0.5
+                    || self.config.min_trend_persistence_secs > 0;
+                let signal_dir = if direction == Direction::Up {
                     1.0
-                };
-
-                // Acceleration factor: accelerating in our direction is bullish.
-                let accel_factor = if sigma_horizon > 0.0 {
-                    let normalized_accel = accel_alignment * secs_remaining / sigma_horizon;
-                    1.0 + normalized_accel.clamp(-0.5, 0.5) * 0.1
                 } else {
-                    1.0
+                    -1.0
                 };
 
-                // Apply all factors to base probability (multiplicative on odds ratio)
-                let combined_factor = consistency_factor * drift_factor * accel_factor;
-                let odds = base_p / (1.0 - base_p).max(1e-9);
-                let adjusted_odds = odds * combined_factor;
-                let adjusted_p = adjusted_odds / (1.0 + adjusted_odds);
+                if requires_structure_history {
+                    if buf.len() < 3 {
+                        debug!(
+                            symbol,
+                            event_id = %event.event_id,
+                            history_len = buf.len(),
+                            "Gate 4: insufficient structure history"
+                        );
+                        return None;
+                    }
 
-                debug!(
-                    symbol,
-                    event_id = %event.event_id,
-                    base_p = format!("{:.3}", base_p),
-                    adjusted_p = format!("{:.3}", adjusted_p),
-                    drift = format!("{:.6}", drift),
-                    accel = format!("{:.6}", accel),
-                    consistency = format!("{:.2}", consistency),
-                    "Gate 4: Price structure adjustment"
-                );
+                    let aligned_consistency = buf.aligned_consistency(signal_dir);
+                    let persistence_secs = buf.trailing_persistence_secs(signal_dir);
 
-                adjusted_p
+                    if aligned_consistency < self.config.min_trend_consistency {
+                        debug!(
+                            symbol,
+                            event_id = %event.event_id,
+                            aligned_consistency = format!("{:.2}", aligned_consistency),
+                            threshold = format!("{:.2}", self.config.min_trend_consistency),
+                            "Gate 4: aligned consistency too weak"
+                        );
+                        return None;
+                    }
+                    if persistence_secs + f64::EPSILON
+                        < self.config.min_trend_persistence_secs as f64
+                    {
+                        debug!(
+                            symbol,
+                            event_id = %event.event_id,
+                            persistence_secs = format!("{:.2}", persistence_secs),
+                            threshold = self.config.min_trend_persistence_secs,
+                            "Gate 4: trend persistence too short"
+                        );
+                        return None;
+                    }
+                }
+
+                if buf.len() >= 10 {
+                    let drift = buf.drift_speed();
+                    let accel = buf.drift_acceleration();
+                    let (consistency, dom_dir) = buf.directional_consistency();
+                    let aligned_consistency = buf.aligned_consistency(signal_dir);
+                    let persistence_secs = buf.trailing_persistence_secs(signal_dir);
+
+                    // Drift alignment: is the price moving in our signal direction?
+                    // Positive = drift confirms signal, negative = drift opposes signal.
+                    let drift_alignment = drift * signal_dir;
+
+                    // Acceleration alignment: is the drift accelerating in our direction?
+                    let accel_alignment = accel * signal_dir;
+
+                    // Consistency bonus: if >70% of ticks move in our direction, boost confidence.
+                    // If dominant direction opposes our signal, penalize.
+                    let consistency_factor = if dom_dir * signal_dir > 0.0 {
+                        // Ticks confirm our direction
+                        1.0 + (consistency - 0.5).max(0.0) * 0.3 // up to +15% boost
+                    } else {
+                        // Ticks oppose our direction
+                        1.0 - (consistency - 0.5).max(0.0) * 0.3 // up to -15% penalty
+                    };
+
+                    // Drift factor: strong drift in our direction boosts, against penalizes.
+                    // Normalize by sigma to make it scale-invariant.
+                    let drift_factor = if sigma_horizon > 0.0 {
+                        let normalized_drift =
+                            drift_alignment * secs_remaining.sqrt() / sigma_horizon;
+                        1.0 + normalized_drift.clamp(-0.3, 0.3) * 0.2
+                    } else {
+                        1.0
+                    };
+
+                    // Acceleration factor: accelerating in our direction is bullish.
+                    let accel_factor = if sigma_horizon > 0.0 {
+                        let normalized_accel = accel_alignment * secs_remaining / sigma_horizon;
+                        1.0 + normalized_accel.clamp(-0.5, 0.5) * 0.1
+                    } else {
+                        1.0
+                    };
+
+                    // Apply all factors to base probability (multiplicative on odds ratio)
+                    let microstructure_factor = self
+                        .microstructure
+                        .get(symbol)
+                        .map(|state| 1.0 + state.directional_score(signal_dir).clamp(-0.4, 0.4))
+                        .unwrap_or(1.0);
+                    let combined_factor =
+                        consistency_factor * drift_factor * accel_factor * microstructure_factor;
+                    let odds = base_p / (1.0 - base_p).max(1e-9);
+                    let adjusted_odds = odds * combined_factor;
+                    let adjusted_p = adjusted_odds / (1.0 + adjusted_odds);
+
+                    debug!(
+                        symbol,
+                        event_id = %event.event_id,
+                        base_p = format!("{:.3}", base_p),
+                        adjusted_p = format!("{:.3}", adjusted_p),
+                        aligned_consistency = format!("{:.2}", aligned_consistency),
+                        persistence_secs = format!("{:.2}", persistence_secs),
+                        microstructure_factor = format!("{:.3}", microstructure_factor),
+                        drift = format!("{:.6}", drift),
+                        accel = format!("{:.6}", accel),
+                        consistency = format!("{:.2}", consistency),
+                        "Gate 4: Price structure adjustment"
+                    );
+
+                    adjusted_p
+                } else {
+                    base_p
+                }
             } else {
+                if self.config.min_trend_consistency > 0.5
+                    || self.config.min_trend_persistence_secs > 0
+                {
+                    debug!(
+                        symbol,
+                        event_id = %event.event_id,
+                        "Gate 4: missing structure history"
+                    );
+                    return None;
+                }
                 base_p
             }
         } else {
@@ -846,7 +1149,7 @@ impl DirectionalStrategy {
         };
 
         // Gate 5: Adjusted probability threshold
-        if effective_p < self.config.min_probability {
+        if effective_p < min_probability {
             debug!(
                 symbol,
                 event_id = %event.event_id,
@@ -860,12 +1163,12 @@ impl DirectionalStrategy {
         // Gate 6: Edge after fees
         let cost = crypto_fee_cost(entry_f);
         let edge = effective_p - entry_f - cost;
-        if edge < self.config.min_edge {
+        if edge < min_edge {
             debug!(
                 symbol,
                 event_id = %event.event_id,
                 edge,
-                threshold = self.config.min_edge,
+                threshold = min_edge,
                 effective_p,
                 entry_price = entry_f,
                 cost,
@@ -1009,8 +1312,8 @@ impl DirectionalStrategy {
                     symbol,
                     total_events = total,
                     in_window,
-                    min_time = self.config.min_time_remaining_secs,
-                    max_time = self.config.max_time_remaining_secs,
+                    min_time = self.effective_min_time_remaining_secs(symbol),
+                    max_time = self.effective_max_time_remaining_secs(symbol),
                     "No event in valid time window"
                 );
             }
@@ -1140,11 +1443,53 @@ impl StrategyLogic for DirectionalStrategy {
                         self.reset_daily_counter(*ts);
                         if self.daily_trades < self.config.max_daily_trades
                             && !self.in_cooldown(&symbol, *ts)
-                            && self.config.max_daily_loss_usd.map_or(true, |limit| self.daily_realized_pnl > -limit)
+                            && self
+                                .config
+                                .max_daily_loss_usd
+                                .map_or(true, |limit| self.daily_realized_pnl > -limit)
                         {
                             return self.try_entry(&symbol, positions, orders, *ts);
                         }
                     }
+                }
+                vec![]
+            }
+
+            MarketUpdate::AggTrade {
+                symbol,
+                quantity,
+                is_buyer_maker,
+                ts,
+                ..
+            } => {
+                if !self.config.symbols.contains(symbol) {
+                    return vec![];
+                }
+                self.microstructure
+                    .entry(symbol.clone())
+                    .or_default()
+                    .apply_aggtrade(*quantity, *is_buyer_maker, *ts);
+                if self.feed_time.map_or(true, |ft| *ts > ft) {
+                    self.feed_time = Some(*ts);
+                }
+                vec![]
+            }
+
+            MarketUpdate::L2 {
+                symbol,
+                obi,
+                spread_bps,
+                ts,
+            } => {
+                if !self.config.symbols.contains(symbol) {
+                    return vec![];
+                }
+                self.microstructure
+                    .entry(symbol.clone())
+                    .or_default()
+                    .apply_l2(*obi, *spread_bps, *ts);
+                if self.feed_time.map_or(true, |ft| *ts > ft) {
+                    self.feed_time = Some(*ts);
                 }
                 vec![]
             }
@@ -1242,7 +1587,8 @@ impl StrategyLogic for DirectionalStrategy {
                         continue;
                     }
 
-                    let Some(up_won) = self.resolve_expired_event_outcome(&event, *settlement) else {
+                    let Some(up_won) = self.resolve_expired_event_outcome(&event, *settlement)
+                    else {
                         warn!(
                             event_id = %event_id,
                             symbol = %event.symbol,
@@ -1276,8 +1622,7 @@ impl StrategyLogic for DirectionalStrategy {
         // Track entry prices and realized PnL for circuit breaker.
         match fill.side {
             ploy_trading::TradeSide::Buy => {
-                self.entry_prices
-                    .insert(fill.token_id.clone(), fill.price);
+                self.entry_prices.insert(fill.token_id.clone(), fill.price);
             }
             ploy_trading::TradeSide::Sell => {
                 if let Some(entry_price) = self.entry_prices.remove(&fill.token_id) {
@@ -1307,11 +1652,7 @@ impl StrategyLogic for DirectionalStrategy {
         // arm the per-symbol cooldown so the same event isn't retried on every tick.
         if let Some(symbol) = self.token_symbol.get(&intent.token_id).cloned() {
             self.cooldowns.insert(symbol.clone(), now);
-            debug!(
-                symbol,
-                reason,
-                "Rejection cooldown armed"
-            );
+            debug!(symbol, reason, "Rejection cooldown armed");
         }
     }
 
@@ -1329,6 +1670,7 @@ mod tests {
     fn default_config() -> DirectionalConfig {
         DirectionalConfig {
             symbols: vec!["BTCUSDT".into()],
+            symbol_profiles: HashMap::new(),
             vol_floor: 0.001,
             min_probability: 0.55,
             min_z_score: 0.35,
@@ -1337,6 +1679,25 @@ mod tests {
             no_trade_zone_min: 0.45,
             no_trade_zone_max: 0.55,
             min_edge: 0.02,
+            min_deviation_pct: 0.005,
+            min_reversal_consistency: 0.55,
+            min_trend_consistency: 0.50,
+            min_trend_persistence_secs: 0,
+            take_profit_price_delta: 0.10,
+            stop_loss_price_delta: 0.05,
+            max_hold_secs: 120,
+            reversal_bonus_cap: 0.20,
+            use_multiscale_volatility: true,
+            use_price_structure_adjustment: true,
+            reversal_max_distance_pct: 0.015,
+            reversal_max_drift_flip_age_secs: 20,
+            reversal_min_post_flip_drift: 0.0001,
+            reversal_lob_depth_pct: 0.001,
+            reversal_min_lob_depth_ratio: 1.3,
+            reversal_max_ask_for_reversal: 0.25,
+            reversal_max_pm_lag_secs: 30,
+            reversal_take_profit_ask: 0.65,
+            reversal_stop_distance_pct: 0.025,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
             cooldown_secs: 0,
@@ -1346,6 +1707,35 @@ mod tests {
             max_daily_loss_usd: None,
             allowed_window_secs: vec![300, 900],
         }
+    }
+
+    #[test]
+    fn symbol_profile_override_replaces_global_thresholds() {
+        let mut config = default_config();
+        config.symbols = vec!["ETHUSDT".into()];
+        config.min_probability = 0.52;
+        config.max_entry_price = 0.85;
+        config.min_edge = 0.02;
+        config.min_time_remaining_secs = 60;
+        config.max_time_remaining_secs = 300;
+        config.symbol_profiles.insert(
+            "ETHUSDT".into(),
+            DirectionalSymbolProfile {
+                min_probability: Some(0.70),
+                max_entry_price: Some(0.55),
+                min_edge: Some(0.05),
+                min_time_remaining_secs: Some(90),
+                max_time_remaining_secs: Some(180),
+                ..Default::default()
+            },
+        );
+        let strat = DirectionalStrategy::new(config);
+
+        assert!((strat.effective_min_probability("ETHUSDT") - 0.70).abs() < f64::EPSILON);
+        assert!((strat.effective_max_entry_price("ETHUSDT") - 0.55).abs() < f64::EPSILON);
+        assert!((strat.effective_min_edge("ETHUSDT") - 0.05).abs() < f64::EPSILON);
+        assert_eq!(strat.effective_min_time_remaining_secs("ETHUSDT"), 90);
+        assert_eq!(strat.effective_max_time_remaining_secs("ETHUSDT"), 180);
     }
 
     #[test]
@@ -1516,6 +1906,178 @@ mod tests {
                 assert_eq!(signal.direction, "UP");
                 assert_eq!(signal.decision, "enter");
             }
+            other => panic!("Expected Enter, got {:?}", other),
+        }
+    }
+
+    fn strengthened_v3_config() -> DirectionalConfig {
+        let mut config = default_config();
+        config.min_probability = 0.52;
+        config.min_trend_consistency = 0.62;
+        config.min_trend_persistence_secs = 20;
+        config
+    }
+
+    fn seed_event_for_structure_tests(
+        strat: &mut DirectionalStrategy,
+        positions: &PositionLedger,
+        now: DateTime<Utc>,
+    ) {
+        strat.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: "evt-structure".into(),
+                symbol: "BTCUSDT".into(),
+                up_token: "up-structure".into(),
+                down_token: "dn-structure".into(),
+                end_time: now + chrono::Duration::seconds(120),
+                window_secs: 300,
+                price_to_beat: None,
+                resolved_up_won: None,
+            },
+            positions,
+            &OrderLedger::default(),
+        );
+
+        let bootstrap = strat.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            },
+            positions,
+            &OrderLedger::default(),
+        );
+        assert!(bootstrap.is_empty(), "bootstrap spot should not trade");
+    }
+
+    fn seed_quotes_for_structure_tests(
+        strat: &mut DirectionalStrategy,
+        positions: &PositionLedger,
+        now: DateTime<Utc>,
+    ) {
+        strat.on_update(
+            &MarketUpdate::Quote {
+                token_id: "up-structure".into(),
+                bid: Some(dec!(0.29)),
+                ask: Some(dec!(0.30)),
+                ts: now,
+            },
+            positions,
+            &OrderLedger::default(),
+        );
+        strat.on_update(
+            &MarketUpdate::Quote {
+                token_id: "dn-structure".into(),
+                bid: Some(dec!(0.69)),
+                ask: Some(dec!(0.70)),
+                ts: now,
+            },
+            positions,
+            &OrderLedger::default(),
+        );
+    }
+
+    fn replay_spot_path(
+        strat: &mut DirectionalStrategy,
+        positions: &PositionLedger,
+        now: DateTime<Utc>,
+        prices: &[i64],
+    ) -> Vec<StrategyDecision> {
+        let mut last = Vec::new();
+        for (idx, price) in prices.iter().enumerate() {
+            if idx == prices.len() - 1 {
+                seed_quotes_for_structure_tests(
+                    strat,
+                    positions,
+                    now + chrono::Duration::seconds(((idx + 1) * 5) as i64 - 1),
+                );
+            }
+            last = strat.on_update(
+                &MarketUpdate::SpotPrice {
+                    symbol: "BTCUSDT".into(),
+                    price: Decimal::from(*price),
+                    ts: now + chrono::Duration::seconds(((idx + 1) * 5) as i64),
+                },
+                positions,
+                &OrderLedger::default(),
+            );
+        }
+        last
+    }
+
+    #[test]
+    fn weak_trend_consistency_blocks_v3_entry() {
+        let config = strengthened_v3_config();
+        let mut strat = DirectionalStrategy::new(config);
+        let positions = PositionLedger::default();
+        let now = Utc::now();
+
+        seed_event_for_structure_tests(&mut strat, &positions, now);
+
+        let decisions = replay_spot_path(
+            &mut strat,
+            &positions,
+            now,
+            &[
+                99950, 99900, 99850, 99800, 100150, 100500, 100900, 101300, 101700, 102000,
+            ],
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "weak aligned consistency should block the V3 entry"
+        );
+    }
+
+    #[test]
+    fn short_trend_persistence_blocks_v3_entry() {
+        let config = strengthened_v3_config();
+        let mut strat = DirectionalStrategy::new(config);
+        let positions = PositionLedger::default();
+        let now = Utc::now();
+
+        seed_event_for_structure_tests(&mut strat, &positions, now);
+
+        let decisions = replay_spot_path(
+            &mut strat,
+            &positions,
+            now,
+            &[
+                100200, 100420, 100650, 100900, 101120, 101350, 101280, 101520, 101760, 102000,
+            ],
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "short trailing persistence should block the V3 entry"
+        );
+    }
+
+    #[test]
+    fn strong_persistent_trend_still_enters_with_v3_strengthening() {
+        let config = strengthened_v3_config();
+        let mut strat = DirectionalStrategy::new(config);
+        let positions = PositionLedger::default();
+        let now = Utc::now();
+
+        seed_event_for_structure_tests(&mut strat, &positions, now);
+
+        let decisions = replay_spot_path(
+            &mut strat,
+            &positions,
+            now,
+            &[
+                99980, 100180, 100380, 100320, 100620, 100920, 101220, 101520, 101760, 102000,
+            ],
+        );
+
+        assert_eq!(
+            decisions.len(),
+            1,
+            "strong persistent structure should still enter"
+        );
+        match &decisions[0] {
+            StrategyDecision::Enter { intent, .. } => assert_eq!(intent.token_id, "up-structure"),
             other => panic!("Expected Enter, got {:?}", other),
         }
     }
@@ -1731,7 +2293,11 @@ mod tests {
         strat.events.get_mut("BTCUSDT").unwrap()[1].open_price = Some(dec!(100000));
 
         for token_id in ["up-near", "dn-near", "up-far", "dn-far"] {
-            let ask = if token_id.starts_with("up") { dec!(0.30) } else { dec!(0.70) };
+            let ask = if token_id.starts_with("up") {
+                dec!(0.30)
+            } else {
+                dec!(0.70)
+            };
             let bid = ask - dec!(0.01);
             strat.on_update(
                 &MarketUpdate::Quote {
@@ -1882,7 +2448,11 @@ mod tests {
             pending.is_empty(),
             "unresolved expiry should stay pending until settlement can be determined"
         );
-        assert_eq!(strat.events["BTCUSDT"].len(), 1, "event should remain tracked");
+        assert_eq!(
+            strat.events["BTCUSDT"].len(),
+            1,
+            "event should remain tracked"
+        );
 
         let decisions = strat.on_update(
             &MarketUpdate::SpotPrice {
@@ -1900,7 +2470,8 @@ mod tests {
             other => panic!("Expected Exit, got {:?}", other),
         }
         assert!(
-            strat.events
+            strat
+                .events
                 .get("BTCUSDT")
                 .map(|events| events.is_empty())
                 .unwrap_or(true),

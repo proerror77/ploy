@@ -16,17 +16,12 @@ Guidelines for contributing to the Ploy Polymarket trading bot.
 ```bash
 git clone <repo-url> && cd ploy
 
-# Default build (no optional features)
-cargo build
+# Default platform spine build
+cargo build -p new-ployd -p new-ploy-runner -p ployctl -p ploytui
 
-# With reinforcement learning support
-cargo build --features rl
-
-# With ONNX inference
-cargo build --features onnx
-
-# Full feature set
-cargo build --features "rl,onnx,analysis"
+# Focused daemon / runner loops
+cargo build -p new-ployd
+cargo build -p new-ploy-runner
 ```
 
 ### Environment
@@ -92,14 +87,12 @@ docs: update agent framework design with Phase 1.5 Kelly scaling-in
 
 ### Test Pipeline
 
-Every push to `main` and every pull request triggers the **Test** workflow (`.github/workflows/test.yml`):
+Every push to `main` and every pull request triggers the **Test** workflow (`.github/workflows/test.yml`), which now validates the current workspace spine directly:
 
-1. **Formatting check** -- `cargo fmt --all -- --check`
-2. **Clippy lints** -- `cargo clippy --all-targets --features rl -- -D warnings`
-3. **Build** -- `cargo build --features rl`
-4. **Tests** -- `cargo test --features rl` (against a PostgreSQL 15 service container)
+1. **Build** -- package-scoped workspace build for `new-ployd`, `new-ploy-runner`, `ployctl`, `ploytui`, `ploy-daemon-host`, `ploy-runner-host`, and supporting crates
+2. **Tests** -- package-scoped workspace tests (against a PostgreSQL 15 service container where needed)
 
-A separate **Build Check** job verifies the release profile compiles (`cargo build --release --features rl`).
+A separate release/deploy path can still build release artifacts, but the default CI lane now covers the shipped runner and the new ownership crates directly.
 
 ### Deployment Pipelines
 
@@ -110,17 +103,18 @@ the default release path for the workspace runtime.
 ## Running Tests
 
 ```bash
-# Run all tests (default features)
-cargo test
+# Run the default platform spine
+cargo test -p new-ployd -p new-ploy-runner -p ployctl -p ploytui
 
-# Run tests with RL feature enabled (matches CI)
-cargo test --features rl
+# Run a specific package
+cargo test -p ploy-daemon-host
+cargo test -p ploy-runner-host
 
 # Run a specific test
 cargo test test_name
 
-# Run tests for a specific module
-cargo test --lib strategy::
+# Run a specific package/module slice
+cargo test -p ploy-platform-runtime --lib
 ```
 
 A running PostgreSQL instance is required for integration tests. Set `DATABASE_URL` in your environment or `.env` file.
@@ -134,24 +128,25 @@ A running PostgreSQL instance is required for integration tests. Set `DATABASE_U
 - Use `zeroize` for any secret material (private keys, API keys).
 - Keep `unsafe` blocks to zero; the codebase currently has none.
 
-## Feature Flags
-
-| Flag       | Purpose                              | Crate(s)                    |
-|------------|--------------------------------------|-----------------------------|
-| `rl`       | Reinforcement learning (PPO)         | burn, burn-ndarray, bincode |
-| `onnx`     | ONNX model inference                 | tract-onnx                  |
-| `analysis` | Offline Parquet analysis via DuckDB  | duckdb                      |
-| `api`      | API module with SQLx compile checks  | (requires DATABASE_URL)     |
-
 ## Project Structure
 
 ```
-src/
-  agents/       -- Domain trading agents (crypto, sports, politics)
-  coordinator/  -- Multi-agent coordinator and bootstrap
-  strategy/     -- Strategy logic (arb, momentum, registry)
-  ai_clients/   -- External AI/data client integrations
-  risk/         -- Risk management (circuit breaker, position limits)
-  tui/          -- Terminal UI (ratatui)
-  api/          -- HTTP/WebSocket API server (axum)
+apps/
+  new-ployd/         -- Next-generation daemon entrypoint
+  new-ploy-runner/   -- Next-generation runner entrypoint
+  ployctl/           -- Operator CLI
+  ploytui/           -- Operator TUI
+crates/
+  ploy-daemon-host/      -- Daemon host/bootstrap crate
+  ploy-runner-host/      -- Runner CLI host crate
+  ploy-control-client/   -- Shared operator client transport
+  ploy-market-data/      -- Collector/feed/scanner/discovery
+  ploy-platform/         -- Control-plane core
+  ploy-platform-runtime/ -- Runtime orchestration ownership
+  ploy-trading/          -- Canonical trading lifecycle
+  ploy-deployments/      -- Worker protocol + supervisor
+  ploy-operator-contracts/ -- Shared API/event contracts
+  ploy-strategy-runtime/ -- Strategy runtime ownership
+  ploy-strategy-bundles/ -- Strategy definitions and composition
+  ploy-research/         -- Replay/backtest consumers
 ```

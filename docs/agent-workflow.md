@@ -98,7 +98,7 @@ rules.
 ## Runtime And Deployment Constraints
 
 - Default to dry-run for local validation.
-- The workspace-default platform path is `ployd` + `ployctl`.
+- The workspace-default local platform path is `new-ployd` + `ployctl`.
 - Treat remaining `ploy ...` runtime commands as compatibility surfaces; do not
   introduce new deployment guidance that depends on them.
 - Do not introduce or rely on direct live order paths unless explicitly

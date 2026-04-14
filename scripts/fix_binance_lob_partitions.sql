@@ -1,59 +1,47 @@
--- Fix Binance LOB partitions for March 29 - April 7, 2026
--- Create missing daily partitions
+-- Ensure binance_lob_ticks has current and near-future daily partitions.
+-- Run safely multiple times.
 
--- March 29-31
-CREATE TABLE IF NOT EXISTS binance_lob_ticks_20260329
-PARTITION OF binance_lob_ticks
-FOR VALUES FROM ('2026-03-29 00:00:00+08') TO ('2026-03-30 00:00:00+08');
+DO $$
+DECLARE
+    partition_day date;
+    start_day date := current_date - 7;
+    end_day date := current_date + 14;
+    partition_name text;
+    range_start text;
+    range_end text;
+BEGIN
+    partition_day := start_day;
+    WHILE partition_day <= end_day LOOP
+        partition_name := format(
+            'binance_lob_ticks_new_%s',
+            to_char(partition_day, 'YYYYMMDD')
+        );
+        range_start := format('%s 00:00:00+08', partition_day);
+        range_end := format('%s 00:00:00+08', partition_day + 1);
 
-CREATE TABLE IF NOT EXISTS binance_lob_ticks_20260330
-PARTITION OF binance_lob_ticks
-FOR VALUES FROM ('2026-03-30 00:00:00+08') TO ('2026-03-31 00:00:00+08');
+        BEGIN
+            EXECUTE format(
+                'CREATE TABLE IF NOT EXISTS %I PARTITION OF binance_lob_ticks FOR VALUES FROM (%L) TO (%L);',
+                partition_name,
+                range_start,
+                range_end
+            );
+        EXCEPTION
+            WHEN duplicate_table THEN
+                NULL;
+            WHEN OTHERS THEN
+                IF position('would overlap partition' in SQLERRM) > 0 THEN
+                    NULL;
+                ELSE
+                    RAISE;
+                END IF;
+        END;
 
-CREATE TABLE IF NOT EXISTS binance_lob_ticks_20260331
-PARTITION OF binance_lob_ticks
-FOR VALUES FROM ('2026-03-31 00:00:00+08') TO ('2026-04-01 00:00:00+08');
+        partition_day := partition_day + 1;
+    END LOOP;
+END
+$$;
 
--- April 2026
-CREATE TABLE IF NOT EXISTS binance_lob_ticks_20260401
-PARTITION OF binance_lob_ticks
-FOR VALUES FROM ('2026-04-01 00:00:00+08') TO ('2026-04-02 00:00:00+08');
-
-CREATE TABLE IF NOT EXISTS binance_lob_ticks_20260402
-PARTITION OF binance_lob_ticks
-FOR VALUES FROM ('2026-04-02 00:00:00+08') TO ('2026-04-03 00:00:00+08');
-
-CREATE TABLE IF NOT EXISTS binance_lob_ticks_20260403
-PARTITION OF binance_lob_ticks
-FOR VALUES FROM ('2026-04-03 00:00:00+08') TO ('2026-04-04 00:00:00+08');
-
-CREATE TABLE IF NOT EXISTS binance_lob_ticks_20260404
-PARTITION OF binance_lob_ticks
-FOR VALUES FROM ('2026-04-04 00:00:00+08') TO ('2026-04-05 00:00:00+08');
-
-CREATE TABLE IF NOT EXISTS binance_lob_ticks_20260405
-PARTITION OF binance_lob_ticks
-FOR VALUES FROM ('2026-04-05 00:00:00+08') TO ('2026-04-06 00:00:00+08');
-
-CREATE TABLE IF NOT EXISTS binance_lob_ticks_20260406
-PARTITION OF binance_lob_ticks
-FOR VALUES FROM ('2026-04-06 00:00:00+08') TO ('2026-04-07 00:00:00+08');
-
-CREATE TABLE IF NOT EXISTS binance_lob_ticks_20260407
-PARTITION OF binance_lob_ticks
-FOR VALUES FROM ('2026-04-07 00:00:00+08') TO ('2026-04-08 00:00:00+08');
-
--- Verify partitions
-SELECT
-    schemaname,
-    tablename,
-    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
-FROM pg_tables
-WHERE tablename LIKE 'binance_lob_ticks_2026%'
-  AND tablename >= 'binance_lob_ticks_20260329'
-ORDER BY tablename;
-
--- Show partition info
 SELECT
     child.relname AS partition_name,
     pg_get_expr(child.relpartbound, child.oid) AS partition_expression
@@ -61,5 +49,4 @@ FROM pg_inherits
 JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
 JOIN pg_class child ON pg_inherits.inhrelid = child.oid
 WHERE parent.relname = 'binance_lob_ticks'
-  AND child.relname >= 'binance_lob_ticks_20260329'
 ORDER BY child.relname;

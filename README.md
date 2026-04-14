@@ -6,9 +6,16 @@ A high-performance Polymarket trading bot focused on crypto and sports predictio
 
 The workspace now also includes the platform-refactor spine:
 
-- `ployd`: daemon entrypoint
+- `new-ployd`: next-generation daemon entrypoint
 - `ployctl`: operator client entrypoint
 - `ploytui`: thin terminal operator console
+- `new-ploy-runner`: next-generation strategy runner entrypoint
+- `crates/ploy-daemon-host`: daemon host/bootstrap crate
+- `crates/ploy-runner-host`: runner CLI host crate
+- `crates/ploy-control-client`: shared operator client transport
+- `crates/ploy-market-data`: collector/feed/scanner/discovery infrastructure
+- `crates/ploy-platform-runtime`: control-plane runtime ownership boundary
+- `crates/ploy-strategy-runtime`: strategy runtime ownership boundary
 - `crates/ploy-platform`: control-plane core
 - `crates/ploy-trading`: canonical trading lifecycle
 - `crates/ploy-deployments`: worker protocol and supervisor
@@ -19,7 +26,7 @@ The workspace now also includes the platform-refactor spine:
 Current smoke path:
 
 ```bash
-cargo run -p ployd
+cargo run -p new-ployd
 cargo run -p ployctl -- system status
 cargo run -p ployctl -- system audit
 cargo run -p ployctl -- trading status
@@ -28,10 +35,108 @@ cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
 cargo run -p ployctl -- trading cancel example.live <order-id>
 cargo run -p ploytui
+cargo run -p new-ploy-runner -- run --config config/strategies/02-pm5d.unified.toml --dry-run
 # realtime operator stream
 curl -N http://127.0.0.1:8081/api/events/stream
 rtk cargo test --test platform_smoke -- --nocapture
 ```
+
+## Deployment Workflow
+
+The default operating model is now:
+
+1. `ployd` is the only long-running platform daemon
+2. strategy configs live in `config/strategies/*.toml`
+3. deployment manifests live in `config/deployments/*.json`
+4. operators use `ployctl deployments apply|inspect|pause|resume|stop`
+5. `ployd` starts and supervises `ploy-runner --config ...` workers for each deployment
+
+Do not create new per-strategy systemd units for normal operation.
+Use deployment manifests instead.
+
+### Bundle Resolution
+
+Deployment manifests use `bundle_id` to select a strategy config:
+
+- if `bundle_id` ends with `.toml` or contains a path separator, it is treated as a config path
+- otherwise it resolves to `config/strategies/<bundle_id>.toml`
+
+Example:
+
+```json
+{
+  "deployment_id": "pm5d.v3.dryrun",
+  "bundle_id": "02-pm5d.v3-dryrun",
+  "account_id": "acct-pm5d-dryrun",
+  "max_gross_exposure": "5.00",
+  "runtime_mode": "paper",
+  "desired_state": "running"
+}
+```
+
+This resolves to:
+
+```text
+config/strategies/02-pm5d.v3-dryrun.toml
+```
+
+### PM5D Dry-Run Deployments
+
+The repo now includes three PM5D deployment manifests:
+
+- `config/deployments/pm5d.v2.dryrun.json`
+- `config/deployments/pm5d.v3.dryrun.json`
+- `config/deployments/pm5d.v4.dryrun.json`
+
+Each one targets:
+
+- `02-pm5d.v2-dryrun.toml`
+- `02-pm5d.v3-dryrun.toml`
+- `02-pm5d.v4-dryrun.toml`
+
+Apply them with:
+
+```bash
+cargo run -p ployctl -- deployments apply config/deployments/pm5d.v2.dryrun.json
+cargo run -p ployctl -- deployments apply config/deployments/pm5d.v3.dryrun.json
+cargo run -p ployctl -- deployments apply config/deployments/pm5d.v4.dryrun.json
+```
+
+Inspect and control them with:
+
+```bash
+cargo run -p ployctl -- deployments list
+cargo run -p ployctl -- deployments inspect pm5d.v3.dryrun
+cargo run -p ployctl -- deployments pause pm5d.v3.dryrun
+cargo run -p ployctl -- deployments resume pm5d.v3.dryrun
+cargo run -p ployctl -- deployments stop pm5d.v3.dryrun
+```
+
+Remote host equivalent:
+
+```bash
+/opt/ploy/bin/ployctl deployments list
+/opt/ploy/bin/ployctl deployments inspect pm5d.v3.dryrun
+/opt/ploy/bin/ployctl deployments pause pm5d.v3.dryrun
+/opt/ploy/bin/ployctl deployments resume pm5d.v3.dryrun
+/opt/ploy/bin/ployctl deployments stop pm5d.v3.dryrun
+```
+
+### Direct Runner Usage
+
+Use `new-ploy-runner -- run --config ...` for:
+
+- local backtests
+- local dry-run debugging
+- one-off manual strategy inspection
+
+Example:
+
+```bash
+cargo run -p new-ploy-runner -- run --config config/strategies/02-pm5d.v4-dryrun.toml --dry-run
+```
+
+Use deployment manifests when you want the platform daemon to own lifecycle and supervision.
 
 Optional admin auth:
 
@@ -67,7 +172,7 @@ Remote live-host acceptance path:
 
 Compatibility note:
 
-- `ployd`, `ployctl`, and `ploytui` are the default workspace entrypoints for the trading platform spine.
+- `new-ployd`, `new-ploy-runner`, `ployctl`, and `ploytui` are the workspace entrypoints for the trading platform spine.
 - The old root runtime tree has been retired from the compiled workspace.
 - Remaining `ploy ...` examples below are historical reference only and are not runnable entrypoints in this branch.
 - Current sports scope in this branch is `discovery + live-state data capture + replay/backtest support`.
@@ -204,7 +309,7 @@ See the inline comments in `config/default.toml` for a full explanation of every
 
 ### Strategy Runtime Backtests
 
-`ploy-runner --config config/strategies/*.toml` uses the unified strategy-runtime config in
+`new-ploy-runner --config config/strategies/*.toml` uses the unified strategy-runtime config in
 `crates/ploy-strategy-bundles`.
 
 - `[reference_data]`
@@ -453,14 +558,21 @@ Strategies run independently and can be managed as daemons (start/stop/status). 
 
 ```
 apps/
-  ployd/         Trading platform daemon entrypoint
+  new-ployd/     Next-generation daemon entrypoint
+  new-ploy-runner/ Next-generation runner entrypoint
   ployctl/       Operator client entrypoint
   ploytui/       Thin terminal operator console
 crates/
+  ploy-daemon-host/ Daemon host/bootstrap crate
+  ploy-runner-host/ Runner CLI host crate
+  ploy-control-client/ Shared operator client transport
+  ploy-market-data/ Collector/feed/scanner/discovery
   ploy-platform/ Control-plane core
+  ploy-platform-runtime/ Runtime orchestration ownership
   ploy-trading/  Canonical trading lifecycle
   ploy-deployments/ Deployment worker protocol + supervisor
   ploy-operator-contracts/ Shared API and event contracts
+  ploy-strategy-runtime/ Strategy runtime ownership
   ploy-strategy-bundles/ Signal-to-intent runtime
   ploy-research/ Replay and backtest consumers
 ploy-frontend/   Web operator console
@@ -472,21 +584,24 @@ docs/            Design docs, runbooks, and migration notes
 ## Development
 
 ```bash
-cargo run -p ployd                   # Boot the platform daemon
+cargo run -p new-ployd               # Boot the platform daemon
 cargo run -p ployctl -- system status
 cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
 cargo run -p ploytui
+cargo run -p new-ploy-runner -- run --config config/strategies/02-pm5d.unified.toml --dry-run
 curl -N http://127.0.0.1:8081/api/events/stream
-rtk cargo check -p ployd             # Fast daemon type-check loop
+rtk cargo check -p new-ployd         # Fast daemon type-check loop
+rtk cargo check -p new-ploy-runner   # Fast runner type-check loop
 rtk cargo check -p ployctl           # Fast client type-check loop
 rtk cargo check -p ploytui           # Fast terminal console type-check loop
 rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_deployment -- --nocapture
 cargo fmt --check                    # Check formatting
 cargo clippy -- -D warnings          # Lint
-rtk cargo build -p ployd             # Build the daemon binary
+rtk cargo build -p new-ployd         # Build the daemon binary
+rtk cargo build -p new-ploy-runner   # Build the runner binary
 rtk cargo build -p ployctl           # Build the operator client binary
 rtk cargo build -p ploytui           # Build the terminal console binary
 ```

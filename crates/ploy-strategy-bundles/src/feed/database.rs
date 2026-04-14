@@ -18,6 +18,8 @@
 
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
+use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tracing::info;
@@ -26,6 +28,7 @@ use crate::traits::MarketUpdate;
 
 /// How far before `from` to load spot prices for EWMA volatility warm-up.
 const WARMUP_MINUTES: i64 = 30;
+const NEAR_DEPTH_PCT_RANGE: f64 = 0.001;
 
 /// Historical research backtests only trust canonical historical PM quote captures.
 ///
@@ -45,6 +48,7 @@ pub struct HistoricalLoadOptions {
     pub include_reference_prices: bool,
     pub reference_symbols: Vec<String>,
     pub include_sports_state: bool,
+    pub require_official_settlement: bool,
 }
 
 impl HistoricalLoadOptions {
@@ -134,11 +138,22 @@ pub async fn load_from_database_with_options(
     let spot_from = from - Duration::minutes(WARMUP_MINUTES);
     load_spot_prices(pool, symbols, spot_from, to, &mut updates).await?;
 
+    // 1b. Aggregated trade flow — additive signal stream for roadmap work.
+    load_agg_trades(pool, symbols, from, to, &mut updates).await?;
+
     // 2. Event windows FIRST — must be registered before quotes are processed.
     //    Quotes for a token can arrive before the event's official start_time
     //    (Polymarket tokens are continuous; ~90% of quotes precede start_time).
     //    Loading events before quotes ensures token_symbol mappings exist.
-    load_events(pool, symbols, from, to, &mut updates).await?;
+    load_events(
+        pool,
+        symbols,
+        from,
+        to,
+        options.require_official_settlement,
+        &mut updates,
+    )
+    .await?;
 
     // 3. Polymarket quotes — try clob_quote_ticks first, fall back to orderbook snapshots
     let token_map = load_token_mappings(pool, symbols, from, to).await?;
@@ -187,8 +202,10 @@ pub async fn load_from_database_with_options(
 fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
     match u {
         MarketUpdate::SpotPrice { ts, .. }
+        | MarketUpdate::AggTrade { ts, .. }
         | MarketUpdate::Quote { ts, .. }
         | MarketUpdate::L2 { ts, .. }
+        | MarketUpdate::L2Depth { ts, .. }
         | MarketUpdate::SportsState { ts, .. }
         | MarketUpdate::ReferencePrice { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
@@ -312,6 +329,48 @@ async fn load_spot_prices(
     );
     for (ts, symbol, price) in rows {
         updates.push(MarketUpdate::SpotPrice { symbol, price, ts });
+    }
+
+    Ok(())
+}
+
+async fn load_agg_trades(
+    pool: &PgPool,
+    symbols: &[String],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    updates: &mut Vec<MarketUpdate>,
+) -> Result<(), sqlx::Error> {
+    let rows: Vec<(DateTime<Utc>, String, i64, Decimal, Decimal, bool)> = sqlx::query_as(
+        r#"
+        SELECT trade_time, symbol, agg_trade_id, price, quantity, is_buyer_maker
+        FROM binance_agg_trade_ticks
+        WHERE symbol = ANY($1)
+          AND trade_time >= $2
+          AND trade_time <= $3
+        ORDER BY trade_time, agg_trade_id
+        "#,
+    )
+    .bind(symbols)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    info!(
+        count = rows.len(),
+        "Loaded agg trades from binance_agg_trade_ticks"
+    );
+    for (ts, symbol, agg_trade_id, price, quantity, is_buyer_maker) in rows {
+        updates.push(MarketUpdate::AggTrade {
+            symbol,
+            agg_trade_id: agg_trade_id as u64,
+            price,
+            quantity,
+            is_buyer_maker,
+            ts,
+        });
     }
 
     Ok(())
@@ -652,16 +711,18 @@ async fn load_l2_data(
     to: DateTime<Utc>,
     updates: &mut Vec<MarketUpdate>,
 ) -> Result<(), sqlx::Error> {
-    let rows: Vec<(DateTime<Utc>, String, f64, i32)> = sqlx::query_as(
+    let rows: Vec<(DateTime<Utc>, String, Decimal, i32, Decimal, Decimal)> = match sqlx::query_as(
         r#"
-        SELECT received_at, symbol,
+        SELECT event_time, symbol,
                COALESCE(obi_5, 0.0) as obi,
-               COALESCE(spread_bps, 0) as spread_bps
+               COALESCE(spread_bps, 0)::int as spread_bps,
+               COALESCE(bid_volume_5, 0) as bid_volume_5,
+               COALESCE(ask_volume_5, 0) as ask_volume_5
         FROM binance_lob_ticks
         WHERE symbol = ANY($1)
-          AND received_at >= $2
-          AND received_at <= $3
-        ORDER BY received_at
+          AND event_time >= $2
+          AND event_time <= $3
+        ORDER BY event_time
         "#,
     )
     .bind(symbols)
@@ -669,19 +730,151 @@ async fn load_l2_data(
     .bind(to)
     .fetch_all(pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "Failed to load L2 data from binance_lob_ticks");
+            Vec::new()
+        }
+    };
 
     info!(count = rows.len(), "Loaded L2 data from binance_lob_ticks");
-    for (ts, symbol, obi, spread_bps) in rows {
-        updates.push(MarketUpdate::L2 {
-            symbol,
-            obi,
-            spread_bps: spread_bps as u32,
+    for (ts, symbol, obi, spread_bps, bid_volume_5, ask_volume_5) in rows {
+        updates.extend(l2_updates_from_depth_totals(
+            &symbol,
+            obi.to_f64().unwrap_or_default(),
+            spread_bps as u32,
+            bid_volume_5,
+            ask_volume_5,
             ts,
-        });
+        ));
     }
 
     Ok(())
+}
+
+fn l2_updates_from_depth_totals(
+    symbol: &str,
+    obi: f64,
+    spread_bps: u32,
+    bid_depth_near: Decimal,
+    ask_depth_near: Decimal,
+    ts: DateTime<Utc>,
+) -> Vec<MarketUpdate> {
+    let mut updates = vec![MarketUpdate::L2 {
+        symbol: symbol.to_string(),
+        obi,
+        spread_bps,
+        ts,
+    }];
+
+    let bid_depth_near = bid_depth_near.to_f64().unwrap_or(0.0);
+    let ask_depth_near = ask_depth_near.to_f64().unwrap_or(0.0);
+
+    updates.push(MarketUpdate::L2Depth {
+        symbol: symbol.to_string(),
+        obi,
+        spread_bps,
+        bid_depth_near,
+        ask_depth_near,
+        ts,
+    });
+
+    updates
+}
+
+#[cfg(test)]
+fn l2_updates_from_book(
+    symbol: &str,
+    obi: f64,
+    spread_bps: u32,
+    mid_price: Decimal,
+    bids: Option<&Value>,
+    asks: Option<&Value>,
+    ts: DateTime<Utc>,
+) -> Vec<MarketUpdate> {
+    let mut updates = vec![MarketUpdate::L2 {
+        symbol: symbol.to_string(),
+        obi,
+        spread_bps,
+        ts,
+    }];
+
+    if bids.is_none() && asks.is_none() {
+        return updates;
+    }
+
+    let Some(mid_price) = mid_price.to_f64() else {
+        return updates;
+    };
+    if !mid_price.is_finite() || mid_price <= 0.0 {
+        return updates;
+    }
+
+    let empty = Value::Null;
+    let (bid_depth_near, ask_depth_near) = near_depth(
+        bids.unwrap_or(&empty),
+        asks.unwrap_or(&empty),
+        mid_price,
+        NEAR_DEPTH_PCT_RANGE,
+    );
+
+    updates.push(MarketUpdate::L2Depth {
+        symbol: symbol.to_string(),
+        obi,
+        spread_bps,
+        bid_depth_near,
+        ask_depth_near,
+        ts,
+    });
+
+    updates
+}
+
+fn near_depth(bids: &Value, asks: &Value, mid_price: f64, pct_range: f64) -> (f64, f64) {
+    if !mid_price.is_finite() || mid_price <= 0.0 || !pct_range.is_finite() || pct_range < 0.0 {
+        return (0.0, 0.0);
+    }
+
+    let bid_min = mid_price * (1.0 - pct_range);
+    let ask_max = mid_price * (1.0 + pct_range);
+
+    (
+        sum_depth_in_range(bids, bid_min, mid_price),
+        sum_depth_in_range(asks, mid_price, ask_max),
+    )
+}
+
+fn sum_depth_in_range(levels: &Value, min_price: f64, max_price: f64) -> f64 {
+    levels
+        .as_array()
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(parse_depth_level)
+                .filter(|(price, _)| *price >= min_price && *price <= max_price)
+                .map(|(_, size)| size)
+                .sum()
+        })
+        .unwrap_or(0.0)
+}
+
+fn parse_depth_level(level: &Value) -> Option<(f64, f64)> {
+    match level {
+        Value::Array(items) if items.len() >= 2 => {
+            Some((json_f64(&items[0])?, json_f64(&items[1])?))
+        }
+        Value::Object(map) => Some((json_f64(map.get("price")?)?, json_f64(map.get("size")?)?)),
+        _ => None,
+    }
+}
+
+fn json_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.parse().ok(),
+        _ => None,
+    }
 }
 
 // ── Events ───────────────────────────────────────────────
@@ -691,6 +884,7 @@ async fn load_events(
     symbols: &[String],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+    require_official_settlement: bool,
     updates: &mut Vec<MarketUpdate>,
 ) -> Result<(), sqlx::Error> {
     // Extract token IDs from JSONB: raw_market->'markets'->0->>'clobTokenIds'
@@ -725,7 +919,11 @@ async fn load_events(
     let settlement_prices = load_event_settlement_prices(pool, &event_ids).await?;
 
     info!(count = rows.len(), "Loaded events from pm_market_metadata");
-    updates.extend(build_event_updates(rows, &settlement_prices));
+    updates.extend(build_event_updates(
+        rows,
+        &settlement_prices,
+        require_official_settlement,
+    ));
 
     Ok(())
 }
@@ -733,6 +931,7 @@ async fn load_events(
 fn build_event_updates(
     rows: Vec<EventMetadataRow>,
     settlement_prices: &HashMap<(String, String), Decimal>,
+    require_official_settlement: bool,
 ) -> Vec<MarketUpdate> {
     let mut updates = Vec::new();
 
@@ -755,6 +954,9 @@ fn build_event_updates(
             &up_token,
             &down_token,
         );
+        if require_official_settlement && resolved_up_won.is_none() {
+            continue;
+        }
         let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
 
         if symbol.is_empty() || up_token.is_empty() || down_token.is_empty() {
@@ -841,11 +1043,12 @@ async fn load_event_settlement_prices(
 mod tests {
     use chrono::{Duration, Utc};
     use rust_decimal_macros::dec;
+    use serde_json::json;
     use std::collections::HashMap;
 
     use super::{
         EventMetadataRow, MarketUpdate, build_event_updates, hex_to_decimal_string,
-        normalize_token_id,
+        l2_updates_from_book, near_depth, normalize_token_id,
     };
 
     #[test]
@@ -882,7 +1085,7 @@ mod tests {
             price_to_beat: Some(dec!(100000)),
         };
 
-        let initial = build_event_updates(vec![row.clone()], &HashMap::new());
+        let initial = build_event_updates(vec![row.clone()], &HashMap::new(), false);
         assert!(matches!(
             initial.last(),
             Some(MarketUpdate::EventExpired {
@@ -895,13 +1098,96 @@ mod tests {
         settlement_prices.insert(("evt-1".to_string(), "up-1".to_string()), dec!(1));
         settlement_prices.insert(("evt-1".to_string(), "down-1".to_string()), dec!(0));
 
-        let repaired = build_event_updates(vec![row], &settlement_prices);
+        let repaired = build_event_updates(vec![row], &settlement_prices, false);
         assert!(matches!(
             repaired.last(),
             Some(MarketUpdate::EventExpired {
                 resolved_up_won: Some(true),
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn official_only_backtest_skips_unresolved_events() {
+        let now = Utc::now();
+        let row = EventMetadataRow {
+            market_slug: "evt-1".into(),
+            symbol: Some("BTCUSDT".into()),
+            end_time: Some(now + Duration::minutes(5)),
+            start_time: Some(now),
+            up_token_id: Some("up-1".into()),
+            down_token_id: Some("down-1".into()),
+            price_to_beat: Some(dec!(100000)),
+        };
+
+        let updates = build_event_updates(vec![row], &HashMap::new(), true);
+        assert!(
+            updates.is_empty(),
+            "official-only mode should skip unresolved events"
+        );
+    }
+
+    #[test]
+    fn near_depth_sums_volume_within_mid_range_for_array_pairs() {
+        let bids = json!([["100.0", "5.0"], ["99.95", "3.0"], ["99.85", "10.0"]]);
+        let asks = json!([["100.05", "4.0"], ["100.10", "2.0"], ["100.25", "7.0"]]);
+
+        let (bid_near, ask_near) = near_depth(&bids, &asks, 100.0, 0.001);
+
+        assert!((bid_near - 8.0).abs() < 1e-9, "bid_near={bid_near}");
+        assert!((ask_near - 6.0).abs() < 1e-9, "ask_near={ask_near}");
+    }
+
+    #[test]
+    fn near_depth_supports_object_levels_and_l2_depth_variant() {
+        let ts = Utc::now();
+        let bids = json!([
+            {"price": "100.0", "size": "1.5"},
+            {"price": "99.91", "size": "2.5"},
+            {"price": "99.70", "size": "9.0"}
+        ]);
+        let asks = json!([
+            {"price": "100.03", "size": "4.5"},
+            {"price": "100.09", "size": "1.0"},
+            {"price": "100.30", "size": "8.0"}
+        ]);
+
+        let updates = l2_updates_from_book(
+            "BTCUSDT",
+            0.125,
+            9,
+            dec!(100.0),
+            Some(&bids),
+            Some(&asks),
+            ts,
+        );
+
+        assert!(matches!(
+            updates.first(),
+            Some(MarketUpdate::L2 {
+                symbol,
+                obi,
+                spread_bps,
+                ts: update_ts
+            }) if symbol == "BTCUSDT" && (obi - 0.125).abs() < f64::EPSILON && *spread_bps == 9 && *update_ts == ts
+        ));
+
+        assert!(matches!(
+            updates.get(1),
+            Some(MarketUpdate::L2Depth {
+                symbol,
+                obi,
+                spread_bps,
+                bid_depth_near,
+                ask_depth_near,
+                ts: update_ts
+            }) if symbol == "BTCUSDT"
+                && (obi - 0.125).abs() < f64::EPSILON
+                && *spread_bps == 9
+                && (bid_depth_near - 4.0).abs() < 1e-9
+                && (ask_depth_near - 5.5).abs() < 1e-9
+                && *update_ts == ts
         ));
     }
 }

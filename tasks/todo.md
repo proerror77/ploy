@@ -1,3 +1,187 @@
+# PM5D Settlement + Strategy Audit (2026-04-12)
+
+## Files
+
+- `.omx/context/pm5d-settlement-strategy-audit-20260412T091000Z.md`
+- `crates/ploy-market-data/src/collector.rs`
+- `scripts/backfill_settlements.py`
+- `crates/ploy-strategy-bundles/src/feed/database.rs`
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+
+## Tasks
+
+- [x] Verify whether recent PM settlement rows match official market state semantics.
+- [x] Replace heuristic settlement ingestion with official market-status based ingestion for new writes.
+- [x] Ensure reconciliation/backfill can overwrite previously wrong resolved rows instead of skipping them.
+- [ ] Audit recent `pm_token_settlements` history against the official API and quantify any stale false positives.
+- [ ] Re-run PM5D backtests on official-only / quote-valid windows before making further strategy changes.
+- [ ] Review PM5D entry logic and order-management assumptions against live-mode behavior and propose the next optimization slice.
+- [ ] Land and verify the tango runner deploy workflow fixes so remote quote-collector updates no longer require manual artifact promotion.
+- [ ] Add a reusable microstructure feature layer to PM5D so `AggTrade` and `L2/OBI` affect directional entry decisions.
+
+## Progress notes
+
+- 2026-04-12: Verified that recent non-BTC quote coverage is window-sensitive; `2026-04-09` had severe non-BTC quote misalignment while `2026-04-10` coverage recovered.
+- 2026-04-12: Verified that official market APIs expose settlement-capable fields (`closed`, `outcomePrices`, token ids) that are stronger than the old `last-trade-price` heuristic.
+- 2026-04-12: Updated `crates/ploy-market-data/src/collector.rs` and `scripts/backfill_settlements.py` so settlement ingestion now requires official market closure + binary `outcomePrices`, and can overwrite previously wrong resolved rows instead of skipping them.
+- 2026-04-12: Hardened the reconciliation safety rule so API/network/parse failures no longer clear settlement rows; only explicit `closed=false` responses trigger a rollback to unresolved.
+- 2026-04-12: Added `backtest_data.require_official_settlement` to the historical loader/config/runtime path so research backtests can skip unresolved markets entirely.
+- 2026-04-12: Disabled the remote `ploy-quote-collector.service` to stop new heuristic settlement pollution while the fixed collector is pending deployment.
+- 2026-04-12: Fresh remote settlement audit after targeted reconciliation showed the most recent 40 resolved markets all align with official market state (`open_markets = 0`).
+- 2026-04-12: Fresh official-only backtest samples on `2026-04-10 00:00 → 02:00 UTC`:
+  - `V2` non-BTC: `0` intents, `0` PnL
+  - `V3` BTC-only: `26` intents, net `-65.66658749577348708750`
+- 2026-04-12: Small BTC-only official-only sensitivity scan on `2026-04-10 00:00 → 02:00 UTC`:
+  - `max_entry_price 0.85/0.70`: `26` intents, net `-65.66658749577348708750`
+  - `max_entry_price 0.55`: `20` intents, net `-59.30898628039399542500`
+  - `min_edge 0.0367 → 0.08` with `max_entry_price=0.55`: no material change
+  - `time window 90-180` with `max_entry_price=0.55`: `14` intents, net `-72.33423359376030416250`
+  - current read: trimming high-price entries helps more than tightening time window or raising `min_edge`
+- 2026-04-12: Fresh multi-asset data review changed the optimization direction:
+  - `ETH` has the strongest recent Binance LOB coverage
+  - `ETH/SOL/XRP` have the best PM quote alignment
+  - `AggTrade` and `L2` already reach the historical/live feed, but `DirectionalStrategy` still ignores them
+  - next slice should connect `AggTrade imbalance` and `OBI delta/flip` into the strategy instead of staying price-only
+- 2026-04-12: Patched `.github/workflows/deploy-tango-1-1.yml` and `.github/workflows/healthcheck-tango-1-1.yml` to target `/opt/ploy` and `ployd`/managed deployments instead of the removed direct dry-run systemd unit.
+- 2026-04-12: First deploy run (`24296421062`) proved the old workflow mismatch:
+  - runner bundle installed into `/root/ploy`, while live services use `/opt/ploy`
+  - deploy step still restarted missing `ploy-strategy-directional-dryrun.service`
+- 2026-04-12: Workflow fix committed in `3ac1a427` and redeploy triggered as GitHub Actions run `24297241762` (still in progress at note time).
+- 2026-04-12: Deploy run `24297241762` completed successfully; remote `ploy-quote-collector.service` is back to `enabled` + `active` on the repaired `/opt/ploy` binary path.
+- 2026-04-12: Deploy run `24297241762` completed successfully after workflow fixes; remote `ploy-quote-collector.service` is now `enabled` + `active` on the repaired `/opt/ploy` runner path.
+- 2026-04-12: Fresh `official-only` BTC-only V3 result on `2026-04-10 00:00 → 02:00 UTC` with `min_probability=0.55`, `max_entry_price=0.55`:
+  - `14` intents
+  - net `-47.87002041110071997500`
+  - better than the earlier `20` intents / `-59.30898628039399542500` baseline
+- 2026-04-12: Added first-pass microstructure feature state into `DirectionalStrategy` so `AggTrade` and `L2` are no longer ignored:
+  - `AggTrade` -> signed aggressor imbalance
+  - `L2` -> `OBI`, `OBI delta`, `spread_bps`
+  - these now feed the Gate 4 probability adjustment
+- 2026-04-12: Added `symbol_profiles` support to `DirectionalConfig` so per-symbol overrides can now tune:
+  - `min_probability`
+  - `max_entry_price`
+  - `min_edge`
+  - `min/max_time_remaining_secs`
+  This removes the old requirement that one threshold set fit every crypto symbol.
+- 2026-04-12: Fresh clean-window multi-asset check on `ETH/BTC/SOL/XRP`, `official-only`, `2026-04-10 00:00 → 02:00 UTC`, `min_probability=0.55`, `max_entry_price=0.55`:
+  - `14` intents
+  - net `-47.87002041110071997500`
+  - same as BTC-only result, implying the current triggers in that window still come from BTC and the next debugging slice should add per-symbol signal attribution
+- 2026-04-12: Corrected the market-selection method for 5-minute crypto PM research:
+  - use `end_time - start_time = 300s` instead of relying on the nullable `horizon` column
+  - on `2026-04-10 08:00 → 10:00 UTC`, all 6 core symbols (`BTC, ETH, SOL, XRP, BNB, DOGE`) have synchronized 5m events
+- 2026-04-12: Fresh per-symbol results on that clean 6-symbol 5m window (`official-only`, `min_probability=0.55`, `max_entry_price=0.55`):
+  - `BTC`: `+132.95`
+  - `DOGE`: `+50.30`
+  - `BNB`: `-18.90`
+  - `XRP`: `-87.36`
+  - `ETH`: `-121.64`
+  - `SOL`: `-152.04`
+- 2026-04-12: Fresh universe combinations on the same clean window:
+  - `BTC + DOGE`: `+183.24`
+  - `BTC + DOGE + BNB`: `+149.17`
+  - `BTC + DOGE + BNB + XRP`: `+46.59`
+  - `all6`: `-242.27`
+  - current read: static all-symbol universe is too blunt; subset selection and symbol-specific profiles are the next high-leverage path
+- 2026-04-12: Foreground `codex-autoresearch` is now running in a dedicated worktree. Current retained findings:
+  - `all6` objective was pivoted away after 4 consecutive discards
+  - `BTC + DOGE + BNB` objective improved from `-1.081560094274` to `+29.320957453216`
+  - `BTC + DOGE` objective baseline is `+44.551957382138`, which is stronger than the 3-asset subset
+  - tightening `DOGE.max_entry_price` below `0.50` did not improve the BTC+DOGE core objective
+  - next research slice should use feature attribution rather than more blind threshold tightening
+- 2026-04-12: Current PM5D research direction is now:
+  - retain `BTC + DOGE` as the strongest clean `official-only` core subset objective
+  - stop spending iterations on static threshold-only tuning that keeps returning zero delta
+  - move the next slice to per-entry/per-event feature attribution for `aggTrade imbalance`, `OBI`, `OBI delta`, and `spread`
+- 2026-04-12: Local verification passed:
+  - `cargo test -p ploy-market-data parse_official_market_settlements -- --nocapture`
+  - `cargo test -p ploy-strategy-bundles official_only_backtest_skips_unresolved_events -- --nocapture`
+  - `cargo check -p ploy-market-data --all-targets`
+  - `cargo check -p ploy-strategy-runtime -p ploy-strategy-bundles --all-targets`
+  - `python3 -m py_compile scripts/backfill_settlements.py`
+
+# PM5D V3.1 Signal Strengthening (2026-04-11)
+
+## Files
+
+- `docs/plans/2026-04-11-pm5d-v3-1-signal-strengthening-design.md`
+- `docs/plans/2026-04-11-pm5d-v3-1-signal-strengthening-implementation-plan.md`
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+- `crates/ploy-strategy-bundles/src/strategies/mean_reversion.rs`
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+- `crates/ploy-strategy-bundles/tests/backtest_integration.rs`
+- `config/strategies/02-pm5d.v3-{dryrun,live}.toml`
+
+## Tasks
+
+- [x] Add failing tests for weak-signal and low-persistence V3 entry rejection.
+- [x] Add the minimal V3-only config/strategy fields to support those tests.
+- [x] Tighten the V3 configs with the new thresholds and keep non-V3 behavior unchanged.
+- [x] Run targeted verification plus one local V2/V3 comparison check.
+
+## Progress notes
+
+- 2026-04-11: Added additive `DirectionalConfig` fields `min_trend_consistency` and `min_trend_persistence_secs` with compatibility defaults so only V3 opts into stronger structure gates.
+- 2026-04-11: Split V3 structure logic into two layers inside `directional.rs`:
+  - hard filter on aligned consistency + trailing persistence
+  - existing odds-ratio probability adjustment remains, but still only applies when enough history exists for that calculation
+- 2026-04-11: Added targeted regression coverage in `directional.rs` for:
+  - weak aligned consistency rejection
+  - short trailing persistence rejection
+  - preserved entry for strong persistent trends
+- 2026-04-11: Updated V3 dry-run/live TOMLs to set:
+  - `min_trend_consistency = 0.62`
+  - `min_trend_persistence_secs = 20`
+- 2026-04-11: Verification passed:
+  - `cargo test -p ploy-strategy-bundles trend -- --nocapture`
+  - `cargo test -p ploy-strategy-bundles -- --nocapture`
+  - `cargo check -p ploy-strategy-bundles --all-targets`
+- 2026-04-11: Local synthetic comparison using temporary V2/V3 backtest configs on the same `run_backtest` example window showed no delta:
+  - V2: `12` trades, net `124.64592955159371414970971429`
+  - V3.1: `12` trades, net `124.64592955159371414970971429`
+  - interpretation: the new gate catches noisy edge cases, but the example's clean synthetic trends are not bottlenecked by the old V3 structure logic
+
+## Review
+
+- This slice stays narrow: no new feeds, no runtime changes, no deployment changes.
+- The main correctness fix during implementation was separating the new hard structure filter from the old `buf.len() >= 10` adjustment gate, so V3 does not silently flatline on lower-frequency replay/example paths.
+- Remaining risk: the checked-in synthetic comparison is too clean to prove that the new V3 thresholds improve selection on realistic PM windows. The next useful validation is a DB/replay comparison over real ETH/SOL/XRP windows rather than the bundled synthetic feed.
+
+# Deployment Worker PID Identity Fix (2026-04-11)
+
+## Tasks
+
+- [x] Tighten inherited worker adoption so pid files are trusted only when the live process still matches the expected launch spec.
+- [x] Prevent pause/stop/restart from killing unrelated reused PIDs; clear stale pid ownership instead.
+- [x] Add regression tests for mismatched inherited pid handling and rerun deployment/platform/daemon verification.
+
+## Progress notes
+
+- 2026-04-11: `DeploymentRuntime` now validates inherited pid files against the expected launch spec by checking Linux `/proc/<pid>/cmdline` before adopting or killing a process.
+- 2026-04-11: Stale or mismatched inherited pids now clear runtime ownership instead of being treated as live workers, and `refresh_status()` surfaces that state as `Failed` so the next tick can restart cleanly.
+- 2026-04-11: Added regression coverage for mismatched inherited pid adoption and stale adopted pid refresh handling in `crates/ploy-deployments/src/runtime.rs`.
+- 2026-04-11: Fresh local verification passed:
+  - `cargo test -p ploy-deployments -- --nocapture`
+  - `cargo test -p ploy-platform-runtime -- --nocapture`
+  - `cargo test -p ploy-daemon-host daemon_pause_then_resume_restarts_paper_worker -- --nocapture`
+  - `cargo check -p new-ployd -p ployctl -p ploy-deployments -p ploy-platform-runtime -p ploy-daemon-host`
+  - `git diff --check`
+- 2026-04-11: Fresh remote verification passed after deploying the updated `ployd` binary:
+  - `systemctl is-active ployd` returned `active`
+  - `curl -fsS http://127.0.0.1:8081/health` returned healthy platform status
+  - `ployctl deployments list` showed `pm5d.v2.dryrun`, `pm5d.v3.dryrun`, and `pm5d.v4.dryrun` as `observed=Running`
+  - remote runner processes existed one-per-config after daemon restart
+  - `ployctl deployments pause pm5d.v2.dryrun` removed the runner process and `resume` started a new pid
+  - collector services remained active and legacy direct strategy services remained inactive
+
+## Review
+
+- The deployment worker now has identity-aware inherited pid adoption instead of the earlier `/proc/<pid>` existence check, which closes the daemon-restart control hole for pause/stop/restart.
+- The fix stays intentionally narrow: it does not broaden control-plane semantics or trading-state federation, it only hardens deployment process ownership.
+- Residual limitation: strong inherited-worker identity checks are Linux-specific because they rely on `/proc/<pid>/cmdline`; non-Linux behavior remains best-effort and is not part of the production deployment path.
+
 # RTDS Reference Foundation Implementation (2026-04-06)
 
 ## Goal
@@ -7407,3 +7591,290 @@ related RTDS reconnect churn in the dry-run feed path by removing all uses of
 - 2026-04-09: Dry-run host PID `725622` still logged `Heartbeat timeout: no PONG received within 15s` plus `ResetWithoutClosingHandshake`, which matches the SDK default RTDS heartbeat policy and explains why the collector-only fix did not clean up the strategy service.
 - 2026-04-09: Added a shared `rtds_market_data_ws_config()` helper in `feeds.rs` and switched all three dry-run RTDS clients to `RtdsClient::new(..., rtds_market_data_ws_config())`, so the strategy service no longer uses the SDK default `5s/15s` heartbeat window on any market-data RTDS feed.
 - 2026-04-09: Local validation passed with `CARGO_TARGET_DIR=/tmp/ploy-dryrun-rtds rtk cargo test -p ploy-runner dry_run_rtds_market_data_uses_relaxed_ws_heartbeat_settings` and `CARGO_TARGET_DIR=/tmp/ploy-dryrun-rtds rtk cargo check -p ploy-runner --bin ploy-runner`.
+
+# Tango Deploy Migration Drift Fix (2026-04-10)
+
+## Goal
+Fix `deploy-tango-1-1.yml` so runner deployments on `main` bundle and apply
+`migrations/033_fix_settlement_view_join_and_confirmed_flag.sql`, and reduce the
+risk of future drift between the bundled migration list and the applied
+migration list.
+
+## File ownership
+
+- `.github/workflows/deploy-tango-1-1.yml`
+  - owner: single-source migration allowlist for tango runner deploys
+- `tasks/todo.md`
+  - owner: track plan, verification, and review notes for the workflow-only fix
+
+## Tasks
+
+- [x] Confirm the root cause is workflow drift, not the unrelated `ployd` build failure in `test.yml`.
+- [x] Replace the duplicated migration filename lists with one shared allowlist in the workflow.
+- [x] Include migration `033_fix_settlement_view_join_and_confirmed_flag.sql` in the tango deploy bundle and apply loop.
+- [x] Run local verification on the updated workflow shell logic and capture residual deployment risks.
+
+## Progress notes
+
+- 2026-04-10: Added `DEPLOY_MIGRATIONS` to `.github/workflows/deploy-tango-1-1.yml` and rewired bundle/install/apply steps to consume the same allowlist instead of maintaining duplicated filename lists.
+- 2026-04-10: The allowlist now includes `033_fix_settlement_view_join_and_confirmed_flag.sql`, which prevents ordinary tango redeploys from shipping only the older 032 track-record view definitions.
+- 2026-04-10: Local verification passed with `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/deploy-tango-1-1.yml")'`, `git diff --check -- .github/workflows/deploy-tango-1-1.yml tasks/todo.md`, and `rg -n "DEPLOY_MIGRATIONS|033_fix_settlement_view_join_and_confirmed_flag" .github/workflows/deploy-tango-1-1.yml`.
+- 2026-04-10: A local shell simulation confirmed the workflow allowlist expands into seven discrete migration filenames and the bundle-copy loop carries `033_fix_settlement_view_join_and_confirmed_flag.sql`.
+
+## Review
+
+- The fix stays narrow: one workflow env allowlist is now the source of truth for bundle, remote install, and remote `psql` apply order.
+- This removes the exact drift that caused `main` to be deployable with a newer `ploy-runner` binary but stale 032-only track-record views.
+- Remaining risk is operational, not code-level: migration 033 still drops/recreates views on host, so concurrent SQL readers may see a brief interruption during deploy.
+
+# Runtime Ownership Refactor Bootstrap (2026-04-11)
+
+## Goal
+Start the forked runtime refactor by creating the new ownership crates and
+rewiring the first high-leverage boundaries: shared operator client transport
+and runner-side market-data infrastructure.
+
+## File ownership
+
+- `Cargo.toml`
+  - owner: workspace membership and narrowed default-members for faster local loops
+- `crates/ploy-control-client/`
+  - owner: shared control-plane client transport moved out of `apps/ployctl`
+- `crates/ploy-market-data/`
+  - owner: market-data/discovery/reference-price infrastructure boundary for runner flows
+- `crates/ploy-platform-runtime/`
+  - owner: bootstrap marker for future daemon orchestration ownership
+- `crates/ploy-strategy-runtime/`
+  - owner: bootstrap marker for future strategy-host ownership
+- `apps/new-ployd/`
+  - owner: next-generation daemon bootstrap shell
+- `apps/new-ploy-runner/`
+  - owner: next-generation runner bootstrap shell
+- `apps/ployctl/`
+  - owner: re-export shared client instead of owning it directly
+- `apps/ploytui/`
+  - owner: depend on shared control client instead of depending on `ployctl`
+- `apps/ploy-runner/`
+  - owner: consume `ploy-market-data` instead of owning those modules directly
+
+## Tasks
+
+- [x] Add the new runtime/client/market-data crates and bootstrap app shells to the workspace.
+- [x] Move `ControlPlaneClient` implementation into `crates/ploy-control-client` and keep `ployctl` as a thin wrapper.
+- [x] Remove the `ploytui -> ployctl` app-to-app dependency by switching TUI to the shared client crate.
+- [x] Create `crates/ploy-market-data` and move runner market-data infrastructure modules into it.
+- [x] Rewire `ploy-runner` to import collector/feed/scanner/reference-price infrastructure from `ploy-market-data`.
+- [x] Verify the new workspace slice compiles and the moved/new crates pass their unit tests.
+
+## Progress notes
+
+- 2026-04-11: Added workspace entries for `crates/ploy-control-client`, `crates/ploy-market-data`, `crates/ploy-platform-runtime`, `crates/ploy-strategy-runtime`, `apps/new-ployd`, and `apps/new-ploy-runner`.
+- 2026-04-11: Narrowed `default-members` so root workspace commands default to the control-plane/runtime spine instead of implicitly pulling the full heavy runner/research toolchain.
+- 2026-04-11: Moved the real `ControlPlaneClient` implementation into `crates/ploy-control-client` and converted `apps/ployctl/src/client.rs` into a thin re-export.
+- 2026-04-11: Switched `apps/ploytui` to depend directly on `ploy-control-client`, removing the `ploytui -> ployctl` app-level dependency.
+- 2026-04-11: Created `crates/ploy-market-data`; moved `reference_prices`, `scanner`, `sports_feed`, `discovery/*`, `feeds`, and `collector` into the new crate so runner-side market-data infrastructure now has a real crate home.
+- 2026-04-11: Rewired `apps/ploy-runner/src/main.rs` to use `ploy-market-data::{collector,feeds,reference_prices,scanner,sports_feed}`.
+- 2026-04-11: Added bootstrap shells for `apps/new-ployd` and `apps/new-ploy-runner`, plus marker runtime crates for the next ownership cuts.
+- 2026-04-11: Validation passed with `cargo check -p ploy-control-client -p ploy-market-data -p ployctl -p ploytui -p ploy-runner -p new-ployd -p new-ploy-runner`, `cargo test -p ploy-control-client -p ploy-market-data --lib`, `cargo test -p ployctl -p ploytui --lib`, and `cargo test -p ploy-runner --bin ploy-runner -- --nocapture`.
+- 2026-04-11: Completed the full `ploy-market-data` ownership move by relocating `feeds.rs` and `collector.rs` into the new crate; `apps/ploy-runner` no longer path-hosts those implementations.
+- 2026-04-11: Started the `ployd` ownership cut by moving runtime support logic into `crates/ploy-platform-runtime::runtime_support`, including proposal ID generation, trading snapshot encode/decode, order control response shaping, state/side/purpose wire conversions, reconcile backoff policy, and atomic JSON persistence.
+- 2026-04-11: `cargo check -p ploy-platform-runtime -p new-ployd` and `cargo test -p ploy-platform-runtime --lib` passed for the new platform-runtime slice.
+- 2026-04-11: `apps/ployd` still has pre-existing compile failures unrelated to this refactor slice, centered on missing `ploy-operator-contracts` symbols and stale `PlatformConfig`/HTTP assumptions. Those errors showed up when checking `-p ployd` and were intentionally left out of this ownership cut.
+- 2026-04-11: Moved the main strategy execution path out of `apps/ploy-runner/src/main.rs` into `crates/ploy-strategy-runtime/src/lib.rs`. The new crate now owns runtime-mode dispatch, historical/replay/live feed assembly, signal recording, and live execution/reconcile wiring.
+- 2026-04-11: Reduced `apps/ploy-runner/src/main.rs` to CLI parsing plus the tool-style `check-db` and `collect-quotes` commands; the default `run` path now delegates to `ploy_strategy_runtime::run_strategy(...)`.
+- 2026-04-11: Validation passed with `cargo check -p ploy-strategy-runtime -p ploy-runner -p new-ploy-runner`, `cargo test -p ploy-strategy-runtime --lib`, and `cargo test -p ploy-runner --bin ploy-runner -- --nocapture`.
+- 2026-04-11: Updated `.github/workflows/test.yml` so the default CI build/test package lists now include `ploy-runner` and the new ownership crates/apps (`new-ployd`, `new-ploy-runner`, `ploy-control-client`, `ploy-market-data`, `ploy-platform-runtime`, `ploy-strategy-runtime`) instead of leaving the shipped runner path outside the default validation lane.
+- 2026-04-11: Static workflow validation passed with `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/test.yml")'`, `git diff --check -- .github/workflows/test.yml tasks/todo.md`, and `rg -n "new-ployd|new-ploy-runner|ploy-control-client|ploy-market-data|ploy-runner|ploy-strategy-runtime|ploy-platform-runtime" .github/workflows/test.yml`.
+- 2026-04-11: Restored `apps/ployd` to a green compile/test state by filling the missing operator-contract diagnostics/proposal/oversight types, aligning `PlatformConfig` with the HTTP/runtime paths (`agent_runs_file`, `proposals_file`, `circuit_breaker_enabled`), adding `DeploymentRegistry::set_max_gross_exposure`, and normalizing config-derived paths during boot.
+- 2026-04-11: Moved proposal lifecycle state into `crates/ploy-platform-runtime::ProposalStore`; `PloyDaemon` now delegates proposal create/prepare-approval/approve/reject state transitions to that store instead of owning raw `Vec<SafetyProposal>` lifecycle logic inline.
+- 2026-04-11: Moved `check_database` out of `apps/ploy-runner/src/main.rs` into `crates/ploy-market-data::diagnostics`, further shrinking the runner entrypoint toward a pure CLI shell.
+- 2026-04-11: Validation passed with `cargo check -p ployd`, `cargo test -p ployd --bin ployd -- --nocapture`, `cargo check -p ploy-market-data -p ploy-runner`, and `cargo test -p ploy-market-data --lib`.
+- 2026-04-11: Moved deployment rule logic into `crates/ploy-platform-runtime::deployment_control`, including deployment record construction, deployment state control, max exposure updates, and intent/order-replacement exposure checks.
+- 2026-04-11: Moved registry/trading/proposal state file loading into `crates/ploy-platform-runtime::state_io`, and moved startup registry/worker bootstrap into `crates/ploy-platform-runtime::bootstrap`.
+- 2026-04-11: `apps/ployd/src/runtime.rs` now delegates proposal lifecycle, deployment rule decisions, state loading, and worker bootstrap into `ploy-platform-runtime`, leaving the daemon app with less policy ownership and more coordination-only code.
+- 2026-04-11: Validation passed again after the deeper `platform-runtime` cuts with `cargo test -p ploy-platform-runtime --lib`, `cargo check -p ployd`, and `cargo test -p ployd --bin ployd -- --nocapture`.
+- 2026-04-11: Moved the paper/live order submission entrypoints into `crates/ploy-platform-runtime::trade_submit`; `apps/ployd/src/runtime.rs` now delegates `submit_paper_intent` and `submit_live_intent` into the runtime crate instead of owning those flows inline.
+- 2026-04-11: `platform-runtime` now owns proposal state, deployment rules, state I/O, startup registry bootstrap, and the paper/live submit entrypoint logic. `apps/ployd/src/runtime.rs` is increasingly a coordinator over services rather than the sole owner of platform behavior.
+- 2026-04-11: Moved cancel/replace order control flows into `crates/ploy-platform-runtime::trade_control`; `apps/ployd/src/runtime.rs` now delegates those paths into the runtime crate instead of owning the validation + gateway + ledger mutation flow inline.
+- 2026-04-11: Validation passed again after the trade-control cut with `cargo test -p ploy-platform-runtime --lib`, `cargo check -p ployd`, and `cargo test -p ployd --bin ployd -- --nocapture`.
+- 2026-04-11: Moved live fill reconciliation into `crates/ploy-platform-runtime::reconcile`; `apps/ployd/src/runtime.rs` now delegates the tracked-order collection and fill-recording flow into the runtime crate instead of owning it inline.
+- 2026-04-11: After the reconcile cut, the remaining heavy `ployd` ownership is concentrated in health/degradation/recovery orchestration and the tick loop, not in proposal/deployment/trading control logic.
+- 2026-04-11: Moved live health transitions into `crates/ploy-platform-runtime::health_runtime` and worker desired-state tick/source-health refresh into `crates/ploy-platform-runtime::worker_tick`; `apps/ployd/src/runtime.rs` now delegates health/degraded/recovering transitions and worker tick behavior into the runtime crate.
+- 2026-04-11: Extracted `crates/ploy-daemon-host`; the old `apps/ployd` modules (`config`, `events`, `http`, `runtime`) now live in the host crate, and both `apps/ployd` and `apps/new-ployd` are real thin entrypoints over that shared host.
+- 2026-04-11: Extracted `crates/ploy-runner-host`; both `apps/ploy-runner` and `apps/new-ploy-runner` now delegate to the shared runner-host crate instead of one being real and one being a placeholder shell.
+- 2026-04-11: Validation passed after the host-crate extraction with `cargo test -p ploy-daemon-host --lib`, `cargo check -p ployd -p new-ployd`, `cargo test -p ployd --bin ployd -- --nocapture`, `cargo test -p ploy-platform-runtime --lib`, `cargo check -p ploy-runner-host -p ploy-runner -p new-ploy-runner`, `cargo test -p ploy-runner-host --lib`, and `cargo test -p ploy-runner --bin ploy-runner -- --nocapture`.
+- 2026-04-11: Updated `.github/workflows/test.yml` again so the default CI lane also validates `ploy-daemon-host` and `ploy-runner-host`, not just the wrapper binaries.
+- 2026-04-11: Updated `README.md` and `docs/CONTRIBUTING.md` so the documented default path now points at `new-ployd` / `new-ploy-runner`, the host crates, and the new runtime ownership structure instead of the old single-binary/root-style guidance.
+- 2026-04-11: Final architecture validation passed with `cargo test -p ploy-daemon-host --lib`, `cargo test -p ploy-runner-host --lib`, `cargo check -p new-ployd -p new-ploy-runner -p ployd -p ploy-runner`, `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/test.yml")'`, and `git diff --check -- .github/workflows/test.yml README.md docs/CONTRIBUTING.md Cargo.toml crates/ploy-daemon-host crates/ploy-runner-host apps/new-ployd apps/new-ploy-runner apps/ployd apps/ploy-runner tasks/todo.md`.
+
+## Review
+
+- This slice does not finish the full runtime migration, but it establishes the new top-level ownership graph and removes the most obvious app-to-app dependency.
+- `ploy-market-data` is now the canonical code ownership home for runner-side collector/feed/scanner/reference-price infrastructure, and `apps/ploy-runner` only imports those modules.
+- `ploy-strategy-runtime` now owns the default runner execution path, so the next highest-value ownership cut is deeper `ployd` orchestration extraction into `crates/ploy-platform-runtime`, followed by CI/deploy/default workflow realignment around the new crates.
+- The default CI lane now sees the new runtime crates and the shipped `ploy-runner` package, but the full platform lane is still constrained by pre-existing `ployd`/`ploy-operator-contracts` compile drift that predates this refactor.
+- That pre-existing `ployd`/contracts drift is now cleared: the remaining work is no longer “make the old daemon compile”, but “continue moving real orchestration ownership out of `apps/ployd/src/runtime.rs` into `crates/ploy-platform-runtime`.”
+- `ploy-platform-runtime` now owns more than helpers: it has real proposal state, deployment rule evaluation, registry/trading/proposal state loading, and startup registry bootstrap. The next meaningful cut is live-trading control/orchestration behavior inside `apps/ployd/src/runtime.rs`.
+- After this slice, the remaining heavy `ployd` ownership is concentrated in live fill reconciliation plus health/degradation orchestration. Those are the next cuts.
+- `platform-runtime` now owns proposal state, deployment rules, state I/O, startup bootstrap, submit/cancel/replace order control, and live fill reconciliation. The next remaining daemon-heavy slice is health/degraded/recovering orchestration plus the tick coordinator.
+- `platform-runtime` now owns proposal state, deployment rules, state I/O, startup bootstrap, submit/cancel/replace order control, live fill reconciliation, live health transitions, and worker tick/source-health refresh.
+- `ploy-daemon-host` and `ploy-runner-host` now exist as real host crates, so old/new app binaries are thin wrappers instead of ownership centers.
+- The new architecture is now implemented end-to-end in code shape and validation shape: shared host crates own the real daemon/runner behavior, runtime crates own policy and orchestration behavior, market-data/client crates own their infra boundaries, and the default CI/documented path points at the new stack.
+
+# PM 5m Strategy Roadmap Implementation Slice (2026-04-11)
+
+## Goal
+Audit the V1/V2/V3/V4 roadmap against the refactored runtime, then implement the missing strategy/runtime/config pieces that are already actionable today.
+
+## File ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/`
+  - owner: PM 5m strategy variants and their tests
+- `crates/ploy-strategy-bundles/src/config.rs`
+  - owner: strategy variant config surface
+- `crates/ploy-strategy-runtime/src/lib.rs`
+  - owner: runtime variant selection / wiring
+- `config/strategies/02-pm5d*.toml`
+  - owner: runnable V1/V2/V3/V4 config family
+- `tasks/strategy-evolution-plan.md`
+  - owner: roadmap/design reference only
+
+## Tasks
+
+- [x] Confirm which roadmap versions are already implemented vs only planned.
+- [x] Add failing tests first for any new strategy behavior introduced in this slice.
+- [x] Implement the missing runnable PM 5m strategy variant(s) that do not depend on unavailable live data plumbing.
+- [x] Add explicit config files for the roadmap versions supported by the refactored runtime.
+- [x] Run targeted Rust verification and summarize remaining gaps, especially around live L2 / LOB ingestion.
+
+## Progress notes
+
+- 2026-04-11: Intake confirmed `directional.rs` already contains the roadmap's V3-style `ReturnBuffer`, multi-vol sigma selection, and price-structure adjustments.
+- 2026-04-11: Intake confirmed the runtime currently exposes only two strategy variants: `directional` and `directional_bayes`.
+- 2026-04-11: Intake confirmed `StrategyDecision::Exit` is supported, so a V4 prototype can use non-settlement exits if the strategy logic is added.
+- 2026-04-11: Intake confirmed live/dry-run wiring does not yet feed Binance L2 into the strategy runtime; current `MarketUpdate::L2` is historical/replay only.
+- 2026-04-11: Audit matrix against `tasks/strategy-evolution-plan.md`:
+  - `V1` baseline: **implemented as config-only behavior** on the `directional` runtime path; legacy configs exist, but the explicit unified `v1-*` roadmap config family does not yet exist.
+  - `V2` tightened: **implemented as config-only behavior** on the same `directional` strategy; `02-pm5d.unified.toml` already matches the tightened entry/price window profile, but the dedicated `v2-*` config files/services from the roadmap are still missing.
+  - `V3` multi-vol + price structure: **substantially implemented in `directional.rs`** via `ReturnBuffer`, realized/Parkinson volatility selection, and odds-ratio price-structure adjustment; however, there is still no dedicated roadmap-named variant/config family, and the local LOB-summary enhancement is not wired because the strategy code does not consume `MarketUpdate::L2`.
+  - `V4` mean reversion: **not implemented yet**; the runtime can support a prototype because `StrategyDecision::Exit` already works and historical loading can replay `MarketUpdate::L2`, but live/dry-run still lack Binance L2 ingestion and no mean-reversion entry logic exists today.
+- 2026-04-11: Added runtime alias normalization so `v1/v2/v3` route to `directional` and `v4` routes to the new `mean_reversion` prototype.
+- 2026-04-11: Added `MeanReversionStrategy` as a separate strategy file instead of folding V4 into `directional.rs`; the prototype uses currently-available spot/quote/event data plus return-buffer reversal signals and supports early exits via take-profit, stop-loss, and max-hold rules.
+- 2026-04-11: Added explicit roadmap config family files:
+  - `config/strategies/02-pm5d.v1-{dryrun,live}.toml`
+  - `config/strategies/02-pm5d.v2-{dryrun,live}.toml`
+  - `config/strategies/02-pm5d.v3-{dryrun,live}.toml`
+  - `config/strategies/02-pm5d.v4-{dryrun,live}.toml`
+- 2026-04-11: Verification passed with:
+  - `cargo test -p ploy-strategy-bundles --lib`
+  - `cargo test -p ploy-strategy-runtime --lib`
+  - `cargo check -p new-ploy-runner -p ploy-strategy-runtime -p ploy-strategy-bundles`
+
+## Review
+
+- The roadmap is now encoded directly in runtime/config surfaces: V1/V2/V3 are explicit aliases/config families over the existing directional engine, and V4 has a runnable prototype strategy with early-exit support.
+- The V4 slice intentionally stops short of LOB-aware confirmation because live/dry-run still do not ingest `MarketUpdate::L2`; the prototype stays grounded on data that already reaches the runtime today.
+- Remaining gap: full V3 LOB confirmation and full V4+LOB still require live Binance L2 ingestion plus the upstream LOB collector stability work described in `tasks/strategy-evolution-plan.md`.
+
+# PM5D Reversal Strategy Slice (2026-04-13)
+
+## Goal
+Implement the committed reversal-strategy plan as a runnable strategy/runtime slice, including near-depth L2 plumbing, attribution tooling, strategy/runtime wiring, and reversal configs.
+
+## File ownership
+
+- `crates/ploy-strategy-bundles/src/traits.rs`
+  - owner: new `MarketUpdate::L2Depth` variant
+- `crates/ploy-strategy-bundles/src/feed/database.rs`
+  - owner: historical L2Depth loader + helper tests
+- `crates/ploy-market-data/src/feeds.rs`
+  - owner: live/dry-run DB L2Depth forwarding parity
+- `crates/ploy-strategy-bundles/examples/signal_attribution.rs`
+  - owner: research CSV export example
+- `crates/ploy-strategy-bundles/src/strategies/reversal.rs`
+  - owner: `ReversalStrategy` logic + tests
+- `crates/ploy-strategy-bundles/src/{strategies/mod.rs,lib.rs,config.rs}`
+  - owner: export/config surface for reversal runtime
+- `crates/ploy-strategy-runtime/src/lib.rs`
+  - owner: runtime variant selection for reversal
+- `config/strategies/05-reversal*.toml`
+  - owner: runnable dry-run/backtest config family
+
+## Tasks
+
+- [ ] Add `MarketUpdate::L2Depth` plus near-depth parsing in historical/live L2 feeds.
+- [ ] Add `signal_attribution` example and verify it builds.
+- [ ] Implement `ReversalStrategy` with entry/exit tests first and repo-fit settlement behavior.
+- [ ] Wire reversal strategy selection through config/runtime without breaking existing directional variants.
+- [ ] Add `05-reversal` config files and run targeted verification commands.
+
+## Progress notes
+
+- 2026-04-13: Intake confirmed the repo already has `MeanReversionStrategy`; the new reversal slice must stay independent instead of mutating the V4 prototype.
+- 2026-04-13: Intake confirmed `FullConfig` still hard-binds `[strategy]` to `DirectionalConfig`, so reversal runtime wiring must either reuse/translate that config surface or generalize it without breaking existing configs.
+- 2026-04-13: Intake confirmed live/dry-run already poll `binance_lob_ticks` via `spawn_db_l2_feed`, so a runnable reversal dry-run path requires `L2Depth` parity there, not only in the historical loader.
+- 2026-04-13: Added additive `MarketUpdate::L2Depth` plus near-depth extraction in both historical DB loading and live/dry-run DB L2 polling; existing `L2` updates remain intact for backward compatibility.
+- 2026-04-13: Added `crates/ploy-strategy-bundles/examples/signal_attribution.rs` and verified it builds.
+- 2026-04-13: Added `ReversalStrategy` as a separate strategy implementation with:
+  - drift-flip entry gating near `price_to_beat`
+  - L2 depth ratio confirmation
+  - PM quote freshness / ask cap gating
+  - take-profit, stop-loss, time-stop, and settlement exits
+- 2026-04-13: Reused the existing unified config surface by adding reversal-prefixed fields to `DirectionalConfig` and translating them into a dedicated `ReversalConfig` at runtime, avoiding a wider config-schema rewrite.
+- 2026-04-13: Added `reversal` / `pm5d_reversal` runtime variant normalization and runnable `05-reversal.{dryrun,backtest}.toml` configs.
+- 2026-04-13: Local verification passed:
+  - `rtk cargo test -p ploy-strategy-bundles reversal -- --nocapture`
+  - `rtk cargo test -p ploy-strategy-bundles near_depth -- --nocapture`
+  - `cargo test -p ploy-market-data db_l2_feed_builds_depth_variant_from_pair_levels -- --nocapture`
+  - `cargo build -p ploy-strategy-bundles --example signal_attribution`
+  - `rtk cargo test -p ploy-strategy-bundles roadmap_config_family_parses -- --nocapture`
+  - `cargo test -p ploy-strategy-runtime roadmap_aliases_build_expected_strategy_variants -- --nocapture`
+  - `cargo check -p ploy-strategy-bundles --all-targets`
+  - `cargo check -p ploy-market-data -p ploy-strategy-runtime`
+
+## Review
+
+- The reversal slice now exists as a real selectable strategy/runtime path instead of only a plan doc.
+- The feed side was implemented additively: old `L2` consumers keep working while reversal/research can consume `L2Depth`.
+- The config choice intentionally favors repo fit over purity: reversal uses a dedicated runtime strategy plus `ReversalConfig`, but the TOML surface still flows through the existing unified `[strategy]` section via reversal-prefixed fields on `DirectionalConfig`.
+- Remaining gap: the research/backtest tasks from the plan were not executed end-to-end because this session did not have a validated database-backed backtest run to point at. The config/runtime path is ready, but empirical threshold tuning and strategy-vs-baseline comparison still need a real DB window.
+
+# Binary Options Factor Research Slice (2026-04-13)
+
+## Goal
+Build a Rust-native factor research workflow for binary-options trading that separates settlement-strategy labels from PM-lag-arbitrage labels and uses reusable libraries first, favoring Polars for large observation sets.
+
+## File ownership
+
+- `Cargo.toml`
+  - owner: workspace dependency wiring for Polars
+- `crates/ploy-research/Cargo.toml`
+  - owner: research-crate dependency surface
+- `crates/ploy-research/src/{lib.rs,factors.rs}`
+  - owner: factor observation model, statistics, Polars frame export
+- `crates/ploy-research/examples/factor_research.rs`
+  - owner: runnable Rust research entrypoint
+
+## Progress notes
+
+- 2026-04-13: Confirmed the right home for this workflow is `crates/ploy-research`, not more ad hoc logic under `ploy-strategy-bundles/examples`.
+- 2026-04-13: Added Polars to the workspace and wired it into `ploy-research`.
+- 2026-04-13: Added a first Rust-native factor observation pipeline that computes:
+  - binary-option distance-to-beat features
+  - drift / flip features
+  - LOB / spread / depth-ratio features
+  - volatility-aware features (`sigma_horizon`, `distance_over_sigma`, `model_prob_up`, `model_edge_up`)
+  - settlement and PM-lag labels
+- 2026-04-13: First remote factor research run on `BTCUSDT`, `2026-04-11T10:45:00Z -> 11:30:00Z` produced:
+  - `loaded 63069 updates`
+  - `observation_rows=33630`
+  - `event_rows=14`
+  - settlement top factors by |Spearman IC|: `spread_bps`, `sigma_horizon`, `flip_age_secs`
+  - PM lag top factors by |Spearman IC|: `signed_distance_to_beat`, `abs_distance_to_beat`, `model_prob_up`, `distance_over_sigma`
+- 2026-04-13: Added coarse reversal optimization support and verified that profitable reversal behavior exists on remote L2 windows, but validation quality still depends on choosing windows that contain both events and L2 coverage.
+
+## Review
+
+- This slice changes the research direction from gate-tuning-first to factor-validity-first.
+- The new tool is intentionally research-focused, not yet a production alpha model.
+- Remaining gap: the first `factor_research` version reports IC / Spearman / limited ICIR, but still needs richer bucket outputs, combo-factor ranking, and more robust missing-value handling (`null` instead of `NaN`) before it should be treated as the final research surface.

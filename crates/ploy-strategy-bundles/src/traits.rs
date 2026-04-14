@@ -28,6 +28,16 @@ pub enum MarketUpdate {
         ts: DateTime<Utc>,
     },
 
+    /// Binance aggregated trade tick with aggressor-side metadata.
+    AggTrade {
+        symbol: String,
+        agg_trade_id: u64,
+        price: Decimal,
+        quantity: Decimal,
+        is_buyer_maker: bool,
+        ts: DateTime<Utc>,
+    },
+
     /// Polymarket token quote update.
     Quote {
         token_id: String,
@@ -41,6 +51,16 @@ pub enum MarketUpdate {
         symbol: String,
         obi: f64,
         spread_bps: u32,
+        ts: DateTime<Utc>,
+    },
+
+    /// CEX L2 orderbook summary with near-mid depth totals.
+    L2Depth {
+        symbol: String,
+        obi: f64,
+        spread_bps: u32,
+        bid_depth_near: f64,
+        ask_depth_near: f64,
         ts: DateTime<Utc>,
     },
 
@@ -159,10 +179,7 @@ pub trait Executor: Send {
     async fn cancel(&mut self, order_id: &str) -> bool;
 
     /// Reconcile fills for active venue orders. Default executors can ignore this.
-    async fn reconcile_fills(
-        &mut self,
-        _orders: &OrderLedger,
-    ) -> Result<Vec<FillRecord>, String> {
+    async fn reconcile_fills(&mut self, _orders: &OrderLedger) -> Result<Vec<FillRecord>, String> {
         Ok(Vec::new())
     }
 }

@@ -1,0 +1,12 @@
+[package]
+name = "new-ploy-runner"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bootstrap shell for the next-generation Ploy strategy runner"
+
+[dependencies]
+ploy-runner-host.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

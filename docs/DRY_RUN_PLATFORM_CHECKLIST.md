@@ -14,10 +14,10 @@
 ## 1. 工具與快照檢查
 
 - `cargo fmt --check`
-- `rtk cargo check -p ployd`
+- `rtk cargo check -p new-ployd`
 - `rtk cargo check -p ployctl`
 - `rtk cargo check -p ploytui`
-- `cargo run -p ployd`
+- `cargo run -p new-ployd`
 - `cargo run -p ployctl -- system status`
 - `cargo run -p ployctl -- trading status`
 - `cargo run -p ployctl -- deployments list`

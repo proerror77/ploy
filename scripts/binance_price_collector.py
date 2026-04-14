@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import sys
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
@@ -20,6 +21,8 @@ import websockets
 SYMBOLS = [s.strip().upper() for s in os.getenv("BINANCE_PRICE_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT").split(",") if s.strip()]
 WS_URL = "wss://stream.binance.com:9443/stream"
 DB_URL = os.getenv("PLOY_DATABASE__URL") or os.getenv("DATABASE_URL") or "postgresql://postgres:postgres@localhost:5432/ploy"
+COMMIT_BATCH_SIZE = max(1, int(os.getenv("BINANCE_PRICE_COMMIT_BATCH_SIZE", "25")))
+COMMIT_INTERVAL_SECS = max(0.1, float(os.getenv("BINANCE_PRICE_COMMIT_INTERVAL_SECS", "1.0")))
 
 RUNNING = True
 
@@ -28,6 +31,28 @@ def _on_signal(signum: int, _frame):
     global RUNNING
     RUNNING = False
     print(f"[binance-price] received signal={signum}, stopping...", flush=True)
+
+
+async def _reconnect_db(conn: psycopg.AsyncConnection) -> psycopg.AsyncConnection:
+    try:
+        await conn.rollback()
+    except Exception:
+        pass
+    try:
+        await conn.close()
+    except Exception:
+        pass
+
+    while RUNNING:
+        try:
+            new_conn = await psycopg.AsyncConnection.connect(DB_URL)
+            print("[binance-price] Database connection re-established", flush=True)
+            return new_conn
+        except Exception as exc:
+            print(f"[binance-price] Database reconnect failed: {exc}, retrying in 5s...", flush=True)
+            await asyncio.sleep(5)
+
+    return conn
 
 
 async def collect_prices():
@@ -48,7 +73,10 @@ async def collect_prices():
 
     # Statistics
     insert_count = 0
+    duplicate_count = 0
     last_report_time = datetime.now(timezone.utc)
+    last_commit_at = time.monotonic()
+    pending = 0
 
     try:
         while RUNNING:
@@ -85,26 +113,46 @@ async def collect_prices():
 
                             # Insert into database
                             try:
-                                await conn.execute(
+                                cursor = await conn.execute(
                                     """
                                     INSERT INTO binance_price_ticks (symbol, price, quantity, trade_time)
                                     VALUES (%s, %s, %s, %s)
+                                    ON CONFLICT DO NOTHING
                                     """,
                                     (symbol, price, quantity, trade_time)
                                 )
-                                await conn.commit()
-                                insert_count += 1
+                                pending += 1
+                                rowcount = cursor.rowcount or 0
+                                if rowcount > 0:
+                                    insert_count += rowcount
+                                else:
+                                    duplicate_count += 1
+
+                                now_monotonic = time.monotonic()
+                                if (
+                                    pending >= COMMIT_BATCH_SIZE
+                                    or now_monotonic - last_commit_at >= COMMIT_INTERVAL_SECS
+                                ):
+                                    await conn.commit()
+                                    pending = 0
+                                    last_commit_at = now_monotonic
 
                                 # Report stats every 60 seconds
                                 now = datetime.now(timezone.utc)
                                 if (now - last_report_time).total_seconds() >= 60:
-                                    print(f"[binance-price] Inserted {insert_count} ticks in last minute", flush=True)
+                                    print(
+                                        f"[binance-price] Inserted {insert_count} ticks in last minute (duplicates_ignored={duplicate_count})",
+                                        flush=True,
+                                    )
                                     insert_count = 0
+                                    duplicate_count = 0
                                     last_report_time = now
 
                             except Exception as db_err:
                                 print(f"[binance-price] Database error: {db_err}", flush=True)
-                                await conn.rollback()
+                                pending = 0
+                                last_commit_at = time.monotonic()
+                                conn = await _reconnect_db(conn)
 
                         except (json.JSONDecodeError, KeyError, ValueError) as e:
                             print(f"[binance-price] Error parsing message: {e}", flush=True)
@@ -118,6 +166,8 @@ async def collect_prices():
                     break
 
     finally:
+        if pending > 0:
+            await conn.commit()
         await conn.close()
         print("[binance-price] Collector stopped", flush=True)
 

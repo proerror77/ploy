@@ -1,4 +1,4 @@
-//! Runnable backtest example for pm_5m_directional.
+//! Runnable backtest example for PM5D strategy variants.
 //!
 //! Usage (synthetic):
 //!   cargo run -p ploy-strategy-bundles --example run_backtest -- [config.toml]
@@ -15,8 +15,9 @@
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, RuntimeConfig, RuntimeMode,
-    SimulatedExecutor, SimulatedExecutorConfig, StrategyRuntime,
+    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
+    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
+    StrategyRuntime,
     config::FullConfig,
     feed::{HistoricalLoadOptions, load_from_database_with_options},
 };
@@ -158,8 +159,10 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
     // Sort by timestamp
     updates.sort_by_key(|u| match u {
         MarketUpdate::SpotPrice { ts, .. }
+        | MarketUpdate::AggTrade { ts, .. }
         | MarketUpdate::Quote { ts, .. }
         | MarketUpdate::L2 { ts, .. }
+        | MarketUpdate::L2Depth { ts, .. }
         | MarketUpdate::SportsState { ts, .. }
         | MarketUpdate::ReferencePrice { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
@@ -184,24 +187,28 @@ fn main() {
     let start_date = flag_value(&args, "--start-date");
     let end_date = flag_value(&args, "--end-date");
 
-    let (strategy_config, sim_config, runtime_config, backtest_options) =
+    let (strategy_variant, strategy_config, sim_config, runtime_config, backtest_options) =
         if let Some(ref path) = config_path {
             let config = FullConfig::from_file(path).expect("Failed to parse config");
             let sim = config.sim_executor_config();
             let rt = config.runtime_config();
+            let strategy_variant = config.runtime.canonical_strategy_variant();
             let backtest_options = HistoricalLoadOptions {
                 include_reference_prices: config.backtest_data.include_reference_prices,
                 reference_symbols: config
                     .backtest_data
                     .reference_symbols(&config.reference_data),
                 include_sports_state: config.backtest_data.include_sports_state,
+                require_official_settlement: config.backtest_data.require_official_settlement,
             };
-            (config.strategy, sim, rt, backtest_options)
+            (strategy_variant, config.strategy, sim, rt, backtest_options)
         } else {
             eprintln!("No config file provided, using built-in defaults\n");
             (
+                "directional".to_string(),
                 DirectionalConfig {
                     symbols: vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()],
+                    symbol_profiles: std::collections::HashMap::new(),
                     vol_floor: 0.001,
                     min_probability: 0.62,
                     min_z_score: 0.35,
@@ -210,6 +217,25 @@ fn main() {
                     no_trade_zone_min: 0.45,
                     no_trade_zone_max: 0.55,
                     min_edge: 0.05,
+                    min_deviation_pct: 0.005,
+                    min_reversal_consistency: 0.55,
+                    min_trend_consistency: 0.50,
+                    min_trend_persistence_secs: 0,
+                    take_profit_price_delta: 0.10,
+                    stop_loss_price_delta: 0.05,
+                    max_hold_secs: 120,
+                    reversal_bonus_cap: 0.20,
+                    use_multiscale_volatility: true,
+                    use_price_structure_adjustment: true,
+                    reversal_max_distance_pct: 0.015,
+                    reversal_max_drift_flip_age_secs: 20,
+                    reversal_min_post_flip_drift: 0.0001,
+                    reversal_lob_depth_pct: 0.001,
+                    reversal_min_lob_depth_ratio: 1.3,
+                    reversal_max_ask_for_reversal: 0.25,
+                    reversal_max_pm_lag_secs: 30,
+                    reversal_take_profit_ask: 0.65,
+                    reversal_stop_distance_pct: 0.025,
                     min_time_remaining_secs: 60,
                     max_time_remaining_secs: 300,
                     cooldown_secs: 60,
@@ -217,6 +243,7 @@ fn main() {
                     max_positions: 3,
                     max_daily_trades: 1000,
                     max_daily_loss_usd: None,
+                    allowed_window_secs: vec![300, 900],
                 },
                 SimulatedExecutorConfig {
                     use_spread: true,
@@ -236,8 +263,9 @@ fn main() {
             )
         };
 
-    eprintln!("=== pm_5m_directional Backtest ===");
+    eprintln!("=== PM5D Backtest ===");
     eprintln!("Mode:    {:?}", runtime_config.mode);
+    eprintln!("Variant: {strategy_variant}");
     eprintln!("Symbols: {:?}", strategy_config.symbols);
     eprintln!(
         "Params:  min_edge={:.0}% min_p={:.0}% cooldown={}s",
@@ -294,10 +322,12 @@ fn main() {
         for u in &updates {
             match u {
                 MarketUpdate::SpotPrice { .. } => spot_count += 1,
+                MarketUpdate::AggTrade { .. } => {}
                 MarketUpdate::Quote { .. } => quote_count += 1,
                 MarketUpdate::EventDiscovered { .. } => event_discovered += 1,
                 MarketUpdate::EventExpired { .. } => event_expired += 1,
                 MarketUpdate::L2 { .. } => l2_count += 1,
+                MarketUpdate::L2Depth { .. } => l2_count += 1,
                 MarketUpdate::SportsState { .. } => {}
                 MarketUpdate::ReferencePrice { .. } => {}
                 MarketUpdate::Kline { .. } => kline_count += 1,
@@ -318,7 +348,11 @@ fn main() {
     };
 
     let stake_usd = strategy_config.stake_usd;
-    let strategy = DirectionalStrategy::new(strategy_config);
+    let strategy: Box<dyn StrategyLogic> = match strategy_variant.as_str() {
+        "directional" => Box::new(DirectionalStrategy::new(strategy_config)),
+        "reversal" => Box::new(ReversalStrategy::new(strategy_config.into())),
+        other => panic!("unsupported strategy_variant in run_backtest example: {other}"),
+    };
     let feed = HistoricalFeed::new(data);
     let executor = SimulatedExecutor::new(sim_config);
     let recorder = Box::new(NullRecorder);

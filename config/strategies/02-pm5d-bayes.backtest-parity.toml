@@ -38,3 +38,4 @@ enable_market_impact = false
 [backtest_data]
 include_reference_prices = false
 include_sports_state = false
+require_official_settlement = true

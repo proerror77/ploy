@@ -15,9 +15,10 @@ fn release_platform_workflow_builds_new_workspace_binaries() {
 
     for needle in [
         "cargo build --release --locked",
-        "apps/ployd",
-        "apps/ployctl",
-        "apps/ploytui",
+        "new-ployd",
+        "new-ploy-runner",
+        "-p ployctl",
+        "-p ploytui",
         "bin/ployd",
         "bin/ployctl",
         "bin/ploytui",

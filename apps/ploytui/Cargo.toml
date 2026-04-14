@@ -8,6 +8,6 @@ repository.workspace = true
 description = "Thin terminal console for the ploy control plane"
 
 [dependencies]
+ploy-control-client.workspace = true
 ploy-operator-contracts.workspace = true
-ployctl = { path = "../ployctl" }
 chrono.workspace = true

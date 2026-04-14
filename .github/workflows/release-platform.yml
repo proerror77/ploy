@@ -45,17 +45,18 @@ jobs:
 
       - name: Build platform binaries
         run: |
-          # Workspace app crates: apps/ployd, apps/ployctl, apps/ploytui, apps/ploy-runner
+          # Build the new entrypoints, then install them under the compatibility
+          # binary names used by existing hosts and systemd units.
           cargo build --release --locked \
             --target "${PLATFORM_TARGET}" \
-            -p ployd \
+            -p new-ployd \
             -p ployctl \
             -p ploytui \
-            -p ploy-runner
-          strip "target/${PLATFORM_TARGET}/release/ployd" || true
+            -p new-ploy-runner
+          strip "target/${PLATFORM_TARGET}/release/new-ployd" || true
           strip "target/${PLATFORM_TARGET}/release/ployctl" || true
           strip "target/${PLATFORM_TARGET}/release/ploytui" || true
-          strip "target/${PLATFORM_TARGET}/release/ploy-runner" || true
+          strip "target/${PLATFORM_TARGET}/release/new-ploy-runner" || true
 
       - name: Create platform bundle
         run: |
@@ -67,10 +68,10 @@ jobs:
             "${bundle_root}/deployment" \
             "${bundle_root}/scripts" \
             "${bundle_root}/scripts/drills"
-          install -m 755 "target/${PLATFORM_TARGET}/release/ployd" "${bundle_root}/bin/ployd"
+          install -m 755 "target/${PLATFORM_TARGET}/release/new-ployd" "${bundle_root}/bin/ployd"
           install -m 755 "target/${PLATFORM_TARGET}/release/ployctl" "${bundle_root}/bin/ployctl"
           install -m 755 "target/${PLATFORM_TARGET}/release/ploytui" "${bundle_root}/bin/ploytui"
-          install -m 755 "target/${PLATFORM_TARGET}/release/ploy-runner" "${bundle_root}/bin/ploy-runner"
+          install -m 755 "target/${PLATFORM_TARGET}/release/new-ploy-runner" "${bundle_root}/bin/ploy-runner"
           install -m 644 deployment/ployd.service "${bundle_root}/deployment/ployd.service"
           install -m 755 scripts/install-platform-service.sh "${bundle_root}/scripts/install-platform-service.sh"
           install -m 755 scripts/drills/live_dry_run.sh "${bundle_root}/scripts/drills/live_dry_run.sh"

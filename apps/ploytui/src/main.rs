@@ -1,4 +1,4 @@
-use ployctl::client::ControlPlaneClient;
+use ploy_control_client::ControlPlaneClient;
 use ploytui::{render_dashboard, DashboardSnapshot};
 use std::thread;
 use std::time::Duration;

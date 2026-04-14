@@ -20,7 +20,7 @@ live-host acceptance is documented separately in:
 1. Check the daemon boots:
 
 ```bash
-cargo run -p ployd
+cargo run -p new-ployd
 ```
 
 If you want the control plane protected, export `PLOY_ADMIN_TOKEN` first.
@@ -61,7 +61,7 @@ rtk cargo test --test platform_smoke -- --nocapture
 The current operator flow is:
 
 ```bash
-ployd
+new-ployd
 ployctl deployments apply config/deployments/example.paper.json
 ployctl system status
 ployctl system metrics
@@ -78,11 +78,11 @@ ployctl deployments resume example.paper
 ployctl deployments stop example.paper
 ```
 
-This branch now treats `ployd` as the default long-running daemon entrypoint and
+This branch now treats `new-ployd` as the default local daemon entrypoint and
 `ployctl` as an HTTP-first operator client with snapshot fallback. `ploytui` is
 the thin terminal console on top of the same control-plane API. Deployment CRUD
 is still simplified, but the daemon/client/runtime contract is no longer a
-placeholder. `ployd` also keeps an append-only `run/platform/audit-log.jsonl`
+placeholder. The deployed host binary remains `ployd` and keeps an append-only `run/platform/audit-log.jsonl`
 for authenticated control-plane actions, and `ployctl system audit` reads the
 latest entries back over `/api/audit/logs`. `ployctl system status` now also
 shows `live_reconcile_failures`, `next_live_reconcile_at`, and
