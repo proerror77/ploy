@@ -321,18 +321,49 @@ async fn main() {
     eprintln!("\nobservation_rows={}", total_observations);
     eprintln!("event_rows={}", total_event_rows);
 
-    // === Simple P&L Simulation ===
+    // === P&L Simulation (4 strategy variants) ===
     // For each event, simulate a trade at the last observation before settlement.
-    // Entry: buy UP if model_prob_up > pm_up_ask + fee, buy DOWN if (1-model_prob_up) > pm_down_ask + fee
     // Exit: hold to settlement ($1 win, $0 loss)
-    let mut total_trades = 0u32;
-    let mut wins = 0u32;
-    let mut total_pnl = 0.0f64;
-    let mut total_stake = 0.0f64;
-    let stake_per_trade = 25.0; // $25 per trade
+    //
+    // Variants:
+    //   A. Baseline    – original model direction (model_prob_up > pm_up_ask + fee)
+    //   B. Contrarian  – flip model direction (IC=-0.27 suggests model is systematically wrong)
+    //   C. LOB-only    – trade only when obi_10 + depth_imbalance agree on direction
+    //   D. Combined    – contrarian model + LOB direction filter must agree
+
+    #[derive(Default)]
+    struct SimStats {
+        trades: u32,
+        wins: u32,
+        pnl: f64,
+        stake: f64,
+    }
+
+    impl SimStats {
+        fn record(&mut self, won: bool, pnl: f64, stake: f64) {
+            self.trades += 1;
+            if won { self.wins += 1; }
+            self.pnl += pnl;
+            self.stake += stake;
+        }
+        fn win_rate(&self) -> f64 {
+            if self.trades > 0 { self.wins as f64 / self.trades as f64 * 100.0 } else { 0.0 }
+        }
+        fn roi(&self) -> f64 {
+            if self.stake > 0.0 { self.pnl / self.stake * 100.0 } else { 0.0 }
+        }
+    }
+
+    let mut baseline = SimStats::default();
+    let mut contrarian = SimStats::default();
+    let mut lob_only = SimStats::default();
+    let mut combined = SimStats::default();
+
+    let stake_per_trade = 25.0f64;
+    let min_edge = 0.02f64;
 
     for observations in &all_observations {
-        // Group by event_id, take last observation per event
+        // Group by event_id, take last observation per event.
         let mut last_obs: std::collections::HashMap<&str, &ploy_research::FactorObservation> =
             std::collections::HashMap::new();
         for obs in observations.iter() {
@@ -343,69 +374,132 @@ async fn main() {
         }
 
         for obs in last_obs.values() {
-            if !obs.pm_up_ask.is_finite() || !obs.model_prob_up.is_finite() {
+            if !obs.pm_up_ask.is_finite()
+                || !obs.pm_down_ask.is_finite()
+                || !obs.model_prob_up.is_finite()
+            {
                 continue;
             }
+
             let fee_up = 0.02 * obs.pm_up_ask * (1.0 - obs.pm_up_ask);
-            let fee_down = if obs.pm_down_ask.is_finite() {
-                0.02 * obs.pm_down_ask * (1.0 - obs.pm_down_ask)
-            } else {
-                continue;
-            };
+            let fee_down = 0.02 * obs.pm_down_ask * (1.0 - obs.pm_down_ask);
 
-            let edge_up = obs.model_prob_up - obs.pm_up_ask - fee_up;
-            let edge_down = (1.0 - obs.model_prob_up) - obs.pm_down_ask - fee_down;
-
-            // Pick the side with more edge, if any exceeds min_edge
-            let min_edge = 0.02;
-            let (took_trade, won) = if edge_up >= min_edge && edge_up >= edge_down {
-                // Buy UP
-                let pnl = if obs.settlement_up == 1.0 {
-                    stake_per_trade * (1.0 / obs.pm_up_ask - 1.0) - stake_per_trade * fee_up / obs.pm_up_ask
+            // Payout helpers: returns (pnl, won) for a given side.
+            let pnl_up = |won: bool| -> (f64, bool) {
+                let p = if won {
+                    stake_per_trade * (1.0 / obs.pm_up_ask - 1.0)
+                        - stake_per_trade * fee_up / obs.pm_up_ask
                 } else {
                     -stake_per_trade - stake_per_trade * fee_up / obs.pm_up_ask
                 };
-                total_pnl += pnl;
-                total_stake += stake_per_trade;
-                (true, obs.settlement_up == 1.0)
-            } else if edge_down >= min_edge {
-                // Buy DOWN
-                let pnl = if obs.settlement_up == 0.0 {
-                    stake_per_trade * (1.0 / obs.pm_down_ask - 1.0) - stake_per_trade * fee_down / obs.pm_down_ask
+                (p, won)
+            };
+            let pnl_down = |won: bool| -> (f64, bool) {
+                let p = if won {
+                    stake_per_trade * (1.0 / obs.pm_down_ask - 1.0)
+                        - stake_per_trade * fee_down / obs.pm_down_ask
                 } else {
                     -stake_per_trade - stake_per_trade * fee_down / obs.pm_down_ask
                 };
-                total_pnl += pnl;
-                total_stake += stake_per_trade;
-                (true, obs.settlement_up == 0.0)
-            } else {
-                (false, false)
+                (p, won)
             };
 
-            if took_trade {
-                total_trades += 1;
-                if won {
-                    wins += 1;
+            // --- A. Baseline (original model) ---
+            {
+                let edge_up = obs.model_prob_up - obs.pm_up_ask - fee_up;
+                let edge_down = (1.0 - obs.model_prob_up) - obs.pm_down_ask - fee_down;
+                if edge_up >= min_edge && edge_up >= edge_down {
+                    let (p, w) = pnl_up(obs.settlement_up == 1.0);
+                    baseline.record(w, p, stake_per_trade);
+                } else if edge_down >= min_edge {
+                    let (p, w) = pnl_down(obs.settlement_up == 0.0);
+                    baseline.record(w, p, stake_per_trade);
+                }
+            }
+
+            // --- B. Contrarian (flip model direction) ---
+            // If model says UP with edge, we bet DOWN (and vice versa).
+            // Rationale: model_prob_up IC = -0.27 means the model is systematically wrong.
+            {
+                let contrarian_prob_up = 1.0 - obs.model_prob_up;
+                let edge_up = contrarian_prob_up - obs.pm_up_ask - fee_up;
+                let edge_down = (1.0 - contrarian_prob_up) - obs.pm_down_ask - fee_down;
+                if edge_up >= min_edge && edge_up >= edge_down {
+                    let (p, w) = pnl_up(obs.settlement_up == 1.0);
+                    contrarian.record(w, p, stake_per_trade);
+                } else if edge_down >= min_edge {
+                    let (p, w) = pnl_down(obs.settlement_up == 0.0);
+                    contrarian.record(w, p, stake_per_trade);
+                }
+            }
+
+            // --- C. LOB-only (ignore model, use LOB direction signal) ---
+            // lob_direction = obi_10 + depth_imbalance (both have IC ~0.09-0.10)
+            // microprice_offset_bps has IC=-0.09 so we subtract it (positive offset = sell pressure)
+            {
+                let lob_score = obs.obi_10 + obs.depth_imbalance
+                    - 0.5 * obs.microprice_offset_bps.signum();
+                let lob_bullish = lob_score > 0.1;
+                let lob_bearish = lob_score < -0.1;
+
+                if lob_bullish {
+                    // LOB says UP: buy UP if there's any positive expected value
+                    let edge_up = 0.5 - obs.pm_up_ask - fee_up; // neutral prior, LOB provides direction
+                    if edge_up >= min_edge {
+                        let (p, w) = pnl_up(obs.settlement_up == 1.0);
+                        lob_only.record(w, p, stake_per_trade);
+                    }
+                } else if lob_bearish {
+                    let edge_down = 0.5 - obs.pm_down_ask - fee_down;
+                    if edge_down >= min_edge {
+                        let (p, w) = pnl_down(obs.settlement_up == 0.0);
+                        lob_only.record(w, p, stake_per_trade);
+                    }
+                }
+            }
+
+            // --- D. Combined (contrarian model + LOB filter must agree) ---
+            {
+                let contrarian_prob_up = 1.0 - obs.model_prob_up;
+                let edge_up = contrarian_prob_up - obs.pm_up_ask - fee_up;
+                let edge_down = (1.0 - contrarian_prob_up) - obs.pm_down_ask - fee_down;
+
+                let lob_score = obs.obi_10 + obs.depth_imbalance
+                    - 0.5 * obs.microprice_offset_bps.signum();
+                let lob_bullish = lob_score > 0.0;
+                let lob_bearish = lob_score < 0.0;
+
+                if edge_up >= min_edge && edge_up >= edge_down && lob_bullish {
+                    let (p, w) = pnl_up(obs.settlement_up == 1.0);
+                    combined.record(w, p, stake_per_trade);
+                } else if edge_down >= min_edge && lob_bearish {
+                    let (p, w) = pnl_down(obs.settlement_up == 0.0);
+                    combined.record(w, p, stake_per_trade);
                 }
             }
         }
     }
 
-    let win_rate = if total_trades > 0 {
-        wins as f64 / total_trades as f64 * 100.0
-    } else {
-        0.0
-    };
-    let roi = if total_stake > 0.0 {
-        total_pnl / total_stake * 100.0
-    } else {
-        0.0
-    };
-
-    eprintln!("\n=== P&L Simulation (last-tick entry, min_edge=2%) ===");
+    eprintln!("\n=== P&L Simulation (last-tick entry, min_edge=2%, stake=$25) ===");
     eprintln!(
-        "trades={} wins={} win_rate={:.1}% pnl=${:.2} stake=${:.0} roi={:.2}%",
-        total_trades, wins, win_rate, total_pnl, total_stake, roi
+        "{:<14} trades={:<6} wins={:<6} win_rate={:>5.1}%  pnl=${:>8.2}  stake=${:>8.0}  roi={:>7.2}%",
+        "A.Baseline", baseline.trades, baseline.wins, baseline.win_rate(),
+        baseline.pnl, baseline.stake, baseline.roi()
+    );
+    eprintln!(
+        "{:<14} trades={:<6} wins={:<6} win_rate={:>5.1}%  pnl=${:>8.2}  stake=${:>8.0}  roi={:>7.2}%",
+        "B.Contrarian", contrarian.trades, contrarian.wins, contrarian.win_rate(),
+        contrarian.pnl, contrarian.stake, contrarian.roi()
+    );
+    eprintln!(
+        "{:<14} trades={:<6} wins={:<6} win_rate={:>5.1}%  pnl=${:>8.2}  stake=${:>8.0}  roi={:>7.2}%",
+        "C.LOB-only", lob_only.trades, lob_only.wins, lob_only.win_rate(),
+        lob_only.pnl, lob_only.stake, lob_only.roi()
+    );
+    eprintln!(
+        "{:<14} trades={:<6} wins={:<6} win_rate={:>5.1}%  pnl=${:>8.2}  stake=${:>8.0}  roi={:>7.2}%",
+        "D.Combined", combined.trades, combined.wins, combined.win_rate(),
+        combined.pnl, combined.stake, combined.roi()
     );
 
     let mut settlement_metrics: Vec<_> = aggregated
