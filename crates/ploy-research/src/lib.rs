@@ -22,3 +22,11 @@ pub const CRATE_MARKER: &str = "ploy-research";
 pub fn crate_marker() -> &'static str {
     CRATE_MARKER
 }
+
+// New layered pipeline exports
+pub use factors_new::{FactorMeta, FactorRegistry, Regime, scan_into_registry};
+pub use signal::{Signal, SignalSource, ThresholdRule, RegimeRouter};
+pub use backtest::{run_binary_backtest, SimulatedFill, BacktestMetrics};
+pub use attribution::{regime_pnl, RegimePnl, factor_pnl, AttributionReport};
+pub use model::{RlAgent, StrategyModel, Transition};
+pub use model::rl::{BinaryEventEnv, Environment, ReplayBuffer, DqnAgent};
