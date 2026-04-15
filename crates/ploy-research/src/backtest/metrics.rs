@@ -19,7 +19,15 @@ impl BacktestMetrics {
         let total_pnl: f64 = pnls.iter().sum();
         let mean = total_pnl / n as f64;
         let variance = pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / n as f64;
-        let sharpe = if variance > 0.0 { mean / variance.sqrt() } else { 0.0 };
+        let sharpe = if variance > 0.0 {
+            mean / variance.sqrt()
+        } else if mean > 0.0 {
+            f64::INFINITY
+        } else if mean < 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            0.0
+        };
 
         let mut peak = 0.0_f64;
         let mut cumulative = 0.0_f64;

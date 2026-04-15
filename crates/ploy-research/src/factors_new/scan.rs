@@ -38,18 +38,15 @@ pub fn scan_into_registry(obs: &[FactorObservation], registry: &mut FactorRegist
         }
 
         for (label_name, label_fn) in LABELS {
-            let ys: Vec<f64> = regime_obs.iter().filter_map(|o| label_fn(o)).collect();
-            if ys.len() < MIN_OBS {
-                continue;
-            }
-            let n = ys.len();
-
             for (factor_name, factor_fn) in FACTOR_EXTRACTORS {
-                let xs: Vec<f64> = regime_obs.iter().take(n).map(|o| factor_fn(o)).collect();
+                let pairs: Vec<(f64, f64)> = regime_obs.iter()
+                    .filter_map(|o| label_fn(o).map(|y| (factor_fn(o), y)))
+                    .collect();
+                if pairs.len() < MIN_OBS { continue; }
+                let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
+                let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();
                 let ic = spearman_ic(&xs, &ys);
-                if ic.is_nan() {
-                    continue;
-                }
+                if ic.is_nan() { continue; }
                 registry.insert(FactorMeta {
                     name: factor_name.to_string(),
                     regime,

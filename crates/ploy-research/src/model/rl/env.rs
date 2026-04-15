@@ -17,6 +17,7 @@ pub struct BinaryEventEnv<'a> {
 
 impl<'a> BinaryEventEnv<'a> {
     pub fn new(obs: &'a [FactorObservation], fee: f64) -> Self {
+        assert!(!obs.is_empty(), "BinaryEventEnv requires at least one observation");
         Self { obs, cursor: 0, fee }
     }
 }

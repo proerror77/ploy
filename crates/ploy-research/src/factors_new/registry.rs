@@ -61,6 +61,10 @@ impl FactorRegistry {
     pub fn all(&self) -> &[FactorMeta] { &self.factors }
 }
 
+impl Default for FactorRegistry {
+    fn default() -> Self { Self::new() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
