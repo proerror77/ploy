@@ -567,6 +567,8 @@ pub fn spawn_quote_feed(
                                     token_id: token_str.clone(),
                                     bid,
                                     ask,
+                                    bid_size: None,
+                                    ask_size: None,
                                     ts: now,
                                 };
                                 if tx.send(update).is_err() {
