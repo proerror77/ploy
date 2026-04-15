@@ -926,6 +926,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                 bid,
                 ask,
                 ts,
+                ..
             } => {
                 self.quotes.insert(
                     token_id.clone(),

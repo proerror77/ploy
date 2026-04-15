@@ -763,6 +763,7 @@ impl StrategyLogic for ReversalStrategy {
                 bid,
                 ask,
                 ts,
+                ..
             } => {
                 self.quotes.insert(
                     token_id.clone(),

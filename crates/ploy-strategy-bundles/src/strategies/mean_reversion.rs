@@ -822,6 +822,7 @@ impl StrategyLogic for MeanReversionStrategy {
                 bid,
                 ask,
                 ts,
+                ..
             } => {
                 self.quotes.insert(
                     token_id.clone(),

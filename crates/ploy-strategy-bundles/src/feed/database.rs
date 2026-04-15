@@ -574,10 +574,10 @@ async fn load_pm_quotes(
     // - UP token:   best_bid is the real price, best_ask may be NULL
     // - DOWN token: best_ask is the real price, best_bid may be NULL
     // Accept rows where EITHER bid OR ask is in the real price range (0.01, 0.99).
-    let rows: Vec<(DateTime<Utc>, String, Option<Decimal>, Option<Decimal>)> = sqlx::query_as(
+    let rows: Vec<(DateTime<Utc>, String, Option<Decimal>, Option<Decimal>, Option<Decimal>, Option<Decimal>)> = sqlx::query_as(
         r#"
         SELECT DISTINCT ON (date_trunc('second', received_at), token_id)
-               received_at, token_id, best_bid, best_ask
+               received_at, token_id, best_bid, best_ask, bid_size, ask_size
         FROM clob_quote_ticks
         WHERE received_at >= $1
           AND received_at <= $2
@@ -604,11 +604,13 @@ async fn load_pm_quotes(
         sources = ?TRUSTED_PM_RESEARCH_QUOTE_SOURCES,
         "Loaded PM quotes from clob_quote_ticks (trusted sources, filtered: bid/ask in 0.02-0.98)"
     );
-    for (ts, token_id, bid, ask) in rows {
+    for (ts, token_id, bid, ask, bid_size, ask_size) in rows {
         updates.push(MarketUpdate::Quote {
             token_id,
             bid,
             ask,
+            bid_size,
+            ask_size,
             ts,
         });
     }
@@ -695,11 +697,11 @@ async fn load_pm_quotes_from_snapshots(
             token_id,
             bid,
             ask,
+            bid_size: None,
+            ask_size: None,
             ts,
         });
-    }
-
-    Ok(())
+    }    Ok(())
 }
 
 // ── L2 Data ──────────────────────────────────────────────

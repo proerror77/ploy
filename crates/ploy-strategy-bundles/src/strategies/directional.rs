@@ -1471,6 +1471,7 @@ impl StrategyLogic for DirectionalStrategy {
                 bid,
                 ask,
                 ts,
+                ..
             } => {
                 self.quotes.insert(
                     token_id.clone(),

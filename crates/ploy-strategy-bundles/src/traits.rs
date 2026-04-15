@@ -43,6 +43,8 @@ pub enum MarketUpdate {
         token_id: String,
         bid: Option<Decimal>,
         ask: Option<Decimal>,
+        bid_size: Option<Decimal>,
+        ask_size: Option<Decimal>,
         ts: DateTime<Utc>,
     },
 

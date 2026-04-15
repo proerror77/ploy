@@ -776,6 +776,14 @@ async fn main() {
                 .unwrap_or_else(|_| panic!("invalid three-layer-max-entry-price: {raw}"))
         })
         .unwrap_or(0.65);
+    // Minimum liquidity (ask_size in USDC) required to enter a trade.
+    // Filters out thin markets where slippage would be severe.
+    let three_layer_min_liquidity = flag_value(&args, "--three-layer-min-liquidity")
+        .map(|raw| {
+            raw.parse::<f64>()
+                .unwrap_or_else(|_| panic!("invalid three-layer-min-liquidity: {raw}"))
+        })
+        .unwrap_or(0.0); // default: no filter (backward-compatible)
     let three_layer_middle_vol_adjust = flag_value(&args, "--three-layer-middle-vol-adjust")
         .map(|raw| {
             raw.parse::<f64>()
@@ -1644,6 +1652,14 @@ async fn main() {
                 if entry_price > three_layer_max_entry_price {
                     continue;
                 }
+                // Liquidity filter: skip if ask_size is known and below threshold
+                let ask_size = if side_up { obs.pm_up_ask_size } else { obs.pm_down_ask_size };
+                if three_layer_min_liquidity > 0.0
+                    && ask_size.is_finite()
+                    && ask_size < three_layer_min_liquidity
+                {
+                    continue;
+                }
 
                 traded = true;
                 three_layer_one_trade.overall.record(
@@ -1686,12 +1702,12 @@ async fn main() {
     }
 
     eprintln!(
-        "\n=== P&L by Entry Time (min_edge=2%, stake=$25, three_layer_confirm_min={}, three_layer_rr_min={:.2}, three_layer_max_entry={:.2}, middle_vol_adjust={:.2}, late_distance_adjust={:.2}) ===",
+        "\n=== P&L by Entry Time (min_edge=2%, stake=$25, three_layer_confirm_min={}, three_layer_rr_min={:.2}, three_layer_max_entry={:.2}, min_liquidity={:.0}, middle_vol_adjust={:.2}) ===",
         three_layer_confirmations_min,
         three_layer_reward_risk_min,
         three_layer_max_entry_price,
-        three_layer_middle_vol_adjust,
-        three_layer_late_distance_adjust
+        three_layer_min_liquidity,
+        three_layer_middle_vol_adjust
     );
     eprintln!(
         "{:<8} {:<14} {:<43} {:<43} {:<43} {:<43}",
