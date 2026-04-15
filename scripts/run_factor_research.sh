@@ -19,9 +19,9 @@ HOST="${PLOY_RESEARCH_HOST:-tango-1-1}"
 BINARY="${PLOY_RESEARCH_BINARY:-/opt/ploy/bin/factor-research}"
 DB_URL="${PLOY_RESEARCH_DB_URL:-postgresql://postgres:postgres@localhost:5432/ploy}"
 
-exec ssh "${HOST}" systemd-run --scope --quiet \
-  -p MemoryMax=768M \
-  -p MemoryHigh=512M \
+exec ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+  "${HOST}" systemd-run --scope --quiet \
+  -p MemoryMax=3G \
   "${BINARY}" \
   --db-url "${DB_URL}" \
   --discover-valid-5m-windows \

@@ -35,6 +35,7 @@ env:
     034_clob_quote_ticks_full_resolution.sql
     035_binance_agg_trade_ticks.sql
     036_research_valid_windows_matview.sql
+    037_research_time_conditioned_factor_metrics.sql
 
 jobs:
   build-and-deploy:
