@@ -18,6 +18,14 @@ serde_json.workspace = true
 sqlx.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
+uuid.workspace = true
+anyhow = "1"
+linfa = "0.8"
+linfa-logistic = "0.8"
+linfa-trees = "0.8"
+forust-ml = "0.5"
+burn = { version = "0.17", default-features = false, features = ["ndarray", "autodiff", "std"] }
+burn-ndarray = "0.17"
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
