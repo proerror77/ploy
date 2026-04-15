@@ -23,9 +23,16 @@ pub struct FactorObservation {
     pub flip_age_secs: f64,
     pub post_flip_drift: f64,
     pub sigma_horizon: f64,
+    pub fair_prob_up: f64,
+    pub fair_prob_up_clean: f64,
+    pub prob_disagreement: f64,
+    pub implied_sigma_horizon: f64,
+    pub vol_gap: f64,
     pub distance_over_sigma: f64,
     pub model_prob_up: f64,
     pub model_edge_up: f64,
+    pub reward_risk_up: f64,
+    pub reward_risk_down: f64,
     pub obi: f64,
     pub spread_bps: f64,
     pub microprice_offset_bps: f64,
@@ -36,7 +43,9 @@ pub struct FactorObservation {
     pub depth_far_ratio: f64,
     pub depth_acceleration: f64,
     pub obi_10: f64,
+    pub pm_up_bid: f64,
     pub pm_up_ask: f64,
+    pub pm_down_bid: f64,
     pub pm_down_ask: f64,
     pub pm_lag_secs: f64,
     pub settlement_up: f64,
@@ -61,9 +70,16 @@ pub struct EventFactorSummary {
     pub flip_age_secs: f64,
     pub post_flip_drift: f64,
     pub sigma_horizon: f64,
+    pub fair_prob_up: f64,
+    pub fair_prob_up_clean: f64,
+    pub prob_disagreement: f64,
+    pub implied_sigma_horizon: f64,
+    pub vol_gap: f64,
     pub distance_over_sigma: f64,
     pub model_prob_up: f64,
     pub model_edge_up: f64,
+    pub reward_risk_up: f64,
+    pub reward_risk_down: f64,
     pub obi: f64,
     pub spread_bps: f64,
     pub microprice_offset_bps: f64,
@@ -74,7 +90,9 @@ pub struct EventFactorSummary {
     pub depth_far_ratio: f64,
     pub depth_acceleration: f64,
     pub obi_10: f64,
+    pub pm_up_bid: f64,
     pub pm_up_ask: f64,
+    pub pm_down_bid: f64,
     pub pm_down_ask: f64,
     pub pm_lag_secs: f64,
     pub cum_obi_delta_5m: f64,
@@ -519,7 +537,7 @@ pub fn build_factor_observations_with_lob(
     let mut vol: HashMap<String, VolatilityState> = HashMap::new();
     let mut retbuf: HashMap<String, ReturnBuffer> = HashMap::new();
     let mut events: HashMap<String, EventState> = HashMap::new();
-    let mut quotes: HashMap<String, (DateTime<Utc>, f64)> = HashMap::new();
+    let mut quotes: HashMap<String, (DateTime<Utc>, f64, f64)> = HashMap::new();
     let mut lob: HashMap<String, LobState> = HashMap::new();
     let mut lob_by_symbol: HashMap<String, Vec<&ResearchLobSnapshot>> = HashMap::new();
     let mut lob_flow: HashMap<String, LobFlowAccumulator> = HashMap::new();
@@ -574,10 +592,12 @@ pub fn build_factor_observations_with_lob(
                 }
             }
             MarketUpdate::Quote {
-                token_id, ask, ts, ..
+                token_id, bid, ask, ts, ..
             } => {
-                if let Some(ask) = ask.and_then(|value| value.to_f64()) {
-                    quotes.insert(token_id.clone(), (*ts, ask));
+                let bid = bid.and_then(|value| value.to_f64()).unwrap_or(f64::NAN);
+                let ask = ask.and_then(|value| value.to_f64()).unwrap_or(f64::NAN);
+                if bid.is_finite() || ask.is_finite() {
+                    quotes.insert(token_id.clone(), (*ts, bid, ask));
                 }
             }
             MarketUpdate::L2 {
@@ -745,13 +765,15 @@ pub fn build_factor_observations_with_lob(
                         continue;
                     }
 
-                    let (up_ask, up_lag) = quotes
+                    let (up_bid, up_ask, up_lag) = quotes
                         .get(&event.up_token)
-                        .map(|(quote_ts, ask)| (*ask, (*ts - *quote_ts).num_seconds() as f64))
-                        .unwrap_or((f64::NAN, f64::NAN));
-                    let (down_ask, _) = quotes
+                        .map(|(quote_ts, bid, ask)| {
+                            (*bid, *ask, (*ts - *quote_ts).num_seconds() as f64)
+                        })
+                        .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
+                    let (down_bid, down_ask) = quotes
                         .get(&event.down_token)
-                        .map(|(quote_ts, ask)| (*ask, (*ts - *quote_ts).num_seconds() as f64))
+                        .map(|(_, bid, ask)| (*bid, *ask))
                         .unwrap_or((f64::NAN, f64::NAN));
 
                     if !up_lag.is_finite() || up_lag < 0.0 || up_lag > max_quote_age_secs as f64 {
@@ -820,12 +842,37 @@ pub fn build_factor_observations_with_lob(
                         f64::NAN
                     };
 
+                    let up_break_even_prob = if up_ask.is_finite() {
+                        (up_ask + crypto_fee_cost(up_ask)).clamp(1e-4, 1.0 - 1e-4)
+                    } else {
+                        f64::NAN
+                    };
+                    let down_break_even_prob = if down_ask.is_finite() {
+                        (down_ask + crypto_fee_cost(down_ask)).clamp(1e-4, 1.0 - 1e-4)
+                    } else {
+                        f64::NAN
+                    };
+                    let fair_prob_up = fair_market_prob_up(up_bid, up_ask, down_bid, down_ask);
+                    let fair_prob_up_clean =
+                        clean_market_prob_up(up_bid, up_ask, down_bid, down_ask, up_break_even_prob, down_break_even_prob);
+                    let prob_disagreement =
+                        implied_prob_disagreement(up_break_even_prob, down_break_even_prob);
+                    let implied_sigma_horizon =
+                        implied_sigma_horizon(price_to_beat, spot_price, fair_prob_up_clean);
+                    let vol_gap = if implied_sigma_horizon.is_finite() {
+                        implied_sigma_horizon - sigma_horizon
+                    } else {
+                        f64::NAN
+                    };
+
                     let model_prob_up = estimate_probability(price_to_beat, spot_price, sigma_horizon);
                     let model_edge_up = if up_ask.is_finite() {
                         model_prob_up - up_ask - crypto_fee_cost(up_ask)
                     } else {
                         f64::NAN
                     };
+                    let reward_risk_up = reward_risk_ratio(up_ask);
+                    let reward_risk_down = reward_risk_ratio(down_ask);
                     let flip_age_secs = dstate
                         .flip_ts
                         .map(|flip_ts| (*ts - flip_ts).num_milliseconds() as f64 / 1000.0)
@@ -843,9 +890,16 @@ pub fn build_factor_observations_with_lob(
                         flip_age_secs,
                         post_flip_drift: dstate.post_flip_drift,
                         sigma_horizon,
+                        fair_prob_up,
+                        fair_prob_up_clean,
+                        prob_disagreement,
+                        implied_sigma_horizon,
+                        vol_gap,
                         distance_over_sigma,
                         model_prob_up,
                         model_edge_up,
+                        reward_risk_up,
+                        reward_risk_down,
                         obi: lob_state.obi,
                         spread_bps: lob_state.spread_bps,
                         microprice_offset_bps,
@@ -856,7 +910,9 @@ pub fn build_factor_observations_with_lob(
                         depth_far_ratio,
                         depth_acceleration,
                         obi_10: lob_state.obi_10,
+                        pm_up_bid: up_bid,
                         pm_up_ask: up_ask,
+                        pm_down_bid: down_bid,
                         pm_down_ask: down_ask,
                         pm_lag_secs: up_lag,
                         settlement_up: if resolved_up_won { 1.0 } else { 0.0 },
@@ -969,9 +1025,16 @@ pub fn build_event_summaries(rows: &[FactorObservation]) -> Vec<EventFactorSumma
                 flip_age_secs: mean(rows.iter().map(|row| row.flip_age_secs)),
                 post_flip_drift: mean(rows.iter().map(|row| row.post_flip_drift)),
                 sigma_horizon: mean(rows.iter().map(|row| row.sigma_horizon)),
+                fair_prob_up: mean(rows.iter().map(|row| row.fair_prob_up)),
+                fair_prob_up_clean: mean(rows.iter().map(|row| row.fair_prob_up_clean)),
+                prob_disagreement: mean(rows.iter().map(|row| row.prob_disagreement)),
+                implied_sigma_horizon: mean(rows.iter().map(|row| row.implied_sigma_horizon)),
+                vol_gap: mean(rows.iter().map(|row| row.vol_gap)),
                 distance_over_sigma: mean(rows.iter().map(|row| row.distance_over_sigma)),
                 model_prob_up: mean(rows.iter().map(|row| row.model_prob_up)),
                 model_edge_up: mean(rows.iter().map(|row| row.model_edge_up)),
+                reward_risk_up: mean(rows.iter().map(|row| row.reward_risk_up)),
+                reward_risk_down: mean(rows.iter().map(|row| row.reward_risk_down)),
                 obi: mean(rows.iter().map(|row| row.obi)),
                 spread_bps: mean(rows.iter().map(|row| row.spread_bps)),
                 microprice_offset_bps: mean(rows.iter().map(|row| row.microprice_offset_bps)),
@@ -982,7 +1045,9 @@ pub fn build_event_summaries(rows: &[FactorObservation]) -> Vec<EventFactorSumma
                 depth_far_ratio: mean(rows.iter().map(|row| row.depth_far_ratio)),
                 depth_acceleration: mean(rows.iter().map(|row| row.depth_acceleration)),
                 obi_10: mean(rows.iter().map(|row| row.obi_10)),
+                pm_up_bid: mean(rows.iter().map(|row| row.pm_up_bid)),
                 pm_up_ask: mean(rows.iter().map(|row| row.pm_up_ask)),
+                pm_down_bid: mean(rows.iter().map(|row| row.pm_down_bid)),
                 pm_down_ask: mean(rows.iter().map(|row| row.pm_down_ask)),
                 pm_lag_secs: mean(rows.iter().map(|row| row.pm_lag_secs)),
                 cum_obi_delta_5m: mean(rows.iter().map(|row| row.cum_obi_delta_5m)),
@@ -1147,9 +1212,16 @@ pub fn observations_to_frame(rows: &[FactorObservation]) -> PolarsResult<DataFra
         "flip_age_secs" => rows.iter().map(|row| row.flip_age_secs).collect::<Vec<_>>(),
         "post_flip_drift" => rows.iter().map(|row| row.post_flip_drift).collect::<Vec<_>>(),
         "sigma_horizon" => rows.iter().map(|row| row.sigma_horizon).collect::<Vec<_>>(),
+        "fair_prob_up" => rows.iter().map(|row| row.fair_prob_up).collect::<Vec<_>>(),
+        "fair_prob_up_clean" => rows.iter().map(|row| row.fair_prob_up_clean).collect::<Vec<_>>(),
+        "prob_disagreement" => rows.iter().map(|row| row.prob_disagreement).collect::<Vec<_>>(),
+        "implied_sigma_horizon" => rows.iter().map(|row| row.implied_sigma_horizon).collect::<Vec<_>>(),
+        "vol_gap" => rows.iter().map(|row| row.vol_gap).collect::<Vec<_>>(),
         "distance_over_sigma" => rows.iter().map(|row| row.distance_over_sigma).collect::<Vec<_>>(),
         "model_prob_up" => rows.iter().map(|row| row.model_prob_up).collect::<Vec<_>>(),
         "model_edge_up" => rows.iter().map(|row| row.model_edge_up).collect::<Vec<_>>(),
+        "reward_risk_up" => rows.iter().map(|row| row.reward_risk_up).collect::<Vec<_>>(),
+        "reward_risk_down" => rows.iter().map(|row| row.reward_risk_down).collect::<Vec<_>>(),
         "obi" => rows.iter().map(|row| row.obi).collect::<Vec<_>>(),
         "spread_bps" => rows.iter().map(|row| row.spread_bps).collect::<Vec<_>>(),
         "microprice_offset_bps" => rows.iter().map(|row| row.microprice_offset_bps).collect::<Vec<_>>(),
@@ -1160,7 +1232,9 @@ pub fn observations_to_frame(rows: &[FactorObservation]) -> PolarsResult<DataFra
         "depth_far_ratio" => rows.iter().map(|row| row.depth_far_ratio).collect::<Vec<_>>(),
         "depth_acceleration" => rows.iter().map(|row| row.depth_acceleration).collect::<Vec<_>>(),
         "obi_10" => rows.iter().map(|row| row.obi_10).collect::<Vec<_>>(),
+        "pm_up_bid" => rows.iter().map(|row| row.pm_up_bid).collect::<Vec<_>>(),
         "pm_up_ask" => rows.iter().map(|row| row.pm_up_ask).collect::<Vec<_>>(),
+        "pm_down_bid" => rows.iter().map(|row| row.pm_down_bid).collect::<Vec<_>>(),
         "pm_down_ask" => rows.iter().map(|row| row.pm_down_ask).collect::<Vec<_>>(),
         "pm_lag_secs" => rows.iter().map(|row| row.pm_lag_secs).collect::<Vec<_>>(),
         "settlement_up" => rows.iter().map(|row| row.settlement_up).collect::<Vec<_>>(),
@@ -1178,9 +1252,16 @@ fn row_factor_accessors() -> Vec<(&'static str, fn(&FactorObservation) -> f64)> 
         ("flip_age_secs", |row| row.flip_age_secs),
         ("post_flip_drift", |row| row.post_flip_drift),
         ("sigma_horizon", |row| row.sigma_horizon),
+        ("fair_prob_up", |row| row.fair_prob_up),
+        ("fair_prob_up_clean", |row| row.fair_prob_up_clean),
+        ("prob_disagreement", |row| row.prob_disagreement),
+        ("implied_sigma_horizon", |row| row.implied_sigma_horizon),
+        ("vol_gap", |row| row.vol_gap),
         ("distance_over_sigma", |row| row.distance_over_sigma),
         ("model_prob_up", |row| row.model_prob_up),
         ("model_edge_up", |row| row.model_edge_up),
+        ("reward_risk_up", |row| row.reward_risk_up),
+        ("reward_risk_down", |row| row.reward_risk_down),
         ("obi", |row| row.obi),
         ("spread_bps", |row| row.spread_bps),
         ("microprice_offset_bps", |row| row.microprice_offset_bps),
@@ -1189,7 +1270,9 @@ fn row_factor_accessors() -> Vec<(&'static str, fn(&FactorObservation) -> f64)> 
         ("depth_far_ratio", |row| row.depth_far_ratio),
         ("depth_acceleration", |row| row.depth_acceleration),
         ("obi_10", |row| row.obi_10),
+        ("pm_up_bid", |row| row.pm_up_bid),
         ("pm_up_ask", |row| row.pm_up_ask),
+        ("pm_down_bid", |row| row.pm_down_bid),
         ("pm_lag_secs", |row| row.pm_lag_secs),
         ("cum_obi_delta_5m", |row| row.cum_obi_delta_5m),
         ("cum_depth_delta_5m", |row| row.cum_depth_delta_5m),
@@ -1207,9 +1290,16 @@ fn event_factor_accessors() -> Vec<(&'static str, fn(&EventFactorSummary) -> f64
         ("flip_age_secs", |row| row.flip_age_secs),
         ("post_flip_drift", |row| row.post_flip_drift),
         ("sigma_horizon", |row| row.sigma_horizon),
+        ("fair_prob_up", |row| row.fair_prob_up),
+        ("fair_prob_up_clean", |row| row.fair_prob_up_clean),
+        ("prob_disagreement", |row| row.prob_disagreement),
+        ("implied_sigma_horizon", |row| row.implied_sigma_horizon),
+        ("vol_gap", |row| row.vol_gap),
         ("distance_over_sigma", |row| row.distance_over_sigma),
         ("model_prob_up", |row| row.model_prob_up),
         ("model_edge_up", |row| row.model_edge_up),
+        ("reward_risk_up", |row| row.reward_risk_up),
+        ("reward_risk_down", |row| row.reward_risk_down),
         ("obi", |row| row.obi),
         ("spread_bps", |row| row.spread_bps),
         ("microprice_offset_bps", |row| row.microprice_offset_bps),
@@ -1218,7 +1308,9 @@ fn event_factor_accessors() -> Vec<(&'static str, fn(&EventFactorSummary) -> f64
         ("depth_far_ratio", |row| row.depth_far_ratio),
         ("depth_acceleration", |row| row.depth_acceleration),
         ("obi_10", |row| row.obi_10),
+        ("pm_up_bid", |row| row.pm_up_bid),
         ("pm_up_ask", |row| row.pm_up_ask),
+        ("pm_down_bid", |row| row.pm_down_bid),
         ("pm_lag_secs", |row| row.pm_lag_secs),
         ("cum_obi_delta_5m", |row| row.cum_obi_delta_5m),
         ("cum_depth_delta_5m", |row| row.cum_depth_delta_5m),
@@ -1254,6 +1346,74 @@ fn estimate_probability(s0: f64, st: f64, sigma_horizon: f64) -> f64 {
     normal_cdf(z)
 }
 
+fn quote_mid(bid: f64, ask: f64) -> f64 {
+    if bid.is_finite() && ask.is_finite() && bid > 0.0 && ask > 0.0 && bid <= ask {
+        0.5 * (bid + ask)
+    } else if ask.is_finite() && ask > 0.0 {
+        ask
+    } else if bid.is_finite() && bid > 0.0 {
+        bid
+    } else {
+        f64::NAN
+    }
+}
+
+fn fair_market_prob_up(up_bid: f64, up_ask: f64, down_bid: f64, down_ask: f64) -> f64 {
+    let up_mid = quote_mid(up_bid, up_ask);
+    let down_mid = quote_mid(down_bid, down_ask);
+    if !up_mid.is_finite() || !down_mid.is_finite() || up_mid <= 0.0 || down_mid <= 0.0 {
+        return f64::NAN;
+    }
+    let total = up_mid + down_mid;
+    if total <= 0.0 {
+        return f64::NAN;
+    }
+    (up_mid / total).clamp(1e-4, 1.0 - 1e-4)
+}
+
+fn clean_market_prob_up(
+    up_bid: f64,
+    up_ask: f64,
+    down_bid: f64,
+    down_ask: f64,
+    up_break_even_prob: f64,
+    down_break_even_prob: f64,
+) -> f64 {
+    if !up_break_even_prob.is_finite() || !down_break_even_prob.is_finite() {
+        return f64::NAN;
+    }
+    let down_implied_up = 1.0 - down_break_even_prob;
+    let ask_clean = 0.5 * (up_break_even_prob + down_implied_up);
+    let mid_fair = fair_market_prob_up(up_bid, up_ask, down_bid, down_ask);
+    if mid_fair.is_finite() {
+        (0.5 * ask_clean + 0.5 * mid_fair).clamp(1e-4, 1.0 - 1e-4)
+    } else {
+        ask_clean.clamp(1e-4, 1.0 - 1e-4)
+    }
+}
+
+fn implied_prob_disagreement(up_break_even_prob: f64, down_break_even_prob: f64) -> f64 {
+    if !up_break_even_prob.is_finite() || !down_break_even_prob.is_finite() {
+        return f64::NAN;
+    }
+    up_break_even_prob - (1.0 - down_break_even_prob)
+}
+
+fn implied_sigma_horizon(s0: f64, st: f64, fair_prob_up: f64) -> f64 {
+    if !s0.is_finite() || !st.is_finite() || s0 <= 0.0 || st <= 0.0 || !fair_prob_up.is_finite() {
+        return f64::NAN;
+    }
+    let log_ratio = (st / s0).ln().abs();
+    if log_ratio <= 1e-12 {
+        return 0.0;
+    }
+    let z = inv_normal_cdf(fair_prob_up);
+    if !z.is_finite() || z.abs() <= 1e-9 {
+        return f64::NAN;
+    }
+    log_ratio / z.abs()
+}
+
 fn normal_cdf(x: f64) -> f64 {
     let a1 = 0.254829592_f64;
     let a2 = -0.284496736_f64;
@@ -1270,8 +1430,77 @@ fn normal_cdf(x: f64) -> f64 {
     0.5 * (1.0 + sign * y)
 }
 
+fn inv_normal_cdf(p: f64) -> f64 {
+    if !p.is_finite() {
+        return f64::NAN;
+    }
+    let p = p.clamp(1e-12, 1.0 - 1e-12);
+
+    const A: [f64; 6] = [
+        -3.969_683_028_665_376e1,
+        2.209_460_984_245_205e2,
+        -2.759_285_104_469_687e2,
+        1.383_577_518_672_69e2,
+        -3.066_479_806_614_716e1,
+        2.506_628_277_459_239,
+    ];
+    const B: [f64; 5] = [
+        -5.447_609_879_822_406e1,
+        1.615_858_368_580_409e2,
+        -1.556_989_798_598_866e2,
+        6.680_131_188_771_972e1,
+        -1.328_068_155_288_572e1,
+    ];
+    const C: [f64; 6] = [
+        -7.784_894_002_430_293e-3,
+        -3.223_964_580_411_365e-1,
+        -2.400_758_277_161_838,
+        -2.549_732_539_343_734,
+        4.374_664_141_464_968,
+        2.938_163_982_698_783,
+    ];
+    const D: [f64; 4] = [
+        7.784_695_709_041_462e-3,
+        3.224_671_290_700_398e-1,
+        2.445_134_137_142_996,
+        3.754_408_661_907_416,
+    ];
+
+    const P_LOW: f64 = 0.02425;
+    const P_HIGH: f64 = 1.0 - P_LOW;
+
+    if p < P_LOW {
+        let q = (-2.0 * p.ln()).sqrt();
+        return (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0);
+    }
+    if p > P_HIGH {
+        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        return -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0);
+    }
+
+    let q = p - 0.5;
+    let r = q * q;
+    (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+        / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+}
+
 fn crypto_fee_cost(entry_price: f64) -> f64 {
     0.02 * entry_price * (1.0 - entry_price)
+}
+
+fn reward_risk_ratio(entry_price: f64) -> f64 {
+    if !entry_price.is_finite() || entry_price <= 0.0 || entry_price >= 1.0 {
+        return f64::NAN;
+    }
+    let fee = crypto_fee_cost(entry_price);
+    let reward = 1.0 - entry_price - fee;
+    let risk = entry_price + fee;
+    if risk <= 0.0 {
+        return f64::NAN;
+    }
+    reward / risk
 }
 
 fn signum(value: f64) -> f64 {
@@ -1429,9 +1658,16 @@ mod tests {
                     flip_age_secs: 0.0,
                     post_flip_drift: 0.0,
                     sigma_horizon: 1.0,
+                    fair_prob_up: 0.4,
+                    fair_prob_up_clean: 0.39,
+                    prob_disagreement: 0.02,
+                    implied_sigma_horizon: 0.2,
+                    vol_gap: -0.8,
                     distance_over_sigma: 0.0,
                     model_prob_up: 0.5,
                     model_edge_up: 0.0,
+                    reward_risk_up: 1.0,
+                    reward_risk_down: 0.5,
                     obi: 0.0,
                     spread_bps: 0.0,
                     microprice_offset_bps: f64::NAN,
@@ -1442,7 +1678,9 @@ mod tests {
                     depth_far_ratio: 0.0,
                     depth_acceleration: 0.0,
                     obi_10: 0.0,
+                    pm_up_bid: 0.39,
                     pm_up_ask: 0.40,
+                    pm_down_bid: 0.59,
                     pm_down_ask: 0.60,
                     pm_lag_secs: 0.0,
                     settlement_up: 1.0,
@@ -1465,9 +1703,16 @@ mod tests {
                     flip_age_secs: 0.0,
                     post_flip_drift: 0.0,
                     sigma_horizon: 1.0,
+                    fair_prob_up: 0.1,
+                    fair_prob_up_clean: 0.12,
+                    prob_disagreement: -0.01,
+                    implied_sigma_horizon: 0.3,
+                    vol_gap: -0.7,
                     distance_over_sigma: 0.0,
                     model_prob_up: 0.5,
                     model_edge_up: 0.0,
+                    reward_risk_up: 4.0,
+                    reward_risk_down: 0.1,
                     obi: 0.0,
                     spread_bps: 0.0,
                     microprice_offset_bps: f64::NAN,
@@ -1478,7 +1723,9 @@ mod tests {
                     depth_far_ratio: 0.0,
                     depth_acceleration: 0.0,
                     obi_10: 0.0,
+                    pm_up_bid: 0.09,
                     pm_up_ask: 0.10,
+                    pm_down_bid: 0.89,
                     pm_down_ask: 0.90,
                     pm_lag_secs: 0.0,
                     settlement_up: 1.0,
@@ -1501,9 +1748,16 @@ mod tests {
                     flip_age_secs: 0.0,
                     post_flip_drift: 0.0,
                     sigma_horizon: 1.0,
+                    fair_prob_up: 0.6,
+                    fair_prob_up_clean: 0.58,
+                    prob_disagreement: 0.03,
+                    implied_sigma_horizon: 0.4,
+                    vol_gap: -0.6,
                     distance_over_sigma: 0.0,
                     model_prob_up: 0.5,
                     model_edge_up: 0.0,
+                    reward_risk_up: 0.6,
+                    reward_risk_down: 1.5,
                     obi: 0.0,
                     spread_bps: 0.0,
                     microprice_offset_bps: f64::NAN,
@@ -1514,7 +1768,9 @@ mod tests {
                     depth_far_ratio: 0.0,
                     depth_acceleration: 0.0,
                     obi_10: 0.0,
+                    pm_up_bid: 0.24,
                     pm_up_ask: 0.25,
+                    pm_down_bid: 0.74,
                     pm_down_ask: 0.75,
                     pm_lag_secs: 0.0,
                     settlement_up: 1.0,
