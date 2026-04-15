@@ -29,6 +29,7 @@ impl<'a> Environment for BinaryEventEnv<'a> {
     }
 
     fn step(&mut self, action: u8) -> (Vec<f64>, f64, bool) {
+        assert!(self.cursor < self.obs.len(), "step() called after done=true");
         let o = &self.obs[self.cursor];
         let settled_up = o.settlement_up > 0.5;
         let reward = match action {

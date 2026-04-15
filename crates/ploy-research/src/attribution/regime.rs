@@ -45,11 +45,11 @@ mod tests {
         let fills = vec![
             fill(Regime::Early, 0.3),
             fill(Regime::Early, -0.1),
-            fill(Regime::Late, 0.2),
+            fill(Regime::Middle, 0.2),
         ];
         let by_regime = regime_pnl(&fills);
         assert!((by_regime[&Regime::Early].total_pnl - 0.2).abs() < 1e-9);
         assert_eq!(by_regime[&Regime::Early].trade_count, 2);
-        assert_eq!(by_regime[&Regime::Late].trade_count, 1);
+        assert_eq!(by_regime[&Regime::Middle].trade_count, 1);
     }
 }

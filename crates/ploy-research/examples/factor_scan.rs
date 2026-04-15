@@ -184,7 +184,7 @@ async fn main() {
     eprintln!("scan_into_registry: {:?} ({} factors registered)", t3.elapsed(), registry.all().len());
 
     // Print top-N factors per regime × label.
-    let regimes = [Regime::Early, Regime::Middle, Regime::Late, Regime::Expiry];
+    let regimes = [Regime::Early, Regime::Middle, Regime::Expiry];
     let labels = ["settlement_up", "future_up_ask_change_30s"];
 
     for regime in &regimes {

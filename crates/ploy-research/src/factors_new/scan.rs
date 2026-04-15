@@ -28,7 +28,7 @@ const LABELS: &[(&str, fn(&FactorObservation) -> Option<f64>)] = &[
 ];
 
 pub fn scan_into_registry(obs: &[FactorObservation], registry: &mut FactorRegistry) {
-    for regime in [Regime::Early, Regime::Middle, Regime::Late, Regime::Expiry] {
+    for regime in [Regime::Early, Regime::Middle, Regime::Expiry] {
         let regime_obs: Vec<&FactorObservation> = obs
             .iter()
             .filter(|o| Regime::from_secs(o.time_remaining_secs) == regime)
@@ -117,10 +117,10 @@ mod tests {
 
     #[test]
     fn scan_populates_registry_for_early_regime() {
-        // 20 observations in early regime (250s remaining)
+        // 20 observations in early regime (285s remaining, >270s = Early)
         // distance_over_sigma increases monotonically → should have non-zero IC with settlement_up
         let observations: Vec<FactorObservation> = (0..20)
-            .map(|i| obs(250, i as f64 * 0.1, if i % 2 == 0 { 1.0 } else { 0.0 }))
+            .map(|i| obs(285, i as f64 * 0.1, if i % 2 == 0 { 1.0 } else { 0.0 }))
             .collect();
         let mut reg = FactorRegistry::new();
         scan_into_registry(&observations, &mut reg);

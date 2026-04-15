@@ -1,25 +1,24 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Regime {
-    Early,   // 181..=300s
-    Middle,  // 61..=180s
-    Late,    // 6..=60s
-    Expiry,  // 0..=5s
+    Early,   // >270s  (first 30s of event, price still settling)
+    Middle,  // 61..=270s (main trading zone)
+    Expiry,  // 0..=60s  (last 60s, no trading — thin liquidity)
 }
 
 impl Regime {
     pub fn from_secs(t: i64) -> Self {
-        match t {
-            181..=300 => Regime::Early,
-            61..=180  => Regime::Middle,
-            6..=60    => Regime::Late,
-            _         => Regime::Expiry,
+        if t > 270 {
+            Regime::Early
+        } else if t > 60 {
+            Regime::Middle
+        } else {
+            Regime::Expiry
         }
     }
     pub fn as_str(self) -> &'static str {
         match self {
             Regime::Early  => "early",
             Regime::Middle => "middle",
-            Regime::Late   => "late",
             Regime::Expiry => "expiry",
         }
     }
@@ -46,7 +45,7 @@ impl FactorRegistry {
         let mut v: Vec<&FactorMeta> = self.factors.iter()
             .filter(|m| m.regime == regime && m.label == label)
             .collect();
-        v.sort_by(|a, b| b.ic.abs().partial_cmp(&a.ic.abs()).unwrap());
+        v.sort_by(|a, b| b.ic.abs().partial_cmp(&a.ic.abs()).unwrap_or(std::cmp::Ordering::Equal));
         v.truncate(n);
         v
     }
@@ -54,7 +53,7 @@ impl FactorRegistry {
     pub fn for_regime(&self, regime: Regime) -> Vec<&FactorMeta> {
         let mut v: Vec<&FactorMeta> = self.factors.iter()
             .filter(|m| m.regime == regime).collect();
-        v.sort_by(|a, b| b.ic.abs().partial_cmp(&a.ic.abs()).unwrap());
+        v.sort_by(|a, b| b.ic.abs().partial_cmp(&a.ic.abs()).unwrap_or(std::cmp::Ordering::Equal));
         v
     }
 
@@ -72,8 +71,11 @@ mod tests {
     #[test]
     fn regime_from_time_remaining() {
         assert_eq!(Regime::from_secs(290), Regime::Early);
+        assert_eq!(Regime::from_secs(271), Regime::Early);
+        assert_eq!(Regime::from_secs(270), Regime::Middle);
         assert_eq!(Regime::from_secs(120), Regime::Middle);
-        assert_eq!(Regime::from_secs(30),  Regime::Late);
+        assert_eq!(Regime::from_secs(61),  Regime::Middle);
+        assert_eq!(Regime::from_secs(60),  Regime::Expiry);
         assert_eq!(Regime::from_secs(3),   Regime::Expiry);
     }
 

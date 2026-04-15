@@ -65,7 +65,7 @@ mod tests {
     fn router_dispatches_to_correct_regime_source() {
         let mut router = RegimeRouter::new(Box::new(FixedSignal(Signal::Hold)));
         router.set(Regime::Early, Box::new(FixedSignal(Signal::Buy)));
-        assert_eq!(router.signal(&obs_at(250)), Signal::Buy);   // early
-        assert_eq!(router.signal(&obs_at(30)),  Signal::Hold);  // late -> falls back to default
+        assert_eq!(router.signal(&obs_at(285)), Signal::Buy);   // early (>270s)
+        assert_eq!(router.signal(&obs_at(30)),  Signal::Hold);  // expiry -> falls back to default
     }
 }

@@ -19,6 +19,7 @@ impl ReplayBuffer {
     pub fn is_empty(&self) -> bool { self.buffer.is_empty() }
     /// Deterministic sample: evenly spaced. Replace with random sampling in production.
     pub fn sample(&self, n: usize) -> Vec<&Transition> {
+        if n == 0 || self.buffer.is_empty() { return vec![]; }
         let step = (self.buffer.len() / n).max(1);
         self.buffer.iter().step_by(step).take(n).collect()
     }
