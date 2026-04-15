@@ -1,6 +1,12 @@
 pub mod backtesting;
 pub mod factors;
 pub mod replay;
+pub mod data;
+pub mod factors_new;
+pub mod signal;
+pub mod backtest;
+pub mod attribution;
+pub mod model;
 
 pub use backtesting::{run_backtest, BacktestReport};
 pub use factors::{
