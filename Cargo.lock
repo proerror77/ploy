@@ -53,6 +53,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-no-stdlib"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
+
+[[package]]
+name = "alloc-stdlib"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94fb8275041c72129eb51b7d0322c29b8387a0386127718b096429201a5d6ece"
+dependencies = [
+ "alloc-no-stdlib",
+]
+
+[[package]]
 name = "alloca"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1482,6 +1497,27 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "brotli"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc97b8f16f944bba54f0433f07e30be199b6dc2bd25937444bbad560bcea29bd"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a334ef7c9e23abf0ce748e8cd309037da93e606ad52eb372e4ce327a0dcfbdfd"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
 ]
 
 [[package]]
@@ -3321,6 +3357,7 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -6003,6 +6040,7 @@ dependencies = [
  "polars-lazy",
  "polars-ops",
  "polars-parquet",
+ "polars-sql",
  "polars-time",
  "polars-utils",
  "version_check",
@@ -6015,6 +6053,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6611c758d52e799761cc25900666b71552e6c929d88052811bc9daad4b3321a8"
 dependencies = [
  "ahash 0.8.12",
+ "atoi_simd",
  "bytemuck",
  "chrono",
  "chrono-tz",
@@ -6023,6 +6062,7 @@ dependencies = [
  "ethnum",
  "getrandom 0.2.17",
  "hashbrown 0.15.5",
+ "itoa",
  "lz4",
  "num-traits",
  "parking_lot",
@@ -6079,6 +6119,7 @@ dependencies = [
  "bitflags 2.11.1",
  "bytemuck",
  "chrono",
+ "chrono-tz",
  "comfy-table",
  "either",
  "hashbrown 0.14.5",
@@ -6229,9 +6270,13 @@ checksum = "cbb83218b0c216104f0076cd1a005128be078f958125f3d59b094ee73d78c18e"
 dependencies = [
  "ahash 0.8.12",
  "argminmax",
+ "base64 0.22.1",
  "bytemuck",
+ "chrono",
+ "chrono-tz",
  "either",
  "hashbrown 0.15.5",
+ "hex",
  "indexmap 2.14.0",
  "memchr",
  "num-traits",
@@ -6246,6 +6291,8 @@ dependencies = [
  "regex",
  "regex-syntax",
  "strum_macros 0.26.4",
+ "unicode-normalization",
+ "unicode-reverse",
  "version_check",
 ]
 
@@ -6258,10 +6305,13 @@ dependencies = [
  "ahash 0.8.12",
  "async-stream",
  "base64 0.22.1",
+ "brotli",
  "bytemuck",
  "ethnum",
+ "flate2",
  "futures",
  "hashbrown 0.15.5",
+ "lz4",
  "num-traits",
  "polars-arrow",
  "polars-compute",
@@ -6269,7 +6319,9 @@ dependencies = [
  "polars-parquet-format",
  "polars-utils",
  "simdutf8",
+ "snap",
  "streaming-decompression",
+ "zstd",
 ]
 
 [[package]]
@@ -6291,6 +6343,7 @@ dependencies = [
  "crossbeam-channel",
  "crossbeam-queue",
  "enum_dispatch",
+ "futures",
  "hashbrown 0.15.5",
  "num-traits",
  "once_cell",
@@ -6319,6 +6372,7 @@ dependencies = [
  "bytemuck",
  "bytes",
  "chrono",
+ "chrono-tz",
  "either",
  "hashbrown 0.15.5",
  "memmap2",
@@ -6330,10 +6384,12 @@ dependencies = [
  "polars-core",
  "polars-io",
  "polars-ops",
+ "polars-parquet",
  "polars-time",
  "polars-utils",
  "rayon",
  "recursive",
+ "regex",
  "strum_macros 0.26.4",
  "version_check",
 ]
@@ -6362,6 +6418,26 @@ dependencies = [
  "polars-error",
  "polars-utils",
  "version_check",
+]
+
+[[package]]
+name = "polars-sql"
+version = "0.46.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edaab553b90aa4d6743bb538978e1982368acb58a94408d7dd3299cad49c7083"
+dependencies = [
+ "hex",
+ "polars-core",
+ "polars-error",
+ "polars-lazy",
+ "polars-ops",
+ "polars-plan",
+ "polars-time",
+ "polars-utils",
+ "rand 0.8.5",
+ "regex",
+ "serde",
+ "sqlparser",
 ]
 
 [[package]]
@@ -6403,6 +6479,7 @@ dependencies = [
  "atoi_simd",
  "bytemuck",
  "chrono",
+ "chrono-tz",
  "now",
  "num-traits",
  "once_cell",
@@ -8002,6 +8079,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "snap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
+
+[[package]]
 name = "socket2"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8060,6 +8143,15 @@ dependencies = [
  "num-complex",
  "num-traits",
  "smallvec",
+]
+
+[[package]]
+name = "sqlparser"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05a528114c392209b3264855ad491fcce534b94a38771b0a0b97a79379275ce8"
+dependencies = [
+ "log",
 ]
 
 [[package]]
@@ -9052,6 +9144,15 @@ name = "unicode-properties"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+
+[[package]]
+name = "unicode-reverse"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b6f4888ebc23094adfb574fdca9fdc891826287a6397d2cd28802ffd6f20c76"
+dependencies = [
+ "unicode-segmentation",
+]
 
 [[package]]
 name = "unicode-segmentation"
@@ -10353,6 +10454,12 @@ dependencies = [
  "num_enum",
  "thiserror 1.0.69",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3be3d40e40a133f9c916ee3f9f4fa2d9d63435b5fbe1bfc6d9dae0aa0ada1513"
 
 [[package]]
 name = "zmij"
