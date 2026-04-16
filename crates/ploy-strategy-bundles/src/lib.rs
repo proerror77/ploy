@@ -23,6 +23,7 @@ pub use strategies::BayesianDirectionalStrategy;
 pub use strategies::DirectionalStrategy;
 pub use strategies::MeanReversionStrategy;
 pub use strategies::ReversalStrategy;
+pub use strategies::ThreeLayerStrategy;
 pub use traits::{
     ExecutionReport, Executor, Feed, MarketUpdate, NullRecorder, Recorder, SignalRecord,
     StrategyDecision, StrategyLogic,
