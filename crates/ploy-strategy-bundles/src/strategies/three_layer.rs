@@ -249,6 +249,143 @@ fn crypto_fee_cost(ask: f64) -> f64 {
     0.02 * ask * (1.0 - ask)
 }
 
+// ── Gate Functions ──────────────────────────────────────────────────
+
+/// Normal CDF approximation (Abramowitz & Stegun).
+fn norm_cdf(x: f64) -> f64 {
+    let t = 1.0 / (1.0 + 0.2316419 * x.abs());
+    let d = 0.3989422804014327 * (-x * x / 2.0).exp();
+    let p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+    if x >= 0.0 { 1.0 - p } else { p }
+}
+
+/// Gate 1: Direction.
+/// Returns Some((direction_sign, effective_probability)) or None.
+///
+/// - `distance_over_sigma`: (spot - price_to_beat) / (sigma * price_to_beat)
+/// - In Early regime: direction driven by distance_over_sigma + model_prob.
+/// - In Middle regime: cum_mprice_drift_5m co-drives direction.
+/// - In Late/Expiry: drift_30s becomes primary directional signal.
+fn evaluate_direction(
+    distance_over_sigma: f64,
+    _sigma_horizon: f64,
+    cum_mprice_drift_5m: f64,
+    drift_30s: f64,
+    regime: Regime,
+    config: &ThreeLayerConfig,
+) -> Option<(f64, f64)> {
+    if distance_over_sigma.abs() < config.min_distance_over_sigma
+        && regime == Regime::Early
+    {
+        return None;
+    }
+
+    let model_prob_up = norm_cdf(distance_over_sigma);
+
+    let direction_prob = match regime {
+        Regime::Early => {
+            model_prob_up
+        }
+        Regime::Middle => {
+            let lob_nudge = (cum_mprice_drift_5m / 100.0).clamp(-0.08, 0.08);
+            (model_prob_up + lob_nudge).clamp(0.01, 0.99)
+        }
+        Regime::Late => {
+            let drift_nudge = (drift_30s * 500.0).clamp(-0.12, 0.12);
+            let lob_nudge = (cum_mprice_drift_5m / 80.0).clamp(-0.06, 0.06);
+            (model_prob_up + drift_nudge + lob_nudge).clamp(0.01, 0.99)
+        }
+        Regime::Expiry => {
+            let drift_nudge = (drift_30s * 800.0).clamp(-0.15, 0.15);
+            (model_prob_up + drift_nudge).clamp(0.01, 0.99)
+        }
+    };
+
+    let (direction_sign, effective_p) = if direction_prob >= 0.5 {
+        (1.0_f64, direction_prob)
+    } else {
+        (-1.0_f64, 1.0 - direction_prob)
+    };
+
+    if effective_p < config.min_direction_prob {
+        return None;
+    }
+
+    Some((direction_sign, effective_p))
+}
+
+/// Gate 2: Confirmation.
+/// Returns true if LOB microstructure agrees with the chosen direction.
+fn evaluate_confirmation(
+    direction_sign: f64,
+    lob: &LobState,
+    cum_mprice_drift_5m: f64,
+    drift_30s: f64,
+    regime: Regime,
+    config: &ThreeLayerConfig,
+) -> bool {
+    let raw_score = lob.confirmation_score() + (cum_mprice_drift_5m / 200.0).clamp(-0.15, 0.15);
+    let aligned_score = direction_sign * raw_score;
+
+    let threshold = match regime {
+        Regime::Early  => config.min_confirmation_score * 0.5,
+        Regime::Middle => config.min_confirmation_score,
+        Regime::Late   => config.min_confirmation_score * 1.5,
+        Regime::Expiry => config.min_confirmation_score * 2.0,
+    };
+
+    if aligned_score < threshold {
+        return false;
+    }
+
+    if matches!(regime, Regime::Late | Regime::Expiry) {
+        let drift_agrees = (direction_sign > 0.0 && drift_30s > config.min_drift_confirmation)
+            || (direction_sign < 0.0 && drift_30s < -config.min_drift_confirmation);
+        if !drift_agrees {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Gate 3: Worth-It.
+/// Returns Some((entry_price, edge, reward_risk)) or None.
+fn evaluate_worth_it(
+    effective_p: f64,
+    ask: f64,
+    regime: Regime,
+    config: &ThreeLayerConfig,
+) -> Option<(f64, f64, f64)> {
+    if ask < config.min_entry_price || ask > config.max_entry_price {
+        return None;
+    }
+
+    let fee = crypto_fee_cost(ask);
+    let edge = effective_p - ask - fee;
+
+    let min_edge = match regime {
+        Regime::Early  => config.min_edge,
+        Regime::Middle => config.min_edge,
+        Regime::Late   => config.min_edge * 1.2,
+        Regime::Expiry => config.min_edge * 1.5,
+    };
+
+    if edge < min_edge {
+        return None;
+    }
+
+    let reward = 1.0 - ask - fee;
+    let risk = ask + fee;
+    let rr = if risk > 0.0 { reward / risk } else { 0.0 };
+
+    if rr < config.min_reward_risk {
+        return None;
+    }
+
+    Some((ask, edge, rr))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +434,81 @@ mod tests {
             tracker.push(t, price);
         }
         assert!(tracker.drift_30s() > 0.0);
+    }
+
+    fn test_config() -> ThreeLayerConfig {
+        ThreeLayerConfig {
+            symbols: vec!["BTCUSDT".into()],
+            min_direction_prob: 0.56,
+            min_distance_over_sigma: 0.3,
+            min_confirmation_score: 0.10,
+            min_drift_confirmation: 0.0002,
+            min_edge: 0.03,
+            min_reward_risk: 1.2,
+            take_profit_ask: 0.70,
+            stop_distance_pct: 0.020,
+            max_pm_lag_secs: 15,
+            min_time_remaining_secs: 60,
+            max_time_remaining_secs: 300,
+            cooldown_secs: 0,
+            stake_usd: Decimal::new(25, 0),
+            max_positions: 10,
+            max_daily_trades: 100,
+            allowed_window_secs: vec![300],
+            min_entry_price: 0.15,
+            max_entry_price: 0.85,
+        }
+    }
+
+    #[test]
+    fn direction_rejects_weak_early_signal() {
+        let config = test_config();
+        let result = evaluate_direction(0.1, 0.02, 0.0, 0.0, Regime::Early, &config);
+        assert!(result.is_none(), "should reject weak direction signal");
+    }
+
+    #[test]
+    fn direction_passes_strong_early_signal() {
+        let config = test_config();
+        let result = evaluate_direction(1.5, 0.02, 0.0, 0.0, Regime::Early, &config);
+        assert!(result.is_some(), "should pass strong early signal");
+        let (dir, prob) = result.unwrap();
+        assert!(dir > 0.0);
+        assert!(prob > 0.56);
+    }
+
+    #[test]
+    fn confirmation_rejects_opposing_lob_in_late() {
+        let config = test_config();
+        let lob = LobState {
+            obi: -0.5,
+            obi_prev: -0.3,
+            spread_bps: 10,
+            bid_depth_near: 50.0,
+            ask_depth_near: 100.0,
+            signed_trade_imbalance: -20.0,
+            last_aggtrade_ts: None,
+            ts: None,
+        };
+        let pass = evaluate_confirmation(1.0, &lob, -5.0, -0.001, Regime::Late, &config);
+        assert!(!pass, "should reject opposing LOB in late regime");
+    }
+
+    #[test]
+    fn worth_it_rejects_low_edge() {
+        let config = test_config();
+        // ask=0.35 → fee≈0.00455, edge=0.55-0.35-0.00455≈0.195, rr≈1.82 → passes
+        let result = evaluate_worth_it(0.55, 0.35, Regime::Early, &config);
+        assert!(result.is_some());
+        // ask=0.50 → fee=0.005, edge=0.52-0.50-0.005=0.015 < min_edge → rejected
+        let result = evaluate_worth_it(0.52, 0.50, Regime::Early, &config);
+        assert!(result.is_none(), "should reject low edge");
+    }
+
+    #[test]
+    fn norm_cdf_basic_values() {
+        assert!((norm_cdf(0.0) - 0.5).abs() < 0.001);
+        assert!(norm_cdf(2.0) > 0.97);
+        assert!(norm_cdf(-2.0) < 0.03);
     }
 }
