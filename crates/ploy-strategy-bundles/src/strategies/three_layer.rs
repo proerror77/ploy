@@ -1,10 +1,16 @@
 //! Three-layer strategy config and regime classification.
 
 use chrono::{DateTime, Utc};
+use ploy_trading::{
+    FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
+};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use std::collections::{HashMap, VecDeque};
+use tracing::{info, warn};
+
 use crate::strategies::directional::DirectionalConfig;
+use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 /// Time-remaining regime for a binary option market.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +390,639 @@ fn evaluate_worth_it(
     }
 
     Some((ask, edge, rr))
+}
+
+// ── ThreeLayerStrategy ─────────────────────────────────────────────
+
+pub struct ThreeLayerStrategy {
+    config: ThreeLayerConfig,
+    drift: HashMap<String, DriftTracker>,
+    lob: HashMap<String, LobState>,
+    mprice_acc: HashMap<String, MpriceDriftAccumulator>,
+    spot: HashMap<String, Decimal>,
+    quotes: HashMap<String, QuoteState>,
+    token_symbol: HashMap<String, String>,
+    token_event: HashMap<String, String>,
+    events: HashMap<String, Vec<EventWindow>>,
+    last_entry: HashMap<String, DateTime<Utc>>,
+    daily_trade_count: u32,
+    daily_trade_date: Option<chrono::NaiveDate>,
+    feed_time: Option<DateTime<Utc>>,
+}
+
+impl ThreeLayerStrategy {
+    pub fn new(config: ThreeLayerConfig) -> Self {
+        Self {
+            config,
+            drift: HashMap::new(),
+            lob: HashMap::new(),
+            mprice_acc: HashMap::new(),
+            spot: HashMap::new(),
+            quotes: HashMap::new(),
+            token_symbol: HashMap::new(),
+            token_event: HashMap::new(),
+            events: HashMap::new(),
+            last_entry: HashMap::new(),
+            daily_trade_count: 0,
+            daily_trade_date: None,
+            feed_time: None,
+        }
+    }
+
+    fn now(&self) -> DateTime<Utc> {
+        self.feed_time.unwrap_or_else(Utc::now)
+    }
+
+    fn reset_daily_counter(&mut self, ts: DateTime<Utc>) {
+        let today = ts.date_naive();
+        if self.daily_trade_date != Some(today) {
+            self.daily_trade_count = 0;
+            self.daily_trade_date = Some(today);
+        }
+    }
+
+    fn window_allowed(&self, window_secs: u64) -> bool {
+        self.config.allowed_window_secs.is_empty()
+            || self.config.allowed_window_secs.contains(&window_secs)
+    }
+
+    fn candidate_events(&self, symbol: &str, now: DateTime<Utc>) -> Vec<EventWindow> {
+        self.events
+            .get(symbol)
+            .map(|events| {
+                events
+                    .iter()
+                    .filter(|e| {
+                        self.window_allowed(e.window_secs)
+                            && e.end_time > now
+                            && {
+                                let remaining = (e.end_time - now).num_seconds();
+                                remaining >= self.config.min_time_remaining_secs as i64
+                                    && remaining <= self.config.max_time_remaining_secs as i64
+                            }
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn entry_quantity(&self, entry_price: Decimal) -> Decimal {
+        if entry_price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        (self.config.stake_usd / entry_price).round_dp(6)
+    }
+
+    fn try_entry(
+        &mut self,
+        symbol: &str,
+        now: DateTime<Utc>,
+        positions: &PositionLedger,
+        orders: &OrderLedger,
+    ) -> Option<StrategyDecision> {
+        if self.daily_trade_count >= self.config.max_daily_trades {
+            return None;
+        }
+        if positions.positions().count() >= self.config.max_positions {
+            return None;
+        }
+
+        let spot_price = (*self.spot.get(symbol)?).to_f64()?;
+        if spot_price <= 0.0 {
+            return None;
+        }
+
+        // Cooldown check
+        if let Some(last) = self.last_entry.get(symbol) {
+            if (now - *last).num_seconds() < self.config.cooldown_secs as i64 {
+                return None;
+            }
+        }
+
+        let candidates = self.candidate_events(symbol, now);
+        for event in &candidates {
+            let price_to_beat = event.price_to_beat?.to_f64()?;
+            if price_to_beat <= 0.0 {
+                continue;
+            }
+
+            let time_remaining = (event.end_time - now).num_seconds();
+            let regime = Regime::from_secs(time_remaining);
+
+            let drift_tracker = self.drift.get_mut(symbol)?;
+            let sigma_h = drift_tracker.sigma_horizon(time_remaining as f64);
+            let drift_30s = drift_tracker.drift_30s();
+
+            let distance_over_sigma = if sigma_h > 0.0 {
+                (spot_price - price_to_beat) / (sigma_h * price_to_beat)
+            } else {
+                0.0
+            };
+
+            let cum_mprice_drift_5m = self
+                .mprice_acc
+                .get(symbol)
+                .map(|acc| acc.cum_drift())
+                .unwrap_or(0.0);
+
+            // Gate 1: Direction
+            let (direction_sign, effective_p) = evaluate_direction(
+                distance_over_sigma,
+                sigma_h,
+                cum_mprice_drift_5m,
+                drift_30s,
+                regime,
+                &self.config,
+            )?;
+
+            let betting_up = direction_sign > 0.0;
+            let (token_id, direction) = if betting_up {
+                (&event.up_token, "UP")
+            } else {
+                (&event.down_token, "DOWN")
+            };
+
+            // Skip if already positioned or have active order on this token
+            if positions.net_qty(token_id) > Decimal::ZERO {
+                continue;
+            }
+            if orders.orders().any(|o| {
+                o.token_id == *token_id
+                    && matches!(
+                        o.state,
+                        OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
+                    )
+            }) {
+                continue;
+            }
+
+            // Check quote freshness
+            let quote = self.quotes.get(token_id)?;
+            let ask = quote.ask?.to_f64()?;
+            let quote_age = (now - quote.ts).num_seconds();
+            if quote_age > self.config.max_pm_lag_secs as i64 {
+                continue;
+            }
+
+            // Gate 2: Confirmation
+            let lob = self.lob.get(symbol).copied().unwrap_or_default();
+            if !evaluate_confirmation(
+                direction_sign,
+                &lob,
+                cum_mprice_drift_5m,
+                drift_30s,
+                regime,
+                &self.config,
+            ) {
+                continue;
+            }
+
+            // Gate 3: Worth-It
+            let (entry_price_f, edge, _rr) =
+                evaluate_worth_it(effective_p, ask, regime, &self.config)?;
+
+            let entry_price = Decimal::try_from(entry_price_f).ok()?;
+            let quantity = self.entry_quantity(entry_price);
+            if quantity <= Decimal::ZERO {
+                continue;
+            }
+
+            let intent_id = format!(
+                "tl_{}_{}_{}_{}",
+                symbol.to_lowercase(),
+                direction.to_lowercase(),
+                event.event_id,
+                now.timestamp_millis()
+            );
+
+            let intent = TradingIntent {
+                intent_id: intent_id.clone(),
+                deployment_id: String::new(),
+                market_id: event.event_id.clone(),
+                token_id: token_id.clone(),
+                side: TradeSide::Buy,
+                quantity,
+                limit_price: Some(entry_price),
+                purpose: IntentPurpose::Entry,
+                created_at: now,
+            };
+
+            let signal = SignalRecord {
+                strategy: self.name().to_string(),
+                event_id: Some(event.event_id.clone()),
+                token_id: Some(token_id.clone()),
+                intent_id: Some(intent_id),
+                symbol: symbol.to_string(),
+                direction: direction.to_string(),
+                p_hat: effective_p,
+                edge,
+                entry_price,
+                decision: "enter".to_string(),
+                ts: now,
+            };
+
+            info!(
+                strategy = "three_layer",
+                symbol,
+                direction,
+                p_hat = effective_p,
+                edge,
+                entry_price = %entry_price,
+                regime = regime.as_str(),
+                "entry signal"
+            );
+
+            return Some(StrategyDecision::Enter {
+                intent,
+                signal: Some(signal),
+            });
+        }
+        None
+    }
+
+    fn exit_decisions_for_symbol(
+        &self,
+        symbol: &str,
+        now: DateTime<Utc>,
+        spot: Option<f64>,
+        positions: &PositionLedger,
+    ) -> Vec<StrategyDecision> {
+        let mut decisions = Vec::new();
+
+        for event in self.events.get(symbol).into_iter().flatten() {
+            let time_remaining = (event.end_time - now).num_seconds();
+
+            for (token_id, is_up) in [(&event.up_token, true), (&event.down_token, false)] {
+                let qty = positions.net_qty(token_id);
+                if qty <= Decimal::ZERO {
+                    continue;
+                }
+
+                // Time stop
+                if time_remaining < TIME_STOP_SECS {
+                    decisions.push(StrategyDecision::Exit(TradingIntent {
+                        intent_id: format!(
+                            "tl_time_exit_{}_{}",
+                            token_id,
+                            now.timestamp_millis()
+                        ),
+                        deployment_id: String::new(),
+                        market_id: event.event_id.clone(),
+                        token_id: token_id.clone(),
+                        side: TradeSide::Sell,
+                        quantity: qty,
+                        limit_price: None,
+                        purpose: IntentPurpose::Exit,
+                        created_at: now,
+                    }));
+                    continue;
+                }
+
+                // Take profit
+                if let Some(quote) = self.quotes.get(token_id) {
+                    if let Some(ask) = quote.ask.and_then(|v| v.to_f64()) {
+                        if ask >= self.config.take_profit_ask {
+                            decisions.push(StrategyDecision::Exit(TradingIntent {
+                                intent_id: format!(
+                                    "tl_tp_{}_{}",
+                                    token_id,
+                                    now.timestamp_millis()
+                                ),
+                                deployment_id: String::new(),
+                                market_id: event.event_id.clone(),
+                                token_id: token_id.clone(),
+                                side: TradeSide::Sell,
+                                quantity: qty,
+                                limit_price: quote.bid,
+                                purpose: IntentPurpose::Exit,
+                                created_at: now,
+                            }));
+                            continue;
+                        }
+                    }
+                }
+
+                // Stop loss
+                if let (Some(price_to_beat), Some(spot_price)) =
+                    (event.price_to_beat.and_then(|v| v.to_f64()), spot)
+                {
+                    let dist = (spot_price - price_to_beat) / price_to_beat;
+                    let wrong_direction = if is_up {
+                        dist < -self.config.stop_distance_pct
+                    } else {
+                        dist > self.config.stop_distance_pct
+                    };
+                    if wrong_direction {
+                        decisions.push(StrategyDecision::Exit(TradingIntent {
+                            intent_id: format!(
+                                "tl_sl_{}_{}",
+                                token_id,
+                                now.timestamp_millis()
+                            ),
+                            deployment_id: String::new(),
+                            market_id: event.event_id.clone(),
+                            token_id: token_id.clone(),
+                            side: TradeSide::Sell,
+                            quantity: qty,
+                            limit_price: None,
+                            purpose: IntentPurpose::Exit,
+                            created_at: now,
+                        }));
+                    }
+                }
+            }
+        }
+
+        decisions
+    }
+
+    fn build_settlement_exits(
+        &self,
+        event: &EventWindow,
+        up_won: bool,
+        now: DateTime<Utc>,
+        positions: &PositionLedger,
+    ) -> Vec<StrategyDecision> {
+        let mut exits = Vec::new();
+
+        if positions.net_qty(&event.up_token) > Decimal::ZERO {
+            exits.push(StrategyDecision::Exit(TradingIntent {
+                intent_id: format!("tl_settle_{}_up", event.event_id),
+                deployment_id: String::new(),
+                market_id: event.event_id.clone(),
+                token_id: event.up_token.clone(),
+                side: TradeSide::Sell,
+                quantity: positions.net_qty(&event.up_token),
+                limit_price: Some(if up_won {
+                    Decimal::new(1, 0)
+                } else {
+                    Decimal::ZERO
+                }),
+                purpose: IntentPurpose::Exit,
+                created_at: now,
+            }));
+        }
+
+        if positions.net_qty(&event.down_token) > Decimal::ZERO {
+            exits.push(StrategyDecision::Exit(TradingIntent {
+                intent_id: format!("tl_settle_{}_down", event.event_id),
+                deployment_id: String::new(),
+                market_id: event.event_id.clone(),
+                token_id: event.down_token.clone(),
+                side: TradeSide::Sell,
+                quantity: positions.net_qty(&event.down_token),
+                limit_price: Some(if up_won {
+                    Decimal::ZERO
+                } else {
+                    Decimal::new(1, 0)
+                }),
+                purpose: IntentPurpose::Exit,
+                created_at: now,
+            }));
+        }
+
+        exits
+    }
+
+    fn resolve_up_won(&self, event: &EventWindow, resolved: Option<bool>) -> Option<bool> {
+        if resolved.is_some() {
+            return resolved;
+        }
+        let price_to_beat = event.price_to_beat?.to_f64()?;
+        let spot = (*self.spot.get(&event.symbol)?).to_f64()?;
+        Some(spot >= price_to_beat)
+    }
+}
+
+// ── StrategyLogic impl ────────────────────────────────────────────
+
+impl StrategyLogic for ThreeLayerStrategy {
+    fn on_update(
+        &mut self,
+        update: &MarketUpdate,
+        positions: &PositionLedger,
+        orders: &OrderLedger,
+    ) -> Vec<StrategyDecision> {
+        match update {
+            MarketUpdate::SpotPrice { symbol, price, ts } => {
+                if !self.config.symbols.iter().any(|s| s == symbol) {
+                    return Vec::new();
+                }
+                self.feed_time = Some(*ts);
+                self.reset_daily_counter(*ts);
+
+                let price_f64 = match price.to_f64() {
+                    Some(p) if p > 0.0 => p,
+                    _ => return Vec::new(),
+                };
+
+                self.drift
+                    .entry(symbol.clone())
+                    .or_insert_with(DriftTracker::new)
+                    .push(*ts, price_f64);
+                self.spot.insert(symbol.clone(), *price);
+
+                // Set price_to_beat for events that don't have one yet
+                if let Some(events) = self.events.get_mut(symbol) {
+                    for event in events.iter_mut() {
+                        if event.price_to_beat.is_none() {
+                            event.price_to_beat = Some(*price);
+                        }
+                    }
+                }
+
+                // Check exits first
+                let spot_opt = Some(price_f64);
+                let mut decisions =
+                    self.exit_decisions_for_symbol(symbol, *ts, spot_opt, positions);
+
+                // Cooldown check before entry
+                if let Some(last) = self.last_entry.get(symbol) {
+                    if (*ts - *last).num_seconds() < self.config.cooldown_secs as i64 {
+                        return decisions;
+                    }
+                }
+
+                if let Some(entry) = self.try_entry(symbol, *ts, positions, orders) {
+                    decisions.push(entry);
+                }
+                decisions
+            }
+
+            MarketUpdate::Quote {
+                token_id,
+                bid,
+                ask,
+                ts,
+                ..
+            } => {
+                self.quotes.insert(
+                    token_id.clone(),
+                    QuoteState {
+                        bid: *bid,
+                        ask: *ask,
+                        ts: *ts,
+                    },
+                );
+
+                let Some(symbol) = self.token_symbol.get(token_id).cloned() else {
+                    return Vec::new();
+                };
+                let spot = self.spot.get(&symbol).and_then(|p| p.to_f64());
+                self.exit_decisions_for_symbol(&symbol, *ts, spot, positions)
+            }
+
+            MarketUpdate::AggTrade {
+                symbol,
+                quantity,
+                is_buyer_maker,
+                ts,
+                ..
+            } => {
+                if !self.config.symbols.iter().any(|s| s == symbol) {
+                    return Vec::new();
+                }
+                self.feed_time = Some(*ts);
+                let qty_f64 = quantity.to_f64().unwrap_or(0.0);
+                self.lob
+                    .entry(symbol.clone())
+                    .or_default()
+                    .apply_aggtrade(qty_f64, *is_buyer_maker, *ts);
+                Vec::new()
+            }
+
+            MarketUpdate::L2Depth {
+                symbol,
+                obi,
+                spread_bps,
+                bid_depth_near,
+                ask_depth_near,
+                ts,
+            } => {
+                if !self.config.symbols.iter().any(|s| s == symbol) {
+                    return Vec::new();
+                }
+                self.feed_time = Some(*ts);
+                self.lob
+                    .entry(symbol.clone())
+                    .or_default()
+                    .apply_l2(*obi, *spread_bps, *bid_depth_near, *ask_depth_near, *ts);
+
+                let mid = (bid_depth_near + ask_depth_near) / 2.0;
+                if mid > 0.0 {
+                    let microprice_offset = (bid_depth_near - ask_depth_near) / mid;
+                    self.mprice_acc
+                        .entry(symbol.clone())
+                        .or_insert_with(|| MpriceDriftAccumulator::new(300.0))
+                        .push(*ts, microprice_offset);
+                }
+                Vec::new()
+            }
+
+            MarketUpdate::L2 {
+                symbol,
+                obi,
+                spread_bps,
+                ts,
+            } => {
+                if let Some(lob) = self.lob.get_mut(symbol) {
+                    lob.obi_prev = lob.obi;
+                    lob.obi = *obi;
+                    lob.spread_bps = *spread_bps;
+                    lob.ts = Some(*ts);
+                }
+                Vec::new()
+            }
+
+            MarketUpdate::EventDiscovered {
+                event_id,
+                symbol,
+                up_token,
+                down_token,
+                end_time,
+                window_secs,
+                price_to_beat,
+                ..
+            } => {
+                if !self.config.symbols.iter().any(|s| s == symbol)
+                    || !self.window_allowed(*window_secs)
+                {
+                    return Vec::new();
+                }
+
+                self.token_symbol.insert(up_token.clone(), symbol.clone());
+                self.token_symbol
+                    .insert(down_token.clone(), symbol.clone());
+                self.token_event
+                    .insert(up_token.clone(), event_id.clone());
+                self.token_event
+                    .insert(down_token.clone(), event_id.clone());
+
+                self.events
+                    .entry(symbol.clone())
+                    .or_default()
+                    .push(EventWindow {
+                        event_id: event_id.clone(),
+                        symbol: symbol.clone(),
+                        up_token: up_token.clone(),
+                        down_token: down_token.clone(),
+                        end_time: *end_time,
+                        window_secs: *window_secs,
+                        price_to_beat: *price_to_beat,
+                    });
+                Vec::new()
+            }
+
+            MarketUpdate::EventExpired {
+                event_id,
+                end_time,
+                resolved_up_won,
+            } => {
+                let mut decisions = Vec::new();
+                let mut resolved_events = Vec::new();
+
+                for events in self.events.values() {
+                    for event in events {
+                        if event.event_id != *event_id {
+                            continue;
+                        }
+                        if let Some(up_won) =
+                            self.resolve_up_won(event, *resolved_up_won)
+                        {
+                            decisions.extend(self.build_settlement_exits(
+                                event, up_won, *end_time, positions,
+                            ));
+                            resolved_events.push(event.event_id.clone());
+                        }
+                    }
+                }
+
+                if !resolved_events.is_empty() {
+                    for events in self.events.values_mut() {
+                        events.retain(|e| !resolved_events.contains(&e.event_id));
+                    }
+                }
+
+                decisions
+            }
+
+            _ => Vec::new(),
+        }
+    }
+
+    fn on_fill(&mut self, fill: &FillRecord) {
+        if fill.side == TradeSide::Buy {
+            if let Some(symbol) = self.token_symbol.get(&fill.token_id).cloned() {
+                self.last_entry.insert(symbol, fill.timestamp);
+            }
+            self.daily_trade_count += 1;
+        }
+    }
+
+    fn name(&self) -> &str {
+        "three_layer"
+    }
 }
 
 #[cfg(test)]
