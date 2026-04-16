@@ -93,12 +93,16 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 bid: Some(up_ask - dec!(0.01)),
                 ask: Some(up_ask),
                 ts: window_start + Duration::seconds(5),
+                    bid_size: None,
+                    ask_size: None,
             });
             updates.push(MarketUpdate::Quote {
                 token_id: dn_token.clone(),
                 bid: Some(dec!(1) - up_ask - dec!(0.01)),
                 ask: Some(dec!(1) - up_ask),
                 ts: window_start + Duration::seconds(5),
+                    bid_size: None,
+                    ask_size: None,
             });
 
             // Spot ticks showing the drift
@@ -132,12 +136,16 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 bid: Some(up_ask_final - dec!(0.01)),
                 ask: Some(up_ask_final),
                 ts: window_start + Duration::seconds(55),
+                    bid_size: None,
+                    ask_size: None,
             });
             updates.push(MarketUpdate::Quote {
                 token_id: dn_token,
                 bid: Some(dec!(1) - up_ask_final - dec!(0.01)),
                 ask: Some(dec!(1) - up_ask_final),
                 ts: window_start + Duration::seconds(55),
+                    bid_size: None,
+                    ask_size: None,
             });
 
             // Spot at window midpoint (entry zone: 60-300s remaining)
@@ -244,6 +252,15 @@ fn main() {
                     max_daily_trades: 1000,
                     max_daily_loss_usd: None,
                     allowed_window_secs: vec![300, 900],
+                    three_layer_min_direction_prob: 0.56,
+                    three_layer_min_distance_over_sigma: 0.3,
+                    three_layer_min_confirmation_score: 0.10,
+                    three_layer_min_drift_confirmation: 0.0002,
+                    three_layer_min_edge: 0.03,
+                    three_layer_min_reward_risk: 1.2,
+                    three_layer_take_profit_ask: 0.70,
+                    three_layer_stop_distance_pct: 0.020,
+                    three_layer_max_pm_lag_secs: 15,
                 },
                 SimulatedExecutorConfig {
                     use_spread: true,

@@ -46,12 +46,16 @@ fn build_scenario() -> Vec<MarketUpdate> {
         bid: Some(dec!(0.29)),
         ask: Some(dec!(0.30)),
         ts: now,
+            bid_size: None,
+            ask_size: None,
     });
     updates.push(MarketUpdate::Quote {
         token_id: "dn-btc-001".into(),
         bid: Some(dec!(0.69)),
         ask: Some(dec!(0.70)),
         ts: now,
+            bid_size: None,
+            ask_size: None,
     });
 
     // 4. BTC trends up over several updates so realized vol has a usable estimate.
@@ -193,6 +197,15 @@ async fn backtest_full_loop_produces_entry() {
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
         allowed_window_secs: vec![],
+        three_layer_min_direction_prob: 0.56,
+        three_layer_min_distance_over_sigma: 0.3,
+        three_layer_min_confirmation_score: 0.10,
+        three_layer_min_drift_confirmation: 0.0002,
+        three_layer_min_edge: 0.03,
+        three_layer_min_reward_risk: 1.2,
+        three_layer_take_profit_ask: 0.70,
+        three_layer_stop_distance_pct: 0.020,
+        three_layer_max_pm_lag_secs: 15,
     };
 
     let strategy = DirectionalStrategy::new(config);
@@ -316,6 +329,15 @@ async fn empty_feed_produces_zero_trades() {
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
         allowed_window_secs: vec![],
+        three_layer_min_direction_prob: 0.56,
+        three_layer_min_distance_over_sigma: 0.3,
+        three_layer_min_confirmation_score: 0.10,
+        three_layer_min_drift_confirmation: 0.0002,
+        three_layer_min_edge: 0.03,
+        three_layer_min_reward_risk: 1.2,
+        three_layer_take_profit_ask: 0.70,
+        three_layer_stop_distance_pct: 0.020,
+        three_layer_max_pm_lag_secs: 15,
     };
 
     let strategy = DirectionalStrategy::new(config);
@@ -377,6 +399,15 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
         allowed_window_secs: vec![],
+        three_layer_min_direction_prob: 0.56,
+        three_layer_min_distance_over_sigma: 0.3,
+        three_layer_min_confirmation_score: 0.10,
+        three_layer_min_drift_confirmation: 0.0002,
+        three_layer_min_edge: 0.03,
+        three_layer_min_reward_risk: 1.2,
+        three_layer_take_profit_ask: 0.70,
+        three_layer_stop_distance_pct: 0.020,
+        three_layer_max_pm_lag_secs: 15,
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,
@@ -487,6 +518,15 @@ async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
         allowed_window_secs: vec![],
+        three_layer_min_direction_prob: 0.56,
+        three_layer_min_distance_over_sigma: 0.3,
+        three_layer_min_confirmation_score: 0.10,
+        three_layer_min_drift_confirmation: 0.0002,
+        three_layer_min_edge: 0.03,
+        three_layer_min_reward_risk: 1.2,
+        three_layer_take_profit_ask: 0.70,
+        three_layer_stop_distance_pct: 0.020,
+        three_layer_max_pm_lag_secs: 15,
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,
@@ -590,6 +630,15 @@ async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior()
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
         allowed_window_secs: vec![],
+        three_layer_min_direction_prob: 0.56,
+        three_layer_min_distance_over_sigma: 0.3,
+        three_layer_min_confirmation_score: 0.10,
+        three_layer_min_drift_confirmation: 0.0002,
+        three_layer_min_edge: 0.03,
+        three_layer_min_reward_risk: 1.2,
+        three_layer_take_profit_ask: 0.70,
+        three_layer_stop_distance_pct: 0.020,
+        three_layer_max_pm_lag_secs: 15,
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,
