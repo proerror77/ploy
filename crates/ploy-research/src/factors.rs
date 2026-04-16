@@ -1642,6 +1642,26 @@ fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Option<f64> {
     }
 }
 
+/// Export a slice of `FactorObservation` to a Parquet file at `path`.
+///
+/// Creates or overwrites the file. Returns an error if the DataFrame cannot
+/// be built or the file cannot be written.
+pub fn export_observations_parquet(
+    rows: &[FactorObservation],
+    path: &std::path::Path,
+) -> polars::prelude::PolarsResult<()> {
+    use polars::io::parquet::write::ParquetWriter;
+    use std::fs::File;
+
+    let mut df = observations_to_frame(rows)?;
+    let file = File::create(path).map_err(|e| polars::prelude::PolarsError::IO {
+        error: std::sync::Arc::new(e),
+        msg: None,
+    })?;
+    ParquetWriter::new(file).finish(&mut df)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{attach_future_pm_labels, pearson_ic, spearman_ic, FactorObservation};

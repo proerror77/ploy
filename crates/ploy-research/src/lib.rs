@@ -10,9 +10,10 @@ pub mod model;
 pub use backtesting::{run_backtest, BacktestReport};
 pub use factors::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations,
-    build_factor_observations_with_lob, factor_metrics, load_research_lob_snapshots,
-    load_research_lob_snapshots_sampled, observations_to_frame, AggregatedFactorMetric,
-    EventFactorSummary, FactorMetric, FactorObservation, ResearchLobSnapshot,
+    build_factor_observations_with_lob, export_observations_parquet, factor_metrics,
+    load_research_lob_snapshots, load_research_lob_snapshots_sampled, observations_to_frame,
+    AggregatedFactorMetric, EventFactorSummary, FactorMetric, FactorObservation,
+    ResearchLobSnapshot,
 };
 pub use replay::replay_fills;
 
