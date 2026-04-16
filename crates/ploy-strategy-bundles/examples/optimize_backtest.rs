@@ -26,8 +26,8 @@ use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
     feed::{HistoricalLoadOptions, load_from_database_with_options},
     DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
-    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
-    StrategyRuntime,
+    ThreeLayerStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
+    StrategyLogic, StrategyRuntime,
 };
 use ploy_trading::TradeSide;
 use rust_decimal_macros::dec;
@@ -69,6 +69,9 @@ fn canonical_strategy_variant(raw: &str) -> String {
             "directional".to_string()
         }
         "reversal" | "pm5d_reversal" | "pm-5m-reversal" => "reversal".to_string(),
+        "three_layer" | "3layer" | "pm5d_three_layer" | "pm-5m-three-layer" => {
+            "three_layer".to_string()
+        }
         other => other.to_string(),
     }
 }
@@ -77,6 +80,7 @@ fn build_strategy(strategy_variant: &str, config: DirectionalConfig) -> Box<dyn 
     match strategy_variant {
         "directional" => Box::new(DirectionalStrategy::new(config)),
         "reversal" => Box::new(ReversalStrategy::new(config.into())),
+        "three_layer" => Box::new(ThreeLayerStrategy::new(config.into())),
         other => panic!("unsupported strategy_variant: {other}"),
     }
 }
