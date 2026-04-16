@@ -60,3 +60,4 @@ ploy-sidecar/dist/
 # Skill development (not part of trading system)
 skill-creator-updated/
 skills/
+.omx/

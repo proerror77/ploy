@@ -1077,4 +1077,24 @@ mod tests {
                 && *spread_bps == 11
         ));
     }
+
+    #[test]
+    fn parse_agg_trade_message_extracts_fields() {
+        let msg = serde_json::json!({
+            "e": "aggTrade",
+            "s": "BTCUSDT",
+            "a": 12345_i64,
+            "p": "50000.00",
+            "q": "0.01",
+            "f": 100_i64,
+            "l": 105_i64,
+            "T": 1672515782136_i64,
+            "m": true
+        });
+        let parsed = parse_agg_trade_msg(&msg).unwrap();
+        assert_eq!(parsed.symbol, "BTCUSDT");
+        assert_eq!(parsed.agg_trade_id, 12345);
+        assert!((parsed.price.to_f64().unwrap() - 50000.0).abs() < 0.01);
+        assert!(parsed.is_buyer_maker);
+    }
 }

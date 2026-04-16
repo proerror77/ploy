@@ -108,7 +108,8 @@ jobs:
           # Temporary exception: sqlx 0.8.6 keeps an unused mysql driver chain in Cargo.lock,
           # which pulls the vulnerable `rsa` crate despite no mysql runtime in this repo.
           # RUSTSEC-2026-0049: rustls-webpki 0.103.8 has CRL matching issue, requires rustls update.
-          cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0049
+          # RUSTSEC-2026-0098: rustls-webpki 0.103.10 URI name constraints issue; fix requires rustls upgrade.
+          cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0049 --ignore RUSTSEC-2026-0098
 
       - name: Prepare database schema for compile-time SQLx checks
         env:

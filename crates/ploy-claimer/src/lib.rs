@@ -7,7 +7,7 @@
 //! # Quick start
 //!
 //! Call [`ensure_account_claimer_daemon`] once at startup (gated by
-//! `CLAIMER_DAEMON_ENABLED`, default `true`). It spawns a background tokio
+//! `CLAIMER_DAEMON_ENABLED`, default `false`). It spawns a background tokio
 //! task that scans for redeemable positions every `CLAIMER_CHECK_INTERVAL_SECS`
 //! seconds (default 60).
 
@@ -15,7 +15,7 @@ use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest as AlloyTransactionRequest;
-use alloy::signers::{local::PrivateKeySigner, Signer as _};
+use alloy::signers::{Signer as _, local::PrivateKeySigner};
 use alloy::sol;
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -26,8 +26,8 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-mod discovery;
 mod claim_flow;
+mod discovery;
 mod relayer;
 
 use self::relayer::{
@@ -36,10 +36,8 @@ use self::relayer::{
 };
 
 // CTF contracts on Polygon
-pub(crate) const CONDITIONAL_TOKENS_POLYGON: &str =
-    "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
-pub(crate) const NEG_RISK_ADAPTER_POLYGON: &str =
-    "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296";
+pub(crate) const CONDITIONAL_TOKENS_POLYGON: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
+pub(crate) const NEG_RISK_ADAPTER_POLYGON: &str = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296";
 pub(crate) const USDC_E_POLYGON: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 pub(crate) const POLYGON_RPC_DEFAULT: &str = "https://polygon-bor-rpc.publicnode.com";
 pub(crate) const POLYGON_CHAIN_ID: u64 = 137;
@@ -122,6 +120,25 @@ pub(crate) fn env_u64_any(keys: &[&str]) -> Option<u64> {
     None
 }
 
+pub(crate) fn claim_allow_price_fallback() -> bool {
+    env_flag("CLAIMER_ALLOW_PRICE_FALLBACK", false)
+}
+
+pub(crate) fn max_claims_per_cycle() -> Option<usize> {
+    env_u64_any(&["CLAIMER_MAX_CLAIMS_PER_CYCLE"])
+        .map(|value| value as usize)
+        .filter(|value| *value > 0)
+}
+
+pub(crate) fn max_claim_payout_per_cycle() -> Option<Decimal> {
+    env_string_any(&[
+        "CLAIMER_MAX_PAYOUT_PER_CYCLE_USDC",
+        "CLAIMER_MAX_CLAIM_PAYOUT_USDC",
+    ])
+    .and_then(|value| Decimal::from_str(value.trim()).ok())
+    .filter(|value| *value > Decimal::ZERO)
+}
+
 pub(crate) fn min_native_gas_wei() -> U256 {
     std::env::var("CLAIMER_MIN_NATIVE_GAS_WEI")
         .ok()
@@ -141,13 +158,15 @@ pub(crate) fn auto_topup_enabled() -> bool {
 ///
 /// Safe to call multiple times — only the first call spawns the daemon.
 /// Reads configuration from environment variables:
-/// - `CLAIMER_DAEMON_ENABLED` (default: true)
+/// - `CLAIMER_DAEMON_ENABLED` (default: false)
 /// - `POLYMARKET_PRIVATE_KEY` or `PRIVATE_KEY`
 /// - `POLYMARKET_FUNDER` or `POLYMARKET_FUNDER_ADDRESS` (optional proxy wallet)
-/// - `CLAIMER_CHECK_INTERVAL_SECS` (default: 60, min: 10)
+/// - `CLAIMER_CHECK_INTERVAL_SECS` (default: 300, min: 60)
 /// - `CLAIMER_MIN_CLAIM_SIZE` (default: 1 USDC)
+/// - `CLAIMER_MAX_CLAIMS_PER_CYCLE` (optional hard cap)
+/// - `CLAIMER_MAX_PAYOUT_PER_CYCLE_USDC` (optional hard cap)
 pub async fn ensure_account_claimer_daemon() -> Result<(), ClaimerError> {
-    if !env_flag("CLAIMER_DAEMON_ENABLED", true) {
+    if !env_flag("CLAIMER_DAEMON_ENABLED", false) {
         return Ok(());
     }
 
@@ -187,16 +206,20 @@ pub async fn ensure_account_claimer_daemon() -> Result<(), ClaimerError> {
 
     let interval_secs = env_u64_any(&["CLAIMER_CHECK_INTERVAL_SECS", "CLAIMER_INTERVAL_SECS"])
         .unwrap_or(300) // Default: check every 5 minutes (matches 5-min market settlement cycle)
-        .max(60);       // Minimum 60s to avoid accidental hammering
+        .max(60); // Minimum 60s to avoid accidental hammering
     let min_claim_size = env_string_any(&["CLAIMER_MIN_CLAIM_SIZE", "CLAIMER_MIN_SIZE_USDC"])
         .and_then(|v| Decimal::from_str(v.trim()).ok())
         .unwrap_or(Decimal::ONE);
+    let max_claims_per_cycle = max_claims_per_cycle();
+    let max_payout_per_cycle_usdc = max_claim_payout_per_cycle();
 
     let claimer = AutoClaimer::new(
         lookup_address,
         ClaimerConfig {
             check_interval_secs: interval_secs,
             min_claim_size,
+            max_claims_per_cycle,
+            max_payout_per_cycle_usdc,
             auto_claim: true,
             private_key: Some(private_key),
         },
@@ -215,6 +238,8 @@ pub async fn ensure_account_claimer_daemon() -> Result<(), ClaimerError> {
     info!(
         interval_secs,
         min_claim_size = %min_claim_size,
+        max_claims_per_cycle = ?max_claims_per_cycle,
+        max_payout_per_cycle_usdc = ?max_payout_per_cycle_usdc,
         %wallet_address,
         %lookup_address,
         "Auto-claimer daemon started (account-level)"
@@ -296,6 +321,10 @@ pub struct ClaimerConfig {
     pub check_interval_secs: u64,
     /// Minimum position size to claim (avoid dust).
     pub min_claim_size: Decimal,
+    /// Maximum claim attempts allowed per scan cycle.
+    pub max_claims_per_cycle: Option<usize>,
+    /// Maximum total payout allowed per scan cycle.
+    pub max_payout_per_cycle_usdc: Option<Decimal>,
     /// Whether to claim automatically or just report.
     pub auto_claim: bool,
     /// Private key for signing transactions.
@@ -307,6 +336,8 @@ impl std::fmt::Debug for ClaimerConfig {
         f.debug_struct("ClaimerConfig")
             .field("check_interval_secs", &self.check_interval_secs)
             .field("min_claim_size", &self.min_claim_size)
+            .field("max_claims_per_cycle", &self.max_claims_per_cycle)
+            .field("max_payout_per_cycle_usdc", &self.max_payout_per_cycle_usdc)
             .field("auto_claim", &self.auto_claim)
             .field(
                 "private_key",
@@ -321,6 +352,8 @@ impl Default for ClaimerConfig {
         Self {
             check_interval_secs: 60,
             min_claim_size: Decimal::ONE,
+            max_claims_per_cycle: None,
+            max_payout_per_cycle_usdc: None,
             auto_claim: true,
             private_key: None,
         }
@@ -400,8 +433,14 @@ impl AutoClaimer {
                     // Back off based on failure type to avoid burning relayer quota.
                     // 5-minute markets settle every 5 minutes, so normal interval = 5 min.
                     if had_relayer_limit {
-                        warn!("Relayer quota exhausted — backing off 30 minutes before next claim attempt");
-                        1800 // 30 minutes
+                        let backoff = env_u64_any(&["CLAIMER_RATE_LIMIT_BACKOFF_SECS"])
+                            .unwrap_or(600) // default 10 min — enough to clear quota without missing many settlement windows
+                            .max(60);
+                        warn!(
+                            "Relayer quota exhausted — backing off {}s before next claim attempt",
+                            backoff
+                        );
+                        backoff
                     } else if had_no_gas {
                         warn!("No MATIC gas — backing off 10 minutes before next claim attempt");
                         600 // 10 minutes
@@ -432,6 +471,7 @@ impl AutoClaimer {
         let discovery::EligiblePositions {
             positions: eligible,
             skipped_small,
+            skipped_cycle_limited,
         } = discovery::discover_eligible_positions(self.lookup_address, self.config.min_claim_size)
             .await?;
 
@@ -468,6 +508,9 @@ impl AutoClaimer {
             eligible = eligible.len(),
             min_claim_size = %self.config.min_claim_size,
             skipped_small,
+            skipped_cycle_limited,
+            max_claims_per_cycle = ?self.config.max_claims_per_cycle,
+            max_payout_per_cycle_usdc = ?self.config.max_payout_per_cycle_usdc,
             "Found redeemable conditions"
         );
 
@@ -549,8 +592,7 @@ impl AutoClaimer {
         current_balance: U256,
         min_balance: U256,
     ) -> Result<Option<U256>, ClaimerError> {
-        claim_flow::maybe_auto_topup_wallet(self, target_wallet, current_balance, min_balance)
-            .await
+        claim_flow::maybe_auto_topup_wallet(self, target_wallet, current_balance, min_balance).await
     }
 
     async fn claim_position(&self, pos: &RedeemablePosition) -> Result<String, ClaimerError> {
@@ -573,6 +615,8 @@ mod tests {
         let config = ClaimerConfig::default();
         assert_eq!(config.check_interval_secs, 60);
         assert_eq!(config.min_claim_size, Decimal::ONE);
+        assert_eq!(config.max_claims_per_cycle, None);
+        assert_eq!(config.max_payout_per_cycle_usdc, None);
         assert!(config.auto_claim);
     }
 
@@ -619,11 +663,14 @@ mod tests {
         let config = ClaimerConfig {
             check_interval_secs: 60,
             min_claim_size: Decimal::ONE,
+            max_claims_per_cycle: Some(2),
+            max_payout_per_cycle_usdc: Some(dec!(10)),
             auto_claim: true,
             private_key: Some("0xdeadbeef".to_string()),
         };
         let debug = format!("{config:?}");
         assert!(!debug.contains("0xdeadbeef"));
         assert!(debug.contains("[redacted]"));
+        assert!(debug.contains("max_claims_per_cycle"));
     }
 }
