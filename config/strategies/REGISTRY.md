@@ -44,6 +44,7 @@ numeric ID used as filename prefix.
 |----|----------|--------|-------------|
 | 01 | momentum | Crypto | CEX lag momentum — buys PM side predicted to win when Binance moves |
 | 02 | pm5-directional | Crypto | Log-normal P(S_T>=S_0) on 5-min binary options via Binance oracle |
+| 02b | pm5d-three-layer | Crypto | Three-gate directional: direction → confirmation → worth-it |
 | 03 | pattern-memory | Crypto | Bayesian beta-posterior on kline return pattern similarity |
 | 04 | staggered-arb | Crypto | Time-separated two-leg arb (Leg1 + hedge Leg2, sum < $1) |
 | 05 | split-arb | Crypto | Simultaneous YES+NO when combined < $1 |
@@ -80,6 +81,11 @@ numeric ID used as filename prefix.
 | `02-pm5d.live.toml` | LEGACY — DELETE after migration | Legacy `name="momentum"` with `directional_mode` |
 | `02-pm5d.canary.toml` | LEGACY — DELETE after migration | BTC only variant |
 | `02-pm5d.backtest-relaxed.toml` | LEGACY — DELETE after migration | Relaxed OBI (3%), loose timing |
+
+### S02b — PM 5-Min Three-Layer Directional
+| File | Format | Notes |
+|------|--------|-------|
+| `02-pm5d-threelayer.unified.toml` | **UNIFIED** | Three-gate entry filter on top of directional |
 
 ### S03 — Pattern Memory
 | File | Format | Notes |
