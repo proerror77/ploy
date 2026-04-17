@@ -11,39 +11,7 @@ use tracing::{info, warn};
 
 use crate::strategies::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
-
-/// Time-remaining regime for a binary option market.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Regime {
-    /// 181..=300 seconds remaining.
-    Early,
-    /// 61..=180 seconds remaining.
-    Middle,
-    /// 6..=60 seconds remaining.
-    Late,
-    /// 0..=5 seconds remaining.
-    Expiry,
-}
-
-impl Regime {
-    pub fn from_secs(secs: i64) -> Self {
-        match secs {
-            181..=300 => Regime::Early,
-            61..=180  => Regime::Middle,
-            6..=60    => Regime::Late,
-            _         => Regime::Expiry,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Regime::Early  => "early",
-            Regime::Middle => "middle",
-            Regime::Late   => "late",
-            Regime::Expiry => "expiry",
-        }
-    }
-}
+use ploy_operator_contracts::Regime;
 
 /// Configuration for the three-layer directional strategy.
 #[derive(Debug, Clone)]
