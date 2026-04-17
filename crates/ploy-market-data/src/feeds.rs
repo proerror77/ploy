@@ -1060,9 +1060,10 @@ fn parse_agg_trade_msg(v: &serde_json::Value) -> Option<AggTradeMsg> {
 
 #[cfg(test)]
 mod tests {
-    use super::{l2_updates_from_book, rtds_market_data_ws_config};
+    use super::{l2_updates_from_book, parse_agg_trade_msg, rtds_market_data_ws_config};
     use chrono::Utc;
     use ploy_strategy_bundles::MarketUpdate;
+    use rust_decimal::prelude::ToPrimitive;
     use rust_decimal_macros::dec;
     use serde_json::json;
     use std::time::Duration;
