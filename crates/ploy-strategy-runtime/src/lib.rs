@@ -878,10 +878,22 @@ fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
             );
             Box::new(ReversalStrategy::new(config.strategy.clone().into()))
         }
+        "three_layer" => {
+            info!(
+                configured_variant = configured_variant,
+                canonical_variant = canonical_variant.as_str(),
+                "Using three-layer directional strategy variant",
+            );
+            Box::new(ploy_strategy_bundles::ThreeLayerStrategy::new(
+                ploy_strategy_bundles::strategies::three_layer::ThreeLayerConfig::from(
+                    config.strategy.clone(),
+                ),
+            ))
+        }
         _ => {
             eprintln!(
                 "Unsupported strategy_variant `{configured_variant}` in config. \
-                 Supported runtime variants: directional, directional_bayes, mean_reversion, reversal, v1, v2, v3, v4."
+                 Supported runtime variants: directional, directional_bayes, mean_reversion, reversal, three_layer, v1, v2, v3, v4."
             );
             std::process::exit(1);
         }
@@ -928,6 +940,8 @@ mod tests {
             ("v3", "pm_5m_directional"),
             ("v4", "pm_5m_mean_reversion"),
             ("reversal", "pm_5m_reversal"),
+            ("three_layer", "three_layer"),
+            ("three-layer", "three_layer"),
         ] {
             let config = FullConfig::from_toml(&format!(
                 r#"
