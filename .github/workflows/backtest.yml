@@ -83,6 +83,10 @@ jobs:
           target: /root/ploy/config/
           strip_components: 2
 
+      - name: Resolve config filename
+        id: config
+        run: echo "basename=$(basename '${{ github.event.inputs.config }}')" >> "$GITHUB_OUTPUT"
+
       - name: Run backtest on tango-1-1
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -94,11 +98,8 @@ jobs:
             set -euo pipefail
             chmod +x /root/ploy/bin/run_backtest
 
-            # Resolve the uploaded config filename from the input path
-            CONFIG_FILE="/root/ploy/config/$(basename "${{ github.event.inputs.config }}")"
-
             /root/ploy/bin/run_backtest \
-              --config "${CONFIG_FILE}" \
+              --config "/root/ploy/config/${{ steps.config.outputs.basename }}" \
               --db-url "postgresql://postgres:postgres@localhost:5432/ploy" \
               --start-date "${{ github.event.inputs.start_date }}" \
               --end-date "${{ github.event.inputs.end_date }}"
