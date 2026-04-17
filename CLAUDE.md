@@ -123,6 +123,38 @@ Prefer **atomic commits** for landed repo changes:
 - Use one integration session to merge work: `git switch main && git pull --rebase`, then `git cherry-pick <sha...>`.
 - After merge, remove temporary worktrees to prevent stale branches and accidental edits.
 
+## Git Flow
+
+**One feature = one branch = one PR.** Never accumulate multiple unrelated features on a single branch.
+
+### Branch naming
+```
+feat/<short-description>      — new feature
+fix/<short-description>       — bug fix
+refactor/<short-description>  — refactoring, no behavior change
+docs/<short-description>      — documentation only
+ci/<short-description>        — CI/workflow changes
+```
+
+### Lifecycle
+1. Branch from latest main: `git fetch origin && git checkout -b feat/xxx origin/main`
+2. Work in small atomic commits (one logical change per commit)
+3. When done: run tests locally, then push and open PR → main
+4. CI runs on PR (test.yml triggers on `pull_request: branches: [main]`)
+5. Merge PR → main triggers deploy eligibility
+6. Delete branch after merge
+
+### Deployment
+- **Backtest**: trigger `backtest.yml` (workflow_dispatch) with `git_ref=main`
+- **Deploy dryrun/live**: trigger `deploy-tango-1-1.yml` (workflow_dispatch) with `git_ref=main`
+- Never deploy from a feature branch directly
+- Never build Rust on tango-1-1 — CI builds and ships artifacts only
+
+### Local environment
+- No local database. All data, backtests, and services run on tango-1-1 via CI/CD.
+- Do not run `psql`, `cargo run --example run_backtest -- --db-url`, or any command
+  that assumes a local PostgreSQL instance.
+
 ## Skills
 
 Skills are local instruction sets stored in `SKILL.md` files (usually under
