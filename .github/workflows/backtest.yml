@@ -35,7 +35,7 @@ env:
 jobs:
   backtest:
     name: Run backtest on tango-1-1
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tango-1-1]
     timeout-minutes: 30
     environment: tango-1-1
 

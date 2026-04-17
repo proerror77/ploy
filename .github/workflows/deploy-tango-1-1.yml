@@ -40,7 +40,7 @@ env:
 jobs:
   build-and-deploy:
     name: Build and deploy to tango-1-1
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tango-1-1]
     timeout-minutes: 40
     environment: tango-1-1
 
