@@ -964,17 +964,19 @@ pub fn build_factor_observations_with_lob(
     }
 
     rows.sort_by_key(|row| (row.event_id.clone(), row.tick_ts));
-    attach_future_pm_labels(&mut rows, 30);
-    attach_future_pm_labels_60(&mut rows, 60);
+    attach_future_pm_labels(&mut rows, 30, LabelField::Change30s);
+    attach_future_pm_labels(&mut rows, 60, LabelField::Change60s);
     rows
 }
 
-fn attach_future_pm_labels(rows: &mut [FactorObservation], horizon_secs: i64) {
+#[derive(Clone, Copy)]
+enum LabelField { Change30s, Change60s }
+
+fn attach_future_pm_labels(rows: &mut [FactorObservation], horizon_secs: i64, field: LabelField) {
     let mut grouped: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, row) in rows.iter().enumerate() {
         grouped.entry(row.event_id.clone()).or_default().push(idx);
     }
-
     for indexes in grouped.values_mut() {
         indexes.sort_by_key(|idx| rows[*idx].tick_ts);
         for (pos, row_idx) in indexes.iter().enumerate() {
@@ -988,31 +990,10 @@ fn attach_future_pm_labels(rows: &mut [FactorObservation], horizon_secs: i64) {
                     break;
                 }
             }
-            rows[*row_idx].future_up_ask_change_30s = future_change;
-        }
-    }
-}
-
-fn attach_future_pm_labels_60(rows: &mut [FactorObservation], horizon_secs: i64) {
-    let mut grouped: HashMap<String, Vec<usize>> = HashMap::new();
-    for (idx, row) in rows.iter().enumerate() {
-        grouped.entry(row.event_id.clone()).or_default().push(idx);
-    }
-
-    for indexes in grouped.values_mut() {
-        indexes.sort_by_key(|idx| rows[*idx].tick_ts);
-        for (pos, row_idx) in indexes.iter().enumerate() {
-            let target_ts = rows[*row_idx].tick_ts + chrono::Duration::seconds(horizon_secs);
-            let mut future_change = None;
-            for next_idx in indexes.iter().skip(pos + 1) {
-                if rows[*next_idx].tick_ts >= target_ts {
-                    if rows[*row_idx].pm_up_ask.is_finite() && rows[*next_idx].pm_up_ask.is_finite() {
-                        future_change = Some(rows[*next_idx].pm_up_ask - rows[*row_idx].pm_up_ask);
-                    }
-                    break;
-                }
+            match field {
+                LabelField::Change30s => rows[*row_idx].future_up_ask_change_30s = future_change,
+                LabelField::Change60s => rows[*row_idx].future_up_ask_change_60s = future_change,
             }
-            rows[*row_idx].future_up_ask_change_60s = future_change;
         }
     }
 }
@@ -1664,7 +1645,7 @@ pub fn export_observations_parquet(
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_future_pm_labels, pearson_ic, spearman_ic, FactorObservation};
+    use super::{attach_future_pm_labels, pearson_ic, spearman_ic, FactorObservation, LabelField};
     use chrono::Utc;
     use serde_json::json;
 
@@ -1850,7 +1831,7 @@ mod tests {
 
         let mut rows = make_rows();
         rows.sort_by_key(|row| (row.event_id.clone(), row.tick_ts));
-        attach_future_pm_labels(&mut rows, 30);
+        attach_future_pm_labels(&mut rows, 30, LabelField::Change30s);
 
         let first = rows
             .iter()
