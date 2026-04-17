@@ -24,7 +24,8 @@ pub fn crate_marker() -> &'static str {
 }
 
 // New layered pipeline exports
-pub use factors_new::{FactorMeta, FactorRegistry, Regime, scan_into_registry};
+pub use factors_new::{FactorMeta, FactorRegistry, scan_into_registry};
+pub use ploy_operator_contracts::Regime;
 pub use signal::{Signal, SignalSource, ThresholdRule, RegimeRouter};
 pub use backtest::{run_binary_backtest, SimulatedFill, BacktestMetrics};
 pub use attribution::{regime_pnl, RegimePnl, factor_pnl, AttributionReport};

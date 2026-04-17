@@ -1,5 +1,5 @@
 use crate::factors::FactorObservation;
-use crate::factors_new::registry::Regime;
+use ploy_operator_contracts::Regime;
 use crate::signal::traits::{Signal, SignalSource};
 
 #[derive(Debug, Clone)]

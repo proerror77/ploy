@@ -1,28 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Regime {
-    Early,   // >270s  (first 30s of event, price still settling)
-    Middle,  // 61..=270s (main trading zone)
-    Expiry,  // 0..=60s  (last 60s, no trading — thin liquidity)
-}
-
-impl Regime {
-    pub fn from_secs(t: i64) -> Self {
-        if t > 270 {
-            Regime::Early
-        } else if t > 60 {
-            Regime::Middle
-        } else {
-            Regime::Expiry
-        }
-    }
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Regime::Early  => "early",
-            Regime::Middle => "middle",
-            Regime::Expiry => "expiry",
-        }
-    }
-}
+pub use ploy_operator_contracts::Regime;
 
 #[derive(Debug, Clone)]
 pub struct FactorMeta {
@@ -67,17 +43,6 @@ impl Default for FactorRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn regime_from_time_remaining() {
-        assert_eq!(Regime::from_secs(290), Regime::Early);
-        assert_eq!(Regime::from_secs(271), Regime::Early);
-        assert_eq!(Regime::from_secs(270), Regime::Middle);
-        assert_eq!(Regime::from_secs(120), Regime::Middle);
-        assert_eq!(Regime::from_secs(61),  Regime::Middle);
-        assert_eq!(Regime::from_secs(60),  Regime::Expiry);
-        assert_eq!(Regime::from_secs(3),   Regime::Expiry);
-    }
 
     #[test]
     fn registry_top_n_sorted_by_abs_ic() {

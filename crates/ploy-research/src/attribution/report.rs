@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use crate::backtest::engine::SimulatedFill;
 use crate::backtest::metrics::BacktestMetrics;
-use crate::factors_new::registry::Regime;
+use ploy_operator_contracts::Regime;
 use crate::attribution::regime::{regime_pnl, RegimePnl};
 use crate::attribution::factor::factor_pnl;
 

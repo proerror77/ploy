@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use crate::backtest::engine::SimulatedFill;
-use crate::factors_new::registry::Regime;
+use ploy_operator_contracts::Regime;
 
 #[derive(Debug, Clone, Default)]
 pub struct RegimePnl {
@@ -30,7 +30,7 @@ pub fn regime_pnl(fills: &[SimulatedFill]) -> BTreeMap<Regime, RegimePnl> {
 mod tests {
     use super::*;
     use crate::backtest::engine::SimulatedFill;
-    use crate::factors_new::registry::Regime;
+    use ploy_operator_contracts::Regime;
     use crate::signal::traits::Signal;
 
     fn fill(regime: Regime, pnl: f64) -> SimulatedFill {

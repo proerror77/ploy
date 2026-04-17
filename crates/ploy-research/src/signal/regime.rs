@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::factors::FactorObservation;
-use crate::factors_new::registry::Regime;
+use ploy_operator_contracts::Regime;
 use crate::signal::traits::{Signal, SignalSource};
 
 pub struct RegimeRouter {
@@ -32,7 +32,7 @@ mod tests {
     use super::*;
     use crate::signal::traits::{Signal, SignalSource};
     use crate::factors::FactorObservation;
-    use crate::factors_new::registry::Regime;
+    use ploy_operator_contracts::Regime;
     use chrono::Utc;
 
     struct FixedSignal(Signal);
@@ -66,7 +66,7 @@ mod tests {
     fn router_dispatches_to_correct_regime_source() {
         let mut router = RegimeRouter::new(Box::new(FixedSignal(Signal::Hold)));
         router.set(Regime::Early, Box::new(FixedSignal(Signal::Buy)));
-        assert_eq!(router.signal(&obs_at(285)), Signal::Buy);   // early (>270s)
+        assert_eq!(router.signal(&obs_at(220)), Signal::Buy);   // early (181-300s)
         assert_eq!(router.signal(&obs_at(30)),  Signal::Hold);  // expiry -> falls back to default
     }
 }
