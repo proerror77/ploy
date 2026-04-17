@@ -34,10 +34,12 @@ env:
 
 jobs:
   backtest:
-    name: Run backtest on tango-1-1
-    runs-on: [self-hosted, tango-1-1]
+    # NOTE: ploy-ci-1 is an on-demand instance. Start it manually before
+    # triggering this workflow. The self-hosted runner must be online.
+    name: Run backtest on ploy-ci-1
+    runs-on: [self-hosted, ploy-ci-1]
     timeout-minutes: 30
-    environment: tango-1-1
+    environment: ploy-ci-1
 
     steps:
       - name: Checkout code
@@ -59,6 +61,6 @@ jobs:
         run: |
           ./target/release/examples/run_backtest \
             --config "${CONFIG}" \
-            --db-url "postgresql://postgres:postgres@localhost:5432/ploy" \
+            --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
             --start-date "${START_DATE}" \
             --end-date "${END_DATE}"
