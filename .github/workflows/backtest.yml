@@ -85,7 +85,9 @@ jobs:
 
       - name: Resolve config filename
         id: config
-        run: echo "basename=$(basename '${{ github.event.inputs.config }}')" >> "$GITHUB_OUTPUT"
+        env:
+          CONFIG_PATH: ${{ github.event.inputs.config }}
+        run: echo "basename=$(basename "${CONFIG_PATH}")" >> "$GITHUB_OUTPUT"
 
       - name: Run backtest on tango-1-1
         uses: appleboy/ssh-action@v1.0.3
