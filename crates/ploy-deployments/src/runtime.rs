@@ -253,8 +253,8 @@ fn kill_pid(pid: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::DeploymentRuntime;
-    use crate::protocol::WorkerLaunchSpec;
+    use super::{process_alive, DeploymentRuntime};
+    use crate::protocol::{WorkerLaunchSpec, WorkerStatus};
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use std::path::PathBuf;
 
