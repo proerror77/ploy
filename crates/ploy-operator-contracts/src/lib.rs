@@ -30,7 +30,7 @@ pub use system::{
 pub use trading::{
     FillSnapshot, IntentPurpose, MarketData, OrderControlResponse, OrderReplaceRequest,
     OrderSnapshot, PaperIntentRequest, PaperIntentResponse, PnlSnapshotResponse, PositionResponse,
-    PositionSnapshotResponse, RiskSnapshotResponse, TradeResponse, TradingIntentSnapshot,
+    PositionSnapshotResponse, Regime, RiskSnapshotResponse, TradeResponse, TradingIntentSnapshot,
     TradingStateSnapshot,
 };
 
