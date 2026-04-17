@@ -1588,7 +1588,7 @@ fn update_sort_ts(update: &MarketUpdate) -> DateTime<Utc> {
     }
 }
 
-fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Option<f64> {
+pub(crate) fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Option<f64> {
     let mut grouped: BTreeMap<i64, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
     for (bucket, x, y) in bucketed {
         let entry = grouped.entry(*bucket).or_default();
