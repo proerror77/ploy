@@ -4,7 +4,7 @@ pub struct BacktestMetrics {
     pub win_count: usize,
     pub win_rate: f64,
     pub total_pnl: f64,
-    pub sharpe: f64,
+    pub sharpe_per_trade: f64,
     pub max_drawdown: f64,
 }
 
@@ -13,13 +13,19 @@ impl BacktestMetrics {
         let n = pnls.len();
         if n == 0 {
             return Self { trade_count: 0, win_count: 0, win_rate: 0.0,
-                total_pnl: 0.0, sharpe: 0.0, max_drawdown: 0.0 };
+                total_pnl: 0.0, sharpe_per_trade: 0.0, max_drawdown: 0.0 };
         }
         let win_count = pnls.iter().filter(|&&p| p > 0.0).count();
         let total_pnl: f64 = pnls.iter().sum();
         let mean = total_pnl / n as f64;
-        let variance = pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / n as f64;
-        let sharpe = if variance > 0.0 {
+        let variance = if n > 1 {
+            pnls.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / (n - 1) as f64
+        } else {
+            0.0
+        };
+        // Per-trade Sharpe: mean_pnl / std_pnl. Not annualized.
+        // To annualize: multiply by sqrt(trades_per_year).
+        let sharpe_per_trade = if variance > 0.0 {
             mean / variance.sqrt()
         } else if mean > 0.0 {
             f64::INFINITY
@@ -40,7 +46,7 @@ impl BacktestMetrics {
         }
 
         Self { trade_count: n, win_count, win_rate: win_count as f64 / n as f64,
-            total_pnl, sharpe, max_drawdown }
+            total_pnl, sharpe_per_trade, max_drawdown }
     }
 }
 
