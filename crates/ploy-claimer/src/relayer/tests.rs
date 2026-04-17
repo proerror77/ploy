@@ -1,6 +1,4 @@
-use super::proxy_support::{
-    RelayerBuilderCredentials, ensure_0x_prefix, relayer_hmac_signature,
-};
+use super::proxy_support::{RelayerBuilderCredentials, ensure_0x_prefix, relayer_hmac_signature};
 use super::*;
 
 use ethers_core::types::{Address as EthersAddress, U256 as EthersU256};
@@ -99,7 +97,7 @@ fn test_encode_redeem_calldata_uses_standard_ctf_signature_for_binary_markets() 
         false,
         &[EthersU256::from(1_000_000u64), EthersU256::from(0u64)],
     )
-        .expect("standard redeem calldata should encode");
+    .expect("standard redeem calldata should encode");
     assert_eq!(hex::encode(&encoded[..4]), "9c542ed7");
 }
 
@@ -110,7 +108,7 @@ fn test_encode_redeem_calldata_uses_neg_risk_signature_for_neg_risk_markets() {
         true,
         &[EthersU256::from(500_000u64), EthersU256::from(500_000u64)],
     )
-        .expect("neg-risk redeem calldata should encode");
+    .expect("neg-risk redeem calldata should encode");
     assert_eq!(hex::encode(&encoded[..4]), "d2d72a51");
 }
 

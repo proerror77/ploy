@@ -49,40 +49,30 @@ impl AutoClaimer {
             Self::encode_redeem_calldata(condition_bytes, pos.neg_risk, &redeem_amounts)?;
         let call_target: EthersAddress = if pos.neg_risk {
             NEG_RISK_ADAPTER_POLYGON.parse().map_err(|e| {
-                crate::ClaimerError::Network(format!(
-                    "Invalid NegRisk adapter address: {}",
-                    e
-                ))
+                crate::ClaimerError::Network(format!("Invalid NegRisk adapter address: {}", e))
             })?
         } else {
             CONDITIONAL_TOKENS_POLYGON.parse().map_err(|e| {
-                crate::ClaimerError::Network(format!(
-                    "Invalid ConditionalTokens address: {}",
-                    e
-                ))
+                crate::ClaimerError::Network(format!("Invalid ConditionalTokens address: {}", e))
             })?
         };
         let proxy_factory_addr: EthersAddress =
             RELAYER_PROXY_FACTORY_POLYGON.parse().map_err(|e| {
-                crate::ClaimerError::Network(format!(
-                    "Invalid relayer proxy factory: {}",
-                    e
-                ))
+                crate::ClaimerError::Network(format!("Invalid relayer proxy factory: {}", e))
             })?;
         let relay_hub_addr: EthersAddress = RELAYER_RELAY_HUB_POLYGON.parse().map_err(|e| {
             crate::ClaimerError::Network(format!("Invalid relayer hub address: {}", e))
         })?;
         let proxy_wallet = Self::derive_proxy_wallet_address(signer_addr)?;
-        let proxy_call_data =
-            Self::encode_proxy_transaction_data(call_target, redeem_call_data)?;
+        let proxy_call_data = Self::encode_proxy_transaction_data(call_target, redeem_call_data)?;
 
         let polygon_rpc = std::env::var("POLYGON_RPC_URL")
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| POLYGON_RPC_DEFAULT.to_string());
-        let rpc_url = polygon_rpc.parse().map_err(|e| {
-            crate::ClaimerError::Network(format!("Invalid RPC URL: {}", e))
-        })?;
+        let rpc_url = polygon_rpc
+            .parse()
+            .map_err(|e| crate::ClaimerError::Network(format!("Invalid RPC URL: {}", e)))?;
         let provider = ProviderBuilder::new().connect_http(rpc_url);
 
         let gas_estimate_tx = AlloyTransactionRequest::default()
@@ -133,10 +123,7 @@ impl AutoClaimer {
                 .sign_message(struct_hash.as_bytes())
                 .await
                 .map_err(|e| {
-                    crate::ClaimerError::Internal(format!(
-                        "Relayer proxy signature failed: {}",
-                        e
-                    ))
+                    crate::ClaimerError::Internal(format!("Relayer proxy signature failed: {}", e))
                 })?
                 .to_string(),
         );

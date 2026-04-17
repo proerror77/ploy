@@ -7,6 +7,7 @@ use crate::{ClaimerError, RedeemablePosition};
 pub(super) struct EligiblePositions {
     pub(super) positions: Vec<RedeemablePosition>,
     pub(super) skipped_small: usize,
+    pub(super) skipped_cycle_limited: usize,
 }
 
 fn ignored_condition_patterns() -> Vec<String> {
@@ -55,6 +56,7 @@ pub(super) async fn discover_eligible_positions(
         return Ok(EligiblePositions {
             positions: vec![],
             skipped_small: 0,
+            skipped_cycle_limited: 0,
         });
     }
 
@@ -68,10 +70,17 @@ pub(super) async fn discover_eligible_positions(
         eligible.push(pos);
     }
 
+    let (eligible, skipped_cycle_limited) = limit_positions_for_cycle(
+        eligible,
+        crate::max_claims_per_cycle(),
+        crate::max_claim_payout_per_cycle(),
+    );
+
     if eligible.is_empty() {
         debug!(
             min_claim_size = %min_claim_size,
             skipped_small,
+            skipped_cycle_limited,
             "No redeemable positions above min_claim_size"
         );
     }
@@ -79,7 +88,47 @@ pub(super) async fn discover_eligible_positions(
     Ok(EligiblePositions {
         positions: eligible,
         skipped_small,
+        skipped_cycle_limited,
     })
+}
+
+pub(crate) fn limit_positions_for_cycle(
+    mut positions: Vec<RedeemablePosition>,
+    max_claims_per_cycle: Option<usize>,
+    max_payout_per_cycle_usdc: Option<Decimal>,
+) -> (Vec<RedeemablePosition>, usize) {
+    positions.sort_by(|left, right| {
+        right
+            .payout
+            .cmp(&left.payout)
+            .then_with(|| left.condition_id.cmp(&right.condition_id))
+    });
+
+    let mut selected = Vec::with_capacity(positions.len());
+    let mut skipped = 0usize;
+    let mut running_payout = Decimal::ZERO;
+
+    for pos in positions {
+        if max_claims_per_cycle.is_some_and(|cap| selected.len() >= cap) {
+            skipped += 1;
+            continue;
+        }
+
+        if let Some(cap) = max_payout_per_cycle_usdc {
+            let next_total = running_payout + pos.payout;
+            if next_total > cap {
+                skipped += 1;
+                continue;
+            }
+            running_payout = next_total;
+        } else {
+            running_payout += pos.payout;
+        }
+
+        selected.push(pos);
+    }
+
+    (selected, skipped)
 }
 
 /// Merge multiple redeemable rows for the same condition into one claim attempt.
@@ -133,7 +182,7 @@ pub(crate) async fn get_redeemable_positions(
         .map_err(|e| ClaimerError::Network(format!("Failed to fetch positions: {e}")))?;
 
     let ignored_patterns = ignored_condition_patterns();
-    let allow_price_fallback = crate::env_flag("CLAIMER_ALLOW_PRICE_FALLBACK", true);
+    let allow_price_fallback = crate::claim_allow_price_fallback();
 
     let mut redeemable = Vec::new();
 
@@ -142,7 +191,8 @@ pub(crate) async fn get_redeemable_positions(
             continue;
         }
 
-        let is_winner = p.cur_price > rust_decimal::Decimal::try_from(0.99_f64).unwrap_or(rust_decimal::Decimal::ONE);
+        let is_winner = p.cur_price
+            > rust_decimal::Decimal::try_from(0.99_f64).unwrap_or(rust_decimal::Decimal::ONE);
 
         // API says redeemable, or price fallback for near-certain winners
         if !p.redeemable && !(allow_price_fallback && is_winner) {
@@ -155,8 +205,21 @@ pub(crate) async fn get_redeemable_positions(
             );
         }
 
+        // Only redeem winning positions to avoid burning Builder API quota on
+        // losing/dust positions from high-volume 5-min markets.
+        // Set CLAIMER_WINNERS_ONLY=false to redeem all redeemable positions.
+        if crate::env_flag("CLAIMER_WINNERS_ONLY", true) && !is_winner {
+            debug!(
+                "Skipping non-winning redeemable position: cur_price={}, condition={:?}",
+                p.cur_price, p.condition_id
+            );
+            continue;
+        }
+
         let condition_id = format!("{:#x}", p.condition_id);
-        if condition_id.trim().is_empty() || condition_id == "0x0000000000000000000000000000000000000000000000000000000000000000" {
+        if condition_id.trim().is_empty()
+            || condition_id == "0x0000000000000000000000000000000000000000000000000000000000000000"
+        {
             warn!(
                 "Skipping redeemable position with zero condition_id (outcome={}, size={})",
                 p.outcome, p.size
@@ -198,4 +261,61 @@ pub(crate) async fn get_redeemable_positions(
     }
 
     Ok(collapse_positions_by_condition(redeemable))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::limit_positions_for_cycle;
+    use crate::RedeemablePosition;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    fn pos(condition_id: &str, payout: Decimal) -> RedeemablePosition {
+        RedeemablePosition {
+            condition_id: condition_id.to_string(),
+            token_id: format!("token-{condition_id}"),
+            outcome: "YES".to_string(),
+            outcome_index: 0,
+            size: payout,
+            payout,
+            claim_amounts: vec![payout],
+            neg_risk: false,
+        }
+    }
+
+    #[test]
+    fn cycle_limits_prioritize_highest_payouts() {
+        let (selected, skipped) = limit_positions_for_cycle(
+            vec![
+                pos("small", dec!(3)),
+                pos("large", dec!(10)),
+                pos("mid", dec!(5)),
+            ],
+            Some(2),
+            None,
+        );
+
+        assert_eq!(skipped, 1);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].condition_id, "large");
+        assert_eq!(selected[1].condition_id, "mid");
+    }
+
+    #[test]
+    fn cycle_limits_respect_total_payout_cap() {
+        let (selected, skipped) = limit_positions_for_cycle(
+            vec![
+                pos("large", dec!(10)),
+                pos("mid", dec!(5)),
+                pos("small", dec!(3)),
+            ],
+            None,
+            Some(dec!(13)),
+        );
+
+        assert_eq!(skipped, 1);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].condition_id, "large");
+        assert_eq!(selected[1].condition_id, "small");
+    }
 }

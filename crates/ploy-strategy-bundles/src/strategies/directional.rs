@@ -150,6 +150,44 @@ pub struct DirectionalConfig {
     #[serde(default = "default_reversal_stop_distance_pct")]
     pub reversal_stop_distance_pct: f64,
 
+    // ── Three-Layer strategy parameters ──────────────────────────────
+
+    /// Direction gate: minimum effective probability to consider a trade.
+    #[serde(default = "default_tl_min_direction_prob")]
+    pub three_layer_min_direction_prob: f64,
+
+    /// Direction gate: minimum |distance_over_sigma| to consider a trade.
+    #[serde(default = "default_tl_min_distance_over_sigma")]
+    pub three_layer_min_distance_over_sigma: f64,
+
+    /// Confirmation gate: minimum absolute confirmation score to pass.
+    #[serde(default = "default_tl_min_confirmation_score")]
+    pub three_layer_min_confirmation_score: f64,
+
+    /// Confirmation gate: in late/expiry regimes, require drift_30s to agree with direction.
+    #[serde(default = "default_tl_min_drift_confirmation")]
+    pub three_layer_min_drift_confirmation: f64,
+
+    /// Worth-it gate: minimum edge after fees.
+    #[serde(default = "default_tl_min_edge")]
+    pub three_layer_min_edge: f64,
+
+    /// Worth-it gate: minimum reward/risk ratio.
+    #[serde(default = "default_tl_min_reward_risk")]
+    pub three_layer_min_reward_risk: f64,
+
+    /// Take-profit: exit when token ask reaches this level.
+    #[serde(default = "default_tl_take_profit_ask")]
+    pub three_layer_take_profit_ask: f64,
+
+    /// Stop-loss: exit when spot moves against direction by this pct.
+    #[serde(default = "default_tl_stop_distance_pct")]
+    pub three_layer_stop_distance_pct: f64,
+
+    /// Maximum PM quote staleness (seconds) before rejecting entry.
+    #[serde(default = "default_tl_max_pm_lag_secs")]
+    pub three_layer_max_pm_lag_secs: u64,
+
     // Timing
     #[serde(default = "default_min_time")]
     pub min_time_remaining_secs: u64,
@@ -277,6 +315,15 @@ fn default_reversal_take_profit_ask() -> f64 {
 fn default_reversal_stop_distance_pct() -> f64 {
     0.025
 }
+fn default_tl_min_direction_prob() -> f64 { 0.56 }
+fn default_tl_min_distance_over_sigma() -> f64 { 0.3 }
+fn default_tl_min_confirmation_score() -> f64 { 0.10 }
+fn default_tl_min_drift_confirmation() -> f64 { 0.0002 }
+fn default_tl_min_edge() -> f64 { 0.03 }
+fn default_tl_min_reward_risk() -> f64 { 1.2 }
+fn default_tl_take_profit_ask() -> f64 { 0.70 }
+fn default_tl_stop_distance_pct() -> f64 { 0.020 }
+fn default_tl_max_pm_lag_secs() -> u64 { 15 }
 fn default_min_time() -> u64 {
     60
 }
@@ -1424,6 +1471,7 @@ impl StrategyLogic for DirectionalStrategy {
                 bid,
                 ask,
                 ts,
+                ..
             } => {
                 self.quotes.insert(
                     token_id.clone(),
@@ -1698,6 +1746,15 @@ mod tests {
             reversal_max_pm_lag_secs: 30,
             reversal_take_profit_ask: 0.65,
             reversal_stop_distance_pct: 0.025,
+            three_layer_min_direction_prob: 0.56,
+            three_layer_min_distance_over_sigma: 0.3,
+            three_layer_min_confirmation_score: 0.10,
+            three_layer_min_drift_confirmation: 0.0002,
+            three_layer_min_edge: 0.03,
+            three_layer_min_reward_risk: 1.2,
+            three_layer_take_profit_ask: 0.70,
+            three_layer_stop_distance_pct: 0.020,
+            three_layer_max_pm_lag_secs: 15,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
             cooldown_secs: 0,
@@ -1867,6 +1924,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,
@@ -1877,6 +1936,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,
@@ -1961,6 +2022,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             positions,
             &OrderLedger::default(),
@@ -1971,6 +2034,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             positions,
             &OrderLedger::default(),
@@ -2116,6 +2181,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,
@@ -2126,6 +2193,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,
@@ -2197,6 +2266,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &OrderLedger::default(),
@@ -2207,6 +2278,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &OrderLedger::default(),
@@ -2305,6 +2378,8 @@ mod tests {
                     bid: Some(bid),
                     ask: Some(ask),
                     ts: now,
+                        bid_size: None,
+                        ask_size: None,
                 },
                 &positions,
                 &OrderLedger::default(),

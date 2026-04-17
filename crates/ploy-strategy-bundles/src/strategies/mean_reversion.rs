@@ -822,6 +822,7 @@ impl StrategyLogic for MeanReversionStrategy {
                 bid,
                 ask,
                 ts,
+                ..
             } => {
                 self.quotes.insert(
                     token_id.clone(),
@@ -1061,7 +1062,16 @@ mod tests {
             max_daily_trades: 1000,
             max_daily_loss_usd: None,
             allowed_window_secs: vec![300, 900],
-        }
+        three_layer_min_direction_prob: 0.56,
+        three_layer_min_distance_over_sigma: 0.3,
+        three_layer_min_confirmation_score: 0.10,
+        three_layer_min_drift_confirmation: 0.0002,
+        three_layer_min_edge: 0.03,
+        three_layer_min_reward_risk: 1.2,
+        three_layer_take_profit_ask: 0.70,
+        three_layer_stop_distance_pct: 0.020,
+        three_layer_max_pm_lag_secs: 15,
+    }
     }
 
     #[test]
@@ -1092,6 +1102,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,
@@ -1102,6 +1114,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,
@@ -1179,6 +1193,8 @@ mod tests {
                 bid: Some(dec!(0.42)),
                 ask: Some(dec!(0.43)),
                 ts: now + chrono::Duration::seconds(30),
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,
@@ -1311,6 +1327,8 @@ mod tests {
                 bid: Some(dec!(0.45)),
                 ask: Some(dec!(0.46)),
                 ts: now + chrono::Duration::seconds(35),
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,

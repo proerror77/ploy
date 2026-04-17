@@ -396,10 +396,13 @@ ploy paper --symbols BTCUSDT,ETHUSDT           # Paper mode using Binance underl
 Live momentum mode now supports automatic post-settlement claims (redeem winning positions) when keys are configured:
 
 ```bash
-export PLOY_AUTO_CLAIM=true                    # default true in live momentum mode
-export CLAIMER_CHECK_INTERVAL_SECS=60          # optional
+export CLAIMER_DAEMON_ENABLED=true             # explicit opt-in; default false in live mode
+export CLAIMER_CHECK_INTERVAL_SECS=300         # optional; defaults to 5 minutes
 export CLAIMER_MIN_CLAIM_SIZE=1                # optional (USDC)
+export CLAIMER_MAX_CLAIMS_PER_CYCLE=3          # optional hard cap per scan
+export CLAIMER_MAX_PAYOUT_PER_CYCLE_USDC=50    # optional hard cap per scan
 export CLAIMER_IGNORE_CONDITION_IDS=0xabc,0xdef # optional ignore list (prefix match)
+export CLAIMER_ALLOW_PRICE_FALLBACK=false      # safer default; only claim when API marks redeemable
 export POLYGON_RPC_URL=https://polygon-rpc.com # optional RPC override
 ```
 

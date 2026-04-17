@@ -1,5 +1,6 @@
 use crate::factors::{spearman_ic, FactorObservation};
-use crate::factors_new::registry::{FactorMeta, FactorRegistry, Regime};
+use crate::factors_new::registry::{FactorMeta, FactorRegistry};
+use ploy_operator_contracts::Regime;
 
 const MIN_OBS: usize = 10;
 
@@ -22,13 +23,21 @@ const FACTOR_EXTRACTORS: &[(&str, fn(&FactorObservation) -> f64)] = &[
     ("cum_trade_imbalance_5m", |o| o.cum_trade_imbalance_5m),
 ];
 
+fn event_bucket_id(event_id: &str) -> i64 {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    event_id.hash(&mut h);
+    h.finish() as i64
+}
+
 const LABELS: &[(&str, fn(&FactorObservation) -> Option<f64>)] = &[
     ("settlement_up",            |o| Some(o.settlement_up)),
     ("future_up_ask_change_30s", |o| o.future_up_ask_change_30s),
 ];
 
 pub fn scan_into_registry(obs: &[FactorObservation], registry: &mut FactorRegistry) {
-    for regime in [Regime::Early, Regime::Middle, Regime::Expiry] {
+    for regime in [Regime::Early, Regime::Middle, Regime::Late, Regime::Expiry] {
         let regime_obs: Vec<&FactorObservation> = obs
             .iter()
             .filter(|o| Regime::from_secs(o.time_remaining_secs) == regime)
@@ -39,21 +48,24 @@ pub fn scan_into_registry(obs: &[FactorObservation], registry: &mut FactorRegist
 
         for (label_name, label_fn) in LABELS {
             for (factor_name, factor_fn) in FACTOR_EXTRACTORS {
-                let pairs: Vec<(f64, f64)> = regime_obs.iter()
-                    .filter_map(|o| label_fn(o).map(|y| (factor_fn(o), y)))
+                let triples: Vec<(i64, f64, f64)> = regime_obs.iter()
+                    .filter_map(|o| label_fn(o).map(|y| {
+                        (event_bucket_id(&o.event_id), factor_fn(o), y)
+                    }))
                     .collect();
-                if pairs.len() < MIN_OBS { continue; }
-                let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
-                let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();
+                if triples.len() < MIN_OBS { continue; }
+                let xs: Vec<f64> = triples.iter().map(|t| t.1).collect();
+                let ys: Vec<f64> = triples.iter().map(|t| t.2).collect();
                 let ic = spearman_ic(&xs, &ys);
                 if ic.is_nan() { continue; }
+                let icir = crate::factors::bucket_icir(&triples, 3).unwrap_or(0.0);
                 registry.insert(FactorMeta {
                     name: factor_name.to_string(),
                     regime,
                     label: label_name.to_string(),
                     ic,
                     direction: if ic >= 0.0 { 1 } else { -1 },
-                    stability: ic.abs(),
+                    stability: icir,
                 });
             }
         }
@@ -64,7 +76,8 @@ pub fn scan_into_registry(obs: &[FactorObservation], registry: &mut FactorRegist
 mod tests {
     use super::*;
     use crate::factors::FactorObservation;
-    use crate::factors_new::registry::{FactorRegistry, Regime};
+    use crate::factors_new::registry::FactorRegistry;
+    use ploy_operator_contracts::Regime;
     use chrono::Utc;
 
     fn obs(time_remaining_secs: i64, distance_over_sigma: f64, settlement_up: f64) -> FactorObservation {
@@ -105,6 +118,10 @@ mod tests {
             pm_up_ask: 0.0,
             pm_down_bid: 0.0,
             pm_down_ask: 0.0,
+            pm_up_bid_size: 0.0,
+            pm_up_ask_size: 0.0,
+            pm_down_bid_size: 0.0,
+            pm_down_ask_size: 0.0,
             pm_lag_secs: 0.0,
             future_up_ask_change_30s: None,
             future_up_ask_change_60s: None,
@@ -117,10 +134,13 @@ mod tests {
 
     #[test]
     fn scan_populates_registry_for_early_regime() {
-        // 20 observations in early regime (285s remaining, >270s = Early)
-        // distance_over_sigma increases monotonically → should have non-zero IC with settlement_up
+        // 20 observations across 5 events in early regime (220s = Early 181-300s)
         let observations: Vec<FactorObservation> = (0..20)
-            .map(|i| obs(285, i as f64 * 0.1, if i % 2 == 0 { 1.0 } else { 0.0 }))
+            .map(|i| {
+                let mut o = obs(220, i as f64 * 0.1, if i % 2 == 0 { 1.0 } else { 0.0 });
+                o.event_id = format!("event-{}", i / 4); // 5 events, 4 obs each
+                o
+            })
             .collect();
         let mut reg = FactorRegistry::new();
         scan_into_registry(&observations, &mut reg);

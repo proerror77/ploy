@@ -1,7 +1,9 @@
 use super::*;
 use crate::ClaimerError;
 
-pub(super) async fn preflight_wallet_can_claim(claimer: &AutoClaimer) -> Result<bool, ClaimerError> {
+pub(super) async fn preflight_wallet_can_claim(
+    claimer: &AutoClaimer,
+) -> Result<bool, ClaimerError> {
     let private_key = claimer
         .config
         .private_key
@@ -23,10 +25,7 @@ pub(super) async fn preflight_wallet_can_claim(claimer: &AutoClaimer) -> Result<
 
     let wallet_addr = signer.address();
     let balance = provider.get_balance(wallet_addr).await.map_err(|e| {
-        ClaimerError::Contract(format!(
-            "Failed to read claimer wallet balance: {}",
-            e
-        ))
+        ClaimerError::Contract(format!("Failed to read claimer wallet balance: {}", e))
     })?;
     let min_balance = min_native_gas_wei();
 
@@ -43,9 +42,7 @@ pub(super) async fn preflight_wallet_can_claim(claimer: &AutoClaimer) -> Result<
     if effective_balance < min_balance {
         warn!(
             "Auto-claim paused: wallet {} has {} wei, need at least {} wei for gas. Top up MATIC and claimer will resume automatically.",
-            wallet_addr,
-            effective_balance,
-            min_balance
+            wallet_addr, effective_balance, min_balance
         );
         return Ok(false);
     }
@@ -304,21 +301,15 @@ pub(super) async fn claim_position(
         .map_err(|e| ClaimerError::Network(format!("Invalid RPC URL: {}", e)))?;
     let provider = ProviderBuilder::new().wallet(wallet).connect_http(rpc_url);
 
-    let conditional_tokens_addr: Address = CONDITIONAL_TOKENS_POLYGON.parse().map_err(|e| {
-        ClaimerError::Network(format!(
-            "Invalid ConditionalTokens address: {}",
-            e
-        ))
-    })?;
-    let neg_risk_adapter_addr: Address = NEG_RISK_ADAPTER_POLYGON.parse().map_err(|e| {
-        ClaimerError::Network(format!(
-            "Invalid NegRisk adapter address: {}",
-            e
-        ))
-    })?;
-    let collateral_addr: Address = USDC_E_POLYGON.parse().map_err(|e| {
-        ClaimerError::Network(format!("Invalid USDC.e address: {}", e))
-    })?;
+    let conditional_tokens_addr: Address = CONDITIONAL_TOKENS_POLYGON
+        .parse()
+        .map_err(|e| ClaimerError::Network(format!("Invalid ConditionalTokens address: {}", e)))?;
+    let neg_risk_adapter_addr: Address = NEG_RISK_ADAPTER_POLYGON
+        .parse()
+        .map_err(|e| ClaimerError::Network(format!("Invalid NegRisk adapter address: {}", e)))?;
+    let collateral_addr: Address = USDC_E_POLYGON
+        .parse()
+        .map_err(|e| ClaimerError::Network(format!("Invalid USDC.e address: {}", e)))?;
 
     let contract = IConditionalTokens::new(conditional_tokens_addr, provider.clone());
 
@@ -371,9 +362,10 @@ pub(super) async fn claim_position(
             .map_err(|e| ClaimerError::Contract(format!("Redeem tx failed: {}", e)))?
     };
 
-    let receipt = pending.get_receipt().await.map_err(|e| {
-        ClaimerError::Contract(format!("Tx confirmation failed: {}", e))
-    })?;
+    let receipt = pending
+        .get_receipt()
+        .await
+        .map_err(|e| ClaimerError::Contract(format!("Tx confirmation failed: {}", e)))?;
 
     let tx_hash = format!("{:?}", receipt.transaction_hash);
     info!("Redeem successful! Tx: {}", tx_hash);

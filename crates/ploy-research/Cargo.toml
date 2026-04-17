@@ -8,8 +8,10 @@ repository.workspace = true
 description = "Ploy research and backtesting crate"
 
 [dependencies]
+rand.workspace = true
 chrono.workspace = true
 polars.workspace = true
+ploy-operator-contracts.workspace = true
 ploy-strategy-bundles.workspace = true
 ploy-trading.workspace = true
 rust_decimal.workspace = true

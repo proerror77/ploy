@@ -272,6 +272,8 @@ mod tests {
                 bid: Some(dec!(0.39)),
                 ask: Some(dec!(0.40)),
                 ts: now + Duration::seconds(1),
+                    bid_size: None,
+                    ask_size: None,
             },
             MarketUpdate::SportsState {
                 game_id: "19439".into(),

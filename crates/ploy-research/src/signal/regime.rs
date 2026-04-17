@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::factors::FactorObservation;
-use crate::factors_new::registry::Regime;
+use ploy_operator_contracts::Regime;
 use crate::signal::traits::{Signal, SignalSource};
 
 pub struct RegimeRouter {
@@ -32,7 +32,7 @@ mod tests {
     use super::*;
     use crate::signal::traits::{Signal, SignalSource};
     use crate::factors::FactorObservation;
-    use crate::factors_new::registry::Regime;
+    use ploy_operator_contracts::Regime;
     use chrono::Utc;
 
     struct FixedSignal(Signal);
@@ -54,7 +54,8 @@ mod tests {
             bid_depth_near: 0.0, ask_depth_near: 0.0, depth_ratio: 0.0,
             depth_imbalance: 0.0, depth_far_ratio: 0.0, depth_acceleration: 0.0,
             obi_10: 0.0, pm_up_bid: 0.0, pm_up_ask: 0.0, pm_down_bid: 0.0,
-            pm_down_ask: 0.0, pm_lag_secs: 0.0, future_up_ask_change_30s: None,
+            pm_down_ask: 0.0, pm_up_bid_size: 0.0, pm_up_ask_size: 0.0,
+            pm_down_bid_size: 0.0, pm_down_ask_size: 0.0, pm_lag_secs: 0.0, future_up_ask_change_30s: None,
             future_up_ask_change_60s: None, cum_obi_delta_5m: 0.0,
             cum_depth_delta_5m: 0.0, cum_mprice_drift_5m: 0.0,
             cum_trade_imbalance_5m: 0.0,
@@ -65,7 +66,7 @@ mod tests {
     fn router_dispatches_to_correct_regime_source() {
         let mut router = RegimeRouter::new(Box::new(FixedSignal(Signal::Hold)));
         router.set(Regime::Early, Box::new(FixedSignal(Signal::Buy)));
-        assert_eq!(router.signal(&obs_at(285)), Signal::Buy);   // early (>270s)
+        assert_eq!(router.signal(&obs_at(220)), Signal::Buy);   // early (181-300s)
         assert_eq!(router.signal(&obs_at(30)),  Signal::Hold);  // expiry -> falls back to default
     }
 }

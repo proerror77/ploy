@@ -1,5 +1,21 @@
 # PM5D Settlement + Strategy Audit (2026-04-12)
 
+## 2026-04-16 Claimer hardening addendum
+
+### Files
+
+- `crates/ploy-claimer/src/lib.rs`
+- `crates/ploy-claimer/src/discovery.rs`
+- `README.md`
+
+### Tasks
+
+- [x] Audit the live auto-claimer defaults against the recent PM5D live-loss postmortem.
+- [x] Disable optimistic redeem discovery defaults that can spam Builder/API before a market is explicitly redeemable.
+- [x] Add per-cycle redeem caps so one sweep cannot hammer the relayer/account on every eligible condition at once.
+- [x] Flip auto-claimer activation to explicit opt-in instead of default-on in all live runs.
+- [ ] Add a true net-PnL-aware redeem policy once claim decisions can see per-condition cost basis, not only payout size.
+
 ## Files
 
 - `.omx/context/pm5d-settlement-strategy-audit-20260412T091000Z.md`
@@ -7872,6 +7888,144 @@ Build a Rust-native factor research workflow for binary-options trading that sep
   - settlement top factors by |Spearman IC|: `spread_bps`, `sigma_horizon`, `flip_age_secs`
   - PM lag top factors by |Spearman IC|: `signed_distance_to_beat`, `abs_distance_to_beat`, `model_prob_up`, `distance_over_sigma`
 - 2026-04-13: Added coarse reversal optimization support and verified that profitable reversal behavior exists on remote L2 windows, but validation quality still depends on choosing windows that contain both events and L2 coverage.
+- 2026-04-15: Remote validation follow-up plan:
+  - expand the time-stratified P&L check from the earlier small sample to a larger remote `tango-1-1` database slice
+  - run the research binary against remote valid 5m windows across multiple symbols and days
+  - quantify whether the positive `@1m` / early-entry ROI survives larger sample size, not just whether a single small batch looked good
+  - restate the ROI formula in per-trade terms so win rate vs payout asymmetry is explicit in the final conclusion
+- 2026-04-15: Larger-sample validation exposed a robustness bug in `factor_research`:
+  - larger cross-symbol runs could panic when sorting non-finite metric values with a non-total comparator
+  - fixed by switching factor ranking sorts to finite-safe total ordering and dropping dead calibration-table code that was no longer used by the strategy table
+  - added example-level regression tests for non-finite sort handling and default fine-grained entry-target parsing
+- 2026-04-15: Research execution path for fresh validation now uses the local rebuilt `factor_research` binary against an SSH-forwarded `tango-1-1` PostgreSQL tunnel, so the code under test is current while the data source stays remote.
+- 2026-04-15: Added configurable fine-grained entry targets to `factor_research`; default grid is now:
+  - `240,180,120,60,30,10,5,0` seconds before settlement
+  - output now includes per-target coverage counts so late-window data sparsity is visible instead of hidden by nearest-tick matching
+- 2026-04-15: Fine-grid cross-symbol result on remote DB (`BTC, ETH, SOL, XRP, BNB, DOGE`, valid 5m windows in `2026-04-11`, up to `30` windows per symbol):
+  - coverage stayed high even in the last minute: `@30s ~94.5%`, `@10s ~87.2%`, `@5s ~86.9%`
+  - `D.Combined` stake-weighted ROI by entry time: `@4m +32.4%`, `@3m -1.3%`, `@2m -1.7%`, `@1m +41.3%`, `@30s -9.1%`, `@10s -6.5%`, `@5s -23.4%`, `@last -61.4%`
+  - current read: the issue is not primarily “no late trades”; there is still substantial late coverage, but the edge decays sharply inside the final `30s`, while `@1m` remains the strongest aggregate entry point in this sample
+- 2026-04-15: Added full-range per-second scan support through range syntax in `--entry-targets-secs` (for example `300:0:1`), so the entire 5-minute lifecycle can be profiled instead of only a few coarse entry checkpoints.
+- 2026-04-15: Fresh `BTC+ETH` remote-db scan over the full `300s -> 0s` range with `--entry-targets-secs 300:0:1 --entry-tolerance-secs 1` confirms the right object of study is the full time-to-expiry curve:
+  - raw per-second ROI is noisy because each second has low trade count, so rolling/weighted views are more informative than isolated seconds
+  - 15-second rolling weighted ROI for `D.Combined` stayed positive through most of the 5-minute path and only turned clearly negative right at expiry (`0s`)
+  - current read: factor research should be conditioned on `time_remaining_secs`; treating all ticks from `300s` to `0s` as one pooled sample is hiding the binary-option time-value regime change
+- 2026-04-15: Added time-conditioned IC reporting directly to `factor_research` output (no CSV path):
+  - supports `--time-ic-factors`, `--time-ic-labels`, `--time-ic-bin-secs`, `--time-ic-max-secs`, `--time-ic-min-points`
+  - fresh `BTC+ETH` run with `1s` bins over `300s -> 0s` showed factor relevance is strongly time-dependent rather than stable across the whole event
+  - settlement label examples:
+    - `distance_over_sigma` / `model_prob_up` strongest around `218s` remaining with Spearman about `-0.74`, but near expiry (`0s`) the same signal collapses toward `0`
+    - `sigma_horizon` is strongly negative in many late buckets and still negative at expiry (`0s ~ -0.36`), matching the intuition that time value / volatility interaction matters more as expiry approaches
+    - `drift_30s` flips to a strong positive settlement relationship in very late buckets (`20s ~ +0.79`, `0s ~ +0.46`)
+  - PM-lag label examples:
+    - `distance_over_sigma` / `model_prob_up` are strongest much earlier (`~270s`, Spearman about `-0.89`)
+    - `drift_30s` peaks later (`~138s`, Spearman about `+0.81`)
+  - current read: there is no single global IC for these factors; at minimum the research/modeling surface needs `time_remaining_secs` segmentation
+- 2026-04-15: Added database-backed persistence for time-conditioned IC research:
+  - migration `037_research_time_conditioned_factor_metrics.sql` defines the formal table/index shape
+  - `factor_research --time-ic-write-db` now bootstraps the table if needed, upserts rows by `(analysis_scope, label, factor, bucket_start_secs, bucket_end_secs)`, and immediately reads back persisted row counts plus the strongest row for verification
+  - fresh smoke verification against the remote `tango-1-1` database using scope `btc-5s-smoke-2026-04-15` wrote and read back `456` rows
+  - read-back strongest row: `distance_over_sigma` vs `future_up_ask_change_30s` at bucket `270..274s`, `n=100`, `abs_spearman=0.9028`
+- 2026-04-15: Added regime-level factor summaries so the output now answers “what should I research in each phase?” instead of only dumping per-bucket IC lines.
+- 2026-04-15: Fresh `BTC+ETH` regime summary with `5s` bins on the remote DB:
+  - settlement / early (`181..300s`): `model_prob_up` and `distance_over_sigma` dominate, both strongly negative
+  - settlement / middle (`61..180s`): `cum_mprice_drift_5m`, `depth_imbalance`, and `obi_10` become the most useful
+  - settlement / late (`6..60s`): `drift_30s` becomes the strongest positive factor; `pm_lag_secs` and `sigma_horizon` also matter
+  - settlement / expiry (`0..5s`): `drift_30s` is the clearest positive signal, while `sigma_horizon` remains meaningfully negative
+  - PM-lag / early-middle: `model_prob_up` and `distance_over_sigma` dominate
+  - PM-lag / late: `model_prob_up`/`distance_over_sigma` still matter, but `obi_10` becomes a meaningful late microstructure signal
+  - current read: the research direction is a staged model, not a single global factor model
+- 2026-04-15: Added cleaned option-state features to the research surface:
+  - `fair_prob_up_clean`
+  - `prob_disagreement`
+  - `implied_sigma_horizon`
+  - `vol_gap = implied_sigma_horizon - sigma_horizon`
+  - `reward_risk_up` / `reward_risk_down`
+- 2026-04-15: Fresh `BTCUSDT` remote smoke with those cleaned features shows:
+  - `settlement_up / early`: `distance_over_sigma` and `sigma_horizon` still dominate, so the early regime remains option-state driven
+  - `settlement_up / middle-late-expiry`: `fair_prob_up_clean` becomes very strong; `reward_risk_up` is equally strong in magnitude but with the opposite sign, so it is better treated as a trade filter than a direction signal
+  - `settlement_up / middle`: `vol_gap` becomes informative, supporting the “implied vs realized volatility gap” research direction
+  - `future_up_ask_change_30s / early`: `distance_over_sigma` still dominates
+  - `future_up_ask_change_30s / middle-late`: `implied_sigma_horizon` and `vol_gap` move into the top group, meaning PM repricing is sensitive to cleaned option-state features even when settlement prediction is no longer purely state-driven
+  - current read: the trading design should use cleaned option-state for direction, LOB for confirmation, and reward/risk only as a gate on whether a positive-edge trade is worth taking
+- 2026-04-15: First `I.ThreeLayer` smoke on `BTCUSDT` produced `0` trades across all tested entry times.
+  - this is an informative failure, not noise
+  - root cause: the first implementation used `fair_prob_up_clean` both as the directional probability and as the source of trade edge against PM prices
+  - because `fair_prob_up_clean` is derived from PM quotes themselves, it cannot produce meaningful positive edge versus those same quotes after fees
+  - current read: ThreeLayer needs an **independent settlement probability estimator** (for example option-state score calibrated to settlement), while `fair_prob_up_clean` should remain a state descriptor / regime variable rather than the final executable price signal
+- 2026-04-15: `I.ThreeLayer` v2 now uses an independent settlement-side estimate (`1 - model_prob_up`) as the base probability, with `fair_prob_up_clean`, `vol_gap`, and `distance_over_sigma` acting as regime-dependent modifiers/filters instead of directly pricing edge.
+- 2026-04-15: Fresh `BTCUSDT` smoke for `I.ThreeLayer` after that fix:
+  - the strategy now trades across early / middle / late buckets instead of staying at zero trades
+  - on this small-sample smoke it materially outperformed `D/G/H` in many buckets, for example:
+    - `@3m`: `11` trades, `100%` win rate, `ROI +107.2%`
+    - `@2m`: `9` trades, `100%` win rate, `ROI +127.2%`
+    - `@1m`: `7` trades, `71.4%` win rate, `ROI +60.0%`
+  - very late buckets remain unstable (`@20s` and parts of the final seconds can still flip negative), so the current read is still: expiry-near trading should stay strict or default to `no-trade`
+  - because this is only a `BTC` smoke over `25` events, treat the magnitude as provisional; the useful result is that the three-layer design now produces plausible executable trades instead of a self-cancelling zero-trade policy
+- 2026-04-15: Small sensitivity scan on `all6` for `I.ThreeLayer`:
+  - scanned `confirmations_min ∈ {1,2,3}` × `reward_risk_min ∈ {0.0,0.25,0.5}`
+  - all runs used the same remote-db slice (`all6`, `max_windows=30`)
+  - best weighted ROI in this grid was:
+    - `confirmations_min=2`, `reward_risk_min=0.5`
+    - weighted ROI `+69.33%`
+    - total trades `2058`
+    - weighted win rate `63.8%`
+  - `confirmations_min=3` was too restrictive and started to choke trade count / edge
+- 2026-04-15: Fresh expanded-window validation for the current best parameter set on `all6` with `max_windows=60`:
+  - aggregate weighted ROI by strategy:
+    - `D = -2.82%`
+    - `G = -24.43%`
+    - `H = -6.66%`
+    - `I.ThreeLayer = +26.10%`
+  - weighted win rates:
+    - `D 45.4%`
+    - `G 39.8%`
+    - `H 53.0%`
+    - `I 54.6%`
+  - current read: the ThreeLayer design weakens when the sample is widened, but it still remains clearly superior to the existing baselines on this larger validation slice
+- 2026-04-15: Parameter sensitivity on `all6` for `I.ThreeLayer` (`max_windows=30`):
+  - scanned `confirmations_min ∈ {1,2,3}` and `reward_risk_min ∈ {0.0,0.25,0.5}`
+  - best weighted ROI in this grid was:
+    - `confirmations_min=2`
+    - `reward_risk_min=0.5`
+    - weighted ROI `+69.33%`
+    - total trades `2058`
+    - weighted win rate `63.8%`
+  - `confirmations_min=3` is still viable but too restrictive; `confirmations_min=2` remains the best balance
+- 2026-04-15: Time-split validation for the current best parameter set (`confirm=2`, `rr_min=0.5`) on `all6`:
+  - early split (`2026-04-11 10:45 -> 12:05 UTC`):
+    - `I.ThreeLayer` weighted ROI `+53.23%`
+    - weighted win rate `62.7%`
+    - total trades `6618`
+  - late split (`2026-04-11 14:40 -> 16:25 UTC`):
+    - `I.ThreeLayer` weighted ROI `+76.65%`
+    - weighted win rate `69.8%`
+    - total trades `4460`
+  - current read: the strategy is not only surviving on one half of the day; it remains positive in both temporal slices, though the late slice is materially stronger
+- 2026-04-15: One-event diagnostics now print `avg_entry` and `avg_rr`, so ROI can be interpreted against actual fill prices instead of only win rate.
+- 2026-04-15: Fresh `all6` one-event diagnostics for the current best parameter set (`confirm=2`, `rr_min=0.5`, no explicit price cap):
+  - `overall`: `648` trades, `67.6%` win rate, `ROI +38.98%`, `avg_entry 0.485`, `avg_rr 1.088`
+  - this confirms the current strategy is still buying many contracts around the `0.48-0.49` area, i.e. close to 50/50 pricing
+- 2026-04-15: Fresh `BTC+ETH` one-event explicit price-cap sweep on top of the current best parameter set:
+  - `max_entry_price = 0.45`
+    - trades `72`
+    - win rate `66.7%`
+    - ROI `+77.41%`
+    - avg entry `0.362`
+    - avg reward/risk `1.924`
+  - `max_entry_price = 0.55`
+    - trades `103`
+    - win rate `80.6%`
+    - ROI `+68.87%`
+    - avg entry `0.485`
+    - avg reward/risk `1.077`
+  - `max_entry_price = 0.65`
+    - trades `103`
+    - win rate `80.6%`
+    - ROI `+68.46%`
+    - avg entry `0.486`
+    - avg reward/risk `1.073`
+  - current read: an explicit entry-price cap is useful and does exactly what was intended; tightening from `0.55/0.65` to `0.45` reduces trade count but materially improves payout quality and slightly improves ROI, which supports treating price caps as a first-class strategy control rather than relying on reward/risk alone
 
 ## Review
 

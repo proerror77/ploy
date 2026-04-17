@@ -926,6 +926,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                 bid,
                 ask,
                 ts,
+                ..
             } => {
                 self.quotes.insert(
                     token_id.clone(),
@@ -1205,6 +1206,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,
@@ -1215,6 +1218,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,

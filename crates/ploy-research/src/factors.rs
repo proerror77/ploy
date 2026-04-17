@@ -45,8 +45,12 @@ pub struct FactorObservation {
     pub obi_10: f64,
     pub pm_up_bid: f64,
     pub pm_up_ask: f64,
+    pub pm_up_bid_size: f64,
+    pub pm_up_ask_size: f64,
     pub pm_down_bid: f64,
     pub pm_down_ask: f64,
+    pub pm_down_bid_size: f64,
+    pub pm_down_ask_size: f64,
     pub pm_lag_secs: f64,
     pub settlement_up: f64,
     pub future_up_ask_change_30s: Option<f64>,
@@ -92,8 +96,12 @@ pub struct EventFactorSummary {
     pub obi_10: f64,
     pub pm_up_bid: f64,
     pub pm_up_ask: f64,
+    pub pm_up_bid_size: f64,
+    pub pm_up_ask_size: f64,
     pub pm_down_bid: f64,
     pub pm_down_ask: f64,
+    pub pm_down_bid_size: f64,
+    pub pm_down_ask_size: f64,
     pub pm_lag_secs: f64,
     pub cum_obi_delta_5m: f64,
     pub cum_depth_delta_5m: f64,
@@ -537,7 +545,7 @@ pub fn build_factor_observations_with_lob(
     let mut vol: HashMap<String, VolatilityState> = HashMap::new();
     let mut retbuf: HashMap<String, ReturnBuffer> = HashMap::new();
     let mut events: HashMap<String, EventState> = HashMap::new();
-    let mut quotes: HashMap<String, (DateTime<Utc>, f64, f64)> = HashMap::new();
+    let mut quotes: HashMap<String, (DateTime<Utc>, f64, f64, f64, f64)> = HashMap::new();
     let mut lob: HashMap<String, LobState> = HashMap::new();
     let mut lob_by_symbol: HashMap<String, Vec<&ResearchLobSnapshot>> = HashMap::new();
     let mut lob_flow: HashMap<String, LobFlowAccumulator> = HashMap::new();
@@ -592,12 +600,14 @@ pub fn build_factor_observations_with_lob(
                 }
             }
             MarketUpdate::Quote {
-                token_id, bid, ask, ts, ..
+                token_id, bid, ask, bid_size, ask_size, ts, ..
             } => {
                 let bid = bid.and_then(|value| value.to_f64()).unwrap_or(f64::NAN);
                 let ask = ask.and_then(|value| value.to_f64()).unwrap_or(f64::NAN);
+                let bid_sz = bid_size.and_then(|v| v.to_f64()).unwrap_or(f64::NAN);
+                let ask_sz = ask_size.and_then(|v| v.to_f64()).unwrap_or(f64::NAN);
                 if bid.is_finite() || ask.is_finite() {
-                    quotes.insert(token_id.clone(), (*ts, bid, ask));
+                    quotes.insert(token_id.clone(), (*ts, bid, ask, bid_sz, ask_sz));
                 }
             }
             MarketUpdate::L2 {
@@ -765,16 +775,16 @@ pub fn build_factor_observations_with_lob(
                         continue;
                     }
 
-                    let (up_bid, up_ask, up_lag) = quotes
+                    let (up_bid, up_ask, up_lag, up_bid_sz, up_ask_sz) = quotes
                         .get(&event.up_token)
-                        .map(|(quote_ts, bid, ask)| {
-                            (*bid, *ask, (*ts - *quote_ts).num_seconds() as f64)
+                        .map(|(quote_ts, bid, ask, bid_sz, ask_sz)| {
+                            (*bid, *ask, (*ts - *quote_ts).num_seconds() as f64, *bid_sz, *ask_sz)
                         })
-                        .unwrap_or((f64::NAN, f64::NAN, f64::NAN));
-                    let (down_bid, down_ask) = quotes
+                        .unwrap_or((f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN));
+                    let (down_bid, down_ask, down_bid_sz, down_ask_sz) = quotes
                         .get(&event.down_token)
-                        .map(|(_, bid, ask)| (*bid, *ask))
-                        .unwrap_or((f64::NAN, f64::NAN));
+                        .map(|(_, bid, ask, bid_sz, ask_sz)| (*bid, *ask, *bid_sz, *ask_sz))
+                        .unwrap_or((f64::NAN, f64::NAN, f64::NAN, f64::NAN));
 
                     if !up_lag.is_finite() || up_lag < 0.0 || up_lag > max_quote_age_secs as f64 {
                         continue;
@@ -912,8 +922,12 @@ pub fn build_factor_observations_with_lob(
                         obi_10: lob_state.obi_10,
                         pm_up_bid: up_bid,
                         pm_up_ask: up_ask,
+                        pm_up_bid_size: up_bid_sz,
+                        pm_up_ask_size: up_ask_sz,
                         pm_down_bid: down_bid,
                         pm_down_ask: down_ask,
+                        pm_down_bid_size: down_bid_sz,
+                        pm_down_ask_size: down_ask_sz,
                         pm_lag_secs: up_lag,
                         settlement_up: if resolved_up_won { 1.0 } else { 0.0 },
                         future_up_ask_change_30s: None,
@@ -950,17 +964,19 @@ pub fn build_factor_observations_with_lob(
     }
 
     rows.sort_by_key(|row| (row.event_id.clone(), row.tick_ts));
-    attach_future_pm_labels(&mut rows, 30);
-    attach_future_pm_labels_60(&mut rows, 60);
+    attach_future_pm_labels(&mut rows, 30, LabelField::Change30s);
+    attach_future_pm_labels(&mut rows, 60, LabelField::Change60s);
     rows
 }
 
-fn attach_future_pm_labels(rows: &mut [FactorObservation], horizon_secs: i64) {
+#[derive(Clone, Copy)]
+enum LabelField { Change30s, Change60s }
+
+fn attach_future_pm_labels(rows: &mut [FactorObservation], horizon_secs: i64, field: LabelField) {
     let mut grouped: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, row) in rows.iter().enumerate() {
         grouped.entry(row.event_id.clone()).or_default().push(idx);
     }
-
     for indexes in grouped.values_mut() {
         indexes.sort_by_key(|idx| rows[*idx].tick_ts);
         for (pos, row_idx) in indexes.iter().enumerate() {
@@ -974,31 +990,10 @@ fn attach_future_pm_labels(rows: &mut [FactorObservation], horizon_secs: i64) {
                     break;
                 }
             }
-            rows[*row_idx].future_up_ask_change_30s = future_change;
-        }
-    }
-}
-
-fn attach_future_pm_labels_60(rows: &mut [FactorObservation], horizon_secs: i64) {
-    let mut grouped: HashMap<String, Vec<usize>> = HashMap::new();
-    for (idx, row) in rows.iter().enumerate() {
-        grouped.entry(row.event_id.clone()).or_default().push(idx);
-    }
-
-    for indexes in grouped.values_mut() {
-        indexes.sort_by_key(|idx| rows[*idx].tick_ts);
-        for (pos, row_idx) in indexes.iter().enumerate() {
-            let target_ts = rows[*row_idx].tick_ts + chrono::Duration::seconds(horizon_secs);
-            let mut future_change = None;
-            for next_idx in indexes.iter().skip(pos + 1) {
-                if rows[*next_idx].tick_ts >= target_ts {
-                    if rows[*row_idx].pm_up_ask.is_finite() && rows[*next_idx].pm_up_ask.is_finite() {
-                        future_change = Some(rows[*next_idx].pm_up_ask - rows[*row_idx].pm_up_ask);
-                    }
-                    break;
-                }
+            match field {
+                LabelField::Change30s => rows[*row_idx].future_up_ask_change_30s = future_change,
+                LabelField::Change60s => rows[*row_idx].future_up_ask_change_60s = future_change,
             }
-            rows[*row_idx].future_up_ask_change_60s = future_change;
         }
     }
 }
@@ -1047,8 +1042,12 @@ pub fn build_event_summaries(rows: &[FactorObservation]) -> Vec<EventFactorSumma
                 obi_10: mean(rows.iter().map(|row| row.obi_10)),
                 pm_up_bid: mean(rows.iter().map(|row| row.pm_up_bid)),
                 pm_up_ask: mean(rows.iter().map(|row| row.pm_up_ask)),
+                pm_up_bid_size: mean(rows.iter().map(|row| row.pm_up_bid_size)),
+                pm_up_ask_size: mean(rows.iter().map(|row| row.pm_up_ask_size)),
                 pm_down_bid: mean(rows.iter().map(|row| row.pm_down_bid)),
                 pm_down_ask: mean(rows.iter().map(|row| row.pm_down_ask)),
+                pm_down_bid_size: mean(rows.iter().map(|row| row.pm_down_bid_size)),
+                pm_down_ask_size: mean(rows.iter().map(|row| row.pm_down_ask_size)),
                 pm_lag_secs: mean(rows.iter().map(|row| row.pm_lag_secs)),
                 cum_obi_delta_5m: mean(rows.iter().map(|row| row.cum_obi_delta_5m)),
                 cum_depth_delta_5m: mean(rows.iter().map(|row| row.cum_depth_delta_5m)),
@@ -1234,8 +1233,12 @@ pub fn observations_to_frame(rows: &[FactorObservation]) -> PolarsResult<DataFra
         "obi_10" => rows.iter().map(|row| row.obi_10).collect::<Vec<_>>(),
         "pm_up_bid" => rows.iter().map(|row| row.pm_up_bid).collect::<Vec<_>>(),
         "pm_up_ask" => rows.iter().map(|row| row.pm_up_ask).collect::<Vec<_>>(),
+        "pm_up_bid_size" => rows.iter().map(|row| row.pm_up_bid_size).collect::<Vec<_>>(),
+        "pm_up_ask_size" => rows.iter().map(|row| row.pm_up_ask_size).collect::<Vec<_>>(),
         "pm_down_bid" => rows.iter().map(|row| row.pm_down_bid).collect::<Vec<_>>(),
         "pm_down_ask" => rows.iter().map(|row| row.pm_down_ask).collect::<Vec<_>>(),
+        "pm_down_bid_size" => rows.iter().map(|row| row.pm_down_bid_size).collect::<Vec<_>>(),
+        "pm_down_ask_size" => rows.iter().map(|row| row.pm_down_ask_size).collect::<Vec<_>>(),
         "pm_lag_secs" => rows.iter().map(|row| row.pm_lag_secs).collect::<Vec<_>>(),
         "settlement_up" => rows.iter().map(|row| row.settlement_up).collect::<Vec<_>>(),
         "future_up_ask_change_30s" => rows.iter().map(|row| row.future_up_ask_change_30s.unwrap_or(f64::NAN)).collect::<Vec<_>>(),
@@ -1272,7 +1275,12 @@ fn row_factor_accessors() -> Vec<(&'static str, fn(&FactorObservation) -> f64)> 
         ("obi_10", |row| row.obi_10),
         ("pm_up_bid", |row| row.pm_up_bid),
         ("pm_up_ask", |row| row.pm_up_ask),
+        ("pm_up_bid_size", |row| row.pm_up_bid_size),
+        ("pm_up_ask_size", |row| row.pm_up_ask_size),
         ("pm_down_bid", |row| row.pm_down_bid),
+        ("pm_down_ask", |row| row.pm_down_ask),
+        ("pm_down_bid_size", |row| row.pm_down_bid_size),
+        ("pm_down_ask_size", |row| row.pm_down_ask_size),
         ("pm_lag_secs", |row| row.pm_lag_secs),
         ("cum_obi_delta_5m", |row| row.cum_obi_delta_5m),
         ("cum_depth_delta_5m", |row| row.cum_depth_delta_5m),
@@ -1310,7 +1318,12 @@ fn event_factor_accessors() -> Vec<(&'static str, fn(&EventFactorSummary) -> f64
         ("obi_10", |row| row.obi_10),
         ("pm_up_bid", |row| row.pm_up_bid),
         ("pm_up_ask", |row| row.pm_up_ask),
+        ("pm_up_bid_size", |row| row.pm_up_bid_size),
+        ("pm_up_ask_size", |row| row.pm_up_ask_size),
         ("pm_down_bid", |row| row.pm_down_bid),
+        ("pm_down_ask", |row| row.pm_down_ask),
+        ("pm_down_bid_size", |row| row.pm_down_bid_size),
+        ("pm_down_ask_size", |row| row.pm_down_ask_size),
         ("pm_lag_secs", |row| row.pm_lag_secs),
         ("cum_obi_delta_5m", |row| row.cum_obi_delta_5m),
         ("cum_depth_delta_5m", |row| row.cum_depth_delta_5m),
@@ -1575,7 +1588,7 @@ fn update_sort_ts(update: &MarketUpdate) -> DateTime<Utc> {
     }
 }
 
-fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Option<f64> {
+pub(crate) fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Option<f64> {
     let mut grouped: BTreeMap<i64, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
     for (bucket, x, y) in bucketed {
         let entry = grouped.entry(*bucket).or_default();
@@ -1610,9 +1623,29 @@ fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Option<f64> {
     }
 }
 
+/// Export a slice of `FactorObservation` to a Parquet file at `path`.
+///
+/// Creates or overwrites the file. Returns an error if the DataFrame cannot
+/// be built or the file cannot be written.
+pub fn export_observations_parquet(
+    rows: &[FactorObservation],
+    path: &std::path::Path,
+) -> polars::prelude::PolarsResult<()> {
+    use polars::io::parquet::write::ParquetWriter;
+    use std::fs::File;
+
+    let mut df = observations_to_frame(rows)?;
+    let file = File::create(path).map_err(|e| polars::prelude::PolarsError::IO {
+        error: std::sync::Arc::new(e),
+        msg: None,
+    })?;
+    ParquetWriter::new(file).finish(&mut df)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{attach_future_pm_labels, pearson_ic, spearman_ic, FactorObservation};
+    use super::{attach_future_pm_labels, pearson_ic, spearman_ic, FactorObservation, LabelField};
     use chrono::Utc;
     use serde_json::json;
 
@@ -1680,8 +1713,12 @@ mod tests {
                     obi_10: 0.0,
                     pm_up_bid: 0.39,
                     pm_up_ask: 0.40,
+                    pm_up_bid_size: f64::NAN,
+                    pm_up_ask_size: f64::NAN,
                     pm_down_bid: 0.59,
                     pm_down_ask: 0.60,
+                    pm_down_bid_size: f64::NAN,
+                    pm_down_ask_size: f64::NAN,
                     pm_lag_secs: 0.0,
                     settlement_up: 1.0,
                     future_up_ask_change_30s: None,
@@ -1725,8 +1762,12 @@ mod tests {
                     obi_10: 0.0,
                     pm_up_bid: 0.09,
                     pm_up_ask: 0.10,
+                    pm_up_bid_size: f64::NAN,
+                    pm_up_ask_size: f64::NAN,
                     pm_down_bid: 0.89,
                     pm_down_ask: 0.90,
+                    pm_down_bid_size: f64::NAN,
+                    pm_down_ask_size: f64::NAN,
                     pm_lag_secs: 0.0,
                     settlement_up: 1.0,
                     future_up_ask_change_30s: None,
@@ -1770,8 +1811,12 @@ mod tests {
                     obi_10: 0.0,
                     pm_up_bid: 0.24,
                     pm_up_ask: 0.25,
+                    pm_up_bid_size: f64::NAN,
+                    pm_up_ask_size: f64::NAN,
                     pm_down_bid: 0.74,
                     pm_down_ask: 0.75,
+                    pm_down_bid_size: f64::NAN,
+                    pm_down_ask_size: f64::NAN,
                     pm_lag_secs: 0.0,
                     settlement_up: 1.0,
                     future_up_ask_change_30s: None,
@@ -1786,7 +1831,7 @@ mod tests {
 
         let mut rows = make_rows();
         rows.sort_by_key(|row| (row.event_id.clone(), row.tick_ts));
-        attach_future_pm_labels(&mut rows, 30);
+        attach_future_pm_labels(&mut rows, 30, LabelField::Change30s);
 
         let first = rows
             .iter()

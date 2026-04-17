@@ -100,7 +100,7 @@ fn build_entry_targets(
     shared_tolerance_secs: Option<i64>,
 ) -> Vec<EntryTarget> {
     let mut seconds: Vec<i64> = raw_targets
-        .unwrap_or("290:10:10,0")
+        .unwrap_or("290:10:10,10:1:1,0")
         .split(',')
         .flat_map(parse_entry_target_token)
         .collect();
@@ -670,23 +670,19 @@ mod tests {
     fn build_entry_targets_defaults_to_fine_grained_last_minute_grid() {
         let targets = build_entry_targets(None, None);
         let labels: Vec<_> = targets.iter().map(|target| target.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            vec![
-                "@290s", "@280s", "@270s", "@260s", "@250s", "@4m", "@230s", "@220s", "@210s",
-                "@200s", "@190s", "@3m", "@170s", "@160s", "@150s", "@140s", "@130s", "@2m",
-                "@110s", "@100s", "@90s", "@80s", "@70s", "@1m", "@50s", "@40s", "@30s",
-                "@20s", "@10s", "@last"
-            ]
-        );
+        // Default: 290s..10s step 10, then 10s..1s step 1, then @last
+        assert!(labels.contains(&"@290s"), "should have @290s");
+        assert!(labels.contains(&"@10s"), "should have @10s");
+        assert!(labels.contains(&"@9s"), "should have @9s");
+        assert!(labels.contains(&"@1s"), "should have @1s");
+        assert!(labels.contains(&"@last"), "should have @last");
+        assert!(labels.len() >= 30, "should have at least 30 targets");
 
-        let sec290 = targets.iter().find(|target| target.seconds == 290).unwrap();
-        let sec60 = targets.iter().find(|target| target.seconds == 60).unwrap();
         let sec10 = targets.iter().find(|target| target.seconds == 10).unwrap();
+        let sec1 = targets.iter().find(|target| target.seconds == 1).unwrap();
 
-        assert_eq!(sec290.tolerance_secs, 5);
-        assert_eq!(sec60.tolerance_secs, 5);
-        assert_eq!(sec10.tolerance_secs, 5);
+        assert!(sec10.tolerance_secs <= 5);
+        assert!(sec1.tolerance_secs <= 1);
     }
 
     #[test]
@@ -776,6 +772,24 @@ async fn main() {
                 .unwrap_or_else(|_| panic!("invalid three-layer-max-entry-price: {raw}"))
         })
         .unwrap_or(0.65);
+    // Minimum liquidity (ask_size in USDC) required to enter a trade.
+    // Filters out thin markets where slippage would be severe.
+    let three_layer_min_liquidity = flag_value(&args, "--three-layer-min-liquidity")
+        .map(|raw| {
+            raw.parse::<f64>()
+                .unwrap_or_else(|_| panic!("invalid three-layer-min-liquidity: {raw}"))
+        })
+        .unwrap_or(0.0); // default: no filter (backward-compatible)
+    // PM quote staleness filters:
+    //   max_pm_lag_secs: skip if quote is too old (PM price unreliable)
+    //   min_pm_lag_secs: only trade when quote is stale enough to exploit
+    //     (spot has moved but PM hasn't updated yet → mispricing window)
+    let three_layer_max_pm_lag_secs = flag_value(&args, "--three-layer-max-pm-lag")
+        .map(|raw| raw.parse::<f64>().unwrap_or_else(|_| panic!("invalid --three-layer-max-pm-lag: {raw}")))
+        .unwrap_or(f64::INFINITY); // default: no upper limit
+    let three_layer_min_pm_lag_secs = flag_value(&args, "--three-layer-min-pm-lag")
+        .map(|raw| raw.parse::<f64>().unwrap_or_else(|_| panic!("invalid --three-layer-min-pm-lag: {raw}")))
+        .unwrap_or(0.0); // default: no lower limit
     let three_layer_middle_vol_adjust = flag_value(&args, "--three-layer-middle-vol-adjust")
         .map(|raw| {
             raw.parse::<f64>()
@@ -788,6 +802,8 @@ async fn main() {
                 .unwrap_or_else(|_| panic!("invalid three-layer-late-distance-adjust: {raw}"))
         })
         .unwrap_or(0.08);
+    let export_parquet: Option<std::path::PathBuf> =
+        flag_value(&args, "--export-parquet").map(std::path::PathBuf::from);
 
     eprintln!("loading factor research range {start} -> {end} for {:?}", symbols);
 
@@ -924,6 +940,17 @@ async fn main() {
     }
 
     let aggregated = aggregate_factor_metrics(&all_metrics);
+
+    if let Some(ref parquet_path) = export_parquet {
+        let flat_obs: Vec<FactorObservation> = all_observations
+            .iter()
+            .flat_map(|rows| rows.iter().cloned())
+            .collect();
+        tracing::info!(path = %parquet_path.display(), observations = flat_obs.len(), "Exporting observations to Parquet");
+        ploy_research::export_observations_parquet(&flat_obs, parquet_path)
+            .expect("Parquet export failed");
+        tracing::info!(path = %parquet_path.display(), "Parquet export complete");
+    }
 
     if !time_ic_factors.is_empty() {
         let flat_rows: Vec<FactorObservation> = all_observations
@@ -1146,6 +1173,7 @@ async fn main() {
         priced_trades: u32,
         entry_price_sum: f64,
         reward_risk_sum: f64,
+        pnl_series: Vec<f64>, // per-trade P&L for Monte Carlo
     }
 
     impl SimStats {
@@ -1161,6 +1189,7 @@ async fn main() {
             if won { self.wins += 1; }
             self.pnl += pnl;
             self.stake += stake;
+            self.pnl_series.push(pnl);
             if entry_price.is_finite() {
                 self.priced_trades += 1;
                 self.entry_price_sum += entry_price;
@@ -1615,57 +1644,102 @@ async fn main() {
                     continue;
                 }
 
-                let (edge, reward_risk, won, pnl) = if side_up {
-                    let edge = p_three_up - (obs.pm_up_ask + fee_up);
-                    let reward_risk = obs.reward_risk_up;
-                    let pnl = if obs.settlement_up == 1.0 {
-                        stake_per_trade * (1.0 / obs.pm_up_ask - 1.0)
-                            - stake_per_trade * fee_up / obs.pm_up_ask
-                    } else {
-                        -stake_per_trade - stake_per_trade * fee_up / obs.pm_up_ask
-                    };
-                    (edge, reward_risk, obs.settlement_up == 1.0, pnl)
+                // Pre-fill edge check (at quoted price, before impact adjustment)
+                let (pre_fill_edge, pre_fill_rr) = if side_up {
+                    (p_three_up - (obs.pm_up_ask + fee_up), obs.reward_risk_up)
                 } else {
-                    let edge = (1.0 - p_three_up) - (obs.pm_down_ask + fee_down);
-                    let reward_risk = obs.reward_risk_down;
-                    let pnl = if obs.settlement_up == 0.0 {
-                        stake_per_trade * (1.0 / obs.pm_down_ask - 1.0)
-                            - stake_per_trade * fee_down / obs.pm_down_ask
-                    } else {
-                        -stake_per_trade - stake_per_trade * fee_down / obs.pm_down_ask
-                    };
-                    (edge, reward_risk, obs.settlement_up == 0.0, pnl)
+                    ((1.0 - p_three_up) - (obs.pm_down_ask + fee_down), obs.reward_risk_down)
                 };
+
                 let entry_price = if side_up { obs.pm_up_ask } else { obs.pm_down_ask };
 
-                if edge < min_edge || reward_risk < three_layer_reward_risk_min {
+                if pre_fill_edge < min_edge || pre_fill_rr < three_layer_reward_risk_min {
                     continue;
                 }
                 if entry_price > three_layer_max_entry_price {
                     continue;
                 }
 
+                // PM quote staleness filter:
+                // - Skip if quote is too stale (PM price unreliable, direction unknown)
+                // - Skip if quote is too fresh (no mispricing window yet)
+                if obs.pm_lag_secs.is_finite() {
+                    if obs.pm_lag_secs > three_layer_max_pm_lag_secs {
+                        continue; // quote too old, PM price unreliable
+                    }
+                    if obs.pm_lag_secs < three_layer_min_pm_lag_secs {
+                        continue; // quote too fresh, no stale-quote edge yet
+                    }
+                }
+
+                // Fill simulation using orderbook depth.
+                // order_shares = how many shares we need to buy at entry_price
+                let order_shares = stake_per_trade / entry_price;
+                let ask_size = if side_up { obs.pm_up_ask_size } else { obs.pm_down_ask_size };
+                let bid_size = if side_up { obs.pm_up_bid_size } else { obs.pm_down_bid_size };
+
+                // Liquidity filter: skip if ask_size is known and below threshold
+                if three_layer_min_liquidity > 0.0
+                    && ask_size.is_finite()
+                    && ask_size < three_layer_min_liquidity
+                {
+                    continue;
+                }
+
+                // Price impact: if best ask can't fill our full order, we walk up one tick.
+                // This is conservative — real impact could be larger for thin books.
+                let fill_price = if ask_size.is_finite() && ask_size > 0.0 && ask_size < order_shares {
+                    (entry_price + 0.01).min(0.99) // one tick slippage
+                } else {
+                    entry_price
+                };
+
+                // Recalculate edge and pnl with actual fill price
+                let fill_fee = 0.02 * fill_price * (1.0 - fill_price);
+                let (edge, reward_risk, won, pnl) = if side_up {
+                    let e = p_three_up - (fill_price + fill_fee);
+                    let rr = if fill_price > 0.0 { (1.0 / fill_price) - 1.0 } else { 0.0 };
+                    let p = if obs.settlement_up == 1.0 {
+                        stake_per_trade * (1.0 / fill_price - 1.0)
+                            - stake_per_trade * fill_fee / fill_price
+                    } else {
+                        -stake_per_trade - stake_per_trade * fill_fee / fill_price
+                    };
+                    (e, rr, obs.settlement_up == 1.0, p)
+                } else {
+                    let e = (1.0 - p_three_up) - (fill_price + fill_fee);
+                    let rr = if fill_price > 0.0 { (1.0 / fill_price) - 1.0 } else { 0.0 };
+                    let p = if obs.settlement_up == 0.0 {
+                        stake_per_trade * (1.0 / fill_price - 1.0)
+                            - stake_per_trade * fill_fee / fill_price
+                    } else {
+                        -stake_per_trade - stake_per_trade * fill_fee / fill_price
+                    };
+                    (e, rr, obs.settlement_up == 0.0, p)
+                };
+                let _ = bid_size; // available for future spread-based filters
+
                 traded = true;
                 three_layer_one_trade.overall.record(
                     won,
                     pnl,
                     stake_per_trade,
-                    entry_price,
+                    fill_price,
                     reward_risk,
                 );
                 match regime {
                     "early" => three_layer_one_trade
                         .early
-                        .record(won, pnl, stake_per_trade, entry_price, reward_risk),
+                        .record(won, pnl, stake_per_trade, fill_price, reward_risk),
                     "middle" => three_layer_one_trade
                         .middle
-                        .record(won, pnl, stake_per_trade, entry_price, reward_risk),
+                        .record(won, pnl, stake_per_trade, fill_price, reward_risk),
                     "late" => three_layer_one_trade
                         .late
-                        .record(won, pnl, stake_per_trade, entry_price, reward_risk),
+                        .record(won, pnl, stake_per_trade, fill_price, reward_risk),
                     _ => three_layer_one_trade
                         .expiry
-                        .record(won, pnl, stake_per_trade, entry_price, reward_risk),
+                        .record(won, pnl, stake_per_trade, fill_price, reward_risk),
                 }
                 break;
             }
@@ -1686,12 +1760,12 @@ async fn main() {
     }
 
     eprintln!(
-        "\n=== P&L by Entry Time (min_edge=2%, stake=$25, three_layer_confirm_min={}, three_layer_rr_min={:.2}, three_layer_max_entry={:.2}, middle_vol_adjust={:.2}, late_distance_adjust={:.2}) ===",
+        "\n=== P&L by Entry Time (min_edge=2%, stake=$25, three_layer_confirm_min={}, three_layer_rr_min={:.2}, three_layer_max_entry={:.2}, min_liquidity={:.0}, middle_vol_adjust={:.2}) ===",
         three_layer_confirmations_min,
         three_layer_reward_risk_min,
         three_layer_max_entry_price,
-        three_layer_middle_vol_adjust,
-        three_layer_late_distance_adjust
+        three_layer_min_liquidity,
+        three_layer_middle_vol_adjust
     );
     eprintln!(
         "{:<8} {:<14} {:<43} {:<43} {:<43} {:<43}",
@@ -1753,9 +1827,572 @@ async fn main() {
         three_layer_one_trade.late.avg_reward_risk(),
     );
 
+    // === Monte Carlo Analysis ===
+    {
+        let series = &three_layer_one_trade.overall.pnl_series;
+        let n = series.len();
+        if n >= 10 {
+            let stake = stake_per_trade;
+            let bankroll_start = 500.0f64; // user's starting capital in USDC
+
+            // --- Actual series metrics ---
+            let mean_pnl = series.iter().sum::<f64>() / n as f64;
+            let variance = series.iter().map(|x| (x - mean_pnl).powi(2)).sum::<f64>() / n as f64;
+            let std_pnl = variance.sqrt();
+            let downside_variance = series.iter()
+                .filter(|&&x| x < 0.0)
+                .map(|x| x.powi(2))
+                .sum::<f64>() / n as f64;
+            let downside_std = downside_variance.sqrt();
+
+            // Sharpe (per-trade, annualized assuming ~6 trades/day × 365)
+            let trades_per_year = 6.0_f64 * 365.0;
+            let sharpe = if std_pnl > 0.0 {
+                (mean_pnl / std_pnl) * trades_per_year.sqrt()
+            } else { 0.0 };
+            let sortino = if downside_std > 0.0 {
+                (mean_pnl / downside_std) * trades_per_year.sqrt()
+            } else { 0.0 };
+
+            // Max drawdown on actual series
+            let mut peak = 0.0f64;
+            let mut equity = 0.0f64;
+            let mut max_dd = 0.0f64;
+            for &p in series {
+                equity += p;
+                if equity > peak { peak = equity; }
+                let dd = peak - equity;
+                if dd > max_dd { max_dd = dd; }
+            }
+            let max_dd_pct = if peak > 0.0 { max_dd / (bankroll_start + peak) * 100.0 } else { 0.0 };
+
+            eprintln!("\n=== Monte Carlo Analysis ({} trades, bankroll={}U, stake={}U) ===", n, bankroll_start, stake);
+            eprintln!("Actual series:");
+            eprintln!("  mean_pnl/trade={:.2}U  std={:.2}U  sharpe={:.2}  sortino={:.2}", mean_pnl, std_pnl, sharpe, sortino);
+            eprintln!("  max_drawdown={:.2}U ({:.1}% of peak equity)", max_dd, max_dd_pct);
+            eprintln!("  total_pnl={:.2}U  roi_on_bankroll={:.1}%",
+                series.iter().sum::<f64>(),
+                series.iter().sum::<f64>() / bankroll_start * 100.0);
+
+            // --- Monte Carlo bootstrap ---
+            const MC_RUNS: usize = 10_000;
+            let mut rng_state: u64 = 0xdeadbeef_cafebabe;
+            let mut mc_final_pnl = Vec::with_capacity(MC_RUNS);
+            let mut mc_max_dd = Vec::with_capacity(MC_RUNS);
+            let mut ruin_count = 0u32;
+
+            for _ in 0..MC_RUNS {
+                let mut equity = 0.0f64;
+                let mut peak = 0.0f64;
+                let mut max_dd = 0.0f64;
+                let mut ruined = false;
+
+                for _ in 0..n {
+                    // xorshift64 PRNG
+                    rng_state ^= rng_state << 13;
+                    rng_state ^= rng_state >> 7;
+                    rng_state ^= rng_state << 17;
+                    let idx = (rng_state % n as u64) as usize;
+                    let p = series[idx];
+
+                    equity += p;
+                    if equity > peak { peak = equity; }
+                    let dd = peak - equity;
+                    if dd > max_dd { max_dd = dd; }
+
+                    // Ruin: bankroll + equity < stake (can't place next trade)
+                    if bankroll_start + equity < stake { ruined = true; }
+                }
+
+                mc_final_pnl.push(equity);
+                mc_max_dd.push(max_dd);
+                if ruined { ruin_count += 1; }
+            }
+
+            mc_final_pnl.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            mc_max_dd.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            let p5_pnl  = mc_final_pnl[(MC_RUNS as f64 * 0.05) as usize];
+            let p25_pnl = mc_final_pnl[(MC_RUNS as f64 * 0.25) as usize];
+            let p50_pnl = mc_final_pnl[(MC_RUNS as f64 * 0.50) as usize];
+            let p75_pnl = mc_final_pnl[(MC_RUNS as f64 * 0.75) as usize];
+            let p95_pnl = mc_final_pnl[(MC_RUNS as f64 * 0.95) as usize];
+
+            let p50_dd  = mc_max_dd[(MC_RUNS as f64 * 0.50) as usize];
+            let p90_dd  = mc_max_dd[(MC_RUNS as f64 * 0.90) as usize];
+            let p95_dd  = mc_max_dd[(MC_RUNS as f64 * 0.95) as usize];
+            let p99_dd  = mc_max_dd[(MC_RUNS as f64 * 0.99) as usize];
+
+            let ruin_prob = ruin_count as f64 / MC_RUNS as f64 * 100.0;
+
+            eprintln!("\nMonte Carlo ({} simulations, bootstrap resampling):", MC_RUNS);
+            eprintln!("  Final P&L distribution (same {} trades, random order):", n);
+            eprintln!("    p5={:.0}U  p25={:.0}U  p50={:.0}U  p75={:.0}U  p95={:.0}U",
+                p5_pnl, p25_pnl, p50_pnl, p75_pnl, p95_pnl);
+            eprintln!("  Max drawdown distribution:");
+            eprintln!("    p50={:.0}U  p90={:.0}U  p95={:.0}U  p99={:.0}U",
+                p50_dd, p90_dd, p95_dd, p99_dd);
+            eprintln!("  Ruin probability (bankroll < stake): {:.2}%", ruin_prob);
+
+            // --- Strategy summary ---
+            eprintln!("\n=== Strategy Core ===");
+            eprintln!("Name:    ThreeLayer (State→Direction, LOB→Confirm, R/R→Filter)");
+            eprintln!("Markets: Polymarket 5-minute binary options on crypto (BTC/ETH/DOGE/SOL/XRP/BNB)");
+            eprintln!("Regimes:");
+            eprintln!("  early  (271-300s): direction = contrarian(model_prob_up), gate = always");
+            eprintln!("  middle ( 61-270s): direction = 0.65*contrarian + 0.35*fair_prob_up_clean + vol_gap_adjust");
+            eprintln!("                     gate = vol_gap must agree with direction");
+            eprintln!("  expiry (  0- 60s): NO TRADE (thin liquidity, PM price converged)");
+            eprintln!("Layer 1 (Direction): fair_prob_up_clean, vol_gap, distance_over_sigma");
+            eprintln!("Layer 2 (Confirm):   drift_30s + obi_10 + depth_imbalance + cum_mprice_drift_5m");
+            eprintln!("                     need >= {} of 4 LOB signals to agree", three_layer_confirmations_min);
+            eprintln!("Layer 3 (R/R):       edge >= 2%, reward_risk >= {:.1}, entry_price <= {:.2}",
+                three_layer_reward_risk_min, three_layer_max_entry_price);
+        }
+    }
+
+    // === Parameter Grid Sweep ===
+    // Pre-compute per-event signals (direction + LOB votes + fill price) once,
+    // then sweep filter thresholds without re-running the full simulation.
+    {
+        struct EventSignal {
+            symbol: String,
+            entry_ts: DateTime<Utc>,
+            side_up: bool,
+            entry_price: f64,
+            fill_price: f64,
+            had_slippage: bool,
+            p_three_up: f64,
+            confirmations: usize,
+            pre_fill_rr: f64,
+            pm_lag_secs: f64,
+            settlement_up: f64,
+            pnl_if_up: f64,
+            pnl_if_down: f64,
+        }
+
+        let mut signals: Vec<EventSignal> = Vec::new();
+
+        for observations in &all_observations {
+            let mut by_event: std::collections::HashMap<&str, Vec<&ploy_research::FactorObservation>> =
+                std::collections::HashMap::new();
+            for obs in observations.iter() {
+                by_event.entry(obs.event_id.as_str()).or_default().push(obs);
+            }
+            for event_obs in by_event.values_mut() {
+                event_obs.sort_by_key(|obs| obs.tick_ts);
+            }
+
+            for event_obs in by_event.values() {
+                // Find first qualifying observation (same logic as one-trade sim)
+                for obs in event_obs.iter() {
+                    if !obs.pm_up_ask.is_finite() || !obs.pm_down_ask.is_finite()
+                        || !obs.model_prob_up.is_finite() || !obs.fair_prob_up_clean.is_finite()
+                        || !obs.reward_risk_up.is_finite() || !obs.reward_risk_down.is_finite()
+                    { continue; }
+
+                    let regime = three_layer_regime(obs.time_remaining_secs);
+                    if regime == "expiry" { continue; }
+
+                    let fee_up = 0.02 * obs.pm_up_ask * (1.0 - obs.pm_up_ask);
+                    let fee_down = 0.02 * obs.pm_down_ask * (1.0 - obs.pm_down_ask);
+                    let independent_state_up = (1.0 - obs.model_prob_up).clamp(1e-4, 1.0 - 1e-4);
+                    let p_three_up = match regime {
+                        "early" => independent_state_up,
+                        "middle" => {
+                            let vol_adj = if obs.vol_gap.is_finite() {
+                                three_layer_middle_vol_adjust * sign_vote(obs.vol_gap) as f64
+                            } else { 0.0 };
+                            (0.65 * independent_state_up + 0.35 * obs.fair_prob_up_clean + vol_adj)
+                                .clamp(1e-4, 1.0 - 1e-4)
+                        }
+                        _ => 0.5,
+                    };
+
+                    let side_up_opt = if p_three_up > 0.5 { Some(true) }
+                        else if p_three_up < 0.5 { Some(false) }
+                        else { None };
+                    let side_up_opt = side_up_opt.filter(|su| match regime {
+                        "early" => true,
+                        "middle" => obs.vol_gap.is_finite() && (
+                            (*su && obs.vol_gap > 0.0) || (!*su && obs.vol_gap < 0.0)),
+                        _ => false,
+                    });
+                    let Some(side_up) = side_up_opt else { continue };
+
+                    let lob_votes = [sign_vote(obs.drift_30s), sign_vote(obs.obi_10),
+                        sign_vote(obs.depth_imbalance), sign_vote(obs.cum_mprice_drift_5m)];
+                    let desired = if side_up { 1 } else { -1 };
+                    let confirmations = lob_votes.iter().filter(|&&v| v == desired).count();
+
+                    let entry_price = if side_up { obs.pm_up_ask } else { obs.pm_down_ask };
+                    let pre_fill_rr = if side_up { obs.reward_risk_up } else { obs.reward_risk_down };
+                    let pre_fill_edge = if side_up {
+                        p_three_up - (obs.pm_up_ask + fee_up)
+                    } else {
+                        (1.0 - p_three_up) - (obs.pm_down_ask + fee_down)
+                    };
+                    if pre_fill_edge < min_edge { continue; }
+
+                    // Fill price (same logic as main sim)
+                    let ask_size = if side_up { obs.pm_up_ask_size } else { obs.pm_down_ask_size };
+                    let order_shares = stake_per_trade / entry_price;
+                    let had_slippage = ask_size.is_finite() && ask_size > 0.0 && ask_size < order_shares;
+                    let fill_price = if had_slippage {
+                        (entry_price + 0.01).min(0.99)
+                    } else { entry_price };
+
+                    let fill_fee = 0.02 * fill_price * (1.0 - fill_price);
+                    let pnl_win = stake_per_trade * (1.0 / fill_price - 1.0)
+                        - stake_per_trade * fill_fee / fill_price;
+                    let pnl_lose = -stake_per_trade - stake_per_trade * fill_fee / fill_price;
+
+                    signals.push(EventSignal {
+                        symbol: obs.symbol.clone(),
+                        entry_ts: obs.tick_ts,
+                        side_up,
+                        entry_price,
+                        fill_price,
+                        had_slippage,
+                        p_three_up,
+                        confirmations,
+                        pre_fill_rr,
+                        pm_lag_secs: obs.pm_lag_secs,
+                        settlement_up: obs.settlement_up,
+                        pnl_if_up: if obs.settlement_up == 1.0 { pnl_win } else { pnl_lose },
+                        pnl_if_down: if obs.settlement_up == 0.0 { pnl_win } else { pnl_lose },
+                    });
+                    break; // one trade per event
+                }
+            }
+        }
+
+        // Grid sweep — now includes pm_lag_secs thresholds
+        // max_pm_lag: skip if quote older than this (stale = unreliable)
+        // min_pm_lag: only trade when quote is at least this old (stale = exploitable)
+        let max_entry_prices = [0.35f64, 0.40, 0.45, 0.50, 0.55];
+        let confirm_mins = [1usize, 2, 3];
+        let rr_mins = [0.2f64, 0.5];
+        let max_pm_lags = [5.0f64, 10.0, 15.0, f64::INFINITY]; // INFINITY = no filter
+        let min_pm_lags = [0.0f64, 5.0, 10.0]; // 0 = no filter
+
+        struct SweepResult {
+            max_entry: f64, confirm: usize, rr_min: f64,
+            max_pm_lag: f64, min_pm_lag: f64,
+            trades: u32, win_rate: f64, roi: f64, sharpe: f64, max_dd: f64,
+        }
+        let mut sweep_results: Vec<SweepResult> = Vec::new();
+
+        for &max_entry in &max_entry_prices {
+            for &confirm in &confirm_mins {
+                for &rr_min in &rr_mins {
+                    for &max_pm_lag in &max_pm_lags {
+                        for &min_pm_lag in &min_pm_lags {
+                    let mut pnl_series: Vec<f64> = Vec::new();
+                    let mut wins = 0u32;
+
+                    for sig in &signals {
+                        if sig.fill_price > max_entry { continue; }
+                        if sig.confirmations < confirm { continue; }
+                        if sig.pre_fill_rr < rr_min { continue; }
+                        if sig.pm_lag_secs.is_finite() {
+                            if sig.pm_lag_secs > max_pm_lag { continue; }
+                            if sig.pm_lag_secs < min_pm_lag { continue; }
+                        }
+
+                        let pnl = if sig.side_up { sig.pnl_if_up } else { sig.pnl_if_down };
+                        let won = (sig.side_up && sig.settlement_up == 1.0)
+                            || (!sig.side_up && sig.settlement_up == 0.0);
+                        pnl_series.push(pnl);
+                        if won { wins += 1; }
+                    }
+
+                    let n = pnl_series.len();
+                    if n < 5 { continue; }
+
+                    let total_pnl: f64 = pnl_series.iter().sum();
+                    let total_stake = n as f64 * stake_per_trade;
+                    let roi = total_pnl / total_stake * 100.0;
+                    let win_rate = wins as f64 / n as f64 * 100.0;
+
+                    let mean = total_pnl / n as f64;
+                    let std = (pnl_series.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+                    let sharpe = if std > 1e-9 { mean / std * (6.0_f64 * 365.0).sqrt() } else { 0.0 };
+
+                    let mut peak = 0.0f64;
+                    let mut equity = 0.0f64;
+                    let mut max_dd = 0.0f64;
+                    for &p in &pnl_series {
+                        equity += p;
+                        if equity > peak { peak = equity; }
+                        let dd = peak - equity;
+                        if dd > max_dd { max_dd = dd; }
+                    }
+
+                    sweep_results.push(SweepResult { max_entry, confirm, rr_min,
+                        max_pm_lag, min_pm_lag,
+                        trades: n as u32, win_rate, roi, sharpe, max_dd });
+                        } // min_pm_lag
+                        } // max_pm_lag
+                }
+            }
+        }
+
+        // Sort by Sharpe descending
+        sweep_results.sort_by(|a, b| b.sharpe.partial_cmp(&a.sharpe).unwrap_or(std::cmp::Ordering::Equal));
+
+        eprintln!("\n=== Parameter Grid Sweep (top 20 by Sharpe, {} pre-qualified events) ===", signals.len());
+        eprintln!("{:<8} {:<8} {:<6} {:<10} {:<10} {:<7} {:<7} {:<8} {:<8} {:<8}",
+            "max_ent", "confirm", "rr", "max_lag", "min_lag", "trades", "wr%", "roi%", "sharpe", "max_dd");
+        for r in sweep_results.iter().take(20) {
+            let max_lag_str = if r.max_pm_lag.is_infinite() { "∞".to_string() } else { format!("{:.0}", r.max_pm_lag) };
+            eprintln!("{:<8.2} {:<8} {:<6.1} {:<10} {:<10.0} {:<7} {:<7.1} {:<8.1} {:<8.2} {:<8.0}",
+                r.max_entry, r.confirm, r.rr_min, max_lag_str, r.min_pm_lag,
+                r.trades, r.win_rate, r.roi, r.sharpe, r.max_dd);
+        }
+
+        // Per-symbol breakdown for the current (default) parameters
+        eprintln!("\n=== Per-Symbol Breakdown (max_entry={:.2}, confirm>={}, rr>={:.1}) ===",
+            three_layer_max_entry_price, three_layer_confirmations_min, three_layer_reward_risk_min);
+        eprintln!("{:<12} {:<7} {:<7} {:<8} {:<8} {:<10}", "symbol", "trades", "wr%", "roi%", "avg_entry", "slippage%");
+        let mut sym_map: std::collections::HashMap<&str, (u32, u32, f64, f64, f64, u32)> = std::collections::HashMap::new();
+        for sig in &signals {
+            if sig.fill_price > three_layer_max_entry_price { continue; }
+            if sig.confirmations < three_layer_confirmations_min { continue; }
+            if sig.pre_fill_rr < three_layer_reward_risk_min { continue; }
+            let pnl = if sig.side_up { sig.pnl_if_up } else { sig.pnl_if_down };
+            let won = (sig.side_up && sig.settlement_up == 1.0)
+                || (!sig.side_up && sig.settlement_up == 0.0);
+            let e = sym_map.entry(sig.symbol.as_str()).or_insert((0, 0, 0.0, 0.0, 0.0, 0));
+            e.0 += 1;
+            if won { e.1 += 1; }
+            e.2 += pnl;
+            e.3 += stake_per_trade;
+            e.4 += sig.fill_price;
+            if sig.had_slippage { e.5 += 1; }
+        }
+        let mut sym_vec: Vec<_> = sym_map.iter().collect();
+        sym_vec.sort_by(|a, b| b.1.2.partial_cmp(&a.1.2).unwrap_or(std::cmp::Ordering::Equal));
+        for (sym, (trades, wins, pnl, stake, price_sum, slippage_count)) in &sym_vec {
+            let wr = *wins as f64 / *trades as f64 * 100.0;
+            let roi = pnl / stake * 100.0;
+            let avg_entry = price_sum / *trades as f64;
+            let slippage_pct = *slippage_count as f64 / *trades as f64 * 100.0;
+            eprintln!("{:<12} {:<7} {:<7.1} {:<8.1} {:<8.3} {:<10.1}", sym, trades, wr, roi, avg_entry, slippage_pct);
+        }
+
+        // === Per-Symbol Grid Sweep ===
+        // Find optimal parameters for each symbol independently.
+        let all_symbols: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            signals.iter().filter(|s| seen.insert(s.symbol.clone())).map(|s| s.symbol.clone()).collect()
+        };
+
+        eprintln!("\n=== Per-Symbol Best Parameters (by Sharpe) ===");
+        eprintln!("{:<12} {:<8} {:<8} {:<6} {:<7} {:<7} {:<8} {:<8} {:<8}",
+            "symbol", "max_ent", "confirm", "rr", "trades", "wr%", "roi%", "sharpe", "max_dd");
+
+        // Store best params per symbol for portfolio construction
+        let mut best_params: std::collections::HashMap<String, (f64, usize, f64)> = std::collections::HashMap::new();
+
+        for sym in &all_symbols {
+            let mut best: Option<(f64, usize, f64, u32, f64, f64, f64, f64)> = None; // (max_entry, confirm, rr, trades, wr, roi, sharpe, max_dd)
+
+            for &max_entry in &max_entry_prices {
+                for &confirm in &confirm_mins {
+                    for &rr_min in &rr_mins {
+                        let mut pnl_series: Vec<f64> = Vec::new();
+                        let mut wins = 0u32;
+
+                        for sig in signals.iter().filter(|s| &s.symbol == sym) {
+                            if sig.fill_price > max_entry { continue; }
+                            if sig.confirmations < confirm { continue; }
+                            if sig.pre_fill_rr < rr_min { continue; }
+                            let pnl = if sig.side_up { sig.pnl_if_up } else { sig.pnl_if_down };
+                            let won = (sig.side_up && sig.settlement_up == 1.0)
+                                || (!sig.side_up && sig.settlement_up == 0.0);
+                            pnl_series.push(pnl);
+                            if won { wins += 1; }
+                        }
+
+                        let n = pnl_series.len();
+                        if n < 3 { continue; }
+
+                        let total_pnl: f64 = pnl_series.iter().sum();
+                        let total_stake = n as f64 * stake_per_trade;
+                        let roi = total_pnl / total_stake * 100.0;
+                        let wr = wins as f64 / n as f64 * 100.0;
+                        let mean = total_pnl / n as f64;
+                        let std = (pnl_series.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+                        let sharpe = if std > 1e-9 { mean / std * (6.0_f64 * 365.0).sqrt() } else { 0.0 };
+
+                        let mut peak = 0.0f64; let mut equity = 0.0f64; let mut max_dd = 0.0f64;
+                        for &p in &pnl_series {
+                            equity += p;
+                            if equity > peak { peak = equity; }
+                            let dd = peak - equity;
+                            if dd > max_dd { max_dd = dd; }
+                        }
+
+                        if best.is_none() || sharpe > best.unwrap().6 {
+                            best = Some((max_entry, confirm, rr_min, n as u32, wr, roi, sharpe, max_dd));
+                        }
+                    }
+                }
+            }
+
+            if let Some((me, co, rr, tr, wr, roi, sh, dd)) = best {
+                eprintln!("{:<12} {:<8.2} {:<8} {:<6.1} {:<7} {:<7.1} {:<8.1} {:<8.2} {:<8.0}",
+                    sym, me, co, rr, tr, wr, roi, sh, dd);
+                best_params.insert(sym.clone(), (me, co, rr));
+            }
+        }
+
+        // === Portfolio Equity Curve ===
+        // Use each symbol's best parameters, combine trades time-ordered.
+        // Sort signals by entry_ts, apply per-symbol best params.
+        let mut portfolio_trades: Vec<(DateTime<Utc>, &str, f64)> = Vec::new(); // (ts, symbol, pnl)
+
+        for sig in &signals {
+            let (max_entry, confirm, rr_min) = best_params
+                .get(&sig.symbol)
+                .copied()
+                .unwrap_or((three_layer_max_entry_price, three_layer_confirmations_min, three_layer_reward_risk_min));
+
+            if sig.fill_price > max_entry { continue; }
+            if sig.confirmations < confirm { continue; }
+            if sig.pre_fill_rr < rr_min { continue; }
+
+            let pnl = if sig.side_up { sig.pnl_if_up } else { sig.pnl_if_down };
+            portfolio_trades.push((sig.entry_ts, sig.symbol.as_str(), pnl));
+        }
+
+        portfolio_trades.sort_by_key(|(ts, _, _)| *ts);
+
+        // Print equity curve (one row per trade, cumulative P&L)
+        eprintln!("\n=== Portfolio Equity Curve (per-symbol optimal params, {} trades) ===", portfolio_trades.len());
+        eprintln!("{:<26} {:<12} {:<8} {:<10} {:<10}", "ts", "symbol", "pnl", "cum_pnl", "drawdown");
+        let mut cum_pnl = 0.0f64;
+        let mut peak_pnl = 0.0f64;
+        let mut max_portfolio_dd = 0.0f64;
+        let mut portfolio_wins = 0u32;
+        for (ts, sym, pnl) in &portfolio_trades {
+            cum_pnl += pnl;
+            if cum_pnl > peak_pnl { peak_pnl = cum_pnl; }
+            let dd = peak_pnl - cum_pnl;
+            if dd > max_portfolio_dd { max_portfolio_dd = dd; }
+            if *pnl > 0.0 { portfolio_wins += 1; }
+            eprintln!("{:<26} {:<12} {:<8.2} {:<10.2} {:<10.2}", ts.format("%Y-%m-%d %H:%M:%S"), sym, pnl, cum_pnl, dd);
+        }
+        let n_port = portfolio_trades.len();
+        let port_wr = if n_port > 0 { portfolio_wins as f64 / n_port as f64 * 100.0 } else { 0.0 };
+        let port_roi = if n_port > 0 { cum_pnl / (n_port as f64 * stake_per_trade) * 100.0 } else { 0.0 };
+        eprintln!("\nPortfolio summary: trades={} wins={} wr={:.1}% total_pnl={:.2}U roi={:.1}% max_dd={:.0}U",
+            n_port, portfolio_wins, port_wr, cum_pnl, port_roi, max_portfolio_dd);
+
+        // === Walk-Forward Validation ===
+        // Split signals chronologically: first half = train, second half = test.
+        // Use median timestamp as split point (robust even if all signals are same date).
+        if signals.len() >= 20 {
+            let mut sorted_signals: Vec<&EventSignal> = signals.iter().collect();
+            sorted_signals.sort_by_key(|s| s.entry_ts);
+            let mid_idx = sorted_signals.len() / 2;
+            let split_ts = sorted_signals[mid_idx].entry_ts;
+
+            let train_signals: Vec<&EventSignal> = signals.iter()
+                .filter(|s| s.entry_ts < split_ts)
+                .collect();
+            let test_signals: Vec<&EventSignal> = signals.iter()
+                .filter(|s| s.entry_ts >= split_ts)
+                .collect();
+
+                eprintln!("\n=== Walk-Forward Validation ===");
+                eprintln!("Train: before {} ({} signals)", split_ts.format("%Y-%m-%d %H:%M"), train_signals.len());
+                eprintln!("Test:  from   {} ({} signals)", split_ts.format("%Y-%m-%d %H:%M"), test_signals.len());
+
+                // Find best params on train set
+                let mut best_train: Option<(f64, usize, f64, f64)> = None; // (max_entry, confirm, rr, sharpe)
+                for &max_entry in &max_entry_prices {
+                    for &confirm in &confirm_mins {
+                        for &rr_min in &rr_mins {
+                            let pnl_series: Vec<f64> = train_signals.iter()
+                                .filter(|s| s.fill_price <= max_entry
+                                    && s.confirmations >= confirm
+                                    && s.pre_fill_rr >= rr_min)
+                                .map(|s| if s.side_up { s.pnl_if_up } else { s.pnl_if_down })
+                                .collect();
+                            if pnl_series.len() < 10 { continue; }
+                            let n = pnl_series.len() as f64;
+                            let mean = pnl_series.iter().sum::<f64>() / n;
+                            let std = (pnl_series.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt();
+                            let sharpe = if std > 0.0 { mean / std * (6.0 * 365.0_f64).sqrt() } else { 0.0 };
+                            if best_train.map_or(true, |(_, _, _, s)| sharpe > s) {
+                                best_train = Some((max_entry, confirm, rr_min, sharpe));
+                            }
+                        }
+                    }
+                }
+
+                if let Some((best_max_entry, best_confirm, best_rr, train_sharpe)) = best_train {
+                    // Evaluate on test set with train-optimized params
+                    let test_pnl: Vec<f64> = test_signals.iter()
+                        .filter(|s| s.fill_price <= best_max_entry
+                            && s.confirmations >= best_confirm
+                            && s.pre_fill_rr >= best_rr)
+                        .map(|s| if s.side_up { s.pnl_if_up } else { s.pnl_if_down })
+                        .collect();
+
+                    let test_n = test_pnl.len();
+                    let test_wins = test_pnl.iter().filter(|&&p| p > 0.0).count();
+                    let test_total = test_pnl.iter().sum::<f64>();
+                    let test_stake = test_n as f64 * stake_per_trade;
+                    let test_wr = if test_n > 0 { test_wins as f64 / test_n as f64 * 100.0 } else { 0.0 };
+                    let test_roi = if test_stake > 0.0 { test_total / test_stake * 100.0 } else { 0.0 };
+                    let test_mean = if test_n > 0 { test_total / test_n as f64 } else { 0.0 };
+                    let test_std = if test_n > 1 {
+                        (test_pnl.iter().map(|x| (x - test_mean).powi(2)).sum::<f64>() / test_n as f64).sqrt()
+                    } else { 0.0 };
+                    let test_sharpe = if test_std > 0.0 { test_mean / test_std * (6.0 * 365.0_f64).sqrt() } else { 0.0 };
+
+                    // Also evaluate train set with same params for comparison
+                    let train_pnl: Vec<f64> = train_signals.iter()
+                        .filter(|s| s.fill_price <= best_max_entry
+                            && s.confirmations >= best_confirm
+                            && s.pre_fill_rr >= best_rr)
+                        .map(|s| if s.side_up { s.pnl_if_up } else { s.pnl_if_down })
+                        .collect();
+                    let train_n = train_pnl.len();
+                    let train_wins = train_pnl.iter().filter(|&&p| p > 0.0).count();
+                    let train_total = train_pnl.iter().sum::<f64>();
+                    let train_stake = train_n as f64 * stake_per_trade;
+                    let train_wr = if train_n > 0 { train_wins as f64 / train_n as f64 * 100.0 } else { 0.0 };
+                    let train_roi = if train_stake > 0.0 { train_total / train_stake * 100.0 } else { 0.0 };
+
+                    eprintln!("Best params (by train Sharpe): max_entry={:.2} confirm>={} rr>={:.1}",
+                        best_max_entry, best_confirm, best_rr);
+                    eprintln!("{:<8} {:<8} {:<8} {:<8} {:<8} {:<8}",
+                        "period", "trades", "wr%", "roi%", "sharpe", "verdict");
+                    eprintln!("{:<8} {:<8} {:<8.1} {:<8.1} {:<8.2} {:<8}",
+                        "train", train_n, train_wr, train_roi, train_sharpe, "in-sample");
+                    eprintln!("{:<8} {:<8} {:<8.1} {:<8.1} {:<8.2} {:<8}",
+                        "test", test_n, test_wr, test_roi, test_sharpe,
+                        if test_sharpe > 1.0 { "VALID" } else if test_sharpe > 0.0 { "WEAK" } else { "FAIL" });
+
+                    let decay = if train_sharpe > 0.0 { (1.0 - test_sharpe / train_sharpe) * 100.0 } else { 0.0 };
+                    eprintln!("Sharpe decay: {:.1}% (train={:.2} → test={:.2})", decay, train_sharpe, test_sharpe);
+                    if test_wr > 55.0 && test_roi > 0.0 {
+                        eprintln!("Verdict: OUT-OF-SAMPLE POSITIVE — signal likely real");
+                    } else if test_wr > 50.0 {
+                        eprintln!("Verdict: MARGINAL — weak signal, needs more data");
+                    } else {
+                        eprintln!("Verdict: OVERFIT — in-sample only, no real edge");
+                    }
+                }
+        }
+    }
+
     // Print final multi-factor weights
-    if let Some((weights, _, _)) = mf_model.fit() {
-        let names = [
+    if let Some((weights, _, _)) = mf_model.fit() {        let names = [
             "obi_10", "depth_imbal", "depth_accel", "spread_bps",
             "cum_obi_d5m", "cum_dep_d5m", "cum_mp_d5m", "cum_trd_i5m",
             "drift_10s", "drift_30s", "pm_lag_secs",

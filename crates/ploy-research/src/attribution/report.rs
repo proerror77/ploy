@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use crate::backtest::engine::SimulatedFill;
 use crate::backtest::metrics::BacktestMetrics;
-use crate::factors_new::registry::Regime;
+use ploy_operator_contracts::Regime;
 use crate::attribution::regime::{regime_pnl, RegimePnl};
 use crate::attribution::factor::factor_pnl;
 
@@ -26,11 +26,11 @@ impl AttributionReport {
 
     pub fn print(&self) {
         eprintln!("\n=== Attribution Report ===");
-        eprintln!("Overall: trades={} win_rate={:.1}% total_pnl={:.4} sharpe={:.3} max_dd={:.4}",
+        eprintln!("Overall: trades={} win_rate={:.1}% total_pnl={:.4} sharpe_per_trade={:.3} max_dd={:.4}",
             self.overall.trade_count,
             self.overall.win_rate * 100.0,
             self.overall.total_pnl,
-            self.overall.sharpe,
+            self.overall.sharpe_per_trade,
             self.overall.max_drawdown,
         );
         eprintln!("\n--- By Regime ---");

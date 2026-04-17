@@ -763,6 +763,7 @@ impl StrategyLogic for ReversalStrategy {
                 bid,
                 ask,
                 ts,
+                ..
             } => {
                 self.quotes.insert(
                     token_id.clone(),
@@ -1047,6 +1048,8 @@ mod tests {
                 bid: Some(dec!(0.21)),
                 ask: Some(dec!(0.24)),
                 ts: now - Duration::seconds(1),
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,
@@ -1147,6 +1150,8 @@ mod tests {
                 bid: Some(dec!(0.21)),
                 ask: Some(dec!(0.24)),
                 ts: now - Duration::seconds(1),
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,
@@ -1216,6 +1221,8 @@ mod tests {
                 bid: Some(dec!(0.61)),
                 ask: Some(dec!(0.63)),
                 ts: now + Duration::seconds(15),
+                    bid_size: None,
+                    ask_size: None,
             },
             &positions,
             &orders,

@@ -567,6 +567,8 @@ pub fn spawn_quote_feed(
                                     token_id: token_str.clone(),
                                     bid,
                                     ask,
+                                    bid_size: None,
+                                    ask_size: None,
                                     ts: now,
                                 };
                                 if tx.send(update).is_err() {
@@ -1022,11 +1024,46 @@ fn reference_price_update(snapshot: &ReferencePriceSnapshot) -> MarketUpdate {
     }
 }
 
+#[derive(Debug)]
+struct AggTradeMsg {
+    symbol: String,
+    agg_trade_id: i64,
+    first_trade_id: i64,
+    last_trade_id: i64,
+    price: rust_decimal::Decimal,
+    quantity: rust_decimal::Decimal,
+    trade_time: chrono::DateTime<chrono::Utc>,
+    event_time: chrono::DateTime<chrono::Utc>,
+    is_buyer_maker: bool,
+}
+
+fn parse_agg_trade_msg(v: &serde_json::Value) -> Option<AggTradeMsg> {
+    use chrono::TimeZone;
+    let symbol = v["s"].as_str()?.to_string();
+    let agg_trade_id = v["a"].as_i64()?;
+    let first_trade_id = v["f"].as_i64().unwrap_or(0);
+    let last_trade_id = v["l"].as_i64().unwrap_or(0);
+    let price_str = v["p"].as_str()?;
+    let qty_str = v["q"].as_str()?;
+    let trade_time_ms = v["T"].as_i64()?;
+    let event_time_ms = v["E"].as_i64().unwrap_or(trade_time_ms);
+    let is_buyer_maker = v["m"].as_bool().unwrap_or(false);
+    let price = price_str.parse::<rust_decimal::Decimal>().ok()?;
+    let quantity = qty_str.parse::<rust_decimal::Decimal>().ok()?;
+    let trade_time = chrono::Utc.timestamp_millis_opt(trade_time_ms).single()?;
+    let event_time = chrono::Utc.timestamp_millis_opt(event_time_ms).single()?;
+    Some(AggTradeMsg {
+        symbol, agg_trade_id, first_trade_id, last_trade_id,
+        price, quantity, trade_time, event_time, is_buyer_maker,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{l2_updates_from_book, rtds_market_data_ws_config};
+    use super::{l2_updates_from_book, parse_agg_trade_msg, rtds_market_data_ws_config};
     use chrono::Utc;
     use ploy_strategy_bundles::MarketUpdate;
+    use rust_decimal::prelude::ToPrimitive;
     use rust_decimal_macros::dec;
     use serde_json::json;
     use std::time::Duration;
@@ -1074,5 +1111,25 @@ mod tests {
                 && (ask_depth_near - 5.5).abs() < 1e-9
                 && *spread_bps == 11
         ));
+    }
+
+    #[test]
+    fn parse_agg_trade_message_extracts_fields() {
+        let msg = serde_json::json!({
+            "e": "aggTrade",
+            "s": "BTCUSDT",
+            "a": 12345_i64,
+            "p": "50000.00",
+            "q": "0.01",
+            "f": 100_i64,
+            "l": 105_i64,
+            "T": 1672515782136_i64,
+            "m": true
+        });
+        let parsed = parse_agg_trade_msg(&msg).unwrap();
+        assert_eq!(parsed.symbol, "BTCUSDT");
+        assert_eq!(parsed.agg_trade_id, 12345);
+        assert!((parsed.price.to_f64().unwrap() - 50000.0).abs() < 0.01);
+        assert!(parsed.is_buyer_maker);
     }
 }

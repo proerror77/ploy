@@ -140,6 +140,7 @@ impl RuntimeSection {
             }
             "mean_reversion" | "mean-reversion" | "pm5d_v4" | "v4" => "mean_reversion".to_string(),
             "reversal" | "pm5d_reversal" | "pm-5m-reversal" => "reversal".to_string(),
+            "three_layer" | "three-layer" | "threelayer" => "three_layer".to_string(),
             other => other.to_string(),
         }
     }

@@ -8,7 +8,6 @@ use super::{
     relayer_base_url, relayer_poll_interval_ms, relayer_poll_max,
 };
 #[cfg(feature = "builder_relayer_sdk")]
-
 #[cfg(feature = "builder_relayer_sdk")]
 use builder_relayer_client_rust::signer::DummySigner;
 #[cfg(feature = "builder_relayer_sdk")]
@@ -48,7 +47,9 @@ impl AutoClaimer {
         let redeem_amounts = pos
             .claim_amounts
             .iter()
-            .map(|amount| crate::decimal_to_token_units(*amount).map(ethers_core::types::U256::from))
+            .map(|amount| {
+                crate::decimal_to_token_units(*amount).map(ethers_core::types::U256::from)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let redeem_call_data =
             Self::encode_redeem_calldata(condition_bytes, pos.neg_risk, &redeem_amounts)?;
@@ -92,10 +93,7 @@ impl AutoClaimer {
             )
             .await
             .map_err(|e| {
-                crate::ClaimerError::Contract(format!(
-                    "Relayer SDK submit failed: {}",
-                    e
-                ))
+                crate::ClaimerError::Contract(format!("Relayer SDK submit failed: {}", e))
             })?;
 
         info!(
@@ -110,10 +108,7 @@ impl AutoClaimer {
                 .get_transaction(&submitted.transaction_id)
                 .await
                 .map_err(|e| {
-                    crate::ClaimerError::Contract(format!(
-                        "Relayer SDK polling failed: {}",
-                        e
-                    ))
+                    crate::ClaimerError::Contract(format!("Relayer SDK polling failed: {}", e))
                 })?;
 
             if let Some(txn) = transactions.first() {

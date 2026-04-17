@@ -176,6 +176,41 @@ pub struct MarketData {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Time-remaining regime for a binary option market.
+/// Shared between research (backtesting) and live strategy runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Regime {
+    /// 181..=300 seconds remaining.
+    Early,
+    /// 61..=180 seconds remaining.
+    Middle,
+    /// 6..=60 seconds remaining.
+    Late,
+    /// 0..=5 seconds remaining.
+    Expiry,
+}
+
+impl Regime {
+    pub fn from_secs(t: i64) -> Self {
+        match t {
+            181..=300 => Regime::Early,
+            61..=180  => Regime::Middle,
+            6..=60    => Regime::Late,
+            _         => Regime::Expiry,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Regime::Early  => "early",
+            Regime::Middle => "middle",
+            Regime::Late   => "late",
+            Regime::Expiry => "expiry",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

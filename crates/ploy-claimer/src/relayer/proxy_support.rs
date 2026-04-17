@@ -91,7 +91,10 @@ pub(super) fn relayer_builder_credentials() -> Option<RelayerBuilderCredentials>
     })
 }
 
-pub(super) fn relayer_hmac_signature(secret_base64: &str, message: &str) -> Result<String, crate::ClaimerError> {
+pub(super) fn relayer_hmac_signature(
+    secret_base64: &str,
+    message: &str,
+) -> Result<String, crate::ClaimerError> {
     let trimmed = secret_base64.trim();
     let secret = BASE64
         .decode(trimmed)
@@ -105,9 +108,8 @@ pub(super) fn relayer_hmac_signature(secret_base64: &str, message: &str) -> Resu
         .map_err(|e| {
             crate::ClaimerError::Internal(format!("Invalid builder secret encoding: {}", e))
         })?;
-    let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&secret).map_err(|e| {
-        crate::ClaimerError::Internal(format!("Builder HMAC init failed: {}", e))
-    })?;
+    let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&secret)
+        .map_err(|e| crate::ClaimerError::Internal(format!("Builder HMAC init failed: {}", e)))?;
     mac.update(message.as_bytes());
     let sig = BASE64.encode(mac.finalize().into_bytes());
     Ok(sig.replace('+', "-").replace('/', "_"))
@@ -177,10 +179,7 @@ impl AutoClaimer {
             })?
             .encode_input(&tokens)
             .map_err(|e| {
-                crate::ClaimerError::Internal(format!(
-                    "Failed to encode redeem calldata: {}",
-                    e
-                ))
+                crate::ClaimerError::Internal(format!("Failed to encode redeem calldata: {}", e))
             })
     }
 
@@ -202,15 +201,14 @@ impl AutoClaimer {
         Ok(payload)
     }
 
-    pub(super) fn derive_proxy_wallet_address(signer: EthersAddress) -> Result<EthersAddress, crate::ClaimerError> {
+    pub(super) fn derive_proxy_wallet_address(
+        signer: EthersAddress,
+    ) -> Result<EthersAddress, crate::ClaimerError> {
         let proxy_factory: EthersAddress = RELAYER_PROXY_FACTORY_POLYGON.parse().map_err(|e| {
             crate::ClaimerError::Network(format!("Invalid relayer proxy factory: {}", e))
         })?;
         let init_hash: EthersH256 = RELAYER_PROXY_INIT_CODE_HASH.parse().map_err(|e| {
-            crate::ClaimerError::Network(format!(
-                "Invalid relayer proxy init code hash: {}",
-                e
-            ))
+            crate::ClaimerError::Network(format!("Invalid relayer proxy init code hash: {}", e))
         })?;
         let salt = keccak256(signer.as_bytes());
         Ok(ethers_get_create2_address_from_hash(
@@ -271,28 +269,19 @@ impl AutoClaimer {
         headers.insert(
             HeaderName::from_static("poly_builder_passphrase"),
             HeaderValue::from_str(&creds.passphrase).map_err(|e| {
-                crate::ClaimerError::Internal(format!(
-                    "Invalid builder passphrase header: {}",
-                    e
-                ))
+                crate::ClaimerError::Internal(format!("Invalid builder passphrase header: {}", e))
             })?,
         );
         headers.insert(
             HeaderName::from_static("poly_builder_signature"),
             HeaderValue::from_str(&signature).map_err(|e| {
-                crate::ClaimerError::Internal(format!(
-                    "Invalid builder signature header: {}",
-                    e
-                ))
+                crate::ClaimerError::Internal(format!("Invalid builder signature header: {}", e))
             })?,
         );
         headers.insert(
             HeaderName::from_static("poly_builder_timestamp"),
             HeaderValue::from_str(&timestamp.to_string()).map_err(|e| {
-                crate::ClaimerError::Internal(format!(
-                    "Invalid builder timestamp header: {}",
-                    e
-                ))
+                crate::ClaimerError::Internal(format!("Invalid builder timestamp header: {}", e))
             })?,
         );
         Ok(headers)
