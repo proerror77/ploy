@@ -187,12 +187,83 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
+/// Load market updates from Parquet files.
+/// Requires the `parquet-feed` feature; panics at runtime without it.
+fn load_parquet_data(
+    data_dir: &str,
+    symbols: &[String],
+    start_date: &Option<String>,
+    end_date: &Option<String>,
+    options: &HistoricalLoadOptions,
+) -> Vec<MarketUpdate> {
+    #[cfg(not(feature = "parquet-feed"))]
+    {
+        let _ = (data_dir, symbols, start_date, end_date, options);
+        panic!("--data-dir requires the parquet-feed feature flag");
+    }
+    #[cfg(feature = "parquet-feed")]
+    {
+        let from = start_date.as_deref().unwrap_or("2026-03-28");
+        let to = end_date.as_deref().unwrap_or("2026-04-03");
+        let from_dt = Utc.from_utc_datetime(
+            &NaiveDate::parse_from_str(from, "%Y-%m-%d")
+                .expect("Invalid --start-date (use YYYY-MM-DD)")
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        );
+        let to_dt = Utc.from_utc_datetime(
+            &NaiveDate::parse_from_str(to, "%Y-%m-%d")
+                .expect("Invalid --end-date (use YYYY-MM-DD)")
+                .and_hms_opt(23, 59, 59)
+                .unwrap(),
+        );
+        eprintln!("Loading Parquet data from: {data_dir}");
+        let updates = ploy_strategy_bundles::feed::parquet::load_from_parquet(
+            data_dir,
+            symbols,
+            from_dt,
+            to_dt,
+            options,
+        )
+        .expect("Failed to load from Parquet");
+        eprintln!("Loaded {} market updates from Parquet\n", updates.len());
+
+        // Data diagnostics
+        let mut spot_count = 0u64;
+        let mut quote_count = 0u64;
+        let mut event_discovered = 0u64;
+        let mut event_expired = 0u64;
+        let mut l2_count = 0u64;
+        let mut kline_count = 0u64;
+        for u in &updates {
+            match u {
+                MarketUpdate::SpotPrice { .. } => spot_count += 1,
+                MarketUpdate::AggTrade { .. } => {}
+                MarketUpdate::Quote { .. } => quote_count += 1,
+                MarketUpdate::EventDiscovered { .. } => event_discovered += 1,
+                MarketUpdate::EventExpired { .. } => event_expired += 1,
+                MarketUpdate::L2 { .. } => l2_count += 1,
+                MarketUpdate::L2Depth { .. } => l2_count += 1,
+                MarketUpdate::SportsState { .. } => {}
+                MarketUpdate::ReferencePrice { .. } => {}
+                MarketUpdate::Kline { .. } => kline_count += 1,
+            }
+        }
+        eprintln!(
+            "Data breakdown: spot={spot_count} quote={quote_count} discovered={event_discovered} expired={event_expired} l2={l2_count} kline={kline_count}"
+        );
+
+        updates
+    }
+}
+
 fn main() {
     // Parse CLI flags
     let args: Vec<String> = std::env::args().collect();
     let config_path = flag_value(&args, "--config")
         .or_else(|| args.get(1).filter(|a| !a.starts_with('-')).cloned());
     let db_url = flag_value(&args, "--db-url");
+    let data_dir = flag_value(&args, "--data-dir");
     let start_date = flag_value(&args, "--start-date");
     let end_date = flag_value(&args, "--end-date");
 
@@ -300,7 +371,9 @@ fn main() {
         .build()
         .expect("tokio runtime");
 
-    let data: Vec<MarketUpdate> = if let Some(ref url) = db_url {
+    let data: Vec<MarketUpdate> = if let Some(ref dir) = data_dir {
+        load_parquet_data(dir, &strategy_config.symbols, &start_date, &end_date, &backtest_options)
+    } else if let Some(ref url) = db_url {
         let from = start_date.as_deref().unwrap_or("2026-03-28");
         let to = end_date.as_deref().unwrap_or("2026-04-03");
         let from_dt = Utc.from_utc_datetime(
