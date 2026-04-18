@@ -209,6 +209,7 @@ fn main() {
                     .reference_symbols(&config.reference_data),
                 include_sports_state: config.backtest_data.include_sports_state,
                 require_official_settlement: config.backtest_data.require_official_settlement,
+                lob_sample_secs: 30,
             };
             (strategy_variant, config.strategy, sim, rt, backtest_options)
         } else {
