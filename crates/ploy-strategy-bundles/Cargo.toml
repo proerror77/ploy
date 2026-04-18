@@ -9,8 +9,10 @@ description = "Ploy strategy bundle runtime crate"
 
 [features]
 default = []
+parquet-feed = ["duckdb"]
 
 [dependencies]
+duckdb = { version = "1.1", features = ["bundled"], optional = true }
 async-trait.workspace = true
 chrono.workspace = true
 ploy-operator-contracts.workspace = true
