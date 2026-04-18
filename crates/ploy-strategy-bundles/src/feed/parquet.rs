@@ -146,7 +146,7 @@ fn load_spot_prices(
     let to_str = to.to_rfc3339();
 
     let sql = format!(
-        "SELECT trade_time, symbol, CAST(price AS DOUBLE) \
+        "SELECT EPOCH_US(trade_time)::BIGINT, symbol, CAST(price AS DOUBLE) \
          FROM read_parquet('{glob}') \
          WHERE trade_time >= TIMESTAMPTZ '{from_str}' \
            AND trade_time <= TIMESTAMPTZ '{to_str}' \
@@ -157,7 +157,7 @@ fn load_spot_prices(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((
-            row.get::<_, String>(0)?,
+            row.get::<_, i64>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, f64>(2)?,
         ))
@@ -165,8 +165,8 @@ fn load_spot_prices(
 
     let mut count = 0usize;
     for row in rows {
-        let (ts_str, symbol, price_f) = row?;
-        let ts = parse_ts(&ts_str)?;
+        let (ts_us, symbol, price_f) = row?;
+        let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
         let price = Decimal::try_from(price_f).unwrap_or_default();
         updates.push(MarketUpdate::SpotPrice { symbol, price, ts });
         count += 1;
@@ -196,7 +196,7 @@ fn load_agg_trades(
     // 5-second downsampling: keep first row per (symbol, 5s bucket)
     let sql = format!(
         "SELECT DISTINCT ON (symbol, epoch_ms(trade_time)::BIGINT / 5000) \
-             trade_time, symbol, agg_trade_id, \
+             EPOCH_US(trade_time)::BIGINT, symbol, agg_trade_id, \
              CAST(price AS DOUBLE), CAST(quantity AS DOUBLE), is_buyer_maker \
          FROM read_parquet('{glob}') \
          WHERE trade_time >= TIMESTAMPTZ '{from_str}' \
@@ -208,7 +208,7 @@ fn load_agg_trades(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((
-            row.get::<_, String>(0)?,
+            row.get::<_, i64>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?,
             row.get::<_, f64>(3)?,
@@ -219,8 +219,8 @@ fn load_agg_trades(
 
     let mut count = 0usize;
     for row in rows {
-        let (ts_str, symbol, agg_trade_id, price_f, qty_f, is_buyer_maker) = row?;
-        let ts = parse_ts(&ts_str)?;
+        let (ts_us, symbol, agg_trade_id, price_f, qty_f, is_buyer_maker) = row?;
+        let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
         let price = Decimal::try_from(price_f).unwrap_or_default();
         let quantity = Decimal::try_from(qty_f).unwrap_or_default();
         updates.push(MarketUpdate::AggTrade {
@@ -259,7 +259,7 @@ fn load_l2_data(
 
     let sql = format!(
         "SELECT DISTINCT ON (symbol, epoch_ms(event_time)::BIGINT / {bucket_ms}) \
-             event_time, symbol, \
+             EPOCH_US(event_time)::BIGINT, symbol, \
              COALESCE(obi_5, 0.0) AS obi, \
              COALESCE(spread_bps, 0) AS spread_bps, \
              COALESCE(bid_volume_5, 0.0) AS bid_depth_near, \
@@ -274,7 +274,7 @@ fn load_l2_data(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((
-            row.get::<_, String>(0)?,
+            row.get::<_, i64>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, f64>(2)?,
             row.get::<_, i64>(3)?,
@@ -285,8 +285,8 @@ fn load_l2_data(
 
     let mut count = 0usize;
     for row in rows {
-        let (ts_str, symbol, obi, spread_bps, bid_depth_near, ask_depth_near) = row?;
-        let ts = parse_ts(&ts_str)?;
+        let (ts_us, symbol, obi, spread_bps, bid_depth_near, ask_depth_near) = row?;
+        let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
         let spread_bps = spread_bps as u32;
         updates.push(MarketUpdate::L2 {
             symbol: symbol.clone(),
@@ -325,7 +325,7 @@ fn load_pm_quotes(
     let to_str = to.to_rfc3339();
 
     let sql = format!(
-        "SELECT received_at, token_id, \
+        "SELECT EPOCH_US(received_at)::BIGINT, token_id, \
                 CAST(best_bid AS DOUBLE), CAST(best_ask AS DOUBLE), \
                 CAST(bid_size AS DOUBLE), CAST(ask_size AS DOUBLE) \
          FROM read_parquet('{glob}') \
@@ -338,7 +338,7 @@ fn load_pm_quotes(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((
-            row.get::<_, String>(0)?,
+            row.get::<_, i64>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, Option<f64>>(2)?,
             row.get::<_, Option<f64>>(3)?,
@@ -349,8 +349,8 @@ fn load_pm_quotes(
 
     let mut count = 0usize;
     for row in rows {
-        let (ts_str, token_id, bid_f, ask_f, bid_size_f, ask_size_f) = row?;
-        let ts = parse_ts(&ts_str)?;
+        let (ts_us, token_id, bid_f, ask_f, bid_size_f, ask_size_f) = row?;
+        let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
         let bid = bid_f.and_then(|f| Decimal::try_from(f).ok());
         let ask = ask_f.and_then(|f| Decimal::try_from(f).ok());
         let bid_size = bid_size_f.and_then(|f| Decimal::try_from(f).ok());
@@ -388,7 +388,7 @@ fn load_events(
     let to_str = to.to_rfc3339();
 
     let sql = format!(
-        "SELECT market_slug, symbol, start_time, end_time, \
+        "SELECT market_slug, symbol, EPOCH_US(start_time)::BIGINT, EPOCH_US(end_time)::BIGINT, \
                 up_token_id, down_token_id, CAST(price_to_beat AS DOUBLE), resolved_up_won \
          FROM read_parquet('{glob}') \
          WHERE end_time >= TIMESTAMPTZ '{from_str}' \
@@ -402,8 +402,8 @@ fn load_events(
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, Option<f64>>(6)?,
@@ -416,8 +416,8 @@ fn load_events(
         let (
             market_slug,
             symbol_opt,
-            start_str,
-            end_str,
+            start_us,
+            end_us,
             up_token_opt,
             down_token_opt,
             price_to_beat_f,
@@ -428,13 +428,13 @@ fn load_events(
             Some(s) if !s.is_empty() => s,
             _ => continue,
         };
-        let end_time = match end_str.as_deref().map(parse_ts) {
-            Some(Ok(t)) => t,
-            _ => continue,
+        let end_time = match end_us {
+            Some(us) => DateTime::from_timestamp_micros(us).unwrap_or_default(),
+            None => continue,
         };
-        let start_time = match start_str.as_deref().map(parse_ts) {
-            Some(Ok(t)) => t,
-            _ => continue,
+        let start_time = match start_us {
+            Some(us) => DateTime::from_timestamp_micros(us).unwrap_or_default(),
+            None => continue,
         };
         let up_token = match up_token_opt {
             Some(s) if !s.is_empty() => s,
@@ -466,25 +466,4 @@ fn load_events(
     }
     info!(count, "Loaded events from Parquet pm_market_metadata");
     Ok(())
-}
-
-#[cfg(feature = "parquet-feed")]
-fn parse_ts(s: &str) -> Result<DateTime<Utc>, Box<dyn std::error::Error>> {
-    // DuckDB returns timestamps in various formats; try RFC3339 first, then a
-    // space-separated format like "2024-01-15 12:34:56.789 UTC".
-    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return Ok(dt.with_timezone(&Utc));
-    }
-    // Try "YYYY-MM-DD HH:MM:SS[.fff] UTC" or similar
-    for fmt in &[
-        "%Y-%m-%d %H:%M:%S%.f %Z",
-        "%Y-%m-%d %H:%M:%S %Z",
-        "%Y-%m-%dT%H:%M:%S%.f%z",
-        "%Y-%m-%dT%H:%M:%S%z",
-    ] {
-        if let Ok(dt) = DateTime::parse_from_str(s, fmt) {
-            return Ok(dt.with_timezone(&Utc));
-        }
-    }
-    Err(format!("cannot parse timestamp: {s}").into())
 }
