@@ -30,7 +30,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  PATH: /home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 jobs:
   build:
@@ -45,6 +44,9 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
+      - name: Add cargo to PATH
+        run: echo "/home/runner/.cargo/bin" >> $GITHUB_PATH
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -54,7 +56,6 @@ jobs:
 
       - name: Build run_backtest
         run: |
-          . /home/runner/.cargo/env
           cargo build --release --locked \
             -p ploy-strategy-bundles \
             --example run_backtest
