@@ -17,7 +17,6 @@
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use std::path::Path;
-use std::str::FromStr;
 use tracing::info;
 
 use crate::feed::database::HistoricalLoadOptions;
@@ -147,7 +146,7 @@ fn load_spot_prices(
     let to_str = to.to_rfc3339();
 
     let sql = format!(
-        "SELECT trade_time, symbol, price \
+        "SELECT trade_time, symbol, CAST(price AS DOUBLE) \
          FROM read_parquet('{glob}') \
          WHERE trade_time >= TIMESTAMPTZ '{from_str}' \
            AND trade_time <= TIMESTAMPTZ '{to_str}' \
@@ -160,15 +159,15 @@ fn load_spot_prices(
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
+            row.get::<_, f64>(2)?,
         ))
     })?;
 
     let mut count = 0usize;
     for row in rows {
-        let (ts_str, symbol, price_str) = row?;
+        let (ts_str, symbol, price_f) = row?;
         let ts = parse_ts(&ts_str)?;
-        let price = Decimal::from_str(&price_str)?;
+        let price = Decimal::try_from(price_f).unwrap_or_default();
         updates.push(MarketUpdate::SpotPrice { symbol, price, ts });
         count += 1;
     }
@@ -197,7 +196,8 @@ fn load_agg_trades(
     // 5-second downsampling: keep first row per (symbol, 5s bucket)
     let sql = format!(
         "SELECT DISTINCT ON (symbol, epoch_ms(trade_time)::BIGINT / 5000) \
-             trade_time, symbol, agg_trade_id, price, quantity, is_buyer_maker \
+             trade_time, symbol, agg_trade_id, \
+             CAST(price AS DOUBLE), CAST(quantity AS DOUBLE), is_buyer_maker \
          FROM read_parquet('{glob}') \
          WHERE trade_time >= TIMESTAMPTZ '{from_str}' \
            AND trade_time <= TIMESTAMPTZ '{to_str}' \
@@ -211,18 +211,18 @@ fn load_agg_trades(
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
+            row.get::<_, f64>(3)?,
+            row.get::<_, f64>(4)?,
             row.get::<_, bool>(5)?,
         ))
     })?;
 
     let mut count = 0usize;
     for row in rows {
-        let (ts_str, symbol, agg_trade_id, price_str, qty_str, is_buyer_maker) = row?;
+        let (ts_str, symbol, agg_trade_id, price_f, qty_f, is_buyer_maker) = row?;
         let ts = parse_ts(&ts_str)?;
-        let price = Decimal::from_str(&price_str)?;
-        let quantity = Decimal::from_str(&qty_str)?;
+        let price = Decimal::try_from(price_f).unwrap_or_default();
+        let quantity = Decimal::try_from(qty_f).unwrap_or_default();
         updates.push(MarketUpdate::AggTrade {
             symbol,
             agg_trade_id: agg_trade_id as u64,
@@ -325,7 +325,9 @@ fn load_pm_quotes(
     let to_str = to.to_rfc3339();
 
     let sql = format!(
-        "SELECT received_at, token_id, best_bid, best_ask, bid_size, ask_size \
+        "SELECT received_at, token_id, \
+                CAST(best_bid AS DOUBLE), CAST(best_ask AS DOUBLE), \
+                CAST(bid_size AS DOUBLE), CAST(ask_size AS DOUBLE) \
          FROM read_parquet('{glob}') \
          WHERE received_at >= TIMESTAMPTZ '{from_str}' \
            AND received_at <= TIMESTAMPTZ '{to_str}' \
@@ -338,21 +340,21 @@ fn load_pm_quotes(
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<f64>>(2)?,
+            row.get::<_, Option<f64>>(3)?,
+            row.get::<_, Option<f64>>(4)?,
+            row.get::<_, Option<f64>>(5)?,
         ))
     })?;
 
     let mut count = 0usize;
     for row in rows {
-        let (ts_str, token_id, bid_str, ask_str, bid_size_str, ask_size_str) = row?;
+        let (ts_str, token_id, bid_f, ask_f, bid_size_f, ask_size_f) = row?;
         let ts = parse_ts(&ts_str)?;
-        let bid = bid_str.as_deref().and_then(|s| Decimal::from_str(s).ok());
-        let ask = ask_str.as_deref().and_then(|s| Decimal::from_str(s).ok());
-        let bid_size = bid_size_str.as_deref().and_then(|s| Decimal::from_str(s).ok());
-        let ask_size = ask_size_str.as_deref().and_then(|s| Decimal::from_str(s).ok());
+        let bid = bid_f.and_then(|f| Decimal::try_from(f).ok());
+        let ask = ask_f.and_then(|f| Decimal::try_from(f).ok());
+        let bid_size = bid_size_f.and_then(|f| Decimal::try_from(f).ok());
+        let ask_size = ask_size_f.and_then(|f| Decimal::try_from(f).ok());
         updates.push(MarketUpdate::Quote {
             token_id,
             bid,
@@ -387,7 +389,7 @@ fn load_events(
 
     let sql = format!(
         "SELECT market_slug, symbol, start_time, end_time, \
-                up_token_id, down_token_id, price_to_beat, resolved_up_won \
+                up_token_id, down_token_id, CAST(price_to_beat AS DOUBLE), resolved_up_won \
          FROM read_parquet('{glob}') \
          WHERE end_time >= TIMESTAMPTZ '{from_str}' \
            AND start_time <= TIMESTAMPTZ '{to_str}' \
@@ -404,7 +406,7 @@ fn load_events(
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
-            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<f64>>(6)?,
             row.get::<_, Option<bool>>(7)?,
         ))
     })?;
@@ -418,7 +420,7 @@ fn load_events(
             end_str,
             up_token_opt,
             down_token_opt,
-            price_to_beat_str,
+            price_to_beat_f,
             resolved_up_won,
         ) = row?;
 
@@ -442,9 +444,7 @@ fn load_events(
             Some(s) if !s.is_empty() => s,
             _ => continue,
         };
-        let price_to_beat = price_to_beat_str
-            .as_deref()
-            .and_then(|s| Decimal::from_str(s).ok());
+        let price_to_beat = price_to_beat_f.and_then(|f| Decimal::try_from(f).ok());
         let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
 
         updates.push(MarketUpdate::EventDiscovered {
