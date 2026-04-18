@@ -238,7 +238,7 @@ fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
     }
 }
 
-fn normalize_token_id(raw: &str) -> String {
+pub fn normalize_token_id(raw: &str) -> String {
     let trimmed = raw.trim().trim_matches('"');
     if let Some(hex) = trimmed
         .strip_prefix("0x")

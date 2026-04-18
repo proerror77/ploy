@@ -28,7 +28,7 @@ use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use tracing::info;
 
-use crate::feed::database::HistoricalLoadOptions;
+use crate::feed::database::{HistoricalLoadOptions, normalize_token_id};
 use crate::traits::{Feed, MarketUpdate};
 
 /// How far before `from` to load spot prices for EWMA warm-up.
@@ -237,7 +237,9 @@ fn run_background(
                     "SELECT DISTINCT ON (symbol, epoch_ms(event_time)::BIGINT / {bucket_ms}) \
                          EPOCH_US(event_time)::BIGINT, symbol, \
                          COALESCE(obi_5, 0.0) AS obi, \
-                         COALESCE(spread_bps, 0) AS spread_bps \
+                         COALESCE(spread_bps, 0) AS spread_bps, \
+                         COALESCE(bid_volume_5, 0.0) AS bid_volume_5, \
+                         COALESCE(ask_volume_5, 0.0) AS ask_volume_5 \
                      FROM read_parquet('{glob}') \
                      WHERE event_time >= TIMESTAMPTZ '{from_str}' \
                        AND event_time <= TIMESTAMPTZ '{to_str}' \
@@ -251,19 +253,32 @@ fn run_background(
                         row.get::<_, String>(1)?,
                         row.get::<_, f64>(2)?,
                         row.get::<_, i64>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, f64>(5)?,
                     ))
                 })?;
                 for row in rows {
-                    let (ts_us, symbol, obi, spread_bps_raw) =
+                    let (ts_us, symbol, obi, spread_bps_raw, bid_depth_near, ask_depth_near) =
                         row?;
                     let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
                     let spread_bps = spread_bps_raw as u32;
                     heap.push(Reverse(TimestampedUpdate {
                         ts_us,
                         update: MarketUpdate::L2 {
+                            symbol: symbol.clone(),
+                            obi,
+                            spread_bps,
+                            ts,
+                        },
+                    }));
+                    heap.push(Reverse(TimestampedUpdate {
+                        ts_us,
+                        update: MarketUpdate::L2Depth {
                             symbol,
                             obi,
                             spread_bps,
+                            bid_depth_near,
+                            ask_depth_near,
                             ts,
                         },
                     }));
@@ -285,8 +300,7 @@ fn run_background(
             let to_str = to.to_rfc3339();
             let sql = format!(
                 "SELECT EPOCH_US(received_at)::BIGINT, token_id, \
-                        CAST(best_bid AS DOUBLE), CAST(best_ask AS DOUBLE), \
-                        CAST(bid_size AS DOUBLE), CAST(ask_size AS DOUBLE) \
+                        CAST(best_bid AS DOUBLE), CAST(best_ask AS DOUBLE) \
                  FROM read_parquet('{glob}') \
                  WHERE received_at >= TIMESTAMPTZ '{from_str}' \
                    AND received_at <= TIMESTAMPTZ '{to_str}' \
@@ -300,26 +314,22 @@ fn run_background(
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<f64>>(2)?,
                     row.get::<_, Option<f64>>(3)?,
-                    row.get::<_, Option<f64>>(4)?,
-                    row.get::<_, Option<f64>>(5)?,
                 ))
             })?;
             let mut count = 0usize;
             for row in rows {
-                let (ts_us, token_id, bid_f, ask_f, bid_size_f, ask_size_f) = row?;
+                let (ts_us, token_id, bid_f, ask_f) = row?;
                 let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
                 let bid = bid_f.and_then(|f| Decimal::try_from(f).ok());
                 let ask = ask_f.and_then(|f| Decimal::try_from(f).ok());
-                let bid_size = bid_size_f.and_then(|f| Decimal::try_from(f).ok());
-                let ask_size = ask_size_f.and_then(|f| Decimal::try_from(f).ok());
                 heap.push(Reverse(TimestampedUpdate {
                     ts_us,
                     update: MarketUpdate::Quote {
                         token_id,
                         bid,
                         ask,
-                        bid_size,
-                        ask_size,
+                        bid_size: None,
+                        ask_size: None,
                         ts,
                     },
                 }));
@@ -342,8 +352,8 @@ fn run_background(
                 "SELECT market_slug, symbol, \
                         EPOCH_US(start_time)::BIGINT, EPOCH_US(end_time)::BIGINT, \
                         CAST(price_to_beat AS DOUBLE), \
-                        json_extract_string(raw_market, '$.markets[0].clobTokenIds[0]') AS up_token_id, \
-                        json_extract_string(raw_market, '$.markets[0].clobTokenIds[1]') AS down_token_id \
+                        (json_extract_string(raw_market, '$.markets[0].clobTokenIds')::JSON->>0) AS up_token_id, \
+                        (json_extract_string(raw_market, '$.markets[0].clobTokenIds')::JSON->>1) AS down_token_id \
                  FROM read_parquet('{glob}') \
                  WHERE end_time >= TIMESTAMPTZ '{from_str}' \
                    AND start_time <= TIMESTAMPTZ '{to_str}' \
@@ -379,11 +389,11 @@ fn run_background(
                     None => continue,
                 };
                 let up_token = match up_opt {
-                    Some(s) if !s.is_empty() => s.trim_matches('"').to_string(),
+                    Some(s) if !s.is_empty() => normalize_token_id(&s),
                     _ => continue,
                 };
                 let down_token = match dn_opt {
-                    Some(s) if !s.is_empty() => s.trim_matches('"').to_string(),
+                    Some(s) if !s.is_empty() => normalize_token_id(&s),
                     _ => continue,
                 };
                 let price_to_beat = price_to_beat_f.and_then(|f| Decimal::try_from(f).ok());
