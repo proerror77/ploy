@@ -82,18 +82,34 @@ fn load_with_duckdb(
 ) -> Result<Vec<MarketUpdate>, Box<dyn std::error::Error>> {
     use duckdb::Connection;
 
-    let conn = Connection::open_in_memory()?;
-    // Allow DuckDB to spill to disk when memory pressure is high.
-    conn.execute_batch("SET memory_limit='6GB'; SET temp_directory='/tmp/duckdb_spill';")?;
-    let mut updates: Vec<MarketUpdate> = Vec::new();
+    // Create spill directory and process one day at a time to keep memory bounded.
+    // LOB Parquet files are large; loading all days at once causes OOM.
+    std::fs::create_dir_all("/tmp/duckdb_spill").ok();
 
+    let mut updates: Vec<MarketUpdate> = Vec::new();
     let spot_from = from - Duration::minutes(WARMUP_MINUTES);
 
-    load_spot_prices(&conn, data_dir, symbols, spot_from, to, &mut updates)?;
-    load_agg_trades(&conn, data_dir, symbols, from, to, &mut updates)?;
-    load_events(&conn, data_dir, symbols, from, to, &mut updates)?;
-    load_pm_quotes(&conn, data_dir, from, to, &mut updates)?;
-    load_l2_data(&conn, data_dir, symbols, from, to, options.lob_sample_secs, &mut updates)?;
+    // Non-LOB tables: load all at once (small files)
+    {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("SET memory_limit='4GB'; SET temp_directory='/tmp/duckdb_spill';")?;
+        load_spot_prices(&conn, data_dir, symbols, spot_from, to, &mut updates)?;
+        load_agg_trades(&conn, data_dir, symbols, from, to, &mut updates)?;
+        load_events(&conn, data_dir, symbols, from, to, &mut updates)?;
+        load_pm_quotes(&conn, data_dir, from, to, &mut updates)?;
+    }
+
+    // LOB: process one day at a time to avoid OOM
+    let mut day = from.date_naive();
+    let to_date = to.date_naive();
+    while day <= to_date {
+        let day_start = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let day_end = day.succ_opt().unwrap_or(day).and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("SET memory_limit='4GB'; SET temp_directory='/tmp/duckdb_spill';")?;
+        load_l2_data(&conn, data_dir, symbols, day_start, day_end, options.lob_sample_secs, &mut updates)?;
+        day = day.succ_opt().unwrap_or(day);
+    }
 
     updates.sort_by_key(|u| update_ts(u));
 
