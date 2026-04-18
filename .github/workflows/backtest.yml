@@ -54,6 +54,7 @@ jobs:
 
       - name: Build run_backtest
         run: |
+          . "$HOME/.cargo/env"
           cargo build --release --locked \
             -p ploy-strategy-bundles \
             --example run_backtest
