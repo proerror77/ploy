@@ -83,6 +83,8 @@ fn load_with_duckdb(
     use duckdb::Connection;
 
     let conn = Connection::open_in_memory()?;
+    // Allow DuckDB to spill to disk when memory pressure is high.
+    conn.execute_batch("SET memory_limit='6GB'; SET temp_directory='/tmp/duckdb_spill';")?;
     let mut updates: Vec<MarketUpdate> = Vec::new();
 
     let spot_from = from - Duration::minutes(WARMUP_MINUTES);
