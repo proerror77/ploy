@@ -5,6 +5,12 @@
 //! bounded `mpsc` channel. Memory usage is O(channel buffer) regardless of
 //! date range.
 //!
+//! The main data tables (spot, agg trades, LOB, quotes) are merged via a single
+//! DuckDB `UNION ALL … ORDER BY` query — DuckDB handles the merge sort
+//! internally with disk spill, so Rust never holds more than the channel buffer
+//! in memory. Events (~11K rows) are loaded separately and merged via a
+//! two-pointer technique in the send loop.
+//!
 //! # Usage
 //!
 //! ```no_run
@@ -39,10 +45,11 @@ const CHANNEL_CAPACITY: usize = 1000;
 
 /// Streaming Parquet feed backed by a DuckDB background thread.
 ///
-/// The background thread executes per-table queries (spot, LOB, agg trades,
-/// quotes, events) and merges them in timestamp order via a priority queue,
-/// sending each `MarketUpdate` through a bounded channel. The async `next()`
-/// method receives one item at a time, keeping memory usage constant.
+/// The background thread executes a single DuckDB `UNION ALL` query across all
+/// data tables (spot, LOB, agg trades, quotes) with `ORDER BY ts_us`. DuckDB
+/// handles the merge sort internally with disk spill, so Rust never holds more
+/// than the channel buffer in memory. Events are loaded separately (~11K rows)
+/// and merged via two-pointer in the send loop.
 pub struct StreamingParquetFeed {
     receiver: Receiver<MarketUpdate>,
     /// Keep the thread handle so it is joined on drop (prevents leaks).
@@ -83,9 +90,6 @@ impl StreamingParquetFeed {
 #[async_trait]
 impl Feed for StreamingParquetFeed {
     async fn next(&mut self) -> Option<MarketUpdate> {
-        // `recv()` blocks until an item is available or the sender is dropped.
-        // We call it from an async context; for backtest use this is fine since
-        // the tokio runtime is single-threaded and DuckDB is CPU-bound anyway.
         self.receiver.recv().ok()
     }
 }
@@ -94,9 +98,10 @@ impl Feed for StreamingParquetFeed {
 
 /// Entry point for the background worker thread.
 ///
-/// Loads each table independently (to keep per-query memory bounded), merges
-/// all rows into a single timestamp-sorted stream via a `BinaryHeap`, and
-/// sends each `MarketUpdate` through the channel.
+/// Builds a single DuckDB `UNION ALL` query across spot, agg trades, LOB, and
+/// quotes, ordered by timestamp. DuckDB handles the merge sort with disk spill.
+/// Events are loaded separately (small dataset) and merged via two-pointer.
+/// Memory usage is O(channel buffer) regardless of date range.
 #[cfg(feature = "parquet-feed")]
 fn run_background(
     data_dir: &str,
@@ -106,8 +111,7 @@ fn run_background(
     lob_sample_secs: u32,
     tx: SyncSender<MarketUpdate>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::collections::BinaryHeap;
-    use std::cmp::Reverse;
+    use duckdb::Connection;
     use std::path::Path;
 
     if !Path::new(data_dir).exists() {
@@ -115,333 +119,210 @@ fn run_background(
     }
 
     std::fs::create_dir_all("/tmp/duckdb_spill").ok();
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch("SET memory_limit='6GB'; SET temp_directory='/tmp/duckdb_spill';")?;
 
+    let sym_filter = symbol_filter_sql(symbols);
     let spot_from = from - Duration::minutes(WARMUP_MINUTES);
+    let from_str = from.to_rfc3339();
+    let to_str = to.to_rfc3339();
+    let spot_from_str = spot_from.to_rfc3339();
+    let bucket_us = (lob_sample_secs.max(1) as i64) * 1_000_000;
 
-    // Collect all updates into a heap for merge-sort.
-    // Each table is loaded with its own short-lived DuckDB connection so
-    // memory is released between tables.
-    let mut heap: BinaryHeap<Reverse<TimestampedUpdate>> = BinaryHeap::new();
+    // File globs
+    let spot_glob = format!("{data_dir}/binance_price_ticks/*.parquet");
+    let agg_glob = format!("{data_dir}/binance_agg_trade_ticks/*.parquet");
+    let lob_glob = format!("{data_dir}/binance_lob_ticks/*.parquet");
+    let quote_glob = format!("{data_dir}/clob_quote_ticks/*.parquet");
 
-    // ── Spot prices ──────────────────────────────────────────────────────────
-    {
-        let dir = format!("{data_dir}/binance_price_ticks");
-        if Path::new(&dir).exists() {
-            let conn = open_conn()?;
-            let glob = format!("{dir}/*.parquet");
-            let sym_filter = symbol_filter_sql(symbols);
-            let from_str = spot_from.to_rfc3339();
-            let to_str = to.to_rfc3339();
-            let sql = format!(
-                "SELECT EPOCH_US(trade_time)::BIGINT, symbol, CAST(price AS DOUBLE) \
-                 FROM read_parquet('{glob}') \
+    // ── 1. Load events separately (small, ~11K rows) ────────────────────────
+    let events = load_events_vec(&conn, data_dir, symbols, &from_str, &to_str)?;
+    info!(count = events.len(), "StreamingParquetFeed: loaded events");
+    let mut evt_idx = 0;
+
+    // ── 2. Build UNION ALL query for the big tables ─────────────────────────
+    let mut parts: Vec<String> = Vec::new();
+
+    // Spot prices (with 30min warmup)
+    if Path::new(&format!("{data_dir}/binance_price_ticks")).exists() {
+        parts.push(format!(
+            "SELECT EPOCH_US(trade_time)::BIGINT AS ts_us, \
+                    'spot' AS typ, \
+                    symbol AS s1, NULL AS s2, \
+                    CAST(price AS DOUBLE) AS f1, 0.0 AS f2, 0.0 AS f3, 0.0 AS f4, \
+                    CAST(0 AS BIGINT) AS i1, false AS b1 \
+             FROM read_parquet('{spot_glob}') \
+             WHERE trade_time >= TIMESTAMPTZ '{spot_from_str}' \
+               AND trade_time <= TIMESTAMPTZ '{to_str}' \
+               {sym_filter}"
+        ));
+    }
+
+    // Agg trades (5s downsampled)
+    if Path::new(&format!("{data_dir}/binance_agg_trade_ticks")).exists() {
+        parts.push(format!(
+            "SELECT EPOCH_US(trade_time)::BIGINT AS ts_us, \
+                    'agg' AS typ, \
+                    symbol AS s1, NULL AS s2, \
+                    CAST(price AS DOUBLE) AS f1, CAST(quantity AS DOUBLE) AS f2, \
+                    0.0 AS f3, 0.0 AS f4, \
+                    CAST(agg_trade_id AS BIGINT) AS i1, is_buyer_maker AS b1 \
+             FROM ( \
+                 SELECT DISTINCT ON (symbol, EPOCH_US(trade_time)::BIGINT / 5000000) \
+                        trade_time, symbol, price, quantity, agg_trade_id, is_buyer_maker \
+                 FROM read_parquet('{agg_glob}') \
                  WHERE trade_time >= TIMESTAMPTZ '{from_str}' \
                    AND trade_time <= TIMESTAMPTZ '{to_str}' \
                    {sym_filter} \
-                 ORDER BY trade_time"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, f64>(2)?))
-            })?;
-            let mut count = 0usize;
-            for row in rows {
-                let (ts_us, symbol, price_f) = row?;
-                let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
-                let price = Decimal::try_from(price_f).unwrap_or_default();
-                heap.push(Reverse(TimestampedUpdate {
-                    ts_us,
-                    update: MarketUpdate::SpotPrice { symbol, price, ts },
-                }));
-                count += 1;
-            }
-            info!(count, "StreamingParquetFeed: queued spot prices");
-        }
+                 ORDER BY symbol, EPOCH_US(trade_time)::BIGINT / 5000000, trade_time \
+             )"
+        ));
     }
 
-    // ── Agg trades (5s downsampled) ──────────────────────────────────────────
-    {
-        let dir = format!("{data_dir}/binance_agg_trade_ticks");
-        if Path::new(&dir).exists() {
-            let conn = open_conn()?;
-            let glob = format!("{dir}/*.parquet");
-            let sym_filter = symbol_filter_sql(symbols);
-            let from_str = from.to_rfc3339();
-            let to_str = to.to_rfc3339();
-            let sql = format!(
-                "SELECT DISTINCT ON (symbol, epoch_ms(trade_time)::BIGINT / 5000) \
-                     EPOCH_US(trade_time)::BIGINT, symbol, agg_trade_id, \
-                     CAST(price AS DOUBLE), CAST(quantity AS DOUBLE), is_buyer_maker \
-                 FROM read_parquet('{glob}') \
-                 WHERE trade_time >= TIMESTAMPTZ '{from_str}' \
-                   AND trade_time <= TIMESTAMPTZ '{to_str}' \
+    // LOB (downsampled)
+    if Path::new(&format!("{data_dir}/binance_lob_ticks")).exists() {
+        parts.push(format!(
+            "SELECT EPOCH_US(event_time)::BIGINT AS ts_us, \
+                    'lob' AS typ, \
+                    symbol AS s1, NULL AS s2, \
+                    COALESCE(obi_5, 0.0) AS f1, \
+                    CAST(COALESCE(spread_bps, 0) AS DOUBLE) AS f2, \
+                    COALESCE(bid_volume_5, 0.0) AS f3, \
+                    COALESCE(ask_volume_5, 0.0) AS f4, \
+                    CAST(0 AS BIGINT) AS i1, false AS b1 \
+             FROM ( \
+                 SELECT DISTINCT ON (symbol, EPOCH_US(event_time)::BIGINT / {bucket_us}) \
+                        event_time, symbol, obi_5, spread_bps, bid_volume_5, ask_volume_5 \
+                 FROM read_parquet('{lob_glob}') \
+                 WHERE event_time >= TIMESTAMPTZ '{from_str}' \
+                   AND event_time <= TIMESTAMPTZ '{to_str}' \
                    {sym_filter} \
-                 ORDER BY symbol, epoch_ms(trade_time)::BIGINT / 5000, trade_time"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, f64>(3)?,
-                    row.get::<_, f64>(4)?,
-                    row.get::<_, bool>(5)?,
-                ))
-            })?;
-            let mut count = 0usize;
-            for row in rows {
-                let (ts_us, symbol, agg_trade_id, price_f, qty_f, is_buyer_maker) = row?;
-                let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
-                let price = Decimal::try_from(price_f).unwrap_or_default();
-                let quantity = Decimal::try_from(qty_f).unwrap_or_default();
-                heap.push(Reverse(TimestampedUpdate {
-                    ts_us,
-                    update: MarketUpdate::AggTrade {
-                        symbol,
-                        agg_trade_id: agg_trade_id as u64,
-                        price,
-                        quantity,
-                        is_buyer_maker,
-                        ts,
-                    },
-                }));
-                count += 1;
-            }
-            info!(count, "StreamingParquetFeed: queued agg trades");
-        }
+                 ORDER BY symbol, EPOCH_US(event_time)::BIGINT / {bucket_us}, event_time DESC \
+             )"
+        ));
     }
 
-    // ── LOB (day-by-day to avoid OOM) ────────────────────────────────────────
-    {
-        let dir = format!("{data_dir}/binance_lob_ticks");
-        if Path::new(&dir).exists() {
-            let bucket_ms = (lob_sample_secs.max(1) as i64) * 1000;
-            let sym_filter = symbol_filter_sql(symbols);
-            let mut day = from.date_naive();
-            let to_date = to.date_naive();
-            let mut total = 0usize;
-            while day <= to_date {
-                let day_start = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
-                let day_end = day
-                    .succ_opt()
-                    .unwrap_or(day)
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap()
-                    .and_utc();
-                let from_str = day_start.to_rfc3339();
-                let to_str = day_end.to_rfc3339();
-                let glob = format!("{dir}/*.parquet");
-                let conn = open_conn()?;
-                let sql = format!(
-                    "SELECT DISTINCT ON (symbol, epoch_ms(event_time)::BIGINT / {bucket_ms}) \
-                         EPOCH_US(event_time)::BIGINT, symbol, \
-                         COALESCE(obi_5, 0.0) AS obi, \
-                         COALESCE(spread_bps, 0) AS spread_bps, \
-                         COALESCE(bid_volume_5, 0.0) AS bid_volume_5, \
-                         COALESCE(ask_volume_5, 0.0) AS ask_volume_5 \
-                     FROM read_parquet('{glob}') \
-                     WHERE event_time >= TIMESTAMPTZ '{from_str}' \
-                       AND event_time <= TIMESTAMPTZ '{to_str}' \
-                       {sym_filter} \
-                     ORDER BY symbol, epoch_ms(event_time)::BIGINT / {bucket_ms}, event_time DESC"
-                );
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, f64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, f64>(4)?,
-                        row.get::<_, f64>(5)?,
-                    ))
-                })?;
-                for row in rows {
-                    let (ts_us, symbol, obi, spread_bps_raw, bid_depth_near, ask_depth_near) =
-                        row?;
-                    let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
-                    let spread_bps = spread_bps_raw as u32;
-                    heap.push(Reverse(TimestampedUpdate {
-                        ts_us,
-                        update: MarketUpdate::L2 {
-                            symbol: symbol.clone(),
-                            obi,
-                            spread_bps,
-                            ts,
-                        },
-                    }));
-                    heap.push(Reverse(TimestampedUpdate {
-                        ts_us,
-                        update: MarketUpdate::L2Depth {
-                            symbol,
-                            obi,
-                            spread_bps,
-                            bid_depth_near,
-                            ask_depth_near,
-                            ts,
-                        },
-                    }));
-                    total += 1;
+    // PM quotes
+    if Path::new(&format!("{data_dir}/clob_quote_ticks")).exists() {
+        parts.push(format!(
+            "SELECT EPOCH_US(received_at)::BIGINT AS ts_us, \
+                    'quote' AS typ, \
+                    token_id AS s1, NULL AS s2, \
+                    CAST(best_bid AS DOUBLE) AS f1, CAST(best_ask AS DOUBLE) AS f2, \
+                    0.0 AS f3, 0.0 AS f4, \
+                    CAST(0 AS BIGINT) AS i1, false AS b1 \
+             FROM read_parquet('{quote_glob}') \
+             WHERE received_at >= TIMESTAMPTZ '{from_str}' \
+               AND received_at <= TIMESTAMPTZ '{to_str}' \
+               AND (best_bid > 0.01 AND best_bid < 0.99 OR best_ask > 0.01 AND best_ask < 0.99)"
+        ));
+    }
+
+    if parts.is_empty() {
+        // No data tables found — just send events
+        for (_, update) in &events {
+            if tx.send(update.clone()).is_err() { return Ok(()); }
+        }
+        return Ok(());
+    }
+
+    let union_sql = format!(
+        "SELECT * FROM ({}) ORDER BY ts_us",
+        parts.join(" UNION ALL ")
+    );
+
+    // ── 3. Stream UNION ALL results, merging events via two-pointer ─────────
+    let mut stmt = conn.prepare(&union_sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,            // ts_us
+            row.get::<_, String>(1)?,          // typ
+            row.get::<_, Option<String>>(2)?,  // s1
+            row.get::<_, Option<String>>(3)?,  // s2
+            row.get::<_, f64>(4)?,             // f1
+            row.get::<_, f64>(5)?,             // f2
+            row.get::<_, f64>(6)?,             // f3
+            row.get::<_, f64>(7)?,             // f4
+            row.get::<_, i64>(8)?,             // i1
+            row.get::<_, bool>(9)?,            // b1
+        ))
+    })?;
+
+    let mut total = 0usize;
+    for row in rows {
+        let (ts_us, typ, s1, _s2, f1, f2, f3, f4, i1, b1) = row?;
+
+        // Insert any events that should come before this row
+        while evt_idx < events.len() && events[evt_idx].0 <= ts_us {
+            if tx.send(events[evt_idx].1.clone()).is_err() { return Ok(()); }
+            evt_idx += 1;
+        }
+
+        let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
+
+        match typ.as_str() {
+            "spot" => {
+                let symbol = s1.unwrap_or_default();
+                let price = Decimal::try_from(f1).unwrap_or_default();
+                if tx.send(MarketUpdate::SpotPrice { symbol, price, ts }).is_err() {
+                    return Ok(());
                 }
-                day = day.succ_opt().unwrap_or(day);
             }
-            info!(total, "StreamingParquetFeed: queued LOB rows");
-        }
-    }
-
-    // ── PM quotes ────────────────────────────────────────────────────────────
-    {
-        let dir = format!("{data_dir}/clob_quote_ticks");
-        if Path::new(&dir).exists() {
-            let conn = open_conn()?;
-            let glob = format!("{dir}/*.parquet");
-            let from_str = from.to_rfc3339();
-            let to_str = to.to_rfc3339();
-            let sql = format!(
-                "SELECT EPOCH_US(received_at)::BIGINT, token_id, \
-                        CAST(best_bid AS DOUBLE), CAST(best_ask AS DOUBLE) \
-                 FROM read_parquet('{glob}') \
-                 WHERE received_at >= TIMESTAMPTZ '{from_str}' \
-                   AND received_at <= TIMESTAMPTZ '{to_str}' \
-                   AND (best_bid > 0.01 AND best_bid < 0.99 OR best_ask > 0.01 AND best_ask < 0.99) \
-                 ORDER BY received_at"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<f64>>(2)?,
-                    row.get::<_, Option<f64>>(3)?,
-                ))
-            })?;
-            let mut count = 0usize;
-            for row in rows {
-                let (ts_us, token_id, bid_f, ask_f) = row?;
-                let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
-                let bid = bid_f.and_then(|f| Decimal::try_from(f).ok());
-                let ask = ask_f.and_then(|f| Decimal::try_from(f).ok());
-                heap.push(Reverse(TimestampedUpdate {
-                    ts_us,
-                    update: MarketUpdate::Quote {
-                        token_id,
-                        bid,
-                        ask,
-                        bid_size: None,
-                        ask_size: None,
-                        ts,
-                    },
-                }));
-                count += 1;
+            "agg" => {
+                let symbol = s1.unwrap_or_default();
+                let price = Decimal::try_from(f1).unwrap_or_default();
+                let quantity = Decimal::try_from(f2).unwrap_or_default();
+                if tx.send(MarketUpdate::AggTrade {
+                    symbol,
+                    agg_trade_id: i1 as u64,
+                    price,
+                    quantity,
+                    is_buyer_maker: b1,
+                    ts,
+                }).is_err() {
+                    return Ok(());
+                }
             }
-            info!(count, "StreamingParquetFeed: queued PM quotes");
-        }
-    }
-
-    // ── Events (EventDiscovered + EventExpired pairs) ─────────────────────────
-    {
-        let dir = format!("{data_dir}/pm_market_metadata");
-        if Path::new(&dir).exists() {
-            let conn = open_conn()?;
-            let glob = format!("{dir}/*.parquet");
-            let sym_filter = symbol_filter_sql(symbols);
-            let from_str = from.to_rfc3339();
-            let to_str = to.to_rfc3339();
-            let sql = format!(
-                "SELECT market_slug, symbol, \
-                        EPOCH_US(start_time)::BIGINT, EPOCH_US(end_time)::BIGINT, \
-                        CAST(price_to_beat AS DOUBLE), \
-                        (json_extract_string(raw_market, '$.markets[0].clobTokenIds')::JSON->>0) AS up_token_id, \
-                        (json_extract_string(raw_market, '$.markets[0].clobTokenIds')::JSON->>1) AS down_token_id \
-                 FROM read_parquet('{glob}') \
-                 WHERE end_time >= TIMESTAMPTZ '{from_str}' \
-                   AND start_time <= TIMESTAMPTZ '{to_str}' \
-                   {sym_filter} \
-                 ORDER BY start_time"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, Option<f64>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                ))
-            })?;
-            let mut count = 0usize;
-            for row in rows {
-                let (market_slug, symbol_opt, start_us, end_us, price_to_beat_f, up_opt, dn_opt) =
-                    row?;
-                let symbol = match symbol_opt {
-                    Some(s) if !s.is_empty() => s,
-                    _ => continue,
-                };
-                let end_time = match end_us {
-                    Some(us) => DateTime::from_timestamp_micros(us).unwrap_or_default(),
-                    None => continue,
-                };
-                let start_time = match start_us {
-                    Some(us) => DateTime::from_timestamp_micros(us).unwrap_or_default(),
-                    None => continue,
-                };
-                let up_token = match up_opt {
-                    Some(s) if !s.is_empty() => normalize_token_id(&s),
-                    _ => continue,
-                };
-                let down_token = match dn_opt {
-                    Some(s) if !s.is_empty() => normalize_token_id(&s),
-                    _ => continue,
-                };
-                let price_to_beat = price_to_beat_f.and_then(|f| Decimal::try_from(f).ok());
-                let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
-
-                // EventDiscovered fires at start_time (matching database.rs)
-                let discovered_ts_us = start_time.timestamp_micros();
-                heap.push(Reverse(TimestampedUpdate {
-                    ts_us: discovered_ts_us,
-                    update: MarketUpdate::EventDiscovered {
-                        event_id: market_slug.clone(),
-                        symbol,
-                        up_token,
-                        down_token,
-                        end_time,
-                        window_secs,
-                        price_to_beat,
-                        resolved_up_won: None,
-                    },
-                }));
-
-                // EventExpired fires at end_time
-                let expired_ts_us = end_time.timestamp_micros();
-                heap.push(Reverse(TimestampedUpdate {
-                    ts_us: expired_ts_us,
-                    update: MarketUpdate::EventExpired {
-                        event_id: market_slug,
-                        end_time,
-                        resolved_up_won: None,
-                    },
-                }));
-                count += 1;
+            "lob" => {
+                let symbol = s1.unwrap_or_default();
+                let obi = f1;
+                let spread_bps = f2 as u32;
+                let bid_depth_near = f3;
+                let ask_depth_near = f4;
+                // Send both L2 and L2Depth (matching original behavior)
+                if tx.send(MarketUpdate::L2 {
+                    symbol: symbol.clone(), obi, spread_bps, ts,
+                }).is_err() {
+                    return Ok(());
+                }
+                if tx.send(MarketUpdate::L2Depth {
+                    symbol, obi, spread_bps, bid_depth_near, ask_depth_near, ts,
+                }).is_err() {
+                    return Ok(());
+                }
             }
-            info!(count, "StreamingParquetFeed: queued events");
+            "quote" => {
+                let token_id = s1.unwrap_or_default();
+                let bid = Decimal::try_from(f1).ok();
+                let ask = Decimal::try_from(f2).ok();
+                if tx.send(MarketUpdate::Quote {
+                    token_id, bid, ask, bid_size: None, ask_size: None, ts,
+                }).is_err() {
+                    return Ok(());
+                }
+            }
+            _ => continue,
         }
+        total += 1;
     }
 
-    // ── Drain heap in timestamp order ────────────────────────────────────────
-    let total = heap.len();
-    info!(total, "StreamingParquetFeed: streaming merged updates");
-    while let Some(Reverse(item)) = heap.pop() {
-        // send() blocks when the channel is full — this is the backpressure mechanism.
-        if tx.send(item.update).is_err() {
-            // Receiver dropped (runtime stopped early); exit cleanly.
-            break;
-        }
+    // Send remaining events after the UNION ALL stream is exhausted
+    while evt_idx < events.len() {
+        if tx.send(events[evt_idx].1.clone()).is_err() { break; }
+        evt_idx += 1;
     }
 
+    info!(total, events = events.len(), "StreamingParquetFeed: streaming complete");
     Ok(())
 }
 
@@ -460,11 +341,95 @@ fn run_background(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Load event rows (EventDiscovered + EventExpired pairs) into a sorted Vec.
+///
+/// Events are small (~11K rows) so loading them into memory is fine. They are
+/// merged into the main UNION ALL stream via two-pointer in the send loop.
 #[cfg(feature = "parquet-feed")]
-fn open_conn() -> Result<duckdb::Connection, Box<dyn std::error::Error + Send + Sync>> {
-    let conn = duckdb::Connection::open_in_memory()?;
-    conn.execute_batch("SET memory_limit='4GB'; SET temp_directory='/tmp/duckdb_spill';")?;
-    Ok(conn)
+fn load_events_vec(
+    conn: &duckdb::Connection,
+    data_dir: &str,
+    symbols: &[String],
+    from_str: &str,
+    to_str: &str,
+) -> Result<Vec<(i64, MarketUpdate)>, Box<dyn std::error::Error + Send + Sync>> {
+    use std::path::Path;
+
+    let dir = format!("{data_dir}/pm_market_metadata");
+    if !Path::new(&dir).exists() {
+        return Ok(Vec::new());
+    }
+
+    let glob = format!("{dir}/*.parquet");
+    let sym_filter = symbol_filter_sql(symbols);
+    let sql = format!(
+        "SELECT market_slug, symbol, \
+                EPOCH_US(start_time)::BIGINT, EPOCH_US(end_time)::BIGINT, \
+                CAST(price_to_beat AS DOUBLE), \
+                (json_extract_string(raw_market, '$.markets[0].clobTokenIds')::JSON->>0) AS up_token_id, \
+                (json_extract_string(raw_market, '$.markets[0].clobTokenIds')::JSON->>1) AS down_token_id \
+         FROM read_parquet('{glob}') \
+         WHERE end_time >= TIMESTAMPTZ '{from_str}' \
+           AND start_time <= TIMESTAMPTZ '{to_str}' \
+           {sym_filter} \
+           AND raw_market IS NOT NULL \
+         ORDER BY start_time"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<f64>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        let (market_slug, symbol_opt, start_us, end_us, price_to_beat_f, up_opt, dn_opt) = row?;
+        let symbol = match symbol_opt {
+            Some(s) if !s.is_empty() => s,
+            _ => continue,
+        };
+        let start_us = match start_us { Some(v) => v, None => continue };
+        let end_us = match end_us { Some(v) => v, None => continue };
+        let up_raw = match up_opt { Some(s) if !s.is_empty() => s, _ => continue };
+        let dn_raw = match dn_opt { Some(s) if !s.is_empty() => s, _ => continue };
+
+        let up_token = normalize_token_id(&up_raw);
+        let down_token = normalize_token_id(&dn_raw);
+        let start_time = DateTime::from_timestamp_micros(start_us).unwrap_or_default();
+        let end_time = DateTime::from_timestamp_micros(end_us).unwrap_or_default();
+        let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
+        let price_to_beat = price_to_beat_f.and_then(|f| Decimal::try_from(f).ok());
+
+        // EventDiscovered fires at start_time
+        events.push((start_us, MarketUpdate::EventDiscovered {
+            event_id: market_slug.clone(),
+            symbol,
+            up_token,
+            down_token,
+            end_time,
+            window_secs,
+            price_to_beat,
+            resolved_up_won: None,
+        }));
+
+        // EventExpired fires at end_time
+        events.push((end_us, MarketUpdate::EventExpired {
+            event_id: market_slug,
+            end_time,
+            resolved_up_won: None,
+        }));
+    }
+
+    events.sort_by_key(|(ts, _)| *ts);
+    Ok(events)
 }
 
 fn symbol_filter_sql(symbols: &[String]) -> String {
@@ -477,30 +442,4 @@ fn symbol_filter_sql(symbols: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("AND symbol IN ({list})")
-}
-
-/// Wrapper that makes `MarketUpdate` orderable by timestamp for the heap.
-struct TimestampedUpdate {
-    ts_us: i64,
-    update: MarketUpdate,
-}
-
-impl PartialEq for TimestampedUpdate {
-    fn eq(&self, other: &Self) -> bool {
-        self.ts_us == other.ts_us
-    }
-}
-
-impl Eq for TimestampedUpdate {}
-
-impl PartialOrd for TimestampedUpdate {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for TimestampedUpdate {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.ts_us.cmp(&other.ts_us)
-    }
 }
