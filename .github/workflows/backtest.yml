@@ -19,6 +19,10 @@ on:
         description: "Strategy config path (relative to repo root)"
         required: true
         default: "config/strategies/02-pm5d-threelayer.unified.toml"
+      data_dir:
+        description: "Local Parquet data dir (leave empty to use DB)"
+        required: false
+        default: "/tmp/ploy-parquet"
 
 concurrency:
   group: backtest-${{ github.ref }}
@@ -56,8 +60,10 @@ jobs:
 
       - name: Build run_backtest
         run: |
+          . /home/runner/.cargo/env
           cargo build --release --locked \
             -p ploy-strategy-bundles \
+            --features ploy-strategy-bundles/parquet-feed \
             --example run_backtest
 
       - name: Upload run_backtest binary
@@ -89,14 +95,32 @@ jobs:
       - name: Make binary executable
         run: chmod +x target/release/examples/run_backtest
 
+      - name: Sync Parquet data from Tango-1-1
+        if: ${{ github.event.inputs.data_dir != '' }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.TANGO_SSH_KEY }}" > ~/.ssh/tango_key
+          chmod 600 ~/.ssh/tango_key
+          mkdir -p ${{ github.event.inputs.data_dir }}
+          rsync -az \
+            -e "ssh -i ~/.ssh/tango_key -o StrictHostKeyChecking=no" \
+            root@172.16.0.204:/opt/ploy/data/parquet/ \
+            ${{ github.event.inputs.data_dir }}/
+
       - name: Run backtest
         env:
           CONFIG: ${{ github.event.inputs.config }}
           START_DATE: ${{ github.event.inputs.start_date }}
           END_DATE: ${{ github.event.inputs.end_date }}
+          DATA_DIR: ${{ github.event.inputs.data_dir }}
         run: |
+          EXTRA_ARGS=""
+          if [ -n "$DATA_DIR" ]; then
+            EXTRA_ARGS="--data-dir $DATA_DIR"
+          fi
           ./target/release/examples/run_backtest \
             --config "${CONFIG}" \
             --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
             --start-date "${START_DATE}" \
-            --end-date "${END_DATE}"
+            --end-date "${END_DATE}" \
+            $EXTRA_ARGS
