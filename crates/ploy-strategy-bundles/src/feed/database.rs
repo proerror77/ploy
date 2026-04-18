@@ -43,12 +43,27 @@ const TRUSTED_PM_RESEARCH_QUOTE_SOURCES: &[&str] = &[
 ];
 
 /// Additive historical-loader flags for non-crypto datasets.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoricalLoadOptions {
     pub include_reference_prices: bool,
     pub reference_symbols: Vec<String>,
     pub include_sports_state: bool,
     pub require_official_settlement: bool,
+    /// Downsample `binance_lob_ticks` to one snapshot per N seconds per symbol.
+    /// Defaults to 30 (one row per 30-second bucket). Set to 1 to disable downsampling.
+    pub lob_sample_secs: u32,
+}
+
+impl Default for HistoricalLoadOptions {
+    fn default() -> Self {
+        Self {
+            include_reference_prices: false,
+            reference_symbols: Vec::new(),
+            include_sports_state: false,
+            require_official_settlement: false,
+            lob_sample_secs: 30,
+        }
+    }
 }
 
 impl HistoricalLoadOptions {
@@ -169,7 +184,7 @@ pub async fn load_from_database_with_options(
     }
 
     // 4. L2 orderbook from binance_lob_ticks
-    load_l2_data(pool, symbols, from, to, &mut updates).await?;
+    load_l2_data(pool, symbols, from, to, options.lob_sample_secs, &mut updates).await?;
 
     if options.include_reference_prices {
         let reference_symbols = options.normalized_reference_symbols();
@@ -711,11 +726,14 @@ async fn load_l2_data(
     symbols: &[String],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+    sample_secs: u32,
     updates: &mut Vec<MarketUpdate>,
 ) -> Result<(), sqlx::Error> {
+    let sample_secs = sample_secs.max(1) as i64;
     let rows: Vec<(DateTime<Utc>, String, Decimal, i32, Decimal, Decimal)> = match sqlx::query_as(
         r#"
-        SELECT event_time, symbol,
+        SELECT DISTINCT ON (symbol, date_trunc('second', event_time) - INTERVAL '1 second' * (EXTRACT(EPOCH FROM event_time)::bigint % $4))
+               event_time, symbol,
                COALESCE(obi_5, 0.0) as obi,
                COALESCE(spread_bps, 0)::int as spread_bps,
                COALESCE(bid_volume_5, 0) as bid_volume_5,
@@ -724,12 +742,15 @@ async fn load_l2_data(
         WHERE symbol = ANY($1)
           AND event_time >= $2
           AND event_time <= $3
-        ORDER BY event_time
+        ORDER BY symbol,
+                 date_trunc('second', event_time) - INTERVAL '1 second' * (EXTRACT(EPOCH FROM event_time)::bigint % $4),
+                 event_time DESC
         "#,
     )
     .bind(symbols)
     .bind(from)
     .bind(to)
+    .bind(sample_secs)
     .fetch_all(pool)
     .await
     {

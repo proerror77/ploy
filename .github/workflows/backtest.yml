@@ -18,7 +18,7 @@ on:
       config:
         description: "Strategy config path (relative to repo root)"
         required: true
-        default: "config/strategies/02-pm5d.unified.toml"
+        default: "config/strategies/02-pm5d-threelayer.unified.toml"
 
 concurrency:
   group: backtest-${{ github.ref }}
@@ -33,12 +33,10 @@ env:
   PATH: /home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 jobs:
-  backtest:
-    # NOTE: ploy-ci-1 is an on-demand instance. Start it manually before
-    # triggering this workflow. The self-hosted runner must be online.
-    name: Run backtest on ploy-ci-1
+  build:
+    name: Build run_backtest binary
     runs-on: [self-hosted, ploy-ci-1]
-    timeout-minutes: 30
+    timeout-minutes: 45
     environment: ploy-ci-1
 
     steps:
@@ -47,11 +45,47 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-targets: "true"
+          key: backtest-${{ hashFiles('crates/ploy-strategy-bundles/**', 'Cargo.lock') }}
+
       - name: Build run_backtest
         run: |
           cargo build --release --locked \
             -p ploy-strategy-bundles \
             --example run_backtest
+
+      - name: Upload run_backtest binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: run_backtest-${{ github.sha }}
+          path: target/release/examples/run_backtest
+          retention-days: 1
+
+  backtest:
+    name: Run backtest on ploy-ci-1
+    runs-on: [self-hosted, ploy-ci-1]
+    timeout-minutes: 30
+    environment: ploy-ci-1
+    needs: [build]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Download run_backtest binary
+        uses: actions/download-artifact@v4
+        with:
+          name: run_backtest-${{ github.sha }}
+          path: target/release/examples
+
+      - name: Make binary executable
+        run: chmod +x target/release/examples/run_backtest
 
       - name: Run backtest
         env:

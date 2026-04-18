@@ -16,6 +16,7 @@ use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
     DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
+    ThreeLayerStrategy,
     RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
     StrategyRuntime,
     config::FullConfig,
@@ -368,6 +369,7 @@ fn main() {
     let strategy: Box<dyn StrategyLogic> = match strategy_variant.as_str() {
         "directional" => Box::new(DirectionalStrategy::new(strategy_config)),
         "reversal" => Box::new(ReversalStrategy::new(strategy_config.into())),
+        "three_layer" => Box::new(ThreeLayerStrategy::new(strategy_config.into())),
         other => panic!("unsupported strategy_variant in run_backtest example: {other}"),
     };
     let feed = HistoricalFeed::new(data);
