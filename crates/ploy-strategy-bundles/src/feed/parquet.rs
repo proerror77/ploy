@@ -388,8 +388,11 @@ fn load_events(
     let to_str = to.to_rfc3339();
 
     let sql = format!(
-        "SELECT market_slug, symbol, EPOCH_US(start_time)::BIGINT, EPOCH_US(end_time)::BIGINT, \
-                up_token_id, down_token_id, CAST(price_to_beat AS DOUBLE), resolved_up_won \
+        "SELECT market_slug, symbol, \
+                EPOCH_US(start_time)::BIGINT, EPOCH_US(end_time)::BIGINT, \
+                CAST(price_to_beat AS DOUBLE), \
+                json_extract_string(raw_market, '$.markets[0].clobTokenIds[0]') AS up_token_id, \
+                json_extract_string(raw_market, '$.markets[0].clobTokenIds[1]') AS down_token_id \
          FROM read_parquet('{glob}') \
          WHERE end_time >= TIMESTAMPTZ '{from_str}' \
            AND start_time <= TIMESTAMPTZ '{to_str}' \
@@ -404,10 +407,9 @@ fn load_events(
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<i64>>(2)?,
             row.get::<_, Option<i64>>(3)?,
-            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<f64>>(4)?,
             row.get::<_, Option<String>>(5)?,
-            row.get::<_, Option<f64>>(6)?,
-            row.get::<_, Option<bool>>(7)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
 
@@ -418,10 +420,9 @@ fn load_events(
             symbol_opt,
             start_us,
             end_us,
+            price_to_beat_f,
             up_token_opt,
             down_token_opt,
-            price_to_beat_f,
-            resolved_up_won,
         ) = row?;
 
         let symbol = match symbol_opt {
@@ -460,7 +461,7 @@ fn load_events(
         updates.push(MarketUpdate::EventExpired {
             event_id: market_slug,
             end_time,
-            resolved_up_won,
+            resolved_up_won: None,
         });
         count += 1;
     }
