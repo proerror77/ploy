@@ -356,14 +356,20 @@ async fn load_agg_trades(
     to: DateTime<Utc>,
     updates: &mut Vec<MarketUpdate>,
 ) -> Result<(), sqlx::Error> {
+    // Downsample to one row per 5-second bucket per symbol to avoid OOM.
+    // AggTrade volume can reach millions of rows per hour; the strategy only
+    // needs the signed trade imbalance signal, not tick-level granularity.
     let rows: Vec<(DateTime<Utc>, String, i64, Decimal, Decimal, bool)> = sqlx::query_as(
         r#"
-        SELECT trade_time, symbol, agg_trade_id, price, quantity, is_buyer_maker
+        SELECT DISTINCT ON (symbol, date_trunc('seconds', trade_time) - INTERVAL '1 second' * (EXTRACT(EPOCH FROM trade_time)::bigint % 5))
+               trade_time, symbol, agg_trade_id, price, quantity, is_buyer_maker
         FROM binance_agg_trade_ticks
         WHERE symbol = ANY($1)
           AND trade_time >= $2
           AND trade_time <= $3
-        ORDER BY trade_time, agg_trade_id
+        ORDER BY symbol,
+                 date_trunc('seconds', trade_time) - INTERVAL '1 second' * (EXTRACT(EPOCH FROM trade_time)::bigint % 5),
+                 trade_time
         "#,
     )
     .bind(symbols)
@@ -375,7 +381,7 @@ async fn load_agg_trades(
 
     info!(
         count = rows.len(),
-        "Loaded agg trades from binance_agg_trade_ticks"
+        "Loaded agg trades from binance_agg_trade_ticks (5s downsampled)"
     );
     for (ts, symbol, agg_trade_id, price, quantity, is_buyer_maker) in rows {
         updates.push(MarketUpdate::AggTrade {
