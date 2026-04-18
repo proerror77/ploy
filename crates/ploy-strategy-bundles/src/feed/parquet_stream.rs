@@ -237,9 +237,7 @@ fn run_background(
                     "SELECT DISTINCT ON (symbol, epoch_ms(event_time)::BIGINT / {bucket_ms}) \
                          EPOCH_US(event_time)::BIGINT, symbol, \
                          COALESCE(obi_5, 0.0) AS obi, \
-                         COALESCE(spread_bps, 0) AS spread_bps, \
-                         COALESCE(bid_volume_5, 0.0) AS bid_depth_near, \
-                         COALESCE(ask_volume_5, 0.0) AS ask_depth_near \
+                         COALESCE(spread_bps, 0) AS spread_bps \
                      FROM read_parquet('{glob}') \
                      WHERE event_time >= TIMESTAMPTZ '{from_str}' \
                        AND event_time <= TIMESTAMPTZ '{to_str}' \
@@ -253,32 +251,19 @@ fn run_background(
                         row.get::<_, String>(1)?,
                         row.get::<_, f64>(2)?,
                         row.get::<_, i64>(3)?,
-                        row.get::<_, f64>(4)?,
-                        row.get::<_, f64>(5)?,
                     ))
                 })?;
                 for row in rows {
-                    let (ts_us, symbol, obi, spread_bps_raw, bid_depth_near, ask_depth_near) =
+                    let (ts_us, symbol, obi, spread_bps_raw) =
                         row?;
                     let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
                     let spread_bps = spread_bps_raw as u32;
                     heap.push(Reverse(TimestampedUpdate {
                         ts_us,
                         update: MarketUpdate::L2 {
-                            symbol: symbol.clone(),
-                            obi,
-                            spread_bps,
-                            ts,
-                        },
-                    }));
-                    heap.push(Reverse(TimestampedUpdate {
-                        ts_us,
-                        update: MarketUpdate::L2Depth {
                             symbol,
                             obi,
                             spread_bps,
-                            bid_depth_near,
-                            ask_depth_near,
                             ts,
                         },
                     }));
@@ -394,19 +379,18 @@ fn run_background(
                     None => continue,
                 };
                 let up_token = match up_opt {
-                    Some(s) if !s.is_empty() => s,
+                    Some(s) if !s.is_empty() => s.trim_matches('"').to_string(),
                     _ => continue,
                 };
                 let down_token = match dn_opt {
-                    Some(s) if !s.is_empty() => s,
+                    Some(s) if !s.is_empty() => s.trim_matches('"').to_string(),
                     _ => continue,
                 };
                 let price_to_beat = price_to_beat_f.and_then(|f| Decimal::try_from(f).ok());
                 let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
 
-                // EventDiscovered fires at start_time (with 1h pre-window like parquet.rs)
-                let discovered_ts_us = start_time.timestamp_micros()
-                    - Duration::hours(1).num_microseconds().unwrap_or(0);
+                // EventDiscovered fires at start_time (matching database.rs)
+                let discovered_ts_us = start_time.timestamp_micros();
                 heap.push(Reverse(TimestampedUpdate {
                     ts_us: discovered_ts_us,
                     update: MarketUpdate::EventDiscovered {
