@@ -1,0 +1,123 @@
+name: Optimize three_layer params
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref"
+        required: true
+        default: "main"
+      start_date:
+        description: "Train start date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-11"
+      end_date:
+        description: "Train end date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-17"
+      iterations:
+        description: "Number of TPE iterations"
+        required: true
+        default: "200"
+      data_dir:
+        description: "Local Parquet data dir"
+        required: false
+        default: "/tmp/ploy-parquet"
+
+concurrency:
+  group: optimize-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build optimize_backtest binary
+    runs-on: [self-hosted, ploy-ci-1]
+    timeout-minutes: 45
+    environment: ploy-ci-1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Add cargo to PATH
+        run: echo "/home/runner/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-targets: "true"
+          key: optimize-${{ hashFiles('crates/ploy-strategy-bundles/**', 'Cargo.lock') }}
+
+      - name: Build optimize_backtest
+        run: |
+          . /home/runner/.cargo/env
+          cargo build --release --locked \
+            -p ploy-strategy-bundles \
+            --features ploy-strategy-bundles/parquet-feed \
+            --example optimize_backtest
+
+      - name: Upload optimize_backtest binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimize_backtest-${{ github.sha }}
+          path: target/release/examples/optimize_backtest
+          retention-days: 1
+
+  optimize:
+    name: Run optimize on ploy-ci-1
+    runs-on: [self-hosted, ploy-ci-1]
+    timeout-minutes: 60
+    environment: ploy-ci-1
+    needs: [build]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Download optimize_backtest binary
+        uses: actions/download-artifact@v4
+        with:
+          name: optimize_backtest-${{ github.sha }}
+          path: target/release/examples
+
+      - name: Make binary executable
+        run: chmod +x target/release/examples/optimize_backtest
+
+      - name: Sync Parquet data from Tango-1-1
+        if: ${{ github.event.inputs.data_dir != '' }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.TANGO_SSH_KEY }}" > ~/.ssh/tango_key
+          chmod 600 ~/.ssh/tango_key
+          mkdir -p ${{ github.event.inputs.data_dir }}
+          rsync -az \
+            -e "ssh -i ~/.ssh/tango_key -o StrictHostKeyChecking=no" \
+            root@172.16.0.204:/opt/ploy/data/parquet/ \
+            ${{ github.event.inputs.data_dir }}/
+
+      - name: Run optimize
+        env:
+          START_DATE: ${{ github.event.inputs.start_date }}
+          END_DATE: ${{ github.event.inputs.end_date }}
+          DATA_DIR: ${{ github.event.inputs.data_dir }}
+          ITERATIONS: ${{ github.event.inputs.iterations }}
+        run: |
+          ./target/release/examples/optimize_backtest \
+            --config "config/strategies/02-pm5d-threelayer.unified.toml" \
+            --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
+            --start-date "${START_DATE}" \
+            --end-date "${END_DATE}" \
+            --data-dir "${DATA_DIR}" \
+            --iterations "${ITERATIONS}"
