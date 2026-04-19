@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
@@ -183,10 +184,10 @@ impl From<DirectionalConfig> for ReversalConfig {
 
 #[derive(Clone)]
 struct EventWindow {
-    event_id: String,
-    symbol: String,
-    up_token: String,
-    down_token: String,
+    event_id: Arc<str>,
+    symbol: Arc<str>,
+    up_token: Arc<str>,
+    down_token: Arc<str>,
     end_time: DateTime<Utc>,
     window_secs: u64,
     price_to_beat: Option<Decimal>,
@@ -230,17 +231,17 @@ struct EntryState {
 
 pub struct ReversalStrategy {
     config: ReversalConfig,
-    spot: HashMap<String, SpotState>,
-    events: HashMap<String, Vec<EventWindow>>,
-    quotes: HashMap<String, QuoteState>,
-    lob: HashMap<String, LobDepthState>,
-    price_history: HashMap<String, VecDeque<(DateTime<Utc>, f64)>>,
-    drift: HashMap<String, DriftState>,
-    last_entry: HashMap<String, DateTime<Utc>>,
-    token_symbol: HashMap<String, String>,
-    token_event: HashMap<String, String>,
-    entry_state: HashMap<String, EntryState>,
-    retired_events: HashSet<String>,
+    spot: HashMap<Arc<str>, SpotState>,
+    events: HashMap<Arc<str>, Vec<EventWindow>>,
+    quotes: HashMap<Arc<str>, QuoteState>,
+    lob: HashMap<Arc<str>, LobDepthState>,
+    price_history: HashMap<Arc<str>, VecDeque<(DateTime<Utc>, f64)>>,
+    drift: HashMap<Arc<str>, DriftState>,
+    last_entry: HashMap<Arc<str>, DateTime<Utc>>,
+    token_symbol: HashMap<Arc<str>, Arc<str>>,
+    token_event: HashMap<Arc<str>, Arc<str>>,
+    entry_state: HashMap<Arc<str>, EntryState>,
+    retired_events: HashSet<Arc<str>>,
     daily_trade_count: u32,
     daily_reset_date: Option<NaiveDate>,
 }
@@ -296,7 +297,7 @@ impl ReversalStrategy {
             return;
         }
 
-        let history = self.price_history.entry(symbol.to_string()).or_default();
+        let history = self.price_history.entry(Arc::from(symbol)).or_default();
         history.push_back((ts, price_f.ln()));
         while history.len() > 1 {
             let oldest = history.front().expect("history not empty").0;
@@ -307,7 +308,7 @@ impl ReversalStrategy {
             }
         }
 
-        let state = self.drift.entry(symbol.to_string()).or_default();
+        let state = self.drift.entry(Arc::from(symbol)).or_default();
         if history.len() < MIN_DRIFT_POINTS {
             return;
         }
@@ -371,8 +372,8 @@ impl ReversalStrategy {
             exits.push(StrategyDecision::Exit(TradingIntent {
                 intent_id: format!("reversal_settle_{}_up", event.event_id),
                 deployment_id: String::new(),
-                market_id: event.event_id.clone(),
-                token_id: event.up_token.clone(),
+                market_id: event.event_id.to_string(),
+                token_id: event.up_token.to_string(),
                 side: TradeSide::Sell,
                 quantity: positions.net_qty(&event.up_token),
                 limit_price: Some(if up_won {
@@ -389,8 +390,8 @@ impl ReversalStrategy {
             exits.push(StrategyDecision::Exit(TradingIntent {
                 intent_id: format!("reversal_settle_{}_down", event.event_id),
                 deployment_id: String::new(),
-                market_id: event.event_id.clone(),
-                token_id: event.down_token.clone(),
+                market_id: event.event_id.to_string(),
+                token_id: event.down_token.to_string(),
                 side: TradeSide::Sell,
                 quantity: positions.net_qty(&event.down_token),
                 limit_price: Some(if up_won {
@@ -452,14 +453,14 @@ impl ReversalStrategy {
     ) -> SignalRecord {
         SignalRecord {
             strategy: self.name().to_string(),
-            event_id: Some(event.event_id.clone()),
+            event_id: Some(event.event_id.to_string()),
             token_id: Some(token_id.to_string()),
             intent_id: Some(format!(
                 "reversal_signal_{}_{}",
                 token_id,
                 now.timestamp_millis()
             )),
-            symbol: event.symbol.clone(),
+            symbol: event.symbol.to_string(),
             direction: direction.to_string(),
             p_hat,
             edge,
@@ -570,8 +571,8 @@ impl ReversalStrategy {
         let intent = TradingIntent {
             intent_id: intent_id.clone(),
             deployment_id: String::new(),
-            market_id: event.event_id.clone(),
-            token_id: token_id.clone(),
+            market_id: event.event_id.to_string(),
+            token_id: token_id.to_string(),
             side: TradeSide::Buy,
             quantity,
             limit_price: Some(entry_price),
@@ -624,8 +625,8 @@ impl ReversalStrategy {
                             now.timestamp_millis()
                         ),
                         deployment_id: String::new(),
-                        market_id: event.event_id.clone(),
-                        token_id: token_id.clone(),
+                        market_id: event.event_id.to_string(),
+                        token_id: token_id.to_string(),
                         side: TradeSide::Sell,
                         quantity: qty,
                         limit_price: None,
@@ -645,8 +646,8 @@ impl ReversalStrategy {
                                     now.timestamp_millis()
                                 ),
                                 deployment_id: String::new(),
-                                market_id: event.event_id.clone(),
-                                token_id: token_id.clone(),
+                                market_id: event.event_id.to_string(),
+                                token_id: token_id.to_string(),
                                 side: TradeSide::Sell,
                                 quantity: qty,
                                 limit_price: quote.bid.or(quote.ask),
@@ -675,8 +676,8 @@ impl ReversalStrategy {
                                 now.timestamp_millis()
                             ),
                             deployment_id: String::new(),
-                            market_id: event.event_id.clone(),
-                            token_id: token_id.clone(),
+                            market_id: event.event_id.to_string(),
+                            token_id: token_id.to_string(),
                             side: TradeSide::Sell,
                             quantity: qty,
                             limit_price: None,
@@ -703,14 +704,14 @@ impl ReversalStrategy {
             .config
             .symbols
             .iter()
-            .any(|configured| configured == symbol)
+            .any(|configured| configured.as_str() == symbol)
         {
             return Vec::new();
         }
 
         self.reset_daily_counter(ts);
         self.update_drift(symbol, price, ts);
-        self.spot.insert(symbol.to_string(), SpotState { price });
+        self.spot.insert(Arc::from(symbol), SpotState { price });
 
         if let Some(events) = self.events.get_mut(symbol) {
             for event in events {
@@ -829,7 +830,7 @@ impl StrategyLogic for ReversalStrategy {
                     .config
                     .symbols
                     .iter()
-                    .any(|configured| configured == symbol)
+                    .any(|configured| configured.as_str() == symbol.as_ref())
                     || !self.window_allowed(*window_secs)
                 {
                     return Vec::new();
@@ -893,12 +894,12 @@ impl StrategyLogic for ReversalStrategy {
     fn on_fill(&mut self, fill: &FillRecord) {
         match fill.side {
             TradeSide::Buy => {
-                if let Some(symbol) = self.token_symbol.get(&fill.token_id).cloned() {
+                if let Some(symbol) = self.token_symbol.get(fill.token_id.as_str()).cloned() {
                     self.last_entry.insert(symbol, fill.timestamp);
                 }
                 self.daily_trade_count += 1;
                 self.entry_state
-                    .entry(fill.token_id.clone())
+                    .entry(Arc::from(fill.token_id.as_str()))
                     .and_modify(|entry| {
                         let total_qty = entry.remaining_qty + fill.quantity;
                         if total_qty > Decimal::ZERO {
@@ -916,11 +917,11 @@ impl StrategyLogic for ReversalStrategy {
                     });
             }
             TradeSide::Sell => {
-                if let Some(entry) = self.entry_state.get_mut(&fill.token_id) {
+                if let Some(entry) = self.entry_state.get_mut(fill.token_id.as_str()) {
                     entry.remaining_qty = (entry.remaining_qty - fill.quantity).max(Decimal::ZERO);
                     if entry.remaining_qty <= Decimal::ZERO {
-                        self.entry_state.remove(&fill.token_id);
-                        if let Some(event_id) = self.token_event.get(&fill.token_id).cloned() {
+                        self.entry_state.remove(fill.token_id.as_str());
+                        if let Some(event_id) = self.token_event.get(fill.token_id.as_str()).cloned() {
                             self.retired_events.insert(event_id);
                         }
                     }

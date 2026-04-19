@@ -22,6 +22,7 @@ use rust_decimal::prelude::ToPrimitive;
 use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::info;
 
 use crate::traits::MarketUpdate;
@@ -315,7 +316,7 @@ async fn load_spot_prices(
     if !rows.is_empty() {
         info!(count = rows.len(), "Loaded spot prices from sync_records");
         for (ts, symbol, price) in rows {
-            updates.push(MarketUpdate::SpotPrice { symbol, price, ts });
+            updates.push(MarketUpdate::SpotPrice { symbol: Arc::from(symbol), price, ts });
         }
         return Ok(());
     }
@@ -343,7 +344,7 @@ async fn load_spot_prices(
         "Loaded spot prices from binance_price_ticks"
     );
     for (ts, symbol, price) in rows {
-        updates.push(MarketUpdate::SpotPrice { symbol, price, ts });
+        updates.push(MarketUpdate::SpotPrice { symbol: Arc::from(symbol), price, ts });
     }
 
     Ok(())
@@ -385,7 +386,7 @@ async fn load_agg_trades(
     );
     for (ts, symbol, agg_trade_id, price, quantity, is_buyer_maker) in rows {
         updates.push(MarketUpdate::AggTrade {
-            symbol,
+            symbol: Arc::from(symbol),
             agg_trade_id: agg_trade_id as u64,
             price,
             quantity,
@@ -452,11 +453,11 @@ pub async fn load_reference_price_updates(
     Ok(rows
         .into_iter()
         .map(|row| MarketUpdate::ReferencePrice {
-            symbol: row.symbol,
-            source: row.source,
-            asset_class: row.asset_class,
+            symbol: Arc::from(row.symbol),
+            source: Arc::from(row.source),
+            asset_class: Arc::from(row.asset_class),
             price: row.price,
-            full_accuracy_value: row.full_accuracy_value,
+            full_accuracy_value: row.full_accuracy_value.map(Arc::from),
             is_carried_forward: row.is_carried_forward,
             ts: row.price_time,
         })
@@ -507,15 +508,15 @@ pub async fn load_sports_state_events(
     Ok(rows
         .into_iter()
         .map(|row| MarketUpdate::SportsState {
-            game_id: row.game_id,
-            league: row.league,
-            slug: row.slug,
-            home_team: row.home_team,
-            away_team: row.away_team,
-            status: row.status,
-            period: row.period,
-            score: row.score,
-            elapsed: row.elapsed,
+            game_id: Arc::from(row.game_id),
+            league: Arc::from(row.league),
+            slug: Arc::from(row.slug),
+            home_team: Arc::from(row.home_team),
+            away_team: Arc::from(row.away_team),
+            status: Arc::from(row.status),
+            period: row.period.map(Arc::from),
+            score: row.score.map(Arc::from),
+            elapsed: row.elapsed.map(Arc::from),
             live: row.live,
             ended: row.ended,
             finished_at: row.finished_at,
@@ -627,7 +628,7 @@ async fn load_pm_quotes(
     );
     for (ts, token_id, bid, ask, bid_size, ask_size) in rows {
         updates.push(MarketUpdate::Quote {
-            token_id,
+            token_id: Arc::from(token_id),
             bid,
             ask,
             bid_size,
@@ -715,7 +716,7 @@ async fn load_pm_quotes_from_snapshots(
     );
     for (ts, token_id, bid, ask) in rows {
         updates.push(MarketUpdate::Quote {
-            token_id,
+            token_id: Arc::from(token_id),
             bid,
             ask,
             bid_size: None,
@@ -790,8 +791,9 @@ fn l2_updates_from_depth_totals(
     ask_depth_near: Decimal,
     ts: DateTime<Utc>,
 ) -> Vec<MarketUpdate> {
+    let sym: Arc<str> = Arc::from(symbol);
     let mut updates = vec![MarketUpdate::L2 {
-        symbol: symbol.to_string(),
+        symbol: Arc::clone(&sym),
         obi,
         spread_bps,
         ts,
@@ -801,7 +803,7 @@ fn l2_updates_from_depth_totals(
     let ask_depth_near = ask_depth_near.to_f64().unwrap_or(0.0);
 
     updates.push(MarketUpdate::L2Depth {
-        symbol: symbol.to_string(),
+        symbol: sym,
         obi,
         spread_bps,
         bid_depth_near,
@@ -822,8 +824,9 @@ fn l2_updates_from_book(
     asks: Option<&Value>,
     ts: DateTime<Utc>,
 ) -> Vec<MarketUpdate> {
+    let sym: Arc<str> = Arc::from(symbol);
     let mut updates = vec![MarketUpdate::L2 {
-        symbol: symbol.to_string(),
+        symbol: Arc::clone(&sym),
         obi,
         spread_bps,
         ts,
@@ -849,7 +852,7 @@ fn l2_updates_from_book(
     );
 
     updates.push(MarketUpdate::L2Depth {
-        symbol: symbol.to_string(),
+        symbol: sym,
         obi,
         spread_bps,
         bid_depth_near,
@@ -975,8 +978,8 @@ fn build_event_updates(
             None => continue,
         };
 
-        let up_token = normalize_token_id(&row.up_token_id.unwrap_or_default());
-        let down_token = normalize_token_id(&row.down_token_id.unwrap_or_default());
+        let up_token: Arc<str> = Arc::from(normalize_token_id(&row.up_token_id.unwrap_or_default()));
+        let down_token: Arc<str> = Arc::from(normalize_token_id(&row.down_token_id.unwrap_or_default()));
         let resolved_up_won = resolve_up_won_from_settlements(
             settlement_prices,
             &row.market_slug,
@@ -992,8 +995,11 @@ fn build_event_updates(
             continue;
         }
 
+        let event_id: Arc<str> = Arc::from(row.market_slug);
+        let symbol: Arc<str> = Arc::from(symbol);
+
         updates.push(MarketUpdate::EventDiscovered {
-            event_id: row.market_slug.clone(),
+            event_id: Arc::clone(&event_id),
             symbol,
             up_token,
             down_token,
@@ -1003,7 +1009,7 @@ fn build_event_updates(
             resolved_up_won: None,
         });
         updates.push(MarketUpdate::EventExpired {
-            event_id: row.market_slug,
+            event_id,
             end_time,
             resolved_up_won,
         });
@@ -1199,7 +1205,7 @@ mod tests {
                 obi,
                 spread_bps,
                 ts: update_ts
-            }) if symbol == "BTCUSDT" && (obi - 0.125).abs() < f64::EPSILON && *spread_bps == 9 && *update_ts == ts
+            }) if symbol.as_ref() == "BTCUSDT" && (obi - 0.125).abs() < f64::EPSILON && *spread_bps == 9 && *update_ts == ts
         ));
 
         assert!(matches!(
@@ -1211,7 +1217,7 @@ mod tests {
                 bid_depth_near,
                 ask_depth_near,
                 ts: update_ts
-            }) if symbol == "BTCUSDT"
+            }) if symbol.as_ref() == "BTCUSDT"
                 && (obi - 0.125).abs() < f64::EPSILON
                 && *spread_bps == 9
                 && (bid_depth_near - 4.0).abs() < 1e-9

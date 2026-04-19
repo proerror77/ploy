@@ -17,6 +17,7 @@
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use std::path::Path;
+use std::sync::Arc;
 use tracing::info;
 
 use crate::feed::database::HistoricalLoadOptions;
@@ -186,7 +187,7 @@ fn load_spot_prices(
         let (ts_us, symbol, price_f) = row?;
         let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
         let price = Decimal::try_from(price_f).unwrap_or_default();
-        updates.push(MarketUpdate::SpotPrice { symbol, price, ts });
+        updates.push(MarketUpdate::SpotPrice { symbol: Arc::from(symbol), price, ts });
         count += 1;
     }
     info!(count, "Loaded spot prices from Parquet");
@@ -242,7 +243,7 @@ fn load_agg_trades(
         let price = Decimal::try_from(price_f).unwrap_or_default();
         let quantity = Decimal::try_from(qty_f).unwrap_or_default();
         updates.push(MarketUpdate::AggTrade {
-            symbol,
+            symbol: Arc::from(symbol),
             agg_trade_id: agg_trade_id as u64,
             price,
             quantity,
@@ -306,14 +307,15 @@ fn load_l2_data(
         let (ts_us, symbol, obi, spread_bps, bid_depth_near, ask_depth_near) = row?;
         let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
         let spread_bps = spread_bps as u32;
+        let sym: Arc<str> = Arc::from(symbol);
         updates.push(MarketUpdate::L2 {
-            symbol: symbol.clone(),
+            symbol: Arc::clone(&sym),
             obi,
             spread_bps,
             ts,
         });
         updates.push(MarketUpdate::L2Depth {
-            symbol,
+            symbol: sym,
             obi,
             spread_bps,
             bid_depth_near,
@@ -374,7 +376,7 @@ fn load_pm_quotes(
         let bid_size = bid_size_f.and_then(|f| Decimal::try_from(f).ok());
         let ask_size = ask_size_f.and_then(|f| Decimal::try_from(f).ok());
         updates.push(MarketUpdate::Quote {
-            token_id,
+            token_id: Arc::from(token_id),
             bid,
             ask,
             bid_size,
@@ -466,18 +468,19 @@ fn load_events(
         let price_to_beat = price_to_beat_f.and_then(|f| Decimal::try_from(f).ok());
         let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
 
+        let event_id: Arc<str> = Arc::from(market_slug);
         updates.push(MarketUpdate::EventDiscovered {
-            event_id: market_slug.clone(),
-            symbol,
-            up_token,
-            down_token,
+            event_id: Arc::clone(&event_id),
+            symbol: Arc::from(symbol),
+            up_token: Arc::from(up_token),
+            down_token: Arc::from(down_token),
             end_time,
             window_secs,
             price_to_beat,
             resolved_up_won: None,
         });
         updates.push(MarketUpdate::EventExpired {
-            event_id: market_slug,
+            event_id,
             end_time,
             resolved_up_won: None,
         });

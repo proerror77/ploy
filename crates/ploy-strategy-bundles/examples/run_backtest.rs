@@ -26,6 +26,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Generate synthetic market data: 1 hour of 5-min windows for 3 symbols.
 ///
@@ -44,23 +45,24 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
 
         for (sym_idx, &symbol) in symbols.iter().enumerate() {
             let base = base_prices[sym_idx % base_prices.len()];
-            let event_id = format!("evt-{}-{}", symbol.to_lowercase(), window_idx);
-            let up_token = format!("up-{}-{}", symbol.to_lowercase(), window_idx);
-            let dn_token = format!("dn-{}-{}", symbol.to_lowercase(), window_idx);
+            let sym: Arc<str> = Arc::from(symbol);
+            let event_id: Arc<str> = Arc::from(format!("evt-{}-{}", symbol.to_lowercase(), window_idx));
+            let up_token: Arc<str> = Arc::from(format!("up-{}-{}", symbol.to_lowercase(), window_idx));
+            let dn_token: Arc<str> = Arc::from(format!("dn-{}-{}", symbol.to_lowercase(), window_idx));
 
             // Initial spot (open price)
             updates.push(MarketUpdate::SpotPrice {
-                symbol: symbol.to_string(),
+                symbol: Arc::clone(&sym),
                 price: base,
                 ts: window_start,
             });
 
             // Event discovered
             updates.push(MarketUpdate::EventDiscovered {
-                event_id: event_id.clone(),
-                symbol: symbol.to_string(),
-                up_token: up_token.clone(),
-                down_token: dn_token.clone(),
+                event_id: Arc::clone(&event_id),
+                symbol: Arc::clone(&sym),
+                up_token: Arc::clone(&up_token),
+                down_token: Arc::clone(&dn_token),
                 end_time: window_end,
                 window_secs,
                 price_to_beat: None,
@@ -90,7 +92,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
             };
 
             updates.push(MarketUpdate::Quote {
-                token_id: up_token.clone(),
+                token_id: Arc::clone(&up_token),
                 bid: Some(up_ask - dec!(0.01)),
                 ask: Some(up_ask),
                 ts: window_start + Duration::seconds(5),
@@ -98,7 +100,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                     ask_size: None,
             });
             updates.push(MarketUpdate::Quote {
-                token_id: dn_token.clone(),
+                token_id: Arc::clone(&dn_token),
                 bid: Some(dec!(1) - up_ask - dec!(0.01)),
                 ask: Some(dec!(1) - up_ask),
                 ts: window_start + Duration::seconds(5),
@@ -112,7 +114,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 let pct = Decimal::from(tick) / dec!(5);
                 let price = base + drift * pct;
                 updates.push(MarketUpdate::SpotPrice {
-                    symbol: symbol.to_string(),
+                    symbol: Arc::clone(&sym),
                     price,
                     ts: t,
                 });
@@ -151,7 +153,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
 
             // Spot at window midpoint (entry zone: 60-300s remaining)
             updates.push(MarketUpdate::SpotPrice {
-                symbol: symbol.to_string(),
+                symbol: sym,
                 price: final_price,
                 ts: window_start + Duration::seconds(120), // 180s remaining
             });

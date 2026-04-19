@@ -6,6 +6,8 @@
 //! - [`StrategyLogic`] — signal evaluation and decision making
 //! - [`Recorder`] — signal and trade persistence
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ploy_trading::{FillRecord, OrderLedger, PositionLedger, TradingIntent};
@@ -23,14 +25,14 @@ use serde::{Deserialize, Serialize};
 pub enum MarketUpdate {
     /// CEX spot price tick (e.g. Binance BTC/USDT).
     SpotPrice {
-        symbol: String,
+        symbol: Arc<str>,
         price: Decimal,
         ts: DateTime<Utc>,
     },
 
     /// Binance aggregated trade tick with aggressor-side metadata.
     AggTrade {
-        symbol: String,
+        symbol: Arc<str>,
         agg_trade_id: u64,
         price: Decimal,
         quantity: Decimal,
@@ -40,7 +42,7 @@ pub enum MarketUpdate {
 
     /// Polymarket token quote update.
     Quote {
-        token_id: String,
+        token_id: Arc<str>,
         bid: Option<Decimal>,
         ask: Option<Decimal>,
         bid_size: Option<Decimal>,
@@ -50,7 +52,7 @@ pub enum MarketUpdate {
 
     /// CEX L2 orderbook summary.
     L2 {
-        symbol: String,
+        symbol: Arc<str>,
         obi: f64,
         spread_bps: u32,
         ts: DateTime<Utc>,
@@ -58,7 +60,7 @@ pub enum MarketUpdate {
 
     /// CEX L2 orderbook summary with near-mid depth totals.
     L2Depth {
-        symbol: String,
+        symbol: Arc<str>,
         obi: f64,
         spread_bps: u32,
         bid_depth_near: f64,
@@ -68,10 +70,10 @@ pub enum MarketUpdate {
 
     /// New binary-option event window discovered.
     EventDiscovered {
-        event_id: String,
-        symbol: String,
-        up_token: String,
-        down_token: String,
+        event_id: Arc<str>,
+        symbol: Arc<str>,
+        up_token: Arc<str>,
+        down_token: Arc<str>,
         end_time: DateTime<Utc>,
         window_secs: u64,
         /// Price-to-beat from the market API (window open price).
@@ -84,7 +86,7 @@ pub enum MarketUpdate {
 
     /// Event window expired (settlement pending or complete).
     EventExpired {
-        event_id: String,
+        event_id: Arc<str>,
         /// The event's end time, used for timeline sorting in historical feeds.
         end_time: DateTime<Utc>,
         /// Official resolved outcome, populated only in historical replay after the fact.
@@ -95,15 +97,15 @@ pub enum MarketUpdate {
 
     /// External sports game state update from the Polymarket sports feed.
     SportsState {
-        game_id: String,
-        league: String,
-        slug: String,
-        home_team: String,
-        away_team: String,
-        status: String,
-        period: Option<String>,
-        score: Option<String>,
-        elapsed: Option<String>,
+        game_id: Arc<str>,
+        league: Arc<str>,
+        slug: Arc<str>,
+        home_team: Arc<str>,
+        away_team: Arc<str>,
+        status: Arc<str>,
+        period: Option<Arc<str>>,
+        score: Option<Arc<str>>,
+        elapsed: Option<Arc<str>>,
         live: bool,
         ended: bool,
         finished_at: Option<DateTime<Utc>>,
@@ -112,19 +114,19 @@ pub enum MarketUpdate {
 
     /// Reference-price tick from Chainlink, Pyth, or another canonical source.
     ReferencePrice {
-        symbol: String,
-        source: String,
-        asset_class: String,
+        symbol: Arc<str>,
+        source: Arc<str>,
+        asset_class: Arc<str>,
         price: Decimal,
-        full_accuracy_value: Option<String>,
+        full_accuracy_value: Option<Arc<str>>,
         is_carried_forward: bool,
         ts: DateTime<Utc>,
     },
 
     /// CEX kline (candlestick) close.
     Kline {
-        symbol: String,
-        interval: String,
+        symbol: Arc<str>,
+        interval: Arc<str>,
         open: Decimal,
         close: Decimal,
         volume: Decimal,

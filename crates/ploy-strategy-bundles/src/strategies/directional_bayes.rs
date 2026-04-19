@@ -12,6 +12,7 @@
 //! false signals when the model disagrees strongly with the order book.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ploy_trading::{
@@ -209,10 +210,10 @@ struct SpotState {
 /// Active event window for a symbol.
 #[derive(Clone)]
 struct EventWindow {
-    event_id: String,
-    symbol: String,
-    up_token: String,
-    down_token: String,
+    event_id: Arc<str>,
+    symbol: Arc<str>,
+    up_token: Arc<str>,
+    down_token: Arc<str>,
     end_time: DateTime<Utc>,
     open_price: Option<Decimal>,
 }
@@ -233,20 +234,20 @@ struct VolatilityState {
 pub struct BayesianDirectionalStrategy {
     config: BayesianDirectionalConfig,
     // Market state
-    spot: HashMap<String, SpotState>,
-    volatility: HashMap<String, VolatilityState>,
-    events: HashMap<String, Vec<EventWindow>>,
-    quotes: HashMap<String, QuoteState>,
+    spot: HashMap<Arc<str>, SpotState>,
+    volatility: HashMap<Arc<str>, VolatilityState>,
+    events: HashMap<Arc<str>, Vec<EventWindow>>,
+    quotes: HashMap<Arc<str>, QuoteState>,
     // Gating state
-    cooldowns: HashMap<String, DateTime<Utc>>,
+    cooldowns: HashMap<Arc<str>, DateTime<Utc>>,
     daily_trades: u32,
     last_trade_date: Option<chrono::NaiveDate>,
     /// Realized PnL for the current trading day (circuit breaker).
     daily_realized_pnl: Decimal,
     // Token -> symbol mapping
-    token_symbol: HashMap<String, String>,
+    token_symbol: HashMap<Arc<str>, Arc<str>>,
     /// Entry price cache: token_id -> entry price (for PnL tracking on settlement).
-    entry_prices: HashMap<String, Decimal>,
+    entry_prices: HashMap<Arc<str>, Decimal>,
     /// Most recent feed timestamp seen across all updates.
     /// Used instead of Utc::now() so replay runs are deterministic.
     feed_time: Option<DateTime<Utc>>,
@@ -351,7 +352,7 @@ impl BayesianDirectionalStrategy {
 
         let inst_var_per_sec = (curr_f / prev_f).ln().powi(2) / dt_secs.max(1e-6);
         let floor = self.floor_var_per_sec();
-        let state = self.volatility.entry(symbol.to_string()).or_default();
+        let state = self.volatility.entry(Arc::from(symbol)).or_default();
         state.ewma_var_per_sec = if state.ewma_var_per_sec <= 0.0 {
             inst_var_per_sec.max(floor)
         } else {
@@ -389,7 +390,7 @@ impl BayesianDirectionalStrategy {
                 ploy_trading::OrderState::Pending
                     | ploy_trading::OrderState::Acknowledged
                     | ploy_trading::OrderState::PartiallyFilled
-            ) && (order.token_id == event.up_token || order.token_id == event.down_token)
+            ) && (order.token_id.as_str() == &*event.up_token || order.token_id.as_str() == &*event.down_token)
         })
     }
 
@@ -431,8 +432,8 @@ impl BayesianDirectionalStrategy {
             exits.push(StrategyDecision::Exit(TradingIntent {
                 intent_id: format!("settle_{}", event.event_id),
                 deployment_id: String::new(),
-                market_id: event.event_id.clone(),
-                token_id: event.up_token.clone(),
+                market_id: event.event_id.to_string(),
+                token_id: event.up_token.to_string(),
                 side: TradeSide::Sell,
                 quantity: qty,
                 limit_price: Some(settle_price),
@@ -454,8 +455,8 @@ impl BayesianDirectionalStrategy {
             exits.push(StrategyDecision::Exit(TradingIntent {
                 intent_id: format!("settle_{}", event.event_id),
                 deployment_id: String::new(),
-                market_id: event.event_id.clone(),
-                token_id: event.down_token.clone(),
+                market_id: event.event_id.to_string(),
+                token_id: event.down_token.to_string(),
                 side: TradeSide::Sell,
                 quantity: qty,
                 limit_price: Some(settle_price),
@@ -552,7 +553,7 @@ impl BayesianDirectionalStrategy {
         // Gate 0: Price validity
         let open_price = event.open_price?;
         if open_price <= Decimal::ZERO || spot_price <= Decimal::ZERO {
-            debug!(symbol, event_id = %event.event_id, "Gate 0: Invalid prices");
+            debug!(symbol = %symbol, event_id = %event.event_id, "Gate 0: Invalid prices");
             return None;
         }
 
@@ -709,8 +710,8 @@ impl BayesianDirectionalStrategy {
                 now.timestamp_millis(),
             ),
             deployment_id: String::new(),
-            market_id: event.event_id.clone(),
-            token_id,
+            market_id: event.event_id.to_string(),
+            token_id: token_id.to_string(),
             side: TradeSide::Buy,
             quantity: self.shares_for_entry_price(entry_price),
             limit_price: Some(entry_price),
@@ -731,10 +732,10 @@ impl BayesianDirectionalStrategy {
     ) -> SignalRecord {
         SignalRecord {
             strategy: self.name().to_string(),
-            event_id: Some(event.event_id.clone()),
+            event_id: Some(event.event_id.to_string()),
             token_id: Some(intent.token_id.clone()),
             intent_id: Some(intent.intent_id.clone()),
-            symbol: event.symbol.clone(),
+            symbol: event.symbol.to_string(),
             direction: match direction {
                 Direction::Up => "UP".into(),
                 Direction::Down => "DOWN".into(),
@@ -795,7 +796,7 @@ impl BayesianDirectionalStrategy {
         let spot_price = match self.spot.get(symbol) {
             Some(s) => s.price,
             None => {
-                debug!(symbol, "No spot price available");
+                debug!(symbol = %symbol, "No spot price available");
                 return vec![];
             }
         };
@@ -826,11 +827,11 @@ impl BayesianDirectionalStrategy {
 
         for event in candidates {
             if self.event_has_open_position(&event, positions) {
-                debug!(symbol, event_id = %event.event_id, "Already holding position for this event");
+                debug!(symbol = %symbol, event_id = %event.event_id, "Already holding position for this event");
                 continue;
             }
             if self.event_has_active_order(&event, orders) {
-                debug!(symbol, event_id = %event.event_id, "Active order already exists for this event");
+                debug!(symbol = %symbol, event_id = %event.event_id, "Active order already exists for this event");
                 continue;
             }
 
@@ -876,7 +877,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
-                if !self.config.symbols.contains(symbol) {
+                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
                     return vec![];
                 }
 
@@ -937,7 +938,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                 );
 
                 if let Some(symbol) = self.token_symbol.get(token_id).cloned() {
-                    if self.config.symbols.contains(&symbol) {
+                    if self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
                         if self.feed_time.map_or(true, |ft| *ts > ft) {
                             self.feed_time = Some(*ts);
                         }
@@ -966,7 +967,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                 resolved_up_won: _,
             } => {
                 if !self.window_allowed(*window_secs) {
-                    debug!(symbol, event_id = %event_id, window_secs = *window_secs, "Ignoring disallowed event window");
+                    debug!(symbol = %symbol, event_id = %event_id, window_secs = *window_secs, "Ignoring disallowed event window");
                     return vec![];
                 }
                 let now = self
@@ -984,7 +985,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                 }
                 let events = self.events.entry(symbol.clone()).or_default();
                 if !stale_expired.is_empty() {
-                    let stale_expired: HashSet<String> = stale_expired.into_iter().collect();
+                    let stale_expired: HashSet<Arc<str>> = stale_expired.into_iter().collect();
                     events.retain(|event| !stale_expired.contains(&event.event_id));
                 }
                 if events.iter().any(|e| e.event_id == *event_id) {
@@ -1007,7 +1008,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                 let has_cached_quote =
                     self.quotes.contains_key(up_token) || self.quotes.contains_key(down_token);
                 if has_cached_quote
-                    && self.config.symbols.contains(symbol)
+                    && self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref())
                     && self.daily_trades < self.config.max_daily_trades
                     && !self.in_cooldown(symbol, now)
                 {
@@ -1063,7 +1064,7 @@ impl StrategyLogic for BayesianDirectionalStrategy {
     }
 
     fn on_fill(&mut self, fill: &FillRecord) {
-        if let Some(symbol) = self.token_symbol.get(&fill.token_id) {
+        if let Some(symbol) = self.token_symbol.get(fill.token_id.as_str()) {
             self.cooldowns.insert(symbol.clone(), fill.timestamp);
             self.daily_trades += 1;
         }
@@ -1071,10 +1072,10 @@ impl StrategyLogic for BayesianDirectionalStrategy {
         match fill.side {
             ploy_trading::TradeSide::Buy => {
                 self.entry_prices
-                    .insert(fill.token_id.clone(), fill.price);
+                    .insert(Arc::from(fill.token_id.as_str()), fill.price);
             }
             ploy_trading::TradeSide::Sell => {
-                if let Some(entry_price) = self.entry_prices.remove(&fill.token_id) {
+                if let Some(entry_price) = self.entry_prices.remove(fill.token_id.as_str()) {
                     let pnl = (fill.price - entry_price) * fill.quantity - fill.fee;
                     self.daily_realized_pnl += pnl;
                 }
@@ -1095,9 +1096,9 @@ impl StrategyLogic for BayesianDirectionalStrategy {
             return;
         }
 
-        if let Some(symbol) = self.token_symbol.get(&intent.token_id).cloned() {
+        if let Some(symbol) = self.token_symbol.get(intent.token_id.as_str()).cloned() {
             self.cooldowns.insert(symbol.clone(), now);
-            debug!(symbol, reason, "Rejection cooldown armed");
+            debug!(symbol = %symbol, reason, "Rejection cooldown armed");
         }
     }
 

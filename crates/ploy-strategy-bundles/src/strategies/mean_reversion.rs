@@ -5,6 +5,7 @@
 //! `ReturnBuffer`-style drift/acceleration view. It does not depend on live L2.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ploy_trading::{
@@ -70,10 +71,10 @@ struct QuoteState {
 
 #[derive(Clone)]
 struct EventWindow {
-    event_id: String,
-    symbol: String,
-    up_token: String,
-    down_token: String,
+    event_id: Arc<str>,
+    symbol: Arc<str>,
+    up_token: Arc<str>,
+    down_token: Arc<str>,
     end_time: DateTime<Utc>,
     open_price: Option<Decimal>,
 }
@@ -181,25 +182,25 @@ struct VolatilityState {
 struct EntryState {
     entry_price: Decimal,
     entry_time: DateTime<Utc>,
-    event_id: String,
+    event_id: Arc<str>,
     remaining_qty: Decimal,
 }
 
 pub struct MeanReversionStrategy {
     config: DirectionalConfig,
-    spot: HashMap<String, SpotState>,
-    volatility: HashMap<String, VolatilityState>,
-    return_buffers: HashMap<String, ReturnBuffer>,
-    events: HashMap<String, Vec<EventWindow>>,
-    quotes: HashMap<String, QuoteState>,
-    cooldowns: HashMap<String, DateTime<Utc>>,
+    spot: HashMap<Arc<str>, SpotState>,
+    volatility: HashMap<Arc<str>, VolatilityState>,
+    return_buffers: HashMap<Arc<str>, ReturnBuffer>,
+    events: HashMap<Arc<str>, Vec<EventWindow>>,
+    quotes: HashMap<Arc<str>, QuoteState>,
+    cooldowns: HashMap<Arc<str>, DateTime<Utc>>,
     daily_trades: u32,
     last_trade_date: Option<chrono::NaiveDate>,
     daily_realized_pnl: Decimal,
-    token_symbol: HashMap<String, String>,
-    token_event: HashMap<String, String>,
-    entry_state: HashMap<String, EntryState>,
-    retired_events: HashSet<String>,
+    token_symbol: HashMap<Arc<str>, Arc<str>>,
+    token_event: HashMap<Arc<str>, Arc<str>>,
+    entry_state: HashMap<Arc<str>, EntryState>,
+    retired_events: HashSet<Arc<str>>,
     feed_time: Option<DateTime<Utc>>,
     balance_exhausted_until: Option<DateTime<Utc>>,
 }
@@ -257,7 +258,7 @@ impl MeanReversionStrategy {
         let log_return = (curr_f / prev_f).ln();
         let inst_var_per_sec = log_return * log_return / dt_secs.max(1e-6);
         let floor = self.floor_var_per_sec();
-        let state = self.volatility.entry(symbol.to_string()).or_default();
+        let state = self.volatility.entry(Arc::from(symbol)).or_default();
         state.ewma_var_per_sec = if state.ewma_var_per_sec <= 0.0 {
             inst_var_per_sec.max(floor)
         } else {
@@ -266,7 +267,7 @@ impl MeanReversionStrategy {
 
         let buf = self
             .return_buffers
-            .entry(symbol.to_string())
+            .entry(Arc::from(symbol))
             .or_insert_with(ReturnBuffer::new);
         buf.push(log_return, dt_secs, curr_f, RETURN_BUFFER_WINDOW_SECS);
     }
@@ -345,7 +346,7 @@ impl MeanReversionStrategy {
                 ploy_trading::OrderState::Pending
                     | ploy_trading::OrderState::Acknowledged
                     | ploy_trading::OrderState::PartiallyFilled
-            ) && (order.token_id == event.up_token || order.token_id == event.down_token)
+            ) && (order.token_id.as_str() == &*event.up_token || order.token_id.as_str() == &*event.down_token)
         })
     }
 
@@ -385,8 +386,8 @@ impl MeanReversionStrategy {
             exits.push(StrategyDecision::Exit(TradingIntent {
                 intent_id: format!("mr_settle_{}", event.event_id),
                 deployment_id: String::new(),
-                market_id: event.event_id.clone(),
-                token_id: event.up_token.clone(),
+                market_id: event.event_id.to_string(),
+                token_id: event.up_token.to_string(),
                 side: TradeSide::Sell,
                 quantity: positions.net_qty(&event.up_token),
                 limit_price: Some(if up_won { dec!(1.00) } else { dec!(0.00) }),
@@ -399,8 +400,8 @@ impl MeanReversionStrategy {
             exits.push(StrategyDecision::Exit(TradingIntent {
                 intent_id: format!("mr_settle_{}", event.event_id),
                 deployment_id: String::new(),
-                market_id: event.event_id.clone(),
-                token_id: event.down_token.clone(),
+                market_id: event.event_id.to_string(),
+                token_id: event.down_token.to_string(),
                 side: TradeSide::Sell,
                 quantity: positions.net_qty(&event.down_token),
                 limit_price: Some(if up_won { dec!(0.00) } else { dec!(1.00) }),
@@ -501,8 +502,8 @@ impl MeanReversionStrategy {
                 exits.push(StrategyDecision::Exit(TradingIntent {
                     intent_id: format!("mr_exit_{}_{}", event.event_id, now.timestamp_millis()),
                     deployment_id: String::new(),
-                    market_id: event.event_id.clone(),
-                    token_id: token_id.clone(),
+                    market_id: event.event_id.to_string(),
+                    token_id: token_id.to_string(),
                     side: TradeSide::Sell,
                     quantity: qty,
                     limit_price: Some(bid),
@@ -570,8 +571,8 @@ impl MeanReversionStrategy {
                 && entry_f <= self.config.no_trade_zone_max)
         {
             debug!(
-                symbol,
-                token_id,
+                symbol = %symbol,
+                token_id = %token_id,
                 entry_price = entry_f,
                 "mean-reversion price filter"
             );
@@ -661,8 +662,8 @@ impl MeanReversionStrategy {
                 now.timestamp_millis(),
             ),
             deployment_id: String::new(),
-            market_id: event.event_id.clone(),
-            token_id,
+            market_id: event.event_id.to_string(),
+            token_id: token_id.to_string(),
             side: TradeSide::Buy,
             quantity: self.shares_for_entry_price(entry_price),
             limit_price: Some(entry_price),
@@ -683,10 +684,10 @@ impl MeanReversionStrategy {
     ) -> SignalRecord {
         SignalRecord {
             strategy: self.name().to_string(),
-            event_id: Some(event.event_id.clone()),
+            event_id: Some(event.event_id.to_string()),
             token_id: Some(intent.token_id.clone()),
             intent_id: Some(intent.intent_id.clone()),
-            symbol: event.symbol.clone(),
+            symbol: event.symbol.to_string(),
             direction: match direction {
                 Direction::Up => "UP".into(),
                 Direction::Down => "DOWN".into(),
@@ -774,7 +775,7 @@ impl StrategyLogic for MeanReversionStrategy {
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
-                if !self.config.symbols.contains(symbol) {
+                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
                     return Vec::new();
                 }
 
@@ -844,7 +845,7 @@ impl StrategyLogic for MeanReversionStrategy {
                     return active_exits;
                 }
 
-                if self.config.symbols.contains(&symbol)
+                if self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref())
                     && self.daily_trades < self.config.max_daily_trades
                     && !self.in_cooldown(&symbol, *ts)
                 {
@@ -892,7 +893,7 @@ impl StrategyLogic for MeanReversionStrategy {
                         .or_else(|| self.spot.get(symbol).map(|state| state.price)),
                 });
 
-                if self.config.symbols.contains(symbol)
+                if self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref())
                     && self.daily_trades < self.config.max_daily_trades
                     && !self.in_cooldown(symbol, now)
                 {
@@ -946,7 +947,7 @@ impl StrategyLogic for MeanReversionStrategy {
     }
 
     fn on_fill(&mut self, fill: &FillRecord) {
-        if let Some(symbol) = self.token_symbol.get(&fill.token_id) {
+        if let Some(symbol) = self.token_symbol.get(fill.token_id.as_str()) {
             self.cooldowns.insert(symbol.clone(), fill.timestamp);
             self.daily_trades += 1;
         }
@@ -955,11 +956,11 @@ impl StrategyLogic for MeanReversionStrategy {
             TradeSide::Buy => {
                 let event_id = self
                     .token_event
-                    .get(&fill.token_id)
+                    .get(fill.token_id.as_str())
                     .cloned()
                     .unwrap_or_default();
                 self.entry_state
-                    .entry(fill.token_id.clone())
+                    .entry(Arc::from(fill.token_id.as_str()))
                     .and_modify(|entry| {
                         let total_qty = entry.remaining_qty + fill.quantity;
                         if total_qty > Decimal::ZERO {
@@ -981,7 +982,7 @@ impl StrategyLogic for MeanReversionStrategy {
                     });
             }
             TradeSide::Sell => {
-                if let Some(entry) = self.entry_state.get_mut(&fill.token_id) {
+                if let Some(entry) = self.entry_state.get_mut(fill.token_id.as_str()) {
                     let matched_qty = fill.quantity.min(entry.remaining_qty);
                     let pnl = (fill.price - entry.entry_price) * matched_qty - fill.fee;
                     self.daily_realized_pnl += pnl;
@@ -989,7 +990,7 @@ impl StrategyLogic for MeanReversionStrategy {
                     let retire_event = entry.remaining_qty <= Decimal::ZERO;
                     let event_id = entry.event_id.clone();
                     if retire_event {
-                        self.entry_state.remove(&fill.token_id);
+                        self.entry_state.remove(fill.token_id.as_str());
                         if !event_id.is_empty() {
                             self.retired_events.insert(event_id);
                         }
@@ -1007,7 +1008,7 @@ impl StrategyLogic for MeanReversionStrategy {
             return;
         }
 
-        if let Some(symbol) = self.token_symbol.get(&intent.token_id).cloned() {
+        if let Some(symbol) = self.token_symbol.get(intent.token_id.as_str()).cloned() {
             self.cooldowns.insert(symbol, now);
         }
     }

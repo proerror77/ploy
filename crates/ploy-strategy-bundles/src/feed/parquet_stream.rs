@@ -27,6 +27,7 @@
 //! ```
 
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread;
 
 use async_trait::async_trait;
@@ -280,14 +281,14 @@ fn run_background(
 
         match typ.as_str() {
             "spot" => {
-                let symbol = s1.unwrap_or_default();
+                let symbol: Arc<str> = Arc::from(s1.unwrap_or_default());
                 let price = Decimal::try_from(f1).unwrap_or_default();
                 if tx.send(MarketUpdate::SpotPrice { symbol, price, ts }).is_err() {
                     return Ok(());
                 }
             }
             "agg" => {
-                let symbol = s1.unwrap_or_default();
+                let symbol: Arc<str> = Arc::from(s1.unwrap_or_default());
                 let price = Decimal::try_from(f1).unwrap_or_default();
                 let quantity = Decimal::try_from(f2).unwrap_or_default();
                 if tx.send(MarketUpdate::AggTrade {
@@ -302,14 +303,14 @@ fn run_background(
                 }
             }
             "lob" => {
-                let symbol = s1.unwrap_or_default();
+                let symbol: Arc<str> = Arc::from(s1.unwrap_or_default());
                 let obi = f1;
                 let spread_bps = f2 as u32;
                 let bid_depth_near = f3;
                 let ask_depth_near = f4;
                 // Send both L2 and L2Depth (matching original behavior)
                 if tx.send(MarketUpdate::L2 {
-                    symbol: symbol.clone(), obi, spread_bps, ts,
+                    symbol: Arc::clone(&symbol), obi, spread_bps, ts,
                 }).is_err() {
                     return Ok(());
                 }
@@ -320,7 +321,7 @@ fn run_background(
                 }
             }
             "quote" => {
-                let token_id = s1.unwrap_or_default();
+                let token_id: Arc<str> = Arc::from(s1.unwrap_or_default());
                 let bid = f1_opt.and_then(|v| Decimal::try_from(v).ok());
                 let ask = f2_opt.and_then(|v| Decimal::try_from(v).ok());
                 if bid.is_none() && ask.is_none() { continue; }
@@ -420,16 +421,19 @@ fn load_events_vec(
         let up_raw = match up_opt { Some(s) if !s.is_empty() => s, _ => continue };
         let dn_raw = match dn_opt { Some(s) if !s.is_empty() => s, _ => continue };
 
-        let up_token = normalize_token_id(&up_raw);
-        let down_token = normalize_token_id(&dn_raw);
+        let up_token: Arc<str> = Arc::from(normalize_token_id(&up_raw));
+        let down_token: Arc<str> = Arc::from(normalize_token_id(&dn_raw));
         let start_time = DateTime::from_timestamp_micros(start_us).unwrap_or_default();
         let end_time = DateTime::from_timestamp_micros(end_us).unwrap_or_default();
         let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
         let price_to_beat = price_to_beat_f.and_then(|f| Decimal::try_from(f).ok());
 
+        let event_id: Arc<str> = Arc::from(market_slug);
+        let symbol: Arc<str> = Arc::from(symbol);
+
         // EventDiscovered fires at start_time
         events.push((start_us, MarketUpdate::EventDiscovered {
-            event_id: market_slug.clone(),
+            event_id: Arc::clone(&event_id),
             symbol,
             up_token,
             down_token,
@@ -441,7 +445,7 @@ fn load_events_vec(
 
         // EventExpired fires at end_time
         events.push((end_us, MarketUpdate::EventExpired {
-            event_id: market_slug,
+            event_id,
             end_time,
             resolved_up_won: None,
         }));

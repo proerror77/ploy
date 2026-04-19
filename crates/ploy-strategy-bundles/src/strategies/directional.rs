@@ -7,6 +7,7 @@
 //! for backtest, dry-run, and live modes identically.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ploy_trading::{
@@ -485,10 +486,10 @@ impl ReturnBuffer {
 /// Active event window for a symbol.
 #[derive(Clone)]
 struct EventWindow {
-    event_id: String,
-    symbol: String,
-    up_token: String,
-    down_token: String,
+    event_id: Arc<str>,
+    symbol: Arc<str>,
+    up_token: Arc<str>,
+    down_token: Arc<str>,
     end_time: DateTime<Utc>,
     open_price: Option<Decimal>,
 }
@@ -567,22 +568,22 @@ struct VolatilityState {
 pub struct DirectionalStrategy {
     config: DirectionalConfig,
     // Market state
-    spot: HashMap<String, SpotState>,
-    volatility: HashMap<String, VolatilityState>,
-    return_buffers: HashMap<String, ReturnBuffer>,
-    microstructure: HashMap<String, MicrostructureState>,
-    events: HashMap<String, Vec<EventWindow>>,
-    quotes: HashMap<String, QuoteState>,
+    spot: HashMap<Arc<str>, SpotState>,
+    volatility: HashMap<Arc<str>, VolatilityState>,
+    return_buffers: HashMap<Arc<str>, ReturnBuffer>,
+    microstructure: HashMap<Arc<str>, MicrostructureState>,
+    events: HashMap<Arc<str>, Vec<EventWindow>>,
+    quotes: HashMap<Arc<str>, QuoteState>,
     // Gating state
-    cooldowns: HashMap<String, DateTime<Utc>>,
+    cooldowns: HashMap<Arc<str>, DateTime<Utc>>,
     daily_trades: u32,
     last_trade_date: Option<chrono::NaiveDate>,
     /// Realized PnL for the current trading day (circuit breaker).
     daily_realized_pnl: Decimal,
     // Token → symbol mapping
-    token_symbol: HashMap<String, String>,
+    token_symbol: HashMap<Arc<str>, Arc<str>>,
     /// Entry price cache: token_id → entry price (for PnL tracking on settlement).
-    entry_prices: HashMap<String, Decimal>,
+    entry_prices: HashMap<Arc<str>, Decimal>,
     /// Most recent feed timestamp seen across all updates.
     /// Used instead of Utc::now() so replay runs are deterministic.
     feed_time: Option<DateTime<Utc>>,
@@ -727,7 +728,7 @@ impl DirectionalStrategy {
 
         // 1. EWMA (existing)
         let floor = self.floor_var_per_sec();
-        let state = self.volatility.entry(symbol.to_string()).or_default();
+        let state = self.volatility.entry(Arc::from(symbol)).or_default();
         state.ewma_var_per_sec = if state.ewma_var_per_sec <= 0.0 {
             inst_var_per_sec.max(floor)
         } else {
@@ -737,7 +738,7 @@ impl DirectionalStrategy {
         // 2. Return buffer for RV, Parkinson, and price structure features
         let buf = self
             .return_buffers
-            .entry(symbol.to_string())
+            .entry(Arc::from(symbol))
             .or_insert_with(ReturnBuffer::new);
         buf.push(log_return, dt_secs, curr_f, RETURN_BUFFER_WINDOW_SECS);
     }
@@ -792,7 +793,7 @@ impl DirectionalStrategy {
                 ploy_trading::OrderState::Pending
                     | ploy_trading::OrderState::Acknowledged
                     | ploy_trading::OrderState::PartiallyFilled
-            ) && (order.token_id == event.up_token || order.token_id == event.down_token)
+            ) && (order.token_id.as_str() == &*event.up_token || order.token_id.as_str() == &*event.down_token)
         })
     }
 
@@ -834,8 +835,8 @@ impl DirectionalStrategy {
             exits.push(StrategyDecision::Exit(TradingIntent {
                 intent_id: format!("settle_{}", event.event_id),
                 deployment_id: String::new(),
-                market_id: event.event_id.clone(),
-                token_id: event.up_token.clone(),
+                market_id: event.event_id.to_string(),
+                token_id: event.up_token.to_string(),
                 side: TradeSide::Sell,
                 quantity: qty,
                 limit_price: Some(settle_price),
@@ -857,8 +858,8 @@ impl DirectionalStrategy {
             exits.push(StrategyDecision::Exit(TradingIntent {
                 intent_id: format!("settle_{}", event.event_id),
                 deployment_id: String::new(),
-                market_id: event.event_id.clone(),
-                token_id: event.down_token.clone(),
+                market_id: event.event_id.to_string(),
+                token_id: event.down_token.to_string(),
                 side: TradeSide::Sell,
                 quantity: qty,
                 limit_price: Some(settle_price),
@@ -959,7 +960,7 @@ impl DirectionalStrategy {
         // Gate 0: Price validity
         let open_price = event.open_price?;
         if open_price <= Decimal::ZERO || spot_price <= Decimal::ZERO {
-            debug!(symbol, event_id = %event.event_id, "Gate 0: Invalid prices");
+            debug!(symbol = %symbol, event_id = %event.event_id, "Gate 0: Invalid prices");
             return None;
         }
 
@@ -1251,8 +1252,8 @@ impl DirectionalStrategy {
                 now.timestamp_millis(),
             ),
             deployment_id: String::new(), // filled by runtime
-            market_id: event.event_id.clone(),
-            token_id,
+            market_id: event.event_id.to_string(),
+            token_id: token_id.to_string(),
             side: TradeSide::Buy,
             quantity: self.shares_for_entry_price(entry_price),
             limit_price: Some(entry_price),
@@ -1273,10 +1274,10 @@ impl DirectionalStrategy {
     ) -> SignalRecord {
         SignalRecord {
             strategy: self.name().to_string(),
-            event_id: Some(event.event_id.clone()),
+            event_id: Some(event.event_id.to_string()),
             token_id: Some(intent.token_id.clone()),
             intent_id: Some(intent.intent_id.clone()),
-            symbol: event.symbol.clone(),
+            symbol: event.symbol.to_string(),
             direction: match direction {
                 Direction::Up => "UP".into(),
                 Direction::Down => "DOWN".into(),
@@ -1338,7 +1339,7 @@ impl DirectionalStrategy {
         let spot_price = match self.spot.get(symbol) {
             Some(s) => s.price,
             None => {
-                debug!(symbol, "No spot price available");
+                debug!(symbol = %symbol, "No spot price available");
                 return vec![];
             }
         };
@@ -1369,12 +1370,12 @@ impl DirectionalStrategy {
 
         for event in candidates {
             if self.event_has_open_position(&event, positions) {
-                debug!(symbol, event_id = %event.event_id, "Already holding position for this event");
+                debug!(symbol = %symbol, event_id = %event.event_id, "Already holding position for this event");
                 continue;
             }
 
             if self.event_has_active_order(&event, orders) {
-                debug!(symbol, event_id = %event.event_id, "Active order already exists for this event");
+                debug!(symbol = %symbol, event_id = %event.event_id, "Active order already exists for this event");
                 continue;
             }
 
@@ -1420,7 +1421,7 @@ impl StrategyLogic for DirectionalStrategy {
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
-                if !self.config.symbols.contains(symbol) {
+                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
                     return vec![];
                 }
 
@@ -1484,7 +1485,7 @@ impl StrategyLogic for DirectionalStrategy {
                 // Also try entry: a fresh quote may unlock a signal that was
                 // previously blocked by missing ask price (Gate 1).
                 if let Some(symbol) = self.token_symbol.get(token_id).cloned() {
-                    if self.config.symbols.contains(&symbol) {
+                    if self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
                         if self.feed_time.map_or(true, |ft| *ts > ft) {
                             self.feed_time = Some(*ts);
                         }
@@ -1510,7 +1511,7 @@ impl StrategyLogic for DirectionalStrategy {
                 ts,
                 ..
             } => {
-                if !self.config.symbols.contains(symbol) {
+                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
                     return vec![];
                 }
                 self.microstructure
@@ -1529,7 +1530,7 @@ impl StrategyLogic for DirectionalStrategy {
                 spread_bps,
                 ts,
             } => {
-                if !self.config.symbols.contains(symbol) {
+                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
                     return vec![];
                 }
                 self.microstructure
@@ -1553,7 +1554,7 @@ impl StrategyLogic for DirectionalStrategy {
                 resolved_up_won: _,
             } => {
                 if !self.window_allowed(*window_secs) {
-                    debug!(symbol, event_id = %event_id, window_secs = *window_secs, "Ignoring disallowed event window");
+                    debug!(symbol = %symbol, event_id = %event_id, window_secs = *window_secs, "Ignoring disallowed event window");
                     return vec![];
                 }
                 // Use feed_time (last seen spot/quote timestamp) as "now" so that
@@ -1576,7 +1577,7 @@ impl StrategyLogic for DirectionalStrategy {
                 }
                 let events = self.events.entry(symbol.clone()).or_default();
                 if !stale_expired.is_empty() {
-                    let stale_expired: HashSet<String> = stale_expired.into_iter().collect();
+                    let stale_expired: HashSet<Arc<str>> = stale_expired.into_iter().collect();
                     events.retain(|event| !stale_expired.contains(&event.event_id));
                 }
                 // Dedup
@@ -1605,7 +1606,7 @@ impl StrategyLogic for DirectionalStrategy {
                 let has_cached_quote =
                     self.quotes.contains_key(up_token) || self.quotes.contains_key(down_token);
                 if has_cached_quote
-                    && self.config.symbols.contains(symbol)
+                    && self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref())
                     && self.daily_trades < self.config.max_daily_trades
                     && !self.in_cooldown(symbol, now)
                 {
@@ -1662,7 +1663,7 @@ impl StrategyLogic for DirectionalStrategy {
     }
 
     fn on_fill(&mut self, fill: &FillRecord) {
-        if let Some(symbol) = self.token_symbol.get(&fill.token_id) {
+        if let Some(symbol) = self.token_symbol.get(fill.token_id.as_str()) {
             self.cooldowns.insert(symbol.clone(), fill.timestamp);
             self.daily_trades += 1;
         }
@@ -1670,10 +1671,10 @@ impl StrategyLogic for DirectionalStrategy {
         // Track entry prices and realized PnL for circuit breaker.
         match fill.side {
             ploy_trading::TradeSide::Buy => {
-                self.entry_prices.insert(fill.token_id.clone(), fill.price);
+                self.entry_prices.insert(Arc::from(fill.token_id.clone()), fill.price);
             }
             ploy_trading::TradeSide::Sell => {
-                if let Some(entry_price) = self.entry_prices.remove(&fill.token_id) {
+                if let Some(entry_price) = self.entry_prices.remove(fill.token_id.as_str()) {
                     let pnl = (fill.price - entry_price) * fill.quantity - fill.fee;
                     self.daily_realized_pnl += pnl;
                 }
@@ -1698,9 +1699,9 @@ impl StrategyLogic for DirectionalStrategy {
 
         // For all other rejections (FAK no match, precision errors, no market):
         // arm the per-symbol cooldown so the same event isn't retried on every tick.
-        if let Some(symbol) = self.token_symbol.get(&intent.token_id).cloned() {
+        if let Some(symbol) = self.token_symbol.get(intent.token_id.as_str()).cloned() {
             self.cooldowns.insert(symbol.clone(), now);
-            debug!(symbol, reason, "Rejection cooldown armed");
+            debug!(symbol = &*symbol, reason, "Rejection cooldown armed");
         }
     }
 
@@ -1847,7 +1848,7 @@ mod tests {
         );
 
         let picked = strat.pick_event("BTCUSDT", now).unwrap();
-        assert_eq!(picked.event_id, "e1"); // nearer one
+        assert_eq!(picked.event_id.as_ref(), "e1"); // nearer one
     }
 
     #[test]
