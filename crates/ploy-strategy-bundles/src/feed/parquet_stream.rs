@@ -175,22 +175,24 @@ fn run_background(
         ));
     }
 
-    // LOB (downsampled via GROUP BY with ARG_MAX — takes last value per bucket, not average)
+    // LOB — full tick-by-tick, no downsampling. Memory is O(channel buffer) regardless.
+    // Downsampling causes temporal misalignment: a 30s bucket at T=0 is used when
+    // evaluating quotes at T=15s, which is incorrect. Each LOB tick is processed
+    // in timestamp order, matching live trading behavior exactly.
     if Path::new(&format!("{data_dir}/binance_lob_ticks")).exists() {
         parts.push(format!(
-            "SELECT MAX(epoch_us(event_time))::BIGINT AS ts_us, \
+            "SELECT epoch_us(event_time)::BIGINT AS ts_us, \
                     'lob' AS typ, \
                     symbol AS s1, NULL AS s2, \
-                    CAST(ARG_MAX(COALESCE(obi_5, 0.0), event_time) AS DOUBLE) AS f1, \
-                    CAST(ARG_MAX(COALESCE(spread_bps, 0.0), event_time) AS DOUBLE) AS f2, \
-                    CAST(ARG_MAX(COALESCE(bid_volume_5, 0.0), event_time) AS DOUBLE) AS f3, \
-                    CAST(ARG_MAX(COALESCE(ask_volume_5, 0.0), event_time) AS DOUBLE) AS f4, \
+                    CAST(COALESCE(obi_5, 0.0) AS DOUBLE) AS f1, \
+                    CAST(COALESCE(spread_bps, 0.0) AS DOUBLE) AS f2, \
+                    CAST(COALESCE(bid_volume_5, 0.0) AS DOUBLE) AS f3, \
+                    CAST(COALESCE(ask_volume_5, 0.0) AS DOUBLE) AS f4, \
                     CAST(0 AS BIGINT) AS i1, false AS b1 \
              FROM read_parquet('{lob_glob}') \
              WHERE event_time >= TIMESTAMPTZ '{from_str}' \
                AND event_time <= TIMESTAMPTZ '{to_str}' \
-               {sym_filter} \
-             GROUP BY symbol, epoch_us(event_time) // {bucket_us}"
+               {sym_filter}"
         ));
     }
 
