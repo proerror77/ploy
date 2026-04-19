@@ -1,0 +1,108 @@
+name: Build and Push to ACR
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref to build"
+        required: true
+        default: "main"
+      push_images:
+        description: "Push images to ACR"
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  PLATFORM_TARGET: x86_64-unknown-linux-gnu
+  ACR_REGISTRY: registry.ap-northeast-1.aliyuncs.com
+  ACR_NAMESPACE: ploy
+
+jobs:
+  build-and-push:
+    name: Build binaries and Docker images
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.PLATFORM_TARGET }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libpq-dev clang lld
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: acr-build-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build ploy-runner
+        run: |
+          cargo build --release --locked \
+            --target "${PLATFORM_TARGET}" \
+            -p new-ploy-runner
+          strip "target/${PLATFORM_TARGET}/release/new-ploy-runner" || true
+
+      - name: Build research binaries
+        run: |
+          cargo build --release --locked \
+            --target "${PLATFORM_TARGET}" \
+            -p ploy-strategy-bundles \
+            --example run_backtest
+          cargo build --release --locked \
+            --target "${PLATFORM_TARGET}" \
+            -p ploy-research \
+            --example factor_research
+          strip "target/${PLATFORM_TARGET}/release/examples/run_backtest" || true
+          strip "target/${PLATFORM_TARGET}/release/examples/factor_research" || true
+
+      - name: Login to ACR
+        if: ${{ github.event.inputs.push_images == 'true' }}
+        run: |
+          docker login "${ACR_REGISTRY}" \
+            -u "${{ secrets.ACR_USERNAME }}" \
+            -p "${{ secrets.ACR_PASSWORD }}"
+
+      - name: Build and push ploy-runner image
+        run: |
+          IMAGE="${ACR_REGISTRY}/${ACR_NAMESPACE}/ploy-runner"
+          docker build -f Dockerfile.runner -t "${IMAGE}:${{ github.sha }}" -t "${IMAGE}:latest" .
+          if [ "${{ github.event.inputs.push_images }}" = "true" ]; then
+            docker push "${IMAGE}:${{ github.sha }}"
+            docker push "${IMAGE}:latest"
+          fi
+
+      - name: Build and push ploy-collector image
+        run: |
+          IMAGE="${ACR_REGISTRY}/${ACR_NAMESPACE}/ploy-collector"
+          docker build -f Dockerfile.collector -t "${IMAGE}:${{ github.sha }}" -t "${IMAGE}:latest" .
+          if [ "${{ github.event.inputs.push_images }}" = "true" ]; then
+            docker push "${IMAGE}:${{ github.sha }}"
+            docker push "${IMAGE}:latest"
+          fi
+
+      - name: Build and push ploy-research image
+        run: |
+          IMAGE="${ACR_REGISTRY}/${ACR_NAMESPACE}/ploy-research"
+          docker build -f Dockerfile.research -t "${IMAGE}:${{ github.sha }}" -t "${IMAGE}:latest" .
+          if [ "${{ github.event.inputs.push_images }}" = "true" ]; then
+            docker push "${IMAGE}:${{ github.sha }}"
+            docker push "${IMAGE}:latest"
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ploy-runner: built" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ploy-collector: built" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ploy-research: built" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SHA: ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"

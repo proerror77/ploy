@@ -16,6 +16,7 @@ use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
     DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
+    StreamingParquetFeed, ThreeLayerStrategy,
     RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
     StrategyRuntime,
     config::FullConfig,
@@ -25,6 +26,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Generate synthetic market data: 1 hour of 5-min windows for 3 symbols.
 ///
@@ -43,23 +45,24 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
 
         for (sym_idx, &symbol) in symbols.iter().enumerate() {
             let base = base_prices[sym_idx % base_prices.len()];
-            let event_id = format!("evt-{}-{}", symbol.to_lowercase(), window_idx);
-            let up_token = format!("up-{}-{}", symbol.to_lowercase(), window_idx);
-            let dn_token = format!("dn-{}-{}", symbol.to_lowercase(), window_idx);
+            let sym: Arc<str> = Arc::from(symbol);
+            let event_id: Arc<str> = Arc::from(format!("evt-{}-{}", symbol.to_lowercase(), window_idx));
+            let up_token: Arc<str> = Arc::from(format!("up-{}-{}", symbol.to_lowercase(), window_idx));
+            let dn_token: Arc<str> = Arc::from(format!("dn-{}-{}", symbol.to_lowercase(), window_idx));
 
             // Initial spot (open price)
             updates.push(MarketUpdate::SpotPrice {
-                symbol: symbol.to_string(),
+                symbol: Arc::clone(&sym),
                 price: base,
                 ts: window_start,
             });
 
             // Event discovered
             updates.push(MarketUpdate::EventDiscovered {
-                event_id: event_id.clone(),
-                symbol: symbol.to_string(),
-                up_token: up_token.clone(),
-                down_token: dn_token.clone(),
+                event_id: Arc::clone(&event_id),
+                symbol: Arc::clone(&sym),
+                up_token: Arc::clone(&up_token),
+                down_token: Arc::clone(&dn_token),
                 end_time: window_end,
                 window_secs,
                 price_to_beat: None,
@@ -89,7 +92,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
             };
 
             updates.push(MarketUpdate::Quote {
-                token_id: up_token.clone(),
+                token_id: Arc::clone(&up_token),
                 bid: Some(up_ask - dec!(0.01)),
                 ask: Some(up_ask),
                 ts: window_start + Duration::seconds(5),
@@ -97,7 +100,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                     ask_size: None,
             });
             updates.push(MarketUpdate::Quote {
-                token_id: dn_token.clone(),
+                token_id: Arc::clone(&dn_token),
                 bid: Some(dec!(1) - up_ask - dec!(0.01)),
                 ask: Some(dec!(1) - up_ask),
                 ts: window_start + Duration::seconds(5),
@@ -111,7 +114,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 let pct = Decimal::from(tick) / dec!(5);
                 let price = base + drift * pct;
                 updates.push(MarketUpdate::SpotPrice {
-                    symbol: symbol.to_string(),
+                    symbol: Arc::clone(&sym),
                     price,
                     ts: t,
                 });
@@ -150,7 +153,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
 
             // Spot at window midpoint (entry zone: 60-300s remaining)
             updates.push(MarketUpdate::SpotPrice {
-                symbol: symbol.to_string(),
+                symbol: sym,
                 price: final_price,
                 ts: window_start + Duration::seconds(120), // 180s remaining
             });
@@ -192,6 +195,7 @@ fn main() {
     let config_path = flag_value(&args, "--config")
         .or_else(|| args.get(1).filter(|a| !a.starts_with('-')).cloned());
     let db_url = flag_value(&args, "--db-url");
+    let data_dir = flag_value(&args, "--data-dir");
     let start_date = flag_value(&args, "--start-date");
     let end_date = flag_value(&args, "--end-date");
 
@@ -208,6 +212,7 @@ fn main() {
                     .reference_symbols(&config.reference_data),
                 include_sports_state: config.backtest_data.include_sports_state,
                 require_official_settlement: config.backtest_data.require_official_settlement,
+                lob_sample_secs: 30,
             };
             (strategy_variant, config.strategy, sim, rt, backtest_options)
         } else {
@@ -298,7 +303,19 @@ fn main() {
         .build()
         .expect("tokio runtime");
 
-    let data: Vec<MarketUpdate> = if let Some(ref url) = db_url {
+    let stake_usd = strategy_config.stake_usd;
+    let strategy: Box<dyn StrategyLogic> = match strategy_variant.as_str() {
+        "directional" => Box::new(DirectionalStrategy::new(strategy_config.clone())),
+        "reversal" => Box::new(ReversalStrategy::new(strategy_config.clone().into())),
+        "three_layer" => Box::new(ThreeLayerStrategy::new(strategy_config.clone().into())),
+        other => panic!("unsupported strategy_variant in run_backtest example: {other}"),
+    };
+    let executor = SimulatedExecutor::new(sim_config);
+    let recorder = Box::new(NullRecorder);
+
+    // When --data-dir is set, use StreamingParquetFeed for O(1) memory usage.
+    // Otherwise fall back to Vec-backed HistoricalFeed (DB or synthetic).
+    if let Some(ref dir) = data_dir {
         let from = start_date.as_deref().unwrap_or("2026-03-28");
         let to = end_date.as_deref().unwrap_or("2026-04-03");
         let from_dt = Utc.from_utc_datetime(
@@ -313,79 +330,107 @@ fn main() {
                 .and_hms_opt(23, 59, 59)
                 .unwrap(),
         );
-        eprintln!("Loading DB data: {} → {}", from, to);
-        let pool = rt
-            .block_on(PgPoolOptions::new().max_connections(5).connect(url))
-            .expect("DB connection failed");
-        let symbols: Vec<String> = strategy_config.symbols.clone();
-        let updates = rt
-            .block_on(load_from_database_with_options(
-                &pool,
-                &symbols,
-                from_dt,
-                to_dt,
-                &backtest_options,
-            ))
-            .expect("Failed to load from database");
-        eprintln!("Loaded {} market updates from DB\n", updates.len());
-
-        // Data diagnostics
-        let mut spot_count = 0u64;
-        let mut quote_count = 0u64;
-        let mut event_discovered = 0u64;
-        let mut event_expired = 0u64;
-        let mut l2_count = 0u64;
-        let mut kline_count = 0u64;
-        for u in &updates {
-            match u {
-                MarketUpdate::SpotPrice { .. } => spot_count += 1,
-                MarketUpdate::AggTrade { .. } => {}
-                MarketUpdate::Quote { .. } => quote_count += 1,
-                MarketUpdate::EventDiscovered { .. } => event_discovered += 1,
-                MarketUpdate::EventExpired { .. } => event_expired += 1,
-                MarketUpdate::L2 { .. } => l2_count += 1,
-                MarketUpdate::L2Depth { .. } => l2_count += 1,
-                MarketUpdate::SportsState { .. } => {}
-                MarketUpdate::ReferencePrice { .. } => {}
-                MarketUpdate::Kline { .. } => kline_count += 1,
-            }
-        }
-        eprintln!(
-            "Data breakdown: spot={spot_count} quote={quote_count} discovered={event_discovered} expired={event_expired} l2={l2_count} kline={kline_count}"
+        eprintln!("Streaming Parquet data from: {dir} ({from} → {to})");
+        let feed = StreamingParquetFeed::new(
+            dir,
+            &strategy_config.symbols,
+            from_dt,
+            to_dt,
+            &backtest_options,
         );
-
-        updates
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
+        let result = rt.block_on(runtime.run());
+        let mark_prices = BTreeMap::new();
+        let snapshot = runtime.trading().snapshot(&mark_prices);
+        print_results(result, snapshot, stake_usd);
     } else {
-        let updates = generate_synthetic_data(&["BTCUSDT", "ETHUSDT", "SOLUSDT"], 60);
-        eprintln!(
-            "Generated {} market updates (1 hour synthetic)\n",
-            updates.len()
-        );
-        updates
-    };
+        let data: Vec<MarketUpdate> = if let Some(ref url) = db_url {
+            let from = start_date.as_deref().unwrap_or("2026-03-28");
+            let to = end_date.as_deref().unwrap_or("2026-04-03");
+            let from_dt = Utc.from_utc_datetime(
+                &NaiveDate::parse_from_str(from, "%Y-%m-%d")
+                    .expect("Invalid --start-date (use YYYY-MM-DD)")
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            );
+            let to_dt = Utc.from_utc_datetime(
+                &NaiveDate::parse_from_str(to, "%Y-%m-%d")
+                    .expect("Invalid --end-date (use YYYY-MM-DD)")
+                    .and_hms_opt(23, 59, 59)
+                    .unwrap(),
+            );
+            eprintln!("Loading DB data: {} → {}", from, to);
+            let pool = rt
+                .block_on(PgPoolOptions::new().max_connections(5).connect(url))
+                .expect("DB connection failed");
+            let symbols: Vec<String> = strategy_config.symbols.clone();
+            let updates = rt
+                .block_on(load_from_database_with_options(
+                    &pool,
+                    &symbols,
+                    from_dt,
+                    to_dt,
+                    &backtest_options,
+                ))
+                .expect("Failed to load from database");
+            eprintln!("Loaded {} market updates from DB\n", updates.len());
+            print_data_breakdown(&updates);
+            updates
+        } else {
+            let updates = generate_synthetic_data(&["BTCUSDT", "ETHUSDT", "SOLUSDT"], 60);
+            eprintln!(
+                "Generated {} market updates (1 hour synthetic)\n",
+                updates.len()
+            );
+            updates
+        };
 
-    let stake_usd = strategy_config.stake_usd;
-    let strategy: Box<dyn StrategyLogic> = match strategy_variant.as_str() {
-        "directional" => Box::new(DirectionalStrategy::new(strategy_config)),
-        "reversal" => Box::new(ReversalStrategy::new(strategy_config.into())),
-        other => panic!("unsupported strategy_variant in run_backtest example: {other}"),
-    };
-    let feed = HistoricalFeed::new(data);
-    let executor = SimulatedExecutor::new(sim_config);
-    let recorder = Box::new(NullRecorder);
+        let feed = HistoricalFeed::new(data);
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
+        let result = rt.block_on(runtime.run());
+        let mark_prices = BTreeMap::new();
+        let snapshot = runtime.trading().snapshot(&mark_prices);
+        print_results(result, snapshot, stake_usd);
+    }
+}
 
-    let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-    let result = rt.block_on(runtime.run());
+fn print_data_breakdown(updates: &[MarketUpdate]) {
+    let mut spot_count = 0u64;
+    let mut quote_count = 0u64;
+    let mut event_discovered = 0u64;
+    let mut event_expired = 0u64;
+    let mut l2_count = 0u64;
+    let mut kline_count = 0u64;
+    for u in updates {
+        match u {
+            MarketUpdate::SpotPrice { .. } => spot_count += 1,
+            MarketUpdate::AggTrade { .. } => {}
+            MarketUpdate::Quote { .. } => quote_count += 1,
+            MarketUpdate::EventDiscovered { .. } => event_discovered += 1,
+            MarketUpdate::EventExpired { .. } => event_expired += 1,
+            MarketUpdate::L2 { .. } | MarketUpdate::L2Depth { .. } => l2_count += 1,
+            MarketUpdate::SportsState { .. }
+            | MarketUpdate::ReferencePrice { .. } => {}
+            MarketUpdate::Kline { .. } => kline_count += 1,
+        }
+    }
+    eprintln!(
+        "Data breakdown: spot={spot_count} quote={quote_count} discovered={event_discovered} expired={event_expired} l2={l2_count} kline={kline_count}"
+    );
+}
 
-    // Print results
-    let mark_prices = BTreeMap::new();
-    let snapshot = runtime.trading().snapshot(&mark_prices);
+fn print_results(
+    result: ploy_strategy_bundles::RuntimeResult,
+    snapshot: ploy_trading::TradingRuntimeSnapshot,
+    stake_usd: Decimal,
+) {
     let cashflow = snapshot.fill_cashflow_summary();
 
     eprintln!("=== Results ===");
     eprintln!("Updates processed: {}", result.updates_processed);
-    let trade_count = result.fills_recorded / 2; // entry + settlement = 2 fills per trade
+    let trade_count = result.fills_recorded / 2;
     eprintln!(
         "Trades:            {} ({} fills)",
         trade_count, result.fills_recorded
@@ -393,9 +438,6 @@ fn main() {
     eprintln!("Elapsed:           {:.2}s", result.elapsed_secs);
     eprintln!();
 
-    // Compute max concurrent capital using stake_usd per trade.
-    // Each Buy opens one position ($stake_usd), each Sell closes one.
-    // Settlement sells at 1.00 or 0.00 — can't use fill price to track cost.
     let fills = &snapshot.fills;
     let mut open_positions: i64 = 0;
     let mut peak_positions: i64 = 0;

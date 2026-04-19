@@ -1,0 +1,66 @@
+name: Deploy to ACK
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (SHA or 'latest')"
+        required: true
+        default: "latest"
+      component:
+        description: "Component to deploy (all/ployd/strategy/collectors)"
+        required: true
+        default: "all"
+
+jobs:
+  deploy:
+    name: Deploy to ACK cluster
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.ACK_KUBECONFIG }}" > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Verify cluster connection
+        run: kubectl get nodes
+
+      - name: Deploy ployd
+        if: ${{ github.event.inputs.component == 'all' || github.event.inputs.component == 'ployd' }}
+        run: |
+          kubectl set image deployment/ployd \
+            ployd=registry-vpc.ap-northeast-1.aliyuncs.com/ploy/ploy-runner:${{ github.event.inputs.image_tag }} \
+            -n ploy
+          kubectl rollout status deployment/ployd -n ploy --timeout=120s
+
+      - name: Deploy strategy
+        if: ${{ github.event.inputs.component == 'all' || github.event.inputs.component == 'strategy' }}
+        run: |
+          kubectl set image deployment/ploy-strategy-dryrun \
+            strategy=registry-vpc.ap-northeast-1.aliyuncs.com/ploy/ploy-runner:${{ github.event.inputs.image_tag }} \
+            -n ploy
+          kubectl rollout status deployment/ploy-strategy-dryrun -n ploy --timeout=120s
+
+      - name: Deploy collectors
+        if: ${{ github.event.inputs.component == 'all' || github.event.inputs.component == 'collectors' }}
+        run: |
+          for dep in binance-price-collector binance-lob-collector binance-aggtrade-collector; do
+            kubectl set image deployment/${dep} \
+              collector=registry-vpc.ap-northeast-1.aliyuncs.com/ploy/ploy-collector:${{ github.event.inputs.image_tag }} \
+              -n ploy
+            kubectl rollout status deployment/${dep} -n ploy --timeout=60s
+          done
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n ploy
+          kubectl get deployments -n ploy

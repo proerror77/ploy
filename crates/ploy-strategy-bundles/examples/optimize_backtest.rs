@@ -1,6 +1,6 @@
 //! Hyperparameter optimization for PM5D strategy variants using TPE (Bayesian).
 //!
-//! Usage:
+//! Usage (PostgreSQL):
 //!   cargo run --release -p ploy-strategy-bundles --example optimize_backtest -- \
 //!     --db-url postgresql://postgres:postgres@localhost:15432/ploy \
 //!     --strategy-variant directional \
@@ -19,6 +19,21 @@
 //!     --val-end     2026-04-11 \
 //!     --symbols BTCUSDT,DOGEUSDT \
 //!     --trials 80
+//!
+//! Usage (Parquet, --data-dir replaces --db-url):
+//!   cargo run --release -p ploy-strategy-bundles --features parquet-feed \
+//!     --example optimize_backtest -- \
+//!     --data-dir /data/parquet \
+//!     --strategy-variant three_layer \
+//!     --train-start 2026-04-01 \
+//!     --train-end   2026-04-10 \
+//!     --val-start   2026-04-11 \
+//!     --val-end     2026-04-14 \
+//!     --trials 200
+//!
+//! NOTE: out-of-sample validation is always run on the held-out val split.
+//! When using --data-dir without explicit --val-start/--val-end, the last 40%
+//! of the train range is used as validation (train covers first 60%).
 
 use chrono::{NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
@@ -34,6 +49,34 @@ use rust_decimal_macros::dec;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+/// Load data from Parquet files into a Vec<MarketUpdate>.
+#[cfg(feature = "parquet-feed")]
+fn load_from_parquet_vec(
+    data_dir: &str,
+    symbols: &[String],
+    from: chrono::DateTime<Utc>,
+    to: chrono::DateTime<Utc>,
+) -> Vec<MarketUpdate> {
+    ploy_strategy_bundles::feed::parquet::load_from_parquet(
+        data_dir,
+        symbols,
+        from,
+        to,
+        &HistoricalLoadOptions::default(),
+    )
+    .expect("Failed to load Parquet data")
+}
+
+#[cfg(not(feature = "parquet-feed"))]
+fn load_from_parquet_vec(
+    _data_dir: &str,
+    _symbols: &[String],
+    _from: chrono::DateTime<Utc>,
+    _to: chrono::DateTime<Utc>,
+) -> Vec<MarketUpdate> {
+    panic!("Parquet support requires --features parquet-feed")
+}
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
@@ -131,7 +174,7 @@ fn run_backtest(
     }
 
     let sharpe = if per_trade_pnl.len() < 5 {
-        -10.0
+        -999.0
     } else {
         let n = per_trade_pnl.len() as f64;
         let mean = per_trade_pnl.iter().sum::<f64>() / n;
@@ -274,10 +317,82 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
 }
 }
 
+struct ThreeLayerSearchParams {
+    min_direction_prob: f64,
+    min_distance_over_sigma: f64,
+    min_confirmation_score: f64,
+    min_drift_confirmation: f64,
+    min_edge: f64,
+    min_reward_risk: f64,
+    take_profit_ask: f64,
+    stop_distance_pct: f64,
+    cooldown_secs: i64,
+    min_time_remaining_secs: i64,
+    max_time_remaining_secs: i64,
+}
+
+fn make_three_layer_config(symbols: &[String], p: &ThreeLayerSearchParams) -> DirectionalConfig {
+    DirectionalConfig {
+        symbols: symbols.to_vec(),
+        symbol_profiles: std::collections::HashMap::new(),
+        vol_floor: 0.001,
+        min_probability: 0.55,
+        min_z_score: 0.35,
+        min_entry_price: 0.15,
+        max_entry_price: 0.85,
+        no_trade_zone_min: 0.45,
+        no_trade_zone_max: 0.55,
+        min_edge: p.min_edge,
+        min_deviation_pct: 0.005,
+        min_reversal_consistency: 0.55,
+        min_trend_consistency: 0.50,
+        min_trend_persistence_secs: 0,
+        take_profit_price_delta: 0.10,
+        stop_loss_price_delta: 0.05,
+        max_hold_secs: 120,
+        reversal_bonus_cap: 0.20,
+        use_multiscale_volatility: true,
+        use_price_structure_adjustment: true,
+        reversal_max_distance_pct: 0.015,
+        reversal_max_drift_flip_age_secs: 20,
+        reversal_min_post_flip_drift: 0.0001,
+        reversal_lob_depth_pct: 0.001,
+        reversal_min_lob_depth_ratio: 1.3,
+        reversal_max_ask_for_reversal: 0.25,
+        reversal_max_pm_lag_secs: 30,
+        reversal_take_profit_ask: 0.65,
+        reversal_stop_distance_pct: 0.025,
+        min_time_remaining_secs: p.min_time_remaining_secs as u64,
+        max_time_remaining_secs: p.max_time_remaining_secs as u64,
+        cooldown_secs: p.cooldown_secs as u64,
+        stake_usd: dec!(25),
+        max_positions: 30,
+        max_daily_trades: 1000,
+        max_daily_loss_usd: None,
+        allowed_window_secs: vec![300, 900],
+        three_layer_min_direction_prob: p.min_direction_prob,
+        three_layer_min_distance_over_sigma: p.min_distance_over_sigma,
+        three_layer_min_confirmation_score: p.min_confirmation_score,
+        three_layer_min_drift_confirmation: p.min_drift_confirmation,
+        three_layer_min_edge: p.min_edge,
+        three_layer_min_reward_risk: p.min_reward_risk,
+        three_layer_take_profit_ask: p.take_profit_ask,
+        three_layer_stop_distance_pct: p.stop_distance_pct,
+        three_layer_max_pm_lag_secs: 15,
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let db_url = flag_value(&args, "--db-url").expect("--db-url required");
+    let db_url = flag_value(&args, "--db-url");
+    let data_dir = flag_value(&args, "--data-dir");
+
+    if db_url.is_none() && data_dir.is_none() {
+        eprintln!("ERROR: either --db-url or --data-dir is required");
+        std::process::exit(1);
+    }
+
     let strategy_variant = canonical_strategy_variant(
         &flag_value(&args, "--strategy-variant").unwrap_or_else(|| "directional".into()),
     );
@@ -326,11 +441,6 @@ fn main() {
         .build()
         .unwrap();
 
-    let pool = rt
-        .block_on(PgPoolOptions::new().max_connections(3).connect(&db_url))
-        .expect("DB connection failed");
-
-    eprintln!("Loading training data ({} → {})...", train_start, train_end);
     let train_from = train_start_ts
         .as_deref()
         .map(parse_timestamp)
@@ -339,21 +449,6 @@ fn main() {
         .as_deref()
         .map(parse_timestamp)
         .unwrap_or_else(|| parse_date_end(&train_end));
-    let train_data = rt
-        .block_on(load_from_database_with_options(
-            &pool,
-            &symbols,
-            train_from,
-            train_to,
-            &HistoricalLoadOptions {
-                require_official_settlement,
-                ..HistoricalLoadOptions::default()
-            },
-        ))
-        .expect("Failed to load training data");
-    eprintln!("  {} updates loaded", train_data.len());
-
-    eprintln!("Loading validation data ({} → {})...", val_start, val_end);
     let val_from = val_start_ts
         .as_deref()
         .map(parse_timestamp)
@@ -362,19 +457,52 @@ fn main() {
         .as_deref()
         .map(parse_timestamp)
         .unwrap_or_else(|| parse_date_end(&val_end));
-    let val_data = rt
-        .block_on(load_from_database_with_options(
-            &pool,
-            &symbols,
-            val_from,
-            val_to,
-            &HistoricalLoadOptions {
-                require_official_settlement,
-                ..HistoricalLoadOptions::default()
-            },
-        ))
-        .expect("Failed to load validation data");
-    eprintln!("  {} updates loaded\n", val_data.len());
+
+    let (train_data, val_data) = if let Some(ref dir) = data_dir {
+        eprintln!("Loading training data from Parquet ({} → {})...", train_start, train_end);
+        let train = load_from_parquet_vec(dir, &symbols, train_from, train_to);
+        eprintln!("  {} updates loaded", train.len());
+        eprintln!("Loading validation data from Parquet ({} → {})...", val_start, val_end);
+        let val = load_from_parquet_vec(dir, &symbols, val_from, val_to);
+        eprintln!("  {} updates loaded\n", val.len());
+        (train, val)
+    } else {
+        let db_url = db_url.as_deref().unwrap();
+        let pool = rt
+            .block_on(PgPoolOptions::new().max_connections(3).connect(db_url))
+            .expect("DB connection failed");
+
+        eprintln!("Loading training data ({} → {})...", train_start, train_end);
+        let train = rt
+            .block_on(load_from_database_with_options(
+                &pool,
+                &symbols,
+                train_from,
+                train_to,
+                &HistoricalLoadOptions {
+                    require_official_settlement,
+                    ..HistoricalLoadOptions::default()
+                },
+            ))
+            .expect("Failed to load training data");
+        eprintln!("  {} updates loaded", train.len());
+
+        eprintln!("Loading validation data ({} → {})...", val_start, val_end);
+        let val = rt
+            .block_on(load_from_database_with_options(
+                &pool,
+                &symbols,
+                val_from,
+                val_to,
+                &HistoricalLoadOptions {
+                    require_official_settlement,
+                    ..HistoricalLoadOptions::default()
+                },
+            ))
+            .expect("Failed to load validation data");
+        eprintln!("  {} updates loaded\n", val.len());
+        (train, val)
+    };
 
     let train_data = Arc::new(train_data);
     let symbols_ref = Arc::new(symbols.clone());
@@ -560,6 +688,134 @@ fn main() {
                 trial.get(&p_min_edge).unwrap_or(0.0),
             );
         }
+    } else if strategy_variant == "three_layer" {
+        // ── three_layer parameter search ──────────────────────────────────────
+        // Simple LCG random number generator (no external rand crate needed).
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as u64;
+        let mut lcg_state = seed ^ 0x9e3779b97f4a7c15;
+
+        let mut lcg_next = move || -> f64 {
+            // Xorshift64 for better quality than plain LCG
+            lcg_state ^= lcg_state << 13;
+            lcg_state ^= lcg_state >> 7;
+            lcg_state ^= lcg_state << 17;
+            (lcg_state as f64) / (u64::MAX as f64)
+        };
+
+        let sample = |rng: &mut dyn FnMut() -> f64, lo: f64, hi: f64| -> f64 {
+            lo + rng() * (hi - lo)
+        };
+
+        let train_ref = Arc::clone(&train_data);
+        let symbols_ref_c = Arc::clone(&symbols_ref);
+        let mut best_score = f64::NEG_INFINITY;
+        let mut best_params_opt: Option<ThreeLayerSearchParams> = None;
+        let mut best_pnl = 0.0f64;
+        let mut best_trades = 0usize;
+
+        for iter in 0..n_trials {
+            let min_direction_prob = sample(&mut lcg_next, 0.52, 0.70);
+            let min_distance_over_sigma = sample(&mut lcg_next, 0.10, 0.60);
+            let min_confirmation_score = sample(&mut lcg_next, 0.05, 0.30);
+            let min_drift_confirmation = sample(&mut lcg_next, 0.0001, 0.001);
+            let min_edge = sample(&mut lcg_next, 0.02, 0.06);
+            let min_reward_risk = sample(&mut lcg_next, 0.8, 2.0);
+            let take_profit_ask = sample(&mut lcg_next, 0.60, 0.85);
+            let stop_distance_pct = sample(&mut lcg_next, 0.010, 0.040);
+            let cooldown_secs = sample(&mut lcg_next, 30.0, 120.0) as i64;
+            let min_time_remaining_secs = sample(&mut lcg_next, 60.0, 150.0) as i64;
+            let max_time_remaining_secs =
+                min_time_remaining_secs + sample(&mut lcg_next, 30.0, 120.0) as i64;
+
+            let params = ThreeLayerSearchParams {
+                min_direction_prob,
+                min_distance_over_sigma,
+                min_confirmation_score,
+                min_drift_confirmation,
+                min_edge,
+                min_reward_risk,
+                take_profit_ask,
+                stop_distance_pct,
+                cooldown_secs,
+                min_time_remaining_secs,
+                max_time_remaining_secs,
+            };
+
+            let config = make_three_layer_config(symbols_ref_c.as_slice(), &params);
+            let (net_pnl, trades, sharpe) = run_backtest("three_layer", config, &train_ref);
+
+            // Sharpe = mean(pnl_per_trade) / std(pnl_per_trade) * sqrt(trades_per_year)
+            // Penalty for < 5 trades already applied inside run_backtest (-999.0)
+            let score = sharpe;
+
+            eprintln!(
+                "iter {:>3}/{}: sharpe={:>7.3} trades={:>4} pnl=${:>8.2} | params: dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} tp={:.3} stop={:.4} cd={}s",
+                iter + 1,
+                n_trials,
+                sharpe,
+                trades,
+                net_pnl,
+                min_direction_prob,
+                min_distance_over_sigma,
+                min_confirmation_score,
+                min_drift_confirmation,
+                min_edge,
+                min_reward_risk,
+                take_profit_ask,
+                stop_distance_pct,
+                cooldown_secs,
+            );
+
+            if score > best_score {
+                best_score = score;
+                best_pnl = net_pnl;
+                best_trades = trades;
+                best_params_opt = Some(ThreeLayerSearchParams {
+                    min_direction_prob,
+                    min_distance_over_sigma,
+                    min_confirmation_score,
+                    min_drift_confirmation,
+                    min_edge,
+                    min_reward_risk,
+                    take_profit_ask,
+                    stop_distance_pct,
+                    cooldown_secs,
+                    min_time_remaining_secs,
+                    max_time_remaining_secs,
+                });
+            }
+        }
+
+        let best_params = best_params_opt.expect("No completed trials");
+
+        eprintln!("\n=== Best Parameters (Training) ===");
+        eprintln!("Sharpe:                      {best_score:.3}");
+        eprintln!("PnL:                         ${best_pnl:.2}");
+        eprintln!("Trades:                      {best_trades}");
+
+        eprintln!("\n=== Validation (held-out, out-of-sample) ===");
+        let val_config = make_three_layer_config(symbols_ref.as_slice(), &best_params);
+        let (val_pnl, val_trades, val_sharpe) = run_backtest("three_layer", val_config, &val_data);
+        eprintln!("Val Sharpe:  {val_sharpe:.3}");
+        eprintln!("Val PnL:     ${val_pnl:.2}");
+        eprintln!("Val Trades:  {val_trades}");
+
+        eprintln!("\n=== Best Config (TOML) ===");
+        eprintln!("# Paste into [strategy] section of your config file");
+        eprintln!("three_layer_min_direction_prob = {:.4}", best_params.min_direction_prob);
+        eprintln!("three_layer_min_distance_over_sigma = {:.4}", best_params.min_distance_over_sigma);
+        eprintln!("three_layer_min_confirmation_score = {:.4}", best_params.min_confirmation_score);
+        eprintln!("three_layer_min_drift_confirmation = {:.6}", best_params.min_drift_confirmation);
+        eprintln!("three_layer_min_edge = {:.4}", best_params.min_edge);
+        eprintln!("three_layer_min_reward_risk = {:.4}", best_params.min_reward_risk);
+        eprintln!("three_layer_take_profit_ask = {:.4}", best_params.take_profit_ask);
+        eprintln!("three_layer_stop_distance_pct = {:.4}", best_params.stop_distance_pct);
+        eprintln!("cooldown_secs = {}", best_params.cooldown_secs);
+        eprintln!("min_time_remaining_secs = {}", best_params.min_time_remaining_secs);
+        eprintln!("max_time_remaining_secs = {}", best_params.max_time_remaining_secs);
     } else {
         let p_min_prob = FloatParam::new(0.50, 0.72).name("min_probability");
         let p_min_edge = FloatParam::new(0.005, 0.06).name("min_edge");

@@ -1,31 +1,31 @@
-name: Backtest pm_5m_directional
+name: Optimize three_layer params
 
 on:
   workflow_dispatch:
     inputs:
       git_ref:
-        description: "Git ref to build (branch, tag, or SHA)"
+        description: "Git ref"
         required: true
         default: "main"
       start_date:
-        description: "Backtest start date (YYYY-MM-DD)"
+        description: "Train start date (YYYY-MM-DD)"
         required: true
-        default: "2026-03-28"
+        default: "2026-04-11"
       end_date:
-        description: "Backtest end date (YYYY-MM-DD)"
+        description: "Train end date (YYYY-MM-DD)"
         required: true
-        default: "2026-04-03"
-      config:
-        description: "Strategy config path (relative to repo root)"
+        default: "2026-04-17"
+      iterations:
+        description: "Number of TPE iterations"
         required: true
-        default: "config/strategies/02-pm5d-threelayer.unified.toml"
+        default: "200"
       data_dir:
-        description: "Local Parquet data dir (leave empty to use DB)"
+        description: "Local Parquet data dir"
         required: false
         default: "/tmp/ploy-parquet"
 
 concurrency:
-  group: backtest-${{ github.ref }}
+  group: optimize-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -37,7 +37,7 @@ env:
 
 jobs:
   build:
-    name: Build run_backtest binary
+    name: Build optimize_backtest binary
     runs-on: [self-hosted, ploy-ci-1]
     timeout-minutes: 45
     environment: ploy-ci-1
@@ -56,27 +56,27 @@ jobs:
         with:
           cache-on-failure: true
           cache-targets: "true"
-          key: backtest-${{ hashFiles('crates/ploy-strategy-bundles/**', 'Cargo.lock') }}
+          key: optimize-${{ hashFiles('crates/ploy-strategy-bundles/**', 'Cargo.lock') }}
 
-      - name: Build run_backtest
+      - name: Build optimize_backtest
         run: |
           . /home/runner/.cargo/env
           cargo build --release --locked \
             -p ploy-strategy-bundles \
             --features ploy-strategy-bundles/parquet-feed \
-            --example run_backtest
+            --example optimize_backtest
 
-      - name: Upload run_backtest binary
+      - name: Upload optimize_backtest binary
         uses: actions/upload-artifact@v4
         with:
-          name: run_backtest-${{ github.sha }}
-          path: target/release/examples/run_backtest
+          name: optimize_backtest-${{ github.sha }}
+          path: target/release/examples/optimize_backtest
           retention-days: 1
 
-  backtest:
-    name: Run backtest on ploy-ci-1
+  optimize:
+    name: Run optimize on ploy-ci-1
     runs-on: [self-hosted, ploy-ci-1]
-    timeout-minutes: 30
+    timeout-minutes: 60
     environment: ploy-ci-1
     needs: [build]
 
@@ -86,14 +86,14 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
-      - name: Download run_backtest binary
+      - name: Download optimize_backtest binary
         uses: actions/download-artifact@v4
         with:
-          name: run_backtest-${{ github.sha }}
+          name: optimize_backtest-${{ github.sha }}
           path: target/release/examples
 
       - name: Make binary executable
-        run: chmod +x target/release/examples/run_backtest
+        run: chmod +x target/release/examples/optimize_backtest
 
       - name: Sync Parquet data from Tango-1-1
         if: ${{ github.event.inputs.data_dir != '' }}
@@ -107,20 +107,17 @@ jobs:
             root@172.16.0.204:/opt/ploy/data/parquet/ \
             ${{ github.event.inputs.data_dir }}/
 
-      - name: Run backtest
+      - name: Run optimize
         env:
-          CONFIG: ${{ github.event.inputs.config }}
           START_DATE: ${{ github.event.inputs.start_date }}
           END_DATE: ${{ github.event.inputs.end_date }}
           DATA_DIR: ${{ github.event.inputs.data_dir }}
+          ITERATIONS: ${{ github.event.inputs.iterations }}
         run: |
-          EXTRA_ARGS=""
-          if [ -n "$DATA_DIR" ]; then
-            EXTRA_ARGS="--data-dir $DATA_DIR"
-          fi
-          ./target/release/examples/run_backtest \
-            --config "${CONFIG}" \
+          ./target/release/examples/optimize_backtest \
+            --config "config/strategies/02-pm5d-threelayer.unified.toml" \
             --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
             --start-date "${START_DATE}" \
             --end-date "${END_DATE}" \
-            $EXTRA_ARGS
+            --data-dir "${DATA_DIR}" \
+            --iterations "${ITERATIONS}"

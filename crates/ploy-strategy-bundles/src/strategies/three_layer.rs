@@ -7,7 +7,8 @@ use ploy_trading::{
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use std::collections::{HashMap, VecDeque};
-use tracing::{info, warn};
+use std::sync::Arc;
+use tracing::info;
 
 use crate::strategies::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
@@ -210,10 +211,10 @@ struct QuoteState {
 
 #[derive(Clone)]
 struct EventWindow {
-    event_id: String,
-    symbol: String,
-    up_token: String,
-    down_token: String,
+    event_id: Arc<str>,
+    symbol: Arc<str>,
+    up_token: Arc<str>,
+    down_token: Arc<str>,
     end_time: DateTime<Utc>,
     window_secs: u64,
     price_to_beat: Option<Decimal>,
@@ -364,15 +365,15 @@ fn evaluate_worth_it(
 
 pub struct ThreeLayerStrategy {
     config: ThreeLayerConfig,
-    drift: HashMap<String, DriftTracker>,
-    lob: HashMap<String, LobState>,
-    mprice_acc: HashMap<String, MpriceDriftAccumulator>,
-    spot: HashMap<String, Decimal>,
-    quotes: HashMap<String, QuoteState>,
-    token_symbol: HashMap<String, String>,
-    token_event: HashMap<String, String>,
-    events: HashMap<String, Vec<EventWindow>>,
-    last_entry: HashMap<String, DateTime<Utc>>,
+    drift: HashMap<Arc<str>, DriftTracker>,
+    lob: HashMap<Arc<str>, LobState>,
+    mprice_acc: HashMap<Arc<str>, MpriceDriftAccumulator>,
+    spot: HashMap<Arc<str>, Decimal>,
+    quotes: HashMap<Arc<str>, QuoteState>,
+    token_symbol: HashMap<Arc<str>, Arc<str>>,
+    token_event: HashMap<Arc<str>, Arc<str>>,
+    events: HashMap<Arc<str>, Vec<EventWindow>>,
+    last_entry: HashMap<Arc<str>, DateTime<Utc>>,
     daily_trade_count: u32,
     daily_trade_date: Option<chrono::NaiveDate>,
     feed_time: Option<DateTime<Utc>>,
@@ -516,7 +517,7 @@ impl ThreeLayerStrategy {
                 continue;
             }
             if orders.orders().any(|o| {
-                o.token_id == *token_id
+                o.token_id.as_str() == &**token_id
                     && matches!(
                         o.state,
                         OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
@@ -567,8 +568,8 @@ impl ThreeLayerStrategy {
             let intent = TradingIntent {
                 intent_id: intent_id.clone(),
                 deployment_id: String::new(),
-                market_id: event.event_id.clone(),
-                token_id: token_id.clone(),
+                market_id: event.event_id.to_string(),
+                token_id: token_id.to_string(),
                 side: TradeSide::Buy,
                 quantity,
                 limit_price: Some(entry_price),
@@ -578,8 +579,8 @@ impl ThreeLayerStrategy {
 
             let signal = SignalRecord {
                 strategy: self.name().to_string(),
-                event_id: Some(event.event_id.clone()),
-                token_id: Some(token_id.clone()),
+                event_id: Some(event.event_id.to_string()),
+                token_id: Some(token_id.to_string()),
                 intent_id: Some(intent_id),
                 symbol: symbol.to_string(),
                 direction: direction.to_string(),
@@ -592,7 +593,7 @@ impl ThreeLayerStrategy {
 
             info!(
                 strategy = "three_layer",
-                symbol,
+                symbol = %symbol,
                 direction,
                 p_hat = effective_p,
                 edge,
@@ -636,8 +637,8 @@ impl ThreeLayerStrategy {
                             now.timestamp_millis()
                         ),
                         deployment_id: String::new(),
-                        market_id: event.event_id.clone(),
-                        token_id: token_id.clone(),
+                        market_id: event.event_id.to_string(),
+                        token_id: token_id.to_string(),
                         side: TradeSide::Sell,
                         quantity: qty,
                         limit_price: None,
@@ -658,8 +659,8 @@ impl ThreeLayerStrategy {
                                     now.timestamp_millis()
                                 ),
                                 deployment_id: String::new(),
-                                market_id: event.event_id.clone(),
-                                token_id: token_id.clone(),
+                                market_id: event.event_id.to_string(),
+                                token_id: token_id.to_string(),
                                 side: TradeSide::Sell,
                                 quantity: qty,
                                 limit_price: quote.bid,
@@ -689,8 +690,8 @@ impl ThreeLayerStrategy {
                                 now.timestamp_millis()
                             ),
                             deployment_id: String::new(),
-                            market_id: event.event_id.clone(),
-                            token_id: token_id.clone(),
+                            market_id: event.event_id.to_string(),
+                            token_id: token_id.to_string(),
                             side: TradeSide::Sell,
                             quantity: qty,
                             limit_price: None,
@@ -718,8 +719,8 @@ impl ThreeLayerStrategy {
             exits.push(StrategyDecision::Exit(TradingIntent {
                 intent_id: format!("tl_settle_{}_up", event.event_id),
                 deployment_id: String::new(),
-                market_id: event.event_id.clone(),
-                token_id: event.up_token.clone(),
+                market_id: event.event_id.to_string(),
+                token_id: event.up_token.to_string(),
                 side: TradeSide::Sell,
                 quantity: positions.net_qty(&event.up_token),
                 limit_price: Some(if up_won {
@@ -736,8 +737,8 @@ impl ThreeLayerStrategy {
             exits.push(StrategyDecision::Exit(TradingIntent {
                 intent_id: format!("tl_settle_{}_down", event.event_id),
                 deployment_id: String::new(),
-                market_id: event.event_id.clone(),
-                token_id: event.down_token.clone(),
+                market_id: event.event_id.to_string(),
+                token_id: event.down_token.to_string(),
                 side: TradeSide::Sell,
                 quantity: positions.net_qty(&event.down_token),
                 limit_price: Some(if up_won {
@@ -774,7 +775,7 @@ impl StrategyLogic for ThreeLayerStrategy {
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
-                if !self.config.symbols.iter().any(|s| s == symbol) {
+                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
                     return Vec::new();
                 }
                 self.feed_time = Some(*ts);
@@ -848,7 +849,7 @@ impl StrategyLogic for ThreeLayerStrategy {
                 ts,
                 ..
             } => {
-                if !self.config.symbols.iter().any(|s| s == symbol) {
+                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
                     return Vec::new();
                 }
                 self.feed_time = Some(*ts);
@@ -868,7 +869,7 @@ impl StrategyLogic for ThreeLayerStrategy {
                 ask_depth_near,
                 ts,
             } => {
-                if !self.config.symbols.iter().any(|s| s == symbol) {
+                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
                     return Vec::new();
                 }
                 self.feed_time = Some(*ts);
@@ -913,7 +914,7 @@ impl StrategyLogic for ThreeLayerStrategy {
                 price_to_beat,
                 ..
             } => {
-                if !self.config.symbols.iter().any(|s| s == symbol)
+                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref())
                     || !self.window_allowed(*window_secs)
                 {
                     return Vec::new();
@@ -981,7 +982,7 @@ impl StrategyLogic for ThreeLayerStrategy {
 
     fn on_fill(&mut self, fill: &FillRecord) {
         if fill.side == TradeSide::Buy {
-            if let Some(symbol) = self.token_symbol.get(&fill.token_id).cloned() {
+            if let Some(symbol) = self.token_symbol.get(fill.token_id.as_str()).cloned() {
                 self.last_entry.insert(symbol, fill.timestamp);
             }
             self.daily_trade_count += 1;

@@ -15,6 +15,7 @@ pub use engine::{RuntimeConfig, RuntimeMode, RuntimeResult, StrategyRuntime};
 pub use executor::{CallbackExecutor, SimulatedExecutor, SimulatedExecutorConfig};
 pub use feed::{
     HistoricalFeed, LiveFeed, RecordedFeed, RecordedFeedError, RecordedMarketUpdate, RecordingFeed,
+    StreamingParquetFeed,
 };
 pub use recorder::BufferedRecorder;
 pub use runtime::emit_intents;
