@@ -231,8 +231,17 @@ fn run_background(
         parts.join(" UNION ALL ")
     );
 
+    eprintln!("StreamingParquetFeed: UNION ALL query parts={}", parts.len());
+
     // ── 3. Stream UNION ALL results, merging events via two-pointer ─────────
-    let mut stmt = conn.prepare(&union_sql)?;
+    let mut stmt = match conn.prepare(&union_sql) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("StreamingParquetFeed: prepare error: {e}");
+            eprintln!("SQL: {union_sql}");
+            return Err(e.into());
+        }
+    };
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, i64>(0)?,            // ts_us
@@ -250,7 +259,13 @@ fn run_background(
 
     let mut total = 0usize;
     for row in rows {
-        let (ts_us, typ, s1, _s2, f1, f2, f3, f4, i1, b1) = row?;
+        let (ts_us, typ, s1, _s2, f1, f2, f3, f4, i1, b1) = match row {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("StreamingParquetFeed: row error at total={total}: {e}");
+                break;
+            }
+        };
 
         // Insert any events that should come before this row
         while evt_idx < events.len() && events[evt_idx].0 <= ts_us {
