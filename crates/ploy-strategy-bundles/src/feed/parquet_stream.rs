@@ -158,20 +158,21 @@ fn run_background(
         ));
     }
 
-    // Agg trades (5s downsampled via GROUP BY)
+    // Agg trades — full tick-by-tick, no downsampling.
+    // Real collection rate: 0.6-4.4 r/s per symbol. Each trade carries direction
+    // (is_buyer_maker) used for signed_trade_imbalance in the Confirmation layer.
     if Path::new(&format!("{data_dir}/binance_agg_trade_ticks")).exists() {
         parts.push(format!(
-            "SELECT MIN(EPOCH_US(trade_time))::BIGINT AS ts_us, \
+            "SELECT epoch_us(trade_time)::BIGINT AS ts_us, \
                     'agg' AS typ, \
                     symbol AS s1, NULL AS s2, \
-                    AVG(CAST(price AS DOUBLE)) AS f1, SUM(CAST(quantity AS DOUBLE)) AS f2, \
+                    CAST(price AS DOUBLE) AS f1, CAST(quantity AS DOUBLE) AS f2, \
                     0.0 AS f3, 0.0 AS f4, \
-                    CAST(0 AS BIGINT) AS i1, false AS b1 \
+                    CAST(agg_trade_id AS BIGINT) AS i1, is_buyer_maker AS b1 \
              FROM read_parquet('{agg_glob}') \
              WHERE trade_time >= TIMESTAMPTZ '{from_str}' \
                AND trade_time <= TIMESTAMPTZ '{to_str}' \
-               {sym_filter} \
-             GROUP BY symbol, epoch_us(trade_time) // 5000000"
+               {sym_filter}"
         ));
     }
 
