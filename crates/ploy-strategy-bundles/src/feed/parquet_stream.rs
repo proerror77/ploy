@@ -202,19 +202,26 @@ fn run_background(
         ));
     }
 
-    // PM quotes
+    // PM quotes — align with database.rs: DISTINCT ON per-second per-token, trusted sources only
     if Path::new(&format!("{data_dir}/clob_quote_ticks")).exists() {
         parts.push(format!(
-            "SELECT EPOCH_US(received_at)::BIGINT AS ts_us, \
-                    'quote' AS typ, \
-                    token_id AS s1, NULL AS s2, \
-                    CAST(best_bid AS DOUBLE) AS f1, CAST(best_ask AS DOUBLE) AS f2, \
-                    0.0 AS f3, 0.0 AS f4, \
-                    CAST(0 AS BIGINT) AS i1, false AS b1 \
-             FROM read_parquet('{quote_glob}') \
-             WHERE received_at >= TIMESTAMPTZ '{from_str}' \
-               AND received_at <= TIMESTAMPTZ '{to_str}' \
-               AND (best_bid > 0.01 AND best_bid < 0.99 OR best_ask > 0.01 AND best_ask < 0.99)"
+            "SELECT ts_us, typ, s1, s2, f1, f2, f3, f4, i1, b1 \
+             FROM ( \
+                 SELECT DISTINCT ON (date_trunc('second', received_at), token_id) \
+                        EPOCH_US(received_at)::BIGINT AS ts_us, \
+                        'quote' AS typ, \
+                        token_id AS s1, NULL AS s2, \
+                        CAST(best_bid AS DOUBLE) AS f1, CAST(best_ask AS DOUBLE) AS f2, \
+                        0.0 AS f3, 0.0 AS f4, \
+                        CAST(0 AS BIGINT) AS i1, false AS b1 \
+                 FROM read_parquet('{quote_glob}') \
+                 WHERE received_at >= TIMESTAMPTZ '{from_str}' \
+                   AND received_at <= TIMESTAMPTZ '{to_str}' \
+                   AND source IN ('polymarket_ws', 'polymarket_ws_collector', 'ploy_runner_live') \
+                   AND best_bid IS NOT NULL AND best_ask IS NOT NULL \
+                   AND (best_bid > 0.01 AND best_bid < 0.99 OR best_ask > 0.01 AND best_ask < 0.99) \
+                 ORDER BY date_trunc('second', received_at), token_id, received_at DESC \
+             )"
         ));
     }
 
@@ -231,14 +238,10 @@ fn run_background(
         parts.join(" UNION ALL ")
     );
 
-    eprintln!("StreamingParquetFeed: UNION ALL query parts={}", parts.len());
-
     // ── 3. Stream UNION ALL results, merging events via two-pointer ─────────
     let mut stmt = match conn.prepare(&union_sql) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("StreamingParquetFeed: prepare error: {e}");
-            eprintln!("SQL: {union_sql}");
             return Err(e.into());
         }
     };
@@ -261,8 +264,7 @@ fn run_background(
     for row in rows {
         let (ts_us, typ, s1, _s2, f1_opt, f2_opt, f3_opt, f4_opt, i1_opt, b1_opt) = match row {
             Ok(r) => r,
-            Err(e) => {
-                eprintln!("StreamingParquetFeed: row error at total={total}: {e}");
+            Err(_e) => {
                 break;
             }
         };
