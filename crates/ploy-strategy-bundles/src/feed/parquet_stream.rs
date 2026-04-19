@@ -175,16 +175,16 @@ fn run_background(
         ));
     }
 
-    // LOB (downsampled via GROUP BY — most reliable in DuckDB)
+    // LOB (downsampled via GROUP BY with ARG_MAX — takes last value per bucket, not average)
     if Path::new(&format!("{data_dir}/binance_lob_ticks")).exists() {
         parts.push(format!(
-            "SELECT MIN(EPOCH_US(event_time))::BIGINT AS ts_us, \
+            "SELECT MAX(epoch_us(event_time))::BIGINT AS ts_us, \
                     'lob' AS typ, \
                     symbol AS s1, NULL AS s2, \
-                    AVG(COALESCE(obi_5, 0.0)) AS f1, \
-                    AVG(CAST(COALESCE(spread_bps, 0) AS DOUBLE)) AS f2, \
-                    AVG(COALESCE(bid_volume_5, 0.0)) AS f3, \
-                    AVG(COALESCE(ask_volume_5, 0.0)) AS f4, \
+                    CAST(ARG_MAX(COALESCE(obi_5, 0.0), event_time) AS DOUBLE) AS f1, \
+                    CAST(ARG_MAX(COALESCE(spread_bps, 0.0), event_time) AS DOUBLE) AS f2, \
+                    CAST(ARG_MAX(COALESCE(bid_volume_5, 0.0), event_time) AS DOUBLE) AS f3, \
+                    CAST(ARG_MAX(COALESCE(ask_volume_5, 0.0), event_time) AS DOUBLE) AS f4, \
                     CAST(0 AS BIGINT) AS i1, false AS b1 \
              FROM read_parquet('{lob_glob}') \
              WHERE event_time >= TIMESTAMPTZ '{from_str}' \
