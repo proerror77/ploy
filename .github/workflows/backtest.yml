@@ -43,6 +43,13 @@ jobs:
     environment: ploy-ci-1
 
     steps:
+      - name: Repair runner workspace permissions
+        run: |
+          if [ -d "${GITHUB_WORKSPACE}" ]; then
+            sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
+            sudo rm -rf "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/.cargo-lock" || true
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
