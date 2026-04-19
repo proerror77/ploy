@@ -17,9 +17,9 @@ spec:
         args:
         - "--config"
         - "${CONFIG}"
-        - "--from"
+        - "--start-date"
         - "${START_DATE}"
-        - "--to"
+        - "--end-date"
         - "${END_DATE}"
         - "--db-url"
         - "$(DATABASE_URL)"

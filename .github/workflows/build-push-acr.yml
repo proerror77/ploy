@@ -56,8 +56,11 @@ jobs:
         run: |
           cargo build --release --locked \
             --target "${PLATFORM_TARGET}" \
+            -p ploy-strategy-bundles \
+            --example run_backtest
+          cargo build --release --locked \
+            --target "${PLATFORM_TARGET}" \
             -p ploy-research \
-            --example run_backtest \
             --example factor_research
           strip "target/${PLATFORM_TARGET}/release/examples/run_backtest" || true
           strip "target/${PLATFORM_TARGET}/release/examples/factor_research" || true
