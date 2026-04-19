@@ -158,7 +158,7 @@ fn run_background(
         ));
     }
 
-    // Agg trades (5s downsampled)
+    // Agg trades (5s downsampled via QUALIFY)
     if Path::new(&format!("{data_dir}/binance_agg_trade_ticks")).exists() {
         parts.push(format!(
             "SELECT EPOCH_US(trade_time)::BIGINT AS ts_us, \
@@ -167,19 +167,18 @@ fn run_background(
                     CAST(price AS DOUBLE) AS f1, CAST(quantity AS DOUBLE) AS f2, \
                     0.0 AS f3, 0.0 AS f4, \
                     CAST(agg_trade_id AS BIGINT) AS i1, is_buyer_maker AS b1 \
-             FROM ( \
-                 SELECT DISTINCT ON (symbol, EPOCH_US(trade_time)::BIGINT / 5000000) \
-                        trade_time, symbol, price, quantity, agg_trade_id, is_buyer_maker \
-                 FROM read_parquet('{agg_glob}') \
-                 WHERE trade_time >= TIMESTAMPTZ '{from_str}' \
-                   AND trade_time <= TIMESTAMPTZ '{to_str}' \
-                   {sym_filter} \
-                 ORDER BY symbol, EPOCH_US(trade_time)::BIGINT / 5000000, trade_time \
-             )"
+             FROM read_parquet('{agg_glob}') \
+             WHERE trade_time >= TIMESTAMPTZ '{from_str}' \
+               AND trade_time <= TIMESTAMPTZ '{to_str}' \
+               {sym_filter} \
+             QUALIFY ROW_NUMBER() OVER ( \
+                 PARTITION BY symbol, EPOCH_US(trade_time)::BIGINT / 5000000 \
+                 ORDER BY trade_time \
+             ) = 1"
         ));
     }
 
-    // LOB (downsampled)
+    // LOB (downsampled via QUALIFY — more reliable than DISTINCT ON in DuckDB subqueries)
     if Path::new(&format!("{data_dir}/binance_lob_ticks")).exists() {
         parts.push(format!(
             "SELECT EPOCH_US(event_time)::BIGINT AS ts_us, \
@@ -190,15 +189,14 @@ fn run_background(
                     COALESCE(bid_volume_5, 0.0) AS f3, \
                     COALESCE(ask_volume_5, 0.0) AS f4, \
                     CAST(0 AS BIGINT) AS i1, false AS b1 \
-             FROM ( \
-                 SELECT DISTINCT ON (symbol, EPOCH_US(event_time)::BIGINT / {bucket_us}) \
-                        event_time, symbol, obi_5, spread_bps, bid_volume_5, ask_volume_5 \
-                 FROM read_parquet('{lob_glob}') \
-                 WHERE event_time >= TIMESTAMPTZ '{from_str}' \
-                   AND event_time <= TIMESTAMPTZ '{to_str}' \
-                   {sym_filter} \
-                 ORDER BY symbol, EPOCH_US(event_time)::BIGINT / {bucket_us}, event_time DESC \
-             )"
+             FROM read_parquet('{lob_glob}') \
+             WHERE event_time >= TIMESTAMPTZ '{from_str}' \
+               AND event_time <= TIMESTAMPTZ '{to_str}' \
+               {sym_filter} \
+             QUALIFY ROW_NUMBER() OVER ( \
+                 PARTITION BY symbol, EPOCH_US(event_time)::BIGINT / {bucket_us} \
+                 ORDER BY event_time DESC \
+             ) = 1"
         ));
     }
 
