@@ -146,7 +146,7 @@ fn run_background(
     // Spot prices (with 30min warmup)
     if Path::new(&format!("{data_dir}/binance_price_ticks")).exists() {
         parts.push(format!(
-            "SELECT EPOCH_US(trade_time)::BIGINT AS ts_us, \
+            "SELECT epoch_us(trade_time)::BIGINT AS ts_us, \
                     'spot' AS typ, \
                     symbol AS s1, NULL AS s2, \
                     CAST(price AS DOUBLE) AS f1, 0.0 AS f2, 0.0 AS f3, 0.0 AS f4, \
@@ -171,7 +171,7 @@ fn run_background(
              WHERE trade_time >= TIMESTAMPTZ '{from_str}' \
                AND trade_time <= TIMESTAMPTZ '{to_str}' \
                {sym_filter} \
-             GROUP BY symbol, EPOCH_US(trade_time)::BIGINT / 5000000"
+             GROUP BY symbol, epoch_us(trade_time) // 5000000"
         ));
     }
 
@@ -190,7 +190,7 @@ fn run_background(
              WHERE event_time >= TIMESTAMPTZ '{from_str}' \
                AND event_time <= TIMESTAMPTZ '{to_str}' \
                {sym_filter} \
-             GROUP BY symbol, EPOCH_US(event_time)::BIGINT / {bucket_us}"
+             GROUP BY symbol, epoch_us(event_time) // {bucket_us}"
         ));
     }
 
