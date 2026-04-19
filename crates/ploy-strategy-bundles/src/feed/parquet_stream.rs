@@ -158,45 +158,39 @@ fn run_background(
         ));
     }
 
-    // Agg trades (5s downsampled via QUALIFY)
+    // Agg trades (5s downsampled via GROUP BY)
     if Path::new(&format!("{data_dir}/binance_agg_trade_ticks")).exists() {
         parts.push(format!(
-            "SELECT EPOCH_US(trade_time)::BIGINT AS ts_us, \
+            "SELECT MIN(EPOCH_US(trade_time))::BIGINT AS ts_us, \
                     'agg' AS typ, \
                     symbol AS s1, NULL AS s2, \
-                    CAST(price AS DOUBLE) AS f1, CAST(quantity AS DOUBLE) AS f2, \
+                    AVG(CAST(price AS DOUBLE)) AS f1, SUM(CAST(quantity AS DOUBLE)) AS f2, \
                     0.0 AS f3, 0.0 AS f4, \
-                    CAST(agg_trade_id AS BIGINT) AS i1, is_buyer_maker AS b1 \
+                    CAST(0 AS BIGINT) AS i1, false AS b1 \
              FROM read_parquet('{agg_glob}') \
              WHERE trade_time >= TIMESTAMPTZ '{from_str}' \
                AND trade_time <= TIMESTAMPTZ '{to_str}' \
                {sym_filter} \
-             QUALIFY ROW_NUMBER() OVER ( \
-                 PARTITION BY symbol, EPOCH_US(trade_time)::BIGINT / 5000000 \
-                 ORDER BY trade_time \
-             ) = 1"
+             GROUP BY symbol, EPOCH_US(trade_time)::BIGINT / 5000000"
         ));
     }
 
-    // LOB (downsampled via QUALIFY — more reliable than DISTINCT ON in DuckDB subqueries)
+    // LOB (downsampled via GROUP BY — most reliable in DuckDB)
     if Path::new(&format!("{data_dir}/binance_lob_ticks")).exists() {
         parts.push(format!(
-            "SELECT EPOCH_US(event_time)::BIGINT AS ts_us, \
+            "SELECT MIN(EPOCH_US(event_time))::BIGINT AS ts_us, \
                     'lob' AS typ, \
                     symbol AS s1, NULL AS s2, \
-                    COALESCE(obi_5, 0.0) AS f1, \
-                    CAST(COALESCE(spread_bps, 0) AS DOUBLE) AS f2, \
-                    COALESCE(bid_volume_5, 0.0) AS f3, \
-                    COALESCE(ask_volume_5, 0.0) AS f4, \
+                    AVG(COALESCE(obi_5, 0.0)) AS f1, \
+                    AVG(CAST(COALESCE(spread_bps, 0) AS DOUBLE)) AS f2, \
+                    AVG(COALESCE(bid_volume_5, 0.0)) AS f3, \
+                    AVG(COALESCE(ask_volume_5, 0.0)) AS f4, \
                     CAST(0 AS BIGINT) AS i1, false AS b1 \
              FROM read_parquet('{lob_glob}') \
              WHERE event_time >= TIMESTAMPTZ '{from_str}' \
                AND event_time <= TIMESTAMPTZ '{to_str}' \
                {sym_filter} \
-             QUALIFY ROW_NUMBER() OVER ( \
-                 PARTITION BY symbol, EPOCH_US(event_time)::BIGINT / {bucket_us} \
-                 ORDER BY event_time DESC \
-             ) = 1"
+             GROUP BY symbol, EPOCH_US(event_time)::BIGINT / {bucket_us}"
         ));
     }
 
