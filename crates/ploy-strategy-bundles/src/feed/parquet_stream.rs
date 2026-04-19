@@ -248,24 +248,30 @@ fn run_background(
             row.get::<_, String>(1)?,          // typ
             row.get::<_, Option<String>>(2)?,  // s1
             row.get::<_, Option<String>>(3)?,  // s2
-            row.get::<_, f64>(4)?,             // f1
-            row.get::<_, f64>(5)?,             // f2
-            row.get::<_, f64>(6)?,             // f3
-            row.get::<_, f64>(7)?,             // f4
-            row.get::<_, i64>(8)?,             // i1
-            row.get::<_, bool>(9)?,            // b1
+            row.get::<_, Option<f64>>(4)?,     // f1 (nullable for quotes with NULL bid)
+            row.get::<_, Option<f64>>(5)?,     // f2
+            row.get::<_, Option<f64>>(6)?,     // f3
+            row.get::<_, Option<f64>>(7)?,     // f4
+            row.get::<_, Option<i64>>(8)?,     // i1
+            row.get::<_, Option<bool>>(9)?,    // b1
         ))
     })?;
 
     let mut total = 0usize;
     for row in rows {
-        let (ts_us, typ, s1, _s2, f1, f2, f3, f4, i1, b1) = match row {
+        let (ts_us, typ, s1, _s2, f1_opt, f2_opt, f3_opt, f4_opt, i1_opt, b1_opt) = match row {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("StreamingParquetFeed: row error at total={total}: {e}");
                 break;
             }
         };
+        let f1 = f1_opt.unwrap_or(0.0);
+        let f2 = f2_opt.unwrap_or(0.0);
+        let f3 = f3_opt.unwrap_or(0.0);
+        let f4 = f4_opt.unwrap_or(0.0);
+        let i1 = i1_opt.unwrap_or(0);
+        let b1 = b1_opt.unwrap_or(false);
 
         // Insert any events that should come before this row
         while evt_idx < events.len() && events[evt_idx].0 <= ts_us {
@@ -318,8 +324,9 @@ fn run_background(
             }
             "quote" => {
                 let token_id = s1.unwrap_or_default();
-                let bid = Decimal::try_from(f1).ok();
-                let ask = Decimal::try_from(f2).ok();
+                let bid = f1_opt.and_then(|v| Decimal::try_from(v).ok());
+                let ask = f2_opt.and_then(|v| Decimal::try_from(v).ok());
+                if bid.is_none() && ask.is_none() { continue; }
                 if tx.send(MarketUpdate::Quote {
                     token_id, bid, ask, bid_size: None, ask_size: None, ts,
                 }).is_err() {
