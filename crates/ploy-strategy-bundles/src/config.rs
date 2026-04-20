@@ -141,6 +141,17 @@ impl RuntimeSection {
             "mean_reversion" | "mean-reversion" | "pm5d_v4" | "v4" => "mean_reversion".to_string(),
             "reversal" | "pm5d_reversal" | "pm-5m-reversal" => "reversal".to_string(),
             "three_layer" | "three-layer" | "threelayer" => "three_layer".to_string(),
+            "diff_enhanced" | "diff-enhanced" | "s1" | "s1_enhanced" => {
+                "diff_enhanced".to_string()
+            }
+            "diff_regular" | "diff-regular" | "s2" | "s2_regular" => {
+                "diff_regular".to_string()
+            }
+            "sweep" | "s3" | "s3_sweep" => "sweep".to_string(),
+            "prob_reversal" | "prob-reversal" | "s4" | "s4_reversal" => {
+                "prob_reversal".to_string()
+            }
+            "prob_chase" | "prob-chase" | "s5" | "s5_prob_chase" => "prob_chase".to_string(),
             other => other.to_string(),
         }
     }
