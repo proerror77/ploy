@@ -15,6 +15,8 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use polymarket_client_sdk::clob::ws::types::response::OrderBookLevel;
 use polymarket_client_sdk::clob::ws::{BookUpdate, Client as ClobWsClient};
+use polymarket_client_sdk::gamma::types::request::MarketByIdRequest;
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::rtds::Client as RtdsClient;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
 use rust_decimal::Decimal;
@@ -116,7 +118,6 @@ enum OfficialMarketSettlementStatus {
 
 const POLYMARKET_CLOB_WS_ENDPOINT: &str = "wss://ws-subscriptions-clob.polymarket.com";
 const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
-const POLYMARKET_GAMMA_MARKET_BY_ID_ENDPOINT: &str = "https://gamma-api.polymarket.com/markets";
 
 fn is_tradeable_price(price: Decimal) -> bool {
     price > rust_decimal_macros::dec!(0.02) && price < rust_decimal_macros::dec!(0.98)
@@ -233,29 +234,35 @@ fn parse_official_market_settlements(
 }
 
 async fn fetch_official_market_settlements(
-    http: &reqwest::Client,
+    gamma: &GammaClient,
     market_id: &str,
 ) -> OfficialMarketSettlementStatus {
-    let url = format!("{POLYMARKET_GAMMA_MARKET_BY_ID_ENDPOINT}/{market_id}");
-    let response = match http
-        .get(url)
-        .header(reqwest::header::USER_AGENT, "ploy-market-data/official-settlement")
-        .timeout(StdDuration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(response) => response,
+    let request = MarketByIdRequest::builder().id(market_id).build();
+    let market = match gamma.market_by_id(&request).await {
+        Ok(market) => market,
         Err(_) => return OfficialMarketSettlementStatus::Unknown,
     };
 
-    let payload = match response.json::<OfficialMarketSettlementPayload>().await {
-        Ok(payload) => payload,
-        Err(_) => return OfficialMarketSettlementStatus::Unknown,
-    };
-
-    if !payload.closed.unwrap_or(false) {
+    if !market.closed.unwrap_or(false) {
         return OfficialMarketSettlementStatus::Open;
     }
+
+    // Bridge SDK types to local payload format for existing parse logic
+    let payload = OfficialMarketSettlementPayload {
+        closed: market.closed,
+        resolved_by: market.resolved_by,
+        uma_resolution_status: market.uma_resolution_status,
+        outcomes: market.outcomes.map(|v| serde_json::to_string(&v).unwrap_or_default()),
+        outcome_prices: market
+            .outcome_prices
+            .map(|v| serde_json::to_string(&v).unwrap_or_default()),
+        clob_token_ids: market.clob_token_ids.map(|v| {
+            v.iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        }),
+    };
 
     match parse_official_market_settlements(&payload) {
         Some(settlements) => OfficialMarketSettlementStatus::Closed(settlements),
@@ -608,7 +615,7 @@ impl QuoteCollector {
         let pool = self.pool.clone();
 
         tokio::spawn(async move {
-            let http = reqwest::Client::new();
+            let gamma = GammaClient::default();
             let mut settled_count = 0u64;
 
             loop {
@@ -645,7 +652,7 @@ impl QuoteCollector {
                 );
 
                 for (market_id, up_token, down_token) in &rows {
-                    let settlements = match fetch_official_market_settlements(&http, market_id).await {
+                    let settlements = match fetch_official_market_settlements(&gamma, market_id).await {
                         OfficialMarketSettlementStatus::Closed(settlements) => settlements,
                         OfficialMarketSettlementStatus::Open => {
                             match clear_unofficial_market_settlements(&pool, market_id).await {
