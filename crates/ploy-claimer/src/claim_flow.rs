@@ -307,9 +307,9 @@ pub(super) async fn claim_position(
     let neg_risk_adapter_addr: Address = NEG_RISK_ADAPTER_POLYGON
         .parse()
         .map_err(|e| ClaimerError::Network(format!("Invalid NegRisk adapter address: {}", e)))?;
-    let collateral_addr: Address = USDC_E_POLYGON
+    let collateral_addr: Address = PUSD_POLYGON
         .parse()
-        .map_err(|e| ClaimerError::Network(format!("Invalid USDC.e address: {}", e)))?;
+        .map_err(|e| ClaimerError::Network(format!("Invalid pUSD address: {}", e)))?;
 
     let contract = IConditionalTokens::new(conditional_tokens_addr, provider.clone());
 

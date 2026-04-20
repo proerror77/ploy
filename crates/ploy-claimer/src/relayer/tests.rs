@@ -139,13 +139,13 @@ async fn test_proxy_signature_matches_builder_relayer_client_vector() {
     let relay_addr: EthersAddress = "0xae700edfd9ab986395f3999fe11177b9903a52f1"
         .parse()
         .expect("relay address");
-    let usdc: EthersAddress = USDC_E_POLYGON.parse().expect("usdc");
+    let pusd: EthersAddress = PUSD_POLYGON.parse().expect("pusd");
     let approve_calldata = hex::decode(
         "095ea7b30000000000000000000000004d97dcd97ec945f40cf65f87097ace5ea0476045ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     )
     .expect("approve calldata");
     let proxy_call_data =
-        AutoClaimer::encode_proxy_transaction_data(usdc, approve_calldata).expect("proxy data");
+        AutoClaimer::encode_proxy_transaction_data(pusd, approve_calldata).expect("proxy data");
 
     let struct_hash = AutoClaimer::create_proxy_struct_hash(
         signer_addr,
@@ -169,6 +169,6 @@ async fn test_proxy_signature_matches_builder_relayer_client_vector() {
 
     assert_eq!(
         sig,
-        "0x4c18e2d2294a00d686714aff8e7936ab657cb4655dfccb2b556efadcb7e835f800dc2fecec69c501e29bb36ecb54b4da6b7c410c4dc740a33af2afde2b77297e1b"
+        "0x0357bad531e3207e34ca1b2f0ac6e3a54335a179c6dd3ab9c38e1f07fedf06ce1926d0037e2f364977b9a9964804a3681580937679a78e262dc4dd630348e22b1b"
     );
 }

@@ -38,7 +38,9 @@ use self::relayer::{
 // CTF contracts on Polygon
 pub(crate) const CONDITIONAL_TOKENS_POLYGON: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 pub(crate) const NEG_RISK_ADAPTER_POLYGON: &str = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296";
-pub(crate) const USDC_E_POLYGON: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+pub(crate) const PUSD_POLYGON: &str = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+/// Collateral onramp contract — call wrap() to convert USDC.e → pUSD (not yet wired)
+pub(crate) const COLLATERAL_ONRAMP: &str = "0x93070a847efEf7F70739046A929D47a521F5B8ee";
 pub(crate) const POLYGON_RPC_DEFAULT: &str = "https://polygon-bor-rpc.publicnode.com";
 pub(crate) const POLYGON_CHAIN_ID: u64 = 137;
 const DEFAULT_MIN_NATIVE_GAS_WEI: u64 = 5_000_000_000_000_000; // 0.005 MATIC

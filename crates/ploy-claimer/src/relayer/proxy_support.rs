@@ -154,14 +154,14 @@ impl AutoClaimer {
                 ],
             )
         } else {
-            let usdc_addr: EthersAddress = USDC_E_POLYGON.parse().map_err(|e| {
-                crate::ClaimerError::Network(format!("Invalid USDC.e address: {}", e))
+            let pusd_addr: EthersAddress = PUSD_POLYGON.parse().map_err(|e| {
+                crate::ClaimerError::Network(format!("Invalid pUSD address: {}", e))
             })?;
 
             (
                 "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
                 vec![
-                    Token::Address(usdc_addr),
+                    Token::Address(pusd_addr),
                     Token::FixedBytes(vec![0u8; 32]),
                     Token::FixedBytes(condition_id.to_vec()),
                     Token::Array(vec![
