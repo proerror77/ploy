@@ -250,6 +250,7 @@ fn make_directional_config(
     three_layer_take_profit_ask: 0.70,
     three_layer_stop_distance_pct: 0.020,
     three_layer_max_pm_lag_secs: 15,
+    three_layer_min_entry_score: 0.30,
 }
 }
 
@@ -314,6 +315,7 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
     three_layer_take_profit_ask: 0.70,
     three_layer_stop_distance_pct: 0.020,
     three_layer_max_pm_lag_secs: 15,
+    three_layer_min_entry_score: 0.30,
 }
 }
 
@@ -379,6 +381,7 @@ fn make_three_layer_config(symbols: &[String], p: &ThreeLayerSearchParams) -> Di
         three_layer_take_profit_ask: p.take_profit_ask,
         three_layer_stop_distance_pct: p.stop_distance_pct,
         three_layer_max_pm_lag_secs: 15,
+        three_layer_min_entry_score: 0.30,
     }
 }
 

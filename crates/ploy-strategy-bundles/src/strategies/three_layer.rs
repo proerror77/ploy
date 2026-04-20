@@ -36,6 +36,7 @@ pub struct ThreeLayerConfig {
     pub allowed_window_secs: Vec<u64>,
     pub min_entry_price: f64,
     pub max_entry_price: f64,
+    pub min_entry_score: f64,
 }
 
 impl From<DirectionalConfig> for ThreeLayerConfig {
@@ -60,6 +61,7 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             allowed_window_secs: c.allowed_window_secs,
             min_entry_price: c.min_entry_price,
             max_entry_price: c.max_entry_price,
+            min_entry_score: c.three_layer_min_entry_score,
         }
     }
 }
@@ -248,21 +250,20 @@ fn norm_cdf(x: f64) -> f64 {
     if x >= 0.0 { 1.0 - p } else { p }
 }
 
-/// Gate 1: Direction.
-/// Returns Some((direction_sign, effective_probability)) or None.
+/// Layer 1: Direction score (0.0 – 1.0).
+/// Returns Some((direction_sign, effective_probability, direction_score)) or None
+/// only when the signal is too weak to even consider (below minimum distance in Early).
 ///
-/// - `distance_over_sigma`: (spot - price_to_beat) / (sigma * price_to_beat)
-/// - In Early regime: direction driven by distance_over_sigma + model_prob.
-/// - In Middle regime: cum_mprice_drift_5m co-drives direction.
-/// - In Late/Expiry: drift_30s becomes primary directional signal.
-fn evaluate_direction(
+/// The score is a continuous measure of directional conviction:
+///   score = (effective_p - 0.50) / 0.50, clamped to [0, 1].
+fn evaluate_direction_score(
     distance_over_sigma: f64,
     _sigma_horizon: f64,
     cum_mprice_drift_5m: f64,
     drift_30s: f64,
     regime: Regime,
     config: &ThreeLayerConfig,
-) -> Option<(f64, f64)> {
+) -> Option<(f64, f64, f64)> {
     if distance_over_sigma.abs() < config.min_distance_over_sigma
         && regime == Regime::Early
     {
@@ -296,56 +297,46 @@ fn evaluate_direction(
         (-1.0_f64, 1.0 - direction_prob)
     };
 
-    if effective_p < config.min_direction_prob {
-        return None;
-    }
+    // Continuous score: how far effective_p is above 0.50, normalized to [0, 1].
+    let direction_score = ((effective_p - 0.50) / 0.50).clamp(0.0, 1.0);
 
-    Some((direction_sign, effective_p))
+    Some((direction_sign, effective_p, direction_score))
 }
 
-/// Gate 2: Confirmation.
-/// Returns true if LOB microstructure agrees with the chosen direction.
-fn evaluate_confirmation(
+/// Layer 2: Confirmation bonus (-0.2 to +0.2).
+/// Positive = LOB confirms direction, negative = LOB opposes (penalty, not veto).
+fn evaluate_confirmation_bonus(
     direction_sign: f64,
     lob: &LobState,
     cum_mprice_drift_5m: f64,
     drift_30s: f64,
     regime: Regime,
-    config: &ThreeLayerConfig,
-) -> bool {
+    _config: &ThreeLayerConfig,
+) -> f64 {
     let raw_score = lob.confirmation_score() + (cum_mprice_drift_5m / 200.0).clamp(-0.15, 0.15);
     let aligned_score = direction_sign * raw_score;
 
-    let threshold = match regime {
-        Regime::Early  => config.min_confirmation_score * 0.5,
-        Regime::Middle => config.min_confirmation_score,
-        Regime::Late   => config.min_confirmation_score * 1.5,
-        Regime::Expiry => config.min_confirmation_score * 2.0,
+    // In Late/Expiry, drift agreement adds extra bonus/penalty.
+    let drift_factor = match regime {
+        Regime::Late | Regime::Expiry => {
+            let drift_aligned = drift_30s * direction_sign;
+            (drift_aligned * 500.0).clamp(-0.10, 0.10)
+        }
+        _ => 0.0,
     };
 
-    if aligned_score < threshold {
-        return false;
-    }
-
-    if matches!(regime, Regime::Late | Regime::Expiry) {
-        let drift_agrees = (direction_sign > 0.0 && drift_30s > config.min_drift_confirmation)
-            || (direction_sign < 0.0 && drift_30s < -config.min_drift_confirmation);
-        if !drift_agrees {
-            return false;
-        }
-    }
-
-    true
+    (aligned_score + drift_factor).clamp(-0.20, 0.20)
 }
 
-/// Gate 3: Worth-It.
-/// Returns Some((entry_price, edge, reward_risk)) or None.
-fn evaluate_worth_it(
+/// Layer 3: Edge score (0.0 – 1.0).
+/// Returns Some((entry_price, edge, reward_risk, edge_score)) or None
+/// only when the price is outside tradeable bounds.
+fn evaluate_edge_score(
     effective_p: f64,
     ask: f64,
-    regime: Regime,
+    _regime: Regime,
     config: &ThreeLayerConfig,
-) -> Option<(f64, f64, f64)> {
+) -> Option<(f64, f64, f64, f64)> {
     if ask < config.min_entry_price || ask > config.max_entry_price {
         return None;
     }
@@ -353,26 +344,14 @@ fn evaluate_worth_it(
     let fee = crypto_fee_cost(ask);
     let edge = effective_p - ask - fee;
 
-    let min_edge = match regime {
-        Regime::Early  => config.min_edge,
-        Regime::Middle => config.min_edge,
-        Regime::Late   => config.min_edge * 1.2,
-        Regime::Expiry => config.min_edge * 1.5,
-    };
-
-    if edge < min_edge {
-        return None;
-    }
-
     let reward = 1.0 - ask - fee;
     let risk = ask + fee;
     let rr = if risk > 0.0 { reward / risk } else { 0.0 };
 
-    if rr < config.min_reward_risk {
-        return None;
-    }
+    // Continuous score: edge normalized by 0.10 (a 10% edge = perfect score).
+    let edge_score = (edge / 0.10).clamp(0.0, 1.0);
 
-    Some((ask, edge, rr))
+    Some((ask, edge, rr, edge_score))
 }
 
 // ── ThreeLayerStrategy ─────────────────────────────────────────────
@@ -509,8 +488,8 @@ impl ThreeLayerStrategy {
                 .map(|acc| acc.cum_drift())
                 .unwrap_or(0.0);
 
-            // Gate 1: Direction
-            let (direction_sign, effective_p) = evaluate_direction(
+            // Layer 1: Direction score
+            let (direction_sign, effective_p, direction_score) = evaluate_direction_score(
                 distance_over_sigma,
                 sigma_h,
                 cum_mprice_drift_5m,
@@ -548,22 +527,41 @@ impl ThreeLayerStrategy {
                 continue;
             }
 
-            // Gate 2: Confirmation
+            // Layer 2: Confirmation bonus
             let lob = self.lob.get(symbol).copied().unwrap_or_default();
-            if !evaluate_confirmation(
+            let confirmation_bonus = evaluate_confirmation_bonus(
                 direction_sign,
                 &lob,
                 cum_mprice_drift_5m,
                 drift_30s,
                 regime,
                 &self.config,
-            ) {
+            );
+
+            // Layer 3: Edge score
+            let (entry_price_f, edge, _rr, edge_score) =
+                evaluate_edge_score(effective_p, ask, regime, &self.config)?;
+
+            // Composite scoring model
+            let total_score = direction_score * 0.50
+                + edge_score * 0.35
+                + confirmation_bonus * 0.15;
+
+            if total_score < self.config.min_entry_score {
+                info!(
+                    strategy = "three_layer",
+                    symbol = %symbol,
+                    direction,
+                    total_score = format!("{:.3}", total_score),
+                    direction_score = format!("{:.3}", direction_score),
+                    edge_score = format!("{:.3}", edge_score),
+                    confirmation_bonus = format!("{:.3}", confirmation_bonus),
+                    min_entry_score = self.config.min_entry_score,
+                    regime = regime.as_str(),
+                    "score below threshold"
+                );
                 continue;
             }
-
-            // Gate 3: Worth-It
-            let (entry_price_f, edge, _rr) =
-                evaluate_worth_it(effective_p, ask, regime, &self.config)?;
 
             let entry_price = Decimal::try_from(entry_price_f).ok()?;
             let quantity = self.entry_quantity(entry_price);
@@ -609,6 +607,10 @@ impl ThreeLayerStrategy {
                 strategy = "three_layer",
                 symbol = %symbol,
                 direction,
+                total_score = format!("{:.3}", total_score),
+                direction_score = format!("{:.3}", direction_score),
+                edge_score = format!("{:.3}", edge_score),
+                confirmation_bonus = format!("{:.3}", confirmation_bonus),
                 p_hat = effective_p,
                 edge,
                 entry_price = %entry_price,
@@ -1042,6 +1044,7 @@ mod tests {
         assert_eq!(tlc.min_edge, 0.03);
         assert_eq!(tlc.min_reward_risk, 1.2);
         assert_eq!(tlc.take_profit_ask, 0.70);
+        assert!((tlc.min_entry_score - 0.30).abs() < f64::EPSILON);
         assert!(!tlc.symbols.is_empty());
     }
 
@@ -1090,28 +1093,30 @@ mod tests {
             allowed_window_secs: vec![300],
             min_entry_price: 0.15,
             max_entry_price: 0.85,
+            min_entry_score: 0.30,
         }
     }
 
     #[test]
     fn direction_rejects_weak_early_signal() {
         let config = test_config();
-        let result = evaluate_direction(0.1, 0.02, 0.0, 0.0, Regime::Early, &config);
+        let result = evaluate_direction_score(0.1, 0.02, 0.0, 0.0, Regime::Early, &config);
         assert!(result.is_none(), "should reject weak direction signal");
     }
 
     #[test]
     fn direction_passes_strong_early_signal() {
         let config = test_config();
-        let result = evaluate_direction(1.5, 0.02, 0.0, 0.0, Regime::Early, &config);
+        let result = evaluate_direction_score(1.5, 0.02, 0.0, 0.0, Regime::Early, &config);
         assert!(result.is_some(), "should pass strong early signal");
-        let (dir, prob) = result.unwrap();
+        let (dir, prob, score) = result.unwrap();
         assert!(dir > 0.0);
         assert!(prob > 0.56);
+        assert!(score > 0.0, "direction score should be positive for strong signal");
     }
 
     #[test]
-    fn confirmation_rejects_opposing_lob_in_late() {
+    fn confirmation_returns_negative_for_opposing_lob() {
         let config = test_config();
         let lob = LobState {
             obi: -0.5,
@@ -1123,19 +1128,24 @@ mod tests {
             last_aggtrade_ts: None,
             ts: None,
         };
-        let pass = evaluate_confirmation(1.0, &lob, -5.0, -0.001, Regime::Late, &config);
-        assert!(!pass, "should reject opposing LOB in late regime");
+        let bonus = evaluate_confirmation_bonus(1.0, &lob, -5.0, -0.001, Regime::Late, &config);
+        assert!(bonus < 0.0, "opposing LOB should produce negative bonus, got {}", bonus);
     }
 
     #[test]
-    fn worth_it_rejects_low_edge() {
+    fn edge_score_returns_continuous_value() {
         let config = test_config();
-        // ask=0.35 → fee≈0.00455, edge=0.55-0.35-0.00455≈0.195, rr≈1.82 → passes
-        let result = evaluate_worth_it(0.55, 0.35, Regime::Early, &config);
+        // ask=0.35 → fee≈0.00455, edge=0.55-0.35-0.00455≈0.195 → edge_score≈1.95 clamped to 1.0
+        let result = evaluate_edge_score(0.55, 0.35, Regime::Early, &config);
         assert!(result.is_some());
-        // ask=0.50 → fee=0.005, edge=0.52-0.50-0.005=0.015 < min_edge → rejected
-        let result = evaluate_worth_it(0.52, 0.50, Regime::Early, &config);
-        assert!(result.is_none(), "should reject low edge");
+        let (_ask, edge, _rr, edge_score) = result.unwrap();
+        assert!(edge > 0.0);
+        assert!(edge_score > 0.0 && edge_score <= 1.0);
+        // ask=0.50 → fee=0.005, edge=0.52-0.50-0.005=0.015 → edge_score=0.15
+        let result = evaluate_edge_score(0.52, 0.50, Regime::Early, &config);
+        assert!(result.is_some(), "edge_score model should not reject low edge, just score it low");
+        let (_ask, _edge, _rr, edge_score) = result.unwrap();
+        assert!(edge_score < 0.3, "low edge should produce low score, got {}", edge_score);
     }
 
     #[test]

@@ -189,6 +189,10 @@ pub struct DirectionalConfig {
     #[serde(default = "default_tl_max_pm_lag_secs")]
     pub three_layer_max_pm_lag_secs: u64,
 
+    /// Scoring model: minimum total score to enter (0.0-1.0).
+    #[serde(default = "default_tl_min_entry_score")]
+    pub three_layer_min_entry_score: f64,
+
     // Timing
     #[serde(default = "default_min_time")]
     pub min_time_remaining_secs: u64,
@@ -325,6 +329,7 @@ fn default_tl_min_reward_risk() -> f64 { 1.2 }
 fn default_tl_take_profit_ask() -> f64 { 0.70 }
 fn default_tl_stop_distance_pct() -> f64 { 0.020 }
 fn default_tl_max_pm_lag_secs() -> u64 { 15 }
+fn default_tl_min_entry_score() -> f64 { 0.30 }
 fn default_min_time() -> u64 {
     60
 }
@@ -1756,6 +1761,7 @@ mod tests {
             three_layer_take_profit_ask: 0.70,
             three_layer_stop_distance_pct: 0.020,
             three_layer_max_pm_lag_secs: 15,
+            three_layer_min_entry_score: 0.30,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
             cooldown_secs: 0,
