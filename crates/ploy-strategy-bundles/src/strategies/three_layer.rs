@@ -173,9 +173,23 @@ impl LobState {
         self.obi - self.obi_prev
     }
 
-    fn apply_l2(&mut self, obi: f64, spread_bps: u32, bid_near: f64, ask_near: f64, ts: DateTime<Utc>) {
+    fn apply_l2(&mut self, obi_raw: f64, spread_bps: u32, bid_near: f64, ask_near: f64, ts: DateTime<Utc>) {
         self.obi_prev = self.obi;
-        self.obi = obi;
+        // EWMA smoothing with 5-second half-life.
+        // At 10 Hz LOB, raw OBI fluctuates wildly per 100ms tick.
+        // Smoothing captures the 5-second trend, filtering noise while
+        // preserving real microstructure signals. Causal (no look-ahead).
+        if let Some(prev_ts) = self.ts {
+            let dt = (ts - prev_ts).num_milliseconds() as f64 / 1000.0;
+            if dt > 0.0 && dt < 60.0 {
+                let alpha = 1.0 - (-dt / 5.0_f64).exp();
+                self.obi = self.obi * (1.0 - alpha) + obi_raw * alpha;
+            } else {
+                self.obi = obi_raw;
+            }
+        } else {
+            self.obi = obi_raw;
+        }
         self.spread_bps = spread_bps;
         self.bid_depth_near = bid_near;
         self.ask_depth_near = ask_near;
@@ -897,7 +911,18 @@ impl StrategyLogic for ThreeLayerStrategy {
             } => {
                 if let Some(lob) = self.lob.get_mut(symbol) {
                     lob.obi_prev = lob.obi;
-                    lob.obi = *obi;
+                    // Same EWMA smoothing as L2Depth path
+                    if let Some(prev_ts) = lob.ts {
+                        let dt = (*ts - prev_ts).num_milliseconds() as f64 / 1000.0;
+                        if dt > 0.0 && dt < 60.0 {
+                            let alpha = 1.0 - (-dt / 5.0_f64).exp();
+                            lob.obi = lob.obi * (1.0 - alpha) + obi * alpha;
+                        } else {
+                            lob.obi = *obi;
+                        }
+                    } else {
+                        lob.obi = *obi;
+                    }
                     lob.spread_bps = *spread_bps;
                     lob.ts = Some(*ts);
                 }
