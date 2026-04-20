@@ -51,6 +51,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Load data from Parquet files into a Vec<MarketUpdate>.
+/// Uses StreamingParquetFeed (same code path as backtest) to ensure
+/// identical data processing — token ID normalization, event timing, etc.
 #[cfg(feature = "parquet-feed")]
 fn load_from_parquet_vec(
     data_dir: &str,
@@ -58,14 +60,19 @@ fn load_from_parquet_vec(
     from: chrono::DateTime<Utc>,
     to: chrono::DateTime<Utc>,
 ) -> Vec<MarketUpdate> {
-    ploy_strategy_bundles::feed::parquet::load_from_parquet(
-        data_dir,
-        symbols,
-        from,
-        to,
-        &HistoricalLoadOptions::default(),
-    )
-    .expect("Failed to load Parquet data")
+    use ploy_strategy_bundles::feed::parquet_stream::StreamingParquetFeed;
+    use ploy_strategy_bundles::traits::Feed;
+
+    let options = HistoricalLoadOptions::default();
+    let mut feed = StreamingParquetFeed::new(data_dir, symbols, from, to, &options);
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    let mut updates = Vec::new();
+    rt.block_on(async {
+        while let Some(update) = feed.next().await {
+            updates.push(update);
+        }
+    });
+    updates
 }
 
 #[cfg(not(feature = "parquet-feed"))]
