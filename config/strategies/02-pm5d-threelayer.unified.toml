@@ -8,7 +8,7 @@
 [runtime]
 strategy_variant = "three_layer"
 mode = "dryrun"
-throttle_hz = 1
+throttle_hz = 10
 
 [strategy]
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "BNBUSDT"]
