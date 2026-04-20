@@ -25,16 +25,18 @@ no_trade_zone_max = 0.55
 
 min_edge = 0.0367
 
-min_time_remaining_secs = 90
-max_time_remaining_secs = 180
-cooldown_secs = 71
+min_time_remaining_secs = 60
+max_time_remaining_secs = 240
+cooldown_secs = 30
 
 stake_usd = 15.0
 max_positions = 1000
 max_daily_trades = 1000
 allowed_window_secs = [300, 900]
 
-# Three-layer gate parameters (tuned for 10 Hz LOB with 5s EWMA smoothing)
+# Scoring model: direction(50%) + edge(35%) + confirmation bonus(15%)
+# Entry when total_score > min_entry_score
+three_layer_min_entry_score = 0.25
 three_layer_min_direction_prob = 0.52
 three_layer_min_distance_over_sigma = 0.15
 three_layer_min_confirmation_score = 0.03
