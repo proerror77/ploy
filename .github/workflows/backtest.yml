@@ -10,11 +10,11 @@ on:
       start_date:
         description: "Backtest start date (YYYY-MM-DD)"
         required: true
-        default: "2026-03-28"
+        default: "2026-04-10"
       end_date:
         description: "Backtest end date (YYYY-MM-DD)"
         required: true
-        default: "2026-04-03"
+        default: "2026-04-15"
       config:
         description: "Strategy config path (relative to repo root)"
         required: true
