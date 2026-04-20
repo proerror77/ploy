@@ -221,15 +221,15 @@ fn parse_message_text(
 
     Ok(Some(ParsedSportsState {
         update: MarketUpdate::SportsState {
-            game_id,
-            league,
-            slug,
-            home_team,
-            away_team,
-            status,
-            period: non_empty(payload.period),
-            score: non_empty(payload.score),
-            elapsed: non_empty(payload.elapsed),
+            game_id: Arc::from(game_id.as_str()),
+            league: Arc::from(league.as_str()),
+            slug: Arc::from(slug.as_str()),
+            home_team: Arc::from(home_team.as_str()),
+            away_team: Arc::from(away_team.as_str()),
+            status: Arc::from(status.as_str()),
+            period: non_empty(payload.period).map(|s| Arc::from(s.as_str())),
+            score: non_empty(payload.score).map(|s| Arc::from(s.as_str())),
+            elapsed: non_empty(payload.elapsed).map(|s| Arc::from(s.as_str())),
             live: payload.live.unwrap_or(false),
             ended: payload.ended.unwrap_or(false),
             finished_at: payload.finished_timestamp,
@@ -284,15 +284,15 @@ async fn persist_sports_state(pool: &PgPool, parsed: &ParsedSportsState) {
         )
         "#,
     )
-    .bind(game_id)
-    .bind(league)
-    .bind(slug)
-    .bind(home_team)
-    .bind(away_team)
-    .bind(status)
-    .bind(period)
-    .bind(score)
-    .bind(elapsed)
+    .bind(&**game_id)
+    .bind(&**league)
+    .bind(&**slug)
+    .bind(&**home_team)
+    .bind(&**away_team)
+    .bind(&**status)
+    .bind(period.as_deref())
+    .bind(score.as_deref())
+    .bind(elapsed.as_deref())
     .bind(*live)
     .bind(*ended)
     .bind(*finished_at)

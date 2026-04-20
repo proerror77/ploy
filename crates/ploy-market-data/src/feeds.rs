@@ -105,7 +105,7 @@ pub fn spawn_spot_feed(
                     .await;
 
                     let update = MarketUpdate::SpotPrice {
-                        symbol: symbol_upper.clone(),
+                        symbol: Arc::from(symbol_upper.as_str()),
                         price: crypto_price.value,
                         ts,
                     };
@@ -211,7 +211,7 @@ pub fn spawn_db_spot_feed(
                 let last = last_ts.get(&symbol).copied();
                 if last.map_or(true, |l| ts > l) {
                     last_ts.insert(symbol.clone(), ts);
-                    let update = MarketUpdate::SpotPrice { symbol, price, ts };
+                    let update = MarketUpdate::SpotPrice { symbol: Arc::from(symbol.as_str()), price, ts };
                     if tx.send(update).is_err() {
                         return; // channel closed
                     }
@@ -285,7 +285,7 @@ pub fn spawn_db_aggtrade_feed(
 
                 last_seen.insert(symbol.clone(), (ts, agg_trade_id));
                 let update = MarketUpdate::AggTrade {
-                    symbol,
+                    symbol: Arc::from(symbol.as_str()),
                     agg_trade_id: agg_trade_id as u64,
                     price,
                     quantity,
@@ -396,8 +396,9 @@ fn l2_updates_from_depth_totals(
     ask_depth_near: Decimal,
     ts: DateTime<Utc>,
 ) -> Vec<MarketUpdate> {
+    let sym: Arc<str> = Arc::from(symbol);
     let mut updates = vec![MarketUpdate::L2 {
-        symbol: symbol.to_string(),
+        symbol: sym.clone(),
         obi,
         spread_bps,
         ts,
@@ -407,7 +408,7 @@ fn l2_updates_from_depth_totals(
     let ask_depth_near = ask_depth_near.to_f64().unwrap_or(0.0);
 
     updates.push(MarketUpdate::L2Depth {
-        symbol: symbol.to_string(),
+        symbol: sym,
         obi,
         spread_bps,
         bid_depth_near,
@@ -428,8 +429,9 @@ fn l2_updates_from_book(
     asks: Option<&Value>,
     ts: DateTime<Utc>,
 ) -> Vec<MarketUpdate> {
+    let sym: Arc<str> = Arc::from(symbol);
     let mut updates = vec![MarketUpdate::L2 {
-        symbol: symbol.to_string(),
+        symbol: sym.clone(),
         obi,
         spread_bps,
         ts,
@@ -455,7 +457,7 @@ fn l2_updates_from_book(
     );
 
     updates.push(MarketUpdate::L2Depth {
-        symbol: symbol.to_string(),
+        symbol: sym,
         obi,
         spread_bps,
         bid_depth_near,
@@ -564,7 +566,7 @@ pub fn spawn_quote_feed(
 
                                 let now = Utc::now();
                                 let update = MarketUpdate::Quote {
-                                    token_id: token_str.clone(),
+                                    token_id: Arc::from(token_str.as_str()),
                                     bid,
                                     ask,
                                     bid_size: None,
@@ -687,9 +689,9 @@ pub fn spawn_chainlink_feed(
                     .await;
 
                     let update = MarketUpdate::ReferencePrice {
-                        symbol: normalize_reference_symbol(&chainlink_price.symbol),
-                        source: ReferencePriceSource::Chainlink.as_str().to_string(),
-                        asset_class: ReferenceAssetClass::Crypto.as_str().to_string(),
+                        symbol: Arc::from(normalize_reference_symbol(&chainlink_price.symbol).as_str()),
+                        source: Arc::from(ReferencePriceSource::Chainlink.as_str()),
+                        asset_class: Arc::from(ReferenceAssetClass::Crypto.as_str()),
                         price: chainlink_price.value,
                         full_accuracy_value: None,
                         is_carried_forward: false,
@@ -1014,11 +1016,11 @@ async fn persist_reference_price(pool: &PgPool, snapshot: &ReferencePriceSnapsho
 
 fn reference_price_update(snapshot: &ReferencePriceSnapshot) -> MarketUpdate {
     MarketUpdate::ReferencePrice {
-        symbol: snapshot.key.symbol.clone(),
-        source: snapshot.key.source.as_str().to_string(),
-        asset_class: snapshot.asset_class.as_str().to_string(),
+        symbol: Arc::from(snapshot.key.symbol.as_str()),
+        source: Arc::from(snapshot.key.source.as_str()),
+        asset_class: Arc::from(snapshot.asset_class.as_str()),
         price: snapshot.value,
-        full_accuracy_value: snapshot.full_accuracy_value.clone(),
+        full_accuracy_value: snapshot.full_accuracy_value.as_deref().map(Arc::from),
         is_carried_forward: snapshot.is_carried_forward,
         ts: snapshot.source_timestamp,
     }

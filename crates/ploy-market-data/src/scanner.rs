@@ -129,10 +129,10 @@ pub fn spawn_market_scanner(
                         );
 
                         let _ = tx.send(MarketUpdate::EventDiscovered {
-                            event_id: market.compatibility_event_id,
-                            symbol: market.symbol,
-                            up_token: market.up_token,
-                            down_token: market.down_token,
+                            event_id: Arc::from(market.compatibility_event_id.as_str()),
+                            symbol: Arc::from(market.symbol.as_str()),
+                            up_token: Arc::from(market.up_token.as_str()),
+                            down_token: Arc::from(market.down_token.as_str()),
                             end_time,
                             window_secs,
                             price_to_beat,
@@ -240,7 +240,7 @@ async fn recover_expired_open_positions(
                 "Recovery: emitting EventExpired",
             );
             let _ = tx.send(MarketUpdate::EventExpired {
-                event_id,
+                event_id: Arc::from(event_id.as_str()),
                 end_time,
                 resolved_up_won,
             });
@@ -265,7 +265,7 @@ fn expire_tracked_events(
             .map(|event| event.end_time)
             .unwrap_or(now);
         let _ = tx.send(MarketUpdate::EventExpired {
-            event_id,
+            event_id: Arc::from(event_id.as_str()),
             end_time,
             resolved_up_won: None,
         });

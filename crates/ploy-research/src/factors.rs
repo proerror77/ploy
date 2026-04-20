@@ -532,7 +532,7 @@ pub fn build_factor_observations_with_lob(
                 resolved_up_won: Some(outcome),
                 ..
             } => {
-                final_outcomes.insert(event_id.clone(), *outcome);
+                final_outcomes.insert(event_id.to_string(), *outcome);
             }
             _ => {}
         }
@@ -575,18 +575,18 @@ pub fn build_factor_observations_with_lob(
                 ..
             } => {
                 events.insert(
-                    event_id.clone(),
+                    event_id.to_string(),
                     EventState {
-                        event_id: event_id.clone(),
-                        symbol: symbol.clone(),
+                        event_id: event_id.to_string(),
+                        symbol: symbol.to_string(),
                         end_time: Some(*end_time),
                         price_to_beat: price_to_beat.and_then(|value| value.to_f64()),
                         resolved_up_won: final_outcomes
-                            .get(event_id)
+                            .get(&**event_id)
                             .copied()
                             .or(*resolved_up_won),
-                        up_token: up_token.clone(),
-                        down_token: down_token.clone(),
+                        up_token: up_token.to_string(),
+                        down_token: down_token.to_string(),
                     },
                 );
             }
@@ -595,7 +595,7 @@ pub fn build_factor_observations_with_lob(
                 resolved_up_won,
                 ..
             } => {
-                if let Some(event) = events.get_mut(event_id) {
+                if let Some(event) = events.get_mut(&**event_id) {
                     event.resolved_up_won = resolved_up_won.or(event.resolved_up_won);
                 }
             }
@@ -607,7 +607,7 @@ pub fn build_factor_observations_with_lob(
                 let bid_sz = bid_size.and_then(|v| v.to_f64()).unwrap_or(f64::NAN);
                 let ask_sz = ask_size.and_then(|v| v.to_f64()).unwrap_or(f64::NAN);
                 if bid.is_finite() || ask.is_finite() {
-                    quotes.insert(token_id.clone(), (*ts, bid, ask, bid_sz, ask_sz));
+                    quotes.insert(token_id.to_string(), (*ts, bid, ask, bid_sz, ask_sz));
                 }
             }
             MarketUpdate::L2 {
@@ -616,7 +616,7 @@ pub fn build_factor_observations_with_lob(
                 spread_bps,
                 ..
             } => {
-                let state = lob.entry(symbol.clone()).or_default();
+                let state = lob.entry(symbol.to_string()).or_default();
                 state.obi = *obi;
                 state.spread_bps = *spread_bps as f64;
                 state.obi_10 = *obi;
@@ -630,7 +630,7 @@ pub fn build_factor_observations_with_lob(
                 ..
             } => {
                 lob.insert(
-                    symbol.clone(),
+                    symbol.to_string(),
                     LobState {
                         obi: *obi,
                         spread_bps: *spread_bps as f64,
@@ -655,25 +655,26 @@ pub fn build_factor_observations_with_lob(
                     continue;
                 }
 
+                let sym = symbol.to_string();
                 buf_30s
-                    .entry(symbol.clone())
+                    .entry(sym.clone())
                     .or_insert_with(|| DriftBuffer::new(30.0))
                     .push(*ts, spot_price);
                 buf_10s
-                    .entry(symbol.clone())
+                    .entry(sym.clone())
                     .or_insert_with(|| DriftBuffer::new(10.0))
                     .push(*ts, spot_price);
 
                 let drift_30s = buf_30s
-                    .get(symbol)
+                    .get(&sym)
                     .map(DriftBuffer::drift_speed)
                     .unwrap_or(0.0);
                 let drift_10s = buf_10s
-                    .get(symbol)
+                    .get(&sym)
                     .map(DriftBuffer::drift_speed)
                     .unwrap_or(0.0);
 
-                let dstate = drift_state.entry(symbol.clone()).or_default();
+                let dstate = drift_state.entry(sym.clone()).or_default();
                 let old_sign = signum(dstate.prev_drift_30s);
                 let new_sign = signum(drift_30s);
                 let flipped = old_sign != 0.0 && new_sign != 0.0 && old_sign != new_sign;
@@ -683,13 +684,13 @@ pub fn build_factor_observations_with_lob(
                 dstate.prev_drift_30s = drift_30s;
                 dstate.post_flip_drift = drift_30s.abs();
 
-                if let Some((prev_ts, prev_price)) = spot.get(symbol).copied() {
+                if let Some((prev_ts, prev_price)) = spot.get(&sym).copied() {
                     let dt_secs = (*ts - prev_ts).num_milliseconds() as f64 / 1000.0;
                     if dt_secs > 0.0 && prev_price > 0.0 {
                         let log_return = (spot_price / prev_price).ln();
                         let inst_var_per_sec = log_return * log_return / dt_secs.max(1e-6);
                         let floor = 0.001_f64.powi(2) / 900.0;
-                        let vstate = vol.entry(symbol.clone()).or_default();
+                        let vstate = vol.entry(sym.clone()).or_default();
                         vstate.ewma_var_per_sec = if vstate.ewma_var_per_sec <= 0.0 {
                             inst_var_per_sec.max(floor)
                         } else {
@@ -698,14 +699,14 @@ pub fn build_factor_observations_with_lob(
                         };
 
                         retbuf
-                            .entry(symbol.clone())
+                            .entry(sym.clone())
                             .or_insert_with(ReturnBuffer::new)
                             .push(log_return, dt_secs, spot_price);
                     }
                 }
-                spot.insert(symbol.clone(), (*ts, spot_price));
+                spot.insert(sym.clone(), (*ts, spot_price));
 
-                if let Some(snapshots) = lob_by_symbol.get(symbol) {
+                if let Some(snapshots) = lob_by_symbol.get(&sym) {
                     if let Some(snapshot) = snapshots
                         .iter()
                         .rev()
@@ -733,12 +734,12 @@ pub fn build_factor_observations_with_lob(
                         };
 
                         lob_flow
-                            .entry(symbol.clone())
+                            .entry(sym.clone())
                             .or_insert_with(|| LobFlowAccumulator::new(300.0))
                             .push(snapshot.ts, snapshot.obi, snap_di, snap_mprice_bps);
 
                         lob.insert(
-                            symbol.clone(),
+                            sym.clone(),
                             LobState {
                                 obi: snapshot.obi,
                                 spread_bps: snapshot.spread_bps,
@@ -758,7 +759,7 @@ pub fn build_factor_observations_with_lob(
                 }
 
                 for event in events.values() {
-                    if event.symbol != *symbol {
+                    if event.symbol != sym {
                         continue;
                     }
                     let Some(price_to_beat) = event.price_to_beat else {
@@ -793,7 +794,7 @@ pub fn build_factor_observations_with_lob(
                         continue;
                     }
 
-                    let lob_state = lob.get(symbol).cloned().unwrap_or_default();
+                    let lob_state = lob.get(&sym).cloned().unwrap_or_default();
                     let depth_ratio = if lob_state.ask_depth_near > 0.0 {
                         lob_state.bid_depth_near / lob_state.ask_depth_near
                     } else {
@@ -838,9 +839,9 @@ pub fn build_factor_observations_with_lob(
                     };
 
                     let floor = 0.001_f64.powi(2) / 900.0;
-                    let ewma = vol.get(symbol).map(|state| state.ewma_var_per_sec).unwrap_or(floor);
+                    let ewma = vol.get(&sym).map(|state| state.ewma_var_per_sec).unwrap_or(floor);
                     let (rv, parkinson) = retbuf
-                        .get(symbol)
+                        .get(&sym)
                         .map(|buf| (buf.realized_var_per_sec(), buf.parkinson_var_per_sec()))
                         .unwrap_or((0.0, 0.0));
                     let best_var = ewma.max(rv).max(parkinson).max(floor);
@@ -890,7 +891,7 @@ pub fn build_factor_observations_with_lob(
 
                     rows.push(FactorObservation {
                         event_id: event.event_id.clone(),
-                        symbol: symbol.clone(),
+                        symbol: sym.clone(),
                         tick_ts: *ts,
                         time_remaining_secs: time_remaining,
                         signed_distance_to_beat: signed_distance,
@@ -932,13 +933,13 @@ pub fn build_factor_observations_with_lob(
                         settlement_up: if resolved_up_won { 1.0 } else { 0.0 },
                         future_up_ask_change_30s: None,
                         future_up_ask_change_60s: None,
-                        cum_obi_delta_5m: lob_flow.get(symbol)
+                        cum_obi_delta_5m: lob_flow.get(&sym)
                             .map(|f| f.cum_obi_delta()).unwrap_or(0.0),
-                        cum_depth_delta_5m: lob_flow.get(symbol)
+                        cum_depth_delta_5m: lob_flow.get(&sym)
                             .map(|f| f.cum_depth_delta()).unwrap_or(0.0),
-                        cum_mprice_drift_5m: lob_flow.get(symbol)
+                        cum_mprice_drift_5m: lob_flow.get(&sym)
                             .map(|f| f.cum_mprice_drift()).unwrap_or(0.0),
-                        cum_trade_imbalance_5m: trade_flow.get(symbol)
+                        cum_trade_imbalance_5m: trade_flow.get(&sym)
                             .map(|f| f.cum_imbalance()).unwrap_or(0.0),
                     });
                 }
@@ -954,7 +955,7 @@ pub fn build_factor_observations_with_lob(
                     // buyer_maker=false → buyer aggressor (bullish); true → seller aggressor
                     let signed_qty = if *is_buyer_maker { -qty } else { qty };
                     trade_flow
-                        .entry(symbol.clone())
+                        .entry(symbol.to_string())
                         .or_insert_with(|| TradeFlowAccumulator::new(300.0))
                         .push(*ts, signed_qty);
                 }
