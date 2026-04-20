@@ -1,5 +1,6 @@
 use ploy_trading::{FillRecord, TradeSide};
-use polymarket_client_sdk::auth::{LocalSigner, Signer};
+use polymarket_client_sdk::auth::state::Authenticated;
+use polymarket_client_sdk::auth::{LocalSigner, Normal, Signer};
 use polymarket_client_sdk::clob::types::request::TradesRequest;
 use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
 use polymarket_client_sdk::clob::types::{Amount, OrderType, Side, SignatureType};
@@ -10,6 +11,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use secrecy::{ExposeSecret, SecretString};
 use std::str::FromStr;
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
 pub const CRATE_MARKER: &str = "ploy-connectivity";
@@ -288,17 +290,77 @@ impl PolymarketExecutionConfig {
 #[derive(Debug, Clone)]
 pub struct PolymarketExecutionGateway {
     config: PolymarketExecutionConfig,
+    client: Arc<OnceLock<Client<Authenticated<Normal>>>>,
 }
 
 impl PolymarketExecutionGateway {
     pub fn from_env() -> Self {
         Self {
             config: PolymarketExecutionConfig::from_env(),
+            client: Arc::new(OnceLock::new()),
         }
     }
 
     pub fn new(config: PolymarketExecutionConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            client: Arc::new(OnceLock::new()),
+        }
+    }
+
+    fn get_or_init_client(
+        &self,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<Client<Authenticated<Normal>>, ExecutionError> {
+        if let Some(client) = self.client.get() {
+            return Ok(client.clone());
+        }
+
+        let private_key = self
+            .config
+            .private_key
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .ok_or_else(|| {
+                ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
+            })?;
+        let funder = self
+            .config
+            .funder
+            .as_deref()
+            .map(Address::from_str)
+            .transpose()
+            .map_err(|err| ExecutionError::Configuration(format!("invalid POLY_FUNDER: {err}")))?;
+
+        let client = runtime.block_on(async {
+            let signer = LocalSigner::from_str(private_key)
+                .map_err(|err| {
+                    ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
+                })?
+                .with_chain_id(Some(POLYGON));
+
+            let client = Client::new(
+                &self.config.host,
+                Config::builder()
+                    .use_server_time(self.config.use_server_time)
+                    .build(),
+            )
+            .map_err(|err| ExecutionError::Transport(format!("build client: {err}")))?;
+
+            let mut auth = client.authentication_builder(&signer);
+            auth = auth.signature_type(self.config.signature_type.into_sdk());
+            if let Some(funder) = funder {
+                auth = auth.funder(funder);
+            }
+
+            auth.authenticate()
+                .await
+                .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))
+        })?;
+
+        // OnceLock::get_or_init is not fallible, so we use set + ignore race.
+        let _ = self.client.set(client.clone());
+        Ok(self.client.get().unwrap().clone())
     }
 }
 
@@ -320,18 +382,13 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
         let token_id = U256::from_str(&request.token_id).map_err(|err| {
             ExecutionError::Validation(format!("invalid token_id `{}`: {err}", request.token_id))
         })?;
-        let funder = self
-            .config
-            .funder
-            .as_deref()
-            .map(Address::from_str)
-            .transpose()
-            .map_err(|err| ExecutionError::Configuration(format!("invalid POLY_FUNDER: {err}")))?;
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|err| ExecutionError::Transport(format!("create tokio runtime: {err}")))?;
+
+        let client = self.get_or_init_client(&runtime)?;
 
         runtime.block_on(async {
             let signer = LocalSigner::from_str(private_key)
@@ -339,25 +396,6 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                     ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
                 })?
                 .with_chain_id(Some(POLYGON));
-
-            let client = Client::new(
-                &self.config.host,
-                Config::builder()
-                    .use_server_time(self.config.use_server_time)
-                    .build(),
-            )
-            .map_err(|err| ExecutionError::Transport(format!("build client: {err}")))?;
-
-            let mut auth = client.authentication_builder(&signer);
-            auth = auth.signature_type(self.config.signature_type.into_sdk());
-            if let Some(funder) = funder {
-                auth = auth.funder(funder);
-            }
-
-            let client = auth
-                .authenticate()
-                .await
-                .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))?;
 
             let side = polymarket_side(request.side);
             let order = match request.order_type {
@@ -426,53 +464,14 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
             return Ok(Vec::new());
         }
 
-        let private_key = self
-            .config
-            .private_key
-            .as_ref()
-            .map(ExposeSecret::expose_secret)
-            .ok_or_else(|| {
-                ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
-            })?;
-        let funder = self
-            .config
-            .funder
-            .as_deref()
-            .map(Address::from_str)
-            .transpose()
-            .map_err(|err| ExecutionError::Configuration(format!("invalid POLY_FUNDER: {err}")))?;
-
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|err| ExecutionError::Transport(format!("create tokio runtime: {err}")))?;
 
+        let client = self.get_or_init_client(&runtime)?;
+
         runtime.block_on(async {
-            let signer = LocalSigner::from_str(private_key)
-                .map_err(|err| {
-                    ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
-                })?
-                .with_chain_id(Some(POLYGON));
-
-            let client = Client::new(
-                &self.config.host,
-                Config::builder()
-                    .use_server_time(self.config.use_server_time)
-                    .build(),
-            )
-            .map_err(|err| ExecutionError::Transport(format!("build client: {err}")))?;
-
-            let mut auth = client.authentication_builder(&signer);
-            auth = auth.signature_type(self.config.signature_type.into_sdk());
-            if let Some(funder) = funder {
-                auth = auth.funder(funder);
-            }
-
-            let client = auth
-                .authenticate()
-                .await
-                .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))?;
-
             let mut fills = Vec::new();
             for tracked_order in tracked_orders {
                 let asset_id = U256::from_str(&tracked_order.token_id).map_err(|err| {
@@ -506,53 +505,14 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
     }
 
     fn cancel(&self, request: &CancellationRequest) -> Result<CancellationOutcome, ExecutionError> {
-        let private_key = self
-            .config
-            .private_key
-            .as_ref()
-            .map(ExposeSecret::expose_secret)
-            .ok_or_else(|| {
-                ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
-            })?;
-        let funder = self
-            .config
-            .funder
-            .as_deref()
-            .map(Address::from_str)
-            .transpose()
-            .map_err(|err| ExecutionError::Configuration(format!("invalid POLY_FUNDER: {err}")))?;
-
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|err| ExecutionError::Transport(format!("create tokio runtime: {err}")))?;
 
+        let client = self.get_or_init_client(&runtime)?;
+
         runtime.block_on(async {
-            let signer = LocalSigner::from_str(private_key)
-                .map_err(|err| {
-                    ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
-                })?
-                .with_chain_id(Some(POLYGON));
-
-            let client = Client::new(
-                &self.config.host,
-                Config::builder()
-                    .use_server_time(self.config.use_server_time)
-                    .build(),
-            )
-            .map_err(|err| ExecutionError::Transport(format!("build client: {err}")))?;
-
-            let mut auth = client.authentication_builder(&signer);
-            auth = auth.signature_type(self.config.signature_type.into_sdk());
-            if let Some(funder) = funder {
-                auth = auth.funder(funder);
-            }
-
-            let client = auth
-                .authenticate()
-                .await
-                .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))?;
-
             let response = client
                 .cancel_order(&request.venue_order_id)
                 .await
