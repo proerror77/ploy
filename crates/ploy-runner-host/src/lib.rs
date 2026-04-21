@@ -45,6 +45,20 @@ pub async fn run_with_args(args: Vec<String>) {
     }
 }
 
+pub async fn run_mode_binary(args: Vec<String>) {
+    run_with_args(normalize_mode_args(args)).await;
+}
+
+fn normalize_mode_args(mut args: Vec<String>) -> Vec<String> {
+    match args.get(1).map(String::as_str) {
+        None | Some("--config" | "--dry-run" | "--foreground") => {
+            args.insert(1, "run".to_string());
+        }
+        _ => {}
+    }
+    args
+}
+
 fn init_tracing() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| {

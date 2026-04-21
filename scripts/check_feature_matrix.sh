@@ -10,8 +10,8 @@ quick_commands=(
   "cargo check -p ploy-strategy-bundles --no-default-features --lib"
   "cargo check -p ploy-market-data --no-default-features --lib"
   "cargo check -p ploy-strategy-runtime --no-default-features --lib"
-  "cargo check -p new-ploy-runner --no-default-features --features lean-replay"
-  "cargo check -p new-ploy-runner --no-default-features --features lean-backtest"
+  "cargo check -p ploy-replay"
+  "cargo check -p ploy-backtest"
 )
 
 full_commands=(
@@ -34,8 +34,8 @@ run_quick() {
   run_step cargo check -p ploy-strategy-bundles --no-default-features --lib
   run_step cargo check -p ploy-market-data --no-default-features --lib
   run_step cargo check -p ploy-strategy-runtime --no-default-features --lib
-  run_step cargo check -p new-ploy-runner --no-default-features --features lean-replay
-  run_step cargo check -p new-ploy-runner --no-default-features --features lean-backtest
+  run_step cargo check -p ploy-replay
+  run_step cargo check -p ploy-backtest
 }
 
 run_full_only() {
@@ -56,7 +56,7 @@ Usage: scripts/check_feature_matrix.sh [--quick|--full|--heavy|--list]
 Runs the feature/build smoke matrix used by the codebase-slimming plan.
 
 Options:
-  --quick   Run core Phase 0 checks that should stay local-safe.
+  --quick   Run local-safe lean/no-default and mode-binary checks.
   --full    Run quick checks plus full runner/research checks.
   --heavy   Run checks that can compile DuckDB/Parquet/live SDK paths.
   --list    Print the command matrix without executing it.

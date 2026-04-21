@@ -6073,6 +6073,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ploy-backtest"
+version = "0.1.0"
+dependencies = [
+ "ploy-runner-host",
+ "tokio",
+]
+
+[[package]]
 name = "ploy-claimer"
 version = "0.1.0"
 dependencies = [
@@ -6217,6 +6225,14 @@ dependencies = [
  "rust_decimal_macros",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ploy-replay"
+version = "0.1.0"
+dependencies = [
+ "ploy-runner-host",
+ "tokio",
 ]
 
 [[package]]

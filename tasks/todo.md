@@ -8101,8 +8101,8 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - [ ] Execute Phase 2 runtime mode split + binary-per-mode (ploy-replay ~200 deps, ploy-backtest ~400 deps).
   - [ ] Extract mode modules (backtest.rs, replay.rs, live.rs, strategy_factory.rs).
   - [ ] Move `feed/database.rs` out of strategy-bundles into runtime or ploy-feed-loaders.
-  - [ ] Create `apps/ploy-replay` binary (strategy-bundles + trading only).
-  - [ ] Create `apps/ploy-backtest` binary (+ sqlx for DB loading).
+  - [x] Create `apps/ploy-replay` binary (strategy-bundles + trading only).
+  - [x] Create `apps/ploy-backtest` binary (+ sqlx for DB loading).
 - [ ] Execute Phase 3 PM5D shared strategy-state extraction (separate worktree only; write scope `crates/ploy-strategy-bundles/src/strategies/**`).
 - [ ] Execute Phase 4 typed strategy registry/config cleanup.
 - [ ] Execute Phase 5 research feature gating, module cleanup, and DuckDB/parquet gating (after Phase 2; before then inventory/design only).
@@ -8130,3 +8130,4 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-21): Ralplan architect review hardened remaining execution gates: Phase 0.5 is now feature spine + runner forwarding in one atomic slice; single-binary subcommands must not be treated as compile-dependency isolation; Phase 3 requires a separate worktree and strategies-only write scope; Phase 5 waits for Phase 2 except inventory/design; Phase 9/10 require V2 claim/redeem evidence.
 - Review update (2026-04-21): Phase 0.5 implemented. Added full/default and lean replay/backtest feature forwarding through `new-ploy-runner` and `ploy-runner-host`; optionalized `ploy-claimer`, `ploy-connectivity`, `ploy-market-data`, strategy-bundles `sqlx`, and market-data live SDK dependencies. Updated feature matrix so `--quick` verifies no-default and lean builds while DuckDB/Parquet/live-heavy checks sit behind `--heavy`.
 - Review update (2026-04-22): Phase 1 implemented as a runner-host ownership split. `lib.rs` now routes commands and initializes tracing; `run.rs` owns strategy config parsing/runtime launch; `ops.rs` is compiled only with the `ops` feature and owns `check-db` plus `collect-quotes`. Verified default full help still exposes ops commands, while lean replay help only exposes `run` and rejects `check-db` with a full/ops-build message.
+- Review update (2026-04-22): Phase 2 binary-per-mode slice started. Added `apps/ploy-replay` and `apps/ploy-backtest` as non-default workspace members that build through the lean runner-host feature surfaces. Updated the quick feature matrix to check those binaries directly instead of checking lean features through `new-ploy-runner`.

@@ -2,7 +2,9 @@
 members = [
     ".",
     "apps/new-ployd",
+    "apps/ploy-backtest",
     "apps/new-ploy-runner",
+    "apps/ploy-replay",
     "apps/ployctl",
     "apps/ploytui",
     "crates/ploy-control-client",
