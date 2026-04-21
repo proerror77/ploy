@@ -8119,8 +8119,9 @@ Build a Rust-native factor research workflow for binary-options trading that sep
   - [x] Move alias normalization and runtime strategy factory into strategy-bundles registry.
   - [x] Introduce typed strategy config envelope.
   - [x] Keep per-strategy TOML parsing on compatibility `[strategy]` surface and expose typed envelope for future per-strategy parsing.
-- [ ] Execute Phase 5 research feature gating, module cleanup, and DuckDB/parquet gating (after Phase 2; before then inventory/design only).
+- [x] Execute Phase 5 research feature gating, module cleanup, and DuckDB/parquet gating (after Phase 2; before then inventory/design only).
   - [x] Gate research DB, Polars export, ML, RL, and strategy-runtime dependencies behind explicit features.
+  - [x] Gate DB/parquet-heavy examples behind required features so no-default research example checks skip them cleanly.
 - [x] Execute Phase 6 ops script inventory/retirement.
   - [x] Add `docs/operations/data-jobs-inventory.md` classifying canonical, compatibility, one-shot, diagnostic, and archive-candidate data jobs.
 - [x] Execute Phase 7 control-plane API contract cleanup (schemars JSON Schema approach).
@@ -8165,6 +8166,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-22): Phase 7 implemented. `ploy-operator-contracts` now derives `schemars::JsonSchema`, exports checked JSON Schema snapshots, and generates TypeScript contract types for frontend and sidecar. Frontend/sidecar build now consumes generated control-plane types instead of manually duplicated DTO shapes.
 - Review update (2026-04-22): Phase 8 implemented. The main Test workflow is split by dependency lane instead of one large Rust build/test job, frontend/sidecar contract checks run in their own lane, each Rust lane reports elapsed seconds plus sccache stats to the job summary, and the tango deploy workflow no longer runs `cargo clean -p new-ploy-runner` before release build.
 - Review update (2026-04-22): Phase 9/10 pre-V2 gate documented. Added `docs/operations/v2-claim-redeem-gate.md` plus `scripts/check_v2_claim_redeem_gate.sh` to record current SDK/claimer dependency evidence and preserve the hard block until post-cutover V2 claim/redeem behavior is observed.
+- Review update (2026-04-22): Phase 5 completed. `ploy-research` no-default lib and no-default examples now compile without DB/Polars/ML/RL targets; DB-only `factor_scan` and Polars export lib checks were verified behind explicit features.
 - Review update (2026-04-22): Added `strategies/common/event.rs` with shared event window token helpers and migrated `prob_reversal` to use it. Broader event-window migration remains open for larger strategies.
 - Review update (2026-04-22): Continued Phase 3 common-state extraction. Migrated compatible event windows in `sweep`, `mean_reversion`, `diff_regular`, `diff_enhanced`, and `prob_chase`; added shared quote and basic holding state helpers; migrated `three_layer` settlement fallback only, leaving its event/quote shape for a dedicated larger slice.
 - Review update (2026-04-22): Phase 4 completed at compatibility scope. Registry owns alias normalization, factory construction, `StrategyKind`, and `StrategyConfigEnvelope`; the existing `[strategy]` TOML surface remains compatible until a future per-strategy parser migration.

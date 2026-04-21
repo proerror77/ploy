@@ -42,3 +42,13 @@ burn-ndarray = { version = "0.17", optional = true }
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
+
+[[example]]
+name = "factor_research"
+path = "examples/factor_research.rs"
+required-features = ["db", "polars-export"]
+
+[[example]]
+name = "factor_scan"
+path = "examples/factor_scan.rs"
+required-features = ["db"]

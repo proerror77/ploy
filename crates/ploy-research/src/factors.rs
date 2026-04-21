@@ -5,6 +5,7 @@ use ploy_market_contracts::MarketUpdate;
 #[cfg(feature = "polars-export")]
 use polars::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
+#[cfg(feature = "db")]
 use serde_json::Value;
 #[cfg(feature = "db")]
 use sqlx::PgPool;
@@ -483,6 +484,7 @@ pub async fn load_research_lob_snapshots_sampled(
         .collect())
 }
 
+#[cfg(feature = "db")]
 fn depth_band(bids: &Value, asks: &Value, mid_price: f64, pct_range: f64) -> (f64, f64) {
     if !mid_price.is_finite() || mid_price <= 0.0 {
         return (f64::NAN, f64::NAN);
@@ -495,6 +497,7 @@ fn depth_band(bids: &Value, asks: &Value, mid_price: f64, pct_range: f64) -> (f6
     )
 }
 
+#[cfg(feature = "db")]
 fn sum_depth_in_range(levels: &Value, min_price: f64, max_price: f64) -> f64 {
     levels
         .as_array()
@@ -509,6 +512,7 @@ fn sum_depth_in_range(levels: &Value, min_price: f64, max_price: f64) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[cfg(feature = "db")]
 fn parse_depth_level(level: &Value) -> Option<(f64, f64)> {
     match level {
         Value::Array(items) if items.len() >= 2 => {
@@ -519,6 +523,7 @@ fn parse_depth_level(level: &Value) -> Option<(f64, f64)> {
     }
 }
 
+#[cfg(feature = "db")]
 fn json_f64(value: &Value) -> Option<f64> {
     match value {
         Value::String(raw) => raw.parse::<f64>().ok(),
