@@ -8110,6 +8110,11 @@ Build a Rust-native factor research workflow for binary-options trading that sep
   - [x] Migrate duplicated active-order checks in `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal` to the shared guard.
   - [x] Add shared settlement fallback helper and migrate `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`.
   - [x] Add shared event window shape and migrate `prob_reversal`.
+  - [x] Migrate `sweep`, `mean_reversion`, `diff_regular`, `diff_enhanced`, and `prob_chase` to shared event window where compatible.
+  - [x] Add shared quote state for strategies with basic bid/ask/timestamp quotes.
+  - [x] Add shared basic holding state for strategies with token/direction/entry-time holdings.
+  - [x] Migrate `three_layer` settlement fallback to shared helper.
+  - [ ] Document remaining deliberate strategy-specific state shapes.
 - [ ] Execute Phase 4 typed strategy registry/config cleanup.
 - [ ] Execute Phase 5 research feature gating, module cleanup, and DuckDB/parquet gating (after Phase 2; before then inventory/design only).
 - [ ] Execute Phase 6 ops script inventory/retirement.
@@ -8144,6 +8149,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-22): Extended the Phase 3 guard helper migration across remaining strategies with identical active-order checks: `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`. This keeps the first common module focused on order-state predicates before broader event/quote/holding extraction.
 - Review update (2026-04-22): Added `strategies/common/settlement.rs` for explicit settlement + spot/price_to_beat fallback and migrated matching logic in `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`. Left `three_layer` settlement migration for its own slice to avoid broad formatting churn.
 - Review update (2026-04-22): Added `strategies/common/event.rs` with shared event window token helpers and migrated `prob_reversal` to use it. Broader event-window migration remains open for larger strategies.
+- Review update (2026-04-22): Continued Phase 3 common-state extraction. Migrated compatible event windows in `sweep`, `mean_reversion`, `diff_regular`, `diff_enhanced`, and `prob_chase`; added shared quote and basic holding state helpers; migrated `three_layer` settlement fallback only, leaving its event/quote shape for a dedicated larger slice.
 - Review update (2026-04-22): Added Build Configuration Strategy section to plan. Documented current state (profiles, sccache, mold/lld, feature gates, lean binaries, no build.rs, no custom proc-macros, Docker COPY-only). Added remaining actions and team conventions. Verified ploy-replay=118 deps, ploy-backtest=408 deps, new-ploy-runner=1373 deps; alloy/sqlx/SDK confirmed absent from lean binaries.
 
 ### Build Configuration Remaining Actions
