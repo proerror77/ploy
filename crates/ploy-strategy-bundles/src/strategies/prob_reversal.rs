@@ -10,6 +10,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+use super::common::event::EventWindow;
 use super::common::guards::active_order_exists;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
@@ -112,19 +113,6 @@ impl Default for ProbReversalConfig {
 
 // ── State ───────────────────────────────────────────────
 
-#[derive(Clone)]
-struct EventWindow {
-    event_id: Arc<str>,
-    symbol: Arc<str>,
-    up_token: Arc<str>,
-    down_token: Arc<str>,
-    end_time: DateTime<Utc>,
-    #[allow(dead_code)]
-    window_secs: u64,
-    #[allow(dead_code)]
-    price_to_beat: Option<Decimal>,
-}
-
 #[derive(Clone, Copy)]
 struct QuoteState {
     bid: Option<Decimal>,
@@ -191,7 +179,7 @@ impl ProbReversalStrategy {
         self.events
             .values()
             .flatten()
-            .find(|e| e.event_id == *event_id)
+            .find(|event| event.event_id == *event_id && event.contains_token(token_id))
     }
 
     fn entry_quantity(&self, entry_price: Decimal) -> Decimal {
@@ -217,7 +205,10 @@ impl ProbReversalStrategy {
         positions: &PositionLedger,
     ) -> Vec<StrategyDecision> {
         let mut exits = Vec::new();
-        for (token_id, wins) in [(&event.up_token, up_won), (&event.down_token, !up_won)] {
+        for token_id in [&event.up_token, &event.down_token] {
+            let wins = event
+                .token_wins(token_id, up_won)
+                .expect("event token list is built from event sides");
             let qty = positions.net_qty(token_id);
             if qty > Decimal::ZERO {
                 exits.push(StrategyDecision::Exit(TradingIntent {
