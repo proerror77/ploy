@@ -15,13 +15,18 @@ run() {
 run cargo tree -p polymarket-client-sdk --no-default-features --features gamma -i alloy
 run cargo tree -p polymarket-client-sdk --no-default-features --features data -i alloy
 run cargo tree -p polymarket-client-sdk --no-default-features --features ctf -i alloy
-run cargo tree -p ploy-claimer -i ethers-core
-run cargo tree -p ploy-claimer -i ethers-signers
+if cargo metadata --format-version 1 --no-deps | grep -q '"name":"ploy-claimer"'; then
+  run cargo tree -p ploy-claimer -i ethers-core
+  run cargo tree -p ploy-claimer -i ethers-signers
+else
+  echo
+  echo "ploy-claimer is retired from the workspace."
+fi
 
 cat <<'MSG'
 
 Gate status:
 - Phase 9 SDK slimming remains blocked until V2 claim/redeem evidence exists.
-- Phase 10 claimer consolidation/retirement remains blocked until V2
-  auto-redeem, relayer redeem, or manual redeem behavior is observed.
+- Phase 10 claimer retirement has been applied. Keep verifying no downstream
+  crate reintroduces ploy-claimer or ethers.
 MSG

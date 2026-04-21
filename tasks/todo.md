@@ -8135,12 +8135,11 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - [ ] Execute Phase 9 vendored SDK feature slimming after V2 migration stabilizes and V2 claim/redeem evidence exists.
   - [x] Add pre-V2 dependency/evidence gate runbook and local dependency preflight.
   - [ ] Post-V2: capture claim/redeem evidence before making SDK feature changes.
-- [ ] Execute Phase 10 claimer consolidation or candidate retirement investigation (post-V2, ~May 2026).
+- [x] Execute Phase 10 claimer consolidation or candidate retirement investigation (post-V2, ~May 2026).
   - [x] Add gated decision table for claimer retention vs retirement.
-  - [ ] Verify V2 claim/redeem behavior (auto-redeem or manual).
-  - [ ] If retained: migrate relayer legacy flow from ethers to alloy.
-  - [ ] If retained: delegate on-chain redeem to SDK CTF client.
-  - [ ] If V2 auto-redeems or equivalent behavior is verified: treat ploy-claimer as a retirement candidate.
+  - [x] Retire `ploy-claimer` crate and remove live runner auto-claimer startup.
+  - [x] Remove `auto-claimer` feature and `ploy-claimer` dependency from `ploy-strategy-runtime`.
+  - [x] Verify `ploy-strategy-runtime` compiles without `ploy-claimer` in checked feature configurations.
 
 ## Review
 
@@ -8167,6 +8166,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-22): Phase 8 implemented. The main Test workflow is split by dependency lane instead of one large Rust build/test job, frontend/sidecar contract checks run in their own lane, each Rust lane reports elapsed seconds plus sccache stats to the job summary, and the tango deploy workflow no longer runs `cargo clean -p new-ploy-runner` before release build.
 - Review update (2026-04-22): Phase 9/10 pre-V2 gate documented. Added `docs/operations/v2-claim-redeem-gate.md` plus `scripts/check_v2_claim_redeem_gate.sh` to record current SDK/claimer dependency evidence and preserve the hard block until post-cutover V2 claim/redeem behavior is observed.
 - Review update (2026-04-22): Phase 5 completed. `ploy-research` no-default lib and no-default examples now compile without DB/Polars/ML/RL targets; DB-only `factor_scan` and Polars export lib checks were verified behind explicit features.
+- Review update (2026-04-22): Phase 10 applied by operator decision. `ploy-claimer` was removed from the workspace, `ploy-strategy-runtime` no longer exposes `auto-claimer`, and live runtime no longer starts an in-process account claimer daemon.
 - Review update (2026-04-22): Added `strategies/common/event.rs` with shared event window token helpers and migrated `prob_reversal` to use it. Broader event-window migration remains open for larger strategies.
 - Review update (2026-04-22): Continued Phase 3 common-state extraction. Migrated compatible event windows in `sweep`, `mean_reversion`, `diff_regular`, `diff_enhanced`, and `prob_chase`; added shared quote and basic holding state helpers; migrated `three_layer` settlement fallback only, leaving its event/quote shape for a dedicated larger slice.
 - Review update (2026-04-22): Phase 4 completed at compatibility scope. Registry owns alias normalization, factory construction, `StrategyKind`, and `StrategyConfigEnvelope`; the existing `[strategy]` TOML surface remains compatible until a future per-strategy parser migration.

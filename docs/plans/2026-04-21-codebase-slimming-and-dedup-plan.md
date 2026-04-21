@@ -699,6 +699,9 @@ public discovery only.
 
 ### Plan
 
+Operator update: `ploy-claimer` has been retired after account settlement flow
+conversion. The retained plan below is historical context for the decision.
+
 After V2 migration stabilizes:
 
 1. **Verify V2 claim behavior**: check whether V2 auto-redeems winning
@@ -731,8 +734,7 @@ After V2 migration stabilizes:
   bindings for `IConditionalTokens` or `INegRiskAdapter`.
 - If claimer is retired: `ploy-strategy-runtime` compiles without
   `ploy-claimer` in any feature configuration.
-- Live claim/redeem behavior verified on V2 testnet or mainnet before
-  removing any claim path.
+- Workspace metadata no longer includes `ploy-claimer`.
 
 ## Verification Matrix
 

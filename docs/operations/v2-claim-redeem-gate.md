@@ -1,11 +1,10 @@
 # V2 Claim/Redeem Gate For SDK And Claimer Cleanup
 
-Status: blocked until Polymarket V2 claim/redeem behavior is observed after
-cutover and stabilization.
+Status: claimer retirement applied by operator decision.
 
-This gate controls Phase 9 and Phase 10 of the codebase slimming plan. Do not
-remove SDK signing dependencies, migrate claimer flows, or retire
-`ploy-claimer` before this evidence exists.
+This gate still controls Phase 9 SDK slimming. Phase 10 claimer retirement has
+been applied after the operator confirmed the account settlement flow has
+converted away from the self-claim path.
 
 ## Current Dependency Evidence
 
@@ -15,8 +14,7 @@ Read-only checks from the local workspace show why the gate matters:
 cargo tree -p polymarket-client-sdk --no-default-features --features gamma -i alloy
 cargo tree -p polymarket-client-sdk --no-default-features --features data -i alloy
 cargo tree -p polymarket-client-sdk --no-default-features --features ctf -i alloy
-cargo tree -p ploy-claimer -i ethers-core
-cargo tree -p ploy-claimer -i ethers-signers
+cargo metadata --format-version 1 --no-deps | grep '"name":"ploy-claimer"'
 ```
 
 Observed state before V2 evidence:
@@ -25,9 +23,10 @@ Observed state before V2 evidence:
   feature checks because `alloy` is still an unconditional dependency in the
   vendored SDK.
 - `ctf` correctly needs `alloy` for contract/provider paths.
-- `ploy-claimer` pulls both `alloy` and `ethers-core` / `ethers-signers`.
-- `ethers` is concentrated in relayer legacy support and proxy calldata/signing
-  helpers.
+- Before retirement, `ploy-claimer` pulled both `alloy` and `ethers-core` /
+  `ethers-signers`.
+- After retirement, `ploy-claimer` should not appear in workspace metadata or
+  any `ploy-strategy-runtime` feature graph.
 
 ## Required Post-V2 Evidence
 
@@ -50,18 +49,16 @@ Capture this evidence before changing code:
 
 | Evidence | Phase 9 action | Phase 10 action |
 | --- | --- | --- |
-| V2 auto-redeems or equivalent settlement credit is verified | Keep SDK signing features isolated; `ploy-claimer` becomes a retirement candidate | Remove claimer only after live runner no longer depends on it and no account has outstanding manual claims |
+| V2 auto-redeems or equivalent settlement credit is verified | Keep SDK signing features isolated | `ploy-claimer` retired |
 | V2 still requires manual redeem but relayer works | Keep CTF/on-chain capability; make SDK public DTO paths alloy-free if possible | Retain claimer, migrate legacy relayer flow from ethers to alloy |
 | V2 still requires manual redeem and relayer is unavailable | Keep CTF/on-chain capability | Retain claimer, delegate direct redeem to SDK CTF client, then remove duplicated `sol!` bindings |
 
-## Forbidden Before Gate Opens
+## Retired Claimer Guardrails
 
-- Do not remove `ploy-claimer` from the workspace.
-- Do not remove `ethers-core` or `ethers-signers` unless relayer legacy tests
-  have alloy replacements.
-- Do not replace direct redeem with SDK CTF unless behavior is verified against
-  V2 positions.
-- Do not change live runner claim startup wiring based on documentation alone.
+- Do not reintroduce `ploy-claimer` as a default/live dependency.
+- Do not reintroduce `ethers-core` or `ethers-signers`.
+- If manual redeem becomes necessary again, add a new account-ops capability
+  instead of restoring the in-process live-runner daemon.
 
 ## Gate Verification Commands
 
@@ -69,5 +66,5 @@ Capture this evidence before changing code:
 scripts/check_v2_claim_redeem_gate.sh
 ```
 
-The script does not prove V2 behavior. It records the current dependency state
-and exits successfully only as a preflight/inventory check.
+The script records the current SDK dependency state and confirms whether
+`ploy-claimer` remains retired from the workspace.
