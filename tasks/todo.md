@@ -8127,7 +8127,10 @@ Build a Rust-native factor research workflow for binary-options trading that sep
   - [x] Derive Rust JSON Schema from `ploy-operator-contracts` DTOs and check schema snapshots into `contracts/schemas`.
   - [x] Generate frontend and sidecar TypeScript contract types from checked schema snapshots.
   - [x] Add schema/type drift checks and switch frontend/sidecar control-plane surfaces to generated contracts.
-- [ ] Execute Phase 8 CI build-speed cleanup.
+- [x] Execute Phase 8 CI build-speed cleanup.
+  - [x] Remove unnecessary `cargo clean -p new-ploy-runner` from deploy workflow.
+  - [x] Split main CI into dependency lanes: control-plane/core, runner lean, runner live/default, market-data ops, research heavy, frontend/sidecar, and integration regressions.
+  - [x] Add per-lane elapsed time and sccache stats to GitHub job summaries.
 - [ ] Execute Phase 9 vendored SDK feature slimming after V2 migration stabilizes and V2 claim/redeem evidence exists.
 - [ ] Execute Phase 10 claimer consolidation or candidate retirement investigation (post-V2, ~May 2026).
   - [ ] Verify V2 claim/redeem behavior (auto-redeem or manual).
@@ -8157,6 +8160,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-22): Extended the Phase 3 guard helper migration across remaining strategies with identical active-order checks: `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`. This keeps the first common module focused on order-state predicates before broader event/quote/holding extraction.
 - Review update (2026-04-22): Added `strategies/common/settlement.rs` for explicit settlement + spot/price_to_beat fallback and migrated matching logic in `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`. Left `three_layer` settlement migration for its own slice to avoid broad formatting churn.
 - Review update (2026-04-22): Phase 7 implemented. `ploy-operator-contracts` now derives `schemars::JsonSchema`, exports checked JSON Schema snapshots, and generates TypeScript contract types for frontend and sidecar. Frontend/sidecar build now consumes generated control-plane types instead of manually duplicated DTO shapes.
+- Review update (2026-04-22): Phase 8 implemented. The main Test workflow is split by dependency lane instead of one large Rust build/test job, frontend/sidecar contract checks run in their own lane, each Rust lane reports elapsed seconds plus sccache stats to the job summary, and the tango deploy workflow no longer runs `cargo clean -p new-ploy-runner` before release build.
 - Review update (2026-04-22): Added `strategies/common/event.rs` with shared event window token helpers and migrated `prob_reversal` to use it. Broader event-window migration remains open for larger strategies.
 - Review update (2026-04-22): Continued Phase 3 common-state extraction. Migrated compatible event windows in `sweep`, `mean_reversion`, `diff_regular`, `diff_enhanced`, and `prob_chase`; added shared quote and basic holding state helpers; migrated `three_layer` settlement fallback only, leaving its event/quote shape for a dedicated larger slice.
 - Review update (2026-04-22): Phase 4 completed at compatibility scope. Registry owns alias normalization, factory construction, `StrategyKind`, and `StrategyConfigEnvelope`; the existing `[strategy]` TOML surface remains compatible until a future per-strategy parser migration.
