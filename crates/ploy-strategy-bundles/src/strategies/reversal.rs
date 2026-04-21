@@ -3,12 +3,13 @@ use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
-    FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
+    FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use super::common::guards::active_order_exists;
 use super::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
@@ -279,16 +280,6 @@ impl ReversalStrategy {
             || self.config.allowed_window_secs.contains(&window_secs)
     }
 
-    fn active_order_exists(&self, token_id: &str, orders: &OrderLedger) -> bool {
-        orders.orders().any(|order| {
-            order.token_id == token_id
-                && matches!(
-                    order.state,
-                    OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
-                )
-        })
-    }
-
     fn update_drift(&mut self, symbol: &str, price: Decimal, ts: DateTime<Utc>) {
         let Some(price_f) = price.to_f64() else {
             return;
@@ -506,8 +497,7 @@ impl ReversalStrategy {
             (&event.down_token, "DOWN")
         };
 
-        if positions.net_qty(token_id) > Decimal::ZERO || self.active_order_exists(token_id, orders)
-        {
+        if positions.net_qty(token_id) > Decimal::ZERO || active_order_exists(token_id, orders) {
             return None;
         }
 
@@ -921,7 +911,9 @@ impl StrategyLogic for ReversalStrategy {
                     entry.remaining_qty = (entry.remaining_qty - fill.quantity).max(Decimal::ZERO);
                     if entry.remaining_qty <= Decimal::ZERO {
                         self.entry_state.remove(fill.token_id.as_str());
-                        if let Some(event_id) = self.token_event.get(fill.token_id.as_str()).cloned() {
+                        if let Some(event_id) =
+                            self.token_event.get(fill.token_id.as_str()).cloned()
+                        {
                             self.retired_events.insert(event_id);
                         }
                     }
@@ -1049,8 +1041,8 @@ mod tests {
                 bid: Some(dec!(0.21)),
                 ask: Some(dec!(0.24)),
                 ts: now - Duration::seconds(1),
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,
@@ -1151,8 +1143,8 @@ mod tests {
                 bid: Some(dec!(0.21)),
                 ask: Some(dec!(0.24)),
                 ts: now - Duration::seconds(1),
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,
@@ -1222,8 +1214,8 @@ mod tests {
                 bid: Some(dec!(0.61)),
                 ask: Some(dec!(0.63)),
                 ts: now + Duration::seconds(15),
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,

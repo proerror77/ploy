@@ -8107,6 +8107,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
   - [x] Create `apps/ploy-backtest` binary (+ sqlx for DB loading).
 - [ ] Execute Phase 3 PM5D shared strategy-state extraction (separate worktree only; write scope `crates/ploy-strategy-bundles/src/strategies/**`).
   - [x] Start common helper extraction with order guards and migrate `prob_reversal`.
+  - [x] Migrate duplicated active-order checks in `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal` to the shared guard.
 - [ ] Execute Phase 4 typed strategy registry/config cleanup.
 - [ ] Execute Phase 5 research feature gating, module cleanup, and DuckDB/parquet gating (after Phase 2; before then inventory/design only).
 - [ ] Execute Phase 6 ops script inventory/retirement.
@@ -8138,6 +8139,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-22): Phase 2 runtime module extraction completed except DB feed relocation. Moved live/dry-run feed and execution wiring into `live.rs`, and SQLx signal/order/fill recorder into `recording.rs`; `lib.rs` remains the public `run_strategy` facade with feature fallback stubs. Verified default runner, quick feature matrix, and runtime unit tests.
 - Review update (2026-04-22): Phase 2 DB feed relocation completed. Introduced `crates/ploy-feed-loaders` for SQLx historical loaders and removed `feed/database.rs` from `ploy-strategy-bundles`, leaving strategy-bundles no-default free of SQLx. Runtime backtest and research/examples now import DB loading from `ploy-feed-loaders`.
 - Review update (2026-04-22): Phase 3 started in isolated worktree `ploy-phase3-strategy-common`. Added `strategies/common/guards.rs` with shared active-order detection and migrated `prob_reversal` to use it; broader event/quote/holding common-state extraction remains open.
+- Review update (2026-04-22): Extended the Phase 3 guard helper migration across remaining strategies with identical active-order checks: `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`. This keeps the first common module focused on order-state predicates before broader event/quote/holding extraction.
 - Review update (2026-04-22): Added Build Configuration Strategy section to plan. Documented current state (profiles, sccache, mold/lld, feature gates, lean binaries, no build.rs, no custom proc-macros, Docker COPY-only). Added remaining actions and team conventions. Verified ploy-replay=118 deps, ploy-backtest=408 deps, new-ploy-runner=1373 deps; alloy/sqlx/SDK confirmed absent from lean binaries.
 
 ### Build Configuration Remaining Actions

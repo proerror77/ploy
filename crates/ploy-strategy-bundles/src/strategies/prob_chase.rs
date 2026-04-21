@@ -10,13 +10,14 @@ use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
-    FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
+    FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use super::common::guards::active_order_exists;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 // ── Fee model ───────────────────────────────────────────
@@ -231,7 +232,8 @@ fn lookup_fair_prob(table: &[(f64, u64, f64)], abs_diff_pct: f64, remaining_secs
 
     // Clamp to table bounds
     let d = abs_diff_pct.clamp(diff_buckets[0], *diff_buckets.last().unwrap());
-    let r = (remaining_secs as f64).clamp(rem_buckets[0] as f64, *rem_buckets.last().unwrap() as f64);
+    let r =
+        (remaining_secs as f64).clamp(rem_buckets[0] as f64, *rem_buckets.last().unwrap() as f64);
 
     // Find bracketing indices for diff
     let (di_lo, di_hi) = find_bracket_f64(&diff_buckets, d);
@@ -391,16 +393,6 @@ impl ProbChaseStrategy {
             || self.config.allowed_window_secs.contains(&window_secs)
     }
 
-    fn active_order_exists(&self, token_id: &str, orders: &OrderLedger) -> bool {
-        orders.orders().any(|order| {
-            order.token_id == token_id
-                && matches!(
-                    order.state,
-                    OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
-                )
-        })
-    }
-
     fn entry_quantity(&self, entry_price: Decimal) -> Decimal {
         if entry_price <= Decimal::ZERO {
             return Decimal::ZERO;
@@ -512,9 +504,7 @@ impl ProbChaseStrategy {
         }
 
         // No duplicate position or pending order
-        if positions.net_qty(token_id) > Decimal::ZERO
-            || self.active_order_exists(token_id, orders)
-        {
+        if positions.net_qty(token_id) > Decimal::ZERO || active_order_exists(token_id, orders) {
             return None;
         }
 
@@ -527,7 +517,10 @@ impl ProbChaseStrategy {
         let edge = deviation - crypto_fee_cost(actual_prob);
         let direction_str = direction.label().to_lowercase();
         let intent_id = format!(
-            "prob_chase_{}_{}_{}", event.event_id, direction_str, now.timestamp_millis()
+            "prob_chase_{}_{}_{}",
+            event.event_id,
+            direction_str,
+            now.timestamp_millis()
         );
 
         let intent = TradingIntent {
@@ -608,14 +601,20 @@ impl ProbChaseStrategy {
 
                 // Timeout: held > max_hold_secs
                 if hold_secs > self.config.max_hold_secs as i64 {
-                    debug!(token_id = token_id.as_ref(), hold_secs, "exit: max hold timeout");
+                    debug!(
+                        token_id = token_id.as_ref(),
+                        hold_secs, "exit: max hold timeout"
+                    );
                     decisions.push(self.build_exit(event, token_id, qty, "timeout", now));
                     continue;
                 }
 
                 // Timeout: remaining < hold_to_expiry_secs
                 if remaining < self.config.hold_to_expiry_secs as i64 {
-                    debug!(token_id = token_id.as_ref(), remaining, "exit: expiry timeout");
+                    debug!(
+                        token_id = token_id.as_ref(),
+                        remaining, "exit: expiry timeout"
+                    );
                     decisions.push(self.build_exit(event, token_id, qty, "expiry_timeout", now));
                     continue;
                 }
@@ -653,12 +652,15 @@ impl ProbChaseStrategy {
                     if current_deviation < self.config.convergence_threshold {
                         debug!(
                             token_id = token_id.as_ref(),
-                            current_deviation,
-                            "exit: convergence take-profit"
+                            current_deviation, "exit: convergence take-profit"
                         );
-                        decisions.push(
-                            self.build_exit(event, token_id, qty, "convergence_tp", now),
-                        );
+                        decisions.push(self.build_exit(
+                            event,
+                            token_id,
+                            qty,
+                            "convergence_tp",
+                            now,
+                        ));
                         continue;
                     }
 
@@ -672,9 +674,7 @@ impl ProbChaseStrategy {
                             max_deviation,
                             "exit: divergence stop-loss"
                         );
-                        decisions.push(
-                            self.build_exit(event, token_id, qty, "divergence_sl", now),
-                        );
+                        decisions.push(self.build_exit(event, token_id, qty, "divergence_sl", now));
                         continue;
                     }
                 }
@@ -695,7 +695,10 @@ impl ProbChaseStrategy {
         let bid = self.quotes.get(token_id).and_then(|q| q.bid);
         StrategyDecision::Exit(TradingIntent {
             intent_id: format!(
-                "prob_chase_{}_{}_{}", reason, token_id, now.timestamp_millis()
+                "prob_chase_{}_{}_{}",
+                reason,
+                token_id,
+                now.timestamp_millis()
             ),
             deployment_id: String::new(),
             market_id: event.event_id.to_string(),
@@ -780,11 +783,8 @@ impl ProbChaseStrategy {
             }
         }
 
-        let events_snapshot: Vec<EventWindow> = self
-            .events
-            .get(symbol)
-            .cloned()
-            .unwrap_or_default();
+        let events_snapshot: Vec<EventWindow> =
+            self.events.get(symbol).cloned().unwrap_or_default();
 
         // Check exits first
         let exits = self.exit_decisions(symbol, ts, positions);
@@ -816,8 +816,7 @@ impl ProbChaseStrategy {
             }
             if let Some(diff) = self.diff_pct(event) {
                 if self.prev_diff.contains_key(&event.event_id) {
-                    if let Some(decision) =
-                        self.evaluate_entry(event, diff, ts, positions, orders)
+                    if let Some(decision) = self.evaluate_entry(event, diff, ts, positions, orders)
                     {
                         result.push(decision);
                         self.prev_diff.insert(event.event_id.clone(), diff);
@@ -895,8 +894,7 @@ impl StrategyLogic for ProbChaseStrategy {
                 }
 
                 self.token_symbol.insert(up_token.clone(), symbol.clone());
-                self.token_symbol
-                    .insert(down_token.clone(), symbol.clone());
+                self.token_symbol.insert(down_token.clone(), symbol.clone());
                 self.token_event.insert(up_token.clone(), event_id.clone());
                 self.token_event
                     .insert(down_token.clone(), event_id.clone());
@@ -920,8 +918,7 @@ impl StrategyLogic for ProbChaseStrategy {
                     self.spot.get(symbol).and_then(|s| s.price.to_f64()),
                 ) {
                     if ptb > 0.0 {
-                        self.prev_diff
-                            .insert(event_id.clone(), (spot - ptb) / ptb);
+                        self.prev_diff.insert(event_id.clone(), (spot - ptb) / ptb);
                     }
                 }
 
@@ -941,9 +938,9 @@ impl StrategyLogic for ProbChaseStrategy {
                             continue;
                         }
                         if let Some(up_won) = self.resolve_up_won(event, *resolved_up_won) {
-                            decisions.extend(self.build_settlement_exits(
-                                event, up_won, *end_time, positions,
-                            ));
+                            decisions.extend(
+                                self.build_settlement_exits(event, up_won, *end_time, positions),
+                            );
                             resolved.push(event.event_id.clone());
                         }
                     }
@@ -982,10 +979,15 @@ impl StrategyLogic for ProbChaseStrategy {
                     .get(&token_arc)
                     .and_then(|eid| {
                         // Find the event to compute fair prob at entry
-                        let event = self.events.values().flatten().find(|e| e.event_id == *eid)?;
+                        let event = self
+                            .events
+                            .values()
+                            .flatten()
+                            .find(|e| e.event_id == *eid)?;
                         let diff = self.diff_pct(event)?;
                         let abs_diff = diff.abs();
-                        let remaining = (event.end_time - fill.timestamp).num_seconds().max(0) as u64;
+                        let remaining =
+                            (event.end_time - fill.timestamp).num_seconds().max(0) as u64;
                         let fair_prob = lookup_fair_prob(&self.fair_table, abs_diff, remaining);
                         let fair_for_token = match direction {
                             Direction::Up => fair_prob,
@@ -1059,7 +1061,10 @@ mod tests {
 
         // Interpolated: diff=0.00075 (between 0.00071 and 0.001 buckets), rem=90
         let p2 = lookup_fair_prob(&table, 0.00075, 90);
-        assert!(p2 > 0.69 && p2 < 0.75, "expected between 0.69 and 0.75, got {p2}");
+        assert!(
+            p2 > 0.69 && p2 < 0.75,
+            "expected between 0.69 and 0.75, got {p2}"
+        );
     }
 
     #[test]
@@ -1131,7 +1136,9 @@ mod tests {
         );
 
         assert!(
-            decisions.iter().any(|d| matches!(d, StrategyDecision::Enter { .. })),
+            decisions
+                .iter()
+                .any(|d| matches!(d, StrategyDecision::Enter { .. })),
             "expected prob_chase entry, got {decisions:?}"
         );
     }
@@ -1198,7 +1205,9 @@ mod tests {
         );
 
         assert!(
-            !decisions.iter().any(|d| matches!(d, StrategyDecision::Enter { .. })),
+            !decisions
+                .iter()
+                .any(|d| matches!(d, StrategyDecision::Enter { .. })),
             "expected no entry when prob is already fair, got {decisions:?}"
         );
     }

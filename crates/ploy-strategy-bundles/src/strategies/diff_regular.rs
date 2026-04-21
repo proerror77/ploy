@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
-    FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
+    FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+use super::common::guards::active_order_exists;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 // ── Fee model ───────────────────────────────────────────
@@ -221,16 +222,6 @@ impl DiffRegularStrategy {
             || self.config.allowed_window_secs.contains(&window_secs)
     }
 
-    fn active_order_exists(&self, token_id: &str, orders: &OrderLedger) -> bool {
-        orders.orders().any(|order| {
-            order.token_id == token_id
-                && matches!(
-                    order.state,
-                    OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
-                )
-        })
-    }
-
     fn candidate_events(&self, symbol: &str, now: DateTime<Utc>) -> Vec<EventWindow> {
         self.events
             .get(symbol)
@@ -274,9 +265,7 @@ impl DiffRegularStrategy {
                     lock.neutral_since = Some(now);
                 }
                 if let Some(neutral_since) = lock.neutral_since {
-                    if (now - neutral_since).num_seconds()
-                        >= self.config.neutral_hold_secs as i64
-                    {
+                    if (now - neutral_since).num_seconds() >= self.config.neutral_hold_secs as i64 {
                         // Held neutral long enough — unlock
                         self.dual_cooldown.remove(symbol);
                         debug!(symbol = %symbol, "dual cooldown cleared after neutral hold");
@@ -414,14 +403,13 @@ impl DiffRegularStrategy {
 
         // Detect crossover direction
         let threshold = self.config.diff_entry_threshold;
-        let (direction_str, token_id) =
-            if prev_diff <= threshold && diff > threshold {
-                ("UP", &event.up_token)
-            } else if prev_diff >= -threshold && diff < -threshold {
-                ("DOWN", &event.down_token)
-            } else {
-                return None;
-            };
+        let (direction_str, token_id) = if prev_diff <= threshold && diff > threshold {
+            ("UP", &event.up_token)
+        } else if prev_diff >= -threshold && diff < -threshold {
+            ("DOWN", &event.down_token)
+        } else {
+            return None;
+        };
 
         // Probability gate: ask price = implied probability, must be < prob_cap
         // But first check overheat — high prob or extreme diff arms dual lock
@@ -430,9 +418,7 @@ impl DiffRegularStrategy {
         let ask = quote.ask?.to_f64()?;
 
         // Overheat check: high probability OR extreme diff → arm dual lock
-        if ask >= self.config.prob_overheat
-            || diff.abs() >= self.config.diff_overheat_threshold
-        {
+        if ask >= self.config.prob_overheat || diff.abs() >= self.config.diff_overheat_threshold {
             self.arm_dual_lock(symbol, ts);
             return None;
         }
@@ -458,9 +444,7 @@ impl DiffRegularStrategy {
         }
 
         // Existing position / active order check
-        if positions.net_qty(token_id) > Decimal::ZERO
-            || self.active_order_exists(token_id, orders)
-        {
+        if positions.net_qty(token_id) > Decimal::ZERO || active_order_exists(token_id, orders) {
             return None;
         }
 
@@ -483,14 +467,7 @@ impl DiffRegularStrategy {
             direction_str.to_lowercase(),
             ts.timestamp_millis()
         );
-        let mut signal = self.build_signal(
-            event,
-            token_id,
-            direction_str,
-            diff,
-            entry_price,
-            ts,
-        );
+        let mut signal = self.build_signal(event, token_id, direction_str, diff, entry_price, ts);
         signal.intent_id = Some(intent_id.clone());
 
         let intent = TradingIntent {
@@ -528,10 +505,7 @@ impl DiffRegularStrategy {
         positions: &PositionLedger,
     ) -> Vec<StrategyDecision> {
         let mut decisions = Vec::new();
-        let spot_f = self
-            .spot
-            .get(symbol)
-            .and_then(|s| s.price.to_f64());
+        let spot_f = self.spot.get(symbol).and_then(|s| s.price.to_f64());
 
         for event in self.events.get(symbol).into_iter().flatten() {
             if self.retired_events.contains(&event.event_id) {
@@ -751,7 +725,8 @@ impl StrategyLogic for DiffRegularStrategy {
                 self.token_symbol.insert(up_token.clone(), symbol.clone());
                 self.token_symbol.insert(down_token.clone(), symbol.clone());
                 self.token_event.insert(up_token.clone(), event_id.clone());
-                self.token_event.insert(down_token.clone(), event_id.clone());
+                self.token_event
+                    .insert(down_token.clone(), event_id.clone());
 
                 self.events
                     .entry(symbol.clone())
