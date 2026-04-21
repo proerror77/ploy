@@ -1,5 +1,6 @@
 //! Strategy implementations.
 
+mod common;
 pub mod diff_enhanced;
 pub mod diff_regular;
 pub mod directional;
