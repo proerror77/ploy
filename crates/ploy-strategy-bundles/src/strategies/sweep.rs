@@ -12,14 +12,17 @@ use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
-    FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
+    FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use super::common::event::EventWindow;
+use super::common::guards::active_order_exists;
+use super::common::settlement;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 // ── Fee Model ───────────────────────────────────────────
@@ -91,18 +94,42 @@ pub struct SweepConfig {
 fn default_symbols() -> Vec<String> {
     vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into()]
 }
-fn default_diff_sweep_threshold() -> f64 { 0.00071 }
-fn default_prob_cap() -> f64 { 0.95 }
-fn default_diff_floor_stop() -> f64 { 0.00007 }
-fn default_tp_40s() -> f64 { 0.98 }
-fn default_tp_20s() -> f64 { 0.99 }
-fn default_tp_10s() -> f64 { 1.00 }
-fn default_hold_to_expiry_secs() -> u64 { 10 }
-fn default_min_time_remaining() -> u64 { 0 }
-fn default_max_time_remaining() -> u64 { 60 }
-fn default_stake_usd() -> Decimal { dec!(25) }
-fn default_max_positions() -> usize { 1000 }
-fn default_max_daily_trades() -> u32 { 1000 }
+fn default_diff_sweep_threshold() -> f64 {
+    0.00071
+}
+fn default_prob_cap() -> f64 {
+    0.95
+}
+fn default_diff_floor_stop() -> f64 {
+    0.00007
+}
+fn default_tp_40s() -> f64 {
+    0.98
+}
+fn default_tp_20s() -> f64 {
+    0.99
+}
+fn default_tp_10s() -> f64 {
+    1.00
+}
+fn default_hold_to_expiry_secs() -> u64 {
+    10
+}
+fn default_min_time_remaining() -> u64 {
+    0
+}
+fn default_max_time_remaining() -> u64 {
+    60
+}
+fn default_stake_usd() -> Decimal {
+    dec!(25)
+}
+fn default_max_positions() -> usize {
+    1000
+}
+fn default_max_daily_trades() -> u32 {
+    1000
+}
 
 impl Default for SweepConfig {
     fn default() -> Self {
@@ -126,18 +153,6 @@ impl Default for SweepConfig {
 }
 
 // ── Internal State ──────────────────────────────────────
-
-/// Active event window for a symbol.
-#[derive(Clone)]
-struct EventWindow {
-    event_id: Arc<str>,
-    symbol: Arc<str>,
-    up_token: Arc<str>,
-    down_token: Arc<str>,
-    end_time: DateTime<Utc>,
-    window_secs: u64,
-    price_to_beat: Option<Decimal>,
-}
 
 /// Cached CEX spot price.
 struct SpotState {
@@ -208,13 +223,8 @@ impl SweepStrategy {
     }
 
     fn event_has_active_order(&self, event: &EventWindow, orders: &OrderLedger) -> bool {
-        orders.orders().any(|order| {
-            matches!(
-                order.state,
-                OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
-            ) && (order.token_id.as_str() == &*event.up_token
-                || order.token_id.as_str() == &*event.down_token)
-        })
+        active_order_exists(&event.up_token, orders)
+            || active_order_exists(&event.down_token, orders)
     }
 
     /// Find candidate events in the sweep tail window.
@@ -513,16 +523,11 @@ impl SweepStrategy {
         event: &EventWindow,
         settlement: Option<bool>,
     ) -> Option<bool> {
-        if let Some(resolved) = settlement {
-            return Some(resolved);
-        }
-        match (
-            self.spot.get(&event.symbol).map(|s| s.price),
+        settlement::resolve_up_won(
+            settlement,
+            self.spot.get(&event.symbol).map(|state| state.price),
             event.price_to_beat,
-        ) {
-            (Some(current), Some(ptb)) => Some(current >= ptb),
-            _ => None,
-        }
+        )
     }
 
     fn build_settlement_exits(
@@ -643,11 +648,17 @@ impl StrategyLogic for SweepStrategy {
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
-                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                if !self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
+                {
                     return vec![];
                 }
 
-                self.spot.insert(symbol.clone(), SpotState { price: *price });
+                self.spot
+                    .insert(symbol.clone(), SpotState { price: *price });
 
                 // Backfill price_to_beat for events that arrived before first spot
                 if let Some(events) = self.events.get_mut(symbol) {
@@ -696,7 +707,12 @@ impl StrategyLogic for SweepStrategy {
 
                 // A fresh quote may unlock an exit (take-profit on bid change).
                 if let Some(symbol) = self.token_symbol.get(token_id).cloned() {
-                    if self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                    if self
+                        .config
+                        .symbols
+                        .iter()
+                        .any(|s| s.as_str() == symbol.as_ref())
+                    {
                         let exit_decisions = self.check_exits(&symbol, positions, *ts);
                         if !exit_decisions.is_empty() {
                             return exit_decisions;
@@ -741,7 +757,8 @@ impl StrategyLogic for SweepStrategy {
                 self.token_symbol.insert(up_token.clone(), symbol.clone());
                 self.token_symbol.insert(down_token.clone(), symbol.clone());
                 self.token_event.insert(up_token.clone(), event_id.clone());
-                self.token_event.insert(down_token.clone(), event_id.clone());
+                self.token_event
+                    .insert(down_token.clone(), event_id.clone());
 
                 events.push(EventWindow {
                     event_id: event_id.clone(),
@@ -915,7 +932,10 @@ mod tests {
             &orders,
         );
 
-        assert!(decisions.is_empty(), "diff below threshold should not enter");
+        assert!(
+            decisions.is_empty(),
+            "diff below threshold should not enter"
+        );
     }
 
     #[test]
