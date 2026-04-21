@@ -1,9 +1,31 @@
-use ploy_strategy_bundles::{
-    BayesianDirectionalStrategy, FullConfig, MeanReversionStrategy, ReversalStrategy, StrategyLogic,
+use crate::config::FullConfig;
+use crate::traits::StrategyLogic;
+use crate::{
+    BayesianDirectionalStrategy, DirectionalStrategy, MeanReversionStrategy, ReversalStrategy,
+    ThreeLayerStrategy,
 };
 use tracing::info;
 
-pub(crate) fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
+#[must_use]
+pub fn canonical_strategy_variant(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "directional" | "v1" | "v2" | "v3" | "pm5d_v1" | "pm5d_v2" | "pm5d_v3" => {
+            "directional".to_string()
+        }
+        "directional_bayes" | "directional-bayes" | "pm5d_bayes" => "directional_bayes".to_string(),
+        "mean_reversion" | "mean-reversion" | "pm5d_v4" | "v4" => "mean_reversion".to_string(),
+        "reversal" | "pm5d_reversal" | "pm-5m-reversal" => "reversal".to_string(),
+        "three_layer" | "three-layer" | "threelayer" => "three_layer".to_string(),
+        "diff_enhanced" | "diff-enhanced" | "s1" | "s1_enhanced" => "diff_enhanced".to_string(),
+        "diff_regular" | "diff-regular" | "s2" | "s2_regular" => "diff_regular".to_string(),
+        "sweep" | "s3" | "s3_sweep" => "sweep".to_string(),
+        "prob_reversal" | "prob-reversal" | "s4" | "s4_reversal" => "prob_reversal".to_string(),
+        "prob_chase" | "prob-chase" | "s5" | "s5_prob_chase" => "prob_chase".to_string(),
+        other => other.to_string(),
+    }
+}
+
+pub fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
     let configured_variant = config.runtime.strategy_variant.trim();
     let canonical_variant = config.runtime.canonical_strategy_variant();
 
@@ -17,9 +39,7 @@ pub(crate) fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
                 );
             }
 
-            Box::new(ploy_strategy_bundles::DirectionalStrategy::new(
-                config.strategy.clone(),
-            ))
+            Box::new(DirectionalStrategy::new(config.strategy.clone()))
         }
         "directional_bayes" => {
             info!(
@@ -28,7 +48,7 @@ pub(crate) fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
                 "Using Bayesian directional strategy variant",
             );
             let json = serde_json::to_value(&config.strategy).expect("serialize DirectionalConfig");
-            let bayes_config: ploy_strategy_bundles::strategies::directional_bayes::BayesianDirectionalConfig =
+            let bayes_config: crate::strategies::directional_bayes::BayesianDirectionalConfig =
                 serde_json::from_value(json).expect("deserialize BayesianDirectionalConfig");
             Box::new(BayesianDirectionalStrategy::new(bayes_config))
         }
@@ -54,10 +74,8 @@ pub(crate) fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
                 canonical_variant = canonical_variant.as_str(),
                 "Using three-layer directional strategy variant",
             );
-            Box::new(ploy_strategy_bundles::ThreeLayerStrategy::new(
-                ploy_strategy_bundles::strategies::three_layer::ThreeLayerConfig::from(
-                    config.strategy.clone(),
-                ),
+            Box::new(ThreeLayerStrategy::new(
+                crate::strategies::three_layer::ThreeLayerConfig::from(config.strategy.clone()),
             ))
         }
         _ => {
@@ -72,8 +90,25 @@ pub(crate) fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_strategy;
-    use ploy_strategy_bundles::FullConfig;
+    use super::{build_strategy, canonical_strategy_variant};
+    use crate::FullConfig;
+
+    #[test]
+    fn canonical_strategy_variant_normalizes_roadmap_aliases() {
+        for (raw, expected) in [
+            ("directional", "directional"),
+            ("v1", "directional"),
+            ("v2", "directional"),
+            ("v3", "directional"),
+            ("directional_bayes", "directional_bayes"),
+            ("v4", "mean_reversion"),
+            ("pm5d_v4", "mean_reversion"),
+            ("reversal", "reversal"),
+            ("pm5d_reversal", "reversal"),
+        ] {
+            assert_eq!(canonical_strategy_variant(raw), expected);
+        }
+    }
 
     #[test]
     fn roadmap_aliases_build_expected_strategy_variants() {

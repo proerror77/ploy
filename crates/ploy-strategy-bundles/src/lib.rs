@@ -25,6 +25,7 @@ pub use signals::{MarketSignal, SignalConfig};
 pub use strategies::BayesianDirectionalStrategy;
 pub use strategies::DirectionalStrategy;
 pub use strategies::MeanReversionStrategy;
+pub use strategies::registry::{build_strategy, canonical_strategy_variant};
 pub use strategies::ReversalStrategy;
 pub use strategies::ThreeLayerStrategy;
 pub use traits::{

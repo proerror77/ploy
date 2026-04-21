@@ -6,7 +6,6 @@ mod live;
 mod recording;
 #[cfg(feature = "replay")]
 mod replay;
-mod strategy_factory;
 
 #[cfg(feature = "backtest-db")]
 use backtest::run_backtest_entry;
@@ -40,7 +39,7 @@ pub async fn run_strategy(config: FullConfig, config_path: &str, force_dry_run: 
     );
 
     let symbols = prepare_feed_symbols(runtime_config.mode, &config.strategy.symbols);
-    let strategy = strategy_factory::build_strategy(&config);
+    let strategy = ploy_strategy_bundles::build_strategy(&config);
 
     let (result, snapshot) = match runtime_config.mode {
         RuntimeMode::Backtest => {
