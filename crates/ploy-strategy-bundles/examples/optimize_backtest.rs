@@ -37,9 +37,11 @@
 
 use chrono::{NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
+use ploy_feed_loaders::{
+    load_from_database_with_options, HistoricalLoadOptions as DbHistoricalLoadOptions,
+};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    feed::{HistoricalLoadOptions, load_from_database_with_options},
     DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
     ThreeLayerStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
     StrategyLogic, StrategyRuntime,
@@ -63,7 +65,7 @@ fn load_from_parquet_vec(
     use ploy_strategy_bundles::feed::parquet_stream::StreamingParquetFeed;
     use ploy_strategy_bundles::traits::Feed;
 
-    let options = HistoricalLoadOptions::default();
+    let options = ploy_strategy_bundles::feed::HistoricalLoadOptions::default();
     let mut feed = StreamingParquetFeed::new(data_dir, symbols, from, to, &options);
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     let mut updates = Vec::new();
@@ -489,9 +491,9 @@ fn main() {
                 &symbols,
                 train_from,
                 train_to,
-                &HistoricalLoadOptions {
+                &DbHistoricalLoadOptions {
                     require_official_settlement,
-                    ..HistoricalLoadOptions::default()
+                    ..DbHistoricalLoadOptions::default()
                 },
             ))
             .expect("Failed to load training data");
@@ -504,9 +506,9 @@ fn main() {
                 &symbols,
                 val_from,
                 val_to,
-                &HistoricalLoadOptions {
+                &DbHistoricalLoadOptions {
                     require_official_settlement,
-                    ..HistoricalLoadOptions::default()
+                    ..DbHistoricalLoadOptions::default()
                 },
             ))
             .expect("Failed to load validation data");

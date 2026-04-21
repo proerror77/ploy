@@ -12,6 +12,7 @@ members = [
     "crates/ploy-claimer",
     "crates/ploy-daemon-host",
     "crates/ploy-deployments",
+    "crates/ploy-feed-loaders",
     "crates/ploy-market-contracts",
     "crates/ploy-market-data",
     "crates/ploy-operator-contracts",
@@ -55,6 +56,7 @@ ploy-control-client = { path = "crates/ploy-control-client" }
 ploy-connectivity = { path = "crates/ploy-connectivity" }
 ploy-deployments = { path = "crates/ploy-deployments" }
 ploy-daemon-host = { path = "crates/ploy-daemon-host" }
+ploy-feed-loaders = { path = "crates/ploy-feed-loaders" }
 ploy-market-contracts = { path = "crates/ploy-market-contracts" }
 ploy-market-data = { path = "crates/ploy-market-data" }
 ploy-operator-contracts = { path = "crates/ploy-operator-contracts" }

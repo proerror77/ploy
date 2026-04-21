@@ -11,7 +11,7 @@ description = "Next-generation strategy runtime ownership boundary for Ploy"
 default = ["full"]
 full = ["auto-claimer", "backtest-db", "db-recorder", "live", "live-execution", "replay"]
 auto-claimer = ["dep:ploy-claimer"]
-backtest-db = ["dep:sqlx", "ploy-strategy-bundles/db-feed"]
+backtest-db = ["dep:ploy-feed-loaders", "dep:sqlx"]
 db-recorder = ["dep:sqlx"]
 live = ["db-recorder", "dep:ploy-market-data", "ploy-market-data/live"]
 live-execution = ["dep:ploy-connectivity"]
@@ -22,6 +22,7 @@ async-trait.workspace = true
 chrono.workspace = true
 ploy-claimer = { workspace = true, optional = true }
 ploy-connectivity = { workspace = true, optional = true }
+ploy-feed-loaders = { workspace = true, optional = true }
 ploy-market-data = { path = "../ploy-market-data", optional = true, default-features = false }
 ploy-strategy-bundles = { path = "../ploy-strategy-bundles", default-features = false }
 ploy-trading.workspace = true

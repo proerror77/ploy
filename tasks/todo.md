@@ -8091,18 +8091,18 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - [x] Execute Phase 0.5 feature spine + runner forwarding (alloy/ethers/SDK/sqlx feature gates with explicit full vs lean build surfaces).
   - [x] `ploy-strategy-runtime`: make `ploy-claimer` optional (`auto-claimer` feature).
   - [x] `ploy-strategy-runtime`: make `ploy-connectivity` optional (`live-execution` feature).
-  - [x] `ploy-strategy-bundles`: make `sqlx` optional (`db-feed` feature).
+  - [x] Move SQLx historical DB loading out of `ploy-strategy-bundles` into `ploy-feed-loaders`.
   - [x] `ploy-market-data`: make `polymarket-client-sdk` optional (`live` feature).
   - [x] Update `ploy-runner-host` and `new-ploy-runner` feature forwarding so default/full stays current behavior and lean replay/backtest uses explicit Cargo feature/binary boundaries.
 - [x] Execute Phase 1 runner/market-data compile lane split (coarse features first).
   - [x] Split `ploy-runner-host` command ownership into `run` and `ops` modules.
   - [x] Keep full/default runner help showing `run`, `check-db`, and `collect-quotes`.
   - [x] Keep lean replay runner help scoped to `run`; ops commands explicitly reject without the full/ops build.
-- [ ] Execute Phase 2 runtime mode split + binary-per-mode (ploy-replay ~200 deps, ploy-backtest ~400 deps).
+- [x] Execute Phase 2 runtime mode split + binary-per-mode (ploy-replay ~200 deps, ploy-backtest ~400 deps).
   - [x] Extract mode modules (backtest.rs, replay.rs, live.rs, strategy_factory.rs).
     - [x] Extract `backtest.rs`, `replay.rs`, and `strategy_factory.rs`.
     - [x] Extract `live.rs` and `recording.rs`.
-  - [ ] Move `feed/database.rs` out of strategy-bundles into runtime or ploy-feed-loaders.
+  - [x] Move `feed/database.rs` out of strategy-bundles into runtime or ploy-feed-loaders.
   - [x] Create `apps/ploy-replay` binary (strategy-bundles + trading only).
   - [x] Create `apps/ploy-backtest` binary (+ sqlx for DB loading).
 - [ ] Execute Phase 3 PM5D shared strategy-state extraction (separate worktree only; write scope `crates/ploy-strategy-bundles/src/strategies/**`).
@@ -8135,6 +8135,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-22): Phase 2 binary-per-mode slice started. Added `apps/ploy-replay` and `apps/ploy-backtest` as non-default workspace members that build through the lean runner-host feature surfaces. Updated the quick feature matrix to check those binaries directly instead of checking lean features through `new-ploy-runner`.
 - Review update (2026-04-22): Phase 2 module extraction continued with a narrow runtime slice. Moved backtest mode, replay mode, and strategy factory construction into `crates/ploy-strategy-runtime/src/{backtest,replay,strategy_factory}.rs`; live/recording extraction and DB feed relocation remain open follow-ups. Verified quick feature matrix and `cargo test -p ploy-strategy-runtime --lib`.
 - Review update (2026-04-22): Phase 2 runtime module extraction completed except DB feed relocation. Moved live/dry-run feed and execution wiring into `live.rs`, and SQLx signal/order/fill recorder into `recording.rs`; `lib.rs` remains the public `run_strategy` facade with feature fallback stubs. Verified default runner, quick feature matrix, and runtime unit tests.
+- Review update (2026-04-22): Phase 2 DB feed relocation completed. Introduced `crates/ploy-feed-loaders` for SQLx historical loaders and removed `feed/database.rs` from `ploy-strategy-bundles`, leaving strategy-bundles no-default free of SQLx. Runtime backtest and research/examples now import DB loading from `ploy-feed-loaders`.
 - Review update (2026-04-22): Added Build Configuration Strategy section to plan. Documented current state (profiles, sccache, mold/lld, feature gates, lean binaries, no build.rs, no custom proc-macros, Docker COPY-only). Added remaining actions and team conventions. Verified ploy-replay=118 deps, ploy-backtest=408 deps, new-ploy-runner=1373 deps; alloy/sqlx/SDK confirmed absent from lean binaries.
 
 ### Build Configuration Remaining Actions

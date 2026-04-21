@@ -10,10 +10,10 @@ description = "CLI host crate for the Ploy strategy runner"
 [features]
 default = ["full"]
 full = ["ops", "run-full"]
-lean-backtest = ["ploy-strategy-runtime/backtest-db", "ploy-strategy-bundles/db-feed"]
+lean-backtest = ["ploy-strategy-runtime/backtest-db"]
 lean-replay = ["ploy-strategy-runtime/replay"]
 ops = ["dep:ploy-market-data", "dep:sqlx", "ploy-market-data/live"]
-run-full = ["ploy-strategy-runtime/full", "ploy-strategy-bundles/db-feed"]
+run-full = ["ploy-strategy-runtime/full"]
 
 [dependencies]
 ploy-market-data = { path = "../ploy-market-data", optional = true, default-features = false }

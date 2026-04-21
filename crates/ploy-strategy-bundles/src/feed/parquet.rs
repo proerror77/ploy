@@ -141,7 +141,7 @@ fn load_with_duckdb(
 }
 
 #[cfg(feature = "parquet-feed")]
-fn glob_parquet_files(dir: &str, from: DateTime<Utc>, to: DateTime<Utc>) -> String {
+fn glob_parquet_files(dir: &str, _from: DateTime<Utc>, _to: DateTime<Utc>) -> String {
     // Build a glob pattern covering all dates in [from, to].
     // DuckDB accepts a glob like: 'dir/YYYY-MM-DD.parquet'
     // For simplicity, use a wildcard and let DuckDB filter by timestamp column.

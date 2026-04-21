@@ -128,7 +128,7 @@ fn run_background(
     let from_str = from.to_rfc3339();
     let to_str = to.to_rfc3339();
     let spot_from_str = spot_from.to_rfc3339();
-    let bucket_us = (lob_sample_secs.max(1) as i64) * 1_000_000;
+    let _bucket_us = (lob_sample_secs.max(1) as i64) * 1_000_000;
 
     // File globs
     let spot_glob = format!("{data_dir}/binance_price_ticks/*.parquet");
@@ -413,7 +413,7 @@ fn load_events_vec(
     from_str: &str,
     to_str: &str,
 ) -> Result<Vec<(i64, MarketUpdate)>, Box<dyn std::error::Error + Send + Sync>> {
-    use crate::feed::database::normalize_token_id;
+    use super::options::normalize_token_id;
     use rust_decimal::Decimal;
     use std::path::Path;
     use std::sync::Arc;

@@ -32,3 +32,73 @@ impl HistoricalLoadOptions {
             .collect()
     }
 }
+
+#[must_use]
+#[cfg(any(feature = "parquet-feed", test))]
+pub fn normalize_token_id(raw: &str) -> String {
+    let value = raw.trim().trim_matches('"');
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return hex_to_decimal_string(hex).unwrap_or_else(|| value.to_string());
+    }
+    value.to_string()
+}
+
+#[cfg(any(feature = "parquet-feed", test))]
+fn hex_to_decimal_string(hex: &str) -> Option<String> {
+    if hex.is_empty() {
+        return None;
+    }
+
+    let mut digits = vec![0_u8];
+
+    for ch in hex.chars() {
+        let value = ch.to_digit(16)? as u32;
+        let mut carry = value;
+
+        for digit in &mut digits {
+            let next = (*digit as u32) * 16 + carry;
+            *digit = (next % 10) as u8;
+            carry = next / 10;
+        }
+
+        while carry > 0 {
+            digits.push((carry % 10) as u8);
+            carry /= 10;
+        }
+    }
+
+    while digits.len() > 1 && digits.last() == Some(&0) {
+        digits.pop();
+    }
+
+    Some(
+        digits
+            .iter()
+            .rev()
+            .map(|digit| char::from(b'0' + *digit))
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_token_id;
+
+    #[test]
+    fn normalize_token_id_converts_large_hex() {
+        let raw = "\"0x3c38c18444ab803acea0d4de7bcdecae7f0f8ddbcd0466e3323d1cb9e04b6f5d\"";
+        assert_eq!(
+            normalize_token_id(raw),
+            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
+        );
+    }
+
+    #[test]
+    fn normalize_token_id_keeps_decimal_ids() {
+        let raw = "12345678901234567890";
+        assert_eq!(normalize_token_id(raw), raw);
+    }
+}

@@ -15,12 +15,12 @@
 //!     [--top-n 5]
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
     build_factor_observations_with_lob, load_research_lob_snapshots_sampled,
     scan_into_registry, FactorObservation, FactorRegistry, Regime,
 };
-use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
-use ploy_market_contracts::MarketUpdate;
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
 

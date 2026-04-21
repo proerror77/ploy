@@ -1,4 +1,4 @@
-use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::{
     FullConfig, HistoricalFeed, NullRecorder, Recorder, SimulatedExecutor, StrategyLogic,
     StrategyRuntime,

@@ -3,8 +3,8 @@
 //! Loads market data from PostgreSQL into a `Vec<MarketUpdate>` that
 //! can be wrapped in [`HistoricalFeed`] for backtesting.
 //!
-//! Gated behind the `db-feed` feature flag to keep the crate
-//! lightweight when only synthetic data or live feeds are needed.
+//! Kept outside `ploy-strategy-bundles` so strategy logic can compile without
+//! SQLx when only synthetic, recorded, or live feeds are needed.
 //!
 //! # Tables Queried
 //!
@@ -24,11 +24,45 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
-use super::options::HistoricalLoadOptions;
-use crate::traits::MarketUpdate;
+use ploy_market_contracts::MarketUpdate;
 
 #[cfg(test)]
 use serde_json::Value;
+
+/// Additive historical-loader flags for non-crypto datasets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoricalLoadOptions {
+    pub include_reference_prices: bool,
+    pub reference_symbols: Vec<String>,
+    pub include_sports_state: bool,
+    pub require_official_settlement: bool,
+    /// Downsample `binance_lob_ticks` to one snapshot per N seconds per symbol.
+    /// Defaults to 30 (one row per 30-second bucket). Set to 1 to disable downsampling.
+    pub lob_sample_secs: u32,
+}
+
+impl Default for HistoricalLoadOptions {
+    fn default() -> Self {
+        Self {
+            include_reference_prices: false,
+            reference_symbols: Vec::new(),
+            include_sports_state: false,
+            require_official_settlement: false,
+            lob_sample_secs: 30,
+        }
+    }
+}
+
+impl HistoricalLoadOptions {
+    #[must_use]
+    pub fn normalized_reference_symbols(&self) -> Vec<String> {
+        self.reference_symbols
+            .iter()
+            .map(|symbol| symbol.trim().to_lowercase())
+            .filter(|symbol| !symbol.is_empty())
+            .collect()
+    }
+}
 
 /// How far before `from` to load spot prices for EWMA volatility warm-up.
 const WARMUP_MINUTES: i64 = 30;

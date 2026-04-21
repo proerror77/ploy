@@ -1,11 +1,11 @@
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_market_contracts::MarketUpdate;
+use ploy_research::factors::{pearson_ic, spearman_ic};
 use ploy_research::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations_with_lob,
     factor_metrics, load_research_lob_snapshots_sampled, FactorObservation,
 };
-use ploy_research::factors::{pearson_ic, spearman_ic};
-use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
-use ploy_market_contracts::MarketUpdate;
 use sqlx::postgres::PgPoolOptions;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;

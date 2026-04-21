@@ -6160,6 +6160,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ploy-feed-loaders"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ploy-market-contracts",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde_json",
+ "sqlx",
+ "tracing",
+]
+
+[[package]]
 name = "ploy-market-contracts"
 version = "0.1.0"
 dependencies = [
@@ -6247,6 +6260,7 @@ dependencies = [
  "linfa",
  "linfa-logistic",
  "linfa-trees",
+ "ploy-feed-loaders",
  "ploy-market-contracts",
  "ploy-operator-contracts",
  "ploy-strategy-bundles",
@@ -6284,6 +6298,7 @@ dependencies = [
  "chrono",
  "duckdb",
  "optimizer",
+ "ploy-feed-loaders",
  "ploy-market-contracts",
  "ploy-operator-contracts",
  "ploy-trading",
@@ -6307,6 +6322,7 @@ dependencies = [
  "chrono",
  "ploy-claimer",
  "ploy-connectivity",
+ "ploy-feed-loaders",
  "ploy-market-data",
  "ploy-strategy-bundles",
  "ploy-trading",
