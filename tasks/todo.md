@@ -8094,7 +8094,10 @@ Build a Rust-native factor research workflow for binary-options trading that sep
   - [x] `ploy-strategy-bundles`: make `sqlx` optional (`db-feed` feature).
   - [x] `ploy-market-data`: make `polymarket-client-sdk` optional (`live` feature).
   - [x] Update `ploy-runner-host` and `new-ploy-runner` feature forwarding so default/full stays current behavior and lean replay/backtest uses explicit Cargo feature/binary boundaries.
-- [ ] Execute Phase 1 runner/market-data compile lane split (coarse features first).
+- [x] Execute Phase 1 runner/market-data compile lane split (coarse features first).
+  - [x] Split `ploy-runner-host` command ownership into `run` and `ops` modules.
+  - [x] Keep full/default runner help showing `run`, `check-db`, and `collect-quotes`.
+  - [x] Keep lean replay runner help scoped to `run`; ops commands explicitly reject without the full/ops build.
 - [ ] Execute Phase 2 runtime mode split + binary-per-mode (ploy-replay ~200 deps, ploy-backtest ~400 deps).
   - [ ] Extract mode modules (backtest.rs, replay.rs, live.rs, strategy_factory.rs).
   - [ ] Move `feed/database.rs` out of strategy-bundles into runtime or ploy-feed-loaders.
@@ -8126,3 +8129,4 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-21): Ralph deslop review required tighter scope/verification wording; updated file scope, feature-matrix wording, performance estimates, and claimer retirement as a gated investigation. Architect verification approved Phase 0 and noted the current feature-matrix script is enough for Phase 0 but must be expanded after Phase 0.5 adds feature flags.
 - Review update (2026-04-21): Ralplan architect review hardened remaining execution gates: Phase 0.5 is now feature spine + runner forwarding in one atomic slice; single-binary subcommands must not be treated as compile-dependency isolation; Phase 3 requires a separate worktree and strategies-only write scope; Phase 5 waits for Phase 2 except inventory/design; Phase 9/10 require V2 claim/redeem evidence.
 - Review update (2026-04-21): Phase 0.5 implemented. Added full/default and lean replay/backtest feature forwarding through `new-ploy-runner` and `ploy-runner-host`; optionalized `ploy-claimer`, `ploy-connectivity`, `ploy-market-data`, strategy-bundles `sqlx`, and market-data live SDK dependencies. Updated feature matrix so `--quick` verifies no-default and lean builds while DuckDB/Parquet/live-heavy checks sit behind `--heavy`.
+- Review update (2026-04-22): Phase 1 implemented as a runner-host ownership split. `lib.rs` now routes commands and initializes tracing; `run.rs` owns strategy config parsing/runtime launch; `ops.rs` is compiled only with the `ops` feature and owns `check-db` plus `collect-quotes`. Verified default full help still exposes ops commands, while lean replay help only exposes `run` and rejects `check-db` with a full/ops-build message.
