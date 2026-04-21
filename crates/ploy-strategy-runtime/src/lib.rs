@@ -1,29 +1,82 @@
+#[cfg(any(
+    feature = "db-recorder",
+    all(feature = "live", feature = "live-execution")
+))]
 use async_trait::async_trait;
+#[cfg(feature = "auto-claimer")]
 use ploy_claimer::ensure_account_claimer_daemon;
+#[cfg(feature = "live")]
 use ploy_market_data::feeds::{
     spawn_chainlink_feed, spawn_db_aggtrade_feed, spawn_db_l2_feed, spawn_db_spot_feed,
     spawn_pyth_reference_feed, spawn_spot_feed,
 };
+#[cfg(feature = "live")]
 use ploy_market_data::reference_prices::new_reference_price_registry;
+#[cfg(feature = "live")]
 use ploy_market_data::scanner::spawn_market_scanner;
+#[cfg(feature = "live")]
 use ploy_market_data::sports_feed::spawn_sports_feed;
-use ploy_strategy_bundles::feed::{HistoricalLoadOptions, load_from_database_with_options};
+#[cfg(feature = "backtest-db")]
+use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
+#[cfg(any(
+    feature = "db-recorder",
+    all(feature = "live", feature = "live-execution")
+))]
+use ploy_strategy_bundles::ExecutionReport;
+#[cfg(feature = "live")]
+use ploy_strategy_bundles::Feed;
+#[cfg(feature = "backtest-db")]
+use ploy_strategy_bundles::HistoricalFeed;
+#[cfg(feature = "replay")]
+use ploy_strategy_bundles::RecordedFeed;
+#[cfg(feature = "db-recorder")]
+use ploy_strategy_bundles::SignalRecord;
 use ploy_strategy_bundles::{
-    BayesianDirectionalStrategy, ExecutionReport, Feed, FullConfig, HistoricalFeed, LiveFeed,
-    MeanReversionStrategy, NullRecorder, RecordedFeed, Recorder, RecordingFeed, ReversalStrategy,
-    RuntimeMode, SignalRecord, SimulatedExecutor, StrategyLogic, StrategyRuntime,
+    BayesianDirectionalStrategy, FullConfig, MeanReversionStrategy, ReversalStrategy, RuntimeMode,
+    StrategyLogic,
 };
-use ploy_trading::{FillRecord, TradeSide, TradingIntent};
-use rust_decimal::Decimal;
+#[cfg(feature = "live")]
+use ploy_strategy_bundles::{LiveFeed, RecordingFeed};
+#[cfg(any(
+    feature = "backtest-db",
+    feature = "db-recorder",
+    feature = "live",
+    feature = "replay"
+))]
+use ploy_strategy_bundles::{NullRecorder, Recorder};
+#[cfg(any(feature = "backtest-db", feature = "live", feature = "replay"))]
+use ploy_strategy_bundles::{SimulatedExecutor, StrategyRuntime};
+#[cfg(feature = "db-recorder")]
+use ploy_trading::TradeSide;
+#[cfg(any(
+    feature = "db-recorder",
+    all(feature = "live", feature = "live-execution")
+))]
+use ploy_trading::{FillRecord, TradingIntent};
+#[cfg(feature = "db-recorder")]
 use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
+#[cfg(feature = "db-recorder")]
 use serde_json::json;
+#[cfg(any(feature = "backtest-db", feature = "db-recorder", feature = "live"))]
 use sqlx::postgres::PgPoolOptions;
-use std::collections::{BTreeMap, HashMap};
+#[cfg(any(feature = "backtest-db", feature = "live", feature = "replay"))]
+use std::collections::BTreeMap;
+#[cfg(feature = "db-recorder")]
+use std::collections::HashMap;
+#[cfg(feature = "backtest-db")]
 use std::env;
+#[cfg(feature = "live")]
 use std::sync::Arc;
+#[cfg(all(feature = "live", feature = "live-execution"))]
 use std::time::{Duration, Instant};
+#[cfg(feature = "live")]
 use tokio::sync::broadcast;
-use tracing::{error, info, warn};
+#[cfg(feature = "live")]
+use tracing::error;
+use tracing::info;
+#[cfg(any(feature = "auto-claimer", feature = "db-recorder", feature = "live"))]
+use tracing::warn;
 
 pub use ploy_strategy_bundles::RuntimeMode as StrategyRuntimeMode;
 
@@ -45,11 +98,11 @@ pub async fn run_strategy(config: FullConfig, config_path: &str, force_dry_run: 
 
     let (result, snapshot) = match runtime_config.mode {
         RuntimeMode::Backtest => {
-            run_backtest(&config, &symbols, strategy, runtime_config.clone()).await
+            run_backtest_entry(&config, &symbols, strategy, runtime_config.clone()).await
         }
-        RuntimeMode::Replay => run_replay(&config, strategy, runtime_config.clone()).await,
+        RuntimeMode::Replay => run_replay_entry(&config, strategy, runtime_config.clone()).await,
         RuntimeMode::Live | RuntimeMode::DryRun => {
-            run_live_or_dry_run(&config, &symbols, strategy, runtime_config.clone()).await
+            run_live_or_dry_run_entry(&config, &symbols, strategy, runtime_config.clone()).await
         }
     };
 
@@ -84,6 +137,34 @@ pub async fn run_strategy(config: FullConfig, config_path: &str, force_dry_run: 
     }
 }
 
+#[cfg(feature = "backtest-db")]
+async fn run_backtest_entry(
+    config: &FullConfig,
+    symbols: &[String],
+    strategy: Box<dyn StrategyLogic>,
+    runtime_config: RuntimeModeConfig,
+) -> (
+    ploy_strategy_bundles::RuntimeResult,
+    ploy_trading::TradingRuntimeSnapshot,
+) {
+    run_backtest(config, symbols, strategy, runtime_config).await
+}
+
+#[cfg(not(feature = "backtest-db"))]
+async fn run_backtest_entry(
+    _config: &FullConfig,
+    _symbols: &[String],
+    _strategy: Box<dyn StrategyLogic>,
+    _runtime_config: RuntimeModeConfig,
+) -> (
+    ploy_strategy_bundles::RuntimeResult,
+    ploy_trading::TradingRuntimeSnapshot,
+) {
+    eprintln!("Backtest mode requires the `backtest-db` feature");
+    std::process::exit(1);
+}
+
+#[cfg(feature = "backtest-db")]
 async fn run_backtest(
     config: &FullConfig,
     symbols: &[String],
@@ -144,6 +225,32 @@ async fn run_backtest(
     (result, snapshot)
 }
 
+#[cfg(feature = "replay")]
+async fn run_replay_entry(
+    config: &FullConfig,
+    strategy: Box<dyn StrategyLogic>,
+    runtime_config: RuntimeModeConfig,
+) -> (
+    ploy_strategy_bundles::RuntimeResult,
+    ploy_trading::TradingRuntimeSnapshot,
+) {
+    run_replay(config, strategy, runtime_config).await
+}
+
+#[cfg(not(feature = "replay"))]
+async fn run_replay_entry(
+    _config: &FullConfig,
+    _strategy: Box<dyn StrategyLogic>,
+    _runtime_config: RuntimeModeConfig,
+) -> (
+    ploy_strategy_bundles::RuntimeResult,
+    ploy_trading::TradingRuntimeSnapshot,
+) {
+    eprintln!("Replay mode requires the `replay` feature");
+    std::process::exit(1);
+}
+
+#[cfg(feature = "replay")]
 async fn run_replay(
     config: &FullConfig,
     strategy: Box<dyn StrategyLogic>,
@@ -177,6 +284,34 @@ async fn run_replay(
     (result, snapshot)
 }
 
+#[cfg(feature = "live")]
+async fn run_live_or_dry_run_entry(
+    config: &FullConfig,
+    symbols: &[String],
+    strategy: Box<dyn StrategyLogic>,
+    runtime_config: RuntimeModeConfig,
+) -> (
+    ploy_strategy_bundles::RuntimeResult,
+    ploy_trading::TradingRuntimeSnapshot,
+) {
+    run_live_or_dry_run(config, symbols, strategy, runtime_config).await
+}
+
+#[cfg(not(feature = "live"))]
+async fn run_live_or_dry_run_entry(
+    _config: &FullConfig,
+    _symbols: &[String],
+    _strategy: Box<dyn StrategyLogic>,
+    _runtime_config: RuntimeModeConfig,
+) -> (
+    ploy_strategy_bundles::RuntimeResult,
+    ploy_trading::TradingRuntimeSnapshot,
+) {
+    eprintln!("Live and dry-run modes require the `live` feature");
+    std::process::exit(1);
+}
+
+#[cfg(feature = "live")]
 async fn run_live_or_dry_run(
     config: &FullConfig,
     symbols: &[String],
@@ -282,14 +417,26 @@ async fn run_live_or_dry_run(
 
     let recorder = build_signal_recorder(db_pool.clone(), runtime_config.mode);
     let result = if runtime_config.mode == RuntimeMode::Live {
+        #[cfg(feature = "auto-claimer")]
         if let Err(error) = ensure_account_claimer_daemon().await {
             warn!("Auto-claimer daemon failed to start: {error}");
         }
-        let executor = build_live_executor();
-        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
-        let result = runtime.run().await;
-        let snapshot = runtime.trading().snapshot(&BTreeMap::new());
-        (result, snapshot)
+
+        #[cfg(not(feature = "live-execution"))]
+        {
+            eprintln!("Live execution requires the `live-execution` feature");
+            std::process::exit(1);
+        }
+
+        #[cfg(feature = "live-execution")]
+        {
+            let executor = build_live_executor();
+            let mut runtime =
+                StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
+            let result = runtime.run().await;
+            let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+            (result, snapshot)
+        }
     } else {
         let executor = SimulatedExecutor::new(config.sim_executor_config());
         let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
@@ -311,6 +458,7 @@ async fn run_live_or_dry_run(
 
 type RuntimeModeConfig = ploy_strategy_bundles::RuntimeConfig;
 
+#[cfg(feature = "db-recorder")]
 #[derive(Clone, Default)]
 struct TokenExecutionContext {
     event_id: Option<String>,
@@ -318,12 +466,14 @@ struct TokenExecutionContext {
     market_side: Option<String>,
 }
 
+#[cfg(feature = "db-recorder")]
 struct RuntimeDbRecorder {
     pool: sqlx::PgPool,
     mode_label: String,
     token_context: HashMap<String, TokenExecutionContext>,
 }
 
+#[cfg(feature = "db-recorder")]
 impl RuntimeDbRecorder {
     fn new(pool: sqlx::PgPool, mode_label: String) -> Self {
         Self {
@@ -628,6 +778,7 @@ impl RuntimeDbRecorder {
     }
 }
 
+#[cfg(feature = "db-recorder")]
 #[async_trait]
 impl Recorder for RuntimeDbRecorder {
     async fn record_signal(&mut self, signal: &SignalRecord) {
@@ -666,6 +817,7 @@ impl Recorder for RuntimeDbRecorder {
     async fn flush(&mut self) {}
 }
 
+#[cfg(feature = "db-recorder")]
 fn build_signal_recorder(db_pool: Option<sqlx::PgPool>, mode: RuntimeMode) -> Box<dyn Recorder> {
     let Some(pool) = db_pool else {
         info!("Signal recorder disabled — DATABASE_URL unavailable");
@@ -683,12 +835,14 @@ fn build_signal_recorder(db_pool: Option<sqlx::PgPool>, mode: RuntimeMode) -> Bo
     Box::new(RuntimeDbRecorder::new(pool, mode_label))
 }
 
+#[cfg(all(feature = "live", feature = "live-execution"))]
 #[derive(Clone)]
 struct LiveExecutor {
     gateway: Arc<ploy_connectivity::PolymarketExecutionGateway>,
     next_reconcile_at: Option<Instant>,
 }
 
+#[cfg(all(feature = "live", feature = "live-execution"))]
 impl LiveExecutor {
     fn new(gateway: Arc<ploy_connectivity::PolymarketExecutionGateway>) -> Self {
         Self {
@@ -712,6 +866,7 @@ impl LiveExecutor {
     }
 }
 
+#[cfg(all(feature = "live", feature = "live-execution"))]
 #[async_trait]
 impl ploy_strategy_bundles::Executor for LiveExecutor {
     async fn submit(&mut self, intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
@@ -829,6 +984,7 @@ impl ploy_strategy_bundles::Executor for LiveExecutor {
     }
 }
 
+#[cfg(all(feature = "live", feature = "live-execution"))]
 fn build_live_executor() -> LiveExecutor {
     let gateway = Arc::new(ploy_connectivity::PolymarketExecutionGateway::from_env());
     LiveExecutor::new(gateway)
@@ -908,6 +1064,7 @@ fn prepare_feed_symbols(mode: RuntimeMode, strategy_symbols: &[String]) -> Vec<S
     }
 }
 
+#[cfg(any(feature = "live", test))]
 fn database_unavailable_is_fatal(mode: RuntimeMode, database_url_present: bool) -> bool {
     database_url_present && matches!(mode, RuntimeMode::Live | RuntimeMode::DryRun)
 }

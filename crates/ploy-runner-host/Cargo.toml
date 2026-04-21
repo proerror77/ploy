@@ -7,12 +7,19 @@ license.workspace = true
 repository.workspace = true
 description = "CLI host crate for the Ploy strategy runner"
 
+[features]
+default = ["full"]
+full = ["ops", "run-full"]
+lean-backtest = ["ploy-strategy-runtime/backtest-db", "ploy-strategy-bundles/db-feed"]
+lean-replay = ["ploy-strategy-runtime/replay"]
+ops = ["dep:ploy-market-data", "dep:sqlx", "ploy-market-data/live"]
+run-full = ["ploy-strategy-runtime/full", "ploy-strategy-bundles/db-feed"]
+
 [dependencies]
-ploy-market-data.workspace = true
-ploy-strategy-bundles.workspace = true
-ploy-strategy-runtime.workspace = true
-sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono"] }
+ploy-market-data = { path = "../ploy-market-data", optional = true, default-features = false }
+ploy-strategy-bundles = { path = "../ploy-strategy-bundles", default-features = false }
+ploy-strategy-runtime = { path = "../ploy-strategy-runtime", default-features = false }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-

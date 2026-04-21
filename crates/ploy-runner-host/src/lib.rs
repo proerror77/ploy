@@ -1,7 +1,10 @@
+#[cfg(feature = "ops")]
 use ploy_market_data::collector::{CollectorConfig, QuoteCollector};
+#[cfg(feature = "ops")]
 use ploy_market_data::diagnostics::check_database;
 use ploy_strategy_bundles::FullConfig;
 use ploy_strategy_runtime::run_strategy;
+#[cfg(feature = "ops")]
 use sqlx::postgres::PgPoolOptions;
 
 pub fn print_usage() {
@@ -9,7 +12,9 @@ pub fn print_usage() {
     eprintln!();
     eprintln!("Commands:");
     eprintln!("  run               Run the strategy (default)");
+    #[cfg(feature = "ops")]
     eprintln!("  check-db          Check database data completeness");
+    #[cfg(feature = "ops")]
     eprintln!("  collect-quotes    Collect orderbook quotes from Polymarket CLOB WebSocket");
     eprintln!();
     eprintln!("Options for 'run':");
@@ -17,17 +22,20 @@ pub fn print_usage() {
     eprintln!("  --dry-run         Force dry-run mode (simulated execution)");
     eprintln!("  --foreground      Run in foreground (default, kept for compat)");
     eprintln!();
-    eprintln!("Options for 'check-db':");
-    eprintln!(
+    #[cfg(feature = "ops")]
+    {
+        eprintln!("Options for 'check-db':");
+        eprintln!(
         "  --db-url <url>    Database URL (default: postgresql://postgres:postgres@localhost:5432/ploy)"
     );
-    eprintln!();
-    eprintln!("Options for 'collect-quotes':");
-    eprintln!("  --symbols <list>  Comma-separated symbols (default: BTCUSDT,ETHUSDT,SOLUSDT)");
-    eprintln!("  --timeframe <tf>  Market timeframe: 5m or 15m (default: 5m)");
-    eprintln!(
+        eprintln!();
+        eprintln!("Options for 'collect-quotes':");
+        eprintln!("  --symbols <list>  Comma-separated symbols (default: BTCUSDT,ETHUSDT,SOLUSDT)");
+        eprintln!("  --timeframe <tf>  Market timeframe: 5m or 15m (default: 5m)");
+        eprintln!(
         "  --db-url <url>    Database URL (default: postgresql://postgres:postgres@localhost:5432/ploy)"
     );
+    }
 }
 
 pub async fn run_with_args(args: Vec<String>) {
@@ -42,75 +50,95 @@ pub async fn run_with_args(args: Vec<String>) {
                 .parse()
                 .unwrap(),
         );
-    let _ = tracing_subscriber::fmt().with_env_filter(env_filter).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
 
     let command = args.get(1).map(|s| s.as_str());
     match command {
         Some("check-db") => {
-            let db_url = args
-                .iter()
-                .position(|s| s == "--db-url")
-                .and_then(|i| args.get(i + 1))
-                .map(|s| s.as_str())
-                .unwrap_or("postgresql://postgres:postgres@localhost:5432/ploy");
-
-            if let Err(error) = check_database(db_url).await {
-                eprintln!("Database check failed: {error}");
+            #[cfg(not(feature = "ops"))]
+            {
+                eprintln!("The check-db command requires the full/ops runner build");
                 std::process::exit(1);
             }
-            return;
-        }
-        Some("collect-quotes") => {
-            let db_url = args
-                .iter()
-                .position(|s| s == "--db-url")
-                .and_then(|i| args.get(i + 1))
-                .map(|s| s.as_str())
-                .unwrap_or("postgresql://postgres:postgres@localhost:5432/ploy");
 
-            let symbols_str = args
-                .iter()
-                .position(|s| s == "--symbols")
-                .and_then(|i| args.get(i + 1))
-                .map(|s| s.as_str())
-                .unwrap_or("BTCUSDT,ETHUSDT,SOLUSDT");
-
-            let timeframe = args
-                .iter()
-                .position(|s| s == "--timeframe")
-                .and_then(|i| args.get(i + 1))
-                .map(|s| s.as_str())
-                .unwrap_or("5m");
-
-            let symbols: Vec<String> = symbols_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
-
-            let pool = match PgPoolOptions::new()
-                .max_connections(5)
-                .connect(db_url)
-                .await
+            #[cfg(feature = "ops")]
             {
-                Ok(pool) => pool,
-                Err(error) => {
-                    eprintln!("Failed to connect to database: {error}");
+                let db_url = args
+                    .iter()
+                    .position(|s| s == "--db-url")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|s| s.as_str())
+                    .unwrap_or("postgresql://postgres:postgres@localhost:5432/ploy");
+
+                if let Err(error) = check_database(db_url).await {
+                    eprintln!("Database check failed: {error}");
                     std::process::exit(1);
                 }
-            };
-
-            let config = CollectorConfig {
-                symbols,
-                timeframe: timeframe.to_string(),
-                refresh_interval_secs: 300,
-            };
-
-            let collector = QuoteCollector::new(config, pool);
-            if let Err(error) = collector.run().await {
-                eprintln!("Quote collector failed: {error}");
+                return;
+            }
+        }
+        Some("collect-quotes") => {
+            #[cfg(not(feature = "ops"))]
+            {
+                eprintln!("The collect-quotes command requires the full/ops runner build");
                 std::process::exit(1);
             }
-            return;
+
+            #[cfg(feature = "ops")]
+            {
+                let db_url = args
+                    .iter()
+                    .position(|s| s == "--db-url")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|s| s.as_str())
+                    .unwrap_or("postgresql://postgres:postgres@localhost:5432/ploy");
+
+                let symbols_str = args
+                    .iter()
+                    .position(|s| s == "--symbols")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|s| s.as_str())
+                    .unwrap_or("BTCUSDT,ETHUSDT,SOLUSDT");
+
+                let timeframe = args
+                    .iter()
+                    .position(|s| s == "--timeframe")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|s| s.as_str())
+                    .unwrap_or("5m");
+
+                let symbols: Vec<String> = symbols_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+
+                let pool = match PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(db_url)
+                    .await
+                {
+                    Ok(pool) => pool,
+                    Err(error) => {
+                        eprintln!("Failed to connect to database: {error}");
+                        std::process::exit(1);
+                    }
+                };
+
+                let config = CollectorConfig {
+                    symbols,
+                    timeframe: timeframe.to_string(),
+                    refresh_interval_secs: 300,
+                };
+
+                let collector = QuoteCollector::new(config, pool);
+                if let Err(error) = collector.run().await {
+                    eprintln!("Quote collector failed: {error}");
+                    std::process::exit(1);
+                }
+                return;
+            }
         }
         Some("run") | None => {}
         Some("--help") | Some("-h") => {

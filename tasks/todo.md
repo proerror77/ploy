@@ -1,5 +1,37 @@
 # PM5D Settlement + Strategy Audit (2026-04-12)
 
+## Host Role Split Follow-up (2026-04-20)
+
+### Files
+
+- `.github/workflows/backtest.yml`
+- `.github/workflows/optimize.yml`
+- `.github/workflows/deploy-trade.yml`
+- `.github/workflows/deploy-tango-1-1.yml`
+- `README.md`
+- `docs/runbooks/platform-deploy.md`
+- `docs/runbooks/live-deployment-checklist.md`
+- `config/deployments/`
+- `config/strategies/`
+
+### Tasks
+
+- [ ] Split the documented/runtime model explicitly into `backtest host`, `trade host`, and `data/export host` instead of implying one shared machine.
+- [ ] Remove hard-coded assumptions that Parquet generation, trading runtime, and backtest execution all live under the same `/opt/ploy` context.
+- [ ] Decide the canonical transport for research data between hosts (`rsync` pull from exporter vs artifact/object storage) and apply it consistently across `backtest.yml` and `optimize.yml`.
+- [ ] Decide whether `tango-1-1` remains the Parquet exporter/data source or whether that responsibility moves to a dedicated host; then update workflows, docs, and secrets naming to match.
+- [ ] Ensure `deploy-trade.yml` only owns trading-host artifacts/runtime restart behavior, and does not carry backtest/research assumptions.
+- [ ] Ensure `deploy-tango-1-1.yml` only owns the services that actually belong on that host after the split, or rename/replace it if its role is now “data/collector host” rather than “trade host”.
+- [ ] Add one concise runbook section describing which validations must happen on each host class after merge.
+
+### Evidence
+
+- 2026-04-20: `.github/workflows/backtest.yml` runs on `ploy-ci-1` but still pulls Parquet and DB data from `172.16.0.204:/opt/ploy/data/parquet` / `postgresql://postgres:postgres@172.16.0.204:5432/ploy`.
+- 2026-04-20: `.github/workflows/optimize.yml` follows the same pattern as `backtest.yml`, so research execution is already on a separate host but still depends on Tango-host paths and secrets.
+- 2026-04-20: `.github/workflows/deploy-trade.yml` deploys `ploy-runner` and strategy configs to `ploy-trade-1`, which is a different host role from `ploy-ci-1`.
+- 2026-04-20: `.github/workflows/deploy-tango-1-1.yml` still bundles collector/runtime assumptions under one Tango-specific deployment flow, so host ownership is not yet cleanly separated in code/docs.
+- 2026-04-20: Remote checks confirmed `tango-1-1` has working `duckdb`, active `ployd`, and `/opt/ploy/bin/ployctl`, which makes it a valid runtime/data host but not proof that it should remain the backtest host.
+
 ## 2026-04-16 Claimer hardening addendum
 
 ### Files
@@ -8032,3 +8064,65 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - This slice changes the research direction from gate-tuning-first to factor-validity-first.
 - The new tool is intentionally research-focused, not yet a production alpha model.
 - Remaining gap: the first `factor_research` version reports IC / Spearman / limited ICIR, but still needs richer bucket outputs, combo-factor ranking, and more robust missing-value handling (`null` instead of `NaN`) before it should be treated as the final research surface.
+
+# Codebase Slimming + Dedup Planning (2026-04-21)
+
+## Files
+
+- `docs/plans/2026-04-21-codebase-slimming-and-dedup-plan.md`
+- `docs/plans/2026-04-21-codebase-slimming-baseline.md`
+- `scripts/check_feature_matrix.sh`
+- `crates/ploy-research/src/factors_new/mod.rs`
+- `crates/ploy-research/src/factors_new/registry.rs`
+- `crates/ploy-research/src/lib.rs`
+- `tasks/todo.md`
+
+## Tasks
+
+- [x] Inventory workspace crates, source hotspots, dependency fan-in, strategy duplication, research duplication, ops scripts, frontend/sidecar contract duplication, and CI build paths.
+- [x] Write a phased plan that prioritizes compile-speed and dependency-boundary wins before behavior-changing cleanup.
+- [x] Review plan: incorporate feedback on parallelization, feature granularity, test bar, rollback strategy, Phase 7 specificity, Regime conflict, and DuckDB coverage.
+- [x] Deep dependency analysis: quantify alloy (736/1373 deps = 53%), identify 4 highest-ROI Cargo.toml changes, add Phase 0.5.
+- [x] Deep optimization analysis: add Direction A (binary-per-mode), Direction B (strategy-bundles zero IO), Direction C (claimer dual-ethers-stack + V2 retirement). Add Phase 10.
+- [x] Execute Phase 0 baseline, behavior guardrails, Regime fix, and feature-matrix script smoke.
+  - [x] Add `docs/plans/2026-04-21-codebase-slimming-baseline.md` with dependency fan-in and named behavior guardrails.
+  - [x] Resolve `ploy-research` Regime export ambiguity by keeping one root-level `ploy_operator_contracts::Regime` export.
+  - [x] Add `scripts/check_feature_matrix.sh` with quick/full/list modes; verify `--list` plus targeted cargo checks locally.
+- [x] Execute Phase 0.5 feature spine + runner forwarding (alloy/ethers/SDK/sqlx feature gates with explicit full vs lean build surfaces).
+  - [x] `ploy-strategy-runtime`: make `ploy-claimer` optional (`auto-claimer` feature).
+  - [x] `ploy-strategy-runtime`: make `ploy-connectivity` optional (`live-execution` feature).
+  - [x] `ploy-strategy-bundles`: make `sqlx` optional (`db-feed` feature).
+  - [x] `ploy-market-data`: make `polymarket-client-sdk` optional (`live` feature).
+  - [x] Update `ploy-runner-host` and `new-ploy-runner` feature forwarding so default/full stays current behavior and lean replay/backtest uses explicit Cargo feature/binary boundaries.
+- [ ] Execute Phase 1 runner/market-data compile lane split (coarse features first).
+- [ ] Execute Phase 2 runtime mode split + binary-per-mode (ploy-replay ~200 deps, ploy-backtest ~400 deps).
+  - [ ] Extract mode modules (backtest.rs, replay.rs, live.rs, strategy_factory.rs).
+  - [ ] Move `feed/database.rs` out of strategy-bundles into runtime or ploy-feed-loaders.
+  - [ ] Create `apps/ploy-replay` binary (strategy-bundles + trading only).
+  - [ ] Create `apps/ploy-backtest` binary (+ sqlx for DB loading).
+- [ ] Execute Phase 3 PM5D shared strategy-state extraction (separate worktree only; write scope `crates/ploy-strategy-bundles/src/strategies/**`).
+- [ ] Execute Phase 4 typed strategy registry/config cleanup.
+- [ ] Execute Phase 5 research feature gating, module cleanup, and DuckDB/parquet gating (after Phase 2; before then inventory/design only).
+- [ ] Execute Phase 6 ops script inventory/retirement.
+- [ ] Execute Phase 7 control-plane API contract cleanup (schemars JSON Schema approach).
+- [ ] Execute Phase 8 CI build-speed cleanup.
+- [ ] Execute Phase 9 vendored SDK feature slimming after V2 migration stabilizes and V2 claim/redeem evidence exists.
+- [ ] Execute Phase 10 claimer consolidation or candidate retirement investigation (post-V2, ~May 2026).
+  - [ ] Verify V2 claim/redeem behavior (auto-redeem or manual).
+  - [ ] If retained: migrate relayer legacy flow from ethers to alloy.
+  - [ ] If retained: delegate on-chain redeem to SDK CTF client.
+  - [ ] If V2 auto-redeems or equivalent behavior is verified: treat ploy-claimer as a retirement candidate.
+
+## Review
+
+- Planning only; no source behavior changed.
+- Key finding: `new-ploy-runner` still pays for live/data/ops dependencies through `ploy-runner-host`, `ploy-strategy-runtime`, and `ploy-market-data`.
+- Key finding: PM5D strategies duplicate event/quote/holding helpers across nearly every strategy file (33+ struct defs across 10 files).
+- Key finding: `ploy-research` has both old large modules and new layered modules exported together, with heavy ML/RL/Polars dependencies not yet feature-isolated.
+- Review update (2026-04-21): Phase 3 marked parallelizable with Phases 1-2. Phase 1 feature granularity reduced to coarse-first (2-3 features). Phase 0 acceptance bar tightened with named test requirements, Regime conflict fix, and feature-matrix smoke check. Phase 7 specified as schemars JSON Schema. Rollback strategy added. DuckDB/parquet coverage added to Phase 5.
+- Review update (2026-04-21): Added quantitative dependency baseline and Phase 0.5 (quick dependency slimming). alloy = 736/1373 tree lines (53% of runner tree lines). Four Cargo.toml changes target claimer, connectivity, sqlx, and SDK as optional deps; actual compile-path reduction must be measured after implementation.
+- Review update (2026-04-21): Added three deep optimization directions. Direction A: split binaries by runtime mode (target: ploy-replay around ~200 deps for strategy iteration). Direction B: move data loading out of strategy-bundles to make it pure computation. Direction C: claimer dual-ethers consolidation + gated V2 retirement investigation. Added Phase 10 as post-V2 candidate work. Phase 2 expanded with binary-per-mode and feed/database.rs relocation.
+- Review update (2026-04-21): Executed Phase 0 as a lightweight local slice. Added the baseline report, feature-matrix script, and narrowed `ploy-research` Regime exports so there is one public `Regime` type. Verified `scripts/check_feature_matrix.sh --list` and targeted cargo checks locally; full/quick matrix compile remains a CI/isolated-target check before Phase 0.5 because local heavy Rust/DuckDB/Polars builds should not be run silently.
+- Review update (2026-04-21): Ralph deslop review required tighter scope/verification wording; updated file scope, feature-matrix wording, performance estimates, and claimer retirement as a gated investigation. Architect verification approved Phase 0 and noted the current feature-matrix script is enough for Phase 0 but must be expanded after Phase 0.5 adds feature flags.
+- Review update (2026-04-21): Ralplan architect review hardened remaining execution gates: Phase 0.5 is now feature spine + runner forwarding in one atomic slice; single-binary subcommands must not be treated as compile-dependency isolation; Phase 3 requires a separate worktree and strategies-only write scope; Phase 5 waits for Phase 2 except inventory/design; Phase 9/10 require V2 claim/redeem evidence.
+- Review update (2026-04-21): Phase 0.5 implemented. Added full/default and lean replay/backtest feature forwarding through `new-ploy-runner` and `ploy-runner-host`; optionalized `ploy-claimer`, `ploy-connectivity`, `ploy-market-data`, strategy-bundles `sqlx`, and market-data live SDK dependencies. Updated feature matrix so `--quick` verifies no-default and lean builds while DuckDB/Parquet/live-heavy checks sit behind `--heavy`.

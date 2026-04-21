@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::feed::database::HistoricalLoadOptions;
+use super::options::HistoricalLoadOptions;
 use crate::traits::MarketUpdate;
 
 /// How far before `from` to load spot prices for EWMA warm-up.
@@ -31,13 +31,13 @@ fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
         MarketUpdate::SpotPrice { ts, .. }
         | MarketUpdate::AggTrade { ts, .. }
         | MarketUpdate::Quote { ts, .. }
-            | MarketUpdate::L2 { ts, .. }
-            | MarketUpdate::L2Depth { ts, .. }
-            | MarketUpdate::SportsState { ts, .. }
-            | MarketUpdate::SportsPregame { ts, .. }
-            | MarketUpdate::SportsLive { ts, .. }
-            | MarketUpdate::ReferencePrice { ts, .. }
-            | MarketUpdate::Kline { ts, .. } => *ts,
+        | MarketUpdate::L2 { ts, .. }
+        | MarketUpdate::L2Depth { ts, .. }
+        | MarketUpdate::SportsState { ts, .. }
+        | MarketUpdate::SportsPregame { ts, .. }
+        | MarketUpdate::SportsLive { ts, .. }
+        | MarketUpdate::ReferencePrice { ts, .. }
+        | MarketUpdate::Kline { ts, .. } => *ts,
         MarketUpdate::EventDiscovered {
             end_time,
             window_secs,
@@ -107,10 +107,23 @@ fn load_with_duckdb(
     let to_date = to.date_naive();
     while day <= to_date {
         let day_start = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
-        let day_end = day.succ_opt().unwrap_or(day).and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let day_end = day
+            .succ_opt()
+            .unwrap_or(day)
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("SET memory_limit='4GB'; SET temp_directory='/tmp/duckdb_spill';")?;
-        load_l2_data(&conn, data_dir, symbols, day_start, day_end, options.lob_sample_secs, &mut updates)?;
+        load_l2_data(
+            &conn,
+            data_dir,
+            symbols,
+            day_start,
+            day_end,
+            options.lob_sample_secs,
+            &mut updates,
+        )?;
         day = day.succ_opt().unwrap_or(day);
     }
 
@@ -189,7 +202,11 @@ fn load_spot_prices(
         let (ts_us, symbol, price_f) = row?;
         let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
         let price = Decimal::try_from(price_f).unwrap_or_default();
-        updates.push(MarketUpdate::SpotPrice { symbol: Arc::from(symbol), price, ts });
+        updates.push(MarketUpdate::SpotPrice {
+            symbol: Arc::from(symbol),
+            price,
+            ts,
+        });
         count += 1;
     }
     info!(count, "Loaded spot prices from Parquet");

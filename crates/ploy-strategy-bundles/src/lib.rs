@@ -13,9 +13,10 @@ pub use bundle::StrategyBundle;
 pub use config::FullConfig;
 pub use engine::{RuntimeConfig, RuntimeMode, RuntimeResult, StrategyRuntime};
 pub use executor::{CallbackExecutor, SimulatedExecutor, SimulatedExecutorConfig};
+#[cfg(feature = "parquet-feed")]
+pub use feed::StreamingParquetFeed;
 pub use feed::{
     HistoricalFeed, LiveFeed, RecordedFeed, RecordedFeedError, RecordedMarketUpdate, RecordingFeed,
-    StreamingParquetFeed,
 };
 pub use ploy_market_contracts::{Feed, InstrumentKind, MarketUpdate, PredictionFamily, VenueKind};
 pub use recorder::BufferedRecorder;

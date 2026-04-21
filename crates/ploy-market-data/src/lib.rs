@@ -1,7 +1,13 @@
-pub mod diagnostics;
-pub mod discovery;
+#[cfg(feature = "live")]
 pub mod collector;
+#[cfg(feature = "live")]
+pub mod diagnostics;
+#[cfg(feature = "live")]
+pub mod discovery;
+#[cfg(feature = "live")]
 pub mod feeds;
 pub mod reference_prices;
+#[cfg(feature = "live")]
 pub mod scanner;
+#[cfg(feature = "live")]
 pub mod sports_feed;

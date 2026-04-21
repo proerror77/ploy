@@ -23,7 +23,11 @@ pub fn crate_marker() -> &'static str {
     CRATE_MARKER
 }
 
-// New layered pipeline exports
+// New layered pipeline exports.
+//
+// Keep `Regime` as a single root-level export from operator contracts. The
+// factor registry uses the same type internally, but does not re-export its own
+// `factors_new::Regime` alias.
 pub use factors_new::{FactorMeta, FactorRegistry, scan_into_registry};
 pub use ploy_operator_contracts::Regime;
 pub use signal::{Signal, SignalSource, ThresholdRule, RegimeRouter};
