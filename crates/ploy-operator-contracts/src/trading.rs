@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IntentPurpose {
     Entry,
@@ -12,7 +13,7 @@ pub enum IntentPurpose {
     Cancel,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TradingIntentSnapshot {
     pub intent_id: String,
     pub market_id: String,
@@ -24,7 +25,7 @@ pub struct TradingIntentSnapshot {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PaperIntentRequest {
     pub market_id: String,
     pub token_id: String,
@@ -34,7 +35,7 @@ pub struct PaperIntentRequest {
     pub purpose: IntentPurpose,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PaperIntentResponse {
     pub deployment_id: String,
     pub intent_id: String,
@@ -45,13 +46,13 @@ pub struct PaperIntentResponse {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct OrderReplaceRequest {
     pub quantity: Decimal,
     pub limit_price: Option<Decimal>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct OrderControlResponse {
     pub deployment_id: String,
     pub order_id: String,
@@ -68,7 +69,7 @@ pub struct OrderControlResponse {
     pub filled_qty: Decimal,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct OrderSnapshot {
     pub order_id: String,
     pub intent_id: String,
@@ -86,7 +87,7 @@ pub struct OrderSnapshot {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FillSnapshot {
     pub fill_id: String,
     pub order_id: String,
@@ -98,7 +99,7 @@ pub struct FillSnapshot {
     pub timestamp: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PositionSnapshotResponse {
     pub token_id: String,
     pub net_qty: Decimal,
@@ -106,7 +107,7 @@ pub struct PositionSnapshotResponse {
     pub realized_pnl: Decimal,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PnlSnapshotResponse {
     pub realized_pnl: Decimal,
     pub unrealized_pnl: Decimal,
@@ -114,7 +115,7 @@ pub struct PnlSnapshotResponse {
     pub net_pnl: Decimal,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RiskSnapshotResponse {
     pub pending_intents: usize,
     pub active_orders: usize,
@@ -124,7 +125,7 @@ pub struct RiskSnapshotResponse {
     pub total_gross_exposure: Decimal,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TradingStateSnapshot {
     pub deployment_id: String,
     pub runtime_mode: String,
@@ -136,7 +137,7 @@ pub struct TradingStateSnapshot {
     pub risk: RiskSnapshotResponse,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TradeResponse {
     pub id: String,
     pub timestamp: DateTime<Utc>,
@@ -151,7 +152,7 @@ pub struct TradeResponse {
     pub error_message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PositionResponse {
     pub token_id: String,
     pub token_name: String,
@@ -164,7 +165,7 @@ pub struct PositionResponse {
     pub duration_seconds: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MarketData {
     pub token_id: String,
     pub token_name: String,
@@ -178,7 +179,9 @@ pub struct MarketData {
 
 /// Time-remaining regime for a binary option market.
 /// Shared between research (backtesting) and live strategy runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Regime {
     /// 181..=300 seconds remaining.
@@ -195,17 +198,17 @@ impl Regime {
     pub fn from_secs(t: i64) -> Self {
         match t {
             181..=300 => Regime::Early,
-            61..=180  => Regime::Middle,
-            6..=60    => Regime::Late,
-            _         => Regime::Expiry,
+            61..=180 => Regime::Middle,
+            6..=60 => Regime::Late,
+            _ => Regime::Expiry,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Regime::Early  => "early",
+            Regime::Early => "early",
             Regime::Middle => "middle",
-            Regime::Late   => "late",
+            Regime::Late => "late",
             Regime::Expiry => "expiry",
         }
     }

@@ -8123,7 +8123,10 @@ Build a Rust-native factor research workflow for binary-options trading that sep
   - [x] Gate research DB, Polars export, ML, RL, and strategy-runtime dependencies behind explicit features.
 - [x] Execute Phase 6 ops script inventory/retirement.
   - [x] Add `docs/operations/data-jobs-inventory.md` classifying canonical, compatibility, one-shot, diagnostic, and archive-candidate data jobs.
-- [ ] Execute Phase 7 control-plane API contract cleanup (schemars JSON Schema approach).
+- [x] Execute Phase 7 control-plane API contract cleanup (schemars JSON Schema approach).
+  - [x] Derive Rust JSON Schema from `ploy-operator-contracts` DTOs and check schema snapshots into `contracts/schemas`.
+  - [x] Generate frontend and sidecar TypeScript contract types from checked schema snapshots.
+  - [x] Add schema/type drift checks and switch frontend/sidecar control-plane surfaces to generated contracts.
 - [ ] Execute Phase 8 CI build-speed cleanup.
 - [ ] Execute Phase 9 vendored SDK feature slimming after V2 migration stabilizes and V2 claim/redeem evidence exists.
 - [ ] Execute Phase 10 claimer consolidation or candidate retirement investigation (post-V2, ~May 2026).
@@ -8153,6 +8156,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-22): Phase 3 started in isolated worktree `ploy-phase3-strategy-common`. Added `strategies/common/guards.rs` with shared active-order detection and migrated `prob_reversal` to use it; broader event/quote/holding common-state extraction remains open.
 - Review update (2026-04-22): Extended the Phase 3 guard helper migration across remaining strategies with identical active-order checks: `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`. This keeps the first common module focused on order-state predicates before broader event/quote/holding extraction.
 - Review update (2026-04-22): Added `strategies/common/settlement.rs` for explicit settlement + spot/price_to_beat fallback and migrated matching logic in `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`. Left `three_layer` settlement migration for its own slice to avoid broad formatting churn.
+- Review update (2026-04-22): Phase 7 implemented. `ploy-operator-contracts` now derives `schemars::JsonSchema`, exports checked JSON Schema snapshots, and generates TypeScript contract types for frontend and sidecar. Frontend/sidecar build now consumes generated control-plane types instead of manually duplicated DTO shapes.
 - Review update (2026-04-22): Added `strategies/common/event.rs` with shared event window token helpers and migrated `prob_reversal` to use it. Broader event-window migration remains open for larger strategies.
 - Review update (2026-04-22): Continued Phase 3 common-state extraction. Migrated compatible event windows in `sweep`, `mean_reversion`, `diff_regular`, `diff_enhanced`, and `prob_chase`; added shared quote and basic holding state helpers; migrated `three_layer` settlement fallback only, leaving its event/quote shape for a dedicated larger slice.
 - Review update (2026-04-22): Phase 4 completed at compatibility scope. Registry owns alias normalization, factory construction, `StrategyKind`, and `StrategyConfigEnvelope`; the existing `[strategy]` TOML surface remains compatible until a future per-strategy parser migration.

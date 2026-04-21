@@ -3,9 +3,10 @@ use crate::diagnostics::{OversightSnapshotEvent, ProposalSnapshotEvent};
 use crate::system::{ActiveAlert, PlatformMetrics, SystemStatus};
 use crate::trading::{MarketData, PositionResponse, TradeResponse, TradingStateSnapshot};
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LogEntry {
     pub timestamp: DateTime<Utc>,
     pub level: String,
@@ -14,37 +15,37 @@ pub struct LogEntry {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct StatusUpdate {
     pub status: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SystemSnapshotEvent {
     pub system: SystemStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DeploymentSnapshotEvent {
     pub deployments: Vec<DeploymentSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TradingSnapshotEvent {
     pub trading: Vec<TradingStateSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MetricsSnapshotEvent {
     pub metrics: PlatformMetrics,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AlertSnapshotEvent {
     pub alerts: Vec<ActiveAlert>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", content = "data")]
 pub enum OperatorEvent {
     #[serde(rename = "log")]
@@ -258,7 +259,10 @@ mod tests {
 
         assert_eq!(value["type"], json!("metrics_snapshot"));
         assert_eq!(value["data"]["metrics"]["total_deployments"], json!(2));
-        assert_eq!(value["data"]["metrics"]["heartbeats"][0]["state"], json!("stale"));
+        assert_eq!(
+            value["data"]["metrics"]["heartbeats"][0]["state"],
+            json!("stale")
+        );
     }
 
     #[test]

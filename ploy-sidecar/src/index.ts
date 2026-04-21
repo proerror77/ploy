@@ -19,6 +19,11 @@ import { espnServer } from "./tools/espn.js";
 import { polymarketServer } from "./tools/polymarket.js";
 import { ployBackendServer } from "./tools/ploy-backend.js";
 import { tradingOutputSchema } from "./schemas/output.js";
+import type {
+  DeploymentSummary,
+  SystemStatus,
+  TradingStateSnapshot,
+} from "./contracts/operator-contracts.js";
 
 // ── Config ──────────────────────────────────────────
 
@@ -160,26 +165,6 @@ type RuntimeContext = {
   } | null;
 };
 
-type TradingSnapshot = {
-  deployment_id: string;
-  runtime_mode: string;
-  pnl?: {
-    net_pnl?: string;
-  };
-  risk?: {
-    pending_intents?: number;
-    active_orders?: number;
-    open_positions?: number;
-    gross_exposure?: string;
-  };
-};
-
-type DeploymentSummary = {
-  deployment_id: string;
-  desired_state: string;
-  observed_state: string;
-};
-
 async function backendFetchJson<T>(path: string): Promise<T | null> {
   try {
     const headers: Record<string, string> = {
@@ -205,12 +190,8 @@ async function backendFetchJson<T>(path: string): Promise<T | null> {
 
 async function buildRuntimeContext(): Promise<RuntimeContext> {
   const [system, trading, deployments] = await Promise.all([
-    backendFetchJson<{
-      status: string;
-      uptime_seconds: number;
-      error_count_1h: number;
-    }>("/api/system/status"),
-    backendFetchJson<TradingSnapshot[]>("/api/trading/state"),
+    backendFetchJson<SystemStatus>("/api/system/status"),
+    backendFetchJson<TradingStateSnapshot[]>("/api/trading/state"),
     backendFetchJson<DeploymentSummary[]>("/api/deployments"),
   ]);
 
