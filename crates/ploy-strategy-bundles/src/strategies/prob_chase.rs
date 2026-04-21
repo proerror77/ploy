@@ -15,9 +15,10 @@ use ploy_trading::{
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use super::common::guards::active_order_exists;
+use super::common::settlement;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 // ── Fee model ───────────────────────────────────────────
@@ -416,12 +417,11 @@ impl ProbChaseStrategy {
     }
 
     fn resolve_up_won(&self, event: &EventWindow, settlement: Option<bool>) -> Option<bool> {
-        if settlement.is_some() {
-            return settlement;
-        }
-        let price_to_beat = event.price_to_beat?.to_f64()?;
-        let spot = self.spot.get(&event.symbol)?.price.to_f64()?;
-        Some(spot >= price_to_beat)
+        settlement::resolve_up_won(
+            settlement,
+            self.spot.get(&event.symbol).map(|state| state.price),
+            event.price_to_beat,
+        )
     }
 
     /// Determine direction for a token by checking event up/down tokens.

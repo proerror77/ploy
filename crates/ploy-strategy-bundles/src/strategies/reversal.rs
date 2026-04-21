@@ -10,6 +10,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::common::guards::active_order_exists;
+use super::common::settlement;
 use super::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
@@ -341,13 +342,11 @@ impl ReversalStrategy {
     }
 
     fn resolve_up_won(&self, event: &EventWindow, settlement: Option<bool>) -> Option<bool> {
-        if settlement.is_some() {
-            return settlement;
-        }
-
-        let price_to_beat = event.price_to_beat?.to_f64()?;
-        let spot = self.spot.get(&event.symbol)?.price.to_f64()?;
-        Some(spot >= price_to_beat)
+        settlement::resolve_up_won(
+            settlement,
+            self.spot.get(&event.symbol).map(|state| state.price),
+            event.price_to_beat,
+        )
     }
 
     fn build_settlement_exits(
