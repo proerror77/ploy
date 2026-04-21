@@ -17,6 +17,7 @@ pub use feed::{
     HistoricalFeed, LiveFeed, RecordedFeed, RecordedFeedError, RecordedMarketUpdate, RecordingFeed,
     StreamingParquetFeed,
 };
+pub use ploy_market_contracts::{Feed, InstrumentKind, MarketUpdate, PredictionFamily, VenueKind};
 pub use recorder::BufferedRecorder;
 pub use runtime::emit_intents;
 pub use signals::{MarketSignal, SignalConfig};
@@ -26,8 +27,8 @@ pub use strategies::MeanReversionStrategy;
 pub use strategies::ReversalStrategy;
 pub use strategies::ThreeLayerStrategy;
 pub use traits::{
-    ExecutionReport, Executor, Feed, MarketUpdate, NullRecorder, Recorder, SignalRecord,
-    StrategyDecision, StrategyLogic,
+    ExecutionReport, Executor, NullRecorder, Recorder, SignalRecord, StrategyDecision,
+    StrategyLogic,
 };
 
 pub const CRATE_MARKER: &str = "ploy-strategy-bundles";

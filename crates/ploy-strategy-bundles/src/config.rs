@@ -4,6 +4,7 @@
 //! The `[runtime].mode` field selects which Feed and Executor are wired.
 
 use chrono::{DateTime, Utc};
+use ploy_market_contracts::{InstrumentKind, PredictionFamily, VenueKind};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::path::Path;
@@ -63,6 +64,15 @@ pub struct RuntimeSection {
     /// - `"reversal"`, `"pm5d_reversal"` => `"reversal"`
     #[serde(default = "default_strategy_variant")]
     pub strategy_variant: String,
+    /// Prediction family for the configured runtime.
+    #[serde(default)]
+    pub prediction_family: PredictionFamily,
+    /// Instrument kind for the configured runtime.
+    #[serde(default)]
+    pub instrument_kind: InstrumentKind,
+    /// Venue kind for the configured runtime.
+    #[serde(default)]
+    pub venue: VenueKind,
     /// Backtest start time (ISO 8601 format, e.g., "2026-04-01T00:00:00Z")
     pub from: Option<String>,
     /// Backtest end time (ISO 8601 format, e.g., "2026-04-01T23:59:59Z")
@@ -141,16 +151,10 @@ impl RuntimeSection {
             "mean_reversion" | "mean-reversion" | "pm5d_v4" | "v4" => "mean_reversion".to_string(),
             "reversal" | "pm5d_reversal" | "pm-5m-reversal" => "reversal".to_string(),
             "three_layer" | "three-layer" | "threelayer" => "three_layer".to_string(),
-            "diff_enhanced" | "diff-enhanced" | "s1" | "s1_enhanced" => {
-                "diff_enhanced".to_string()
-            }
-            "diff_regular" | "diff-regular" | "s2" | "s2_regular" => {
-                "diff_regular".to_string()
-            }
+            "diff_enhanced" | "diff-enhanced" | "s1" | "s1_enhanced" => "diff_enhanced".to_string(),
+            "diff_regular" | "diff-regular" | "s2" | "s2_regular" => "diff_regular".to_string(),
             "sweep" | "s3" | "s3_sweep" => "sweep".to_string(),
-            "prob_reversal" | "prob-reversal" | "s4" | "s4_reversal" => {
-                "prob_reversal".to_string()
-            }
+            "prob_reversal" | "prob-reversal" | "s4" | "s4_reversal" => "prob_reversal".to_string(),
             "prob_chase" | "prob-chase" | "s5" | "s5_prob_chase" => "prob_chase".to_string(),
             other => other.to_string(),
         }
@@ -487,6 +491,49 @@ strategy_variant = "{raw}"
             .unwrap();
             assert_eq!(config.runtime.canonical_strategy_variant(), expected);
         }
+    }
+
+    #[test]
+    fn runtime_contract_metadata_defaults_to_crypto_polymarket() {
+        let config = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "dryrun"
+
+[strategy]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.runtime.prediction_family,
+            PredictionFamily::CryptoExpiry
+        );
+        assert_eq!(config.runtime.instrument_kind, InstrumentKind::UpDown);
+        assert_eq!(config.runtime.venue, VenueKind::Polymarket);
+    }
+
+    #[test]
+    fn runtime_contract_metadata_parses_snake_case() {
+        let config = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "dryrun"
+prediction_family = "sports_pregame"
+instrument_kind = "moneyline"
+venue = "sportsbook"
+
+[strategy]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.runtime.prediction_family,
+            PredictionFamily::SportsPregame
+        );
+        assert_eq!(config.runtime.instrument_kind, InstrumentKind::Moneyline);
+        assert_eq!(config.runtime.venue, VenueKind::Sportsbook);
     }
 
     #[test]

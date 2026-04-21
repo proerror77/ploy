@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use ploy_strategy_bundles::MarketUpdate;
+use ploy_market_contracts::MarketUpdate;
 use polymarket_client_sdk::gamma::types::request::MarketsRequest;
 use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::types::U256;

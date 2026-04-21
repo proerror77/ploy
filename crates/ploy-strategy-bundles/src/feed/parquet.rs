@@ -31,11 +31,13 @@ fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
         MarketUpdate::SpotPrice { ts, .. }
         | MarketUpdate::AggTrade { ts, .. }
         | MarketUpdate::Quote { ts, .. }
-        | MarketUpdate::L2 { ts, .. }
-        | MarketUpdate::L2Depth { ts, .. }
-        | MarketUpdate::SportsState { ts, .. }
-        | MarketUpdate::ReferencePrice { ts, .. }
-        | MarketUpdate::Kline { ts, .. } => *ts,
+            | MarketUpdate::L2 { ts, .. }
+            | MarketUpdate::L2Depth { ts, .. }
+            | MarketUpdate::SportsState { ts, .. }
+            | MarketUpdate::SportsPregame { ts, .. }
+            | MarketUpdate::SportsLive { ts, .. }
+            | MarketUpdate::ReferencePrice { ts, .. }
+            | MarketUpdate::Kline { ts, .. } => *ts,
         MarketUpdate::EventDiscovered {
             end_time,
             window_secs,

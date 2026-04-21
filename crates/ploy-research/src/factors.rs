@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use chrono::{DateTime, Utc};
-use ploy_strategy_bundles::traits::MarketUpdate;
+use ploy_market_contracts::MarketUpdate;
 use polars::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
 use serde_json::Value;
@@ -1578,6 +1578,8 @@ fn update_sort_ts(update: &MarketUpdate) -> DateTime<Utc> {
         | MarketUpdate::L2 { ts, .. }
         | MarketUpdate::L2Depth { ts, .. }
         | MarketUpdate::SportsState { ts, .. }
+        | MarketUpdate::SportsPregame { ts, .. }
+        | MarketUpdate::SportsLive { ts, .. }
         | MarketUpdate::ReferencePrice { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
         MarketUpdate::EventDiscovered {

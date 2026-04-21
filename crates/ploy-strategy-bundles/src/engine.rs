@@ -335,6 +335,8 @@ where
             | MarketUpdate::L2 { ts, .. }
             | MarketUpdate::L2Depth { ts, .. }
             | MarketUpdate::SportsState { ts, .. }
+            | MarketUpdate::SportsPregame { ts, .. }
+            | MarketUpdate::SportsLive { ts, .. }
             | MarketUpdate::ReferencePrice { ts, .. }
             | MarketUpdate::Kline { ts, .. } => Some(*ts),
             MarketUpdate::EventDiscovered { end_time, .. } => Some(*end_time),
