@@ -155,6 +155,10 @@ fn serialize_orderbook_levels(levels: &[OrderBookLevel]) -> String {
     serde_json::to_string(&levels).expect("serializing persisted orderbook levels cannot fail")
 }
 
+fn bridge_sdk_json<T: Serialize>(value: Option<T>) -> Option<String> {
+    value.and_then(|inner| serde_json::to_string(&inner).ok())
+}
+
 fn parse_json_string_array(raw: &str) -> Option<Vec<String>> {
     serde_json::from_str(raw).ok()
 }
@@ -252,16 +256,13 @@ async fn fetch_official_market_settlements(
         closed: market.closed,
         resolved_by: market.resolved_by,
         uma_resolution_status: market.uma_resolution_status,
-        outcomes: market.outcomes.map(|v| serde_json::to_string(&v).unwrap_or_default()),
+        outcomes: market
+            .outcomes
+            .map(|v| serde_json::to_string(&v).unwrap_or_default()),
         outcome_prices: market
             .outcome_prices
             .map(|v| serde_json::to_string(&v).unwrap_or_default()),
-        clob_token_ids: market.clob_token_ids.map(|v| {
-            v.iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        }),
+        clob_token_ids: bridge_sdk_json(market.clob_token_ids),
     };
 
     match parse_official_market_settlements(&payload) {
@@ -652,7 +653,9 @@ impl QuoteCollector {
                 );
 
                 for (market_id, up_token, down_token) in &rows {
-                    let settlements = match fetch_official_market_settlements(&gamma, market_id).await {
+                    let settlements = match fetch_official_market_settlements(&gamma, market_id)
+                        .await
+                    {
                         OfficialMarketSettlementStatus::Closed(settlements) => settlements,
                         OfficialMarketSettlementStatus::Open => {
                             match clear_unofficial_market_settlements(&pool, market_id).await {
@@ -664,7 +667,9 @@ impl QuoteCollector {
                                     );
                                 }
                                 Ok(_) => {}
-                                Err(e) => warn!(error = %e, market_id = %market_id, "Failed to clear stale settlement rows"),
+                                Err(e) => {
+                                    warn!(error = %e, market_id = %market_id, "Failed to clear stale settlement rows")
+                                }
                             }
                             continue;
                         }
@@ -1078,10 +1083,10 @@ fn hex_to_decimal_string(hex: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        best_tradeable_ask, best_tradeable_bid, book_timestamp, collector_market_data_ws_config,
-        hex_to_decimal_string, normalize_token_id, parse_official_market_settlements,
-        serialize_orderbook_levels, snapshot_context, OfficialMarketSettlementPayload,
-        OrderBookLevel, TokenMetadata,
+        best_tradeable_ask, best_tradeable_bid, book_timestamp, bridge_sdk_json,
+        collector_market_data_ws_config, hex_to_decimal_string, normalize_token_id,
+        parse_official_market_settlements, serialize_orderbook_levels, snapshot_context,
+        OfficialMarketSettlementPayload, OrderBookLevel, TokenMetadata,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;
@@ -1208,5 +1213,28 @@ mod tests {
         };
 
         assert!(parse_official_market_settlements(&payload).is_none());
+    }
+
+    #[test]
+    fn bridged_clob_token_ids_stay_json_for_official_settlement_parser() {
+        let bridged = bridge_sdk_json(Some(vec!["123".to_string(), "456".to_string()]))
+            .expect("bridged clob token ids");
+        let token_ids: Vec<String> =
+            serde_json::from_str(&bridged).expect("bridge should preserve a JSON array");
+        assert_eq!(token_ids, vec!["123", "456"]);
+
+        let payload = OfficialMarketSettlementPayload {
+            closed: Some(true),
+            resolved_by: Some("oracle".to_string()),
+            uma_resolution_status: Some("resolved".to_string()),
+            outcomes: Some(r#"["Up","Down"]"#.to_string()),
+            outcome_prices: Some(r#"["1","0"]"#.to_string()),
+            clob_token_ids: Some(bridged),
+        };
+
+        let settlements = parse_official_market_settlements(&payload).expect("official settlement");
+        assert_eq!(settlements.len(), 2);
+        assert_eq!(settlements[0].token_id, "123");
+        assert_eq!(settlements[1].token_id, "456");
     }
 }
