@@ -9,7 +9,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Timelike, Utc};
 use futures::StreamExt;
-use ploy_strategy_bundles::MarketUpdate;
+use ploy_market_contracts::MarketUpdate;
 use polymarket_client_sdk::rtds::{Client as RtdsClient, EquityPriceMessage};
 use polymarket_client_sdk::types::U256;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
@@ -1064,7 +1064,7 @@ fn parse_agg_trade_msg(v: &serde_json::Value) -> Option<AggTradeMsg> {
 mod tests {
     use super::{l2_updates_from_book, parse_agg_trade_msg, rtds_market_data_ws_config};
     use chrono::Utc;
-    use ploy_strategy_bundles::MarketUpdate;
+    use ploy_market_contracts::MarketUpdate;
     use rust_decimal::prelude::ToPrimitive;
     use rust_decimal_macros::dec;
     use serde_json::json;
@@ -1100,7 +1100,7 @@ mod tests {
         );
 
         assert!(
-            matches!(updates.first(), Some(MarketUpdate::L2 { symbol, .. }) if symbol == "BTCUSDT")
+            matches!(updates.first(), Some(MarketUpdate::L2 { symbol, .. }) if symbol.as_ref() == "BTCUSDT")
         );
         assert!(matches!(
             updates.get(1),

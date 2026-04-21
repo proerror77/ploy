@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt};
-use ploy_strategy_bundles::MarketUpdate;
+use ploy_market_contracts::MarketUpdate;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -334,7 +334,7 @@ fn non_empty(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use ploy_strategy_bundles::MarketUpdate;
+    use ploy_market_contracts::MarketUpdate;
 
     use super::{SportsDescriptor, SportsDescriptorCache, parse_message_text};
 
@@ -358,22 +358,22 @@ mod tests {
         assert!(matches!(
             &updates[0],
             MarketUpdate::SportsState { status, live, ended, .. }
-                if status == "Scheduled" && !live && !ended
+                if status.as_ref() == "Scheduled" && !live && !ended
         ));
         assert!(matches!(
             &updates[1],
             MarketUpdate::SportsState { status, period, live, .. }
-                if status == "InProgress" && period.as_deref() == Some("Q4") && *live
+                if status.as_ref() == "InProgress" && period.as_deref() == Some("Q4") && *live
         ));
         assert!(matches!(
             &updates[2],
             MarketUpdate::SportsState { status, period, .. }
-                if status == "Break" && period.as_deref() == Some("HT")
+                if status.as_ref() == "Break" && period.as_deref() == Some("HT")
         ));
         assert!(matches!(
             &updates[3],
             MarketUpdate::SportsState { status, ended, finished_at, .. }
-                if status == "finished" && *ended && finished_at.is_some()
+                if status.as_ref() == "finished" && *ended && finished_at.is_some()
         ));
     }
 
@@ -401,7 +401,7 @@ mod tests {
         assert!(matches!(
             parsed.update,
             MarketUpdate::SportsState { home_team, away_team, .. }
-                if home_team == "LAL" && away_team == "BOS"
+                if home_team.as_ref() == "LAL" && away_team.as_ref() == "BOS"
         ));
     }
 }

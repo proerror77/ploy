@@ -175,6 +175,8 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
         | MarketUpdate::L2 { ts, .. }
         | MarketUpdate::L2Depth { ts, .. }
         | MarketUpdate::SportsState { ts, .. }
+        | MarketUpdate::SportsPregame { ts, .. }
+        | MarketUpdate::SportsLive { ts, .. }
         | MarketUpdate::ReferencePrice { ts, .. }
         | MarketUpdate::Kline { ts, .. } => *ts,
         MarketUpdate::EventDiscovered { end_time, .. } => *end_time - Duration::seconds(300),
@@ -413,6 +415,8 @@ fn print_data_breakdown(updates: &[MarketUpdate]) {
             MarketUpdate::EventExpired { .. } => event_expired += 1,
             MarketUpdate::L2 { .. } | MarketUpdate::L2Depth { .. } => l2_count += 1,
             MarketUpdate::SportsState { .. }
+            | MarketUpdate::SportsPregame { .. }
+            | MarketUpdate::SportsLive { .. }
             | MarketUpdate::ReferencePrice { .. } => {}
             MarketUpdate::Kline { .. } => kline_count += 1,
         }

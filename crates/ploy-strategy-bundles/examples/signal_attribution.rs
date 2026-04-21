@@ -172,15 +172,15 @@ async fn main() {
                 ..
             } => {
                 events.insert(
-                    event_id.clone(),
+                    event_id.to_string(),
                     EventState {
-                        event_id: event_id.clone(),
-                        symbol: symbol.clone(),
+                        event_id: event_id.to_string(),
+                        symbol: symbol.to_string(),
                         end_time: Some(*end_time),
                         price_to_beat: price_to_beat.and_then(|price| price.to_f64()),
                         resolved_up_won: *resolved_up_won,
-                        up_token: up_token.clone(),
-                        down_token: down_token.clone(),
+                        up_token: up_token.to_string(),
+                        down_token: down_token.to_string(),
                     },
                 );
             }
@@ -189,7 +189,7 @@ async fn main() {
                 resolved_up_won,
                 ..
             } => {
-                if let Some(event) = events.get_mut(event_id) {
+                if let Some(event) = events.get_mut(event_id.as_ref()) {
                     event.resolved_up_won = resolved_up_won.or(event.resolved_up_won);
                 }
             }
@@ -197,7 +197,7 @@ async fn main() {
                 token_id, ask, ts, ..
             } => {
                 if let Some(ask_price) = ask.and_then(|value| value.to_f64()) {
-                    quotes.insert(token_id.clone(), (*ts, ask_price));
+                    quotes.insert(token_id.to_string(), (*ts, ask_price));
                 }
             }
             MarketUpdate::L2 {
@@ -206,7 +206,7 @@ async fn main() {
                 spread_bps,
                 ..
             } => {
-                let state = lob.entry(symbol.clone()).or_default();
+                let state = lob.entry(symbol.to_string()).or_default();
                 state.obi = *obi;
                 state.spread_bps = *spread_bps;
             }
@@ -219,7 +219,7 @@ async fn main() {
                 ..
             } => {
                 lob.insert(
-                    symbol.clone(),
+                    symbol.to_string(),
                     LobState {
                         obi: *obi,
                         spread_bps: *spread_bps,
@@ -229,16 +229,17 @@ async fn main() {
                 );
             }
             MarketUpdate::SpotPrice { symbol, price, ts } => {
+                let symbol = symbol.as_ref();
                 let Some(spot_price) = price.to_f64() else {
                     continue;
                 };
 
                 buf_30s
-                    .entry(symbol.clone())
+                    .entry(symbol.to_string())
                     .or_insert_with(|| DriftBuffer::new(30.0))
                     .push(*ts, spot_price);
                 buf_10s
-                    .entry(symbol.clone())
+                    .entry(symbol.to_string())
                     .or_insert_with(|| DriftBuffer::new(10.0))
                     .push(*ts, spot_price);
 
@@ -248,12 +249,12 @@ async fn main() {
                 let flipped =
                     previous != 0.0 && drift_30 != 0.0 && previous.signum() != drift_30.signum();
                 if flipped {
-                    drift_flip_ts.insert(symbol.clone(), Some(*ts));
+                    drift_flip_ts.insert(symbol.to_string(), Some(*ts));
                 }
-                prev_drift_30s.insert(symbol.clone(), drift_30);
+                prev_drift_30s.insert(symbol.to_string(), drift_30);
 
                 for event in events.values() {
-                    if event.symbol != *symbol {
+                    if event.symbol != symbol {
                         continue;
                     }
                     let Some(end_time) = event.end_time else {
