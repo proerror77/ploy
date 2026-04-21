@@ -17,7 +17,13 @@ use ploy_market_data::scanner::spawn_market_scanner;
 #[cfg(feature = "live")]
 use ploy_market_data::sports_feed::spawn_sports_feed;
 #[cfg(feature = "backtest-db")]
-use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
+mod backtest;
+#[cfg(feature = "replay")]
+mod replay;
+mod strategy_factory;
+
+#[cfg(feature = "backtest-db")]
+use backtest::run_backtest_entry;
 #[cfg(any(
     feature = "db-recorder",
     all(feature = "live", feature = "live-execution")
@@ -25,26 +31,14 @@ use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoa
 use ploy_strategy_bundles::ExecutionReport;
 #[cfg(feature = "live")]
 use ploy_strategy_bundles::Feed;
-#[cfg(feature = "backtest-db")]
-use ploy_strategy_bundles::HistoricalFeed;
-#[cfg(feature = "replay")]
-use ploy_strategy_bundles::RecordedFeed;
 #[cfg(feature = "db-recorder")]
 use ploy_strategy_bundles::SignalRecord;
-use ploy_strategy_bundles::{
-    BayesianDirectionalStrategy, FullConfig, MeanReversionStrategy, ReversalStrategy, RuntimeMode,
-    StrategyLogic,
-};
+use ploy_strategy_bundles::{FullConfig, RuntimeMode, StrategyLogic};
 #[cfg(feature = "live")]
 use ploy_strategy_bundles::{LiveFeed, RecordingFeed};
-#[cfg(any(
-    feature = "backtest-db",
-    feature = "db-recorder",
-    feature = "live",
-    feature = "replay"
-))]
+#[cfg(feature = "db-recorder")]
 use ploy_strategy_bundles::{NullRecorder, Recorder};
-#[cfg(any(feature = "backtest-db", feature = "live", feature = "replay"))]
+#[cfg(feature = "live")]
 use ploy_strategy_bundles::{SimulatedExecutor, StrategyRuntime};
 #[cfg(feature = "db-recorder")]
 use ploy_trading::TradeSide;
@@ -53,18 +47,20 @@ use ploy_trading::TradeSide;
     all(feature = "live", feature = "live-execution")
 ))]
 use ploy_trading::{FillRecord, TradingIntent};
+#[cfg(feature = "replay")]
+use replay::run_replay_entry;
 #[cfg(feature = "db-recorder")]
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 #[cfg(feature = "db-recorder")]
 use serde_json::json;
-#[cfg(any(feature = "backtest-db", feature = "db-recorder", feature = "live"))]
+#[cfg(any(feature = "db-recorder", feature = "live"))]
 use sqlx::postgres::PgPoolOptions;
-#[cfg(any(feature = "backtest-db", feature = "live", feature = "replay"))]
+#[cfg(feature = "live")]
 use std::collections::BTreeMap;
 #[cfg(feature = "db-recorder")]
 use std::collections::HashMap;
-#[cfg(feature = "backtest-db")]
+#[cfg(feature = "live")]
 use std::env;
 #[cfg(feature = "live")]
 use std::sync::Arc;
@@ -94,7 +90,7 @@ pub async fn run_strategy(config: FullConfig, config_path: &str, force_dry_run: 
     );
 
     let symbols = prepare_feed_symbols(runtime_config.mode, &config.strategy.symbols);
-    let strategy = build_strategy(&config);
+    let strategy = strategy_factory::build_strategy(&config);
 
     let (result, snapshot) = match runtime_config.mode {
         RuntimeMode::Backtest => {
@@ -137,19 +133,6 @@ pub async fn run_strategy(config: FullConfig, config_path: &str, force_dry_run: 
     }
 }
 
-#[cfg(feature = "backtest-db")]
-async fn run_backtest_entry(
-    config: &FullConfig,
-    symbols: &[String],
-    strategy: Box<dyn StrategyLogic>,
-    runtime_config: RuntimeModeConfig,
-) -> (
-    ploy_strategy_bundles::RuntimeResult,
-    ploy_trading::TradingRuntimeSnapshot,
-) {
-    run_backtest(config, symbols, strategy, runtime_config).await
-}
-
 #[cfg(not(feature = "backtest-db"))]
 async fn run_backtest_entry(
     _config: &FullConfig,
@@ -164,79 +147,6 @@ async fn run_backtest_entry(
     std::process::exit(1);
 }
 
-#[cfg(feature = "backtest-db")]
-async fn run_backtest(
-    config: &FullConfig,
-    symbols: &[String],
-    strategy: Box<dyn StrategyLogic>,
-    runtime_config: RuntimeModeConfig,
-) -> (
-    ploy_strategy_bundles::RuntimeResult,
-    ploy_trading::TradingRuntimeSnapshot,
-) {
-    let db_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/ploy".to_string());
-
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&db_url)
-        .await
-        .expect("Failed to connect to database");
-
-    let (from, to) = config.backtest_time_range().unwrap_or_else(|| {
-        let from = chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let to = chrono::DateTime::parse_from_rfc3339("2026-04-01T13:30:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        (from, to)
-    });
-
-    info!(
-        from = %from,
-        to = %to,
-        symbols = ?symbols,
-        "Loading historical data from database",
-    );
-
-    let backtest_options = HistoricalLoadOptions {
-        include_reference_prices: config.backtest_data.include_reference_prices,
-        reference_symbols: config
-            .backtest_data
-            .reference_symbols(&config.reference_data),
-        include_sports_state: config.backtest_data.include_sports_state,
-        require_official_settlement: config.backtest_data.require_official_settlement,
-        lob_sample_secs: 30,
-    };
-
-    let updates = load_from_database_with_options(&pool, symbols, from, to, &backtest_options)
-        .await
-        .expect("Failed to load historical data");
-
-    info!(updates = updates.len(), "Historical data loaded");
-
-    let feed = HistoricalFeed::new(updates);
-    let executor = SimulatedExecutor::new(config.sim_executor_config());
-    let recorder: Box<dyn Recorder> = Box::new(NullRecorder);
-    let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
-    let result = runtime.run().await;
-    let snapshot = runtime.trading().snapshot(&BTreeMap::new());
-    (result, snapshot)
-}
-
-#[cfg(feature = "replay")]
-async fn run_replay_entry(
-    config: &FullConfig,
-    strategy: Box<dyn StrategyLogic>,
-    runtime_config: RuntimeModeConfig,
-) -> (
-    ploy_strategy_bundles::RuntimeResult,
-    ploy_trading::TradingRuntimeSnapshot,
-) {
-    run_replay(config, strategy, runtime_config).await
-}
-
 #[cfg(not(feature = "replay"))]
 async fn run_replay_entry(
     _config: &FullConfig,
@@ -248,40 +158,6 @@ async fn run_replay_entry(
 ) {
     eprintln!("Replay mode requires the `replay` feature");
     std::process::exit(1);
-}
-
-#[cfg(feature = "replay")]
-async fn run_replay(
-    config: &FullConfig,
-    strategy: Box<dyn StrategyLogic>,
-    runtime_config: RuntimeModeConfig,
-) -> (
-    ploy_strategy_bundles::RuntimeResult,
-    ploy_trading::TradingRuntimeSnapshot,
-) {
-    let replay_path = config.replay_market_updates_path().unwrap_or_else(|| {
-        eprintln!("Replay mode requires [runtime].replay_market_updates_from in the config");
-        std::process::exit(1);
-    });
-
-    info!(
-        path = %replay_path.display(),
-        "Loading recorded market-update log for replay",
-    );
-
-    let feed = RecordedFeed::from_path(replay_path).unwrap_or_else(|error| {
-        eprintln!(
-            "Failed to load replay market updates from {}: {error}",
-            replay_path.display()
-        );
-        std::process::exit(1);
-    });
-    let executor = SimulatedExecutor::new(config.sim_executor_config());
-    let recorder: Box<dyn Recorder> = Box::new(NullRecorder);
-    let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
-    let result = runtime.run().await;
-    let snapshot = runtime.trading().snapshot(&BTreeMap::new());
-    (result, snapshot)
 }
 
 #[cfg(feature = "live")]
@@ -990,73 +866,6 @@ fn build_live_executor() -> LiveExecutor {
     LiveExecutor::new(gateway)
 }
 
-fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
-    let configured_variant = config.runtime.strategy_variant.trim();
-    let canonical_variant = config.runtime.canonical_strategy_variant();
-
-    match canonical_variant.as_str() {
-        "directional" => {
-            if configured_variant != "directional" {
-                info!(
-                    configured_variant = configured_variant,
-                    canonical_variant = canonical_variant.as_str(),
-                    "Using roadmap alias for directional strategy variant",
-                );
-            }
-
-            Box::new(ploy_strategy_bundles::DirectionalStrategy::new(
-                config.strategy.clone(),
-            ))
-        }
-        "directional_bayes" => {
-            info!(
-                configured_variant = configured_variant,
-                canonical_variant = canonical_variant.as_str(),
-                "Using Bayesian directional strategy variant",
-            );
-            let json = serde_json::to_value(&config.strategy).expect("serialize DirectionalConfig");
-            let bayes_config: ploy_strategy_bundles::strategies::directional_bayes::BayesianDirectionalConfig =
-                serde_json::from_value(json).expect("deserialize BayesianDirectionalConfig");
-            Box::new(BayesianDirectionalStrategy::new(bayes_config))
-        }
-        "mean_reversion" => {
-            info!(
-                configured_variant = configured_variant,
-                canonical_variant = canonical_variant.as_str(),
-                "Using mean-reversion strategy variant",
-            );
-            Box::new(MeanReversionStrategy::new(config.strategy.clone()))
-        }
-        "reversal" => {
-            info!(
-                configured_variant = configured_variant,
-                canonical_variant = canonical_variant.as_str(),
-                "Using reversal strategy variant",
-            );
-            Box::new(ReversalStrategy::new(config.strategy.clone().into()))
-        }
-        "three_layer" => {
-            info!(
-                configured_variant = configured_variant,
-                canonical_variant = canonical_variant.as_str(),
-                "Using three-layer directional strategy variant",
-            );
-            Box::new(ploy_strategy_bundles::ThreeLayerStrategy::new(
-                ploy_strategy_bundles::strategies::three_layer::ThreeLayerConfig::from(
-                    config.strategy.clone(),
-                ),
-            ))
-        }
-        _ => {
-            eprintln!(
-                "Unsupported strategy_variant `{configured_variant}` in config. \
-                 Supported runtime variants: directional, directional_bayes, mean_reversion, reversal, three_layer, v1, v2, v3, v4."
-            );
-            std::process::exit(1);
-        }
-    }
-}
-
 fn prepare_feed_symbols(mode: RuntimeMode, strategy_symbols: &[String]) -> Vec<String> {
     match mode {
         RuntimeMode::Backtest | RuntimeMode::Replay => strategy_symbols.to_vec(),
@@ -1071,8 +880,8 @@ fn database_unavailable_is_fatal(mode: RuntimeMode, database_url_present: bool) 
 
 #[cfg(test)]
 mod tests {
-    use super::{build_strategy, database_unavailable_is_fatal, prepare_feed_symbols};
-    use ploy_strategy_bundles::{FullConfig, RuntimeMode};
+    use super::{database_unavailable_is_fatal, prepare_feed_symbols};
+    use ploy_strategy_bundles::RuntimeMode;
 
     #[test]
     fn keeps_strategy_symbols_canonical_for_live_feeds() {
@@ -1088,32 +897,5 @@ mod tests {
         assert!(!database_unavailable_is_fatal(RuntimeMode::Backtest, true));
         assert!(!database_unavailable_is_fatal(RuntimeMode::Replay, true));
         assert!(!database_unavailable_is_fatal(RuntimeMode::DryRun, false));
-    }
-
-    #[test]
-    fn roadmap_aliases_build_expected_strategy_variants() {
-        for (variant, expected_name) in [
-            ("v1", "pm_5m_directional"),
-            ("v2", "pm_5m_directional"),
-            ("v3", "pm_5m_directional"),
-            ("v4", "pm_5m_mean_reversion"),
-            ("reversal", "pm_5m_reversal"),
-            ("three_layer", "three_layer"),
-            ("three-layer", "three_layer"),
-        ] {
-            let config = FullConfig::from_toml(&format!(
-                r#"
-[runtime]
-mode = "dryrun"
-strategy_variant = "{variant}"
-
-[strategy]
-"#
-            ))
-            .unwrap();
-
-            let strategy = build_strategy(&config);
-            assert_eq!(strategy.name(), expected_name);
-        }
     }
 }
