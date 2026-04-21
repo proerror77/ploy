@@ -8121,7 +8121,8 @@ Build a Rust-native factor research workflow for binary-options trading that sep
   - [x] Keep per-strategy TOML parsing on compatibility `[strategy]` surface and expose typed envelope for future per-strategy parsing.
 - [ ] Execute Phase 5 research feature gating, module cleanup, and DuckDB/parquet gating (after Phase 2; before then inventory/design only).
   - [x] Gate research DB, Polars export, ML, RL, and strategy-runtime dependencies behind explicit features.
-- [ ] Execute Phase 6 ops script inventory/retirement.
+- [x] Execute Phase 6 ops script inventory/retirement.
+  - [x] Add `docs/operations/data-jobs-inventory.md` classifying canonical, compatibility, one-shot, diagnostic, and archive-candidate data jobs.
 - [ ] Execute Phase 7 control-plane API contract cleanup (schemars JSON Schema approach).
 - [ ] Execute Phase 8 CI build-speed cleanup.
 - [ ] Execute Phase 9 vendored SDK feature slimming after V2 migration stabilizes and V2 claim/redeem evidence exists.
@@ -8155,6 +8156,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-22): Added `strategies/common/event.rs` with shared event window token helpers and migrated `prob_reversal` to use it. Broader event-window migration remains open for larger strategies.
 - Review update (2026-04-22): Continued Phase 3 common-state extraction. Migrated compatible event windows in `sweep`, `mean_reversion`, `diff_regular`, `diff_enhanced`, and `prob_chase`; added shared quote and basic holding state helpers; migrated `three_layer` settlement fallback only, leaving its event/quote shape for a dedicated larger slice.
 - Review update (2026-04-22): Phase 4 completed at compatibility scope. Registry owns alias normalization, factory construction, `StrategyKind`, and `StrategyConfigEnvelope`; the existing `[strategy]` TOML surface remains compatible until a future per-strategy parser migration.
+- Review update (2026-04-22): Phase 6 completed as an inventory slice. Added `docs/operations/data-jobs-inventory.md` to classify data jobs and prevent deleting live collector scripts before Rust replacements and freshness evidence exist.
 - Review update (2026-04-22): Phase 5 started with dependency feature gating. `ploy-research` heavy dependencies are now behind `db`, `polars-export`, `ml`, `rl`, and `strategy-runtime`; no-default lib checks compile without Polars/Burn/Linfa/SQLx.
 - Review update (2026-04-22): Phase 4 started with registry ownership. `strategy-bundles::strategies::registry` now owns alias normalization and strategy construction; runtime delegates to it while existing `[strategy]` TOML compatibility remains. Added `StrategyKind` and `StrategyConfigEnvelope` as an additive typed registry API; full per-strategy TOML parsing remains open.
 - Review update (2026-04-22): Phase 3 completed in isolated worktree. Shared identical guards, settlement fallback, compatible event windows, basic quote state, and basic holding state; documented remaining strategy-specific state shapes in `docs/architecture/pm5d-strategy-state-special-cases.md` instead of forcing them into dead-field abstractions.
