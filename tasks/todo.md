@@ -8099,9 +8099,9 @@ Build a Rust-native factor research workflow for binary-options trading that sep
   - [x] Keep full/default runner help showing `run`, `check-db`, and `collect-quotes`.
   - [x] Keep lean replay runner help scoped to `run`; ops commands explicitly reject without the full/ops build.
 - [ ] Execute Phase 2 runtime mode split + binary-per-mode (ploy-replay ~200 deps, ploy-backtest ~400 deps).
-  - [ ] Extract mode modules (backtest.rs, replay.rs, live.rs, strategy_factory.rs).
+  - [x] Extract mode modules (backtest.rs, replay.rs, live.rs, strategy_factory.rs).
     - [x] Extract `backtest.rs`, `replay.rs`, and `strategy_factory.rs`.
-    - [ ] Extract `live.rs` and `recording.rs`.
+    - [x] Extract `live.rs` and `recording.rs`.
   - [ ] Move `feed/database.rs` out of strategy-bundles into runtime or ploy-feed-loaders.
   - [x] Create `apps/ploy-replay` binary (strategy-bundles + trading only).
   - [x] Create `apps/ploy-backtest` binary (+ sqlx for DB loading).
@@ -8134,6 +8134,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-22): Phase 1 implemented as a runner-host ownership split. `lib.rs` now routes commands and initializes tracing; `run.rs` owns strategy config parsing/runtime launch; `ops.rs` is compiled only with the `ops` feature and owns `check-db` plus `collect-quotes`. Verified default full help still exposes ops commands, while lean replay help only exposes `run` and rejects `check-db` with a full/ops-build message.
 - Review update (2026-04-22): Phase 2 binary-per-mode slice started. Added `apps/ploy-replay` and `apps/ploy-backtest` as non-default workspace members that build through the lean runner-host feature surfaces. Updated the quick feature matrix to check those binaries directly instead of checking lean features through `new-ploy-runner`.
 - Review update (2026-04-22): Phase 2 module extraction continued with a narrow runtime slice. Moved backtest mode, replay mode, and strategy factory construction into `crates/ploy-strategy-runtime/src/{backtest,replay,strategy_factory}.rs`; live/recording extraction and DB feed relocation remain open follow-ups. Verified quick feature matrix and `cargo test -p ploy-strategy-runtime --lib`.
+- Review update (2026-04-22): Phase 2 runtime module extraction completed except DB feed relocation. Moved live/dry-run feed and execution wiring into `live.rs`, and SQLx signal/order/fill recorder into `recording.rs`; `lib.rs` remains the public `run_strategy` facade with feature fallback stubs. Verified default runner, quick feature matrix, and runtime unit tests.
 - Review update (2026-04-22): Added Build Configuration Strategy section to plan. Documented current state (profiles, sccache, mold/lld, feature gates, lean binaries, no build.rs, no custom proc-macros, Docker COPY-only). Added remaining actions and team conventions. Verified ploy-replay=118 deps, ploy-backtest=408 deps, new-ploy-runner=1373 deps; alloy/sqlx/SDK confirmed absent from lean binaries.
 
 ### Build Configuration Remaining Actions
