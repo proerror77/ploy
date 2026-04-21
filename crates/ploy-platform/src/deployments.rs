@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentRecord {
     pub deployment_id: String,
+    #[serde(default)]
     pub bundle_id: String,
+    #[serde(default)]
     pub runtime_mode: String,
     #[serde(default = "default_account_id")]
     pub account_id: String,
@@ -15,6 +17,7 @@ pub struct DeploymentRecord {
     #[serde(default)]
     pub deployment_state: DeploymentState,
     pub desired_state: DesiredState,
+    #[serde(default)]
     pub observed_state: ObservedState,
 }
 
