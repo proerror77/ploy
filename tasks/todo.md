@@ -8105,7 +8105,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
   - [x] Move `feed/database.rs` out of strategy-bundles into runtime or ploy-feed-loaders.
   - [x] Create `apps/ploy-replay` binary (strategy-bundles + trading only).
   - [x] Create `apps/ploy-backtest` binary (+ sqlx for DB loading).
-- [ ] Execute Phase 3 PM5D shared strategy-state extraction (separate worktree only; write scope `crates/ploy-strategy-bundles/src/strategies/**`).
+- [x] Execute Phase 3 PM5D shared strategy-state extraction (separate worktree only; write scope `crates/ploy-strategy-bundles/src/strategies/**`).
   - [x] Start common helper extraction with order guards and migrate `prob_reversal`.
   - [x] Migrate duplicated active-order checks in `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal` to the shared guard.
   - [x] Add shared settlement fallback helper and migrate `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`.
@@ -8114,7 +8114,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
   - [x] Add shared quote state for strategies with basic bid/ask/timestamp quotes.
   - [x] Add shared basic holding state for strategies with token/direction/entry-time holdings.
   - [x] Migrate `three_layer` settlement fallback to shared helper.
-  - [ ] Document remaining deliberate strategy-specific state shapes.
+  - [x] Document remaining deliberate strategy-specific state shapes.
 - [ ] Execute Phase 4 typed strategy registry/config cleanup.
 - [ ] Execute Phase 5 research feature gating, module cleanup, and DuckDB/parquet gating (after Phase 2; before then inventory/design only).
 - [ ] Execute Phase 6 ops script inventory/retirement.
@@ -8150,6 +8150,7 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - Review update (2026-04-22): Added `strategies/common/settlement.rs` for explicit settlement + spot/price_to_beat fallback and migrated matching logic in `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`. Left `three_layer` settlement migration for its own slice to avoid broad formatting churn.
 - Review update (2026-04-22): Added `strategies/common/event.rs` with shared event window token helpers and migrated `prob_reversal` to use it. Broader event-window migration remains open for larger strategies.
 - Review update (2026-04-22): Continued Phase 3 common-state extraction. Migrated compatible event windows in `sweep`, `mean_reversion`, `diff_regular`, `diff_enhanced`, and `prob_chase`; added shared quote and basic holding state helpers; migrated `three_layer` settlement fallback only, leaving its event/quote shape for a dedicated larger slice.
+- Review update (2026-04-22): Phase 3 completed in isolated worktree. Shared identical guards, settlement fallback, compatible event windows, basic quote state, and basic holding state; documented remaining strategy-specific state shapes in `docs/architecture/pm5d-strategy-state-special-cases.md` instead of forcing them into dead-field abstractions.
 - Review update (2026-04-22): Added Build Configuration Strategy section to plan. Documented current state (profiles, sccache, mold/lld, feature gates, lean binaries, no build.rs, no custom proc-macros, Docker COPY-only). Added remaining actions and team conventions. Verified ploy-replay=118 deps, ploy-backtest=408 deps, new-ploy-runner=1373 deps; alloy/sqlx/SDK confirmed absent from lean binaries.
 
 ### Build Configuration Remaining Actions
