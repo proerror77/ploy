@@ -12,6 +12,7 @@ use tracing::{debug, info};
 
 use super::common::event::EventWindow;
 use super::common::guards::active_order_exists;
+use super::common::holding::BasicHoldingState;
 use super::common::quote::QuoteState;
 use super::common::settlement;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
@@ -149,13 +150,6 @@ struct DualCooldownLock {
     neutral_since: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone)]
-struct HoldingState {
-    token_id: Arc<str>,
-    direction: String,
-    entry_time: DateTime<Utc>,
-}
-
 // ── Strategy ────────────────────────────────────────────
 
 pub struct DiffRegularStrategy {
@@ -166,7 +160,7 @@ pub struct DiffRegularStrategy {
     prev_diff: HashMap<Arc<str>, f64>,
     /// Per-symbol dual cooldown: locks BOTH directions when triggered.
     dual_cooldown: HashMap<Arc<str>, DualCooldownLock>,
-    holdings: HashMap<Arc<str>, HoldingState>,
+    holdings: HashMap<Arc<str>, BasicHoldingState>,
     token_symbol: HashMap<Arc<str>, Arc<str>>,
     token_event: HashMap<Arc<str>, Arc<str>>,
     last_entry: HashMap<Arc<str>, DateTime<Utc>>,
@@ -785,7 +779,7 @@ impl StrategyLogic for DiffRegularStrategy {
 
                 self.holdings.insert(
                     token.clone(),
-                    HoldingState {
+                    BasicHoldingState {
                         token_id: token,
                         direction: direction.to_string(),
                         entry_time: fill.timestamp,

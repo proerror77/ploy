@@ -12,6 +12,7 @@ use tracing::{debug, info};
 
 use super::common::event::EventWindow;
 use super::common::guards::active_order_exists;
+use super::common::holding::BasicHoldingState;
 use super::common::quote::QuoteState;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
@@ -114,16 +115,6 @@ impl Default for ProbReversalConfig {
 
 // ── State ───────────────────────────────────────────────
 
-#[derive(Clone)]
-struct HoldingState {
-    #[allow(dead_code)]
-    token_id: Arc<str>,
-    #[allow(dead_code)]
-    direction: String,
-    #[allow(dead_code)]
-    entry_time: DateTime<Utc>,
-}
-
 // ── Strategy ────────────────────────────────────────────
 
 pub struct ProbReversalStrategy {
@@ -131,7 +122,7 @@ pub struct ProbReversalStrategy {
     events: HashMap<Arc<str>, Vec<EventWindow>>,
     quotes: HashMap<Arc<str>, QuoteState>,
     prev_up_prob: HashMap<Arc<str>, f64>,
-    holdings: HashMap<Arc<str>, HoldingState>,
+    holdings: HashMap<Arc<str>, BasicHoldingState>,
     token_symbol: HashMap<Arc<str>, Arc<str>>,
     token_event: HashMap<Arc<str>, Arc<str>>,
     retired_events: HashSet<Arc<str>>,
@@ -604,7 +595,7 @@ impl StrategyLogic for ProbReversalStrategy {
                 };
                 self.holdings.insert(
                     token_id,
-                    HoldingState {
+                    BasicHoldingState {
                         token_id: Arc::from(fill.token_id.as_str()),
                         direction: direction.to_string(),
                         entry_time: fill.timestamp,
