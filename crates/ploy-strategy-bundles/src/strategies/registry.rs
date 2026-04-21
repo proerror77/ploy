@@ -25,6 +25,80 @@ pub fn canonical_strategy_variant(raw: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StrategyKind {
+    Directional,
+    DirectionalBayes,
+    MeanReversion,
+    Reversal,
+    ThreeLayer,
+    DiffEnhanced,
+    DiffRegular,
+    Sweep,
+    ProbReversal,
+    ProbChase,
+    Unknown(String),
+}
+
+impl StrategyKind {
+    #[must_use]
+    pub fn from_raw(raw: &str) -> Self {
+        match canonical_strategy_variant(raw).as_str() {
+            "directional" => Self::Directional,
+            "directional_bayes" => Self::DirectionalBayes,
+            "mean_reversion" => Self::MeanReversion,
+            "reversal" => Self::Reversal,
+            "three_layer" => Self::ThreeLayer,
+            "diff_enhanced" => Self::DiffEnhanced,
+            "diff_regular" => Self::DiffRegular,
+            "sweep" => Self::Sweep,
+            "prob_reversal" => Self::ProbReversal,
+            "prob_chase" => Self::ProbChase,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    #[must_use]
+    pub fn canonical_name(&self) -> &str {
+        match self {
+            Self::Directional => "directional",
+            Self::DirectionalBayes => "directional_bayes",
+            Self::MeanReversion => "mean_reversion",
+            Self::Reversal => "reversal",
+            Self::ThreeLayer => "three_layer",
+            Self::DiffEnhanced => "diff_enhanced",
+            Self::DiffRegular => "diff_regular",
+            Self::Sweep => "sweep",
+            Self::ProbReversal => "prob_reversal",
+            Self::ProbChase => "prob_chase",
+            Self::Unknown(name) => name.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StrategyConfigEnvelope<T> {
+    pub kind: StrategyKind,
+    pub config: T,
+}
+
+impl FullConfig {
+    #[must_use]
+    pub fn strategy_kind(&self) -> StrategyKind {
+        StrategyKind::from_raw(&self.runtime.strategy_variant)
+    }
+
+    #[must_use]
+    pub fn strategy_config_envelope(
+        &self,
+    ) -> StrategyConfigEnvelope<crate::strategies::directional::DirectionalConfig> {
+        StrategyConfigEnvelope {
+            kind: self.strategy_kind(),
+            config: self.strategy.clone(),
+        }
+    }
+}
+
 pub fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
     let configured_variant = config.runtime.strategy_variant.trim();
     let canonical_variant = config.runtime.canonical_strategy_variant();
@@ -90,7 +164,7 @@ pub fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_strategy, canonical_strategy_variant};
+    use super::{build_strategy, canonical_strategy_variant, StrategyKind};
     use crate::FullConfig;
 
     #[test]
@@ -108,6 +182,33 @@ mod tests {
         ] {
             assert_eq!(canonical_strategy_variant(raw), expected);
         }
+    }
+
+    #[test]
+    fn strategy_kind_exposes_canonical_kind() {
+        assert_eq!(StrategyKind::from_raw("v4"), StrategyKind::MeanReversion);
+        assert_eq!(StrategyKind::from_raw("s5"), StrategyKind::ProbChase);
+        assert_eq!(
+            StrategyKind::from_raw("unknown"),
+            StrategyKind::Unknown("unknown".to_string())
+        );
+    }
+
+    #[test]
+    fn full_config_exposes_strategy_config_envelope() {
+        let config = FullConfig::from_toml(
+            r#"
+[runtime]
+strategy_variant = "reversal"
+
+[strategy]
+stake_usd = 12.0
+"#,
+        )
+        .unwrap();
+        let envelope = config.strategy_config_envelope();
+        assert_eq!(envelope.kind, StrategyKind::Reversal);
+        assert_eq!(envelope.config.stake_usd, rust_decimal::Decimal::new(12, 0));
     }
 
     #[test]
