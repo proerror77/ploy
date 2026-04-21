@@ -9,7 +9,9 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use super::common::event::EventWindow;
 use super::common::guards::active_order_exists;
+use super::common::quote::QuoteState;
 use super::common::settlement;
 use super::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
@@ -184,27 +186,9 @@ impl From<DirectionalConfig> for ReversalConfig {
     }
 }
 
-#[derive(Clone)]
-struct EventWindow {
-    event_id: Arc<str>,
-    symbol: Arc<str>,
-    up_token: Arc<str>,
-    down_token: Arc<str>,
-    end_time: DateTime<Utc>,
-    window_secs: u64,
-    price_to_beat: Option<Decimal>,
-}
-
 #[derive(Clone, Copy)]
 struct SpotState {
     price: Decimal,
-}
-
-#[derive(Clone, Copy)]
-struct QuoteState {
-    bid: Option<Decimal>,
-    ask: Option<Decimal>,
-    ts: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy, Default)]
