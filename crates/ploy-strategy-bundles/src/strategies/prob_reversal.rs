@@ -12,6 +12,7 @@ use tracing::{debug, info};
 
 use super::common::event::EventWindow;
 use super::common::guards::active_order_exists;
+use super::common::quote::QuoteState;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 fn crypto_fee_cost(entry_price: f64) -> f64 {
@@ -112,14 +113,6 @@ impl Default for ProbReversalConfig {
 }
 
 // ── State ───────────────────────────────────────────────
-
-#[derive(Clone, Copy)]
-struct QuoteState {
-    bid: Option<Decimal>,
-    ask: Option<Decimal>,
-    #[allow(dead_code)]
-    ts: DateTime<Utc>,
-}
 
 #[derive(Clone)]
 struct HoldingState {

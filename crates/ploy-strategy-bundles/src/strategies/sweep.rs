@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 
 use super::common::event::EventWindow;
 use super::common::guards::active_order_exists;
+use super::common::quote::QuoteState;
 use super::common::settlement;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
@@ -157,13 +158,6 @@ impl Default for SweepConfig {
 /// Cached CEX spot price.
 struct SpotState {
     price: Decimal,
-}
-
-/// Cached Polymarket quote.
-struct QuoteState {
-    bid: Option<Decimal>,
-    ask: Option<Decimal>,
-    ts: DateTime<Utc>,
 }
 
 /// Tracked holding for exit management.

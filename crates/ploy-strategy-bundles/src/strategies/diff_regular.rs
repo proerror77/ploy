@@ -12,6 +12,7 @@ use tracing::{debug, info};
 
 use super::common::event::EventWindow;
 use super::common::guards::active_order_exists;
+use super::common::quote::QuoteState;
 use super::common::settlement;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
@@ -137,13 +138,6 @@ impl Default for DiffRegularConfig {
 #[derive(Clone, Copy)]
 struct SpotState {
     price: Decimal,
-}
-
-#[derive(Clone, Copy)]
-struct QuoteState {
-    bid: Option<Decimal>,
-    ask: Option<Decimal>,
-    ts: DateTime<Utc>,
 }
 
 /// Dual-direction cooldown lock: when triggered, blocks BOTH UP and DOWN
