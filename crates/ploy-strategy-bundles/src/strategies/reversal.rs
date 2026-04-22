@@ -19,7 +19,6 @@ use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic}
 
 const DRIFT_WINDOW_SECS: i64 = 35;
 const MIN_DRIFT_POINTS: usize = 4;
-const TIME_STOP_SECS: i64 = 30;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReversalConfig {
@@ -580,7 +579,6 @@ impl ReversalStrategy {
                 continue;
             }
 
-            let time_remaining = (event.end_time - now).num_seconds();
             for (token_id, is_up) in [(&event.up_token, true), (&event.down_token, false)] {
                 let qty = positions.net_qty(token_id);
                 if qty <= Decimal::ZERO {
@@ -590,25 +588,6 @@ impl ReversalStrategy {
                 let Some(exit_bid) = self.quotes.get(token_id).and_then(|q| q.bid) else {
                     continue;
                 };
-
-                if time_remaining < TIME_STOP_SECS {
-                    decisions.push(StrategyDecision::Exit(TradingIntent {
-                        intent_id: format!(
-                            "reversal_time_exit_{}_{}",
-                            token_id,
-                            now.timestamp_millis()
-                        ),
-                        deployment_id: String::new(),
-                        market_id: event.event_id.to_string(),
-                        token_id: token_id.to_string(),
-                        side: TradeSide::Sell,
-                        quantity: qty,
-                        limit_price: Some(exit_bid),
-                        purpose: IntentPurpose::Exit,
-                        created_at: now,
-                    }));
-                    continue;
-                }
 
                 if let Some(quote) = self.quotes.get(token_id) {
                     if let Some(ask) = quote.ask.and_then(|value| value.to_f64()) {

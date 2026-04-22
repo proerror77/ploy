@@ -73,7 +73,6 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
 const DRIFT_WINDOW_SECS: f64 = 30.0;
 const VOL_WINDOW_SECS: f64 = 120.0;
 const MIN_VOL_POINTS: usize = 5;
-const TIME_STOP_SECS: i64 = 3;
 
 struct DriftTracker {
     history: VecDeque<(DateTime<Utc>, f64)>,
@@ -469,12 +468,12 @@ impl ThreeLayerStrategy {
 
         let candidates = self.candidate_events(symbol, now);
         for event in &candidates {
+            let time_remaining = (event.end_time - now).num_seconds();
             let price_to_beat = event.price_to_beat?.to_f64()?;
             if price_to_beat <= 0.0 {
                 continue;
             }
 
-            let time_remaining = (event.end_time - now).num_seconds();
             let regime = Regime::from_secs(time_remaining);
 
             let drift_tracker = self.drift.get_mut(symbol)?;
@@ -642,8 +641,6 @@ impl ThreeLayerStrategy {
         let mut decisions = Vec::new();
 
         for event in self.events.get(symbol).into_iter().flatten() {
-            let time_remaining = (event.end_time - now).num_seconds();
-
             for (token_id, is_up) in [(&event.up_token, true), (&event.down_token, false)] {
                 let qty = positions.net_qty(token_id);
                 if qty <= Decimal::ZERO {
@@ -653,22 +650,6 @@ impl ThreeLayerStrategy {
                 let Some(exit_bid) = self.quotes.get(token_id).and_then(|q| q.bid) else {
                     continue;
                 };
-
-                // Time stop
-                if time_remaining < TIME_STOP_SECS {
-                    decisions.push(StrategyDecision::Exit(TradingIntent {
-                        intent_id: format!("tl_time_exit_{}_{}", token_id, now.timestamp_millis()),
-                        deployment_id: String::new(),
-                        market_id: event.event_id.to_string(),
-                        token_id: token_id.to_string(),
-                        side: TradeSide::Sell,
-                        quantity: qty,
-                        limit_price: Some(exit_bid),
-                        purpose: IntentPurpose::Exit,
-                        created_at: now,
-                    }));
-                    continue;
-                }
 
                 // Take profit
                 if let Some(quote) = self.quotes.get(token_id) {

@@ -330,29 +330,6 @@ impl ProbReversalStrategy {
                         created_at: *ts,
                     }));
                 }
-            } else if remaining <= 0 {
-                let qty = positions.net_qty(token_id);
-                if qty > Decimal::ZERO {
-                    debug!(
-                        token_id = %token_id,
-                        "prob_reversal force-close at expiry"
-                    );
-                    decisions.push(StrategyDecision::Exit(TradingIntent {
-                        intent_id: format!(
-                            "prob_reversal_expiry_{}_{}",
-                            token_id,
-                            ts.timestamp_millis()
-                        ),
-                        deployment_id: String::new(),
-                        market_id: event.event_id.to_string(),
-                        token_id: token_id.to_string(),
-                        side: TradeSide::Sell,
-                        quantity: qty,
-                        limit_price: Some(exit_bid),
-                        purpose: IntentPurpose::Exit,
-                        created_at: *ts,
-                    }));
-                }
             }
         }
 
