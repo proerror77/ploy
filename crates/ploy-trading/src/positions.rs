@@ -1,7 +1,7 @@
 use crate::fills::FillRecord;
 use crate::pnl::PnlSnapshot;
-use rust_decimal::prelude::Signed;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::Signed;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -20,6 +20,16 @@ pub struct PositionLedger {
 }
 
 impl PositionLedger {
+    pub fn restore(positions: Vec<PositionSnapshot>, total_fees: Decimal) -> Self {
+        Self {
+            positions: positions
+                .into_iter()
+                .map(|position| (position.token_id.clone(), position))
+                .collect(),
+            total_fees,
+        }
+    }
+
     pub fn apply_fill(&mut self, fill: &FillRecord) {
         let signed_qty = fill.quantity * fill.side.sign();
         let position = self

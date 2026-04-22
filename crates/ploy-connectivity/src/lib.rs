@@ -94,6 +94,7 @@ pub enum CancellationOutcome {
 pub enum ReplaceOutcome {
     Replaced { venue_order_id: String },
     Rejected { reason: String },
+    PartialFailure { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -594,7 +595,7 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
             ExecutionOutcome::Acknowledged { venue_order_id } => {
                 Ok(ReplaceOutcome::Replaced { venue_order_id })
             }
-            ExecutionOutcome::Rejected { reason } => Ok(ReplaceOutcome::Rejected { reason }),
+            ExecutionOutcome::Rejected { reason } => Ok(ReplaceOutcome::PartialFailure { reason }),
         }
     }
 }
@@ -745,11 +746,12 @@ fn normalize_execution_amount(
 
 fn tracked_trade_fill(tracked_order: &TrackedOrder, trade: &TradeResponse) -> Option<FillRecord> {
     if trade.taker_order_id == tracked_order.venue_order_id {
+        let side = trade_side(trade.side.clone())?;
         return Some(FillRecord {
             fill_id: tracked_fill_id(tracked_order, &trade.id),
             order_id: tracked_order.order_id.clone(),
             token_id: tracked_order.token_id.clone(),
-            side: trade_side(trade.side.clone()),
+            side,
             quantity: trade.size,
             price: trade.price,
             fee: fee_from_bps(trade.size, trade.price, trade.fee_rate_bps),
@@ -761,19 +763,20 @@ fn tracked_trade_fill(tracked_order: &TrackedOrder, trade: &TradeResponse) -> Op
         .maker_orders
         .iter()
         .find(|maker_order| maker_order.order_id == tracked_order.venue_order_id)
-        .map(|maker_order| tracked_maker_fill(tracked_order, trade, maker_order))
+        .and_then(|maker_order| tracked_maker_fill(tracked_order, trade, maker_order))
 }
 
 fn tracked_maker_fill(
     tracked_order: &TrackedOrder,
     trade: &TradeResponse,
     maker_order: &MakerOrder,
-) -> FillRecord {
-    FillRecord {
+) -> Option<FillRecord> {
+    let side = trade_side(maker_order.side.clone())?;
+    Some(FillRecord {
         fill_id: tracked_fill_id(tracked_order, &trade.id),
         order_id: tracked_order.order_id.clone(),
         token_id: tracked_order.token_id.clone(),
-        side: trade_side(maker_order.side.clone()),
+        side,
         quantity: maker_order.matched_amount,
         price: maker_order.price,
         fee: fee_from_bps(
@@ -782,18 +785,18 @@ fn tracked_maker_fill(
             maker_order.fee_rate_bps,
         ),
         timestamp: trade.match_time,
-    }
+    })
 }
 
 fn tracked_fill_id(tracked_order: &TrackedOrder, trade_id: &str) -> String {
     format!("{trade_id}:{}", tracked_order.order_id)
 }
 
-fn trade_side(side: Side) -> TradeSide {
+fn trade_side(side: Side) -> Option<TradeSide> {
     match side {
-        Side::Buy => TradeSide::Buy,
-        Side::Sell => TradeSide::Sell,
-        _ => TradeSide::Buy,
+        Side::Buy => Some(TradeSide::Buy),
+        Side::Sell => Some(TradeSide::Sell),
+        _ => None,
     }
 }
 
@@ -808,12 +811,12 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        execution_price_override, normalize_aggressive_price, normalize_execution_amount,
-        normalize_order_notional, normalize_order_quantity, polymarket_signature_type_from_env,
-        tracked_trade_fill, unique_token_ids, CancellationOutcome, CancellationRequest,
-        ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
-        OrderExecutionType, PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome,
-        ReplaceRequest, StaticExecutionGateway, TrackedOrder, WalletSignatureType,
+        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
+        ExecutionRequest, LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
+        PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
+        TrackedOrder, WalletSignatureType, execution_price_override, normalize_aggressive_price,
+        normalize_execution_amount, normalize_order_notional, normalize_order_quantity,
+        polymarket_signature_type_from_env, tracked_trade_fill, trade_side, unique_token_ids,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -914,6 +917,11 @@ mod tests {
         assert_eq!(buy.as_inner(), dec!(15.00));
         assert!(sell.is_shares());
         assert_eq!(sell.as_inner(), dec!(24.46));
+    }
+
+    #[test]
+    fn unknown_venue_trade_side_is_not_mapped_to_buy() {
+        assert_eq!(trade_side(Side::Unknown), None);
     }
 
     #[test]
@@ -1041,20 +1049,22 @@ mod tests {
                 Address::from_str("0x0000000000000000000000000000000000000001")
                     .expect("maker address"),
             )
-            .maker_orders(vec![MakerOrder::builder()
-                .order_id("venue-order-b")
-                .owner(ApiKey::nil())
-                .maker_address(
-                    Address::from_str("0x0000000000000000000000000000000000000002")
-                        .expect("second maker address"),
-                )
-                .matched_amount(dec!(2))
-                .price(dec!(0.56))
-                .fee_rate_bps(dec!(4))
-                .asset_id(U256::from(1_u64))
-                .outcome("YES")
-                .side(polymarket_client_sdk::clob::types::Side::Sell)
-                .build()])
+            .maker_orders(vec![
+                MakerOrder::builder()
+                    .order_id("venue-order-b")
+                    .owner(ApiKey::nil())
+                    .maker_address(
+                        Address::from_str("0x0000000000000000000000000000000000000002")
+                            .expect("second maker address"),
+                    )
+                    .matched_amount(dec!(2))
+                    .price(dec!(0.56))
+                    .fee_rate_bps(dec!(4))
+                    .asset_id(U256::from(1_u64))
+                    .outcome("YES")
+                    .side(polymarket_client_sdk::clob::types::Side::Sell)
+                    .build(),
+            ])
             .transaction_hash(B256::ZERO)
             .trader_side(TraderSide::Taker)
             .build();

@@ -3,7 +3,7 @@ use crate::intents::{TradeSide, TradingIntent};
 use crate::orders::OrderLedger;
 use crate::pnl::PnlSnapshot;
 use crate::positions::{PositionLedger, PositionSnapshot};
-use crate::risk::{snapshot_from_state, RiskSnapshot};
+use crate::risk::{RiskSnapshot, snapshot_from_state};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -81,10 +81,15 @@ pub struct TradingRuntime {
 
 impl TradingRuntime {
     pub fn restore(snapshot: TradingRuntimeSnapshot) -> Self {
-        let mut positions = PositionLedger::default();
-        for fill in &snapshot.fills {
-            positions.apply_fill(fill);
-        }
+        let positions = if snapshot.positions.is_empty() {
+            let mut positions = PositionLedger::default();
+            for fill in &snapshot.fills {
+                positions.apply_fill(fill);
+            }
+            positions
+        } else {
+            PositionLedger::restore(snapshot.positions, snapshot.pnl.total_fees)
+        };
 
         Self {
             intents: snapshot.intents,
@@ -210,8 +215,8 @@ impl TradingRuntime {
 mod tests {
     use super::TradingRuntime;
     use crate::{
-        FillRecord, IntentPurpose, OrderRecord, OrderState, TradeSide, TradingIntent,
-        TradingRuntimeSnapshot,
+        FillRecord, IntentPurpose, OrderRecord, OrderState, PnlSnapshot, PositionSnapshot,
+        TradeSide, TradingIntent, TradingRuntimeSnapshot,
     };
     use chrono::Utc;
     use rust_decimal::Decimal;
@@ -272,6 +277,34 @@ mod tests {
     }
 
     #[test]
+    fn restore_preserves_persisted_positions_when_fills_are_absent() {
+        let snapshot = TradingRuntimeSnapshot {
+            positions: vec![PositionSnapshot {
+                token_id: "token-1".to_string(),
+                net_qty: dec!(3),
+                avg_entry_price: dec!(0.42),
+                realized_pnl: dec!(0.7),
+            }],
+            pnl: PnlSnapshot {
+                realized_pnl: dec!(0.7),
+                unrealized_pnl: Decimal::ZERO,
+                total_fees: dec!(0.03),
+            },
+            ..TradingRuntimeSnapshot::default()
+        };
+
+        let runtime = TradingRuntime::restore(snapshot);
+        let restored = runtime.snapshot(&BTreeMap::new());
+
+        assert_eq!(restored.positions.len(), 1);
+        assert_eq!(restored.positions[0].net_qty, dec!(3));
+        assert_eq!(restored.pnl.realized_pnl, dec!(0.7));
+        assert_eq!(restored.pnl.total_fees, dec!(0.03));
+        assert_eq!(restored.risk.open_positions, 1);
+        assert_eq!(restored.risk.gross_exposure, dec!(1.26));
+    }
+
+    #[test]
     fn cashflow_summary_treats_quantity_as_shares_not_dollars() {
         let now = Utc::now();
         let snapshot = TradingRuntimeSnapshot {
@@ -308,10 +341,7 @@ mod tests {
         assert_eq!(summary.deployed_capital(), dec!(10.00));
         assert_eq!(summary.net_pnl(), dec!(14.95));
         assert_eq!(
-            summary
-                .roi_on_deployed_capital()
-                .expect("roi")
-                .round_dp(4),
+            summary.roi_on_deployed_capital().expect("roi").round_dp(4),
             dec!(1.4950)
         );
     }
