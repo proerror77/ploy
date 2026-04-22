@@ -510,6 +510,10 @@ impl DiffRegularStrategy {
                     continue;
                 }
 
+                let Some(exit_bid) = self.quotes.get(token_id).and_then(|q| q.bid) else {
+                    continue;
+                };
+
                 // Floor stop: abs(diff) <= floor_threshold → exit immediately
                 if let (Some(ptb), Some(spot)) = (price_to_beat, spot_f) {
                     if ptb > 0.0 {
@@ -533,7 +537,7 @@ impl DiffRegularStrategy {
                                 token_id: token_id.to_string(),
                                 side: TradeSide::Sell,
                                 quantity: qty,
-                                limit_price: None,
+                                limit_price: Some(exit_bid),
                                 purpose: IntentPurpose::Exit,
                                 created_at: now,
                             }));
@@ -548,34 +552,32 @@ impl DiffRegularStrategy {
                 }
 
                 // Stepped take-profit via quote bid
-                if let Some(quote) = self.quotes.get(token_id) {
-                    if let Some(bid) = quote.bid.and_then(|v| v.to_f64()) {
-                        let tp_threshold = self.take_profit_threshold(remaining);
-                        if bid >= tp_threshold {
-                            info!(
-                                event_id = %event.event_id,
-                                token_id = %token_id,
-                                bid,
-                                tp_threshold,
-                                remaining,
-                                "stepped take-profit triggered"
-                            );
-                            decisions.push(StrategyDecision::Exit(TradingIntent {
-                                intent_id: format!(
-                                    "diff_regular_tp_{}_{}",
-                                    token_id,
-                                    now.timestamp_millis()
-                                ),
-                                deployment_id: String::new(),
-                                market_id: event.event_id.to_string(),
-                                token_id: token_id.to_string(),
-                                side: TradeSide::Sell,
-                                quantity: qty,
-                                limit_price: quote.bid.or(quote.ask),
-                                purpose: IntentPurpose::Exit,
-                                created_at: now,
-                            }));
-                        }
+                if let Some(bid) = exit_bid.to_f64() {
+                    let tp_threshold = self.take_profit_threshold(remaining);
+                    if bid >= tp_threshold {
+                        info!(
+                            event_id = %event.event_id,
+                            token_id = %token_id,
+                            bid,
+                            tp_threshold,
+                            remaining,
+                            "stepped take-profit triggered"
+                        );
+                        decisions.push(StrategyDecision::Exit(TradingIntent {
+                            intent_id: format!(
+                                "diff_regular_tp_{}_{}",
+                                token_id,
+                                now.timestamp_millis()
+                            ),
+                            deployment_id: String::new(),
+                            market_id: event.event_id.to_string(),
+                            token_id: token_id.to_string(),
+                            side: TradeSide::Sell,
+                            quantity: qty,
+                            limit_price: Some(exit_bid),
+                            purpose: IntentPurpose::Exit,
+                            created_at: now,
+                        }));
                     }
                 }
             }
@@ -1025,6 +1027,33 @@ mod tests {
         positions.apply_fill(&buy_fill);
         strategy.on_fill(&buy_fill);
 
+        let no_quote_decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(99999),
+                ts: now + Duration::seconds(5),
+            },
+            &positions,
+            &orders,
+        );
+        assert!(
+            no_quote_decisions.is_empty(),
+            "floor stop must not emit an exit without an executable bid"
+        );
+
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: "up3".into(),
+                bid: Some(dec!(0.44)),
+                ask: Some(dec!(0.45)),
+                bid_size: None,
+                ask_size: None,
+                ts: now + Duration::seconds(6),
+            },
+            &positions,
+            &orders,
+        );
+
         // Spot near price_to_beat but slightly negative diff (unfavorable for UP)
         // diff = (99999 - 100000) / 100000 = -0.00001, abs = 0.00001 < 0.00007
         let decisions = strategy.on_update(
@@ -1043,5 +1072,9 @@ mod tests {
                 .any(|d| matches!(d, StrategyDecision::Exit(..))),
             "expected floor stop exit, got {decisions:?}"
         );
+        match &decisions[0] {
+            StrategyDecision::Exit(intent) => assert_eq!(intent.limit_price, Some(dec!(0.44))),
+            other => panic!("expected exit, got {other:?}"),
+        }
     }
 }

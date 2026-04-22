@@ -593,28 +593,6 @@ impl ProbChaseStrategy {
                     None => continue,
                 };
 
-                let hold_secs = (now - holding.entry_time).num_seconds();
-
-                // Timeout: held > max_hold_secs
-                if hold_secs > self.config.max_hold_secs as i64 {
-                    debug!(
-                        token_id = token_id.as_ref(),
-                        hold_secs, "exit: max hold timeout"
-                    );
-                    decisions.push(self.build_exit(event, token_id, qty, "timeout", now));
-                    continue;
-                }
-
-                // Timeout: remaining < hold_to_expiry_secs
-                if remaining < self.config.hold_to_expiry_secs as i64 {
-                    debug!(
-                        token_id = token_id.as_ref(),
-                        remaining, "exit: expiry timeout"
-                    );
-                    decisions.push(self.build_exit(event, token_id, qty, "expiry_timeout", now));
-                    continue;
-                }
-
                 // Stop-loss: diff reverses (trend gone)
                 if let Some(d) = diff {
                     let directional_diff = match dir {
