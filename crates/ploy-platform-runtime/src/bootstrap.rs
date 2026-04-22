@@ -47,7 +47,14 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_runner_binary() -> PathBuf {
-        let path = std::env::temp_dir().join("ploy-platform-bootstrap-test-runner.sh");
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ploy-platform-bootstrap-test-runner-{}-{unique}.sh",
+            std::process::id()
+        ));
         fs::write(&path, "#!/bin/sh\nsleep 30\n").expect("write test runner");
         #[cfg(unix)]
         {

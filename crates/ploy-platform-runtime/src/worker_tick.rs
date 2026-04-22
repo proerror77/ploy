@@ -196,7 +196,14 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_runner_binary() -> PathBuf {
-        let path = std::env::temp_dir().join("ploy-platform-runtime-test-runner.sh");
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ploy-platform-runtime-test-runner-{}-{unique}.sh",
+            std::process::id()
+        ));
         fs::write(&path, "#!/bin/sh\nsleep 30\n").expect("write test runner");
         #[cfg(unix)]
         {
@@ -279,7 +286,9 @@ mod tests {
 
         assert!(spec
             .command
-            .ends_with("ploy-platform-runtime-test-runner.sh"));
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("ploy-platform-runtime-test-runner-")));
         assert!(spec
             .args
             .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string()));
