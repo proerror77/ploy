@@ -320,7 +320,7 @@ mod tests {
         let pid_file = std::env::temp_dir().join("ploy-deployments-existing.pid");
         let _ = std::fs::remove_file(&pid_file);
 
-        let first = DeploymentRuntime::new(WorkerLaunchSpec {
+        let mut first = DeploymentRuntime::new(WorkerLaunchSpec {
             pid_file: pid_file.clone(),
             ..shell_sleep_spec()
         });
@@ -355,6 +355,7 @@ mod tests {
 
         let status = inherited.stop();
         assert_eq!(status.observed_state, ObservedState::Stopped);
+        first.refresh_status();
         assert!(!process_alive(pid));
 
         let _ = std::fs::remove_file(pid_file);
