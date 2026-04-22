@@ -11,13 +11,15 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use tracing::{debug, info, warn};
 
 use super::common::event::EventWindow;
+use super::common::fees::crypto_fee_cost;
 use super::common::guards::active_order_exists;
+use super::common::quote::QuoteState;
 use super::common::settlement;
 use super::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
@@ -49,10 +51,6 @@ fn estimate_probability(s0: f64, st: f64, sigma_horizon: f64) -> f64 {
     normal_cdf(z)
 }
 
-fn crypto_fee_cost(entry_price: f64) -> f64 {
-    0.02 * entry_price * (1.0 - entry_price)
-}
-
 const EWMA_LAMBDA: f64 = 0.94;
 const RETURN_BUFFER_WINDOW_SECS: f64 = 300.0;
 
@@ -65,11 +63,6 @@ enum Direction {
 struct SpotState {
     price: Decimal,
     ts: DateTime<Utc>,
-}
-
-struct QuoteState {
-    bid: Option<Decimal>,
-    ask: Option<Decimal>,
 }
 
 struct ReturnBuffer {
@@ -816,6 +809,7 @@ impl StrategyLogic for MeanReversionStrategy {
                     QuoteState {
                         bid: *bid,
                         ask: *ask,
+                        ts: *ts,
                     },
                 );
 

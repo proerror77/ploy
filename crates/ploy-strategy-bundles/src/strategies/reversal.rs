@@ -5,11 +5,12 @@ use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 use super::common::event::EventWindow;
+use super::common::fees::crypto_fee_cost;
 use super::common::guards::active_order_exists;
 use super::common::quote::QuoteState;
 use super::common::settlement;
@@ -19,10 +20,6 @@ use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic}
 const DRIFT_WINDOW_SECS: i64 = 35;
 const MIN_DRIFT_POINTS: usize = 4;
 const TIME_STOP_SECS: i64 = 30;
-
-fn crypto_fee_cost(entry_price: f64) -> f64 {
-    0.02 * entry_price * (1.0 - entry_price)
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReversalConfig {

@@ -1,8 +1,13 @@
 use crate::config::FullConfig;
+use crate::strategies::{
+    diff_enhanced::DiffEnhancedConfig, diff_regular::DiffRegularConfig,
+    prob_chase::ProbChaseConfig, prob_reversal::ProbReversalConfig, sweep::SweepConfig,
+};
 use crate::traits::StrategyLogic;
 use crate::{
-    BayesianDirectionalStrategy, DirectionalStrategy, MeanReversionStrategy, ReversalStrategy,
-    ThreeLayerStrategy,
+    BayesianDirectionalStrategy, DiffEnhancedStrategy, DiffRegularStrategy, DirectionalStrategy,
+    MeanReversionStrategy, ProbChaseStrategy, ProbReversalStrategy, ReversalStrategy,
+    SweepStrategy, ThreeLayerStrategy,
 };
 use tracing::info;
 
@@ -152,10 +157,60 @@ pub fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
                 crate::strategies::three_layer::ThreeLayerConfig::from(config.strategy.clone()),
             ))
         }
+        "diff_enhanced" => {
+            info!(
+                configured_variant = configured_variant,
+                canonical_variant = canonical_variant.as_str(),
+                "Using diff-enhanced strategy variant",
+            );
+            Box::new(DiffEnhancedStrategy::new(DiffEnhancedConfig::from(
+                config.strategy.clone(),
+            )))
+        }
+        "diff_regular" => {
+            info!(
+                configured_variant = configured_variant,
+                canonical_variant = canonical_variant.as_str(),
+                "Using diff-regular strategy variant",
+            );
+            Box::new(DiffRegularStrategy::new(DiffRegularConfig::from(
+                config.strategy.clone(),
+            )))
+        }
+        "sweep" => {
+            info!(
+                configured_variant = configured_variant,
+                canonical_variant = canonical_variant.as_str(),
+                "Using sweep strategy variant",
+            );
+            Box::new(SweepStrategy::new(SweepConfig::from(
+                config.strategy.clone(),
+            )))
+        }
+        "prob_reversal" => {
+            info!(
+                configured_variant = configured_variant,
+                canonical_variant = canonical_variant.as_str(),
+                "Using probability-reversal strategy variant",
+            );
+            Box::new(ProbReversalStrategy::new(ProbReversalConfig::from(
+                config.strategy.clone(),
+            )))
+        }
+        "prob_chase" => {
+            info!(
+                configured_variant = configured_variant,
+                canonical_variant = canonical_variant.as_str(),
+                "Using probability-chase strategy variant",
+            );
+            Box::new(ProbChaseStrategy::new(ProbChaseConfig::from(
+                config.strategy.clone(),
+            )))
+        }
         _ => {
             eprintln!(
                 "Unsupported strategy_variant `{configured_variant}` in config. \
-                 Supported runtime variants: directional, directional_bayes, mean_reversion, reversal, three_layer, v1, v2, v3, v4."
+                 Supported runtime variants: directional, directional_bayes, mean_reversion, reversal, three_layer, diff_enhanced, diff_regular, sweep, prob_reversal, prob_chase, v1, v2, v3, v4, s1, s2, s3, s4, s5."
             );
             std::process::exit(1);
         }
@@ -164,7 +219,7 @@ pub fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_strategy, canonical_strategy_variant, StrategyKind};
+    use super::{StrategyKind, build_strategy, canonical_strategy_variant};
     use crate::FullConfig;
 
     #[test]
@@ -221,6 +276,16 @@ stake_usd = 12.0
             ("reversal", "pm_5m_reversal"),
             ("three_layer", "three_layer"),
             ("three-layer", "three_layer"),
+            ("diff_enhanced", "diff_enhanced"),
+            ("diff_regular", "diff_regular"),
+            ("sweep", "sweep"),
+            ("prob_reversal", "prob_reversal"),
+            ("prob_chase", "prob_chase"),
+            ("s1", "diff_enhanced"),
+            ("s2", "diff_regular"),
+            ("s3", "sweep"),
+            ("s4", "prob_reversal"),
+            ("s5", "prob_chase"),
         ] {
             let config = FullConfig::from_toml(&format!(
                 r#"

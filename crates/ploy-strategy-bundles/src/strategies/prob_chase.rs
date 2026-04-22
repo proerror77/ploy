@@ -12,22 +12,18 @@ use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use super::common::event::EventWindow;
+use super::common::fees::crypto_fee_cost;
 use super::common::guards::active_order_exists;
 use super::common::quote::QuoteState;
 use super::common::settlement;
+use super::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
-
-// ── Fee model ───────────────────────────────────────────
-
-fn crypto_fee_cost(entry_price: f64) -> f64 {
-    0.02 * entry_price * (1.0 - entry_price)
-}
 
 // ── Direction enum ──────────────────────────────────────
 
@@ -163,6 +159,22 @@ impl Default for ProbChaseConfig {
             max_daily_trades: default_max_daily_trades(),
             allowed_window_secs: Vec::new(),
             fair_prob_table: None,
+        }
+    }
+}
+
+impl From<DirectionalConfig> for ProbChaseConfig {
+    fn from(config: DirectionalConfig) -> Self {
+        Self {
+            symbols: config.symbols,
+            min_time_remaining_secs: config.min_time_remaining_secs,
+            max_time_remaining_secs: config.max_time_remaining_secs,
+            stake_usd: config.stake_usd,
+            cooldown_secs: config.cooldown_secs,
+            max_positions: config.max_positions as usize,
+            max_daily_trades: config.max_daily_trades,
+            allowed_window_secs: config.allowed_window_secs,
+            ..Self::default()
         }
     }
 }

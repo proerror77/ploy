@@ -19,6 +19,9 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use super::common::event::EventWindow;
+use super::common::fees::crypto_fee_cost;
+use super::common::quote::QuoteState;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 // ── Probability Model ────────────────────────────────────
@@ -50,16 +53,6 @@ fn estimate_probability(s0: f64, st: f64, sigma_horizon: f64) -> f64 {
     }
     let z = (st / s0).ln() / sigma_horizon;
     normal_cdf(z)
-}
-
-// ── Fee Model ────────────────────────────────────────────
-
-/// Polymarket trading fee for crypto binary markets.
-///
-/// Actual PM fee: 2% × p × (1 − p) per share.
-/// Returns fee per share (not multiplied by quantity).
-fn crypto_fee_cost(entry_price: f64) -> f64 {
-    0.02 * entry_price * (1.0 - entry_price)
 }
 
 const EWMA_LAMBDA: f64 = 0.94;
@@ -152,7 +145,6 @@ pub struct DirectionalConfig {
     pub reversal_stop_distance_pct: f64,
 
     // ── Three-Layer strategy parameters ──────────────────────────────
-
     /// Direction gate: minimum effective probability to consider a trade.
     #[serde(default = "default_tl_min_direction_prob")]
     pub three_layer_min_direction_prob: f64,
@@ -320,16 +312,36 @@ fn default_reversal_take_profit_ask() -> f64 {
 fn default_reversal_stop_distance_pct() -> f64 {
     0.025
 }
-fn default_tl_min_direction_prob() -> f64 { 0.56 }
-fn default_tl_min_distance_over_sigma() -> f64 { 0.3 }
-fn default_tl_min_confirmation_score() -> f64 { 0.10 }
-fn default_tl_min_drift_confirmation() -> f64 { 0.0002 }
-fn default_tl_min_edge() -> f64 { 0.03 }
-fn default_tl_min_reward_risk() -> f64 { 1.2 }
-fn default_tl_take_profit_ask() -> f64 { 0.70 }
-fn default_tl_stop_distance_pct() -> f64 { 0.020 }
-fn default_tl_max_pm_lag_secs() -> u64 { 15 }
-fn default_tl_min_entry_score() -> f64 { 0.30 }
+fn default_tl_min_direction_prob() -> f64 {
+    0.56
+}
+fn default_tl_min_distance_over_sigma() -> f64 {
+    0.3
+}
+fn default_tl_min_confirmation_score() -> f64 {
+    0.10
+}
+fn default_tl_min_drift_confirmation() -> f64 {
+    0.0002
+}
+fn default_tl_min_edge() -> f64 {
+    0.03
+}
+fn default_tl_min_reward_risk() -> f64 {
+    1.2
+}
+fn default_tl_take_profit_ask() -> f64 {
+    0.70
+}
+fn default_tl_stop_distance_pct() -> f64 {
+    0.020
+}
+fn default_tl_max_pm_lag_secs() -> u64 {
+    15
+}
+fn default_tl_min_entry_score() -> f64 {
+    0.30
+}
 fn default_min_time() -> u64 {
     60
 }
@@ -486,23 +498,6 @@ impl ReturnBuffer {
     fn len(&self) -> usize {
         self.entries.len()
     }
-}
-
-/// Active event window for a symbol.
-#[derive(Clone)]
-struct EventWindow {
-    event_id: Arc<str>,
-    symbol: Arc<str>,
-    up_token: Arc<str>,
-    down_token: Arc<str>,
-    end_time: DateTime<Utc>,
-    open_price: Option<Decimal>,
-}
-
-/// Cached Polymarket quote.
-struct QuoteState {
-    _bid: Option<Decimal>,
-    ask: Option<Decimal>,
 }
 
 #[derive(Default)]
@@ -798,7 +793,8 @@ impl DirectionalStrategy {
                 ploy_trading::OrderState::Pending
                     | ploy_trading::OrderState::Acknowledged
                     | ploy_trading::OrderState::PartiallyFilled
-            ) && (order.token_id.as_str() == &*event.up_token || order.token_id.as_str() == &*event.down_token)
+            ) && (order.token_id.as_str() == &*event.up_token
+                || order.token_id.as_str() == &*event.down_token)
         })
     }
 
@@ -818,7 +814,7 @@ impl DirectionalStrategy {
 
         match (
             self.spot.get(&event.symbol).map(|spot| spot.price),
-            event.open_price,
+            event.price_to_beat,
         ) {
             (Some(current), Some(open)) => Some(current >= open),
             _ => None,
@@ -963,13 +959,13 @@ impl DirectionalStrategy {
         now: DateTime<Utc>,
     ) -> Option<(Direction, Decimal, f64, f64)> {
         // Gate 0: Price validity
-        let open_price = event.open_price?;
-        if open_price <= Decimal::ZERO || spot_price <= Decimal::ZERO {
+        let price_to_beat = event.price_to_beat?;
+        if price_to_beat <= Decimal::ZERO || spot_price <= Decimal::ZERO {
             debug!(symbol = %symbol, event_id = %event.event_id, "Gate 0: Invalid prices");
             return None;
         }
 
-        let s0 = open_price.to_f64()?;
+        let s0 = price_to_beat.to_f64()?;
         let st = spot_price.to_f64()?;
         let secs_remaining = (event.end_time - now).num_seconds().max(0) as f64;
         let sigma_horizon = self.sigma_horizon(symbol, secs_remaining);
@@ -1426,7 +1422,12 @@ impl StrategyLogic for DirectionalStrategy {
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
-                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                if !self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
+                {
                     return vec![];
                 }
 
@@ -1445,8 +1446,8 @@ impl StrategyLogic for DirectionalStrategy {
                 );
                 if let Some(events) = self.events.get_mut(symbol) {
                     for event in events.iter_mut() {
-                        if event.open_price.is_none() {
-                            event.open_price = Some(*price);
+                        if event.price_to_beat.is_none() {
+                            event.price_to_beat = Some(*price);
                         }
                     }
                 }
@@ -1482,15 +1483,21 @@ impl StrategyLogic for DirectionalStrategy {
                 self.quotes.insert(
                     token_id.clone(),
                     QuoteState {
-                        _bid: *bid,
+                        bid: *bid,
                         ask: *ask,
+                        ts: *ts,
                     },
                 );
 
                 // Also try entry: a fresh quote may unlock a signal that was
                 // previously blocked by missing ask price (Gate 1).
                 if let Some(symbol) = self.token_symbol.get(token_id).cloned() {
-                    if self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                    if self
+                        .config
+                        .symbols
+                        .iter()
+                        .any(|s| s.as_str() == symbol.as_ref())
+                    {
                         if self.feed_time.map_or(true, |ft| *ts > ft) {
                             self.feed_time = Some(*ts);
                         }
@@ -1516,7 +1523,12 @@ impl StrategyLogic for DirectionalStrategy {
                 ts,
                 ..
             } => {
-                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                if !self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
+                {
                     return vec![];
                 }
                 self.microstructure
@@ -1535,7 +1547,12 @@ impl StrategyLogic for DirectionalStrategy {
                 spread_bps,
                 ts,
             } => {
-                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                if !self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
+                {
                     return vec![];
                 }
                 self.microstructure
@@ -1590,7 +1607,8 @@ impl StrategyLogic for DirectionalStrategy {
                     return vec![];
                 }
                 // Use price_to_beat if available, otherwise fallback to current spot
-                let open_price = price_to_beat.or_else(|| self.spot.get(symbol).map(|s| s.price));
+                let price_to_beat =
+                    price_to_beat.or_else(|| self.spot.get(symbol).map(|s| s.price));
 
                 // Track token → symbol mapping
                 self.token_symbol.insert(up_token.clone(), symbol.clone());
@@ -1602,7 +1620,8 @@ impl StrategyLogic for DirectionalStrategy {
                     up_token: up_token.clone(),
                     down_token: down_token.clone(),
                     end_time: *end_time,
-                    open_price,
+                    window_secs: *window_secs,
+                    price_to_beat,
                 });
 
                 // Quotes for this event may have arrived before EventDiscovered
@@ -1611,7 +1630,11 @@ impl StrategyLogic for DirectionalStrategy {
                 let has_cached_quote =
                     self.quotes.contains_key(up_token) || self.quotes.contains_key(down_token);
                 if has_cached_quote
-                    && self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref())
+                    && self
+                        .config
+                        .symbols
+                        .iter()
+                        .any(|s| s.as_str() == symbol.as_ref())
                     && self.daily_trades < self.config.max_daily_trades
                     && !self.in_cooldown(symbol, now)
                 {
@@ -1676,7 +1699,8 @@ impl StrategyLogic for DirectionalStrategy {
         // Track entry prices and realized PnL for circuit breaker.
         match fill.side {
             ploy_trading::TradeSide::Buy => {
-                self.entry_prices.insert(Arc::from(fill.token_id.clone()), fill.price);
+                self.entry_prices
+                    .insert(Arc::from(fill.token_id.clone()), fill.price);
             }
             ploy_trading::TradeSide::Sell => {
                 if let Some(entry_price) = self.entry_prices.remove(fill.token_id.as_str()) {
@@ -1840,7 +1864,8 @@ mod tests {
                     up_token: "up1".into(),
                     down_token: "dn1".into(),
                     end_time: e1_end,
-                    open_price: Some(dec!(100000)),
+                    window_secs: 300,
+                    price_to_beat: Some(dec!(100000)),
                 },
                 EventWindow {
                     event_id: "e2".into(),
@@ -1848,7 +1873,8 @@ mod tests {
                     up_token: "up2".into(),
                     down_token: "dn2".into(),
                     end_time: e2_end,
-                    open_price: Some(dec!(100000)),
+                    window_secs: 300,
+                    price_to_beat: Some(dec!(100000)),
                 },
             ],
         );
@@ -1913,7 +1939,7 @@ mod tests {
             &orders,
         );
 
-        // 2. Set initial spot (becomes open_price via event)
+        // 2. Set initial spot (becomes price_to_beat via event)
         strat.spot.insert(
             "BTCUSDT".into(),
             SpotState {
@@ -1921,8 +1947,8 @@ mod tests {
                 ts: now,
             },
         );
-        // Manually set open_price since event was registered before spot
-        strat.events.get_mut("BTCUSDT").unwrap()[0].open_price = Some(dec!(100000));
+        // Manually set price_to_beat since event was registered before spot
+        strat.events.get_mut("BTCUSDT").unwrap()[0].price_to_beat = Some(dec!(100000));
 
         // 3. Provide quotes — UP ask cheap (0.30) meaning market underprices UP
         strat.on_update(
@@ -1931,8 +1957,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,
@@ -1943,8 +1969,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,
@@ -2029,8 +2055,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             positions,
             &OrderLedger::default(),
@@ -2041,8 +2067,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             positions,
             &OrderLedger::default(),
@@ -2155,7 +2181,7 @@ mod tests {
     }
 
     #[test]
-    fn event_before_first_spot_backfills_open_price_and_allows_entry() {
+    fn event_before_first_spot_backfills_price_to_beat_and_allows_entry() {
         let config = default_config();
         let mut strat = DirectionalStrategy::new(config);
         let positions = PositionLedger::default();
@@ -2178,7 +2204,7 @@ mod tests {
         );
 
         assert_eq!(
-            strat.events["BTCUSDT"][0].open_price, None,
+            strat.events["BTCUSDT"][0].price_to_beat, None,
             "precondition: event arrived before first spot"
         );
 
@@ -2188,8 +2214,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,
@@ -2200,8 +2226,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,
@@ -2221,7 +2247,7 @@ mod tests {
             first_spot_decisions.is_empty(),
             "first spot should initialize the event, not trade immediately"
         );
-        assert_eq!(strat.events["BTCUSDT"][0].open_price, Some(dec!(100000)));
+        assert_eq!(strat.events["BTCUSDT"][0].price_to_beat, Some(dec!(100000)));
 
         let decisions = strat.on_update(
             &MarketUpdate::SpotPrice {
@@ -2265,7 +2291,7 @@ mod tests {
                 ts: now,
             },
         );
-        strat.events.get_mut("BTCUSDT").unwrap()[0].open_price = Some(dec!(100000));
+        strat.events.get_mut("BTCUSDT").unwrap()[0].price_to_beat = Some(dec!(100000));
 
         strat.on_update(
             &MarketUpdate::Quote {
@@ -2273,8 +2299,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &OrderLedger::default(),
@@ -2285,8 +2311,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &OrderLedger::default(),
@@ -2369,8 +2395,8 @@ mod tests {
                 ts: now,
             },
         );
-        strat.events.get_mut("BTCUSDT").unwrap()[0].open_price = Some(dec!(100000));
-        strat.events.get_mut("BTCUSDT").unwrap()[1].open_price = Some(dec!(100000));
+        strat.events.get_mut("BTCUSDT").unwrap()[0].price_to_beat = Some(dec!(100000));
+        strat.events.get_mut("BTCUSDT").unwrap()[1].price_to_beat = Some(dec!(100000));
 
         for token_id in ["up-near", "dn-near", "up-far", "dn-far"] {
             let ask = if token_id.starts_with("up") {
@@ -2385,8 +2411,8 @@ mod tests {
                     bid: Some(bid),
                     ask: Some(ask),
                     ts: now,
-                        bid_size: None,
-                        ask_size: None,
+                    bid_size: None,
+                    ask_size: None,
                 },
                 &positions,
                 &OrderLedger::default(),
@@ -2441,7 +2467,8 @@ mod tests {
                 up_token: "up1".into(),
                 down_token: "dn1".into(),
                 end_time: now,
-                open_price: Some(dec!(100000)),
+                window_secs: 300,
+                price_to_beat: Some(dec!(100000)),
             }],
         );
         strat.token_symbol.insert("up1".into(), "BTCUSDT".into());
@@ -2498,7 +2525,8 @@ mod tests {
                 up_token: "up1".into(),
                 down_token: "dn1".into(),
                 end_time: now,
-                open_price: Some(dec!(100000)),
+                window_secs: 300,
+                price_to_beat: Some(dec!(100000)),
             }],
         );
         strat.token_symbol.insert("up1".into(), "BTCUSDT".into());
