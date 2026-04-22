@@ -252,9 +252,9 @@ fn kill_pid(pid: u32) {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
-    use super::process_alive;
     use super::DeploymentRuntime;
+    #[cfg(target_os = "linux")]
+    use super::{process_alive, process_matches_spec};
     use crate::protocol::WorkerLaunchSpec;
     #[cfg(target_os = "linux")]
     use crate::protocol::WorkerStatus;
@@ -263,94 +263,119 @@ mod tests {
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use std::path::PathBuf;
 
-    fn shell_sleep_spec() -> WorkerLaunchSpec {
+    fn test_pid_file(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ploy-deployments-{name}-{}.pid",
+            std::process::id()
+        ))
+    }
+
+    fn sleep_spec(name: &str) -> WorkerLaunchSpec {
         WorkerLaunchSpec {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
             runtime_mode: "paper".to_string(),
             desired_state: DesiredState::Running,
-            command: PathBuf::from("/bin/sh"),
-            args: vec!["-lc".to_string(), "sleep 30; true".to_string()],
+            command: PathBuf::from("/bin/sleep"),
+            args: vec!["30".to_string()],
             working_directory: std::env::current_dir().expect("cwd"),
-            pid_file: std::env::temp_dir().join("ploy-deployments-test.pid"),
+            pid_file: test_pid_file(name),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_process_identity(pid: u32, spec: &WorkerLaunchSpec) {
+        for _ in 0..20 {
+            if process_matches_spec(pid, spec) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(process_matches_spec(pid, spec));
     }
 
     #[test]
     fn starts_worker_process() {
-        let _ = std::fs::remove_file(std::env::temp_dir().join("ploy-deployments-test.pid"));
-        let runtime = DeploymentRuntime::new(shell_sleep_spec());
+        let spec = sleep_spec("starts");
+        let pid_file = spec.pid_file.clone();
+        let _ = std::fs::remove_file(&pid_file);
+        let mut runtime = DeploymentRuntime::new(spec);
         assert_eq!(
             runtime.boot_status().observed_state,
             ObservedState::Starting
         );
         assert!(runtime.boot_status().pid.is_some());
+        runtime.stop();
+        let _ = std::fs::remove_file(pid_file);
     }
 
     #[test]
     fn heartbeat_marks_running_worker() {
-        let _ = std::fs::remove_file(std::env::temp_dir().join("ploy-deployments-test.pid"));
-        let mut runtime = DeploymentRuntime::new(shell_sleep_spec());
+        let spec = sleep_spec("heartbeat");
+        let pid_file = spec.pid_file.clone();
+        let _ = std::fs::remove_file(&pid_file);
+        let mut runtime = DeploymentRuntime::new(spec);
         let status = runtime.refresh_status();
         assert_eq!(status.observed_state, ObservedState::Running);
+        runtime.stop();
+        let _ = std::fs::remove_file(pid_file);
     }
 
     #[test]
     fn stop_marks_worker_stopped() {
-        let _ = std::fs::remove_file(std::env::temp_dir().join("ploy-deployments-test.pid"));
-        let mut runtime = DeploymentRuntime::new(shell_sleep_spec());
+        let spec = sleep_spec("stop");
+        let pid_file = spec.pid_file.clone();
+        let _ = std::fs::remove_file(&pid_file);
+        let mut runtime = DeploymentRuntime::new(spec);
         let status = runtime.stop();
         assert_eq!(status.observed_state, ObservedState::Stopped);
         assert!(status.pid.is_none());
+        let _ = std::fs::remove_file(pid_file);
     }
 
     #[test]
     fn bad_command_marks_worker_failed() {
-        let _ = std::fs::remove_file(std::env::temp_dir().join("ploy-deployments-test.pid"));
-        let mut spec = shell_sleep_spec();
+        let mut spec = sleep_spec("bad-command");
+        let pid_file = spec.pid_file.clone();
+        let _ = std::fs::remove_file(&pid_file);
         spec.command = PathBuf::from("/definitely/missing/ploy-runner");
         let runtime = DeploymentRuntime::new(spec);
         assert_eq!(runtime.boot_status().observed_state, ObservedState::Failed);
         assert!(runtime.boot_status().last_error.is_some());
+        let _ = std::fs::remove_file(pid_file);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn existing_pid_file_prevents_duplicate_spawn() {
-        let pid_file = std::env::temp_dir().join("ploy-deployments-existing.pid");
+        let first_spec = sleep_spec("existing");
+        let pid_file = first_spec.pid_file.clone();
         let _ = std::fs::remove_file(&pid_file);
 
-        let first = DeploymentRuntime::new(WorkerLaunchSpec {
-            pid_file: pid_file.clone(),
-            ..shell_sleep_spec()
-        });
+        let mut first = DeploymentRuntime::new(first_spec.clone());
         let pid = first.boot_status().pid.expect("first pid");
+        wait_for_process_identity(pid, &first_spec);
 
-        let second = DeploymentRuntime::new(WorkerLaunchSpec {
-            pid_file: pid_file.clone(),
-            ..shell_sleep_spec()
-        });
+        let second = DeploymentRuntime::new(first_spec);
         assert_eq!(second.boot_status().pid, Some(pid));
 
+        let first_status = first.stop();
+        assert_eq!(first_status.observed_state, ObservedState::Stopped);
         let _ = std::fs::remove_file(pid_file);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn inherited_pid_can_be_stopped_without_child_handle() {
-        let pid_file = std::env::temp_dir().join("ploy-deployments-inherited.pid");
+        let first_spec = sleep_spec("inherited");
+        let pid_file = first_spec.pid_file.clone();
         let _ = std::fs::remove_file(&pid_file);
 
-        let mut first = DeploymentRuntime::new(WorkerLaunchSpec {
-            pid_file: pid_file.clone(),
-            ..shell_sleep_spec()
-        });
+        let mut first = DeploymentRuntime::new(first_spec.clone());
         let pid = first.boot_status().pid.expect("first pid");
+        wait_for_process_identity(pid, &first_spec);
 
-        let mut inherited = DeploymentRuntime::new(WorkerLaunchSpec {
-            pid_file: pid_file.clone(),
-            ..shell_sleep_spec()
-        });
+        let mut inherited = DeploymentRuntime::new(first_spec);
         assert_eq!(inherited.boot_status().pid, Some(pid));
 
         let status = inherited.stop();
@@ -364,18 +389,16 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn mismatched_inherited_pid_spawns_new_worker_and_does_not_kill_foreign_process() {
-        let pid_file = std::env::temp_dir().join("ploy-deployments-mismatch.pid");
+        let first_spec = sleep_spec("mismatch");
+        let pid_file = first_spec.pid_file.clone();
         let _ = std::fs::remove_file(&pid_file);
 
-        let mut first = DeploymentRuntime::new(WorkerLaunchSpec {
-            pid_file: pid_file.clone(),
-            ..shell_sleep_spec()
-        });
+        let mut first = DeploymentRuntime::new(first_spec.clone());
         let first_pid = first.boot_status().pid.expect("first pid");
+        wait_for_process_identity(first_pid, &first_spec);
 
-        let mut second_spec = shell_sleep_spec();
-        second_spec.pid_file = pid_file.clone();
-        second_spec.args = vec!["-lc".to_string(), "sleep 31; true".to_string()];
+        let mut second_spec = first_spec;
+        second_spec.args = vec!["31".to_string()];
         let mut second = DeploymentRuntime::new(second_spec);
         let second_pid = second.boot_status().pid.expect("second pid");
 
@@ -395,18 +418,16 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn refresh_status_fails_stale_pid_when_process_no_longer_matches_spec() {
-        let pid_file = std::env::temp_dir().join("ploy-deployments-stale.pid");
+        let foreign_spec = sleep_spec("stale");
+        let pid_file = foreign_spec.pid_file.clone();
         let _ = std::fs::remove_file(&pid_file);
 
-        let mut foreign = DeploymentRuntime::new(WorkerLaunchSpec {
-            pid_file: pid_file.clone(),
-            ..shell_sleep_spec()
-        });
+        let mut foreign = DeploymentRuntime::new(foreign_spec.clone());
         let foreign_pid = foreign.boot_status().pid.expect("foreign pid");
+        wait_for_process_identity(foreign_pid, &foreign_spec);
 
-        let mut stale_spec = shell_sleep_spec();
-        stale_spec.pid_file = pid_file.clone();
-        stale_spec.args = vec!["-lc".to_string(), "sleep 31; true".to_string()];
+        let mut stale_spec = foreign_spec;
+        stale_spec.args = vec!["31".to_string()];
 
         let mut runtime = DeploymentRuntime {
             spec: stale_spec,

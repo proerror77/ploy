@@ -66,35 +66,52 @@ mod tests {
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use std::path::PathBuf;
 
-    fn test_launch_spec() -> WorkerLaunchSpec {
+    fn test_pid_file(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ploy-deployments-supervisor-{name}-{}.pid",
+            std::process::id()
+        ))
+    }
+
+    fn test_launch_spec(name: &str) -> WorkerLaunchSpec {
         WorkerLaunchSpec {
             deployment_id: "openclaw.default".to_string(),
             bundle_id: "openclaw".to_string(),
             runtime_mode: "paper".to_string(),
             desired_state: DesiredState::Running,
-            command: PathBuf::from("/bin/sh"),
-            args: vec!["-lc".to_string(), "sleep 30".to_string()],
+            command: PathBuf::from("/bin/sleep"),
+            args: vec!["30".to_string()],
             working_directory: std::env::current_dir().expect("cwd"),
-            pid_file: std::env::temp_dir().join("ploy-deployments-supervisor.pid"),
+            pid_file: test_pid_file(name),
         }
     }
 
     #[test]
     fn start_one_worker() {
+        let spec = test_launch_spec("start-one");
+        let pid_file = spec.pid_file.clone();
+        let _ = std::fs::remove_file(&pid_file);
         let mut supervisor = WorkerSupervisor::default();
-        let status = supervisor.start(test_launch_spec());
+        let status = supervisor.start(spec);
 
         assert_eq!(status.observed_state, ObservedState::Starting);
         assert!(status.pid.is_some());
+        supervisor.stop("openclaw.default");
+        let _ = std::fs::remove_file(pid_file);
     }
 
     #[test]
     fn restart_failed_worker() {
+        let spec = test_launch_spec("restart-failed");
+        let pid_file = spec.pid_file.clone();
+        let _ = std::fs::remove_file(&pid_file);
         let mut supervisor = WorkerSupervisor::default();
-        supervisor.start(test_launch_spec());
+        supervisor.start(spec);
 
         supervisor.fail("openclaw.default");
         let restarted = supervisor.restart("openclaw.default").expect("restarted");
         assert_eq!(restarted.observed_state, ObservedState::Running);
+        supervisor.stop("openclaw.default");
+        let _ = std::fs::remove_file(pid_file);
     }
 }
