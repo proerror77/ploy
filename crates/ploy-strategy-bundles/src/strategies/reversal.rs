@@ -587,7 +587,9 @@ impl ReversalStrategy {
                     continue;
                 }
 
-                let exit_bid = self.quotes.get(token_id).and_then(|q| q.bid);
+                let Some(exit_bid) = self.quotes.get(token_id).and_then(|q| q.bid) else {
+                    continue;
+                };
 
                 if time_remaining < TIME_STOP_SECS {
                     decisions.push(StrategyDecision::Exit(TradingIntent {
@@ -601,7 +603,7 @@ impl ReversalStrategy {
                         token_id: token_id.to_string(),
                         side: TradeSide::Sell,
                         quantity: qty,
-                        limit_price: exit_bid,
+                        limit_price: Some(exit_bid),
                         purpose: IntentPurpose::Exit,
                         created_at: now,
                     }));
@@ -622,7 +624,7 @@ impl ReversalStrategy {
                                 token_id: token_id.to_string(),
                                 side: TradeSide::Sell,
                                 quantity: qty,
-                                limit_price: quote.bid.or(quote.ask),
+                                limit_price: Some(exit_bid),
                                 purpose: IntentPurpose::Exit,
                                 created_at: now,
                             }));
@@ -652,7 +654,7 @@ impl ReversalStrategy {
                             token_id: token_id.to_string(),
                             side: TradeSide::Sell,
                             quantity: qty,
-                            limit_price: exit_bid,
+                            limit_price: Some(exit_bid),
                             purpose: IntentPurpose::Exit,
                             created_at: now,
                         }));

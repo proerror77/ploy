@@ -278,6 +278,9 @@ impl ProbReversalStrategy {
         // 3. Check exit conditions for any holding on this token.
         let mut decisions = Vec::new();
         if self.holdings.contains_key(token_id) {
+            let Some(exit_bid) = bid else {
+                return decisions;
+            };
             let held_prob = current_prob; // probability of the token we hold
             if held_prob >= self.config.take_profit_prob {
                 let qty = positions.net_qty(token_id);
@@ -298,7 +301,7 @@ impl ProbReversalStrategy {
                         token_id: token_id.to_string(),
                         side: TradeSide::Sell,
                         quantity: qty,
-                        limit_price: bid.or(ask),
+                        limit_price: Some(exit_bid),
                         purpose: IntentPurpose::Exit,
                         created_at: *ts,
                     }));
@@ -322,7 +325,7 @@ impl ProbReversalStrategy {
                         token_id: token_id.to_string(),
                         side: TradeSide::Sell,
                         quantity: qty,
-                        limit_price: bid.or(ask),
+                        limit_price: Some(exit_bid),
                         purpose: IntentPurpose::Exit,
                         created_at: *ts,
                     }));
@@ -345,7 +348,7 @@ impl ProbReversalStrategy {
                         token_id: token_id.to_string(),
                         side: TradeSide::Sell,
                         quantity: qty,
-                        limit_price: bid,
+                        limit_price: Some(exit_bid),
                         purpose: IntentPurpose::Exit,
                         created_at: *ts,
                     }));

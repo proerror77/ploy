@@ -650,7 +650,9 @@ impl ThreeLayerStrategy {
                     continue;
                 }
 
-                let exit_bid = self.quotes.get(token_id).and_then(|q| q.bid);
+                let Some(exit_bid) = self.quotes.get(token_id).and_then(|q| q.bid) else {
+                    continue;
+                };
 
                 // Time stop
                 if time_remaining < TIME_STOP_SECS {
@@ -661,7 +663,7 @@ impl ThreeLayerStrategy {
                         token_id: token_id.to_string(),
                         side: TradeSide::Sell,
                         quantity: qty,
-                        limit_price: exit_bid,
+                        limit_price: Some(exit_bid),
                         purpose: IntentPurpose::Exit,
                         created_at: now,
                     }));
@@ -679,7 +681,7 @@ impl ThreeLayerStrategy {
                                 token_id: token_id.to_string(),
                                 side: TradeSide::Sell,
                                 quantity: qty,
-                                limit_price: quote.bid,
+                                limit_price: Some(exit_bid),
                                 purpose: IntentPurpose::Exit,
                                 created_at: now,
                             }));
@@ -706,7 +708,7 @@ impl ThreeLayerStrategy {
                             token_id: token_id.to_string(),
                             side: TradeSide::Sell,
                             quantity: qty,
-                            limit_price: exit_bid,
+                            limit_price: Some(exit_bid),
                             purpose: IntentPurpose::Exit,
                             created_at: now,
                         }));
