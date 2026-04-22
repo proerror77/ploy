@@ -282,6 +282,15 @@ mod tests {
     use chrono::Utc;
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_pid_file(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("duration")
+            .as_nanos();
+        std::env::temp_dir().join(format!("ploy-deployments-{label}-{unique}.pid"))
+    }
 
     fn shell_sleep_spec() -> WorkerLaunchSpec {
         WorkerLaunchSpec {
@@ -292,13 +301,12 @@ mod tests {
             command: PathBuf::from("/bin/sleep"),
             args: vec!["30".to_string()],
             working_directory: std::env::current_dir().expect("cwd"),
-            pid_file: std::env::temp_dir().join("ploy-deployments-test.pid"),
+            pid_file: unique_pid_file("test"),
         }
     }
 
     #[test]
     fn starts_worker_process() {
-        let _ = std::fs::remove_file(std::env::temp_dir().join("ploy-deployments-test.pid"));
         let runtime = DeploymentRuntime::new(shell_sleep_spec());
         assert_eq!(
             runtime.boot_status().observed_state,
@@ -309,7 +317,6 @@ mod tests {
 
     #[test]
     fn heartbeat_marks_running_worker() {
-        let _ = std::fs::remove_file(std::env::temp_dir().join("ploy-deployments-test.pid"));
         let mut runtime = DeploymentRuntime::new(shell_sleep_spec());
         let status = runtime.refresh_status();
         assert_eq!(status.observed_state, ObservedState::Running);
@@ -317,7 +324,6 @@ mod tests {
 
     #[test]
     fn stop_marks_worker_stopped() {
-        let _ = std::fs::remove_file(std::env::temp_dir().join("ploy-deployments-test.pid"));
         let mut runtime = DeploymentRuntime::new(shell_sleep_spec());
         let status = runtime.stop();
         assert_eq!(status.observed_state, ObservedState::Stopped);
@@ -326,7 +332,6 @@ mod tests {
 
     #[test]
     fn bad_command_marks_worker_failed() {
-        let _ = std::fs::remove_file(std::env::temp_dir().join("ploy-deployments-test.pid"));
         let mut spec = shell_sleep_spec();
         spec.command = PathBuf::from("/definitely/missing/ploy-runner");
         let runtime = DeploymentRuntime::new(spec);
@@ -343,7 +348,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn existing_pid_file_prevents_duplicate_spawn() {
-        let pid_file = std::env::temp_dir().join("ploy-deployments-existing.pid");
+        let pid_file = unique_pid_file("existing");
         let _ = std::fs::remove_file(&pid_file);
 
         let first = DeploymentRuntime::new(WorkerLaunchSpec {
@@ -364,7 +369,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn inherited_pid_can_be_stopped_without_child_handle() {
-        let pid_file = std::env::temp_dir().join("ploy-deployments-inherited.pid");
+        let pid_file = unique_pid_file("inherited");
         let _ = std::fs::remove_file(&pid_file);
 
         let mut first = DeploymentRuntime::new(WorkerLaunchSpec {
@@ -390,7 +395,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn mismatched_inherited_pid_spawns_new_worker_and_does_not_kill_foreign_process() {
-        let pid_file = std::env::temp_dir().join("ploy-deployments-mismatch.pid");
+        let pid_file = unique_pid_file("mismatch");
         let _ = std::fs::remove_file(&pid_file);
 
         let mut first = DeploymentRuntime::new(WorkerLaunchSpec {
@@ -421,7 +426,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn refresh_status_fails_stale_pid_when_process_no_longer_matches_spec() {
-        let pid_file = std::env::temp_dir().join("ploy-deployments-stale.pid");
+        let pid_file = unique_pid_file("stale");
         let _ = std::fs::remove_file(&pid_file);
 
         let mut foreign = DeploymentRuntime::new(WorkerLaunchSpec {
