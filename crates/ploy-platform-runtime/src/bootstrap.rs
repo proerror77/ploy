@@ -43,13 +43,26 @@ mod tests {
     use ploy_trading::TradingRuntime;
     use rust_decimal_macros::dec;
     use std::collections::BTreeMap;
+    use std::fs;
     use std::path::PathBuf;
+
+    fn test_runner_binary() -> PathBuf {
+        let path = std::env::temp_dir().join("ploy-platform-bootstrap-test-runner.sh");
+        fs::write(&path, "#!/bin/sh\nsleep 30\n").expect("write test runner");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .expect("chmod test runner");
+        }
+        path
+    }
 
     fn config() -> WorkerTickConfig {
         WorkerTickConfig {
             listen_addr: "127.0.0.1:8081".to_string(),
             worker_heartbeat_stale_after_ms: 15_000,
-            runner_binary: PathBuf::from("/bin/sh"),
+            runner_binary: test_runner_binary(),
             strategy_config_root: PathBuf::from("config/strategies"),
             working_directory: std::env::current_dir().expect("cwd"),
         }
