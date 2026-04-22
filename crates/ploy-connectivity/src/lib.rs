@@ -19,6 +19,7 @@ pub const CRATE_MARKER: &str = "ploy-connectivity";
 const DEFAULT_POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
 const TERMINAL_CURSOR: &str = "LTE=";
 const MAX_CONCURRENT_TRADE_RECONCILE_REQUESTS: usize = 10;
+const TRADE_RECONCILE_LOOKBACK_SECS: u64 = 24 * 60 * 60;
 
 /// Order execution type for live trading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -425,6 +426,7 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                 OrderExecutionType::GTC => {
                     let price = execution_price_override(
                         request.order_type,
+                        request.side,
                         limit_price,
                         request.aggressive_ticks,
                     )
@@ -609,6 +611,7 @@ fn polymarket_side(side: TradeSide) -> Side {
 
 fn execution_price_override(
     order_type: OrderExecutionType,
+    side: TradeSide,
     limit_price: Decimal,
     aggressive_ticks: u8,
 ) -> Option<Decimal> {
@@ -617,6 +620,7 @@ fn execution_price_override(
             let tick_size = dec!(0.01);
             Some(normalize_aggressive_price(
                 limit_price,
+                side,
                 aggressive_ticks,
                 tick_size,
             ))
@@ -690,7 +694,18 @@ async fn load_trades_for_token(
     client: Client<Authenticated<Normal>>,
     token_id: U256,
 ) -> Result<Vec<TradeResponse>, ExecutionError> {
-    let request = TradesRequest::builder().asset_id(token_id).build();
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| {
+            duration
+                .as_secs()
+                .saturating_sub(TRADE_RECONCILE_LOOKBACK_SECS) as i64
+        })
+        .unwrap_or(0);
+    let request = TradesRequest::builder()
+        .asset_id(token_id)
+        .after(after)
+        .build();
     let mut next_cursor = None;
     let mut trades = Vec::new();
 
@@ -712,6 +727,7 @@ async fn load_trades_for_token(
 
 fn normalize_aggressive_price(
     limit_price: Decimal,
+    side: TradeSide,
     aggressive_ticks: u8,
     tick_size: Decimal,
 ) -> Decimal {
@@ -720,7 +736,10 @@ fn normalize_aggressive_price(
         rounded_limit
     } else {
         let offset = tick_size * Decimal::from(aggressive_ticks);
-        (rounded_limit + offset).min(dec!(0.99))
+        match side {
+            TradeSide::Buy => (rounded_limit + offset).min(dec!(0.99)),
+            TradeSide::Sell => (rounded_limit - offset).max(dec!(0.01)),
+        }
     }
 }
 
@@ -883,12 +902,16 @@ mod tests {
     #[test]
     fn normalize_aggressive_price_rounds_to_tick_size_before_offset() {
         assert_eq!(
-            normalize_aggressive_price(dec!(0.607925), 0, dec!(0.01)),
+            normalize_aggressive_price(dec!(0.607925), TradeSide::Buy, 0, dec!(0.01)),
             dec!(0.61)
         );
         assert_eq!(
-            normalize_aggressive_price(dec!(0.607925), 2, dec!(0.01)),
+            normalize_aggressive_price(dec!(0.607925), TradeSide::Buy, 2, dec!(0.01)),
             dec!(0.63)
+        );
+        assert_eq!(
+            normalize_aggressive_price(dec!(0.607925), TradeSide::Sell, 2, dec!(0.01)),
+            dec!(0.59)
         );
     }
 
@@ -939,15 +962,15 @@ mod tests {
     #[test]
     fn immediate_execution_uses_orderbook_pricing_instead_of_signal_cap() {
         assert_eq!(
-            execution_price_override(OrderExecutionType::GTC, dec!(0.417075), 2),
+            execution_price_override(OrderExecutionType::GTC, TradeSide::Buy, dec!(0.417075), 2),
             Some(dec!(0.44))
         );
         assert_eq!(
-            execution_price_override(OrderExecutionType::FAK, dec!(0.417075), 2),
+            execution_price_override(OrderExecutionType::FAK, TradeSide::Buy, dec!(0.417075), 2),
             None
         );
         assert_eq!(
-            execution_price_override(OrderExecutionType::FOK, dec!(0.417075), 2),
+            execution_price_override(OrderExecutionType::FOK, TradeSide::Buy, dec!(0.417075), 2),
             None
         );
     }

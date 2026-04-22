@@ -1,15 +1,15 @@
 use crate::events::EventBroker;
-use crate::runtime::{next_paper_intent_id, PloyDaemon};
+use crate::runtime::{PloyDaemon, next_paper_intent_id};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use ploy_operator_contracts::{
     AgentRunRecord, AlertSnapshotEvent, AuditLogEntry, ControlPlaneErrorResponse,
-    DeploymentApplyRequest, DeploymentControlRequest, DeploymentSnapshotEvent,
-    DeploymentDiagnosticsReport, DiagnosticsEvidence, DiagnosticsFinding, IntentPurpose,
+    DeploymentApplyRequest, DeploymentControlRequest, DeploymentDiagnosticsReport,
+    DeploymentSnapshotEvent, DiagnosticsEvidence, DiagnosticsFinding, IntentPurpose,
     MetricsSnapshotEvent, OperatorEvent, OrderReplaceRequest, OversightSnapshotEvent,
     PaperIntentRequest, PlatformDiagnosticsReport, ProposalCreateRequest, ProposalDecisionRequest,
-    ProposalSnapshotEvent, StatusUpdate, SystemSnapshotEvent, SystemStatus,
-    TradingSnapshotEvent, compute_oversight_report,
+    ProposalSnapshotEvent, StatusUpdate, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
+    compute_oversight_report,
 };
 use ploy_trading::{TradeSide, TradingIntent};
 use secrecy::{ExposeSecret, SecretString};
@@ -36,6 +36,7 @@ pub struct AppState {
 
 const ADMIN_SESSION_COOKIE_NAME: &str = "ploy_admin_session";
 const AUDIT_LOG_TAIL_LIMIT: usize = 200;
+const MAX_HTTP_REQUEST_BYTES: usize = 1024 * 1024;
 type HmacSha256 = Hmac<Sha256>;
 static REQUEST_RATE_LIMITER: OnceLock<Mutex<RateLimiter>> = OnceLock::new();
 
@@ -298,13 +299,11 @@ pub fn spawn_server(state: Arc<AppState>) -> io::Result<thread::JoinHandle<()>> 
 }
 
 fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result<()> {
-    let mut request = [0_u8; 2048];
-    let bytes = stream.read(&mut request)?;
-    if bytes == 0 {
+    let request = read_http_request(&mut stream)?;
+    if request.is_empty() {
         return Ok(());
     }
 
-    let request = String::from_utf8_lossy(&request[..bytes]);
     let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
     let method = request_line.next().unwrap_or("GET");
     let path = request_line.next().unwrap_or("/");
@@ -388,8 +387,8 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
         return handle_event_stream(stream, state);
     }
     let body = request
-        .split("\r\n\r\n")
-        .nth(1)
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
         .filter(|body| !body.is_empty());
     let response = handle_authenticated_runtime_request(
         method,
@@ -427,6 +426,67 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
         response_message(&response.1),
     );
     write_json_response_with_headers(stream, response, &headers)
+}
+
+fn read_http_request(stream: &mut TcpStream) -> io::Result<String> {
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4096];
+
+    loop {
+        let bytes = stream.read(&mut buffer)?;
+        if bytes == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..bytes]);
+        if request.len() > MAX_HTTP_REQUEST_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HTTP request exceeded maximum request size",
+            ));
+        }
+
+        if let Some(header_end) = header_end_offset(&request) {
+            let expected_body_bytes = content_length(&request[..header_end])?;
+            if request.len() >= header_end + 4 + expected_body_bytes {
+                break;
+            }
+            if expected_body_bytes == 0 {
+                break;
+            }
+        }
+    }
+
+    Ok(String::from_utf8_lossy(&request).into_owned())
+}
+
+fn header_end_offset(request: &[u8]) -> Option<usize> {
+    request.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn content_length(headers: &[u8]) -> io::Result<usize> {
+    let headers = String::from_utf8_lossy(headers);
+    for line in headers.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            let length = value.trim().parse::<usize>().map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid Content-Length header: {error}"),
+                )
+            })?;
+            if length > MAX_HTTP_REQUEST_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "HTTP request body exceeded maximum request size",
+                ));
+            }
+            return Ok(length);
+        }
+    }
+    Ok(0)
 }
 
 fn write_json_response(stream: TcpStream, response: (u16, String)) -> io::Result<()> {
@@ -727,10 +787,7 @@ fn build_platform_diagnostics_report(
             // Reuse the pre-built operator_command from recommended_actions so
             // the command shown here always matches what build_operator_command
             // produces (correct deployment id, config hints, etc.).
-            let target = signal
-                .deployment_id
-                .as_deref()
-                .unwrap_or("platform");
+            let target = signal.deployment_id.as_deref().unwrap_or("platform");
             let operator_command = oversight
                 .recommended_actions
                 .iter()
@@ -777,7 +834,10 @@ fn build_platform_diagnostics_report(
             evidence: vec![DiagnosticsEvidence {
                 source: "system_metrics".to_string(),
                 label: "live_reconcile_failures".to_string(),
-                detail: format!("live_reconcile_failures={}", metrics.live_reconcile_failures),
+                detail: format!(
+                    "live_reconcile_failures={}",
+                    metrics.live_reconcile_failures
+                ),
                 observed_at: metrics
                     .last_live_reconcile_success_at
                     .map(|value| value.to_rfc3339()),
@@ -818,14 +878,12 @@ fn build_deployment_diagnostics_report(
 ) -> io::Result<DeploymentDiagnosticsReport> {
     let system = daemon.control_plane.system.status();
     let deployments = daemon.control_plane.deployments.summaries();
-    let deployment = daemon
-        .inspect_deployment(deployment_id)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("deployment `{deployment_id}` was not found"),
-            )
-        })?;
+    let deployment = daemon.inspect_deployment(deployment_id).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("deployment `{deployment_id}` was not found"),
+        )
+    })?;
     let trading = daemon.trading_state();
     let state_snapshot = trading
         .iter()
@@ -876,10 +934,9 @@ fn build_deployment_diagnostics_report(
         .iter()
         .filter(|signal| signal.deployment_id.as_deref() == Some(deployment_id))
     {
-        let action = oversight
-            .recommended_actions
-            .iter()
-            .find(|action| action.target == deployment_id && action.kind == signal.recommended_action);
+        let action = oversight.recommended_actions.iter().find(|action| {
+            action.target == deployment_id && action.kind == signal.recommended_action
+        });
         findings.push(DiagnosticsFinding {
             severity: signal.severity.clone(),
             kind: signal.kind.clone(),
@@ -1001,26 +1058,31 @@ fn event_to_evidence(
                 .last_live_reconcile_success_at
                 .map(|value| value.to_rfc3339()),
         }),
-        OperatorEvent::AlertSnapshot(event) => event.alerts.first().map(|alert| DiagnosticsEvidence {
-            source: "event_stream".to_string(),
-            label: "alert_snapshot".to_string(),
-            detail: format!(
-                "{} {} {}",
-                format!("{:?}", alert.severity).to_lowercase(),
-                format!("{:?}", alert.kind).to_lowercase(),
-                alert.message
-            ),
-            observed_at: Some(alert.triggered_at.to_rfc3339()),
-        }),
+        OperatorEvent::AlertSnapshot(event) => {
+            event.alerts.first().map(|alert| DiagnosticsEvidence {
+                source: "event_stream".to_string(),
+                label: "alert_snapshot".to_string(),
+                detail: format!(
+                    "{} {} {}",
+                    format!("{:?}", alert.severity).to_lowercase(),
+                    format!("{:?}", alert.kind).to_lowercase(),
+                    alert.message
+                ),
+                observed_at: Some(alert.triggered_at.to_rfc3339()),
+            })
+        }
         OperatorEvent::OversightSnapshot(event) => {
             if let Some(target) = deployment_id {
-                if !event.oversight.signals.iter().any(|signal| {
-                    signal.deployment_id.as_deref() == Some(target)
-                }) && !event
+                if !event
                     .oversight
-                    .recommended_actions
+                    .signals
                     .iter()
-                    .any(|action| action.target == target)
+                    .any(|signal| signal.deployment_id.as_deref() == Some(target))
+                    && !event
+                        .oversight
+                        .recommended_actions
+                        .iter()
+                        .any(|action| action.target == target)
                 {
                     return None;
                 }
@@ -1040,7 +1102,8 @@ fn event_to_evidence(
         OperatorEvent::ProposalSnapshot(event) => {
             let count = deployment_id
                 .map(|target| {
-                    event.proposals
+                    event
+                        .proposals
                         .iter()
                         .filter(|proposal| proposal.target_deployment_id == target)
                         .count()
@@ -1075,7 +1138,11 @@ fn event_to_evidence(
         }
         OperatorEvent::TradingSnapshot(event) => {
             if let Some(target) = deployment_id {
-                if !event.trading.iter().any(|snapshot| snapshot.deployment_id == target) {
+                if !event
+                    .trading
+                    .iter()
+                    .any(|snapshot| snapshot.deployment_id == target)
+                {
                     return None;
                 }
             }
@@ -1455,9 +1522,8 @@ fn handle_runtime_request(
         ("GET", "/api/agent/runs") => match agent_runs_path(state)
             .map_err(|response| response)
             .and_then(|path| {
-                read_agent_runs(&path).map_err(|err| {
-                    json_error(500, "agent_runs_unavailable", Some(err.to_string()))
-                })
+                read_agent_runs(&path)
+                    .map_err(|err| json_error(500, "agent_runs_unavailable", Some(err.to_string())))
             }) {
             Ok(runs) => (
                 200,
@@ -1563,17 +1629,20 @@ fn handle_runtime_request(
         ("GET", _) if path.starts_with("/api/trading/diagnose/") => {
             let deployment_id = path.trim_start_matches("/api/trading/diagnose/");
             match state.daemon.lock() {
-                Ok(daemon) => match build_deployment_diagnostics_report(&daemon, state, deployment_id)
-                {
-                    Ok(report) => (
-                        200,
-                        serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string()),
-                    ),
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                        json_error(404, "deployment_not_found", Some(err.to_string()))
+                Ok(daemon) => {
+                    match build_deployment_diagnostics_report(&daemon, state, deployment_id) {
+                        Ok(report) => (
+                            200,
+                            serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string()),
+                        ),
+                        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                            json_error(404, "deployment_not_found", Some(err.to_string()))
+                        }
+                        Err(err) => {
+                            json_error(500, "diagnostics_unavailable", Some(err.to_string()))
+                        }
                     }
-                    Err(err) => json_error(500, "diagnostics_unavailable", Some(err.to_string())),
-                },
+                }
                 Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
         }
@@ -1785,30 +1854,34 @@ fn handle_runtime_request(
                 Err(response) => return response,
             };
             match state.daemon.lock() {
-                Ok(mut daemon) => match daemon.approve_proposal(proposal_id, request).and_then(
-                    |proposal| {
-                        daemon.write_runtime_snapshots()?;
-                        publish_snapshot_events(&daemon, &state.events);
-                        Ok(proposal)
-                    },
-                ) {
-                    Ok(Some(proposal)) => (
-                        200,
-                        serde_json::to_string(&proposal).unwrap_or_else(|_| "{}".to_string()),
-                    ),
-                    Ok(None) => json_error(
-                        404,
-                        "proposal_not_found",
-                        Some(format!("proposal `{proposal_id}` was not found")),
-                    ),
-                    Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
-                        json_error(400, "invalid_request", Some(err.to_string()))
+                Ok(mut daemon) => {
+                    match daemon
+                        .approve_proposal(proposal_id, request)
+                        .and_then(|proposal| {
+                            daemon.write_runtime_snapshots()?;
+                            publish_snapshot_events(&daemon, &state.events);
+                            Ok(proposal)
+                        }) {
+                        Ok(Some(proposal)) => (
+                            200,
+                            serde_json::to_string(&proposal).unwrap_or_else(|_| "{}".to_string()),
+                        ),
+                        Ok(None) => json_error(
+                            404,
+                            "proposal_not_found",
+                            Some(format!("proposal `{proposal_id}` was not found")),
+                        ),
+                        Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+                            json_error(400, "invalid_request", Some(err.to_string()))
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                            json_error(404, "deployment_not_found", Some(err.to_string()))
+                        }
+                        Err(err) => {
+                            json_error(500, "proposal_approve_failed", Some(err.to_string()))
+                        }
                     }
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                        json_error(404, "deployment_not_found", Some(err.to_string()))
-                    }
-                    Err(err) => json_error(500, "proposal_approve_failed", Some(err.to_string())),
-                },
+                }
                 Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
         }
@@ -1827,27 +1900,31 @@ fn handle_runtime_request(
                 Err(response) => return response,
             };
             match state.daemon.lock() {
-                Ok(mut daemon) => match daemon.reject_proposal(proposal_id, request).and_then(
-                    |proposal| {
-                        daemon.write_runtime_snapshots()?;
-                        publish_snapshot_events(&daemon, &state.events);
-                        Ok(proposal)
-                    },
-                ) {
-                    Ok(Some(proposal)) => (
-                        200,
-                        serde_json::to_string(&proposal).unwrap_or_else(|_| "{}".to_string()),
-                    ),
-                    Ok(None) => json_error(
-                        404,
-                        "proposal_not_found",
-                        Some(format!("proposal `{proposal_id}` was not found")),
-                    ),
-                    Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
-                        json_error(400, "invalid_request", Some(err.to_string()))
+                Ok(mut daemon) => {
+                    match daemon
+                        .reject_proposal(proposal_id, request)
+                        .and_then(|proposal| {
+                            daemon.write_runtime_snapshots()?;
+                            publish_snapshot_events(&daemon, &state.events);
+                            Ok(proposal)
+                        }) {
+                        Ok(Some(proposal)) => (
+                            200,
+                            serde_json::to_string(&proposal).unwrap_or_else(|_| "{}".to_string()),
+                        ),
+                        Ok(None) => json_error(
+                            404,
+                            "proposal_not_found",
+                            Some(format!("proposal `{proposal_id}` was not found")),
+                        ),
+                        Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+                            json_error(400, "invalid_request", Some(err.to_string()))
+                        }
+                        Err(err) => {
+                            json_error(500, "proposal_reject_failed", Some(err.to_string()))
+                        }
                     }
-                    Err(err) => json_error(500, "proposal_reject_failed", Some(err.to_string())),
-                },
+                }
                 Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
         }
@@ -1941,10 +2018,10 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_session_cookie, append_audit_entry, handle_api_request,
-        handle_authenticated_runtime_request, handle_runtime_request, request_auth_level,
-        response_headers, route_request, snapshot_events, AppState, AuthLevel, RateLimiter,
-        ADMIN_SESSION_COOKIE_NAME,
+        ADMIN_SESSION_COOKIE_NAME, AppState, AuthLevel, RateLimiter, admin_session_cookie,
+        append_audit_entry, content_length, handle_api_request,
+        handle_authenticated_runtime_request, handle_runtime_request, header_end_offset,
+        request_auth_level, response_headers, route_request, snapshot_events,
     };
     use crate::events::EventBroker;
     use chrono::{Duration, Utc};
@@ -1963,6 +2040,21 @@ mod tests {
             .expect("duration")
             .as_nanos();
         std::env::temp_dir().join(format!("ployd-http-{label}-{unique}"))
+    }
+
+    #[test]
+    fn request_reader_helpers_accept_large_content_length() {
+        let headers = b"POST /api/proposals HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4096";
+        assert_eq!(content_length(headers).expect("content length"), 4096);
+    }
+
+    #[test]
+    fn request_reader_helpers_find_header_end_after_large_headers() {
+        let request = format!(
+            "POST /api/proposals HTTP/1.1\r\nX-Large: {}\r\n\r\n{{}}",
+            "x".repeat(3000)
+        );
+        assert!(header_end_offset(request.as_bytes()).is_some());
     }
 
     #[test]
@@ -2176,11 +2268,13 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(login_headers
-            .iter()
-            .any(|(name, value)| name == "Set-Cookie"
-                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
-                && !value.contains("secret-token")));
+        assert!(
+            login_headers
+                .iter()
+                .any(|(name, value)| name == "Set-Cookie"
+                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
+                    && !value.contains("secret-token"))
+        );
 
         let logout_headers = response_headers(
             "POST",
@@ -2189,11 +2283,13 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(logout_headers
-            .iter()
-            .any(|(name, value)| name == "Set-Cookie"
-                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
-                && value.contains("Max-Age=0")));
+        assert!(
+            logout_headers
+                .iter()
+                .any(|(name, value)| name == "Set-Cookie"
+                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
+                    && value.contains("Max-Age=0"))
+        );
     }
 
     #[test]
@@ -2264,8 +2360,7 @@ mod tests {
 
     #[test]
     fn operator_token_grants_write_access_but_not_admin_access() {
-        let request =
-            "POST /api/deployments/example.paper/control HTTP/1.1\r\nx-ploy-operator-token: operator-secret\r\n\r\n";
+        let request = "POST /api/deployments/example.paper/control HTTP/1.1\r\nx-ploy-operator-token: operator-secret\r\n\r\n";
         assert_eq!(
             request_auth_level(
                 request,
@@ -2535,12 +2630,16 @@ mod tests {
         assert_eq!(alerts_code, 200);
         let alerts: Vec<ploy_operator_contracts::ActiveAlert> =
             serde_json::from_str(&alerts_body).expect("alerts json");
-        assert!(alerts
-            .iter()
-            .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale));
-        assert!(alerts
-            .iter()
-            .any(|alert| alert.source_id.contains("live_reconcile")));
+        assert!(
+            alerts
+                .iter()
+                .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale)
+        );
+        assert!(
+            alerts
+                .iter()
+                .any(|alert| alert.source_id.contains("live_reconcile"))
+        );
     }
 
     #[test]
@@ -3166,10 +3265,9 @@ mod tests {
 
         let (_, create_response) =
             handle_runtime_request("POST", "/api/proposals", Some(&create_body), &state);
-        let proposal = serde_json::from_str::<ploy_operator_contracts::SafetyProposal>(
-            &create_response,
-        )
-        .expect("proposal json");
+        let proposal =
+            serde_json::from_str::<ploy_operator_contracts::SafetyProposal>(&create_response)
+                .expect("proposal json");
 
         let (status_code, body) = handle_runtime_request(
             "GET",
@@ -3231,16 +3329,16 @@ mod tests {
 
         let (_, create_response) =
             handle_runtime_request("POST", "/api/proposals", Some(&create_body), &state);
-        let proposal_id = serde_json::from_str::<ploy_operator_contracts::SafetyProposal>(
-            &create_response,
-        )
-        .expect("proposal json")
-        .proposal_id;
+        let proposal_id =
+            serde_json::from_str::<ploy_operator_contracts::SafetyProposal>(&create_response)
+                .expect("proposal json")
+                .proposal_id;
 
-        let approve_body = serde_json::to_string(&ploy_operator_contracts::ProposalDecisionRequest {
-            decision_note: Some("approved in test".to_string()),
-        })
-        .expect("approve json");
+        let approve_body =
+            serde_json::to_string(&ploy_operator_contracts::ProposalDecisionRequest {
+                decision_note: Some("approved in test".to_string()),
+            })
+            .expect("approve json");
         let (approve_code, approve_response) = handle_runtime_request(
             "POST",
             &format!("/api/proposals/{proposal_id}/approve"),

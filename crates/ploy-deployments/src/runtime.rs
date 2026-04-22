@@ -195,7 +195,27 @@ impl DeploymentRuntime {
 }
 
 fn process_alive(pid: u32) -> bool {
+    process_alive_impl(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn process_alive_impl(pid: u32) -> bool {
     PathBuf::from(format!("/proc/{pid}")).exists()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_alive_impl(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn process_alive_impl(_pid: u32) -> bool {
+    false
 }
 
 fn process_matches_spec(pid: u32, spec: &WorkerLaunchSpec) -> bool {
@@ -252,13 +272,10 @@ fn kill_pid(pid: u32) {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
-    use super::process_alive;
     use super::DeploymentRuntime;
+    use super::process_alive;
     use crate::protocol::WorkerLaunchSpec;
-    #[cfg(target_os = "linux")]
     use crate::protocol::WorkerStatus;
-    #[cfg(target_os = "linux")]
     use chrono::Utc;
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use std::path::PathBuf;
@@ -312,6 +329,12 @@ mod tests {
         let runtime = DeploymentRuntime::new(spec);
         assert_eq!(runtime.boot_status().observed_state, ObservedState::Failed);
         assert!(runtime.boot_status().last_error.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_alive_detects_current_process_on_unix() {
+        assert!(process_alive(std::process::id()));
     }
 
     #[cfg(target_os = "linux")]

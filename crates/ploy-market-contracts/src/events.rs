@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 /// Unified market update consumed by market data, strategy, and research code.
@@ -136,6 +137,34 @@ pub enum MarketUpdate {
     },
 }
 
+#[must_use]
+pub fn l2_updates_from_depth_totals(
+    symbol: &str,
+    obi: f64,
+    spread_bps: u32,
+    bid_depth_near: Decimal,
+    ask_depth_near: Decimal,
+    ts: DateTime<Utc>,
+) -> Vec<MarketUpdate> {
+    let symbol: Arc<str> = Arc::from(symbol);
+    vec![
+        MarketUpdate::L2 {
+            symbol: Arc::clone(&symbol),
+            obi,
+            spread_bps,
+            ts,
+        },
+        MarketUpdate::L2Depth {
+            symbol,
+            obi,
+            spread_bps,
+            bid_depth_near: bid_depth_near.to_f64().unwrap_or(0.0),
+            ask_depth_near: ask_depth_near.to_f64().unwrap_or(0.0),
+            ts,
+        },
+    ]
+}
+
 impl MarketUpdate {
     /// Timestamp used to merge heterogeneous historical updates.
     ///
@@ -223,7 +252,7 @@ fn hex_to_decimal_string(hex: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{market_update_sort_ts, normalize_token_id, MarketUpdate};
+    use super::{MarketUpdate, market_update_sort_ts, normalize_token_id};
     use crate::{InstrumentKind, PredictionFamily, VenueKind};
     use chrono::{DateTime, Utc};
     use rust_decimal::Decimal;

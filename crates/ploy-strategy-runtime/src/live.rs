@@ -173,7 +173,7 @@ mod execution {
 }
 
 use crate::recording::build_signal_recorder;
-use crate::{database_unavailable_is_fatal, RuntimeModeConfig};
+use crate::{RuntimeModeConfig, database_unavailable_is_fatal};
 
 pub(crate) async fn run_live_or_dry_run_entry(
     config: &FullConfig,
@@ -232,25 +232,16 @@ async fn run_live_or_dry_run(
         symbols.to_vec(),
         db_pool.clone(),
     );
-    let _db_spot_handle = if let Some(ref db) = db_pool {
-        Some(spawn_db_spot_feed(tx.clone(), symbols.to_vec(), db.clone()))
-    } else {
-        None
-    };
-    let _db_aggtrade_handle = if let Some(ref db) = db_pool {
-        Some(spawn_db_aggtrade_feed(
+    let mut db_feed_handles = Vec::new();
+    if let Some(ref db) = db_pool {
+        db_feed_handles.push(spawn_db_spot_feed(tx.clone(), symbols.to_vec(), db.clone()));
+        db_feed_handles.push(spawn_db_aggtrade_feed(
             tx.clone(),
             symbols.to_vec(),
             db.clone(),
-        ))
-    } else {
-        None
-    };
-    let _db_l2_handle = if let Some(ref db) = db_pool {
-        Some(spawn_db_l2_feed(tx.clone(), symbols.to_vec(), db.clone()))
-    } else {
-        None
-    };
+        ));
+        db_feed_handles.push(spawn_db_l2_feed(tx.clone(), symbols.to_vec(), db.clone()));
+    }
     let chainlink_handle = spawn_chainlink_feed(
         tx.clone(),
         reference_prices.clone(),
@@ -331,6 +322,9 @@ async fn run_live_or_dry_run(
     };
 
     spot_handle.abort();
+    for handle in db_feed_handles {
+        handle.abort();
+    }
     chainlink_handle.abort();
     pyth_handle.abort();
     scanner_handle.abort();

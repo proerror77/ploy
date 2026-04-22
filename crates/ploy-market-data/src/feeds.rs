@@ -9,7 +9,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Timelike, Utc};
 use futures::StreamExt;
-use ploy_market_contracts::MarketUpdate;
+use ploy_market_contracts::{MarketUpdate, l2_updates_from_depth_totals};
 use polymarket_client_sdk::rtds::{Client as RtdsClient, EquityPriceMessage};
 use polymarket_client_sdk::types::U256;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
@@ -211,7 +211,11 @@ pub fn spawn_db_spot_feed(
                 let last = last_ts.get(&symbol).copied();
                 if last.map_or(true, |l| ts > l) {
                     last_ts.insert(symbol.clone(), ts);
-                    let update = MarketUpdate::SpotPrice { symbol: Arc::from(symbol.as_str()), price, ts };
+                    let update = MarketUpdate::SpotPrice {
+                        symbol: Arc::from(symbol.as_str()),
+                        price,
+                        ts,
+                    };
                     if tx.send(update).is_err() {
                         return; // channel closed
                     }
@@ -283,10 +287,18 @@ pub fn spawn_db_aggtrade_feed(
                     continue;
                 }
 
+                let Ok(agg_trade_id_u64) = u64::try_from(agg_trade_id) else {
+                    warn!(
+                        symbol = %symbol,
+                        agg_trade_id,
+                        "Skipping DB aggTrade row with negative aggregate trade id"
+                    );
+                    continue;
+                };
                 last_seen.insert(symbol.clone(), (ts, agg_trade_id));
                 let update = MarketUpdate::AggTrade {
                     symbol: Arc::from(symbol.as_str()),
-                    agg_trade_id: agg_trade_id as u64,
+                    agg_trade_id: agg_trade_id_u64,
                     price,
                     quantity,
                     is_buyer_maker,
@@ -386,37 +398,6 @@ pub fn spawn_db_l2_feed(
             }
         }
     })
-}
-
-fn l2_updates_from_depth_totals(
-    symbol: &str,
-    obi: f64,
-    spread_bps: u32,
-    bid_depth_near: Decimal,
-    ask_depth_near: Decimal,
-    ts: DateTime<Utc>,
-) -> Vec<MarketUpdate> {
-    let sym: Arc<str> = Arc::from(symbol);
-    let mut updates = vec![MarketUpdate::L2 {
-        symbol: sym.clone(),
-        obi,
-        spread_bps,
-        ts,
-    }];
-
-    let bid_depth_near = bid_depth_near.to_f64().unwrap_or(0.0);
-    let ask_depth_near = ask_depth_near.to_f64().unwrap_or(0.0);
-
-    updates.push(MarketUpdate::L2Depth {
-        symbol: sym,
-        obi,
-        spread_bps,
-        bid_depth_near,
-        ask_depth_near,
-        ts,
-    });
-
-    updates
 }
 
 #[cfg(test)]
@@ -689,7 +670,9 @@ pub fn spawn_chainlink_feed(
                     .await;
 
                     let update = MarketUpdate::ReferencePrice {
-                        symbol: Arc::from(normalize_reference_symbol(&chainlink_price.symbol).as_str()),
+                        symbol: Arc::from(
+                            normalize_reference_symbol(&chainlink_price.symbol).as_str(),
+                        ),
                         source: Arc::from(ReferencePriceSource::Chainlink.as_str()),
                         asset_class: Arc::from(ReferenceAssetClass::Crypto.as_str()),
                         price: chainlink_price.value,
@@ -1055,8 +1038,15 @@ fn parse_agg_trade_msg(v: &serde_json::Value) -> Option<AggTradeMsg> {
     let trade_time = chrono::Utc.timestamp_millis_opt(trade_time_ms).single()?;
     let event_time = chrono::Utc.timestamp_millis_opt(event_time_ms).single()?;
     Some(AggTradeMsg {
-        symbol, agg_trade_id, first_trade_id, last_trade_id,
-        price, quantity, trade_time, event_time, is_buyer_maker,
+        symbol,
+        agg_trade_id,
+        first_trade_id,
+        last_trade_id,
+        price,
+        quantity,
+        trade_time,
+        event_time,
+        is_buyer_maker,
     })
 }
 

@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 const SPORTS_WS_ENDPOINT: &str = "wss://sports-api.polymarket.com/ws";
 const SPORTS_WS_SOURCE: &str = "polymarket_sports_ws";
 const RECONNECT_DELAY_SECS: u64 = 5;
+const MAX_RECONNECT_DELAY_SECS: u64 = 60;
 const DESCRIPTOR_REFRESH_SECS: i64 = 60;
 
 #[derive(Debug, Clone, Default)]
@@ -113,6 +114,7 @@ pub fn spawn_sports_feed(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut descriptors = SportsDescriptorCache::default();
+        let mut reconnect_delay = Duration::from_secs(RECONNECT_DELAY_SECS);
 
         loop {
             descriptors
@@ -143,6 +145,7 @@ pub fn spawn_sports_feed(
 
                                 match parse_message_text(&text, Utc::now(), &descriptors) {
                                     Ok(Some(parsed)) => {
+                                        reconnect_delay = Duration::from_secs(RECONNECT_DELAY_SECS);
                                         if let Some(db) = pool.as_ref() {
                                             persist_sports_state(db, &parsed).await;
                                         }
@@ -180,7 +183,9 @@ pub fn spawn_sports_feed(
                 }
             }
 
-            tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+            tokio::time::sleep(reconnect_delay).await;
+            reconnect_delay =
+                (reconnect_delay * 2).min(Duration::from_secs(MAX_RECONNECT_DELAY_SECS));
         }
     })
 }
