@@ -18,6 +18,7 @@ use thiserror::Error;
 pub const CRATE_MARKER: &str = "ploy-connectivity";
 const DEFAULT_POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
 const TERMINAL_CURSOR: &str = "LTE=";
+const MAX_CONCURRENT_TRADE_RECONCILE_REQUESTS: usize = 10;
 
 /// Order execution type for live trading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -496,21 +497,25 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
 
         let result = self.runtime.block_on(async {
             let token_ids = unique_token_ids(tracked_orders)?;
-            let mut tasks = Vec::with_capacity(token_ids.len());
-
-            for token_id in token_ids {
-                let client = client.clone();
-                tasks.push(tokio::spawn(async move {
-                    load_trades_for_token(client, token_id).await
-                }));
-            }
-
             let mut trades = Vec::new();
-            for task in tasks {
-                let mut token_trades = task.await.map_err(|err| {
-                    ExecutionError::Transport(format!("join trade reconciliation task: {err}"))
-                })??;
-                trades.append(&mut token_trades);
+
+            for chunk in token_ids.chunks(MAX_CONCURRENT_TRADE_RECONCILE_REQUESTS) {
+                let mut tasks = Vec::with_capacity(chunk.len());
+
+                for token_id in chunk {
+                    let client = client.clone();
+                    let token_id = *token_id;
+                    tasks.push(tokio::spawn(async move {
+                        load_trades_for_token(client, token_id).await
+                    }));
+                }
+
+                for task in tasks {
+                    let mut token_trades = task.await.map_err(|err| {
+                        ExecutionError::Transport(format!("join trade reconciliation task: {err}"))
+                    })??;
+                    trades.append(&mut token_trades);
+                }
             }
 
             let mut fills = Vec::new();
