@@ -1,4 +1,4 @@
-use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_strategy_bundles::{
     FullConfig, HistoricalFeed, NullRecorder, Recorder, SimulatedExecutor, StrategyLogic,
     StrategyRuntime,
@@ -31,14 +31,27 @@ async fn run_backtest(
     ploy_strategy_bundles::RuntimeResult,
     ploy_trading::TradingRuntimeSnapshot,
 ) {
-    let db_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/ploy".to_string());
+    let db_url = match env::var("DATABASE_URL") {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => {
+            eprintln!(
+                "DATABASE_URL is required for backtest mode; refusing to fall back to a local database"
+            );
+            std::process::exit(1);
+        }
+    };
 
-    let pool = PgPoolOptions::new()
+    let pool = match PgPoolOptions::new()
         .max_connections(5)
         .connect(&db_url)
         .await
-        .expect("Failed to connect to database");
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            eprintln!("Failed to connect to configured DATABASE_URL for backtest: {error}");
+            std::process::exit(1);
+        }
+    };
 
     let (from, to) = config.backtest_time_range().unwrap_or_else(|| {
         let from = chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
@@ -67,9 +80,14 @@ async fn run_backtest(
         lob_sample_secs: 30,
     };
 
-    let updates = load_from_database_with_options(&pool, symbols, from, to, &backtest_options)
-        .await
-        .expect("Failed to load historical data");
+    let updates =
+        match load_from_database_with_options(&pool, symbols, from, to, &backtest_options).await {
+            Ok(updates) => updates,
+            Err(error) => {
+                eprintln!("Failed to load historical data for backtest: {error}");
+                std::process::exit(1);
+            }
+        };
 
     info!(updates = updates.len(), "Historical data loaded");
 

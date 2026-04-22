@@ -74,6 +74,7 @@ impl TradingRuntimeSnapshot {
 #[derive(Debug, Default)]
 pub struct TradingRuntime {
     intents: Vec<TradingIntent>,
+    intent_by_id: BTreeMap<String, usize>,
     orders: OrderLedger,
     fills: FillLedger,
     positions: PositionLedger,
@@ -91,8 +92,16 @@ impl TradingRuntime {
             PositionLedger::restore(snapshot.positions, snapshot.pnl.total_fees)
         };
 
+        let intent_by_id = snapshot
+            .intents
+            .iter()
+            .enumerate()
+            .map(|(index, intent)| (intent.intent_id.clone(), index))
+            .collect();
+
         Self {
             intents: snapshot.intents,
+            intent_by_id,
             orders: OrderLedger::restore(snapshot.orders),
             fills: FillLedger::restore(snapshot.fills),
             positions,
@@ -104,6 +113,9 @@ impl TradingRuntime {
         intent: TradingIntent,
         order_id: impl Into<String>,
     ) -> &crate::orders::OrderRecord {
+        self.prune_inactive_intents();
+        let index = self.intents.len();
+        self.intent_by_id.insert(intent.intent_id.clone(), index);
         self.intents.push(intent.clone());
         self.orders.insert_from_intent(order_id, &intent)
     }
@@ -152,9 +164,9 @@ impl TradingRuntime {
     }
 
     pub fn intent(&self, intent_id: &str) -> Option<&TradingIntent> {
-        self.intents
-            .iter()
-            .find(|intent| intent.intent_id == intent_id)
+        self.intent_by_id
+            .get(intent_id)
+            .and_then(|index| self.intents.get(*index))
     }
 
     pub fn record_fill(&mut self, fill: FillRecord) -> bool {
@@ -164,6 +176,7 @@ impl TradingRuntime {
         self.orders.apply_fill(&fill);
         self.positions.apply_fill(&fill);
         self.fills.record(fill);
+        self.prune_inactive_intents();
         true
     }
 
@@ -179,6 +192,35 @@ impl TradingRuntime {
     /// Read-only access to the order ledger.
     pub fn orders(&self) -> &OrderLedger {
         &self.orders
+    }
+
+    fn prune_inactive_intents(&mut self) {
+        let retained_intent_ids = self
+            .orders
+            .orders()
+            .filter(|order| {
+                matches!(
+                    order.state,
+                    crate::orders::OrderState::Pending
+                        | crate::orders::OrderState::Acknowledged
+                        | crate::orders::OrderState::PartiallyFilled
+                ) || self.positions.net_qty(&order.token_id) != Decimal::ZERO
+            })
+            .map(|order| order.intent_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        if retained_intent_ids.len() == self.intents.len() {
+            return;
+        }
+
+        self.intents
+            .retain(|intent| retained_intent_ids.contains(intent.intent_id.as_str()));
+        self.intent_by_id = self
+            .intents
+            .iter()
+            .enumerate()
+            .map(|(index, intent)| (intent.intent_id.clone(), index))
+            .collect();
     }
 
     pub fn snapshot(&self, mark_prices: &BTreeMap<String, Decimal>) -> TradingRuntimeSnapshot {
@@ -302,6 +344,52 @@ mod tests {
         assert_eq!(restored.pnl.total_fees, dec!(0.03));
         assert_eq!(restored.risk.open_positions, 1);
         assert_eq!(restored.risk.gross_exposure, dec!(1.26));
+    }
+
+    #[test]
+    fn closed_position_intents_are_pruned_from_lookup() {
+        let mut runtime = TradingRuntime::default();
+        runtime.submit_intent(
+            TradingIntent {
+                intent_id: "intent-1".to_string(),
+                deployment_id: "dep-1".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "token-1".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                limit_price: Some(dec!(0.40)),
+                purpose: IntentPurpose::Entry,
+                created_at: Utc::now(),
+            },
+            "order-1",
+        );
+        runtime.acknowledge_order("order-1", "venue-1");
+        assert!(runtime.intent("intent-1").is_some());
+
+        runtime.record_fill(FillRecord {
+            fill_id: "fill-1".to_string(),
+            order_id: "order-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(1),
+            price: dec!(0.40),
+            fee: Decimal::ZERO,
+            timestamp: Utc::now(),
+        });
+        assert!(runtime.intent("intent-1").is_some());
+
+        runtime.record_fill(FillRecord {
+            fill_id: "fill-2".to_string(),
+            order_id: "order-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: TradeSide::Sell,
+            quantity: dec!(1),
+            price: dec!(0.60),
+            fee: Decimal::ZERO,
+            timestamp: Utc::now(),
+        });
+        assert!(runtime.intent("intent-1").is_none());
+        assert!(runtime.snapshot(&BTreeMap::new()).intents.is_empty());
     }
 
     #[test]

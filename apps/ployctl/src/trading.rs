@@ -141,7 +141,8 @@ mod tests {
         )
         .expect("write trading state");
 
-        let client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = "127.0.0.1:9".to_string();
         let output = render_trading_state(&client).expect("trading state");
         assert!(output.contains("example.paper"));
         assert!(output.contains("net_pnl=0"));

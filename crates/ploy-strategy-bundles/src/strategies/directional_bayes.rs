@@ -18,12 +18,15 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use super::common::event::EventWindow;
+use super::common::fees::crypto_fee_cost;
+use super::common::quote::QuoteState;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 // ── Probability Model ────────────────────────────────────
@@ -68,16 +71,6 @@ fn bayesian_posterior(prior: f64, likelihood: f64) -> f64 {
     let likelihood_ratio = likelihood / (1.0 - likelihood).max(1e-9);
     let posterior_odds = prior_odds * likelihood_ratio;
     posterior_odds / (1.0 + posterior_odds)
-}
-
-// ── Fee Model ────────────────────────────────────────────
-
-/// Polymarket trading fee for crypto binary markets.
-///
-/// Actual PM fee: 2% x p x (1 - p) per share.
-/// Returns fee per share (not multiplied by quantity).
-fn crypto_fee_cost(entry_price: f64) -> f64 {
-    0.02 * entry_price * (1.0 - entry_price)
 }
 
 const EWMA_LAMBDA: f64 = 0.94;
@@ -205,23 +198,6 @@ fn default_max_daily_trades() -> u32 {
 struct SpotState {
     price: Decimal,
     ts: DateTime<Utc>,
-}
-
-/// Active event window for a symbol.
-#[derive(Clone)]
-struct EventWindow {
-    event_id: Arc<str>,
-    symbol: Arc<str>,
-    up_token: Arc<str>,
-    down_token: Arc<str>,
-    end_time: DateTime<Utc>,
-    open_price: Option<Decimal>,
-}
-
-/// Cached Polymarket quote.
-struct QuoteState {
-    _bid: Option<Decimal>,
-    ask: Option<Decimal>,
 }
 
 #[derive(Default)]
@@ -390,7 +366,8 @@ impl BayesianDirectionalStrategy {
                 ploy_trading::OrderState::Pending
                     | ploy_trading::OrderState::Acknowledged
                     | ploy_trading::OrderState::PartiallyFilled
-            ) && (order.token_id.as_str() == &*event.up_token || order.token_id.as_str() == &*event.down_token)
+            ) && (order.token_id.as_str() == &*event.up_token
+                || order.token_id.as_str() == &*event.down_token)
         })
     }
 
@@ -410,7 +387,7 @@ impl BayesianDirectionalStrategy {
 
         match (
             self.spot.get(&event.symbol).map(|spot| spot.price),
-            event.open_price,
+            event.price_to_beat,
         ) {
             (Some(current), Some(open)) => Some(current >= open),
             _ => None,
@@ -551,13 +528,13 @@ impl BayesianDirectionalStrategy {
         now: DateTime<Utc>,
     ) -> Option<(Direction, Decimal, f64, f64)> {
         // Gate 0: Price validity
-        let open_price = event.open_price?;
-        if open_price <= Decimal::ZERO || spot_price <= Decimal::ZERO {
+        let price_to_beat = event.price_to_beat?;
+        if price_to_beat <= Decimal::ZERO || spot_price <= Decimal::ZERO {
             debug!(symbol = %symbol, event_id = %event.event_id, "Gate 0: Invalid prices");
             return None;
         }
 
-        let s0 = open_price.to_f64()?;
+        let s0 = price_to_beat.to_f64()?;
         let st = spot_price.to_f64()?;
         let secs_remaining = (event.end_time - now).num_seconds().max(0) as f64;
         let sigma_horizon = self.sigma_horizon(symbol, secs_remaining);
@@ -877,7 +854,12 @@ impl StrategyLogic for BayesianDirectionalStrategy {
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
-                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                if !self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
+                {
                     return vec![];
                 }
 
@@ -895,8 +877,8 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                 );
                 if let Some(events) = self.events.get_mut(symbol) {
                     for event in events.iter_mut() {
-                        if event.open_price.is_none() {
-                            event.open_price = Some(*price);
+                        if event.price_to_beat.is_none() {
+                            event.price_to_beat = Some(*price);
                         }
                     }
                 }
@@ -932,20 +914,29 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                 self.quotes.insert(
                     token_id.clone(),
                     QuoteState {
-                        _bid: *bid,
+                        bid: *bid,
                         ask: *ask,
+                        ts: *ts,
                     },
                 );
 
                 if let Some(symbol) = self.token_symbol.get(token_id).cloned() {
-                    if self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                    if self
+                        .config
+                        .symbols
+                        .iter()
+                        .any(|s| s.as_str() == symbol.as_ref())
+                    {
                         if self.feed_time.map_or(true, |ft| *ts > ft) {
                             self.feed_time = Some(*ts);
                         }
                         self.reset_daily_counter(*ts);
                         if self.daily_trades < self.config.max_daily_trades
                             && !self.in_cooldown(&symbol, *ts)
-                            && self.config.max_daily_loss_usd.map_or(true, |limit| self.daily_realized_pnl > -limit)
+                            && self
+                                .config
+                                .max_daily_loss_usd
+                                .map_or(true, |limit| self.daily_realized_pnl > -limit)
                         {
                             return self.try_entry(&symbol, positions, orders, *ts);
                         }
@@ -991,7 +982,8 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                 if events.iter().any(|e| e.event_id == *event_id) {
                     return vec![];
                 }
-                let open_price = price_to_beat.or_else(|| self.spot.get(symbol).map(|s| s.price));
+                let price_to_beat =
+                    price_to_beat.or_else(|| self.spot.get(symbol).map(|s| s.price));
 
                 self.token_symbol.insert(up_token.clone(), symbol.clone());
                 self.token_symbol.insert(down_token.clone(), symbol.clone());
@@ -1002,13 +994,18 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                     up_token: up_token.clone(),
                     down_token: down_token.clone(),
                     end_time: *end_time,
-                    open_price,
+                    window_secs: *window_secs,
+                    price_to_beat,
                 });
 
                 let has_cached_quote =
                     self.quotes.contains_key(up_token) || self.quotes.contains_key(down_token);
                 if has_cached_quote
-                    && self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref())
+                    && self
+                        .config
+                        .symbols
+                        .iter()
+                        .any(|s| s.as_str() == symbol.as_ref())
                     && self.daily_trades < self.config.max_daily_trades
                     && !self.in_cooldown(symbol, now)
                 {
@@ -1038,7 +1035,8 @@ impl StrategyLogic for BayesianDirectionalStrategy {
                         continue;
                     }
 
-                    let Some(up_won) = self.resolve_expired_event_outcome(&event, *settlement) else {
+                    let Some(up_won) = self.resolve_expired_event_outcome(&event, *settlement)
+                    else {
                         warn!(
                             event_id = %event_id,
                             symbol = %event.symbol,
@@ -1198,7 +1196,7 @@ mod tests {
                 ts: now,
             },
         );
-        strat.events.get_mut("BTCUSDT").unwrap()[0].open_price = Some(dec!(100000));
+        strat.events.get_mut("BTCUSDT").unwrap()[0].price_to_beat = Some(dec!(100000));
 
         // 3. Provide quotes — UP ask cheap (0.30)
         strat.on_update(
@@ -1207,8 +1205,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,
@@ -1219,8 +1217,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,

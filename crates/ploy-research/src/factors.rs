@@ -1245,11 +1245,7 @@ pub fn aggregate_factor_metrics(windows: &[Vec<FactorMetric>]) -> Vec<Aggregated
                     let std = (vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
                         / vals.len() as f64)
                         .sqrt();
-                    if std <= 1e-9 {
-                        None
-                    } else {
-                        Some(mean / std)
-                    }
+                    if std <= 1e-9 { None } else { Some(mean / std) }
                 }
             };
             AggregatedFactorMetric {
@@ -1676,11 +1672,7 @@ pub(crate) fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Op
                 return None;
             }
             let ic = spearman_ic(&xs, &ys);
-            if ic.is_finite() {
-                Some(ic)
-            } else {
-                None
-            }
+            if ic.is_finite() { Some(ic) } else { None }
         })
         .collect();
 
@@ -1720,8 +1712,9 @@ pub fn export_observations_parquet(
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_future_pm_labels, pearson_ic, spearman_ic, FactorObservation, LabelField};
+    use super::{FactorObservation, LabelField, attach_future_pm_labels, pearson_ic, spearman_ic};
     use chrono::Utc;
+    #[cfg(feature = "db")]
     use serde_json::json;
 
     #[test]
@@ -1924,6 +1917,7 @@ mod tests {
         assert_eq!(first.future_up_ask_change_30s, Some(0.15));
     }
 
+    #[cfg(feature = "db")]
     #[test]
     fn depth_band_supports_near_and_far_ranges() {
         let bids = json!([

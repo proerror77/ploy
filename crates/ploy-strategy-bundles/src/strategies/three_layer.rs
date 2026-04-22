@@ -10,6 +10,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tracing::info;
 
+use super::common::event::EventWindow;
+use super::common::fees::crypto_fee_cost;
+use super::common::quote::QuoteState;
 use super::common::settlement;
 use crate::strategies::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
@@ -78,11 +81,15 @@ struct DriftTracker {
 
 impl DriftTracker {
     fn new() -> Self {
-        Self { history: VecDeque::new() }
+        Self {
+            history: VecDeque::new(),
+        }
     }
 
     fn push(&mut self, ts: DateTime<Utc>, price: f64) {
-        if price <= 0.0 { return; }
+        if price <= 0.0 {
+            return;
+        }
         self.history.push_back((ts, price.ln()));
         while self.history.len() > 1 {
             let oldest = self.history.front().unwrap().0;
@@ -95,32 +102,39 @@ impl DriftTracker {
     }
 
     fn drift_30s(&self) -> f64 {
-        if self.history.len() < 2 { return 0.0; }
+        if self.history.len() < 2 {
+            return 0.0;
+        }
         let now = self.history.back().unwrap();
         let cutoff = now.0 - chrono::Duration::seconds(30);
-        let anchor = self.history.iter()
+        let anchor = self
+            .history
+            .iter()
             .find(|(ts, _)| *ts >= cutoff)
             .unwrap_or(self.history.front().unwrap());
         now.1 - anchor.1
     }
 
     fn sigma_horizon(&mut self, horizon_secs: f64) -> f64 {
-        if self.history.len() < MIN_VOL_POINTS { return 0.0; }
+        if self.history.len() < MIN_VOL_POINTS {
+            return 0.0;
+        }
         let contiguous = self.history.make_contiguous();
-        let returns: Vec<f64> = contiguous.windows(2)
-            .map(|w| w[1].1 - w[0].1)
-            .collect();
-        if returns.is_empty() { return 0.0; }
+        let returns: Vec<f64> = contiguous.windows(2).map(|w| w[1].1 - w[0].1).collect();
+        if returns.is_empty() {
+            return 0.0;
+        }
         let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-        let var = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>()
-            / returns.len() as f64;
+        let var = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
         let avg_dt = {
-            let total_secs = (self.history.back().unwrap().0
-                - self.history.front().unwrap().0)
-                .num_milliseconds() as f64 / 1000.0;
+            let total_secs = (self.history.back().unwrap().0 - self.history.front().unwrap().0)
+                .num_milliseconds() as f64
+                / 1000.0;
             total_secs / returns.len() as f64
         };
-        if avg_dt <= 0.0 { return 0.0; }
+        if avg_dt <= 0.0 {
+            return 0.0;
+        }
         let var_per_sec = var / avg_dt;
         (var_per_sec * horizon_secs).sqrt()
     }
@@ -133,7 +147,10 @@ struct MpriceDriftAccumulator {
 
 impl MpriceDriftAccumulator {
     fn new(window_secs: f64) -> Self {
-        Self { entries: VecDeque::new(), window_secs }
+        Self {
+            entries: VecDeque::new(),
+            window_secs,
+        }
     }
 
     fn push(&mut self, ts: DateTime<Utc>, microprice_offset_bps: f64) {
@@ -168,7 +185,9 @@ struct LobState {
 impl LobState {
     fn depth_imbalance(&self) -> f64 {
         let total = self.bid_depth_near + self.ask_depth_near;
-        if total <= 0.0 { return 0.0; }
+        if total <= 0.0 {
+            return 0.0;
+        }
         (self.bid_depth_near - self.ask_depth_near) / total
     }
 
@@ -176,7 +195,14 @@ impl LobState {
         self.obi - self.obi_prev
     }
 
-    fn apply_l2(&mut self, obi_raw: f64, spread_bps: u32, bid_near: f64, ask_near: f64, ts: DateTime<Utc>) {
+    fn apply_l2(
+        &mut self,
+        obi_raw: f64,
+        spread_bps: u32,
+        bid_near: f64,
+        ask_near: f64,
+        ts: DateTime<Utc>,
+    ) {
         self.obi_prev = self.obi;
         // EWMA smoothing with 5-second half-life.
         // At 10 Hz LOB, raw OBI fluctuates wildly per 100ms tick.
@@ -200,11 +226,16 @@ impl LobState {
     }
 
     fn apply_aggtrade(&mut self, quantity: f64, is_buyer_maker: bool, ts: DateTime<Utc>) {
-        let seconds = self.last_aggtrade_ts
+        let seconds = self
+            .last_aggtrade_ts
             .map(|last| (ts - last).num_milliseconds() as f64 / 1000.0)
             .unwrap_or(0.0)
             .max(0.0);
-        let decay = if seconds > 0.0 { (-seconds / 30.0).exp() } else { 1.0 };
+        let decay = if seconds > 0.0 {
+            (-seconds / 30.0).exp()
+        } else {
+            1.0
+        };
         let signed_qty = if is_buyer_maker { -quantity } else { quantity };
         self.signed_trade_imbalance = self.signed_trade_imbalance * decay + signed_qty;
         self.last_aggtrade_ts = Some(ts);
@@ -219,35 +250,14 @@ impl LobState {
     }
 }
 
-#[derive(Clone, Copy)]
-struct QuoteState {
-    bid: Option<Decimal>,
-    ask: Option<Decimal>,
-    ts: DateTime<Utc>,
-}
-
-#[derive(Clone)]
-struct EventWindow {
-    event_id: Arc<str>,
-    symbol: Arc<str>,
-    up_token: Arc<str>,
-    down_token: Arc<str>,
-    end_time: DateTime<Utc>,
-    window_secs: u64,
-    price_to_beat: Option<Decimal>,
-}
-
-fn crypto_fee_cost(ask: f64) -> f64 {
-    0.02 * ask * (1.0 - ask)
-}
-
 // ── Gate Functions ──────────────────────────────────────────────────
 
 /// Normal CDF approximation (Abramowitz & Stegun).
 fn norm_cdf(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.2316419 * x.abs());
     let d = 0.3989422804014327 * (-x * x / 2.0).exp();
-    let p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+    let p =
+        d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
     if x >= 0.0 { 1.0 - p } else { p }
 }
 
@@ -265,18 +275,14 @@ fn evaluate_direction_score(
     regime: Regime,
     config: &ThreeLayerConfig,
 ) -> Option<(f64, f64, f64)> {
-    if distance_over_sigma.abs() < config.min_distance_over_sigma
-        && regime == Regime::Early
-    {
+    if distance_over_sigma.abs() < config.min_distance_over_sigma && regime == Regime::Early {
         return None;
     }
 
     let model_prob_up = norm_cdf(distance_over_sigma);
 
     let direction_prob = match regime {
-        Regime::Early => {
-            model_prob_up
-        }
+        Regime::Early => model_prob_up,
         Regime::Middle => {
             let lob_nudge = (cum_mprice_drift_5m / 100.0).clamp(-0.08, 0.08);
             (model_prob_up + lob_nudge).clamp(0.01, 0.99)
@@ -416,13 +422,11 @@ impl ThreeLayerStrategy {
                 events
                     .iter()
                     .filter(|e| {
-                        self.window_allowed(e.window_secs)
-                            && e.end_time > now
-                            && {
-                                let remaining = (e.end_time - now).num_seconds();
-                                remaining >= self.config.min_time_remaining_secs as i64
-                                    && remaining <= self.config.max_time_remaining_secs as i64
-                            }
+                        self.window_allowed(e.window_secs) && e.end_time > now && {
+                            let remaining = (e.end_time - now).num_seconds();
+                            remaining >= self.config.min_time_remaining_secs as i64
+                                && remaining <= self.config.max_time_remaining_secs as i64
+                        }
                     })
                     .cloned()
                     .collect()
@@ -514,7 +518,9 @@ impl ThreeLayerStrategy {
                 o.token_id.as_str() == &**token_id
                     && matches!(
                         o.state,
-                        OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
+                        OrderState::Pending
+                            | OrderState::Acknowledged
+                            | OrderState::PartiallyFilled
                     )
             }) {
                 continue;
@@ -544,9 +550,8 @@ impl ThreeLayerStrategy {
                 evaluate_edge_score(effective_p, ask, regime, &self.config)?;
 
             // Composite scoring model
-            let total_score = direction_score * 0.50
-                + edge_score * 0.35
-                + confirmation_bonus * 0.15;
+            let total_score =
+                direction_score * 0.50 + edge_score * 0.35 + confirmation_bonus * 0.15;
 
             if total_score < self.config.min_entry_score {
                 info!(
@@ -648,11 +653,7 @@ impl ThreeLayerStrategy {
                 // Time stop
                 if time_remaining < TIME_STOP_SECS {
                     decisions.push(StrategyDecision::Exit(TradingIntent {
-                        intent_id: format!(
-                            "tl_time_exit_{}_{}",
-                            token_id,
-                            now.timestamp_millis()
-                        ),
+                        intent_id: format!("tl_time_exit_{}_{}", token_id, now.timestamp_millis()),
                         deployment_id: String::new(),
                         market_id: event.event_id.to_string(),
                         token_id: token_id.to_string(),
@@ -670,11 +671,7 @@ impl ThreeLayerStrategy {
                     if let Some(ask) = quote.ask.and_then(|v| v.to_f64()) {
                         if ask >= self.config.take_profit_ask {
                             decisions.push(StrategyDecision::Exit(TradingIntent {
-                                intent_id: format!(
-                                    "tl_tp_{}_{}",
-                                    token_id,
-                                    now.timestamp_millis()
-                                ),
+                                intent_id: format!("tl_tp_{}_{}", token_id, now.timestamp_millis()),
                                 deployment_id: String::new(),
                                 market_id: event.event_id.to_string(),
                                 token_id: token_id.to_string(),
@@ -701,11 +698,7 @@ impl ThreeLayerStrategy {
                     };
                     if wrong_direction {
                         decisions.push(StrategyDecision::Exit(TradingIntent {
-                            intent_id: format!(
-                                "tl_sl_{}_{}",
-                                token_id,
-                                now.timestamp_millis()
-                            ),
+                            intent_id: format!("tl_sl_{}_{}", token_id, now.timestamp_millis()),
                             deployment_id: String::new(),
                             market_id: event.event_id.to_string(),
                             token_id: token_id.to_string(),
@@ -791,7 +784,12 @@ impl StrategyLogic for ThreeLayerStrategy {
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
-                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                if !self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
+                {
                     return Vec::new();
                 }
                 self.feed_time = Some(*ts);
@@ -865,15 +863,21 @@ impl StrategyLogic for ThreeLayerStrategy {
                 ts,
                 ..
             } => {
-                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                if !self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
+                {
                     return Vec::new();
                 }
                 self.feed_time = Some(*ts);
                 let qty_f64 = quantity.to_f64().unwrap_or(0.0);
-                self.lob
-                    .entry(symbol.clone())
-                    .or_default()
-                    .apply_aggtrade(qty_f64, *is_buyer_maker, *ts);
+                self.lob.entry(symbol.clone()).or_default().apply_aggtrade(
+                    qty_f64,
+                    *is_buyer_maker,
+                    *ts,
+                );
                 Vec::new()
             }
 
@@ -885,14 +889,22 @@ impl StrategyLogic for ThreeLayerStrategy {
                 ask_depth_near,
                 ts,
             } => {
-                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                if !self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
+                {
                     return Vec::new();
                 }
                 self.feed_time = Some(*ts);
-                self.lob
-                    .entry(symbol.clone())
-                    .or_default()
-                    .apply_l2(*obi, *spread_bps, *bid_depth_near, *ask_depth_near, *ts);
+                self.lob.entry(symbol.clone()).or_default().apply_l2(
+                    *obi,
+                    *spread_bps,
+                    *bid_depth_near,
+                    *ask_depth_near,
+                    *ts,
+                );
 
                 let mid = (bid_depth_near + ask_depth_near) / 2.0;
                 if mid > 0.0 {
@@ -941,17 +953,19 @@ impl StrategyLogic for ThreeLayerStrategy {
                 price_to_beat,
                 ..
             } => {
-                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref())
+                if !self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
                     || !self.window_allowed(*window_secs)
                 {
                     return Vec::new();
                 }
 
                 self.token_symbol.insert(up_token.clone(), symbol.clone());
-                self.token_symbol
-                    .insert(down_token.clone(), symbol.clone());
-                self.token_event
-                    .insert(up_token.clone(), event_id.clone());
+                self.token_symbol.insert(down_token.clone(), symbol.clone());
+                self.token_event.insert(up_token.clone(), event_id.clone());
                 self.token_event
                     .insert(down_token.clone(), event_id.clone());
 
@@ -983,12 +997,10 @@ impl StrategyLogic for ThreeLayerStrategy {
                         if event.event_id != *event_id {
                             continue;
                         }
-                        if let Some(up_won) =
-                            self.resolve_up_won(event, *resolved_up_won)
-                        {
-                            decisions.extend(self.build_settlement_exits(
-                                event, up_won, *end_time, positions,
-                            ));
+                        if let Some(up_won) = self.resolve_up_won(event, *resolved_up_won) {
+                            decisions.extend(
+                                self.build_settlement_exits(event, up_won, *end_time, positions),
+                            );
                             resolved_events.push(event.event_id.clone());
                         }
                     }
@@ -1030,11 +1042,11 @@ mod tests {
         assert_eq!(Regime::from_secs(300), Regime::Early);
         assert_eq!(Regime::from_secs(181), Regime::Early);
         assert_eq!(Regime::from_secs(180), Regime::Middle);
-        assert_eq!(Regime::from_secs(61),  Regime::Middle);
-        assert_eq!(Regime::from_secs(60),  Regime::Late);
-        assert_eq!(Regime::from_secs(6),   Regime::Late);
-        assert_eq!(Regime::from_secs(5),   Regime::Expiry);
-        assert_eq!(Regime::from_secs(0),   Regime::Expiry);
+        assert_eq!(Regime::from_secs(61), Regime::Middle);
+        assert_eq!(Regime::from_secs(60), Regime::Late);
+        assert_eq!(Regime::from_secs(6), Regime::Late);
+        assert_eq!(Regime::from_secs(5), Regime::Expiry);
+        assert_eq!(Regime::from_secs(0), Regime::Expiry);
     }
 
     #[test]
@@ -1112,7 +1124,10 @@ mod tests {
         let (dir, prob, score) = result.unwrap();
         assert!(dir > 0.0);
         assert!(prob > 0.56);
-        assert!(score > 0.0, "direction score should be positive for strong signal");
+        assert!(
+            score > 0.0,
+            "direction score should be positive for strong signal"
+        );
     }
 
     #[test]
@@ -1129,7 +1144,11 @@ mod tests {
             ts: None,
         };
         let bonus = evaluate_confirmation_bonus(1.0, &lob, -5.0, -0.001, Regime::Late, &config);
-        assert!(bonus < 0.0, "opposing LOB should produce negative bonus, got {}", bonus);
+        assert!(
+            bonus < 0.0,
+            "opposing LOB should produce negative bonus, got {}",
+            bonus
+        );
     }
 
     #[test]
@@ -1143,9 +1162,16 @@ mod tests {
         assert!(edge_score > 0.0 && edge_score <= 1.0);
         // ask=0.50 → fee=0.005, edge=0.52-0.50-0.005=0.015 → edge_score=0.15
         let result = evaluate_edge_score(0.52, 0.50, Regime::Early, &config);
-        assert!(result.is_some(), "edge_score model should not reject low edge, just score it low");
+        assert!(
+            result.is_some(),
+            "edge_score model should not reject low edge, just score it low"
+        );
         let (_ask, _edge, _rr, edge_score) = result.unwrap();
-        assert!(edge_score < 0.3, "low edge should produce low score, got {}", edge_score);
+        assert!(
+            edge_score < 0.3,
+            "low edge should produce low score, got {}",
+            edge_score
+        );
     }
 
     #[test]

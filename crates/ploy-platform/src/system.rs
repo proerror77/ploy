@@ -5,6 +5,8 @@ use ploy_operator_contracts::{
 };
 use std::collections::BTreeMap;
 
+const MAX_ERROR_TIMESTAMPS: usize = 3_600;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimePhase {
     Starting,
@@ -99,6 +101,7 @@ impl SystemService {
     pub fn mark_degraded(&mut self, listen_addr: &str) {
         self.listen_addr = Some(listen_addr.to_string());
         if self.phase != RuntimePhase::Degraded {
+            self.prune_error_timestamps(Utc::now());
             self.error_timestamps.push(Utc::now());
         }
         self.phase = RuntimePhase::Degraded;
@@ -321,6 +324,16 @@ impl SystemService {
             active_alert_count: self.active_alerts().len(),
             stale_source_count: self.stale_source_count(),
             last_live_reconcile_success_at: self.last_live_reconcile_success_at,
+        }
+    }
+
+    fn prune_error_timestamps(&mut self, now: DateTime<Utc>) {
+        let cutoff = now - Duration::hours(1);
+        self.error_timestamps
+            .retain(|timestamp| *timestamp >= cutoff);
+        if self.error_timestamps.len() > MAX_ERROR_TIMESTAMPS {
+            let excess = self.error_timestamps.len() - MAX_ERROR_TIMESTAMPS;
+            self.error_timestamps.drain(0..excess);
         }
     }
 

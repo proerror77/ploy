@@ -8,11 +8,11 @@ repository.workspace = true
 description = "Ploy research and backtesting crate"
 
 [features]
-default = ["full"]
+default = []
 full = ["db", "polars-export", "ml", "rl", "strategy-runtime"]
 db = ["dep:sqlx", "dep:ploy-feed-loaders"]
 polars-export = ["dep:polars"]
-ml = ["dep:linfa", "dep:linfa-logistic", "dep:linfa-trees", "dep:forust-ml"]
+ml = []
 rl = ["dep:burn", "dep:burn-ndarray"]
 strategy-runtime = ["dep:ploy-strategy-bundles"]
 
@@ -33,10 +33,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
 uuid.workspace = true
 anyhow = "1"
-linfa = { version = "0.8", optional = true }
-linfa-logistic = { version = "0.8", optional = true }
-linfa-trees = { version = "0.8", optional = true }
-forust-ml = { version = "0.5", optional = true }
 burn = { version = "0.17", default-features = false, features = ["ndarray", "autodiff", "std"], optional = true }
 burn-ndarray = { version = "0.17", optional = true }
 

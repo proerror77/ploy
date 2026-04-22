@@ -185,7 +185,8 @@ mod tests {
         )
         .expect("write status");
 
-        let client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = "127.0.0.1:9".to_string();
         let output = render_system_status(&client).expect("system status");
         assert!(output.contains("running"));
         assert!(output.contains("live_reconcile_failures=0"));

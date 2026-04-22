@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use ploy_market_contracts::MarketUpdate;
-use polymarket_client_sdk::gamma::types::request::MarketsRequest;
 use polymarket_client_sdk::gamma::Client as GammaClient;
+use polymarket_client_sdk::gamma::types::request::MarketsRequest;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -21,12 +21,14 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::discovery::crypto::discover_crypto_markets;
 use crate::discovery::crypto::DiscoveredCryptoMarket;
+use crate::discovery::crypto::discover_crypto_markets;
 use crate::discovery::sports::discover_sports_markets;
 use crate::discovery::upsert_market_catalog;
 use crate::feeds::spawn_quote_feed;
-use crate::reference_prices::ReferencePriceRegistry;
+use crate::reference_prices::{
+    ReferencePriceRegistry, ReferencePriceSource, latest_reference_price,
+};
 
 const SCAN_INTERVAL_SECS: u64 = 30;
 const SPORTS_DISCOVERY_REFRESH_SECS: i64 = 300;
@@ -36,6 +38,8 @@ const RECOVERY_LOOKBACK_HOURS: i64 = 48;
 
 struct TrackedEvent {
     end_time: chrono::DateTime<Utc>,
+    symbol: String,
+    price_to_beat: Option<Decimal>,
 }
 
 /// Spawn a background task that periodically discovers active 5-min binary
@@ -70,7 +74,7 @@ pub fn spawn_market_scanner(
         loop {
             let now = Utc::now();
 
-            expire_tracked_events(&tx, &mut tracked, now);
+            expire_tracked_events(&tx, &mut tracked, &reference_prices, now).await;
 
             let mut request = MarketsRequest::default();
             request.end_date_min = Some(now);
@@ -125,7 +129,11 @@ pub fn spawn_market_scanner(
 
                         tracked.insert(
                             market.compatibility_event_id.clone(),
-                            TrackedEvent { end_time },
+                            TrackedEvent {
+                                end_time,
+                                symbol: market.symbol.clone(),
+                                price_to_beat: price_to_beat.clone(),
+                            },
                         );
 
                         let _ = tx.send(MarketUpdate::EventDiscovered {
@@ -173,10 +181,7 @@ pub fn spawn_market_scanner(
 /// have open positions in `strategy_runtime_fills`. Emit `EventExpired` with
 /// the official settlement outcome from `pm_token_settlements` so the strategy
 /// can close those positions immediately.
-async fn recover_expired_open_positions(
-    tx: &broadcast::Sender<MarketUpdate>,
-    pool: &PgPool,
-) {
+async fn recover_expired_open_positions(tx: &broadcast::Sender<MarketUpdate>, pool: &PgPool) {
     let lookback = Utc::now() - Duration::hours(RECOVERY_LOOKBACK_HOURS);
 
     // Find open positions: BUY fills with no matching SELL, for events that
@@ -248,9 +253,10 @@ async fn recover_expired_open_positions(
     }
 }
 
-fn expire_tracked_events(
+async fn expire_tracked_events(
     tx: &broadcast::Sender<MarketUpdate>,
     tracked: &mut HashMap<String, TrackedEvent>,
+    reference_prices: &ReferencePriceRegistry,
     now: DateTime<Utc>,
 ) {
     let expired: Vec<String> = tracked
@@ -260,16 +266,36 @@ fn expire_tracked_events(
         .collect();
 
     for event_id in expired {
-        let end_time = tracked
-            .remove(&event_id)
-            .map(|event| event.end_time)
-            .unwrap_or(now);
+        let Some(event) = tracked.remove(&event_id) else {
+            continue;
+        };
+        let resolved_up_won = infer_expired_event_outcome(&event, reference_prices).await;
+        let end_time = event.end_time;
         let _ = tx.send(MarketUpdate::EventExpired {
             event_id: Arc::from(event_id.as_str()),
             end_time,
-            resolved_up_won: None,
+            resolved_up_won,
         });
     }
+}
+
+async fn infer_expired_event_outcome(
+    event: &TrackedEvent,
+    reference_prices: &ReferencePriceRegistry,
+) -> Option<bool> {
+    let price_to_beat = event.price_to_beat?;
+    for source in [
+        ReferencePriceSource::Chainlink,
+        ReferencePriceSource::Pyth,
+        ReferencePriceSource::Binance,
+    ] {
+        if let Some(snapshot) =
+            latest_reference_price(reference_prices, source, &event.symbol).await
+        {
+            return Some(snapshot.value >= price_to_beat);
+        }
+    }
+    None
 }
 
 fn should_refresh_sports_catalog(
@@ -404,10 +430,12 @@ mod tests {
 
     #[test]
     fn token_id_parser_accepts_decimal_strings() {
-        assert!(parse_token_id(
-            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
-        )
-        .is_some());
+        assert!(
+            parse_token_id(
+                "27239049953613250678046988034203198692578441444398010699401021233149338414941"
+            )
+            .is_some()
+        );
         assert!(parse_token_id("not-a-token").is_none());
     }
 

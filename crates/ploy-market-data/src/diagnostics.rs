@@ -21,10 +21,13 @@ pub async fn check_database(db_url: &str) -> Result<(), Box<dyn std::error::Erro
     ];
 
     for table in &tables {
-        let exists: bool = sqlx::query_scalar(&format!(
-            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '{}')",
-            table
-        ))
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = $1
+            )",
+        )
+        .bind(table)
         .fetch_one(&pool)
         .await?;
 

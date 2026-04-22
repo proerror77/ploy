@@ -14,26 +14,19 @@ use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use super::common::event::EventWindow;
+use super::common::fees::crypto_fee_cost;
 use super::common::guards::active_order_exists;
 use super::common::quote::QuoteState;
 use super::common::settlement;
+use super::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
-
-// ── Fee Model ───────────────────────────────────────────
-
-/// Polymarket trading fee for crypto binary markets.
-///
-/// Actual PM fee: 2% × p × (1 − p) per share.
-fn crypto_fee_cost(entry_price: f64) -> f64 {
-    0.02 * entry_price * (1.0 - entry_price)
-}
 
 // ── Direction ───────────────────────────────────────────
 
@@ -153,6 +146,21 @@ impl Default for SweepConfig {
     }
 }
 
+impl From<DirectionalConfig> for SweepConfig {
+    fn from(config: DirectionalConfig) -> Self {
+        Self {
+            symbols: config.symbols,
+            min_time_remaining_secs: config.min_time_remaining_secs,
+            max_time_remaining_secs: config.max_time_remaining_secs,
+            stake_usd: config.stake_usd,
+            max_positions: config.max_positions as usize,
+            max_daily_trades: config.max_daily_trades,
+            allowed_window_secs: config.allowed_window_secs,
+            ..Self::default()
+        }
+    }
+}
+
 // ── Internal State ──────────────────────────────────────
 
 /// Cached CEX spot price.
@@ -257,7 +265,7 @@ impl SweepStrategy {
         &self,
         symbol: &str,
         event: &EventWindow,
-        now: DateTime<Utc>,
+        _now: DateTime<Utc>,
     ) -> Option<(Direction, Decimal, f64, f64)> {
         let price_to_beat = event.price_to_beat?;
         let diff = self.diff_pct(symbol, price_to_beat)?;
@@ -345,7 +353,7 @@ impl SweepStrategy {
                 continue;
             }
 
-            if let Some((direction, entry_price, abs_diff, edge)) =
+            if let Some((direction, entry_price, _abs_diff, edge)) =
                 self.evaluate_entry(symbol, &event, now)
             {
                 let direction_str = match direction {
@@ -374,7 +382,7 @@ impl SweepStrategy {
                     intent_id: Some(intent.intent_id.clone()),
                     symbol: event.symbol.to_string(),
                     direction: direction_str.into(),
-                    p_hat: abs_diff,
+                    p_hat: entry_price.to_f64().unwrap_or(0.0),
                     edge,
                     entry_price,
                     decision: "enter".into(),

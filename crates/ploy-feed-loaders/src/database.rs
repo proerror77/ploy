@@ -17,15 +17,16 @@
 //! | `pm_token_settlements` | Settlement outcomes |
 
 use chrono::{DateTime, Duration, Utc};
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
 use ploy_market_contracts::{
-    market_update_sort_ts, normalize_token_id, HistoricalLoadOptions, MarketUpdate,
+    HistoricalLoadOptions, MarketUpdate, l2_updates_from_depth_totals, market_update_sort_ts,
+    normalize_token_id,
 };
 
 #[cfg(test)]
@@ -704,37 +705,6 @@ async fn load_l2_data(
     Ok(())
 }
 
-fn l2_updates_from_depth_totals(
-    symbol: &str,
-    obi: f64,
-    spread_bps: u32,
-    bid_depth_near: Decimal,
-    ask_depth_near: Decimal,
-    ts: DateTime<Utc>,
-) -> Vec<MarketUpdate> {
-    let sym: Arc<str> = Arc::from(symbol);
-    let mut updates = vec![MarketUpdate::L2 {
-        symbol: Arc::clone(&sym),
-        obi,
-        spread_bps,
-        ts,
-    }];
-
-    let bid_depth_near = bid_depth_near.to_f64().unwrap_or(0.0);
-    let ask_depth_near = ask_depth_near.to_f64().unwrap_or(0.0);
-
-    updates.push(MarketUpdate::L2Depth {
-        symbol: sym,
-        obi,
-        spread_bps,
-        bid_depth_near,
-        ask_depth_near,
-        ts,
-    });
-
-    updates
-}
-
 // near_depth / sum_depth_in_range / parse_depth_level / json_f64 are only
 // used in tests via l2_updates_from_book.
 #[cfg(test)]
@@ -1014,7 +984,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        build_event_updates, l2_updates_from_book, near_depth, EventMetadataRow, MarketUpdate,
+        EventMetadataRow, MarketUpdate, build_event_updates, l2_updates_from_book, near_depth,
     };
 
     #[test]
