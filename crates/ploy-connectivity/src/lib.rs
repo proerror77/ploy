@@ -17,6 +17,7 @@ use thiserror::Error;
 
 pub const CRATE_MARKER: &str = "ploy-connectivity";
 const DEFAULT_POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
+const TERMINAL_CURSOR: &str = "LTE=";
 
 /// Order execution type for live trading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -494,31 +495,30 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
         let client = self.get_or_init_client()?;
 
         let result = self.runtime.block_on(async {
-            let mut fills = Vec::new();
-            for tracked_order in tracked_orders {
-                let asset_id = U256::from_str(&tracked_order.token_id).map_err(|err| {
-                    ExecutionError::Validation(format!(
-                        "invalid token_id `{}`: {err}",
-                        tracked_order.token_id
-                    ))
-                })?;
-                let request = TradesRequest::builder().asset_id(asset_id).build();
-                let mut next_cursor = None;
-                loop {
-                    let page = client
-                        .trades(&request, next_cursor.clone())
-                        .await
-                        .map_err(|err| ExecutionError::Transport(format!("load trades: {err}")))?;
-                    for trade in &page.data {
-                        if let Some(fill) = tracked_trade_fill(tracked_order, trade) {
-                            fills.push(fill);
-                        }
-                    }
+            let token_ids = unique_token_ids(tracked_orders)?;
+            let mut tasks = Vec::with_capacity(token_ids.len());
 
-                    if page.next_cursor.is_empty() {
-                        break;
+            for token_id in token_ids {
+                let client = client.clone();
+                tasks.push(tokio::spawn(async move {
+                    load_trades_for_token(client, token_id).await
+                }));
+            }
+
+            let mut trades = Vec::new();
+            for task in tasks {
+                let mut token_trades = task.await.map_err(|err| {
+                    ExecutionError::Transport(format!("join trade reconciliation task: {err}"))
+                })??;
+                trades.append(&mut token_trades);
+            }
+
+            let mut fills = Vec::new();
+            for trade in &trades {
+                for tracked_order in tracked_orders {
+                    if let Some(fill) = tracked_trade_fill(tracked_order, trade) {
+                        fills.push(fill);
                     }
-                    next_cursor = Some(page.next_cursor);
                 }
             }
 
@@ -662,6 +662,48 @@ fn is_auth_recovery_error(error: &ExecutionError) -> bool {
     }
 }
 
+fn unique_token_ids(tracked_orders: &[TrackedOrder]) -> Result<Vec<U256>, ExecutionError> {
+    let mut token_ids = Vec::new();
+
+    for tracked_order in tracked_orders {
+        let asset_id = U256::from_str(&tracked_order.token_id).map_err(|err| {
+            ExecutionError::Validation(format!(
+                "invalid token_id `{}`: {err}",
+                tracked_order.token_id
+            ))
+        })?;
+        if !token_ids.contains(&asset_id) {
+            token_ids.push(asset_id);
+        }
+    }
+
+    Ok(token_ids)
+}
+
+async fn load_trades_for_token(
+    client: Client<Authenticated<Normal>>,
+    token_id: U256,
+) -> Result<Vec<TradeResponse>, ExecutionError> {
+    let request = TradesRequest::builder().asset_id(token_id).build();
+    let mut next_cursor = None;
+    let mut trades = Vec::new();
+
+    loop {
+        let page = client
+            .trades(&request, next_cursor.clone())
+            .await
+            .map_err(|err| ExecutionError::Transport(format!("load trades: {err}")))?;
+        trades.extend(page.data);
+
+        if page.next_cursor.is_empty() || page.next_cursor == TERMINAL_CURSOR {
+            break;
+        }
+        next_cursor = Some(page.next_cursor);
+    }
+
+    Ok(trades)
+}
+
 fn normalize_aggressive_price(
     limit_price: Decimal,
     aggressive_ticks: u8,
@@ -763,10 +805,10 @@ mod tests {
     use super::{
         execution_price_override, normalize_aggressive_price, normalize_execution_amount,
         normalize_order_notional, normalize_order_quantity, polymarket_signature_type_from_env,
-        tracked_trade_fill, CancellationOutcome, CancellationRequest, ExecutionError,
-        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
-        PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest,
-        StaticExecutionGateway, TrackedOrder, WalletSignatureType,
+        tracked_trade_fill, unique_token_ids, CancellationOutcome, CancellationRequest,
+        ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
+        OrderExecutionType, PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome,
+        ReplaceRequest, StaticExecutionGateway, TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -1034,5 +1076,29 @@ mod tests {
         assert_eq!(taker_fill.fill_id, "trade-1:order-a");
         assert_eq!(maker_fill.fill_id, "trade-1:order-b");
         assert_ne!(taker_fill.fill_id, maker_fill.fill_id);
+    }
+
+    #[test]
+    fn unique_token_ids_deduplicates_reconcile_requests() {
+        let token_ids = unique_token_ids(&[
+            TrackedOrder {
+                order_id: "order-1".to_string(),
+                venue_order_id: "venue-1".to_string(),
+                token_id: "10".to_string(),
+            },
+            TrackedOrder {
+                order_id: "order-2".to_string(),
+                venue_order_id: "venue-2".to_string(),
+                token_id: "10".to_string(),
+            },
+            TrackedOrder {
+                order_id: "order-3".to_string(),
+                venue_order_id: "venue-3".to_string(),
+                token_id: "11".to_string(),
+            },
+        ])
+        .expect("valid token ids");
+
+        assert_eq!(token_ids, vec![U256::from(10), U256::from(11)]);
     }
 }
