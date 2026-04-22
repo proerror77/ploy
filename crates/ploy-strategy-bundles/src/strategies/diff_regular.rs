@@ -510,6 +510,8 @@ impl DiffRegularStrategy {
                     continue;
                 }
 
+                let exit_bid = self.quotes.get(token_id).and_then(|q| q.bid);
+
                 // Floor stop: abs(diff) <= floor_threshold → exit immediately
                 if let (Some(ptb), Some(spot)) = (price_to_beat, spot_f) {
                     if ptb > 0.0 {
@@ -533,7 +535,7 @@ impl DiffRegularStrategy {
                                 token_id: token_id.to_string(),
                                 side: TradeSide::Sell,
                                 quantity: qty,
-                                limit_price: None,
+                                limit_price: exit_bid,
                                 purpose: IntentPurpose::Exit,
                                 created_at: now,
                             }));

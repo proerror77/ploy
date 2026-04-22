@@ -345,7 +345,7 @@ impl ProbReversalStrategy {
                         token_id: token_id.to_string(),
                         side: TradeSide::Sell,
                         quantity: qty,
-                        limit_price: None,
+                        limit_price: bid,
                         purpose: IntentPurpose::Exit,
                         created_at: *ts,
                     }));
