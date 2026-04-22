@@ -153,8 +153,9 @@ mod tests {
         )
         .expect("write deployments");
 
-        let output = render_deployments(&ControlPlaneClient::from_runtime_root(&runtime_root))
-            .expect("list deployments");
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = "127.0.0.1:9".to_string();
+        let output = render_deployments(&client).expect("list deployments");
         assert!(output.contains("example.paper"));
     }
 
@@ -176,7 +177,8 @@ mod tests {
         )
         .expect("write deployments");
 
-        let client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = "127.0.0.1:9".to_string();
         let output = render_deployment(&client, "example.paper").expect("deployment");
         assert!(output.contains("example.paper"));
     }

@@ -1,8 +1,7 @@
 use ploy_operator_contracts::{
     ActiveAlert, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
     DeploymentControlRequest, DeploymentState, DeploymentSummary, DesiredState, OperatorEvent,
-    OrderControlResponse, OrderReplaceRequest, PlatformMetrics, SystemStatus,
-    TradingStateSnapshot,
+    OrderControlResponse, OrderReplaceRequest, PlatformMetrics, SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -471,7 +470,8 @@ mod tests {
         )
         .expect("write deployments");
 
-        let client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = "127.0.0.1:9".to_string();
         assert!(client.system_status().contains("running"));
 
         let deployments = client.list_deployments();
@@ -795,7 +795,9 @@ mod tests {
             let mut request = [0_u8; 1024];
             let bytes = stream.read(&mut request).expect("read request");
             let request = String::from_utf8_lossy(&request[..bytes]);
-            assert!(request.starts_with("POST /api/deployments/example.live/orders/order-1/cancel"));
+            assert!(
+                request.starts_with("POST /api/deployments/example.live/orders/order-1/cancel")
+            );
 
             let body = serde_json::to_string(&OrderControlResponse {
                 deployment_id: "example.live".to_string(),

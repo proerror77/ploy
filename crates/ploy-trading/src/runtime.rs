@@ -195,7 +195,7 @@ impl TradingRuntime {
     }
 
     fn prune_inactive_intents(&mut self) {
-        let active_intent_ids = self
+        let retained_intent_ids = self
             .orders
             .orders()
             .filter(|order| {
@@ -204,17 +204,17 @@ impl TradingRuntime {
                     crate::orders::OrderState::Pending
                         | crate::orders::OrderState::Acknowledged
                         | crate::orders::OrderState::PartiallyFilled
-                )
+                ) || self.positions.net_qty(&order.token_id) != Decimal::ZERO
             })
             .map(|order| order.intent_id.as_str())
             .collect::<std::collections::BTreeSet<_>>();
 
-        if active_intent_ids.len() == self.intents.len() {
+        if retained_intent_ids.len() == self.intents.len() {
             return;
         }
 
         self.intents
-            .retain(|intent| active_intent_ids.contains(intent.intent_id.as_str()));
+            .retain(|intent| retained_intent_ids.contains(intent.intent_id.as_str()));
         self.intent_by_id = self
             .intents
             .iter()
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn filled_intents_are_pruned_from_lookup() {
+    fn closed_position_intents_are_pruned_from_lookup() {
         let mut runtime = TradingRuntime::default();
         runtime.submit_intent(
             TradingIntent {
@@ -376,7 +376,18 @@ mod tests {
             fee: Decimal::ZERO,
             timestamp: Utc::now(),
         });
+        assert!(runtime.intent("intent-1").is_some());
 
+        runtime.record_fill(FillRecord {
+            fill_id: "fill-2".to_string(),
+            order_id: "order-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: TradeSide::Sell,
+            quantity: dec!(1),
+            price: dec!(0.60),
+            fee: Decimal::ZERO,
+            timestamp: Utc::now(),
+        });
         assert!(runtime.intent("intent-1").is_none());
         assert!(runtime.snapshot(&BTreeMap::new()).intents.is_empty());
     }

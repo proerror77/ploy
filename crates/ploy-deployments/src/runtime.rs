@@ -2,6 +2,7 @@ use crate::protocol::{WorkerLaunchSpec, WorkerStatus};
 use chrono::Utc;
 use ploy_operator_contracts::ObservedState;
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -275,7 +276,9 @@ mod tests {
     use super::DeploymentRuntime;
     use super::process_alive;
     use crate::protocol::WorkerLaunchSpec;
+    #[cfg(target_os = "linux")]
     use crate::protocol::WorkerStatus;
+    #[cfg(target_os = "linux")]
     use chrono::Utc;
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use std::path::PathBuf;

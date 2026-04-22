@@ -210,7 +210,7 @@ fn execute(command: Command, client: &ControlPlaneClient) -> Result<String, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{execute, Command};
+    use super::{Command, execute};
     use ployctl::client::ControlPlaneClient;
     use std::fs;
     use std::path::PathBuf;
@@ -241,16 +241,14 @@ mod tests {
     #[test]
     fn parses_system_metrics_command() {
         let command =
-            Command::parse(&["ployctl", "system", "metrics"].map(str::to_string))
-                .expect("command");
+            Command::parse(&["ployctl", "system", "metrics"].map(str::to_string)).expect("command");
         assert_eq!(command, Command::SystemMetrics);
     }
 
     #[test]
     fn parses_system_alerts_command() {
         let command =
-            Command::parse(&["ployctl", "system", "alerts"].map(str::to_string))
-                .expect("command");
+            Command::parse(&["ployctl", "system", "alerts"].map(str::to_string)).expect("command");
         assert_eq!(command, Command::SystemAlerts);
     }
 
@@ -363,7 +361,8 @@ mod tests {
         let runtime_root = temp_dir("missing-deployment");
         fs::create_dir_all(&runtime_root).expect("create runtime root");
         fs::write(runtime_root.join("deployments.json"), "[]").expect("write deployments");
-        let client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        let mut client = ControlPlaneClient::from_runtime_root(&runtime_root);
+        client.control_plane_addr = "127.0.0.1:9".to_string();
 
         let error = execute(
             Command::DeploymentsInspect("missing.paper".to_string()),
