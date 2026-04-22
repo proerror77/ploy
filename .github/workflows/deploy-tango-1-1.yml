@@ -318,7 +318,9 @@ jobs:
             require_postgres
 
             systemctl enable --now ploy-binance-aggtrade-collector.service
+            systemctl restart ploy-binance-aggtrade-collector.service
             systemctl enable --now ploy-binance-lob-collector.service
+            systemctl restart ploy-binance-lob-collector.service
             if service_exists ploy-binance-price-collector.service; then
               systemctl restart ploy-binance-price-collector.service
             fi
