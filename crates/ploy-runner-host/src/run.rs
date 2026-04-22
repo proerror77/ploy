@@ -10,6 +10,11 @@ pub async fn run_command(args: &[String], command: Option<&str>) {
     while i < args.len() {
         match args[i].as_str() {
             "--config" => {
+                if i + 1 >= args.len() || args[i + 1].starts_with("--") {
+                    eprintln!("Error: --config requires a value");
+                    print_usage();
+                    std::process::exit(1);
+                }
                 i += 1;
                 config_path = args.get(i).cloned();
             }

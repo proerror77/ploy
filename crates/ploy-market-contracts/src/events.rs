@@ -136,9 +136,94 @@ pub enum MarketUpdate {
     },
 }
 
+impl MarketUpdate {
+    /// Timestamp used to merge heterogeneous historical updates.
+    ///
+    /// `EventDiscovered` deliberately sorts before its quote window because
+    /// Polymarket quotes can arrive before the official start timestamp.
+    #[must_use]
+    pub fn sort_ts(&self) -> DateTime<Utc> {
+        match self {
+            MarketUpdate::SpotPrice { ts, .. }
+            | MarketUpdate::AggTrade { ts, .. }
+            | MarketUpdate::Quote { ts, .. }
+            | MarketUpdate::L2 { ts, .. }
+            | MarketUpdate::L2Depth { ts, .. }
+            | MarketUpdate::SportsState { ts, .. }
+            | MarketUpdate::SportsPregame { ts, .. }
+            | MarketUpdate::SportsLive { ts, .. }
+            | MarketUpdate::ReferencePrice { ts, .. }
+            | MarketUpdate::Kline { ts, .. } => *ts,
+            MarketUpdate::EventDiscovered {
+                end_time,
+                window_secs,
+                ..
+            } => {
+                *end_time
+                    - chrono::Duration::seconds(*window_secs as i64)
+                    - chrono::Duration::hours(1)
+            }
+            MarketUpdate::EventExpired { end_time, .. } => *end_time,
+        }
+    }
+}
+
+#[must_use]
+pub fn market_update_sort_ts(update: &MarketUpdate) -> DateTime<Utc> {
+    update.sort_ts()
+}
+
+#[must_use]
+pub fn normalize_token_id(raw: &str) -> String {
+    let value = raw.trim().trim_matches('"');
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return hex_to_decimal_string(hex).unwrap_or_else(|| value.to_string());
+    }
+    value.to_string()
+}
+
+fn hex_to_decimal_string(hex: &str) -> Option<String> {
+    if hex.is_empty() {
+        return None;
+    }
+
+    let mut digits = vec![0_u8];
+
+    for ch in hex.chars() {
+        let value = ch.to_digit(16)? as u32;
+        let mut carry = value;
+
+        for digit in &mut digits {
+            let next = (*digit as u32) * 16 + carry;
+            *digit = (next % 10) as u8;
+            carry = next / 10;
+        }
+
+        while carry > 0 {
+            digits.push((carry % 10) as u8);
+            carry /= 10;
+        }
+    }
+
+    while digits.len() > 1 && digits.last() == Some(&0) {
+        digits.pop();
+    }
+
+    Some(
+        digits
+            .iter()
+            .rev()
+            .map(|digit| char::from(b'0' + *digit))
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::MarketUpdate;
+    use super::{market_update_sort_ts, normalize_token_id, MarketUpdate};
     use crate::{InstrumentKind, PredictionFamily, VenueKind};
     use chrono::{DateTime, Utc};
     use rust_decimal::Decimal;
@@ -259,5 +344,40 @@ mod tests {
         assert_eq!(family, PredictionFamily::CryptoExpiry);
         assert_eq!(instrument, InstrumentKind::UpDown);
         assert_eq!(venue, VenueKind::Polymarket);
+    }
+
+    #[test]
+    fn normalize_token_id_converts_large_hex() {
+        let raw = "\"0x3c38c18444ab803acea0d4de7bcdecae7f0f8ddbcd0466e3323d1cb9e04b6f5d\"";
+        assert_eq!(
+            normalize_token_id(raw),
+            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
+        );
+    }
+
+    #[test]
+    fn normalize_token_id_keeps_decimal_ids() {
+        let raw = "12345678901234567890";
+        assert_eq!(normalize_token_id(raw), raw);
+    }
+
+    #[test]
+    fn event_discovered_sort_ts_uses_window_and_buffer() {
+        let end_time = ts();
+        let update = MarketUpdate::EventDiscovered {
+            event_id: Arc::from("evt"),
+            symbol: Arc::from("BTCUSDT"),
+            up_token: Arc::from("up"),
+            down_token: Arc::from("down"),
+            end_time,
+            window_secs: 300,
+            price_to_beat: None,
+            resolved_up_won: None,
+        };
+
+        assert_eq!(
+            market_update_sort_ts(&update),
+            end_time - chrono::Duration::seconds(300) - chrono::Duration::hours(1)
+        );
     }
 }

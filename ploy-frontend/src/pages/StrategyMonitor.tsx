@@ -27,7 +27,7 @@ function getStatusVariant(entry: DeploymentSummary) {
 }
 
 function getStatusLabel(entry: DeploymentSummary) {
-  return `${entry.deployment_state} / ${entry.desired_state} / ${entry.observed_state}`;
+  return `${entry.deployment_state ?? 'enabled'} / ${entry.desired_state} / ${entry.observed_state}`;
 }
 
 function nextActions(desiredState: DesiredState): DesiredState[] {
@@ -249,7 +249,7 @@ export function StrategyMonitor() {
                           {actionLabel(desiredState)}
                         </Button>
                       ))}
-                      {nextLifecycleActions(entry.deployment_state).map((deploymentState) => (
+                      {nextLifecycleActions(entry.deployment_state ?? 'enabled').map((deploymentState) => (
                         <Button
                           key={deploymentState}
                           variant={deploymentState === 'disabled' ? 'destructive' : 'outline'}
@@ -273,7 +273,9 @@ export function StrategyMonitor() {
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
                     <div className="rounded-lg border bg-card p-4">
                       <div className="text-sm text-muted-foreground">Lifecycle</div>
-                      <div className="mt-2 text-2xl font-bold">{entry.deployment_state}</div>
+                      <div className="mt-2 text-2xl font-bold">
+                        {entry.deployment_state ?? 'enabled'}
+                      </div>
                       <div className="mt-1 text-xs text-muted-foreground">
                         Enabled accepts all intents. Draining blocks new entries but keeps exits open.
                       </div>

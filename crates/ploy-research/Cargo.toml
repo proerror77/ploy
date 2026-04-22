@@ -7,29 +7,48 @@ license.workspace = true
 repository.workspace = true
 description = "Ploy research and backtesting crate"
 
+[features]
+default = ["full"]
+full = ["db", "polars-export", "ml", "rl", "strategy-runtime"]
+db = ["dep:sqlx", "dep:ploy-feed-loaders"]
+polars-export = ["dep:polars"]
+ml = ["dep:linfa", "dep:linfa-logistic", "dep:linfa-trees", "dep:forust-ml"]
+rl = ["dep:burn", "dep:burn-ndarray"]
+strategy-runtime = ["dep:ploy-strategy-bundles"]
+
 [dependencies]
 rand.workspace = true
 chrono.workspace = true
-polars.workspace = true
+polars = { workspace = true, optional = true }
 ploy-market-contracts.workspace = true
 ploy-operator-contracts.workspace = true
-ploy-feed-loaders.workspace = true
-ploy-strategy-bundles.workspace = true
+ploy-feed-loaders = { workspace = true, optional = true }
+ploy-strategy-bundles = { workspace = true, optional = true }
 ploy-trading.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
 uuid.workspace = true
 anyhow = "1"
-linfa = "0.8"
-linfa-logistic = "0.8"
-linfa-trees = "0.8"
-forust-ml = "0.5"
-burn = { version = "0.17", default-features = false, features = ["ndarray", "autodiff", "std"] }
-burn-ndarray = "0.17"
+linfa = { version = "0.8", optional = true }
+linfa-logistic = { version = "0.8", optional = true }
+linfa-trees = { version = "0.8", optional = true }
+forust-ml = { version = "0.5", optional = true }
+burn = { version = "0.17", default-features = false, features = ["ndarray", "autodiff", "std"], optional = true }
+burn-ndarray = { version = "0.17", optional = true }
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
+
+[[example]]
+name = "factor_research"
+path = "examples/factor_research.rs"
+required-features = ["db", "polars-export"]
+
+[[example]]
+name = "factor_scan"
+path = "examples/factor_scan.rs"
+required-features = ["db"]

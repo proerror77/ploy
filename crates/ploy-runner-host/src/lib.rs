@@ -3,7 +3,11 @@ mod ops;
 mod run;
 
 pub fn print_usage() {
-    eprintln!("Usage: ploy-runner [COMMAND] [OPTIONS]");
+    print_usage_for("ploy-runner");
+}
+
+fn print_usage_for(program: &str) {
+    eprintln!("Usage: {program} [COMMAND] [OPTIONS]");
     eprintln!();
     eprintln!("Commands:");
     eprintln!("  run               Run the strategy (default)");
@@ -18,6 +22,23 @@ pub fn print_usage() {
     eprintln!("  --foreground      Run in foreground (default, kept for compat)");
     #[cfg(feature = "ops")]
     ops::print_usage();
+}
+
+fn print_mode_usage(program: &str) {
+    eprintln!("Usage: {program} --config <path> [--dry-run] [--foreground]");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --config <path>   Unified TOML config file (required)");
+    eprintln!("  --dry-run         Force dry-run mode (simulated execution)");
+    eprintln!("  --foreground      Run in foreground (default, kept for compat)");
+}
+
+fn program_name(args: &[String]) -> String {
+    args.first()
+        .and_then(|arg| std::path::Path::new(arg).file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("ploy-runner")
+        .to_string()
 }
 
 pub async fn run_with_args(args: Vec<String>) {
@@ -46,6 +67,15 @@ pub async fn run_with_args(args: Vec<String>) {
 }
 
 pub async fn run_mode_binary(args: Vec<String>) {
+    if matches!(args.get(1).map(String::as_str), Some("--help" | "-h")) {
+        print_mode_usage(&program_name(&args));
+        return;
+    }
+
+    run_with_args(normalize_mode_args(args)).await;
+}
+
+pub async fn run_with_implicit_run_args(args: Vec<String>) {
     run_with_args(normalize_mode_args(args)).await;
 }
 

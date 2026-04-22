@@ -52,16 +52,8 @@ pub struct RuntimeSection {
     pub max_updates: Option<u64>,
     /// Strategy variant.
     ///
-    /// Canonical runtime values are:
-    /// - `"directional"` — current PM5D directional engine
-    /// - `"directional_bayes"` — experimental Bayesian directional engine
-    /// - `"mean_reversion"` — V4 prototype mean-reversion engine
-    /// - `"reversal"` — PM5D reversal engine with L2-depth confirmation
-    ///
-    /// Roadmap aliases normalize onto those canonical variants:
-    /// - `"v1"`, `"v2"`, `"v3"` => `"directional"`
-    /// - `"v4"` => `"mean_reversion"`
-    /// - `"reversal"`, `"pm5d_reversal"` => `"reversal"`
+    /// Strategy variant. Canonical variants and roadmap aliases are owned by
+    /// `strategies::registry`; keep this config field as the TOML surface only.
     #[serde(default = "default_strategy_variant")]
     pub strategy_variant: String,
     /// Prediction family for the configured runtime.
@@ -141,23 +133,7 @@ fn default_strategy_variant() -> String {
 impl RuntimeSection {
     #[must_use]
     pub fn canonical_strategy_variant(&self) -> String {
-        match self.strategy_variant.trim().to_ascii_lowercase().as_str() {
-            "" | "directional" | "v1" | "v2" | "v3" | "pm5d_v1" | "pm5d_v2" | "pm5d_v3" => {
-                "directional".to_string()
-            }
-            "directional_bayes" | "directional-bayes" | "pm5d_bayes" => {
-                "directional_bayes".to_string()
-            }
-            "mean_reversion" | "mean-reversion" | "pm5d_v4" | "v4" => "mean_reversion".to_string(),
-            "reversal" | "pm5d_reversal" | "pm-5m-reversal" => "reversal".to_string(),
-            "three_layer" | "three-layer" | "threelayer" => "three_layer".to_string(),
-            "diff_enhanced" | "diff-enhanced" | "s1" | "s1_enhanced" => "diff_enhanced".to_string(),
-            "diff_regular" | "diff-regular" | "s2" | "s2_regular" => "diff_regular".to_string(),
-            "sweep" | "s3" | "s3_sweep" => "sweep".to_string(),
-            "prob_reversal" | "prob-reversal" | "s4" | "s4_reversal" => "prob_reversal".to_string(),
-            "prob_chase" | "prob-chase" | "s5" | "s5_prob_chase" => "prob_chase".to_string(),
-            other => other.to_string(),
-        }
+        crate::strategies::registry::canonical_strategy_variant(&self.strategy_variant)
     }
 }
 

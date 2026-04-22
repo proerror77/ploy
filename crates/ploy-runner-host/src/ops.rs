@@ -5,33 +5,39 @@ use sqlx::postgres::PgPoolOptions;
 pub fn print_usage() {
     eprintln!();
     eprintln!("Options for 'check-db':");
-    eprintln!(
-        "  --db-url <url>    Database URL (default: postgresql://postgres:postgres@localhost:5432/ploy)"
-    );
+    eprintln!("  --db-url <url>    Database URL (or DATABASE_URL/PLOY_DATABASE__URL)");
     eprintln!();
     eprintln!("Options for 'collect-quotes':");
     eprintln!("  --symbols <list>  Comma-separated symbols (default: BTCUSDT,ETHUSDT,SOLUSDT)");
     eprintln!("  --timeframe <tf>  Market timeframe: 5m or 15m (default: 5m)");
-    eprintln!(
-        "  --db-url <url>    Database URL (default: postgresql://postgres:postgres@localhost:5432/ploy)"
-    );
+    eprintln!("  --db-url <url>    Database URL (or DATABASE_URL/PLOY_DATABASE__URL)");
 }
 
 pub async fn run_check_db(args: &[String]) {
-    let db_url = arg_value(args, "--db-url")
-        .map(String::as_str)
-        .unwrap_or("postgresql://postgres:postgres@localhost:5432/ploy");
+    let db_url = match db_url(args) {
+        Ok(db_url) => db_url,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            std::process::exit(1);
+        }
+    };
 
-    if let Err(error) = check_database(db_url).await {
+    if let Err(error) = check_database(&db_url).await {
         eprintln!("Database check failed: {error}");
         std::process::exit(1);
     }
 }
 
 pub async fn run_collect_quotes(args: &[String]) {
-    let db_url = arg_value(args, "--db-url")
-        .map(String::as_str)
-        .unwrap_or("postgresql://postgres:postgres@localhost:5432/ploy");
+    let db_url = match db_url(args) {
+        Ok(db_url) => db_url,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            std::process::exit(1);
+        }
+    };
 
     let symbols_str = arg_value(args, "--symbols")
         .map(String::as_str)
@@ -48,7 +54,7 @@ pub async fn run_collect_quotes(args: &[String]) {
 
     let pool = match PgPoolOptions::new()
         .max_connections(5)
-        .connect(db_url)
+        .connect(&db_url)
         .await
     {
         Ok(pool) => pool,
@@ -75,4 +81,13 @@ fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a String> {
     args.iter()
         .position(|arg| arg == flag)
         .and_then(|index| args.get(index + 1))
+}
+
+fn db_url(args: &[String]) -> Result<String, &'static str> {
+    arg_value(args, "--db-url")
+        .cloned()
+        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .or_else(|| std::env::var("PLOY_DATABASE__URL").ok())
+        .filter(|url| !url.trim().is_empty())
+        .ok_or("Database URL is required: pass --db-url or set DATABASE_URL/PLOY_DATABASE__URL")
 }

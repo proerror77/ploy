@@ -1,26 +1,6 @@
-import type {
-  ActiveAlert,
-  DeploymentSummary,
-  LogEntry,
-  MarketData,
-  PlatformMetrics,
-  Position,
-  SystemStatus,
-  Trade,
-  TradingStateSnapshot,
-} from '@/types';
+import type { OperatorEvent } from '@/types';
 
-export type WebSocketEvent =
-  | { type: 'log'; data: LogEntry }
-  | { type: 'trade'; data: Trade }
-  | { type: 'position'; data: Position }
-  | { type: 'market'; data: MarketData }
-  | { type: 'status'; data: { status: 'running' | 'stopped' | 'error' } }
-  | { type: 'system_snapshot'; data: { system: SystemStatus } }
-  | { type: 'deployment_snapshot'; data: { deployments: DeploymentSummary[] } }
-  | { type: 'trading_snapshot'; data: { trading: TradingStateSnapshot[] } }
-  | { type: 'metrics_snapshot'; data: { metrics: PlatformMetrics } }
-  | { type: 'alert_snapshot'; data: { alerts: ActiveAlert[] } };
+export type WebSocketEvent = OperatorEvent;
 
 type ConnectionCallback = (connected: boolean) => void;
 
@@ -90,7 +70,9 @@ export class WebSocketService {
         t === 'deployment_snapshot' ||
         t === 'trading_snapshot' ||
         t === 'metrics_snapshot' ||
-        t === 'alert_snapshot'
+        t === 'alert_snapshot' ||
+        t === 'oversight_snapshot' ||
+        t === 'proposal_snapshot'
       ) {
         this.emit({ type: t, data } as WebSocketEvent);
       }

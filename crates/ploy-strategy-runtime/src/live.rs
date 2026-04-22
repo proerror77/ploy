@@ -292,11 +292,6 @@ async fn run_live_or_dry_run(
 
     let recorder = build_signal_recorder(db_pool.clone(), runtime_config.mode);
     let result = if runtime_config.mode == RuntimeMode::Live {
-        #[cfg(feature = "auto-claimer")]
-        if let Err(error) = ploy_claimer::ensure_account_claimer_daemon().await {
-            warn!("Auto-claimer daemon failed to start: {error}");
-        }
-
         #[cfg(not(feature = "live-execution"))]
         {
             eprintln!("Live execution requires the `live-execution` feature");

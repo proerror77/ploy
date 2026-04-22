@@ -9,13 +9,17 @@ use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
-    FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
+    FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+use super::common::event::EventWindow;
+use super::common::guards::active_order_exists;
+use super::common::quote::QuoteState;
+use super::common::settlement;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 // ── Fee model ───────────────────────────────────────────
@@ -202,27 +206,9 @@ impl Default for DiffEnhancedConfig {
 
 // ── Internal state structs ──────────────────────────────
 
-#[derive(Clone)]
-struct EventWindow {
-    event_id: Arc<str>,
-    symbol: Arc<str>,
-    up_token: Arc<str>,
-    down_token: Arc<str>,
-    end_time: DateTime<Utc>,
-    window_secs: u64,
-    price_to_beat: Option<Decimal>,
-}
-
 #[derive(Clone, Copy)]
 struct SpotState {
     price: Decimal,
-}
-
-#[derive(Clone, Copy)]
-struct QuoteState {
-    bid: Option<Decimal>,
-    ask: Option<Decimal>,
-    ts: DateTime<Utc>,
 }
 
 #[derive(Clone)]
@@ -294,16 +280,6 @@ impl DiffEnhancedStrategy {
             || self.config.allowed_window_secs.contains(&window_secs)
     }
 
-    fn active_order_exists(&self, token_id: &str, orders: &OrderLedger) -> bool {
-        orders.orders().any(|order| {
-            order.token_id == token_id
-                && matches!(
-                    order.state,
-                    OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
-                )
-        })
-    }
-
     fn entry_quantity(&self, entry_price: Decimal) -> Decimal {
         if entry_price <= Decimal::ZERO {
             return Decimal::ZERO;
@@ -329,12 +305,11 @@ impl DiffEnhancedStrategy {
     }
 
     fn resolve_up_won(&self, event: &EventWindow, settlement: Option<bool>) -> Option<bool> {
-        if settlement.is_some() {
-            return settlement;
-        }
-        let price_to_beat = event.price_to_beat?.to_f64()?;
-        let spot = self.spot.get(&event.symbol)?.price.to_f64()?;
-        Some(spot >= price_to_beat)
+        settlement::resolve_up_won(
+            settlement,
+            self.spot.get(&event.symbol).map(|state| state.price),
+            event.price_to_beat,
+        )
     }
 
     /// Compute diff_pct = (spot - price_to_beat) / price_to_beat for an event.
@@ -460,14 +435,13 @@ impl DiffEnhancedStrategy {
         let prev = *self.prev_diff.get(&event.event_id)?;
         let threshold = self.config.diff_entry_threshold;
 
-        let (direction, token_id) =
-            if prev <= threshold && diff > threshold {
-                (Direction::Up, &event.up_token)
-            } else if prev >= -threshold && diff < -threshold {
-                (Direction::Down, &event.down_token)
-            } else {
-                return None;
-            };
+        let (direction, token_id) = if prev <= threshold && diff > threshold {
+            (Direction::Up, &event.up_token)
+        } else if prev >= -threshold && diff < -threshold {
+            (Direction::Down, &event.down_token)
+        } else {
+            return None;
+        };
 
         // Probability chase cap
         let prob = self.current_prob(token_id)?;
@@ -492,9 +466,7 @@ impl DiffEnhancedStrategy {
         }
 
         // No duplicate position or pending order
-        if positions.net_qty(token_id) > Decimal::ZERO
-            || self.active_order_exists(token_id, orders)
-        {
+        if positions.net_qty(token_id) > Decimal::ZERO || active_order_exists(token_id, orders) {
             return None;
         }
 
@@ -506,7 +478,10 @@ impl DiffEnhancedStrategy {
 
         let edge = diff.abs() - prob - crypto_fee_cost(prob);
         let intent_id = format!(
-            "diff_enhanced_{}_{}_{}", event.event_id, direction.label().to_lowercase(), now.timestamp_millis()
+            "diff_enhanced_{}_{}_{}",
+            event.event_id,
+            direction.label().to_lowercase(),
+            now.timestamp_millis()
         );
 
         let intent = TradingIntent {
@@ -628,9 +603,7 @@ impl DiffEnhancedStrategy {
                             drawdown,
                             "exit: trailing stop"
                         );
-                        decisions.push(
-                            self.build_exit(event, token_id, qty, "trailing_stop", now),
-                        );
+                        decisions.push(self.build_exit(event, token_id, qty, "trailing_stop", now));
                         continue;
                     }
                 }
@@ -645,9 +618,7 @@ impl DiffEnhancedStrategy {
                         current_prob = prob,
                         "exit: probability pullback"
                     );
-                    decisions.push(
-                        self.build_exit(event, token_id, qty, "prob_pullback", now),
-                    );
+                    decisions.push(self.build_exit(event, token_id, qty, "prob_pullback", now));
                     continue;
                 }
 
@@ -661,13 +632,9 @@ impl DiffEnhancedStrategy {
                     if prob >= tp_threshold {
                         debug!(
                             token_id = token_id.as_ref(),
-                            prob,
-                            tp_threshold,
-                            "exit: stepped take-profit"
+                            prob, tp_threshold, "exit: stepped take-profit"
                         );
-                        decisions.push(
-                            self.build_exit(event, token_id, qty, "stepped_tp", now),
-                        );
+                        decisions.push(self.build_exit(event, token_id, qty, "stepped_tp", now));
                         continue;
                     }
                 }
@@ -688,7 +655,10 @@ impl DiffEnhancedStrategy {
         let bid = self.quotes.get(token_id).and_then(|q| q.bid);
         StrategyDecision::Exit(TradingIntent {
             intent_id: format!(
-                "diff_enhanced_{}_{}_{}", reason, token_id, now.timestamp_millis()
+                "diff_enhanced_{}_{}_{}",
+                reason,
+                token_id,
+                now.timestamp_millis()
             ),
             deployment_id: String::new(),
             market_id: event.event_id.to_string(),
@@ -797,12 +767,7 @@ impl DiffEnhancedStrategy {
         positions: &PositionLedger,
         orders: &OrderLedger,
     ) -> Vec<StrategyDecision> {
-        if !self
-            .config
-            .symbols
-            .iter()
-            .any(|s| s.as_str() == symbol)
-        {
+        if !self.config.symbols.iter().any(|s| s.as_str() == symbol) {
             return Vec::new();
         }
 
@@ -819,11 +784,8 @@ impl DiffEnhancedStrategy {
         }
 
         // Compute diff for each active event, update prev_diff, cooldowns, peaks
-        let events_snapshot: Vec<EventWindow> = self
-            .events
-            .get(symbol)
-            .cloned()
-            .unwrap_or_default();
+        let events_snapshot: Vec<EventWindow> =
+            self.events.get(symbol).cloned().unwrap_or_default();
 
         for event in &events_snapshot {
             if self.retired_events.contains(&event.event_id) {
@@ -869,8 +831,7 @@ impl DiffEnhancedStrategy {
             }
             if let Some(diff) = self.diff_pct(event) {
                 if self.prev_diff.contains_key(&event.event_id) {
-                    if let Some(decision) =
-                        self.evaluate_entry(event, diff, ts, positions, orders)
+                    if let Some(decision) = self.evaluate_entry(event, diff, ts, positions, orders)
                     {
                         result.push(decision);
                         // Only one entry per update
@@ -957,8 +918,7 @@ impl StrategyLogic for DiffEnhancedStrategy {
                 }
 
                 self.token_symbol.insert(up_token.clone(), symbol.clone());
-                self.token_symbol
-                    .insert(down_token.clone(), symbol.clone());
+                self.token_symbol.insert(down_token.clone(), symbol.clone());
                 self.token_event.insert(up_token.clone(), event_id.clone());
                 self.token_event
                     .insert(down_token.clone(), event_id.clone());
@@ -982,8 +942,7 @@ impl StrategyLogic for DiffEnhancedStrategy {
                     self.spot.get(symbol).and_then(|s| s.price.to_f64()),
                 ) {
                     if ptb > 0.0 {
-                        self.prev_diff
-                            .insert(event_id.clone(), (spot - ptb) / ptb);
+                        self.prev_diff.insert(event_id.clone(), (spot - ptb) / ptb);
                     }
                 }
 
@@ -1003,9 +962,9 @@ impl StrategyLogic for DiffEnhancedStrategy {
                             continue;
                         }
                         if let Some(up_won) = self.resolve_up_won(event, *resolved_up_won) {
-                            decisions.extend(self.build_settlement_exits(
-                                event, up_won, *end_time, positions,
-                            ));
+                            decisions.extend(
+                                self.build_settlement_exits(event, up_won, *end_time, positions),
+                            );
                             resolved.push(event.event_id.clone());
                         }
                     }
@@ -1185,7 +1144,9 @@ mod tests {
         );
 
         assert!(
-            decisions.iter().any(|d| matches!(d, StrategyDecision::Enter { .. })),
+            decisions
+                .iter()
+                .any(|d| matches!(d, StrategyDecision::Enter { .. })),
             "expected crossover entry UP, got {decisions:?}"
         );
     }
@@ -1251,7 +1212,9 @@ mod tests {
         );
 
         assert!(
-            !decisions.iter().any(|d| matches!(d, StrategyDecision::Enter { .. })),
+            !decisions
+                .iter()
+                .any(|d| matches!(d, StrategyDecision::Enter { .. })),
             "expected chase cap rejection, got {decisions:?}"
         );
     }
@@ -1307,7 +1270,9 @@ mod tests {
         );
 
         assert!(
-            decisions.iter().any(|d| matches!(d, StrategyDecision::Exit(..))),
+            decisions
+                .iter()
+                .any(|d| matches!(d, StrategyDecision::Exit(..))),
             "expected force close exit, got {decisions:?}"
         );
     }

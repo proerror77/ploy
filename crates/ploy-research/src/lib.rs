@@ -1,20 +1,23 @@
+pub mod attribution;
+pub mod backtest;
 pub mod backtesting;
 pub mod factors;
-pub mod replay;
 pub mod factors_new;
-pub mod signal;
-pub mod backtest;
-pub mod attribution;
+#[cfg(any(feature = "ml", feature = "rl"))]
 pub mod model;
+pub mod replay;
+pub mod signal;
 
 pub use backtesting::{run_backtest, BacktestReport};
 pub use factors::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations,
-    build_factor_observations_with_lob, export_observations_parquet, factor_metrics,
-    load_research_lob_snapshots, load_research_lob_snapshots_sampled, observations_to_frame,
-    AggregatedFactorMetric, EventFactorSummary, FactorMetric, FactorObservation,
-    ResearchLobSnapshot,
+    build_factor_observations_with_lob, factor_metrics, AggregatedFactorMetric, EventFactorSummary,
+    FactorMetric, FactorObservation, ResearchLobSnapshot,
 };
+#[cfg(feature = "polars-export")]
+pub use factors::{export_observations_parquet, observations_to_frame};
+#[cfg(feature = "db")]
+pub use factors::{load_research_lob_snapshots, load_research_lob_snapshots_sampled};
 pub use replay::replay_fills;
 
 pub const CRATE_MARKER: &str = "ploy-research";
@@ -28,10 +31,12 @@ pub fn crate_marker() -> &'static str {
 // Keep `Regime` as a single root-level export from operator contracts. The
 // factor registry uses the same type internally, but does not re-export its own
 // `factors_new::Regime` alias.
-pub use factors_new::{FactorMeta, FactorRegistry, scan_into_registry};
-pub use ploy_operator_contracts::Regime;
-pub use signal::{Signal, SignalSource, ThresholdRule, RegimeRouter};
-pub use backtest::{run_binary_backtest, SimulatedFill, BacktestMetrics};
-pub use attribution::{regime_pnl, RegimePnl, factor_pnl, AttributionReport};
+pub use attribution::{factor_pnl, regime_pnl, AttributionReport, RegimePnl};
+pub use backtest::{run_binary_backtest, BacktestMetrics, SimulatedFill};
+pub use factors_new::{scan_into_registry, FactorMeta, FactorRegistry};
+#[cfg(feature = "rl")]
+pub use model::rl::{BinaryEventEnv, DqnAgent, Environment, ReplayBuffer};
+#[cfg(any(feature = "ml", feature = "rl"))]
 pub use model::{RlAgent, StrategyModel, Transition};
-pub use model::rl::{BinaryEventEnv, Environment, ReplayBuffer, DqnAgent};
+pub use ploy_operator_contracts::Regime;
+pub use signal::{RegimeRouter, Signal, SignalSource, ThresholdRule};

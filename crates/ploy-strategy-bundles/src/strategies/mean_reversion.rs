@@ -11,11 +11,14 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tracing::{debug, info, warn};
 
+use super::common::event::EventWindow;
+use super::common::guards::active_order_exists;
+use super::common::settlement;
 use super::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
@@ -67,16 +70,6 @@ struct SpotState {
 struct QuoteState {
     bid: Option<Decimal>,
     ask: Option<Decimal>,
-}
-
-#[derive(Clone)]
-struct EventWindow {
-    event_id: Arc<str>,
-    symbol: Arc<str>,
-    up_token: Arc<str>,
-    down_token: Arc<str>,
-    end_time: DateTime<Utc>,
-    open_price: Option<Decimal>,
 }
 
 struct ReturnBuffer {
@@ -340,14 +333,8 @@ impl MeanReversionStrategy {
     }
 
     fn event_has_active_order(&self, event: &EventWindow, orders: &OrderLedger) -> bool {
-        orders.orders().any(|order| {
-            matches!(
-                order.state,
-                ploy_trading::OrderState::Pending
-                    | ploy_trading::OrderState::Acknowledged
-                    | ploy_trading::OrderState::PartiallyFilled
-            ) && (order.token_id.as_str() == &*event.up_token || order.token_id.as_str() == &*event.down_token)
-        })
+        active_order_exists(&event.up_token, orders)
+            || active_order_exists(&event.down_token, orders)
     }
 
     fn window_allowed(&self, window_secs: u64) -> bool {
@@ -360,17 +347,11 @@ impl MeanReversionStrategy {
         event: &EventWindow,
         settlement: Option<bool>,
     ) -> Option<bool> {
-        if let Some(resolved) = settlement {
-            return Some(resolved);
-        }
-
-        match (
+        settlement::resolve_up_won(
+            settlement,
             self.spot.get(&event.symbol).map(|spot| spot.price),
-            event.open_price,
-        ) {
-            (Some(current), Some(open)) => Some(current >= open),
-            _ => None,
-        }
+            event.price_to_beat,
+        )
     }
 
     fn build_settlement_exits(
@@ -523,7 +504,7 @@ impl MeanReversionStrategy {
         event: &EventWindow,
         now: DateTime<Utc>,
     ) -> Option<(Direction, Decimal, f64, f64)> {
-        let open_price = event.open_price?;
+        let open_price = event.price_to_beat?;
         if open_price <= Decimal::ZERO || spot_price <= Decimal::ZERO {
             return None;
         }
@@ -775,7 +756,12 @@ impl StrategyLogic for MeanReversionStrategy {
     ) -> Vec<StrategyDecision> {
         match update {
             MarketUpdate::SpotPrice { symbol, price, ts } => {
-                if !self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref()) {
+                if !self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
+                {
                     return Vec::new();
                 }
 
@@ -792,8 +778,8 @@ impl StrategyLogic for MeanReversionStrategy {
                 );
                 if let Some(events) = self.events.get_mut(symbol) {
                     for event in events.iter_mut() {
-                        if event.open_price.is_none() {
-                            event.open_price = Some(*price);
+                        if event.price_to_beat.is_none() {
+                            event.price_to_beat = Some(*price);
                         }
                     }
                 }
@@ -845,7 +831,11 @@ impl StrategyLogic for MeanReversionStrategy {
                     return active_exits;
                 }
 
-                if self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref())
+                if self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
                     && self.daily_trades < self.config.max_daily_trades
                     && !self.in_cooldown(&symbol, *ts)
                 {
@@ -889,11 +879,16 @@ impl StrategyLogic for MeanReversionStrategy {
                     up_token: up_token.clone(),
                     down_token: down_token.clone(),
                     end_time: *end_time,
-                    open_price: price_to_beat
+                    window_secs: *window_secs,
+                    price_to_beat: price_to_beat
                         .or_else(|| self.spot.get(symbol).map(|state| state.price)),
                 });
 
-                if self.config.symbols.iter().any(|s| s.as_str() == symbol.as_ref())
+                if self
+                    .config
+                    .symbols
+                    .iter()
+                    .any(|s| s.as_str() == symbol.as_ref())
                     && self.daily_trades < self.config.max_daily_trades
                     && !self.in_cooldown(symbol, now)
                 {
@@ -1063,17 +1058,17 @@ mod tests {
             max_daily_trades: 1000,
             max_daily_loss_usd: None,
             allowed_window_secs: vec![300, 900],
-        three_layer_min_direction_prob: 0.56,
-        three_layer_min_distance_over_sigma: 0.3,
-        three_layer_min_confirmation_score: 0.10,
-        three_layer_min_drift_confirmation: 0.0002,
-        three_layer_min_edge: 0.03,
-        three_layer_min_reward_risk: 1.2,
-        three_layer_take_profit_ask: 0.70,
-        three_layer_stop_distance_pct: 0.020,
-        three_layer_max_pm_lag_secs: 15,
-        three_layer_min_entry_score: 0.30,
-    }
+            three_layer_min_direction_prob: 0.56,
+            three_layer_min_distance_over_sigma: 0.3,
+            three_layer_min_confirmation_score: 0.10,
+            three_layer_min_drift_confirmation: 0.0002,
+            three_layer_min_edge: 0.03,
+            three_layer_min_reward_risk: 1.2,
+            three_layer_take_profit_ask: 0.70,
+            three_layer_stop_distance_pct: 0.020,
+            three_layer_max_pm_lag_secs: 15,
+            three_layer_min_entry_score: 0.30,
+        }
     }
 
     #[test]
@@ -1104,8 +1099,8 @@ mod tests {
                 bid: Some(dec!(0.29)),
                 ask: Some(dec!(0.30)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,
@@ -1116,8 +1111,8 @@ mod tests {
                 bid: Some(dec!(0.69)),
                 ask: Some(dec!(0.70)),
                 ts: now,
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,
@@ -1195,8 +1190,8 @@ mod tests {
                 bid: Some(dec!(0.42)),
                 ask: Some(dec!(0.43)),
                 ts: now + chrono::Duration::seconds(30),
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,
@@ -1329,8 +1324,8 @@ mod tests {
                 bid: Some(dec!(0.45)),
                 ask: Some(dec!(0.46)),
                 ts: now + chrono::Duration::seconds(35),
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             &positions,
             &orders,

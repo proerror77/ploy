@@ -15,6 +15,7 @@
 //! ```
 
 use chrono::{DateTime, Duration, Utc};
+use ploy_market_contracts::market_update_sort_ts;
 use rust_decimal::Decimal;
 use std::path::Path;
 use std::sync::Arc;
@@ -25,27 +26,6 @@ use crate::traits::MarketUpdate;
 
 /// How far before `from` to load spot prices for EWMA warm-up.
 const WARMUP_MINUTES: i64 = 30;
-
-fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
-    match u {
-        MarketUpdate::SpotPrice { ts, .. }
-        | MarketUpdate::AggTrade { ts, .. }
-        | MarketUpdate::Quote { ts, .. }
-        | MarketUpdate::L2 { ts, .. }
-        | MarketUpdate::L2Depth { ts, .. }
-        | MarketUpdate::SportsState { ts, .. }
-        | MarketUpdate::SportsPregame { ts, .. }
-        | MarketUpdate::SportsLive { ts, .. }
-        | MarketUpdate::ReferencePrice { ts, .. }
-        | MarketUpdate::Kline { ts, .. } => *ts,
-        MarketUpdate::EventDiscovered {
-            end_time,
-            window_secs,
-            ..
-        } => *end_time - Duration::seconds(*window_secs as i64) - Duration::hours(1),
-        MarketUpdate::EventExpired { end_time, .. } => *end_time,
-    }
-}
 
 /// Load historical market updates from date-partitioned Parquet files.
 ///
@@ -127,7 +107,7 @@ fn load_with_duckdb(
         day = day.succ_opt().unwrap_or(day);
     }
 
-    updates.sort_by_key(|u| update_ts(u));
+    updates.sort_by_key(market_update_sort_ts);
 
     info!(
         count = updates.len(),

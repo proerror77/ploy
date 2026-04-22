@@ -1,11 +1,12 @@
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 fn default_account_id() -> String {
     "default".to_string()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentState {
     Enabled,
@@ -20,7 +21,7 @@ impl Default for DeploymentState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DesiredState {
     Running,
@@ -28,7 +29,7 @@ pub enum DesiredState {
     Stopped,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservedState {
     Starting,
@@ -40,7 +41,7 @@ pub enum ObservedState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeploymentSummary {
     pub deployment_id: String,
     #[serde(default = "default_account_id")]
@@ -53,7 +54,7 @@ pub struct DeploymentSummary {
     pub observed_state: ObservedState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeploymentApplyRequest {
     pub deployment_id: String,
     pub bundle_id: String,
@@ -67,13 +68,13 @@ pub struct DeploymentApplyRequest {
     pub desired_state: DesiredState,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeploymentControlRequest {
     pub desired_state: Option<DesiredState>,
     pub deployment_state: Option<DeploymentState>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeploymentStateSummary {
     pub enabled: usize,
     pub draining: usize,

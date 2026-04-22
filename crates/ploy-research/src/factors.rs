@@ -2,9 +2,12 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use chrono::{DateTime, Utc};
 use ploy_market_contracts::MarketUpdate;
+#[cfg(feature = "polars-export")]
 use polars::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
+#[cfg(feature = "db")]
 use serde_json::Value;
+#[cfg(feature = "db")]
 use sqlx::PgPool;
 
 const EWMA_LAMBDA: f64 = 0.94;
@@ -258,7 +261,11 @@ impl ReturnBuffer {
         if self.total_secs <= 0.0 {
             return 0.0;
         }
-        self.entries.iter().map(|(ret, _, _)| ret * ret).sum::<f64>() / self.total_secs
+        self.entries
+            .iter()
+            .map(|(ret, _, _)| ret * ret)
+            .sum::<f64>()
+            / self.total_secs
     }
 
     fn parkinson_var_per_sec(&self) -> f64 {
@@ -280,11 +287,21 @@ struct LobFlowAccumulator {
 
 impl LobFlowAccumulator {
     fn new(window_secs: f64) -> Self {
-        Self { entries: VecDeque::new(), window_secs }
+        Self {
+            entries: VecDeque::new(),
+            window_secs,
+        }
     }
 
-    fn push(&mut self, ts: DateTime<Utc>, obi: f64, depth_imbalance: f64, microprice_offset_bps: f64) {
-        self.entries.push_back((ts, obi, depth_imbalance, microprice_offset_bps));
+    fn push(
+        &mut self,
+        ts: DateTime<Utc>,
+        obi: f64,
+        depth_imbalance: f64,
+        microprice_offset_bps: f64,
+    ) {
+        self.entries
+            .push_back((ts, obi, depth_imbalance, microprice_offset_bps));
         while self.entries.len() > 1 {
             let oldest = self.entries.front().unwrap().0;
             if (ts - oldest).num_milliseconds() as f64 / 1000.0 > self.window_secs {
@@ -297,16 +314,24 @@ impl LobFlowAccumulator {
 
     /// Sum of consecutive OBI differences within the window.
     fn cum_obi_delta(&self) -> f64 {
-        if self.entries.len() < 2 { return 0.0; }
-        self.entries.iter().zip(self.entries.iter().skip(1))
+        if self.entries.len() < 2 {
+            return 0.0;
+        }
+        self.entries
+            .iter()
+            .zip(self.entries.iter().skip(1))
             .map(|(a, b)| b.1 - a.1)
             .sum()
     }
 
     /// Sum of consecutive depth_imbalance differences within the window.
     fn cum_depth_delta(&self) -> f64 {
-        if self.entries.len() < 2 { return 0.0; }
-        self.entries.iter().zip(self.entries.iter().skip(1))
+        if self.entries.len() < 2 {
+            return 0.0;
+        }
+        self.entries
+            .iter()
+            .zip(self.entries.iter().skip(1))
             .map(|(a, b)| b.2 - a.2)
             .sum()
     }
@@ -325,7 +350,10 @@ struct TradeFlowAccumulator {
 
 impl TradeFlowAccumulator {
     fn new(window_secs: f64) -> Self {
-        Self { entries: VecDeque::new(), window_secs }
+        Self {
+            entries: VecDeque::new(),
+            window_secs,
+        }
     }
 
     fn push(&mut self, ts: DateTime<Utc>, signed_qty: f64) {
@@ -349,6 +377,7 @@ impl TradeFlowAccumulator {
 ///
 /// `binance_lob_ticks` records at ~1 Hz; for factor research 1 tick per 5 s is sufficient
 /// and reduces JSONB transfer by ~5x. Pass `sample_every_secs = 1` to disable downsampling.
+#[cfg(feature = "db")]
 pub async fn load_research_lob_snapshots(
     pool: &PgPool,
     symbols: &[String],
@@ -367,6 +396,7 @@ pub async fn load_research_lob_snapshots(
 /// spaced. For most research use cases (N=5 or N=10), this is not a concern.
 ///
 /// `sample_every_secs` is clamped to a minimum of 1 (no divide-by-zero).
+#[cfg(feature = "db")]
 pub async fn load_research_lob_snapshots_sampled(
     pool: &PgPool,
     symbols: &[String],
@@ -414,28 +444,19 @@ pub async fn load_research_lob_snapshots_sampled(
     .fetch_all(pool)
     .await?;
 
-    eprintln!("lob snapshot rows: {} (sample_every_secs={})", rows.len(), sample_every_secs);
+    eprintln!(
+        "lob snapshot rows: {} (sample_every_secs={})",
+        rows.len(),
+        sample_every_secs
+    );
 
     Ok(rows
         .into_iter()
         .map(
-            |(
-                ts,
-                symbol,
-                obi_5,
-                obi_10,
-                spread_bps,
-                best_bid,
-                best_ask,
-                mid_price,
-                bids,
-                asks,
-            )| {
+            |(ts, symbol, obi_5, obi_10, spread_bps, best_bid, best_ask, mid_price, bids, asks)| {
                 let mid_price = mid_price.to_f64().unwrap_or(f64::NAN);
-                let (bid_depth_near, ask_depth_near) =
-                    depth_band(&bids, &asks, mid_price, 0.001);
-                let (bid_depth_far, ask_depth_far) =
-                    depth_band(&bids, &asks, mid_price, 0.005);
+                let (bid_depth_near, ask_depth_near) = depth_band(&bids, &asks, mid_price, 0.001);
+                let (bid_depth_far, ask_depth_far) = depth_band(&bids, &asks, mid_price, 0.005);
                 // Inner band: much tighter than near, so depth_acceleration
                 // (inner_ratio - near_ratio) has variance even when the book
                 // is very tight (e.g. BTC where all 20 levels sit within 0.007% of mid).
@@ -463,6 +484,7 @@ pub async fn load_research_lob_snapshots_sampled(
         .collect())
 }
 
+#[cfg(feature = "db")]
 fn depth_band(bids: &Value, asks: &Value, mid_price: f64, pct_range: f64) -> (f64, f64) {
     if !mid_price.is_finite() || mid_price <= 0.0 {
         return (f64::NAN, f64::NAN);
@@ -475,6 +497,7 @@ fn depth_band(bids: &Value, asks: &Value, mid_price: f64, pct_range: f64) -> (f6
     )
 }
 
+#[cfg(feature = "db")]
 fn sum_depth_in_range(levels: &Value, min_price: f64, max_price: f64) -> f64 {
     levels
         .as_array()
@@ -489,6 +512,7 @@ fn sum_depth_in_range(levels: &Value, min_price: f64, max_price: f64) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[cfg(feature = "db")]
 fn parse_depth_level(level: &Value) -> Option<(f64, f64)> {
     match level {
         Value::Array(items) if items.len() >= 2 => {
@@ -499,6 +523,7 @@ fn parse_depth_level(level: &Value) -> Option<(f64, f64)> {
     }
 }
 
+#[cfg(feature = "db")]
 fn json_f64(value: &Value) -> Option<f64> {
     match value {
         Value::String(raw) => raw.parse::<f64>().ok(),
@@ -600,7 +625,13 @@ pub fn build_factor_observations_with_lob(
                 }
             }
             MarketUpdate::Quote {
-                token_id, bid, ask, bid_size, ask_size, ts, ..
+                token_id,
+                bid,
+                ask,
+                bid_size,
+                ask_size,
+                ts,
+                ..
             } => {
                 let bid = bid.and_then(|value| value.to_f64()).unwrap_or(f64::NAN);
                 let ask = ask.and_then(|value| value.to_f64()).unwrap_or(f64::NAN);
@@ -707,10 +738,8 @@ pub fn build_factor_observations_with_lob(
                 spot.insert(sym.clone(), (*ts, spot_price));
 
                 if let Some(snapshots) = lob_by_symbol.get(&sym) {
-                    if let Some(snapshot) = snapshots
-                        .iter()
-                        .rev()
-                        .find(|snapshot| snapshot.ts <= *ts)
+                    if let Some(snapshot) =
+                        snapshots.iter().rev().find(|snapshot| snapshot.ts <= *ts)
                     {
                         // Compute microprice offset for flow accumulator
                         let snap_mprice_bps = if snapshot.mid_price > 0.0
@@ -779,7 +808,13 @@ pub fn build_factor_observations_with_lob(
                     let (up_bid, up_ask, up_lag, up_bid_sz, up_ask_sz) = quotes
                         .get(&event.up_token)
                         .map(|(quote_ts, bid, ask, bid_sz, ask_sz)| {
-                            (*bid, *ask, (*ts - *quote_ts).num_seconds() as f64, *bid_sz, *ask_sz)
+                            (
+                                *bid,
+                                *ask,
+                                (*ts - *quote_ts).num_seconds() as f64,
+                                *bid_sz,
+                                *ask_sz,
+                            )
                         })
                         .unwrap_or((f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN));
                     let (down_bid, down_ask, down_bid_sz, down_ask_sz) = quotes
@@ -800,12 +835,13 @@ pub fn build_factor_observations_with_lob(
                     } else {
                         f64::NAN
                     };
-                    let depth_imbalance = if lob_state.bid_depth_near + lob_state.ask_depth_near > 0.0 {
-                        (lob_state.bid_depth_near - lob_state.ask_depth_near)
-                            / (lob_state.bid_depth_near + lob_state.ask_depth_near)
-                    } else {
-                        f64::NAN
-                    };
+                    let depth_imbalance =
+                        if lob_state.bid_depth_near + lob_state.ask_depth_near > 0.0 {
+                            (lob_state.bid_depth_near - lob_state.ask_depth_near)
+                                / (lob_state.bid_depth_near + lob_state.ask_depth_near)
+                        } else {
+                            f64::NAN
+                        };
                     let depth_far_ratio = if lob_state.ask_depth_far > 0.0 {
                         lob_state.bid_depth_far / lob_state.ask_depth_far
                     } else {
@@ -819,11 +855,12 @@ pub fn build_factor_observations_with_lob(
                     // depth_acceleration: difference between inner-book and full-book
                     // depth imbalance. Uses the 0.003% inner band vs 0.1% near band
                     // so that even very tight books (BTC) produce non-zero variance.
-                    let depth_acceleration = if depth_inner_ratio.is_finite() && depth_ratio.is_finite() {
-                        depth_inner_ratio - depth_ratio
-                    } else {
-                        f64::NAN
-                    };
+                    let depth_acceleration =
+                        if depth_inner_ratio.is_finite() && depth_ratio.is_finite() {
+                            depth_inner_ratio - depth_ratio
+                        } else {
+                            f64::NAN
+                        };
                     let microprice_offset_bps = if lob_state.mid_price.is_finite()
                         && lob_state.best_bid.is_finite()
                         && lob_state.best_ask.is_finite()
@@ -839,7 +876,10 @@ pub fn build_factor_observations_with_lob(
                     };
 
                     let floor = 0.001_f64.powi(2) / 900.0;
-                    let ewma = vol.get(&sym).map(|state| state.ewma_var_per_sec).unwrap_or(floor);
+                    let ewma = vol
+                        .get(&sym)
+                        .map(|state| state.ewma_var_per_sec)
+                        .unwrap_or(floor);
                     let (rv, parkinson) = retbuf
                         .get(&sym)
                         .map(|buf| (buf.realized_var_per_sec(), buf.parkinson_var_per_sec()))
@@ -864,8 +904,14 @@ pub fn build_factor_observations_with_lob(
                         f64::NAN
                     };
                     let fair_prob_up = fair_market_prob_up(up_bid, up_ask, down_bid, down_ask);
-                    let fair_prob_up_clean =
-                        clean_market_prob_up(up_bid, up_ask, down_bid, down_ask, up_break_even_prob, down_break_even_prob);
+                    let fair_prob_up_clean = clean_market_prob_up(
+                        up_bid,
+                        up_ask,
+                        down_bid,
+                        down_ask,
+                        up_break_even_prob,
+                        down_break_even_prob,
+                    );
                     let prob_disagreement =
                         implied_prob_disagreement(up_break_even_prob, down_break_even_prob);
                     let implied_sigma_horizon =
@@ -876,7 +922,8 @@ pub fn build_factor_observations_with_lob(
                         f64::NAN
                     };
 
-                    let model_prob_up = estimate_probability(price_to_beat, spot_price, sigma_horizon);
+                    let model_prob_up =
+                        estimate_probability(price_to_beat, spot_price, sigma_horizon);
                     let model_edge_up = if up_ask.is_finite() {
                         model_prob_up - up_ask - crypto_fee_cost(up_ask)
                     } else {
@@ -933,14 +980,22 @@ pub fn build_factor_observations_with_lob(
                         settlement_up: if resolved_up_won { 1.0 } else { 0.0 },
                         future_up_ask_change_30s: None,
                         future_up_ask_change_60s: None,
-                        cum_obi_delta_5m: lob_flow.get(&sym)
-                            .map(|f| f.cum_obi_delta()).unwrap_or(0.0),
-                        cum_depth_delta_5m: lob_flow.get(&sym)
-                            .map(|f| f.cum_depth_delta()).unwrap_or(0.0),
-                        cum_mprice_drift_5m: lob_flow.get(&sym)
-                            .map(|f| f.cum_mprice_drift()).unwrap_or(0.0),
-                        cum_trade_imbalance_5m: trade_flow.get(&sym)
-                            .map(|f| f.cum_imbalance()).unwrap_or(0.0),
+                        cum_obi_delta_5m: lob_flow
+                            .get(&sym)
+                            .map(|f| f.cum_obi_delta())
+                            .unwrap_or(0.0),
+                        cum_depth_delta_5m: lob_flow
+                            .get(&sym)
+                            .map(|f| f.cum_depth_delta())
+                            .unwrap_or(0.0),
+                        cum_mprice_drift_5m: lob_flow
+                            .get(&sym)
+                            .map(|f| f.cum_mprice_drift())
+                            .unwrap_or(0.0),
+                        cum_trade_imbalance_5m: trade_flow
+                            .get(&sym)
+                            .map(|f| f.cum_imbalance())
+                            .unwrap_or(0.0),
                     });
                 }
             }
@@ -971,7 +1026,10 @@ pub fn build_factor_observations_with_lob(
 }
 
 #[derive(Clone, Copy)]
-enum LabelField { Change30s, Change60s }
+enum LabelField {
+    Change30s,
+    Change60s,
+}
 
 fn attach_future_pm_labels(rows: &mut [FactorObservation], horizon_secs: i64, field: LabelField) {
     let mut grouped: HashMap<String, Vec<usize>> = HashMap::new();
@@ -985,7 +1043,8 @@ fn attach_future_pm_labels(rows: &mut [FactorObservation], horizon_secs: i64, fi
             let mut future_change = None;
             for next_idx in indexes.iter().skip(pos + 1) {
                 if rows[*next_idx].tick_ts >= target_ts {
-                    if rows[*row_idx].pm_up_ask.is_finite() && rows[*next_idx].pm_up_ask.is_finite() {
+                    if rows[*row_idx].pm_up_ask.is_finite() && rows[*next_idx].pm_up_ask.is_finite()
+                    {
                         future_change = Some(rows[*next_idx].pm_up_ask - rows[*row_idx].pm_up_ask);
                     }
                     break;
@@ -1012,7 +1071,11 @@ pub fn build_event_summaries(rows: &[FactorObservation]) -> Vec<EventFactorSumma
             Some(EventFactorSummary {
                 event_id: first.event_id.clone(),
                 symbol: first.symbol.clone(),
-                last_tick_ts: rows.iter().map(|row| row.tick_ts).max().unwrap_or(first.tick_ts),
+                last_tick_ts: rows
+                    .iter()
+                    .map(|row| row.tick_ts)
+                    .max()
+                    .unwrap_or(first.tick_ts),
                 settlement_up: first.settlement_up,
                 signed_distance_to_beat: mean(rows.iter().map(|row| row.signed_distance_to_beat)),
                 abs_distance_to_beat: mean(rows.iter().map(|row| row.abs_distance_to_beat)),
@@ -1059,7 +1122,10 @@ pub fn build_event_summaries(rows: &[FactorObservation]) -> Vec<EventFactorSumma
         .collect()
 }
 
-pub fn factor_metrics(rows: &[FactorObservation], event_rows: &[EventFactorSummary]) -> Vec<FactorMetric> {
+pub fn factor_metrics(
+    rows: &[FactorObservation],
+    event_rows: &[EventFactorSummary],
+) -> Vec<FactorMetric> {
     let mut metrics = Vec::new();
 
     for (factor, accessor) in row_factor_accessors() {
@@ -1199,6 +1265,7 @@ pub fn aggregate_factor_metrics(windows: &[Vec<FactorMetric>]) -> Vec<Aggregated
         .collect()
 }
 
+#[cfg(feature = "polars-export")]
 pub fn observations_to_frame(rows: &[FactorObservation]) -> PolarsResult<DataFrame> {
     df![
         "event_id" => rows.iter().map(|row| row.event_id.as_str()).collect::<Vec<_>>(),
@@ -1331,7 +1398,8 @@ fn event_factor_accessors() -> Vec<(&'static str, fn(&EventFactorSummary) -> f64
         ("cum_mprice_drift_5m", |row| row.cum_mprice_drift_5m),
         ("cum_trade_imbalance_5m", |row| row.cum_trade_imbalance_5m),
     ]
-}fn mean(values: impl Iterator<Item = f64>) -> f64 {
+}
+fn mean(values: impl Iterator<Item = f64>) -> f64 {
     let vals: Vec<f64> = values.filter(|value| value.is_finite()).collect();
     if vals.is_empty() {
         f64::NAN
@@ -1586,7 +1654,9 @@ fn update_sort_ts(update: &MarketUpdate) -> DateTime<Utc> {
             end_time,
             window_secs,
             ..
-        } => *end_time - chrono::Duration::seconds(*window_secs as i64) - chrono::Duration::hours(1),
+        } => {
+            *end_time - chrono::Duration::seconds(*window_secs as i64) - chrono::Duration::hours(1)
+        }
         MarketUpdate::EventExpired { end_time, .. } => *end_time,
     }
 }
@@ -1618,7 +1688,8 @@ pub(crate) fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Op
         return None;
     }
     let mean_ic = ics.iter().sum::<f64>() / ics.len() as f64;
-    let std_ic = (ics.iter().map(|ic| (ic - mean_ic).powi(2)).sum::<f64>() / ics.len() as f64).sqrt();
+    let std_ic =
+        (ics.iter().map(|ic| (ic - mean_ic).powi(2)).sum::<f64>() / ics.len() as f64).sqrt();
     if std_ic <= 1e-9 {
         None
     } else {
@@ -1630,6 +1701,7 @@ pub(crate) fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Op
 ///
 /// Creates or overwrites the file. Returns an error if the DataFrame cannot
 /// be built or the file cannot be written.
+#[cfg(feature = "polars-export")]
 pub fn export_observations_parquet(
     rows: &[FactorObservation],
     path: &std::path::Path,
@@ -1671,14 +1743,23 @@ mod tests {
         let xs = vec![1.0, 1.0, 2.0, 2.0];
         let ys = vec![10.0, 20.0, 10.0, 20.0];
         let ic = spearman_ic(&xs, &ys);
-        assert!(ic.abs() < 1e-9, "expected tie-correct spearman near 0, got {ic}");
+        assert!(
+            ic.abs() < 1e-9,
+            "expected tie-correct spearman near 0, got {ic}"
+        );
     }
 
     #[test]
     fn future_label_attachment_is_order_invariant_after_sort() {
-        let ts0 = chrono::DateTime::from_timestamp(0, 0).unwrap().with_timezone(&Utc);
-        let ts1 = chrono::DateTime::from_timestamp(40, 0).unwrap().with_timezone(&Utc);
-        let ts2 = chrono::DateTime::from_timestamp(80, 0).unwrap().with_timezone(&Utc);
+        let ts0 = chrono::DateTime::from_timestamp(0, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts1 = chrono::DateTime::from_timestamp(40, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts2 = chrono::DateTime::from_timestamp(80, 0)
+            .unwrap()
+            .with_timezone(&Utc);
 
         let make_rows = || {
             vec![

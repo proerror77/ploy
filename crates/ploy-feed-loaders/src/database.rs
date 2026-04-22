@@ -24,45 +24,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
-use ploy_market_contracts::MarketUpdate;
+use ploy_market_contracts::{
+    market_update_sort_ts, normalize_token_id, HistoricalLoadOptions, MarketUpdate,
+};
 
 #[cfg(test)]
 use serde_json::Value;
-
-/// Additive historical-loader flags for non-crypto datasets.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistoricalLoadOptions {
-    pub include_reference_prices: bool,
-    pub reference_symbols: Vec<String>,
-    pub include_sports_state: bool,
-    pub require_official_settlement: bool,
-    /// Downsample `binance_lob_ticks` to one snapshot per N seconds per symbol.
-    /// Defaults to 30 (one row per 30-second bucket). Set to 1 to disable downsampling.
-    pub lob_sample_secs: u32,
-}
-
-impl Default for HistoricalLoadOptions {
-    fn default() -> Self {
-        Self {
-            include_reference_prices: false,
-            reference_symbols: Vec::new(),
-            include_sports_state: false,
-            require_official_settlement: false,
-            lob_sample_secs: 30,
-        }
-    }
-}
-
-impl HistoricalLoadOptions {
-    #[must_use]
-    pub fn normalized_reference_symbols(&self) -> Vec<String> {
-        self.reference_symbols
-            .iter()
-            .map(|symbol| symbol.trim().to_lowercase())
-            .filter(|symbol| !symbol.is_empty())
-            .collect()
-    }
-}
 
 /// How far before `from` to load spot prices for EWMA volatility warm-up.
 const WARMUP_MINUTES: i64 = 30;
@@ -208,7 +175,7 @@ pub async fn load_from_database_with_options(
     }
 
     // Sort by timestamp
-    updates.sort_by_key(|u| update_ts(u));
+    updates.sort_by_key(market_update_sort_ts);
 
     info!(
         count = updates.len(),
@@ -222,79 +189,6 @@ pub async fn load_from_database_with_options(
     );
 
     Ok(updates)
-}
-
-fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
-    match u {
-        MarketUpdate::SpotPrice { ts, .. }
-        | MarketUpdate::AggTrade { ts, .. }
-        | MarketUpdate::Quote { ts, .. }
-        | MarketUpdate::L2 { ts, .. }
-        | MarketUpdate::L2Depth { ts, .. }
-        | MarketUpdate::SportsState { ts, .. }
-        | MarketUpdate::SportsPregame { ts, .. }
-        | MarketUpdate::SportsLive { ts, .. }
-        | MarketUpdate::ReferencePrice { ts, .. }
-        | MarketUpdate::Kline { ts, .. } => *ts,
-        MarketUpdate::EventDiscovered {
-            end_time,
-            window_secs,
-            ..
-        } => {
-            // Sort EventDiscovered before all quotes for the same event.
-            // Quotes can arrive before the event's official start_time (~90% of cases),
-            // so we subtract an extra buffer to guarantee ordering.
-            *end_time - chrono::Duration::seconds(*window_secs as i64) - chrono::Duration::hours(1)
-        }
-        MarketUpdate::EventExpired { end_time, .. } => *end_time,
-    }
-}
-
-pub fn normalize_token_id(raw: &str) -> String {
-    let trimmed = raw.trim().trim_matches('"');
-    if let Some(hex) = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-    {
-        return hex_to_decimal_string(hex).unwrap_or_else(|| trimmed.to_string());
-    }
-    trimmed.to_string()
-}
-
-fn hex_to_decimal_string(hex: &str) -> Option<String> {
-    if hex.is_empty() {
-        return None;
-    }
-
-    let mut digits = vec![0_u8];
-
-    for ch in hex.chars() {
-        let value = ch.to_digit(16)? as u32;
-        let mut carry = value;
-
-        for digit in &mut digits {
-            let next = (*digit as u32) * 16 + carry;
-            *digit = (next % 10) as u8;
-            carry = next / 10;
-        }
-
-        while carry > 0 {
-            digits.push((carry % 10) as u8);
-            carry /= 10;
-        }
-    }
-
-    while digits.len() > 1 && digits.last() == Some(&0) {
-        digits.pop();
-    }
-
-    Some(
-        digits
-            .iter()
-            .rev()
-            .map(|digit| char::from(b'0' + *digit))
-            .collect(),
-    )
 }
 
 // ── Spot Prices ──────────────────────────────────────────
@@ -1120,30 +1014,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        build_event_updates, hex_to_decimal_string, l2_updates_from_book, near_depth,
-        normalize_token_id, EventMetadataRow, MarketUpdate,
+        build_event_updates, l2_updates_from_book, near_depth, EventMetadataRow, MarketUpdate,
     };
-
-    #[test]
-    fn normalize_token_id_converts_hex_to_decimal() {
-        let raw = "\"0x3c38c18444ab803acea0d4de7bcdecae7f0f8ddbcd0466e3323d1cb9e04b6f5d\"";
-        let normalized = normalize_token_id(raw);
-        assert_eq!(
-            normalized,
-            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
-        );
-    }
-
-    #[test]
-    fn normalize_token_id_keeps_decimal_ids() {
-        let raw = "35165169860573247111698076491591023728797123337726915178028774493274622598566";
-        assert_eq!(normalize_token_id(raw), raw);
-    }
-
-    #[test]
-    fn hex_to_decimal_string_rejects_invalid_hex() {
-        assert_eq!(hex_to_decimal_string("xyz"), None);
-    }
 
     #[test]
     fn official_settlement_backfill_repairs_event_expiry_outcome() {

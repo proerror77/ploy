@@ -13,9 +13,7 @@
 //! If no --db-url is given, uses synthetic market data.
 
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{
-    load_from_database_with_options, HistoricalLoadOptions as DbHistoricalLoadOptions,
-};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
     config::FullConfig, DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder,
@@ -171,20 +169,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
     }
 
     // Sort by timestamp
-    updates.sort_by_key(|u| match u {
-        MarketUpdate::SpotPrice { ts, .. }
-        | MarketUpdate::AggTrade { ts, .. }
-        | MarketUpdate::Quote { ts, .. }
-        | MarketUpdate::L2 { ts, .. }
-        | MarketUpdate::L2Depth { ts, .. }
-        | MarketUpdate::SportsState { ts, .. }
-        | MarketUpdate::SportsPregame { ts, .. }
-        | MarketUpdate::SportsLive { ts, .. }
-        | MarketUpdate::ReferencePrice { ts, .. }
-        | MarketUpdate::Kline { ts, .. } => *ts,
-        MarketUpdate::EventDiscovered { end_time, .. } => *end_time - Duration::seconds(300),
-        MarketUpdate::EventExpired { end_time, .. } => *end_time,
-    });
+    updates.sort_by_key(MarketUpdate::sort_ts);
 
     updates
 }
@@ -192,19 +177,6 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
 /// Parse a named flag value from args: `--flag value`
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
-}
-
-#[cfg(feature = "parquet-feed")]
-fn parquet_options_from_db(
-    options: &DbHistoricalLoadOptions,
-) -> ploy_strategy_bundles::feed::HistoricalLoadOptions {
-    ploy_strategy_bundles::feed::HistoricalLoadOptions {
-        include_reference_prices: options.include_reference_prices,
-        reference_symbols: options.reference_symbols.clone(),
-        include_sports_state: options.include_sports_state,
-        require_official_settlement: options.require_official_settlement,
-        lob_sample_secs: options.lob_sample_secs,
-    }
 }
 
 fn main() {
@@ -223,7 +195,7 @@ fn main() {
             let sim = config.sim_executor_config();
             let rt = config.runtime_config();
             let strategy_variant = config.runtime.canonical_strategy_variant();
-            let backtest_options = DbHistoricalLoadOptions {
+            let backtest_options = HistoricalLoadOptions {
                 include_reference_prices: config.backtest_data.include_reference_prices,
                 reference_symbols: config
                     .backtest_data
@@ -300,7 +272,7 @@ fn main() {
                     max_updates: None,
                     skip_settlement_exits: false,
                 },
-                DbHistoricalLoadOptions::default(),
+                HistoricalLoadOptions::default(),
             )
         };
 
@@ -366,7 +338,7 @@ fn main() {
                 &strategy_config.symbols,
                 from_dt,
                 to_dt,
-                &parquet_options_from_db(&backtest_options),
+                &backtest_options,
             );
             let mut runtime =
                 StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);

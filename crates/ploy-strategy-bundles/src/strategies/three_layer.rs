@@ -10,6 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tracing::info;
 
+use super::common::settlement;
 use crate::strategies::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 use ploy_operator_contracts::Regime;
@@ -771,12 +772,11 @@ impl ThreeLayerStrategy {
     }
 
     fn resolve_up_won(&self, event: &EventWindow, resolved: Option<bool>) -> Option<bool> {
-        if resolved.is_some() {
-            return resolved;
-        }
-        let price_to_beat = event.price_to_beat?.to_f64()?;
-        let spot = (*self.spot.get(&event.symbol)?).to_f64()?;
-        Some(spot >= price_to_beat)
+        settlement::resolve_up_won(
+            resolved,
+            self.spot.get(&event.symbol).copied(),
+            event.price_to_beat,
+        )
     }
 }
 
