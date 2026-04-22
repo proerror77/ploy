@@ -119,9 +119,8 @@ impl DeploymentRuntime {
             self.status.pid = None;
             self.status.observed_state = ObservedState::Failed;
             self.status.last_heartbeat = Utc::now();
-            self.status.last_error = Some(
-                "worker pid missing or no longer matches launch spec".to_string(),
-            );
+            self.status.last_error =
+                Some("worker pid missing or no longer matches launch spec".to_string());
         }
 
         &mut self.status
@@ -253,8 +252,14 @@ fn kill_pid(pid: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{process_alive, DeploymentRuntime};
-    use crate::protocol::{WorkerLaunchSpec, WorkerStatus};
+    #[cfg(target_os = "linux")]
+    use super::process_alive;
+    use super::DeploymentRuntime;
+    use crate::protocol::WorkerLaunchSpec;
+    #[cfg(target_os = "linux")]
+    use crate::protocol::WorkerStatus;
+    #[cfg(target_os = "linux")]
+    use chrono::Utc;
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use std::path::PathBuf;
 
@@ -275,7 +280,10 @@ mod tests {
     fn starts_worker_process() {
         let _ = std::fs::remove_file(std::env::temp_dir().join("ploy-deployments-test.pid"));
         let runtime = DeploymentRuntime::new(shell_sleep_spec());
-        assert_eq!(runtime.boot_status().observed_state, ObservedState::Starting);
+        assert_eq!(
+            runtime.boot_status().observed_state,
+            ObservedState::Starting
+        );
         assert!(runtime.boot_status().pid.is_some());
     }
 
@@ -333,7 +341,7 @@ mod tests {
         let pid_file = std::env::temp_dir().join("ploy-deployments-inherited.pid");
         let _ = std::fs::remove_file(&pid_file);
 
-        let first = DeploymentRuntime::new(WorkerLaunchSpec {
+        let mut first = DeploymentRuntime::new(WorkerLaunchSpec {
             pid_file: pid_file.clone(),
             ..shell_sleep_spec()
         });
@@ -347,6 +355,7 @@ mod tests {
 
         let status = inherited.stop();
         assert_eq!(status.observed_state, ObservedState::Stopped);
+        first.refresh_status();
         assert!(!process_alive(pid));
 
         let _ = std::fs::remove_file(pid_file);

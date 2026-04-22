@@ -1,6 +1,7 @@
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
 use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
 use ploy_platform::{ControlPlane, DeploymentRecord};
+use std::path::PathBuf;
 
 #[test]
 fn platform_smoke_registers_and_starts_one_deployment() {
@@ -22,6 +23,10 @@ fn platform_smoke_registers_and_starts_one_deployment() {
         bundle_id: "openclaw".to_string(),
         runtime_mode: "paper".to_string(),
         desired_state: DesiredState::Running,
+        command: PathBuf::from("/bin/sh"),
+        args: vec!["-lc".to_string(), "sleep 30".to_string()],
+        working_directory: std::env::current_dir().expect("cwd"),
+        pid_file: std::env::temp_dir().join("ploy-platform-smoke.pid"),
     });
     supervisor.heartbeat("example.paper");
 
@@ -38,4 +43,6 @@ fn platform_smoke_registers_and_starts_one_deployment() {
         supervisor.workers().next().expect("worker").observed_state,
         ObservedState::Running
     );
+
+    supervisor.stop("example.paper");
 }
