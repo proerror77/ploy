@@ -84,15 +84,21 @@ pub fn tick_workers(
     for record in records {
         match record.desired_state {
             DesiredState::Running => {
-                let status = supervisor.status(&record.deployment_id).map(|status| status.observed_state);
+                let status = supervisor
+                    .status(&record.deployment_id)
+                    .map(|status| status.observed_state);
                 match status {
                     None => {
                         supervisor.start(build_worker_launch_spec(&record, config));
                     }
-                    Some(ObservedState::Paused | ObservedState::Stopped | ObservedState::Failed) => {
+                    Some(
+                        ObservedState::Paused | ObservedState::Stopped | ObservedState::Failed,
+                    ) => {
                         supervisor.restart(&record.deployment_id);
                     }
-                    Some(ObservedState::Starting | ObservedState::Running | ObservedState::Degraded) => {}
+                    Some(
+                        ObservedState::Starting | ObservedState::Running | ObservedState::Degraded,
+                    ) => {}
                 }
                 if let Some(status) = supervisor.heartbeat(&record.deployment_id) {
                     control_plane
@@ -181,18 +187,38 @@ pub fn refresh_source_health(control_plane: &mut ControlPlane, listen_addr: &str
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerTickConfig, refresh_source_health, tick_workers};
+    use super::{refresh_source_health, tick_workers, WorkerTickConfig};
     use ploy_deployments::WorkerSupervisor;
     use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
     use ploy_platform::{ControlPlane, DeploymentRecord};
     use rust_decimal_macros::dec;
+    use std::fs;
     use std::path::PathBuf;
+
+    fn test_runner_binary() -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ploy-platform-runtime-test-runner-{}-{unique}.sh",
+            std::process::id()
+        ));
+        fs::write(&path, "#!/bin/sh\nsleep 30\n").expect("write test runner");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .expect("chmod test runner");
+        }
+        path
+    }
 
     fn config() -> WorkerTickConfig {
         WorkerTickConfig {
             listen_addr: "127.0.0.1:8081".to_string(),
             worker_heartbeat_stale_after_ms: 15_000,
-            runner_binary: PathBuf::from("/bin/sh"),
+            runner_binary: test_runner_binary(),
             strategy_config_root: PathBuf::from("config/strategies"),
             working_directory: std::env::current_dir().expect("cwd"),
         }
@@ -258,11 +284,14 @@ mod tests {
             &config(),
         );
 
-        assert_eq!(spec.command, PathBuf::from("/bin/sh"));
-        assert!(
-            spec.args
-                .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string())
-        );
+        assert!(spec
+            .command
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("ploy-platform-runtime-test-runner-")));
+        assert!(spec
+            .args
+            .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string()));
         assert!(spec.args.contains(&"--dry-run".to_string()));
     }
 
@@ -316,7 +345,10 @@ mod tests {
 
         tick_workers(&mut control_plane, &mut supervisor, &config());
         let status = supervisor.status("example.paper").expect("status");
-        assert!(matches!(status.observed_state, ObservedState::Starting | ObservedState::Running));
+        assert!(matches!(
+            status.observed_state,
+            ObservedState::Starting | ObservedState::Running
+        ));
         assert!(status.pid.is_some());
     }
 }

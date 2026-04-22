@@ -44,8 +44,8 @@ impl DeploymentRuntime {
             .args(&self.spec.args)
             .current_dir(&self.spec.working_directory)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
 
         match command.spawn() {
             Ok(child) => {

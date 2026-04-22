@@ -120,7 +120,7 @@ pub fn spawn_market_scanner(
                         }
 
                         let end_time = market.end_time.clone();
-                        let window_secs = market.window_secs;
+                        let window_secs = market.market_window_secs;
                         let price_to_beat = market.price_to_beat.clone();
 
                         tracked.insert(
