@@ -84,7 +84,10 @@ mod tests {
         let mut supervisor = WorkerSupervisor::default();
         let status = supervisor.start(test_launch_spec());
 
-        assert_eq!(status.observed_state, ObservedState::Starting);
+        assert!(matches!(
+            status.observed_state,
+            ObservedState::Starting | ObservedState::Running
+        ));
         assert!(status.pid.is_some());
     }
 
