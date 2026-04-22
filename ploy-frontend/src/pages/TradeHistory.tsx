@@ -105,7 +105,7 @@ export function TradeHistory() {
                           {trade.exit_price ? formatCurrency(trade.exit_price) : '-'}
                         </td>
                         <td className="py-4">
-                          {trade.pnl !== null ? (
+                          {trade.pnl != null ? (
                             <span
                               className={
                                 trade.pnl >= 0 ? 'text-success' : 'text-destructive'

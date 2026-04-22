@@ -15,37 +15,17 @@
 //! ```
 
 use chrono::{DateTime, Duration, Utc};
+use ploy_market_contracts::market_update_sort_ts;
 use rust_decimal::Decimal;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::feed::database::HistoricalLoadOptions;
+use super::options::HistoricalLoadOptions;
 use crate::traits::MarketUpdate;
 
 /// How far before `from` to load spot prices for EWMA warm-up.
 const WARMUP_MINUTES: i64 = 30;
-
-fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
-    match u {
-        MarketUpdate::SpotPrice { ts, .. }
-        | MarketUpdate::AggTrade { ts, .. }
-        | MarketUpdate::Quote { ts, .. }
-            | MarketUpdate::L2 { ts, .. }
-            | MarketUpdate::L2Depth { ts, .. }
-            | MarketUpdate::SportsState { ts, .. }
-            | MarketUpdate::SportsPregame { ts, .. }
-            | MarketUpdate::SportsLive { ts, .. }
-            | MarketUpdate::ReferencePrice { ts, .. }
-            | MarketUpdate::Kline { ts, .. } => *ts,
-        MarketUpdate::EventDiscovered {
-            end_time,
-            window_secs,
-            ..
-        } => *end_time - Duration::seconds(*window_secs as i64) - Duration::hours(1),
-        MarketUpdate::EventExpired { end_time, .. } => *end_time,
-    }
-}
 
 /// Load historical market updates from date-partitioned Parquet files.
 ///
@@ -107,14 +87,27 @@ fn load_with_duckdb(
     let to_date = to.date_naive();
     while day <= to_date {
         let day_start = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
-        let day_end = day.succ_opt().unwrap_or(day).and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let day_end = day
+            .succ_opt()
+            .unwrap_or(day)
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("SET memory_limit='4GB'; SET temp_directory='/tmp/duckdb_spill';")?;
-        load_l2_data(&conn, data_dir, symbols, day_start, day_end, options.lob_sample_secs, &mut updates)?;
+        load_l2_data(
+            &conn,
+            data_dir,
+            symbols,
+            day_start,
+            day_end,
+            options.lob_sample_secs,
+            &mut updates,
+        )?;
         day = day.succ_opt().unwrap_or(day);
     }
 
-    updates.sort_by_key(|u| update_ts(u));
+    updates.sort_by_key(market_update_sort_ts);
 
     info!(
         count = updates.len(),
@@ -128,7 +121,7 @@ fn load_with_duckdb(
 }
 
 #[cfg(feature = "parquet-feed")]
-fn glob_parquet_files(dir: &str, from: DateTime<Utc>, to: DateTime<Utc>) -> String {
+fn glob_parquet_files(dir: &str, _from: DateTime<Utc>, _to: DateTime<Utc>) -> String {
     // Build a glob pattern covering all dates in [from, to].
     // DuckDB accepts a glob like: 'dir/YYYY-MM-DD.parquet'
     // For simplicity, use a wildcard and let DuckDB filter by timestamp column.
@@ -189,7 +182,11 @@ fn load_spot_prices(
         let (ts_us, symbol, price_f) = row?;
         let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
         let price = Decimal::try_from(price_f).unwrap_or_default();
-        updates.push(MarketUpdate::SpotPrice { symbol: Arc::from(symbol), price, ts });
+        updates.push(MarketUpdate::SpotPrice {
+            symbol: Arc::from(symbol),
+            price,
+            ts,
+        });
         count += 1;
     }
     info!(count, "Loaded spot prices from Parquet");

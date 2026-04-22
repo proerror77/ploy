@@ -2,10 +2,11 @@ use crate::deployments::{DeploymentSummary, DesiredState, ObservedState};
 use crate::system::SystemStatus;
 use crate::trading::TradingStateSnapshot;
 use rust_decimal::Decimal;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DiagnosticsEvidence {
     pub source: String,
     pub label: String,
@@ -13,7 +14,7 @@ pub struct DiagnosticsEvidence {
     pub observed_at: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DiagnosticsFinding {
     pub severity: String,
     pub kind: String,
@@ -24,7 +25,7 @@ pub struct DiagnosticsFinding {
     pub evidence: Vec<DiagnosticsEvidence>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PlatformDiagnosticsReport {
     pub generated_at: String,
     pub platform_status: String,
@@ -33,7 +34,7 @@ pub struct PlatformDiagnosticsReport {
     pub recent_evidence: Vec<DiagnosticsEvidence>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DeploymentDiagnosticsMetrics {
     pub pending_intents: usize,
     pub active_orders: usize,
@@ -46,7 +47,7 @@ pub struct DeploymentDiagnosticsMetrics {
     pub net_pnl: Decimal,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DeploymentDiagnosticsReport {
     pub generated_at: String,
     pub deployment_id: String,
@@ -63,7 +64,7 @@ pub struct DeploymentDiagnosticsReport {
     pub recent_evidence: Vec<DiagnosticsEvidence>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProposalActionKind {
     PauseDeployment,
@@ -71,7 +72,7 @@ pub enum ProposalActionKind {
     ReduceMaxExposure,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProposalStatus {
     Pending,
@@ -80,7 +81,7 @@ pub enum ProposalStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SafetyProposal {
     pub proposal_id: String,
     pub action_kind: ProposalActionKind,
@@ -95,7 +96,7 @@ pub struct SafetyProposal {
     pub decision_note: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProposalCreateRequest {
     pub action_kind: ProposalActionKind,
     pub target_deployment_id: String,
@@ -105,12 +106,12 @@ pub struct ProposalCreateRequest {
     pub proposed_max_gross_exposure: Option<Decimal>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProposalDecisionRequest {
     pub decision_note: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct OversightSignal {
     pub severity: String,
     pub kind: String,
@@ -120,14 +121,14 @@ pub struct OversightSignal {
     pub recommended_action: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct OversightRecommendedAction {
     pub target: String,
     pub kind: String,
     pub operator_command: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct OversightReport {
     pub timestamp: String,
     pub platform_status: String,
@@ -137,17 +138,17 @@ pub struct OversightReport {
     pub recommended_actions: Vec<OversightRecommendedAction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct OversightSnapshotEvent {
     pub oversight: OversightReport,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProposalSnapshotEvent {
     pub proposals: Vec<SafetyProposal>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentRunRecord {
     pub run_id: String,
     pub cycle_kind: String,
@@ -223,10 +224,7 @@ pub fn compute_oversight_report(
                         deployment.deployment_id, snapshot.risk.active_orders
                     ),
                     deployment_id: Some(deployment.deployment_id.clone()),
-                    evidence: vec![format!(
-                        "active_orders={}",
-                        snapshot.risk.active_orders
-                    )],
+                    evidence: vec![format!("active_orders={}", snapshot.risk.active_orders)],
                     recommended_action: "pause_deployment".to_string(),
                 });
                 actions.push(OversightRecommendedAction {

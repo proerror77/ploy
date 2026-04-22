@@ -1,5 +1,37 @@
 # PM5D Settlement + Strategy Audit (2026-04-12)
 
+## Host Role Split Follow-up (2026-04-20)
+
+### Files
+
+- `.github/workflows/backtest.yml`
+- `.github/workflows/optimize.yml`
+- `.github/workflows/deploy-trade.yml`
+- `.github/workflows/deploy-tango-1-1.yml`
+- `README.md`
+- `docs/runbooks/platform-deploy.md`
+- `docs/runbooks/live-deployment-checklist.md`
+- `config/deployments/`
+- `config/strategies/`
+
+### Tasks
+
+- [ ] Split the documented/runtime model explicitly into `backtest host`, `trade host`, and `data/export host` instead of implying one shared machine.
+- [ ] Remove hard-coded assumptions that Parquet generation, trading runtime, and backtest execution all live under the same `/opt/ploy` context.
+- [ ] Decide the canonical transport for research data between hosts (`rsync` pull from exporter vs artifact/object storage) and apply it consistently across `backtest.yml` and `optimize.yml`.
+- [ ] Decide whether `tango-1-1` remains the Parquet exporter/data source or whether that responsibility moves to a dedicated host; then update workflows, docs, and secrets naming to match.
+- [ ] Ensure `deploy-trade.yml` only owns trading-host artifacts/runtime restart behavior, and does not carry backtest/research assumptions.
+- [ ] Ensure `deploy-tango-1-1.yml` only owns the services that actually belong on that host after the split, or rename/replace it if its role is now “data/collector host” rather than “trade host”.
+- [ ] Add one concise runbook section describing which validations must happen on each host class after merge.
+
+### Evidence
+
+- 2026-04-20: `.github/workflows/backtest.yml` runs on `ploy-ci-1` but still pulls Parquet and DB data from `172.16.0.204:/opt/ploy/data/parquet` / `postgresql://postgres:postgres@172.16.0.204:5432/ploy`.
+- 2026-04-20: `.github/workflows/optimize.yml` follows the same pattern as `backtest.yml`, so research execution is already on a separate host but still depends on Tango-host paths and secrets.
+- 2026-04-20: `.github/workflows/deploy-trade.yml` deploys `ploy-runner` and strategy configs to `ploy-trade-1`, which is a different host role from `ploy-ci-1`.
+- 2026-04-20: `.github/workflows/deploy-tango-1-1.yml` still bundles collector/runtime assumptions under one Tango-specific deployment flow, so host ownership is not yet cleanly separated in code/docs.
+- 2026-04-20: Remote checks confirmed `tango-1-1` has working `duckdb`, active `ployd`, and `/opt/ploy/bin/ployctl`, which makes it a valid runtime/data host but not proof that it should remain the backtest host.
+
 ## 2026-04-16 Claimer hardening addendum
 
 ### Files
@@ -8032,3 +8064,125 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - This slice changes the research direction from gate-tuning-first to factor-validity-first.
 - The new tool is intentionally research-focused, not yet a production alpha model.
 - Remaining gap: the first `factor_research` version reports IC / Spearman / limited ICIR, but still needs richer bucket outputs, combo-factor ranking, and more robust missing-value handling (`null` instead of `NaN`) before it should be treated as the final research surface.
+
+# Codebase Slimming + Dedup Planning (2026-04-21)
+
+## Files
+
+- `docs/plans/2026-04-21-codebase-slimming-and-dedup-plan.md`
+- `docs/plans/2026-04-21-codebase-slimming-baseline.md`
+- `scripts/check_feature_matrix.sh`
+- `crates/ploy-research/src/factors_new/mod.rs`
+- `crates/ploy-research/src/factors_new/registry.rs`
+- `crates/ploy-research/src/lib.rs`
+- `tasks/todo.md`
+
+## Tasks
+
+- [x] Inventory workspace crates, source hotspots, dependency fan-in, strategy duplication, research duplication, ops scripts, frontend/sidecar contract duplication, and CI build paths.
+- [x] Write a phased plan that prioritizes compile-speed and dependency-boundary wins before behavior-changing cleanup.
+- [x] Review plan: incorporate feedback on parallelization, feature granularity, test bar, rollback strategy, Phase 7 specificity, Regime conflict, and DuckDB coverage.
+- [x] Deep dependency analysis: quantify alloy (736/1373 deps = 53%), identify 4 highest-ROI Cargo.toml changes, add Phase 0.5.
+- [x] Deep optimization analysis: add Direction A (binary-per-mode), Direction B (strategy-bundles zero IO), Direction C (claimer dual-ethers-stack + V2 retirement). Add Phase 10.
+- [x] Execute Phase 0 baseline, behavior guardrails, Regime fix, and feature-matrix script smoke.
+  - [x] Add `docs/plans/2026-04-21-codebase-slimming-baseline.md` with dependency fan-in and named behavior guardrails.
+  - [x] Resolve `ploy-research` Regime export ambiguity by keeping one root-level `ploy_operator_contracts::Regime` export.
+  - [x] Add `scripts/check_feature_matrix.sh` with quick/full/list modes; verify `--list` plus targeted cargo checks locally.
+- [x] Execute Phase 0.5 feature spine + runner forwarding (alloy/ethers/SDK/sqlx feature gates with explicit full vs lean build surfaces).
+  - [x] `ploy-strategy-runtime`: make `ploy-claimer` optional (`auto-claimer` feature).
+  - [x] `ploy-strategy-runtime`: make `ploy-connectivity` optional (`live-execution` feature).
+  - [x] Move SQLx historical DB loading out of `ploy-strategy-bundles` into `ploy-feed-loaders`.
+  - [x] `ploy-market-data`: make `polymarket-client-sdk` optional (`live` feature).
+  - [x] Update `ploy-runner-host` and `new-ploy-runner` feature forwarding so default/full stays current behavior and lean replay/backtest uses explicit Cargo feature/binary boundaries.
+- [x] Execute Phase 1 runner/market-data compile lane split (coarse features first).
+  - [x] Split `ploy-runner-host` command ownership into `run` and `ops` modules.
+  - [x] Keep full/default runner help showing `run`, `check-db`, and `collect-quotes`.
+  - [x] Keep lean replay runner help scoped to `run`; ops commands explicitly reject without the full/ops build.
+- [x] Execute Phase 2 runtime mode split + binary-per-mode (ploy-replay ~200 deps, ploy-backtest ~400 deps).
+  - [x] Extract mode modules (backtest.rs, replay.rs, live.rs, strategy_factory.rs).
+    - [x] Extract `backtest.rs`, `replay.rs`, and `strategy_factory.rs`.
+    - [x] Extract `live.rs` and `recording.rs`.
+  - [x] Move `feed/database.rs` out of strategy-bundles into runtime or ploy-feed-loaders.
+  - [x] Create `apps/ploy-replay` binary (strategy-bundles + trading only).
+  - [x] Create `apps/ploy-backtest` binary (+ sqlx for DB loading).
+- [x] Execute Phase 3 PM5D shared strategy-state extraction (separate worktree only; write scope `crates/ploy-strategy-bundles/src/strategies/**`).
+  - [x] Start common helper extraction with order guards and migrate `prob_reversal`.
+  - [x] Migrate duplicated active-order checks in `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal` to the shared guard.
+  - [x] Add shared settlement fallback helper and migrate `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`.
+  - [x] Add shared event window shape and migrate `prob_reversal`.
+  - [x] Migrate `sweep`, `mean_reversion`, `diff_regular`, `diff_enhanced`, and `prob_chase` to shared event window where compatible.
+  - [x] Add shared quote state for strategies with basic bid/ask/timestamp quotes.
+  - [x] Add shared basic holding state for strategies with token/direction/entry-time holdings.
+  - [x] Migrate `three_layer` settlement fallback to shared helper.
+  - [x] Document remaining deliberate strategy-specific state shapes.
+- [x] Execute Phase 4 typed strategy registry/config cleanup.
+  - [x] Move alias normalization and runtime strategy factory into strategy-bundles registry.
+  - [x] Introduce typed strategy config envelope.
+  - [x] Keep per-strategy TOML parsing on compatibility `[strategy]` surface and expose typed envelope for future per-strategy parsing.
+- [x] Execute Phase 5 research feature gating, module cleanup, and DuckDB/parquet gating (after Phase 2; before then inventory/design only).
+  - [x] Gate research DB, Polars export, ML, RL, and strategy-runtime dependencies behind explicit features.
+  - [x] Gate DB/parquet-heavy examples behind required features so no-default research example checks skip them cleanly.
+- [x] Execute Phase 6 ops script inventory/retirement.
+  - [x] Add `docs/operations/data-jobs-inventory.md` classifying canonical, compatibility, one-shot, diagnostic, and archive-candidate data jobs.
+- [x] Execute Phase 7 control-plane API contract cleanup (schemars JSON Schema approach).
+  - [x] Derive Rust JSON Schema from `ploy-operator-contracts` DTOs and check schema snapshots into `contracts/schemas`.
+  - [x] Generate frontend and sidecar TypeScript contract types from checked schema snapshots.
+  - [x] Add schema/type drift checks and switch frontend/sidecar control-plane surfaces to generated contracts.
+- [x] Execute Phase 8 CI build-speed cleanup.
+  - [x] Remove unnecessary `cargo clean -p new-ploy-runner` from deploy workflow.
+  - [x] Split main CI into dependency lanes: control-plane/core, runner lean, runner live/default, market-data ops, research heavy, frontend/sidecar, and integration regressions.
+  - [x] Add per-lane elapsed time and sccache stats to GitHub job summaries.
+- [ ] Execute Phase 9 vendored SDK feature slimming after V2 migration stabilizes and V2 claim/redeem evidence exists.
+  - [x] Add pre-V2 dependency/evidence gate runbook and local dependency preflight.
+  - [ ] Post-V2: capture claim/redeem evidence before making SDK feature changes.
+- [x] Execute Phase 10 claimer consolidation or candidate retirement investigation (post-V2, ~May 2026).
+  - [x] Add gated decision table for claimer retention vs retirement.
+  - [x] Retire `ploy-claimer` crate and remove live runner auto-claimer startup.
+  - [x] Remove `auto-claimer` feature and `ploy-claimer` dependency from `ploy-strategy-runtime`.
+  - [x] Verify `ploy-strategy-runtime` compiles without `ploy-claimer` in checked feature configurations.
+
+## Review
+
+- Planning only; no source behavior changed.
+- Key finding: `new-ploy-runner` still pays for live/data/ops dependencies through `ploy-runner-host`, `ploy-strategy-runtime`, and `ploy-market-data`.
+- Key finding: PM5D strategies duplicate event/quote/holding helpers across nearly every strategy file (33+ struct defs across 10 files).
+- Key finding: `ploy-research` has both old large modules and new layered modules exported together, with heavy ML/RL/Polars dependencies not yet feature-isolated.
+- Review update (2026-04-21): Phase 3 marked parallelizable with Phases 1-2. Phase 1 feature granularity reduced to coarse-first (2-3 features). Phase 0 acceptance bar tightened with named test requirements, Regime conflict fix, and feature-matrix smoke check. Phase 7 specified as schemars JSON Schema. Rollback strategy added. DuckDB/parquet coverage added to Phase 5.
+- Review update (2026-04-21): Added quantitative dependency baseline and Phase 0.5 (quick dependency slimming). alloy = 736/1373 tree lines (53% of runner tree lines). Four Cargo.toml changes target claimer, connectivity, sqlx, and SDK as optional deps; actual compile-path reduction must be measured after implementation.
+- Review update (2026-04-21): Added three deep optimization directions. Direction A: split binaries by runtime mode (target: ploy-replay around ~200 deps for strategy iteration). Direction B: move data loading out of strategy-bundles to make it pure computation. Direction C: claimer dual-ethers consolidation + gated V2 retirement investigation. Added Phase 10 as post-V2 candidate work. Phase 2 expanded with binary-per-mode and feed/database.rs relocation.
+- Review update (2026-04-21): Executed Phase 0 as a lightweight local slice. Added the baseline report, feature-matrix script, and narrowed `ploy-research` Regime exports so there is one public `Regime` type. Verified `scripts/check_feature_matrix.sh --list` and targeted cargo checks locally; full/quick matrix compile remains a CI/isolated-target check before Phase 0.5 because local heavy Rust/DuckDB/Polars builds should not be run silently.
+- Review update (2026-04-21): Ralph deslop review required tighter scope/verification wording; updated file scope, feature-matrix wording, performance estimates, and claimer retirement as a gated investigation. Architect verification approved Phase 0 and noted the current feature-matrix script is enough for Phase 0 but must be expanded after Phase 0.5 adds feature flags.
+- Review update (2026-04-21): Ralplan architect review hardened remaining execution gates: Phase 0.5 is now feature spine + runner forwarding in one atomic slice; single-binary subcommands must not be treated as compile-dependency isolation; Phase 3 requires a separate worktree and strategies-only write scope; Phase 5 waits for Phase 2 except inventory/design; Phase 9/10 require V2 claim/redeem evidence.
+- Review update (2026-04-21): Phase 0.5 implemented. Added full/default and lean replay/backtest feature forwarding through `new-ploy-runner` and `ploy-runner-host`; optionalized `ploy-claimer`, `ploy-connectivity`, `ploy-market-data`, strategy-bundles `sqlx`, and market-data live SDK dependencies. Updated feature matrix so `--quick` verifies no-default and lean builds while DuckDB/Parquet/live-heavy checks sit behind `--heavy`.
+- Review update (2026-04-22): Phase 1 implemented as a runner-host ownership split. `lib.rs` now routes commands and initializes tracing; `run.rs` owns strategy config parsing/runtime launch; `ops.rs` is compiled only with the `ops` feature and owns `check-db` plus `collect-quotes`. Verified default full help still exposes ops commands, while lean replay help only exposes `run` and rejects `check-db` with a full/ops-build message.
+- Review update (2026-04-22): Phase 2 binary-per-mode slice started. Added `apps/ploy-replay` and `apps/ploy-backtest` as non-default workspace members that build through the lean runner-host feature surfaces. Updated the quick feature matrix to check those binaries directly instead of checking lean features through `new-ploy-runner`.
+- Review update (2026-04-22): Phase 2 module extraction continued with a narrow runtime slice. Moved backtest mode, replay mode, and strategy factory construction into `crates/ploy-strategy-runtime/src/{backtest,replay,strategy_factory}.rs`; live/recording extraction and DB feed relocation remain open follow-ups. Verified quick feature matrix and `cargo test -p ploy-strategy-runtime --lib`.
+- Review update (2026-04-22): Phase 2 runtime module extraction completed except DB feed relocation. Moved live/dry-run feed and execution wiring into `live.rs`, and SQLx signal/order/fill recorder into `recording.rs`; `lib.rs` remains the public `run_strategy` facade with feature fallback stubs. Verified default runner, quick feature matrix, and runtime unit tests.
+- Review update (2026-04-22): Phase 2 DB feed relocation completed. Introduced `crates/ploy-feed-loaders` for SQLx historical loaders and removed `feed/database.rs` from `ploy-strategy-bundles`, leaving strategy-bundles no-default free of SQLx. Runtime backtest and research/examples now import DB loading from `ploy-feed-loaders`.
+- Review update (2026-04-22): Phase 3 started in isolated worktree `ploy-phase3-strategy-common`. Added `strategies/common/guards.rs` with shared active-order detection and migrated `prob_reversal` to use it; broader event/quote/holding common-state extraction remains open.
+- Review update (2026-04-22): Extended the Phase 3 guard helper migration across remaining strategies with identical active-order checks: `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`. This keeps the first common module focused on order-state predicates before broader event/quote/holding extraction.
+- Review update (2026-04-22): Added `strategies/common/settlement.rs` for explicit settlement + spot/price_to_beat fallback and migrated matching logic in `diff_enhanced`, `diff_regular`, `prob_chase`, and `reversal`. Left `three_layer` settlement migration for its own slice to avoid broad formatting churn.
+- Review update (2026-04-22): Phase 7 implemented. `ploy-operator-contracts` now derives `schemars::JsonSchema`, exports checked JSON Schema snapshots, and generates TypeScript contract types for frontend and sidecar. Frontend/sidecar build now consumes generated control-plane types instead of manually duplicated DTO shapes.
+- Review update (2026-04-22): Phase 8 implemented. The main Test workflow is split by dependency lane instead of one large Rust build/test job, frontend/sidecar contract checks run in their own lane, each Rust lane reports elapsed seconds plus sccache stats to the job summary, and the tango deploy workflow no longer runs `cargo clean -p new-ploy-runner` before release build.
+- Review update (2026-04-22): Phase 9/10 pre-V2 gate documented. Added `docs/operations/v2-claim-redeem-gate.md` plus `scripts/check_v2_claim_redeem_gate.sh` to record current SDK/claimer dependency evidence and preserve the hard block until post-cutover V2 claim/redeem behavior is observed.
+- Review update (2026-04-22): Phase 5 completed. `ploy-research` no-default lib and no-default examples now compile without DB/Polars/ML/RL targets; DB-only `factor_scan` and Polars export lib checks were verified behind explicit features.
+- Review update (2026-04-22): Phase 10 applied by operator decision. `ploy-claimer` was removed from the workspace, `ploy-strategy-runtime` no longer exposes `auto-claimer`, and live runtime no longer starts an in-process account claimer daemon.
+- Review update (2026-04-22): Addressed follow-up review findings C1-C3 and I1-I7 where valid. Historical load options, token normalization, and historical update sort keys now live in shared contracts; runner mode help/config errors are clearer; `new-ploy-runner --config ...` supports implicit run; ops DB commands require explicit/env DB URLs; new strategy variants are re-exported at the crate root; `parquet-feed` uses `dep:duckdb`; `ploy-feed-loaders` keeps `serde_json` as a dev dependency only.
+- Review update (2026-04-22): Checked the V2 protocol migration review. P0 heartbeat survival was still open, so `ploy-connectivity` now owns a persistent multi-thread Tokio runtime, caches the signer, stores the authenticated CLOB client behind resettable `RwLock<Option<_>>`, and clears the client cache on auth/401-style transport failures. P1 claimer regressions are no longer applicable after `ploy-claimer` retirement; the market-data `serde_json::Value` compile issue is not present. Remaining V2 ABI/GTD/pUSD/fee-model items still need official V2 evidence before merge of that protocol-specific work.
+- Review update (2026-04-22): Addressed the `reconcile_fills` N+1 review item. Live Polymarket reconciliation now deduplicates tracked orders by token id, fetches each token's paginated trade stream in bounded batches of 10 concurrent requests, then applies the existing order-level fill filter locally. This preserves reconciliation semantics while avoiding duplicate sequential API calls for multiple orders on the same token.
+- Review update (2026-04-22): Added `strategies/common/event.rs` with shared event window token helpers and migrated `prob_reversal` to use it. Broader event-window migration remains open for larger strategies.
+- Review update (2026-04-22): Continued Phase 3 common-state extraction. Migrated compatible event windows in `sweep`, `mean_reversion`, `diff_regular`, `diff_enhanced`, and `prob_chase`; added shared quote and basic holding state helpers; migrated `three_layer` settlement fallback only, leaving its event/quote shape for a dedicated larger slice.
+- Review update (2026-04-22): Phase 4 completed at compatibility scope. Registry owns alias normalization, factory construction, `StrategyKind`, and `StrategyConfigEnvelope`; the existing `[strategy]` TOML surface remains compatible until a future per-strategy parser migration.
+- Review update (2026-04-22): Phase 6 completed as an inventory slice. Added `docs/operations/data-jobs-inventory.md` to classify data jobs and prevent deleting live collector scripts before Rust replacements and freshness evidence exist.
+- Review update (2026-04-22): Phase 5 started with dependency feature gating. `ploy-research` heavy dependencies are now behind `db`, `polars-export`, `ml`, `rl`, and `strategy-runtime`; no-default lib checks compile without Polars/Burn/Linfa/SQLx.
+- Review update (2026-04-22): Phase 4 started with registry ownership. `strategy-bundles::strategies::registry` now owns alias normalization and strategy construction; runtime delegates to it while existing `[strategy]` TOML compatibility remains. Added `StrategyKind` and `StrategyConfigEnvelope` as an additive typed registry API; full per-strategy TOML parsing remains open.
+- Review update (2026-04-22): Phase 3 completed in isolated worktree. Shared identical guards, settlement fallback, compatible event windows, basic quote state, and basic holding state; documented remaining strategy-specific state shapes in `docs/architecture/pm5d-strategy-state-special-cases.md` instead of forcing them into dead-field abstractions.
+- Review update (2026-04-22): Added Build Configuration Strategy section to plan. Documented current state (profiles, sccache, mold/lld, feature gates, lean binaries, no build.rs, no custom proc-macros, Docker COPY-only). Added remaining actions and team conventions. Verified ploy-replay=118 deps, ploy-backtest=408 deps, new-ploy-runner=1373 deps; alloy/sqlx/SDK confirmed absent from lean binaries.
+
+### Build Configuration Remaining Actions
+
+- [ ] Add `Makefile` or `justfile` with dev workflow shortcuts (`dev-check`, `dev-build`, `dev-test`, `full-check`).
+- [ ] Add `required-features` to `new-ploy-runner` and ops-only binaries to prevent accidental compilation in lean contexts.
+- [ ] Run `cargo build --timings` and record baseline HTML report for top-10 slowest crates.
+- [ ] Add `[profile.ci]` (inherits dev, debug=false, incremental=false) and update CI workflows to use it.
+- [ ] Audit `workspace.dependencies` feature sets — verify sqlx/tokio/polars features are minimal common set.

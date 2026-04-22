@@ -1,5 +1,6 @@
 //! Strategy implementations.
 
+mod common;
 pub mod diff_enhanced;
 pub mod diff_regular;
 pub mod directional;
@@ -7,6 +8,7 @@ pub mod directional_bayes;
 pub mod mean_reversion;
 pub mod prob_chase;
 pub mod prob_reversal;
+pub mod registry;
 pub mod reversal;
 pub mod sweep;
 pub mod three_layer;

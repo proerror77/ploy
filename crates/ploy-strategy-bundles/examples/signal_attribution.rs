@@ -9,7 +9,7 @@
 //!     --output /tmp/attribution.csv
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use ploy_strategy_bundles::feed::{HistoricalLoadOptions, load_from_database_with_options};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::traits::MarketUpdate;
 use rust_decimal::prelude::ToPrimitive;
 use sqlx::postgres::PgPoolOptions;
@@ -108,7 +108,9 @@ async fn main() {
         });
     let end = flag_value(&args, "--end-ts")
         .map(|raw| parse_timestamp(&raw))
-        .unwrap_or_else(|| parse_date_end(&flag_value(&args, "--end-date").expect("--end-date required")));
+        .unwrap_or_else(|| {
+            parse_date_end(&flag_value(&args, "--end-date").expect("--end-date required"))
+        });
     let symbols_csv =
         flag_value(&args, "--symbols").unwrap_or_else(|| "BTCUSDT,DOGEUSDT".to_string());
     let output_path =
@@ -120,7 +122,10 @@ async fn main() {
         .map(ToOwned::to_owned)
         .collect();
 
-    eprintln!("loading attribution window {start} -> {end} for {:?}", symbols);
+    eprintln!(
+        "loading attribution window {start} -> {end} for {:?}",
+        symbols
+    );
 
     let pool = PgPoolOptions::new()
         .max_connections(3)

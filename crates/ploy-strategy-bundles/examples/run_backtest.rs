@@ -13,14 +13,12 @@
 //! If no --db-url is given, uses synthetic market data.
 
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
-    StreamingParquetFeed, ThreeLayerStrategy,
-    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
-    StrategyRuntime,
-    config::FullConfig,
-    feed::{HistoricalLoadOptions, load_from_database_with_options},
+    config::FullConfig, DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder,
+    ReversalStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
+    StrategyLogic, StrategyRuntime, ThreeLayerStrategy,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -46,9 +44,12 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
         for (sym_idx, &symbol) in symbols.iter().enumerate() {
             let base = base_prices[sym_idx % base_prices.len()];
             let sym: Arc<str> = Arc::from(symbol);
-            let event_id: Arc<str> = Arc::from(format!("evt-{}-{}", symbol.to_lowercase(), window_idx));
-            let up_token: Arc<str> = Arc::from(format!("up-{}-{}", symbol.to_lowercase(), window_idx));
-            let dn_token: Arc<str> = Arc::from(format!("dn-{}-{}", symbol.to_lowercase(), window_idx));
+            let event_id: Arc<str> =
+                Arc::from(format!("evt-{}-{}", symbol.to_lowercase(), window_idx));
+            let up_token: Arc<str> =
+                Arc::from(format!("up-{}-{}", symbol.to_lowercase(), window_idx));
+            let dn_token: Arc<str> =
+                Arc::from(format!("dn-{}-{}", symbol.to_lowercase(), window_idx));
 
             // Initial spot (open price)
             updates.push(MarketUpdate::SpotPrice {
@@ -96,16 +97,16 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 bid: Some(up_ask - dec!(0.01)),
                 ask: Some(up_ask),
                 ts: window_start + Duration::seconds(5),
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             });
             updates.push(MarketUpdate::Quote {
                 token_id: Arc::clone(&dn_token),
                 bid: Some(dec!(1) - up_ask - dec!(0.01)),
                 ask: Some(dec!(1) - up_ask),
                 ts: window_start + Duration::seconds(5),
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             });
 
             // Spot ticks showing the drift
@@ -139,16 +140,16 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 bid: Some(up_ask_final - dec!(0.01)),
                 ask: Some(up_ask_final),
                 ts: window_start + Duration::seconds(55),
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             });
             updates.push(MarketUpdate::Quote {
                 token_id: dn_token,
                 bid: Some(dec!(1) - up_ask_final - dec!(0.01)),
                 ask: Some(dec!(1) - up_ask_final),
                 ts: window_start + Duration::seconds(55),
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             });
 
             // Spot at window midpoint (entry zone: 60-300s remaining)
@@ -168,20 +169,7 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
     }
 
     // Sort by timestamp
-    updates.sort_by_key(|u| match u {
-        MarketUpdate::SpotPrice { ts, .. }
-        | MarketUpdate::AggTrade { ts, .. }
-        | MarketUpdate::Quote { ts, .. }
-        | MarketUpdate::L2 { ts, .. }
-        | MarketUpdate::L2Depth { ts, .. }
-        | MarketUpdate::SportsState { ts, .. }
-        | MarketUpdate::SportsPregame { ts, .. }
-        | MarketUpdate::SportsLive { ts, .. }
-        | MarketUpdate::ReferencePrice { ts, .. }
-        | MarketUpdate::Kline { ts, .. } => *ts,
-        MarketUpdate::EventDiscovered { end_time, .. } => *end_time - Duration::seconds(300),
-        MarketUpdate::EventExpired { end_time, .. } => *end_time,
-    });
+    updates.sort_by_key(MarketUpdate::sort_ts);
 
     updates
 }
@@ -319,33 +307,46 @@ fn main() {
     // When --data-dir is set, use StreamingParquetFeed for O(1) memory usage.
     // Otherwise fall back to Vec-backed HistoricalFeed (DB or synthetic).
     if let Some(ref dir) = data_dir {
-        let from = start_date.as_deref().unwrap_or("2026-03-28");
-        let to = end_date.as_deref().unwrap_or("2026-04-03");
-        let from_dt = Utc.from_utc_datetime(
-            &NaiveDate::parse_from_str(from, "%Y-%m-%d")
-                .expect("Invalid --start-date (use YYYY-MM-DD)")
-                .and_hms_opt(0, 0, 0)
-                .unwrap(),
-        );
-        let to_dt = Utc.from_utc_datetime(
-            &NaiveDate::parse_from_str(to, "%Y-%m-%d")
-                .expect("Invalid --end-date (use YYYY-MM-DD)")
-                .and_hms_opt(23, 59, 59)
-                .unwrap(),
-        );
-        eprintln!("Streaming Parquet data from: {dir} ({from} → {to})");
-        let feed = StreamingParquetFeed::new(
-            dir,
-            &strategy_config.symbols,
-            from_dt,
-            to_dt,
-            &backtest_options,
-        );
-        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
-        let result = rt.block_on(runtime.run());
-        let mark_prices = BTreeMap::new();
-        let snapshot = runtime.trading().snapshot(&mark_prices);
-        print_results(result, snapshot, stake_usd);
+        #[cfg(not(feature = "parquet-feed"))]
+        {
+            let _ = dir;
+            eprintln!("--data-dir requires the `parquet-feed` feature");
+            std::process::exit(1);
+        }
+
+        #[cfg(feature = "parquet-feed")]
+        {
+            use ploy_strategy_bundles::feed::parquet_stream::StreamingParquetFeed;
+
+            let from = start_date.as_deref().unwrap_or("2026-03-28");
+            let to = end_date.as_deref().unwrap_or("2026-04-03");
+            let from_dt = Utc.from_utc_datetime(
+                &NaiveDate::parse_from_str(from, "%Y-%m-%d")
+                    .expect("Invalid --start-date (use YYYY-MM-DD)")
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            );
+            let to_dt = Utc.from_utc_datetime(
+                &NaiveDate::parse_from_str(to, "%Y-%m-%d")
+                    .expect("Invalid --end-date (use YYYY-MM-DD)")
+                    .and_hms_opt(23, 59, 59)
+                    .unwrap(),
+            );
+            eprintln!("Streaming Parquet data from: {dir} ({from} → {to})");
+            let feed = StreamingParquetFeed::new(
+                dir,
+                &strategy_config.symbols,
+                from_dt,
+                to_dt,
+                &backtest_options,
+            );
+            let mut runtime =
+                StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
+            let result = rt.block_on(runtime.run());
+            let mark_prices = BTreeMap::new();
+            let snapshot = runtime.trading().snapshot(&mark_prices);
+            print_results(result, snapshot, stake_usd);
+        }
     } else {
         let data: Vec<MarketUpdate> = if let Some(ref url) = db_url {
             let from = start_date.as_deref().unwrap_or("2026-03-28");

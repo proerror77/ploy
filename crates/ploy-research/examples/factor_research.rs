@@ -1,11 +1,11 @@
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_market_contracts::MarketUpdate;
+use ploy_research::factors::{pearson_ic, spearman_ic};
 use ploy_research::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations_with_lob,
     factor_metrics, load_research_lob_snapshots_sampled, FactorObservation,
 };
-use ploy_research::factors::{pearson_ic, spearman_ic};
-use ploy_strategy_bundles::feed::{load_from_database_with_options, HistoricalLoadOptions};
-use ploy_market_contracts::MarketUpdate;
 use sqlx::postgres::PgPoolOptions;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -237,29 +237,6 @@ async fn discover_valid_windows(
     .fetch_all(pool)
     .await
     .expect("valid window discovery failed")
-}
-
-fn market_update_ts(u: &MarketUpdate) -> DateTime<Utc> {
-    match u {
-        MarketUpdate::SpotPrice { ts, .. }
-        | MarketUpdate::AggTrade { ts, .. }
-        | MarketUpdate::Quote { ts, .. }
-        | MarketUpdate::L2 { ts, .. }
-        | MarketUpdate::L2Depth { ts, .. }
-        | MarketUpdate::SportsState { ts, .. }
-        | MarketUpdate::SportsPregame { ts, .. }
-        | MarketUpdate::SportsLive { ts, .. }
-        | MarketUpdate::ReferencePrice { ts, .. }
-        | MarketUpdate::Kline { ts, .. } => *ts,
-        MarketUpdate::EventDiscovered { end_time, window_secs, .. } => {
-            // Mirrors database.rs update_ts: subtract window + 1h buffer so EventDiscovered
-            // sorts before all quotes for the same event (quotes can arrive before start_time).
-            *end_time
-                - chrono::Duration::seconds(*window_secs as i64)
-                - chrono::Duration::hours(1)
-        }
-        MarketUpdate::EventExpired { end_time, .. } => *end_time,
-    }
 }
 
 /// Slices a sorted slice to items whose timestamp falls in `[start, end]`.
@@ -901,7 +878,7 @@ async fn main() {
     let mut total_event_rows = 0usize;
 
     for window in &windows {
-        // EventDiscovered sort-ts is end_time - window_secs - 1h (see market_update_ts).
+        // EventDiscovered sort-ts is end_time - window_secs - 1h.
         // Extend the lower bound by that same offset so EventDiscovered items are included.
         let updates_slice_start =
             window.start_time - chrono::Duration::hours(1) - chrono::Duration::seconds(300);
@@ -909,7 +886,7 @@ async fn main() {
             &all_updates,
             updates_slice_start,
             window.end_time,
-            market_update_ts,
+            MarketUpdate::sort_ts,
         );
 
         let lob_slice = slice_by_time(

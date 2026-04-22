@@ -7,17 +7,26 @@ license.workspace = true
 repository.workspace = true
 description = "Next-generation strategy runtime ownership boundary for Ploy"
 
+[features]
+default = ["full"]
+full = ["backtest-db", "db-recorder", "live", "live-execution", "replay"]
+backtest-db = ["dep:ploy-feed-loaders", "dep:sqlx"]
+db-recorder = ["dep:sqlx"]
+live = ["db-recorder", "dep:ploy-market-data", "ploy-market-data/live"]
+live-execution = ["dep:ploy-connectivity"]
+replay = []
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
-ploy-claimer.workspace = true
-ploy-connectivity.workspace = true
-ploy-market-data.workspace = true
-ploy-strategy-bundles.workspace = true
+ploy-connectivity = { workspace = true, optional = true }
+ploy-feed-loaders = { workspace = true, optional = true }
+ploy-market-data = { path = "../ploy-market-data", optional = true, default-features = false }
+ploy-strategy-bundles = { path = "../ploy-strategy-bundles", default-features = false }
 ploy-trading.workspace = true
 rust_decimal.workspace = true
 serde_json.workspace = true
-sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing.workspace = true
 

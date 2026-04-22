@@ -27,19 +27,13 @@
 //! ```
 
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::Arc;
 use std::thread;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
-use rust_decimal::Decimal;
-use tracing::info;
+use chrono::{DateTime, Utc};
 
-use crate::feed::database::{HistoricalLoadOptions, normalize_token_id};
+use super::options::HistoricalLoadOptions;
 use crate::traits::{Feed, MarketUpdate};
-
-/// How far before `from` to load spot prices for EWMA warm-up.
-const WARMUP_MINUTES: i64 = 30;
 
 /// Bounded channel capacity — limits how far ahead the background thread runs.
 const CHANNEL_CAPACITY: usize = 1000;
@@ -112,8 +106,14 @@ fn run_background(
     lob_sample_secs: u32,
     tx: SyncSender<MarketUpdate>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use chrono::Duration;
     use duckdb::Connection;
+    use rust_decimal::Decimal;
     use std::path::Path;
+    use std::sync::Arc;
+    use tracing::info;
+
+    const WARMUP_MINUTES: i64 = 30;
 
     if !Path::new(data_dir).exists() {
         return Ok(());
@@ -128,7 +128,7 @@ fn run_background(
     let from_str = from.to_rfc3339();
     let to_str = to.to_rfc3339();
     let spot_from_str = spot_from.to_rfc3339();
-    let bucket_us = (lob_sample_secs.max(1) as i64) * 1_000_000;
+    let _bucket_us = (lob_sample_secs.max(1) as i64) * 1_000_000;
 
     // File globs
     let spot_glob = format!("{data_dir}/binance_price_ticks/*.parquet");
@@ -224,7 +224,9 @@ fn run_background(
     if parts.is_empty() {
         // No data tables found — just send events
         for (_, update) in &events {
-            if tx.send(update.clone()).is_err() { return Ok(()); }
+            if tx.send(update.clone()).is_err() {
+                return Ok(());
+            }
         }
         return Ok(());
     }
@@ -244,15 +246,15 @@ fn run_background(
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, i64>(0)?,            // ts_us
-            row.get::<_, String>(1)?,          // typ
-            row.get::<_, Option<String>>(2)?,  // s1
-            row.get::<_, Option<String>>(3)?,  // s2
-            row.get::<_, Option<f64>>(4)?,     // f1 (nullable for quotes with NULL bid)
-            row.get::<_, Option<f64>>(5)?,     // f2
-            row.get::<_, Option<f64>>(6)?,     // f3
-            row.get::<_, Option<f64>>(7)?,     // f4
-            row.get::<_, Option<i64>>(8)?,     // i1
-            row.get::<_, Option<bool>>(9)?,    // b1
+            row.get::<_, String>(1)?,         // typ
+            row.get::<_, Option<String>>(2)?, // s1
+            row.get::<_, Option<String>>(3)?, // s2
+            row.get::<_, Option<f64>>(4)?,    // f1 (nullable for quotes with NULL bid)
+            row.get::<_, Option<f64>>(5)?,    // f2
+            row.get::<_, Option<f64>>(6)?,    // f3
+            row.get::<_, Option<f64>>(7)?,    // f4
+            row.get::<_, Option<i64>>(8)?,    // i1
+            row.get::<_, Option<bool>>(9)?,   // b1
         ))
     })?;
 
@@ -273,7 +275,9 @@ fn run_background(
 
         // Insert any events that should come before this row
         while evt_idx < events.len() && events[evt_idx].0 <= ts_us {
-            if tx.send(events[evt_idx].1.clone()).is_err() { return Ok(()); }
+            if tx.send(events[evt_idx].1.clone()).is_err() {
+                return Ok(());
+            }
             evt_idx += 1;
         }
 
@@ -283,7 +287,10 @@ fn run_background(
             "spot" => {
                 let symbol: Arc<str> = Arc::from(s1.unwrap_or_default());
                 let price = Decimal::try_from(f1).unwrap_or_default();
-                if tx.send(MarketUpdate::SpotPrice { symbol, price, ts }).is_err() {
+                if tx
+                    .send(MarketUpdate::SpotPrice { symbol, price, ts })
+                    .is_err()
+                {
                     return Ok(());
                 }
             }
@@ -291,14 +298,17 @@ fn run_background(
                 let symbol: Arc<str> = Arc::from(s1.unwrap_or_default());
                 let price = Decimal::try_from(f1).unwrap_or_default();
                 let quantity = Decimal::try_from(f2).unwrap_or_default();
-                if tx.send(MarketUpdate::AggTrade {
-                    symbol,
-                    agg_trade_id: i1 as u64,
-                    price,
-                    quantity,
-                    is_buyer_maker: b1,
-                    ts,
-                }).is_err() {
+                if tx
+                    .send(MarketUpdate::AggTrade {
+                        symbol,
+                        agg_trade_id: i1 as u64,
+                        price,
+                        quantity,
+                        is_buyer_maker: b1,
+                        ts,
+                    })
+                    .is_err()
+                {
                     return Ok(());
                 }
             }
@@ -309,14 +319,28 @@ fn run_background(
                 let bid_depth_near = f3;
                 let ask_depth_near = f4;
                 // Send both L2 and L2Depth (matching original behavior)
-                if tx.send(MarketUpdate::L2 {
-                    symbol: Arc::clone(&symbol), obi, spread_bps, ts,
-                }).is_err() {
+                if tx
+                    .send(MarketUpdate::L2 {
+                        symbol: Arc::clone(&symbol),
+                        obi,
+                        spread_bps,
+                        ts,
+                    })
+                    .is_err()
+                {
                     return Ok(());
                 }
-                if tx.send(MarketUpdate::L2Depth {
-                    symbol, obi, spread_bps, bid_depth_near, ask_depth_near, ts,
-                }).is_err() {
+                if tx
+                    .send(MarketUpdate::L2Depth {
+                        symbol,
+                        obi,
+                        spread_bps,
+                        bid_depth_near,
+                        ask_depth_near,
+                        ts,
+                    })
+                    .is_err()
+                {
                     return Ok(());
                 }
             }
@@ -324,10 +348,20 @@ fn run_background(
                 let token_id: Arc<str> = Arc::from(s1.unwrap_or_default());
                 let bid = f1_opt.and_then(|v| Decimal::try_from(v).ok());
                 let ask = f2_opt.and_then(|v| Decimal::try_from(v).ok());
-                if bid.is_none() && ask.is_none() { continue; }
-                if tx.send(MarketUpdate::Quote {
-                    token_id, bid, ask, bid_size: None, ask_size: None, ts,
-                }).is_err() {
+                if bid.is_none() && ask.is_none() {
+                    continue;
+                }
+                if tx
+                    .send(MarketUpdate::Quote {
+                        token_id,
+                        bid,
+                        ask,
+                        bid_size: None,
+                        ask_size: None,
+                        ts,
+                    })
+                    .is_err()
+                {
                     return Ok(());
                 }
             }
@@ -338,11 +372,17 @@ fn run_background(
 
     // Send remaining events after the UNION ALL stream is exhausted
     while evt_idx < events.len() {
-        if tx.send(events[evt_idx].1.clone()).is_err() { break; }
+        if tx.send(events[evt_idx].1.clone()).is_err() {
+            break;
+        }
         evt_idx += 1;
     }
 
-    info!(total, events = events.len(), "StreamingParquetFeed: streaming complete");
+    info!(
+        total,
+        events = events.len(),
+        "StreamingParquetFeed: streaming complete"
+    );
     Ok(())
 }
 
@@ -373,7 +413,10 @@ fn load_events_vec(
     from_str: &str,
     to_str: &str,
 ) -> Result<Vec<(i64, MarketUpdate)>, Box<dyn std::error::Error + Send + Sync>> {
+    use super::options::normalize_token_id;
+    use rust_decimal::Decimal;
     use std::path::Path;
+    use std::sync::Arc;
 
     let dir = format!("{data_dir}/pm_market_metadata");
     if !Path::new(&dir).exists() {
@@ -416,10 +459,22 @@ fn load_events_vec(
             Some(s) if !s.is_empty() => s,
             _ => continue,
         };
-        let start_us = match start_us { Some(v) => v, None => continue };
-        let end_us = match end_us { Some(v) => v, None => continue };
-        let up_raw = match up_opt { Some(s) if !s.is_empty() => s, _ => continue };
-        let dn_raw = match dn_opt { Some(s) if !s.is_empty() => s, _ => continue };
+        let start_us = match start_us {
+            Some(v) => v,
+            None => continue,
+        };
+        let end_us = match end_us {
+            Some(v) => v,
+            None => continue,
+        };
+        let up_raw = match up_opt {
+            Some(s) if !s.is_empty() => s,
+            _ => continue,
+        };
+        let dn_raw = match dn_opt {
+            Some(s) if !s.is_empty() => s,
+            _ => continue,
+        };
 
         let up_token: Arc<str> = Arc::from(normalize_token_id(&up_raw));
         let down_token: Arc<str> = Arc::from(normalize_token_id(&dn_raw));
@@ -432,29 +487,36 @@ fn load_events_vec(
         let symbol: Arc<str> = Arc::from(symbol);
 
         // EventDiscovered fires at start_time
-        events.push((start_us, MarketUpdate::EventDiscovered {
-            event_id: Arc::clone(&event_id),
-            symbol,
-            up_token,
-            down_token,
-            end_time,
-            window_secs,
-            price_to_beat,
-            resolved_up_won: None,
-        }));
+        events.push((
+            start_us,
+            MarketUpdate::EventDiscovered {
+                event_id: Arc::clone(&event_id),
+                symbol,
+                up_token,
+                down_token,
+                end_time,
+                window_secs,
+                price_to_beat,
+                resolved_up_won: None,
+            },
+        ));
 
         // EventExpired fires at end_time
-        events.push((end_us, MarketUpdate::EventExpired {
-            event_id,
-            end_time,
-            resolved_up_won: None,
-        }));
+        events.push((
+            end_us,
+            MarketUpdate::EventExpired {
+                event_id,
+                end_time,
+                resolved_up_won: None,
+            },
+        ));
     }
 
     events.sort_by_key(|(ts, _)| *ts);
     Ok(events)
 }
 
+#[cfg(feature = "parquet-feed")]
 fn symbol_filter_sql(symbols: &[String]) -> String {
     if symbols.is_empty() {
         return String::new();

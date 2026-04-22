@@ -1,13 +1,21 @@
+#[cfg(feature = "live")]
 pub mod crypto;
+#[cfg(feature = "live")]
 pub mod sports;
+#[cfg(feature = "live")]
 pub mod types;
 
+#[cfg(feature = "live")]
 use serde_json::Value;
+#[cfg(feature = "live")]
 use sqlx::PgPool;
+#[cfg(feature = "live")]
 use tracing::warn;
 
+#[cfg(feature = "live")]
 use self::types::MarketDescriptor;
 
+#[cfg(feature = "live")]
 pub async fn upsert_market_catalog(
     pool: &PgPool,
     descriptor: &MarketDescriptor,

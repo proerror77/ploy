@@ -7,62 +7,19 @@
 
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import type {
+  DeploymentSummary,
+  PaperIntentResponse,
+  SystemStatus,
+  TradingStateSnapshot,
+} from "../contracts/operator-contracts.js";
 
 const PLOY_API = process.env.PLOY_API_URL || "http://localhost:8081";
 const PLOY_ADMIN_TOKEN = process.env.PLOY_API_ADMIN_TOKEN || process.env.PLOY_ADMIN_TOKEN;
 
-type DesiredState = "running" | "paused" | "stopped";
-type DeploymentState = "enabled" | "draining" | "disabled" | "archived";
-
-type SystemStatusResponse = {
-  status: string;
-  uptime_seconds: number;
-  version: string;
-  strategy: string;
-  last_trade_time: string | null;
-  websocket_connected: boolean;
-  database_connected: boolean;
-  error_count_1h: number;
-};
-
-type DeploymentSummaryResponse = {
-  deployment_id: string;
-  deployment_state: DeploymentState;
-  desired_state: DesiredState;
-  observed_state: string;
-};
-
-type DeploymentRecordResponse = DeploymentSummaryResponse & {
+type DeploymentRecordResponse = DeploymentSummary & {
   bundle_id: string;
   runtime_mode: string;
-};
-
-type TradingStateSnapshot = {
-  deployment_id: string;
-  runtime_mode: string;
-  intents: unknown[];
-  orders: unknown[];
-  fills: unknown[];
-  positions: unknown[];
-  pnl: {
-    realized_pnl: string;
-    unrealized_pnl: string;
-    total_fees: string;
-    net_pnl: string;
-  };
-  risk: {
-    pending_intents: number;
-    active_orders: number;
-    open_positions: number;
-    gross_exposure: string;
-  };
-};
-
-type PaperIntentResponse = {
-  deployment_id: string;
-  intent_id: string;
-  order_id: string;
-  state: string;
 };
 
 async function ployFetch(path: string, options?: RequestInit) {
@@ -101,7 +58,7 @@ export const ployBackendServer = createSdkMcpServer({
       {},
       async () => {
         try {
-          const status = await callBackend<SystemStatusResponse>("/api/system/status");
+          const status = await callBackend<SystemStatus>("/api/system/status");
           return {
             content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
           };
@@ -139,7 +96,7 @@ export const ployBackendServer = createSdkMcpServer({
       {},
       async () => {
         try {
-          const items = await callBackend<DeploymentSummaryResponse[]>("/api/deployments");
+          const items = await callBackend<DeploymentSummary[]>("/api/deployments");
           return {
             content: [{ type: "text" as const, text: JSON.stringify(items, null, 2) }],
           };

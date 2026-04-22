@@ -12,8 +12,7 @@ impl WorkerSupervisor {
     pub fn start(&mut self, spec: WorkerLaunchSpec) -> &WorkerStatus {
         let deployment_id = spec.deployment_id.clone();
         let runtime = DeploymentRuntime::new(spec);
-        self.workers
-            .insert(deployment_id.clone(), runtime);
+        self.workers.insert(deployment_id.clone(), runtime);
         self.workers
             .get(&deployment_id)
             .expect("worker runtime")
@@ -28,7 +27,9 @@ impl WorkerSupervisor {
     }
 
     pub fn status(&self, deployment_id: &str) -> Option<&WorkerStatus> {
-        self.workers.get(deployment_id).map(DeploymentRuntime::status)
+        self.workers
+            .get(deployment_id)
+            .map(DeploymentRuntime::status)
     }
 
     pub fn fail(&mut self, deployment_id: &str) -> Option<&WorkerStatus> {

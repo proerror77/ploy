@@ -7,19 +7,29 @@ license.workspace = true
 repository.workspace = true
 description = "Market-data collection, discovery, and scanning infrastructure for Ploy"
 
+[features]
+default = ["live"]
+live = [
+    "dep:futures",
+    "dep:polymarket-client-sdk",
+    "dep:reqwest",
+    "dep:sqlx",
+    "dep:tokio-tungstenite",
+]
+
 [dependencies]
 chrono.workspace = true
-futures = "0.3"
+futures = { version = "0.3", optional = true }
 ploy-market-contracts.workspace = true
-polymarket-client-sdk = { path = "../../vendor/polymarket-client-sdk", features = ["clob", "gamma", "rtds", "tracing", "ws", "heartbeats"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+polymarket-client-sdk = { path = "../../vendor/polymarket-client-sdk", features = ["clob", "gamma", "rtds", "tracing", "ws", "heartbeats"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "rust_decimal", "json"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chrono", "rust_decimal", "json"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
-tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"], optional = true }
 tracing.workspace = true
 
 [dev-dependencies]

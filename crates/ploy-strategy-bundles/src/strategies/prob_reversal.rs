@@ -3,13 +3,17 @@ use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
-    FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
+    FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+use super::common::event::EventWindow;
+use super::common::guards::active_order_exists;
+use super::common::holding::BasicHoldingState;
+use super::common::quote::QuoteState;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 fn crypto_fee_cost(entry_price: f64) -> f64 {
@@ -111,37 +115,6 @@ impl Default for ProbReversalConfig {
 
 // ── State ───────────────────────────────────────────────
 
-#[derive(Clone)]
-struct EventWindow {
-    event_id: Arc<str>,
-    symbol: Arc<str>,
-    up_token: Arc<str>,
-    down_token: Arc<str>,
-    end_time: DateTime<Utc>,
-    #[allow(dead_code)]
-    window_secs: u64,
-    #[allow(dead_code)]
-    price_to_beat: Option<Decimal>,
-}
-
-#[derive(Clone, Copy)]
-struct QuoteState {
-    bid: Option<Decimal>,
-    ask: Option<Decimal>,
-    #[allow(dead_code)]
-    ts: DateTime<Utc>,
-}
-
-#[derive(Clone)]
-struct HoldingState {
-    #[allow(dead_code)]
-    token_id: Arc<str>,
-    #[allow(dead_code)]
-    direction: String,
-    #[allow(dead_code)]
-    entry_time: DateTime<Utc>,
-}
-
 // ── Strategy ────────────────────────────────────────────
 
 pub struct ProbReversalStrategy {
@@ -149,7 +122,7 @@ pub struct ProbReversalStrategy {
     events: HashMap<Arc<str>, Vec<EventWindow>>,
     quotes: HashMap<Arc<str>, QuoteState>,
     prev_up_prob: HashMap<Arc<str>, f64>,
-    holdings: HashMap<Arc<str>, HoldingState>,
+    holdings: HashMap<Arc<str>, BasicHoldingState>,
     token_symbol: HashMap<Arc<str>, Arc<str>>,
     token_event: HashMap<Arc<str>, Arc<str>>,
     retired_events: HashSet<Arc<str>>,
@@ -185,22 +158,12 @@ impl ProbReversalStrategy {
         self.config.allowed_window_secs.is_empty()
             || self.config.allowed_window_secs.contains(&window_secs)
     }
-    fn active_order_exists(&self, token_id: &str, orders: &OrderLedger) -> bool {
-        orders.orders().any(|order| {
-            order.token_id == token_id
-                && matches!(
-                    order.state,
-                    OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
-                )
-        })
-    }
-
     fn find_event_for_token(&self, token_id: &Arc<str>) -> Option<&EventWindow> {
         let event_id = self.token_event.get(token_id)?;
         self.events
             .values()
             .flatten()
-            .find(|e| e.event_id == *event_id)
+            .find(|event| event.event_id == *event_id && event.contains_token(token_id))
     }
 
     fn entry_quantity(&self, entry_price: Decimal) -> Decimal {
@@ -226,7 +189,10 @@ impl ProbReversalStrategy {
         positions: &PositionLedger,
     ) -> Vec<StrategyDecision> {
         let mut exits = Vec::new();
-        for (token_id, wins) in [(&event.up_token, up_won), (&event.down_token, !up_won)] {
+        for token_id in [&event.up_token, &event.down_token] {
+            let wins = event
+                .token_wins(token_id, up_won)
+                .expect("event token list is built from event sides");
             let qty = positions.net_qty(token_id);
             if qty > Decimal::ZERO {
                 exits.push(StrategyDecision::Exit(TradingIntent {
@@ -236,7 +202,11 @@ impl ProbReversalStrategy {
                     token_id: token_id.to_string(),
                     side: TradeSide::Sell,
                     quantity: qty,
-                    limit_price: Some(if wins { Decimal::new(1, 0) } else { Decimal::ZERO }),
+                    limit_price: Some(if wins {
+                        Decimal::new(1, 0)
+                    } else {
+                        Decimal::ZERO
+                    }),
                     purpose: IntentPurpose::Exit,
                     created_at,
                 }));
@@ -254,14 +224,8 @@ impl ProbReversalStrategy {
         orders: &OrderLedger,
     ) -> Vec<StrategyDecision> {
         // 1. Update quote state.
-        self.quotes.insert(
-            token_id.clone(),
-            QuoteState {
-                bid,
-                ask,
-                ts: *ts,
-            },
-        );
+        self.quotes
+            .insert(token_id.clone(), QuoteState { bid, ask, ts: *ts });
         self.reset_daily_counter(*ts);
 
         // 2. Resolve event for this token.
@@ -400,7 +364,7 @@ impl ProbReversalStrategy {
                     if prev_up < self.config.prev_prob_low
                         && up_prob > self.config.curr_prob_high
                         && positions.net_qty(&event.up_token) <= Decimal::ZERO
-                        && !self.active_order_exists(&event.up_token, orders)
+                        && !active_order_exists(&event.up_token, orders)
                     {
                         let entry_price = ask.unwrap(); // safe: we checked above
                         let quantity = self.entry_quantity(entry_price);
@@ -420,7 +384,9 @@ impl ProbReversalStrategy {
                                 intent: TradingIntent {
                                     intent_id: format!(
                                         "prob_reversal_{}_{}_{}",
-                                        event.event_id, direction_str, ts.timestamp_millis()
+                                        event.event_id,
+                                        direction_str,
+                                        ts.timestamp_millis()
                                     ),
                                     deployment_id: String::new(),
                                     market_id: event.event_id.to_string(),
@@ -452,12 +418,9 @@ impl ProbReversalStrategy {
                     if prev_up > self.config.prev_prob_high
                         && up_prob < self.config.curr_prob_low
                         && positions.net_qty(&event.down_token) <= Decimal::ZERO
-                        && !self.active_order_exists(&event.down_token, orders)
+                        && !active_order_exists(&event.down_token, orders)
                     {
-                        let down_ask = self
-                            .quotes
-                            .get(&event.down_token)
-                            .and_then(|q| q.ask);
+                        let down_ask = self.quotes.get(&event.down_token).and_then(|q| q.ask);
                         if let Some(entry_price) = down_ask {
                             let quantity = self.entry_quantity(entry_price);
                             if quantity > Decimal::ZERO {
@@ -478,7 +441,9 @@ impl ProbReversalStrategy {
                                     intent: TradingIntent {
                                         intent_id: format!(
                                             "prob_reversal_{}_{}_{}",
-                                            event.event_id, direction_str, ts.timestamp_millis()
+                                            event.event_id,
+                                            direction_str,
+                                            ts.timestamp_millis()
                                         ),
                                         deployment_id: String::new(),
                                         market_id: event.event_id.to_string(),
@@ -558,7 +523,8 @@ impl StrategyLogic for ProbReversalStrategy {
                 self.token_symbol.insert(up_token.clone(), symbol.clone());
                 self.token_symbol.insert(down_token.clone(), symbol.clone());
                 self.token_event.insert(up_token.clone(), event_id.clone());
-                self.token_event.insert(down_token.clone(), event_id.clone());
+                self.token_event
+                    .insert(down_token.clone(), event_id.clone());
 
                 self.events
                     .entry(symbol.clone())
@@ -590,9 +556,9 @@ impl StrategyLogic for ProbReversalStrategy {
                             continue;
                         }
                         if let Some(up_won) = self.resolve_up_won(event, *resolved_up_won) {
-                            decisions.extend(self.build_settlement_exits(
-                                event, up_won, *end_time, positions,
-                            ));
+                            decisions.extend(
+                                self.build_settlement_exits(event, up_won, *end_time, positions),
+                            );
                             resolved.push(event.event_id.clone());
                         }
                     }
@@ -629,7 +595,7 @@ impl StrategyLogic for ProbReversalStrategy {
                 };
                 self.holdings.insert(
                     token_id,
-                    HoldingState {
+                    BasicHoldingState {
                         token_id: Arc::from(fill.token_id.as_str()),
                         direction: direction.to_string(),
                         entry_time: fill.timestamp,

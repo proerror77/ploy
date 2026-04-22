@@ -1,6 +1,7 @@
+use alloy::signers::local::PrivateKeySigner;
 use ploy_trading::{FillRecord, TradeSide};
 use polymarket_client_sdk::auth::state::Authenticated;
-use polymarket_client_sdk::auth::{LocalSigner, Normal, Signer};
+use polymarket_client_sdk::auth::{Normal, Signer};
 use polymarket_client_sdk::clob::types::request::TradesRequest;
 use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
 use polymarket_client_sdk::clob::types::{Amount, OrderType, Side, SignatureType};
@@ -11,11 +12,13 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use secrecy::{ExposeSecret, SecretString};
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use thiserror::Error;
 
 pub const CRATE_MARKER: &str = "ploy-connectivity";
 const DEFAULT_POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
+const TERMINAL_CURSOR: &str = "LTE=";
+const MAX_CONCURRENT_TRADE_RECONCILE_REQUESTS: usize = 10;
 
 /// Order execution type for live trading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -263,8 +266,7 @@ impl Default for PolymarketExecutionConfig {
         let funder = polymarket_funder_from_env();
         Self {
             host: DEFAULT_POLY_CLOB_HOST.to_string(),
-            private_key: polymarket_private_key_from_env()
-                .map(SecretString::from),
+            private_key: polymarket_private_key_from_env().map(SecretString::from),
             use_server_time: true,
             signature_type: polymarket_signature_type_from_env(funder.is_some()),
             funder,
@@ -290,30 +292,34 @@ impl PolymarketExecutionConfig {
 #[derive(Debug, Clone)]
 pub struct PolymarketExecutionGateway {
     config: PolymarketExecutionConfig,
-    client: Arc<OnceLock<Client<Authenticated<Normal>>>>,
+    runtime: Arc<tokio::runtime::Runtime>,
+    signer: Arc<OnceLock<PrivateKeySigner>>,
+    client: Arc<RwLock<Option<Client<Authenticated<Normal>>>>>,
 }
 
 impl PolymarketExecutionGateway {
     pub fn from_env() -> Self {
-        Self {
-            config: PolymarketExecutionConfig::from_env(),
-            client: Arc::new(OnceLock::new()),
-        }
+        Self::new(PolymarketExecutionConfig::from_env())
     }
 
     pub fn new(config: PolymarketExecutionConfig) -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("ploy-polymarket-gateway")
+            .build()
+            .expect("create Polymarket execution runtime");
+
         Self {
             config,
-            client: Arc::new(OnceLock::new()),
+            runtime: Arc::new(runtime),
+            signer: Arc::new(OnceLock::new()),
+            client: Arc::new(RwLock::new(None)),
         }
     }
 
-    fn get_or_init_client(
-        &self,
-        runtime: &tokio::runtime::Runtime,
-    ) -> Result<Client<Authenticated<Normal>>, ExecutionError> {
-        if let Some(client) = self.client.get() {
-            return Ok(client.clone());
+    fn get_or_init_signer(&self) -> Result<PrivateKeySigner, ExecutionError> {
+        if let Some(signer) = self.signer.get() {
+            return Ok(signer.clone());
         }
 
         let private_key = self
@@ -324,6 +330,28 @@ impl PolymarketExecutionGateway {
             .ok_or_else(|| {
                 ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
             })?;
+
+        let signer = PrivateKeySigner::from_str(private_key)
+            .map_err(|err| {
+                ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
+            })?
+            .with_chain_id(Some(POLYGON));
+
+        let _ = self.signer.set(signer);
+        Ok(self.signer.get().expect("signer set above").clone())
+    }
+
+    fn get_or_init_client(&self) -> Result<Client<Authenticated<Normal>>, ExecutionError> {
+        if let Some(client) = self
+            .client
+            .read()
+            .map_err(|_| ExecutionError::Transport("client cache poisoned".to_string()))?
+            .clone()
+        {
+            return Ok(client.clone());
+        }
+
+        let signer = self.get_or_init_signer()?;
         let funder = self
             .config
             .funder
@@ -332,13 +360,7 @@ impl PolymarketExecutionGateway {
             .transpose()
             .map_err(|err| ExecutionError::Configuration(format!("invalid POLY_FUNDER: {err}")))?;
 
-        let client = runtime.block_on(async {
-            let signer = LocalSigner::from_str(private_key)
-                .map_err(|err| {
-                    ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
-                })?
-                .with_chain_id(Some(POLYGON));
-
+        let client = self.runtime.block_on(async {
             let client = Client::new(
                 &self.config.host,
                 Config::builder()
@@ -358,9 +380,27 @@ impl PolymarketExecutionGateway {
                 .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))
         })?;
 
-        // OnceLock::get_or_init is not fallible, so we use set + ignore race.
-        let _ = self.client.set(client.clone());
-        Ok(self.client.get().unwrap().clone())
+        let mut guard = self
+            .client
+            .write()
+            .map_err(|_| ExecutionError::Transport("client cache poisoned".to_string()))?;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        *guard = Some(client.clone());
+        Ok(client)
+    }
+
+    fn clear_client_cache(&self) {
+        if let Ok(mut guard) = self.client.write() {
+            *guard = None;
+        }
+    }
+
+    fn maybe_clear_client_cache(&self, error: &ExecutionError) {
+        if is_auth_recovery_error(error) {
+            self.clear_client_cache();
+        }
     }
 }
 
@@ -371,32 +411,14 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                 "live Polymarket execution currently requires a limit price".to_string(),
             )
         })?;
-        let private_key = self
-            .config
-            .private_key
-            .as_ref()
-            .map(ExposeSecret::expose_secret)
-            .ok_or_else(|| {
-                ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
-            })?;
         let token_id = U256::from_str(&request.token_id).map_err(|err| {
             ExecutionError::Validation(format!("invalid token_id `{}`: {err}", request.token_id))
         })?;
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| ExecutionError::Transport(format!("create tokio runtime: {err}")))?;
+        let client = self.get_or_init_client()?;
+        let signer = self.get_or_init_signer()?;
 
-        let client = self.get_or_init_client(&runtime)?;
-
-        runtime.block_on(async {
-            let signer = LocalSigner::from_str(private_key)
-                .map_err(|err| {
-                    ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
-                })?
-                .with_chain_id(Some(POLYGON));
-
+        let result = self.runtime.block_on(async {
             let side = polymarket_side(request.side);
             let order = match request.order_type {
                 OrderExecutionType::GTC => {
@@ -419,7 +441,9 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                 }
                 OrderExecutionType::FAK | OrderExecutionType::FOK => {
                     let amount = normalize_execution_amount(request.quantity, limit_price, side)
-                        .map_err(|err| ExecutionError::Validation(format!("build amount: {err}")))?;
+                        .map_err(|err| {
+                            ExecutionError::Validation(format!("build amount: {err}"))
+                        })?;
                     client
                         .market_order()
                         .token_id(token_id)
@@ -453,7 +477,12 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                     }),
                 })
             }
-        })
+        });
+
+        if let Err(error) = &result {
+            self.maybe_clear_client_cache(error);
+        }
+        result
     }
 
     fn reconcile_fills(
@@ -464,55 +493,53 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
             return Ok(Vec::new());
         }
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| ExecutionError::Transport(format!("create tokio runtime: {err}")))?;
+        let client = self.get_or_init_client()?;
 
-        let client = self.get_or_init_client(&runtime)?;
+        let result = self.runtime.block_on(async {
+            let token_ids = unique_token_ids(tracked_orders)?;
+            let mut trades = Vec::new();
 
-        runtime.block_on(async {
+            for chunk in token_ids.chunks(MAX_CONCURRENT_TRADE_RECONCILE_REQUESTS) {
+                let mut tasks = Vec::with_capacity(chunk.len());
+
+                for token_id in chunk {
+                    let client = client.clone();
+                    let token_id = *token_id;
+                    tasks.push(tokio::spawn(async move {
+                        load_trades_for_token(client, token_id).await
+                    }));
+                }
+
+                for task in tasks {
+                    let mut token_trades = task.await.map_err(|err| {
+                        ExecutionError::Transport(format!("join trade reconciliation task: {err}"))
+                    })??;
+                    trades.append(&mut token_trades);
+                }
+            }
+
             let mut fills = Vec::new();
-            for tracked_order in tracked_orders {
-                let asset_id = U256::from_str(&tracked_order.token_id).map_err(|err| {
-                    ExecutionError::Validation(format!(
-                        "invalid token_id `{}`: {err}",
-                        tracked_order.token_id
-                    ))
-                })?;
-                let request = TradesRequest::builder().asset_id(asset_id).build();
-                let mut next_cursor = None;
-                loop {
-                    let page = client
-                        .trades(&request, next_cursor.clone())
-                        .await
-                        .map_err(|err| ExecutionError::Transport(format!("load trades: {err}")))?;
-                    for trade in &page.data {
-                        if let Some(fill) = tracked_trade_fill(tracked_order, trade) {
-                            fills.push(fill);
-                        }
+            for trade in &trades {
+                for tracked_order in tracked_orders {
+                    if let Some(fill) = tracked_trade_fill(tracked_order, trade) {
+                        fills.push(fill);
                     }
-
-                    if page.next_cursor.is_empty() {
-                        break;
-                    }
-                    next_cursor = Some(page.next_cursor);
                 }
             }
 
             Ok(fills)
-        })
+        });
+
+        if let Err(error) = &result {
+            self.maybe_clear_client_cache(error);
+        }
+        result
     }
 
     fn cancel(&self, request: &CancellationRequest) -> Result<CancellationOutcome, ExecutionError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| ExecutionError::Transport(format!("create tokio runtime: {err}")))?;
+        let client = self.get_or_init_client()?;
 
-        let client = self.get_or_init_client(&runtime)?;
-
-        runtime.block_on(async {
+        let result = self.runtime.block_on(async {
             let response = client
                 .cancel_order(&request.venue_order_id)
                 .await
@@ -536,7 +563,12 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                     ),
                 })
             }
-        })
+        });
+
+        if let Err(error) = &result {
+            self.maybe_clear_client_cache(error);
+        }
+        result
     }
 
     fn replace(&self, request: &ReplaceRequest) -> Result<ReplaceOutcome, ExecutionError> {
@@ -620,6 +652,61 @@ fn polymarket_signature_type_from_env(has_funder: bool) -> WalletSignatureType {
                 WalletSignatureType::Eoa
             }
         })
+}
+
+fn is_auth_recovery_error(error: &ExecutionError) -> bool {
+    match error {
+        ExecutionError::Transport(message) => {
+            let message = message.to_ascii_lowercase();
+            message.contains("401")
+                || message.contains("unauthorized")
+                || message.contains("invalid api key")
+                || message.contains("expired")
+        }
+        ExecutionError::Configuration(_) | ExecutionError::Validation(_) => false,
+    }
+}
+
+fn unique_token_ids(tracked_orders: &[TrackedOrder]) -> Result<Vec<U256>, ExecutionError> {
+    let mut token_ids = Vec::new();
+
+    for tracked_order in tracked_orders {
+        let asset_id = U256::from_str(&tracked_order.token_id).map_err(|err| {
+            ExecutionError::Validation(format!(
+                "invalid token_id `{}`: {err}",
+                tracked_order.token_id
+            ))
+        })?;
+        if !token_ids.contains(&asset_id) {
+            token_ids.push(asset_id);
+        }
+    }
+
+    Ok(token_ids)
+}
+
+async fn load_trades_for_token(
+    client: Client<Authenticated<Normal>>,
+    token_id: U256,
+) -> Result<Vec<TradeResponse>, ExecutionError> {
+    let request = TradesRequest::builder().asset_id(token_id).build();
+    let mut next_cursor = None;
+    let mut trades = Vec::new();
+
+    loop {
+        let page = client
+            .trades(&request, next_cursor.clone())
+            .await
+            .map_err(|err| ExecutionError::Transport(format!("load trades: {err}")))?;
+        trades.extend(page.data);
+
+        if page.next_cursor.is_empty() || page.next_cursor == TERMINAL_CURSOR {
+            break;
+        }
+        next_cursor = Some(page.next_cursor);
+    }
+
+    Ok(trades)
 }
 
 fn normalize_aggressive_price(
@@ -723,10 +810,10 @@ mod tests {
     use super::{
         execution_price_override, normalize_aggressive_price, normalize_execution_amount,
         normalize_order_notional, normalize_order_quantity, polymarket_signature_type_from_env,
-        tracked_trade_fill, CancellationOutcome, CancellationRequest, ExecutionError,
-        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
-        PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest,
-        StaticExecutionGateway, TrackedOrder, WalletSignatureType,
+        tracked_trade_fill, unique_token_ids, CancellationOutcome, CancellationRequest,
+        ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
+        OrderExecutionType, PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome,
+        ReplaceRequest, StaticExecutionGateway, TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -994,5 +1081,29 @@ mod tests {
         assert_eq!(taker_fill.fill_id, "trade-1:order-a");
         assert_eq!(maker_fill.fill_id, "trade-1:order-b");
         assert_ne!(taker_fill.fill_id, maker_fill.fill_id);
+    }
+
+    #[test]
+    fn unique_token_ids_deduplicates_reconcile_requests() {
+        let token_ids = unique_token_ids(&[
+            TrackedOrder {
+                order_id: "order-1".to_string(),
+                venue_order_id: "venue-1".to_string(),
+                token_id: "10".to_string(),
+            },
+            TrackedOrder {
+                order_id: "order-2".to_string(),
+                venue_order_id: "venue-2".to_string(),
+                token_id: "10".to_string(),
+            },
+            TrackedOrder {
+                order_id: "order-3".to_string(),
+                venue_order_id: "venue-3".to_string(),
+                token_id: "11".to_string(),
+            },
+        ])
+        .expect("valid token ids");
+
+        assert_eq!(token_ids, vec![U256::from(10), U256::from(11)]);
     }
 }

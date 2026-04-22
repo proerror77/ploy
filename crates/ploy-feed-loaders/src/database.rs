@@ -3,8 +3,8 @@
 //! Loads market data from PostgreSQL into a `Vec<MarketUpdate>` that
 //! can be wrapped in [`HistoricalFeed`] for backtesting.
 //!
-//! Gated behind the `database` feature flag to keep the crate
-//! lightweight when only synthetic data or live feeds are needed.
+//! Kept outside `ploy-strategy-bundles` so strategy logic can compile without
+//! SQLx when only synthetic, recorded, or live feeds are needed.
 //!
 //! # Tables Queried
 //!
@@ -17,19 +17,22 @@
 //! | `pm_token_settlements` | Settlement outcomes |
 
 use chrono::{DateTime, Duration, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
-use serde_json::Value;
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::traits::MarketUpdate;
+use ploy_market_contracts::{
+    market_update_sort_ts, normalize_token_id, HistoricalLoadOptions, MarketUpdate,
+};
+
+#[cfg(test)]
+use serde_json::Value;
 
 /// How far before `from` to load spot prices for EWMA volatility warm-up.
 const WARMUP_MINUTES: i64 = 30;
-const NEAR_DEPTH_PCT_RANGE: f64 = 0.001;
 
 /// Historical research backtests only trust canonical historical PM quote captures.
 ///
@@ -42,41 +45,6 @@ const TRUSTED_PM_RESEARCH_QUOTE_SOURCES: &[&str] = &[
     "polymarket_ws_collector",
     "ploy_runner_live",
 ];
-
-/// Additive historical-loader flags for non-crypto datasets.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistoricalLoadOptions {
-    pub include_reference_prices: bool,
-    pub reference_symbols: Vec<String>,
-    pub include_sports_state: bool,
-    pub require_official_settlement: bool,
-    /// Downsample `binance_lob_ticks` to one snapshot per N seconds per symbol.
-    /// Defaults to 30 (one row per 30-second bucket). Set to 1 to disable downsampling.
-    pub lob_sample_secs: u32,
-}
-
-impl Default for HistoricalLoadOptions {
-    fn default() -> Self {
-        Self {
-            include_reference_prices: false,
-            reference_symbols: Vec::new(),
-            include_sports_state: false,
-            require_official_settlement: false,
-            lob_sample_secs: 30,
-        }
-    }
-}
-
-impl HistoricalLoadOptions {
-    #[must_use]
-    pub fn normalized_reference_symbols(&self) -> Vec<String> {
-        self.reference_symbols
-            .iter()
-            .map(|symbol| symbol.trim().to_lowercase())
-            .filter(|symbol| !symbol.is_empty())
-            .collect()
-    }
-}
 
 /// One persisted reference-price tick from `reference_price_ticks`.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -185,7 +153,15 @@ pub async fn load_from_database_with_options(
     }
 
     // 4. L2 orderbook from binance_lob_ticks
-    load_l2_data(pool, symbols, from, to, options.lob_sample_secs, &mut updates).await?;
+    load_l2_data(
+        pool,
+        symbols,
+        from,
+        to,
+        options.lob_sample_secs,
+        &mut updates,
+    )
+    .await?;
 
     if options.include_reference_prices {
         let reference_symbols = options.normalized_reference_symbols();
@@ -199,7 +175,7 @@ pub async fn load_from_database_with_options(
     }
 
     // Sort by timestamp
-    updates.sort_by_key(|u| update_ts(u));
+    updates.sort_by_key(market_update_sort_ts);
 
     info!(
         count = updates.len(),
@@ -213,79 +189,6 @@ pub async fn load_from_database_with_options(
     );
 
     Ok(updates)
-}
-
-fn update_ts(u: &MarketUpdate) -> DateTime<Utc> {
-    match u {
-        MarketUpdate::SpotPrice { ts, .. }
-        | MarketUpdate::AggTrade { ts, .. }
-        | MarketUpdate::Quote { ts, .. }
-            | MarketUpdate::L2 { ts, .. }
-            | MarketUpdate::L2Depth { ts, .. }
-            | MarketUpdate::SportsState { ts, .. }
-            | MarketUpdate::SportsPregame { ts, .. }
-            | MarketUpdate::SportsLive { ts, .. }
-            | MarketUpdate::ReferencePrice { ts, .. }
-            | MarketUpdate::Kline { ts, .. } => *ts,
-        MarketUpdate::EventDiscovered {
-            end_time,
-            window_secs,
-            ..
-        } => {
-            // Sort EventDiscovered before all quotes for the same event.
-            // Quotes can arrive before the event's official start_time (~90% of cases),
-            // so we subtract an extra buffer to guarantee ordering.
-            *end_time - chrono::Duration::seconds(*window_secs as i64) - chrono::Duration::hours(1)
-        }
-        MarketUpdate::EventExpired { end_time, .. } => *end_time,
-    }
-}
-
-pub fn normalize_token_id(raw: &str) -> String {
-    let trimmed = raw.trim().trim_matches('"');
-    if let Some(hex) = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-    {
-        return hex_to_decimal_string(hex).unwrap_or_else(|| trimmed.to_string());
-    }
-    trimmed.to_string()
-}
-
-fn hex_to_decimal_string(hex: &str) -> Option<String> {
-    if hex.is_empty() {
-        return None;
-    }
-
-    let mut digits = vec![0_u8];
-
-    for ch in hex.chars() {
-        let value = ch.to_digit(16)? as u32;
-        let mut carry = value;
-
-        for digit in &mut digits {
-            let next = (*digit as u32) * 16 + carry;
-            *digit = (next % 10) as u8;
-            carry = next / 10;
-        }
-
-        while carry > 0 {
-            digits.push((carry % 10) as u8);
-            carry /= 10;
-        }
-    }
-
-    while digits.len() > 1 && digits.last() == Some(&0) {
-        digits.pop();
-    }
-
-    Some(
-        digits
-            .iter()
-            .rev()
-            .map(|digit| char::from(b'0' + *digit))
-            .collect(),
-    )
 }
 
 // ── Spot Prices ──────────────────────────────────────────
@@ -318,7 +221,11 @@ async fn load_spot_prices(
     if !rows.is_empty() {
         info!(count = rows.len(), "Loaded spot prices from sync_records");
         for (ts, symbol, price) in rows {
-            updates.push(MarketUpdate::SpotPrice { symbol: Arc::from(symbol), price, ts });
+            updates.push(MarketUpdate::SpotPrice {
+                symbol: Arc::from(symbol),
+                price,
+                ts,
+            });
         }
         return Ok(());
     }
@@ -346,7 +253,11 @@ async fn load_spot_prices(
         "Loaded spot prices from binance_price_ticks"
     );
     for (ts, symbol, price) in rows {
-        updates.push(MarketUpdate::SpotPrice { symbol: Arc::from(symbol), price, ts });
+        updates.push(MarketUpdate::SpotPrice {
+            symbol: Arc::from(symbol),
+            price,
+            ts,
+        });
     }
 
     Ok(())
@@ -598,7 +509,14 @@ async fn load_pm_quotes(
     // - UP token:   best_bid is the real price, best_ask may be NULL
     // - DOWN token: best_ask is the real price, best_bid may be NULL
     // Accept rows where EITHER bid OR ask is in the real price range (0.01, 0.99).
-    let rows: Vec<(DateTime<Utc>, String, Option<Decimal>, Option<Decimal>, Option<Decimal>, Option<Decimal>)> = sqlx::query_as(
+    let rows: Vec<(
+        DateTime<Utc>,
+        String,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<Decimal>,
+    )> = sqlx::query_as(
         r#"
         SELECT DISTINCT ON (date_trunc('second', received_at), token_id)
                received_at, token_id, best_bid, best_ask, bid_size, ask_size
@@ -725,7 +643,8 @@ async fn load_pm_quotes_from_snapshots(
             ask_size: None,
             ts,
         });
-    }    Ok(())
+    }
+    Ok(())
 }
 
 // ── L2 Data ──────────────────────────────────────────────
@@ -816,6 +735,11 @@ fn l2_updates_from_depth_totals(
     updates
 }
 
+// near_depth / sum_depth_in_range / parse_depth_level / json_f64 are only
+// used in tests via l2_updates_from_book.
+#[cfg(test)]
+const NEAR_DEPTH_PCT_RANGE: f64 = 0.001;
+
 #[cfg(test)]
 fn l2_updates_from_book(
     symbol: &str,
@@ -865,6 +789,7 @@ fn l2_updates_from_book(
     updates
 }
 
+#[cfg(test)]
 fn near_depth(bids: &Value, asks: &Value, mid_price: f64, pct_range: f64) -> (f64, f64) {
     if !mid_price.is_finite() || mid_price <= 0.0 || !pct_range.is_finite() || pct_range < 0.0 {
         return (0.0, 0.0);
@@ -879,6 +804,7 @@ fn near_depth(bids: &Value, asks: &Value, mid_price: f64, pct_range: f64) -> (f6
     )
 }
 
+#[cfg(test)]
 fn sum_depth_in_range(levels: &Value, min_price: f64, max_price: f64) -> f64 {
     levels
         .as_array()
@@ -893,6 +819,7 @@ fn sum_depth_in_range(levels: &Value, min_price: f64, max_price: f64) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[cfg(test)]
 fn parse_depth_level(level: &Value) -> Option<(f64, f64)> {
     match level {
         Value::Array(items) if items.len() >= 2 => {
@@ -903,6 +830,7 @@ fn parse_depth_level(level: &Value) -> Option<(f64, f64)> {
     }
 }
 
+#[cfg(test)]
 fn json_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Number(number) => number.as_f64(),
@@ -980,8 +908,10 @@ fn build_event_updates(
             None => continue,
         };
 
-        let up_token: Arc<str> = Arc::from(normalize_token_id(&row.up_token_id.unwrap_or_default()));
-        let down_token: Arc<str> = Arc::from(normalize_token_id(&row.down_token_id.unwrap_or_default()));
+        let up_token: Arc<str> =
+            Arc::from(normalize_token_id(&row.up_token_id.unwrap_or_default()));
+        let down_token: Arc<str> =
+            Arc::from(normalize_token_id(&row.down_token_id.unwrap_or_default()));
         let resolved_up_won = resolve_up_won_from_settlements(
             settlement_prices,
             &row.market_slug,
@@ -1084,30 +1014,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        EventMetadataRow, MarketUpdate, build_event_updates, hex_to_decimal_string,
-        l2_updates_from_book, near_depth, normalize_token_id,
+        build_event_updates, l2_updates_from_book, near_depth, EventMetadataRow, MarketUpdate,
     };
-
-    #[test]
-    fn normalize_token_id_converts_hex_to_decimal() {
-        let raw = "\"0x3c38c18444ab803acea0d4de7bcdecae7f0f8ddbcd0466e3323d1cb9e04b6f5d\"";
-        let normalized = normalize_token_id(raw);
-        assert_eq!(
-            normalized,
-            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
-        );
-    }
-
-    #[test]
-    fn normalize_token_id_keeps_decimal_ids() {
-        let raw = "35165169860573247111698076491591023728797123337726915178028774493274622598566";
-        assert_eq!(normalize_token_id(raw), raw);
-    }
-
-    #[test]
-    fn hex_to_decimal_string_rejects_invalid_hex() {
-        assert_eq!(hex_to_decimal_string("xyz"), None);
-    }
 
     #[test]
     fn official_settlement_backfill_repairs_event_expiry_outcome() {

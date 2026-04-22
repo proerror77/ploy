@@ -9,143 +9,48 @@ export interface TodayStats {
   active_positions: number;
 }
 
-export type DeploymentState = 'enabled' | 'draining' | 'disabled' | 'archived';
+export type {
+  ActiveAlert,
+  AlertKind,
+  AlertSeverity,
+  AuditLogEntry,
+  ControlPlaneErrorResponse,
+  DeploymentApplyRequest,
+  DeploymentControlRequest,
+  DeploymentState,
+  DeploymentSummary,
+  DesiredState,
+  HeartbeatState,
+  HeartbeatStatus,
+  IntentPurpose,
+  JsonValue,
+  LogEntry,
+  MarketData,
+  ObservedState,
+  OperatorEvent,
+  PlatformMetrics,
+  PositionResponse,
+  PnlSnapshotResponse as TradingPnlSnapshot,
+  RiskSnapshotResponse as TradingRiskSnapshot,
+  StatusUpdate,
+  SystemControlResponse,
+  SystemStatus,
+  TradeResponse,
+  TradingStateSnapshot,
+} from './operator-contracts';
 
-export type IntentPurpose = 'entry' | 'exit' | 'reduce' | 'hedge' | 'cancel';
+import type {
+  DeploymentControlRequest as DeploymentControlRequestContract,
+  JsonValue,
+  OperatorEvent as OperatorEventContract,
+  PositionResponse as PositionResponseContract,
+  TradeResponse as TradeResponseContract,
+} from './operator-contracts';
 
-export interface TradeResponse {
-  id: string;
-  timestamp: string;
-  token_id: string;
-  token_name: string;
-  side: 'UP' | 'DOWN';
-  shares: number;
-  entry_price: number;
-  exit_price: number | null;
-  pnl: number | null;
-  status: 'PENDING' | 'LEG1_FILLED' | 'LEG2_FILLED' | 'COMPLETED' | 'FAILED';
-  error_message?: string;
-}
-
-export type Trade = TradeResponse;
-
-export interface PositionResponse {
-  token_id: string;
-  token_name: string;
-  side: 'UP' | 'DOWN';
-  shares: number;
-  entry_price: number;
-  current_price: number;
-  unrealized_pnl: number;
-  entry_time: string;
-  duration_seconds: number;
-}
-
-export type Position = PositionResponse;
-
-export interface SystemStatus {
-  status: string;
-  uptime_seconds: number;
-  version: string;
-  strategy: string;
-  last_trade_time: string | null;
-  websocket_connected: boolean;
-  database_connected: boolean;
-  error_count_1h: number;
-  live_reconcile_failures: number;
-  next_live_reconcile_at: string | null;
-  last_live_reconcile_error: string | null;
-  active_alert_count: number;
-  stale_source_count: number;
-  last_live_reconcile_success_at: string | null;
-}
-
-export type HeartbeatState = 'healthy' | 'stale';
-
-export interface HeartbeatStatus {
-  source_id: string;
-  source_kind: string;
-  state: HeartbeatState;
-  last_seen_at: string | null;
-  stale_after_seconds: number;
-  message: string | null;
-}
-
-export type AlertSeverity = 'warning' | 'critical';
-export type AlertKind = 'source_stale';
-
-export interface ActiveAlert {
-  alert_id: string;
-  kind: AlertKind;
-  severity: AlertSeverity;
-  source_id: string;
-  message: string;
-  triggered_at: string;
-}
-
-export interface PlatformMetrics {
-  total_deployments: number;
-  live_deployments: number;
-  degraded_deployments: number;
-  active_alerts: number;
-  stale_sources: number;
-  live_reconcile_failures: number;
-  last_trade_time: string | null;
-  last_live_reconcile_success_at: string | null;
-  heartbeats: HeartbeatStatus[];
-}
-
-export interface SystemControlResponse {
-  success: boolean;
-  message: string;
-}
-
-export type DesiredState = 'running' | 'paused' | 'stopped';
-
-export type ObservedState =
-  | 'starting'
-  | 'running'
-  | 'degraded'
-  | 'paused'
-  | 'stopped'
-  | 'failed';
-
-export interface DeploymentSummary {
-  deployment_id: string;
-  deployment_state: DeploymentState;
-  desired_state: DesiredState;
-  observed_state: ObservedState;
-}
-
-export interface TradingPnlSnapshot {
-  realized_pnl: string;
-  unrealized_pnl: string;
-  total_fees: string;
-  net_pnl: string;
-}
-
-export interface TradingRiskSnapshot {
-  pending_intents: number;
-  active_orders: number;
-  open_positions: number;
-  gross_exposure: string;
-}
-
-export interface TradingStateSnapshot {
-  deployment_id: string;
-  runtime_mode: string;
-  intents: unknown[];
-  orders: unknown[];
-  fills: unknown[];
-  positions: unknown[];
-  pnl: TradingPnlSnapshot;
-  risk: TradingRiskSnapshot;
-}
-
-export interface UpdateDeploymentStateRequest {
-  desired_state?: DesiredState;
-  deployment_state?: DeploymentState;
-}
+export type Trade = TradeResponseContract;
+export type Position = PositionResponseContract;
+export type UpdateDeploymentStateRequest = DeploymentControlRequestContract;
+export type WsMessage = OperatorEventContract;
 
 export interface StrategyConfig {
   symbols: string[];
@@ -159,14 +64,6 @@ export interface StrategyConfig {
   liquidity_exit_spread_bps?: number | null;
 }
 
-export interface LogEntry {
-  timestamp: string;
-  level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG';
-  component: string;
-  message: string;
-  metadata?: Record<string, JsonValue>;
-}
-
 export interface SecurityEvent {
   id: string;
   timestamp: string;
@@ -176,39 +73,12 @@ export interface SecurityEvent {
   metadata?: Record<string, JsonValue>;
 }
 
-export interface MarketData {
-  token_id: string;
-  token_name: string;
-  best_bid: number;
-  best_ask: number;
-  spread: number;
-  last_price: number;
-  volume_24h: number;
-  timestamp: string;
-}
-
-export interface StatusUpdate {
-  status: 'running' | 'stopped' | 'error';
-}
-
 export interface DeploymentStateSummary {
   enabled: number;
   draining: number;
   disabled: number;
   archived: number;
 }
-
-export type WsMessage =
-  | { type: 'log'; data: LogEntry }
-  | { type: 'trade'; data: TradeResponse }
-  | { type: 'position'; data: PositionResponse }
-  | { type: 'market'; data: MarketData }
-  | { type: 'status'; data: StatusUpdate }
-  | { type: 'system_snapshot'; data: { system: SystemStatus } }
-  | { type: 'deployment_snapshot'; data: { deployments: DeploymentSummary[] } }
-  | { type: 'trading_snapshot'; data: { trading: TradingStateSnapshot[] } }
-  | { type: 'metrics_snapshot'; data: { metrics: PlatformMetrics } }
-  | { type: 'alert_snapshot'; data: { alerts: ActiveAlert[] } };
 
 export interface PnLDataPoint {
   timestamp: string;
@@ -241,10 +111,3 @@ export interface RiskData {
     state: string;
   }>;
 }
-export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | JsonValue[]
-  | { [key: string]: JsonValue };
