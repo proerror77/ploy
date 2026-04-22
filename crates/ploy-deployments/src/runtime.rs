@@ -269,8 +269,8 @@ mod tests {
             bundle_id: "example".to_string(),
             runtime_mode: "paper".to_string(),
             desired_state: DesiredState::Running,
-            command: PathBuf::from("/bin/sh"),
-            args: vec!["-lc".to_string(), "sleep 30".to_string()],
+            command: PathBuf::from("/bin/sleep"),
+            args: vec!["30".to_string()],
             working_directory: std::env::current_dir().expect("cwd"),
             pid_file: std::env::temp_dir().join("ploy-deployments-test.pid"),
         }
@@ -375,7 +375,7 @@ mod tests {
 
         let mut second_spec = shell_sleep_spec();
         second_spec.pid_file = pid_file.clone();
-        second_spec.args = vec!["-lc".to_string(), "sleep 31".to_string()];
+        second_spec.args = vec!["31".to_string()];
         let mut second = DeploymentRuntime::new(second_spec);
         let second_pid = second.boot_status().pid.expect("second pid");
 
@@ -406,7 +406,7 @@ mod tests {
 
         let mut stale_spec = shell_sleep_spec();
         stale_spec.pid_file = pid_file.clone();
-        stale_spec.args = vec!["-lc".to_string(), "sleep 31".to_string()];
+        stale_spec.args = vec!["31".to_string()];
 
         let mut runtime = DeploymentRuntime {
             spec: stale_spec,
