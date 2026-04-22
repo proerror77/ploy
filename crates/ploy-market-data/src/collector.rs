@@ -13,6 +13,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use ploy_market_contracts::normalize_token_id;
 use polymarket_client_sdk::clob::ws::types::response::OrderBookLevel;
 use polymarket_client_sdk::clob::ws::{BookUpdate, Client as ClobWsClient};
 use polymarket_client_sdk::gamma::types::request::MarketByIdRequest;
@@ -1022,96 +1023,17 @@ async fn persist_book_update(
     })
 }
 
-/// Normalize token ID from hex (0x...) to decimal string.
-///
-/// Polymarket CLOB API returns token IDs as decimal strings, but database
-/// may store them as hex. This function ensures consistent decimal format.
-fn normalize_token_id(raw: &str) -> String {
-    let trimmed = raw.trim().trim_matches('"');
-
-    // If it's hex (0x prefix), convert to decimal
-    if let Some(hex) = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-    {
-        if let Some(decimal) = hex_to_decimal_string(hex) {
-            return decimal;
-        }
-    }
-
-    // Otherwise return as-is
-    trimmed.to_string()
-}
-
-/// Convert hex string to decimal string without external dependencies.
-fn hex_to_decimal_string(hex: &str) -> Option<String> {
-    if hex.is_empty() {
-        return None;
-    }
-
-    let mut digits = vec![0_u8];
-
-    for ch in hex.chars() {
-        let value = ch.to_digit(16)? as u32;
-        let mut carry = value;
-
-        for digit in &mut digits {
-            let next = (*digit as u32) * 16 + carry;
-            *digit = (next % 10) as u8;
-            carry = next / 10;
-        }
-
-        while carry > 0 {
-            digits.push((carry % 10) as u8);
-            carry /= 10;
-        }
-    }
-
-    while digits.len() > 1 && digits.last() == Some(&0) {
-        digits.pop();
-    }
-
-    Some(
-        digits
-            .iter()
-            .rev()
-            .map(|digit| char::from(b'0' + *digit))
-            .collect(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         best_tradeable_ask, best_tradeable_bid, book_timestamp, bridge_sdk_json,
-        collector_market_data_ws_config, hex_to_decimal_string, normalize_token_id,
-        parse_official_market_settlements, serialize_orderbook_levels, snapshot_context,
-        OfficialMarketSettlementPayload, OrderBookLevel, TokenMetadata,
+        collector_market_data_ws_config, parse_official_market_settlements,
+        serialize_orderbook_levels, snapshot_context, OfficialMarketSettlementPayload,
+        OrderBookLevel, TokenMetadata,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;
     use std::time::Duration;
-
-    #[test]
-    fn normalize_token_id_converts_hex_to_decimal() {
-        let raw = "\"0x3c38c18444ab803acea0d4de7bcdecae7f0f8ddbcd0466e3323d1cb9e04b6f5d\"";
-        let normalized = normalize_token_id(raw);
-        assert_eq!(
-            normalized,
-            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
-        );
-    }
-
-    #[test]
-    fn normalize_token_id_keeps_decimal_ids() {
-        let raw = "35165169860573247111698076491591023728797123337726915178028774493274622598566";
-        assert_eq!(normalize_token_id(raw), raw);
-    }
-
-    #[test]
-    fn hex_to_decimal_string_rejects_invalid_hex() {
-        assert_eq!(hex_to_decimal_string("xyz"), None);
-    }
 
     #[test]
     fn best_tradeable_bid_skips_placeholders_and_takes_highest_level() {

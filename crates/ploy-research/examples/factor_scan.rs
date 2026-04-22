@@ -24,27 +24,6 @@ use ploy_research::{
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
 
-fn market_update_ts(u: &MarketUpdate) -> DateTime<Utc> {
-    match u {
-        MarketUpdate::SpotPrice { ts, .. }
-        | MarketUpdate::AggTrade { ts, .. }
-        | MarketUpdate::Quote { ts, .. }
-        | MarketUpdate::L2 { ts, .. }
-        | MarketUpdate::L2Depth { ts, .. }
-        | MarketUpdate::SportsState { ts, .. }
-        | MarketUpdate::SportsPregame { ts, .. }
-        | MarketUpdate::SportsLive { ts, .. }
-        | MarketUpdate::ReferencePrice { ts, .. }
-        | MarketUpdate::Kline { ts, .. } => *ts,
-        MarketUpdate::EventDiscovered { end_time, window_secs, .. } => {
-            *end_time
-                - chrono::Duration::seconds(*window_secs as i64)
-                - chrono::Duration::hours(1)
-        }
-        MarketUpdate::EventExpired { end_time, .. } => *end_time,
-    }
-}
-
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
@@ -156,7 +135,12 @@ async fn main() {
 
     // Slice to the requested window and build FactorObservation rows.
     let updates_slice_start = start - chrono::Duration::hours(1) - chrono::Duration::seconds(300);
-    let updates_slice = slice_by_time(&all_updates, updates_slice_start, end, market_update_ts);
+    let updates_slice = slice_by_time(
+        &all_updates,
+        updates_slice_start,
+        end,
+        MarketUpdate::sort_ts,
+    );
     let lob_slice = slice_by_time(&all_lob_snapshots, start, end, |s| s.ts);
 
     eprintln!(

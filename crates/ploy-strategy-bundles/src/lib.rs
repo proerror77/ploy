@@ -24,9 +24,14 @@ pub use runtime::emit_intents;
 pub use signals::{MarketSignal, SignalConfig};
 pub use strategies::registry::{build_strategy, canonical_strategy_variant};
 pub use strategies::BayesianDirectionalStrategy;
+pub use strategies::DiffEnhancedStrategy;
+pub use strategies::DiffRegularStrategy;
 pub use strategies::DirectionalStrategy;
 pub use strategies::MeanReversionStrategy;
+pub use strategies::ProbChaseStrategy;
+pub use strategies::ProbReversalStrategy;
 pub use strategies::ReversalStrategy;
+pub use strategies::SweepStrategy;
 pub use strategies::ThreeLayerStrategy;
 pub use traits::{
     ExecutionReport, Executor, NullRecorder, Recorder, SignalRecord, StrategyDecision,
