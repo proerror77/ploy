@@ -5,13 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/ploy
+WorkingDirectory=/opt/ploy
 Environment=BINANCE_AGGTRADE_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT
 Environment=BINANCE_AGGTRADE_COMMIT_BATCH_SIZE=50
 Environment=BINANCE_AGGTRADE_COMMIT_INTERVAL_SECS=1.0
 Environment=BINANCE_AGGTRADE_REPORT_INTERVAL_SECS=60
 Environment=PLOY_DATABASE__URL=postgresql://postgres:postgres@localhost:5432/ploy
-ExecStart=/usr/bin/python3 /root/ploy/scripts/binance_aggtrade_collector.py
+ExecStart=/usr/bin/python3 /opt/ploy/scripts/binance_aggtrade_collector.py
 Restart=always
 RestartSec=5
 StandardOutput=journal
