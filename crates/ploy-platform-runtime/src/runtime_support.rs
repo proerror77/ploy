@@ -164,13 +164,28 @@ pub fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<Tra
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
+    let positions = snapshot
+        .positions
+        .into_iter()
+        .map(|position| ploy_trading::PositionSnapshot {
+            token_id: position.token_id,
+            net_qty: position.net_qty,
+            avg_entry_price: position.avg_entry_price,
+            realized_pnl: position.realized_pnl,
+        })
+        .collect();
+    let pnl = ploy_trading::PnlSnapshot {
+        realized_pnl: snapshot.pnl.realized_pnl,
+        unrealized_pnl: snapshot.pnl.unrealized_pnl,
+        total_fees: snapshot.pnl.total_fees,
+    };
 
     Ok(TradingRuntime::restore(TradingRuntimeSnapshot {
         intents,
         orders,
         fills,
-        positions: Vec::new(),
-        pnl: Default::default(),
+        positions,
+        pnl,
         risk: Default::default(),
     }))
 }
@@ -334,19 +349,33 @@ where
 mod tests {
     use super::{
         build_order_control_response, live_reconcile_backoff_ms, observed_state_for_desired,
-        order_state_from_wire, order_state_wire, trade_side_from_wire, trade_side_wire,
+        order_state_from_wire, order_state_wire, restore_trading_runtime, trade_side_from_wire,
+        trade_side_wire,
     };
-    use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
+    use ploy_operator_contracts::{
+        DeploymentState, DesiredState, ObservedState, PnlSnapshotResponse,
+        PositionSnapshotResponse, RiskSnapshotResponse, TradingStateSnapshot,
+    };
     use ploy_trading::{OrderRecord, OrderState, TradeSide};
     use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn state_and_side_wire_formats_round_trip() {
         assert_eq!(trade_side_wire(TradeSide::Buy), "buy");
         assert_eq!(trade_side_from_wire("sell").unwrap(), TradeSide::Sell);
-        assert_eq!(order_state_wire(OrderState::PartiallyFilled), "partially_filled");
-        assert_eq!(order_state_from_wire("acknowledged").unwrap(), OrderState::Acknowledged);
-        assert_eq!(observed_state_for_desired(DesiredState::Running), ObservedState::Starting);
+        assert_eq!(
+            order_state_wire(OrderState::PartiallyFilled),
+            "partially_filled"
+        );
+        assert_eq!(
+            order_state_from_wire("acknowledged").unwrap(),
+            OrderState::Acknowledged
+        );
+        assert_eq!(
+            observed_state_for_desired(DesiredState::Running),
+            ObservedState::Starting
+        );
         assert_eq!(DeploymentState::Enabled, DeploymentState::Enabled);
     }
 
@@ -380,5 +409,34 @@ mod tests {
         assert_eq!(response.deployment_id, "dep-1");
         assert_eq!(response.state, "acknowledged");
         assert_eq!(response.venue_order_id.as_deref(), Some("venue-1"));
+    }
+
+    #[test]
+    fn restore_trading_runtime_preserves_persisted_position_exposure() {
+        let runtime = restore_trading_runtime(TradingStateSnapshot {
+            deployment_id: "dep-1".to_string(),
+            runtime_mode: "live".to_string(),
+            positions: vec![PositionSnapshotResponse {
+                token_id: "token-1".to_string(),
+                net_qty: dec!(4),
+                avg_entry_price: dec!(0.25),
+                realized_pnl: dec!(0.5),
+            }],
+            pnl: PnlSnapshotResponse {
+                realized_pnl: dec!(0.5),
+                unrealized_pnl: Decimal::ZERO,
+                total_fees: dec!(0.02),
+                net_pnl: dec!(0.48),
+            },
+            risk: RiskSnapshotResponse::default(),
+            ..TradingStateSnapshot::default()
+        })
+        .expect("restore runtime");
+
+        let restored = runtime.snapshot(&Default::default());
+        assert_eq!(restored.positions.len(), 1);
+        assert_eq!(restored.positions[0].net_qty, dec!(4));
+        assert_eq!(restored.pnl.total_fees, dec!(0.02));
+        assert_eq!(restored.risk.gross_exposure, dec!(1.00));
     }
 }

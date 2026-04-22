@@ -125,7 +125,10 @@ pub fn replace_order(
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("intent `{}` for order `{order_id}` was not found", order.intent_id),
+                    format!(
+                        "intent `{}` for order `{order_id}` was not found",
+                        order.intent_id
+                    ),
                 )
             })?;
 
@@ -139,7 +142,12 @@ pub fn replace_order(
         }) {
             Ok(ReplaceOutcome::Replaced { venue_order_id }) => {
                 let updated = runtime
-                    .replace_order(order_id, request.quantity, request.limit_price, venue_order_id)
+                    .replace_order(
+                        order_id,
+                        request.quantity,
+                        request.limit_price,
+                        venue_order_id,
+                    )
                     .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
                 Ok(build_order_control_response(
                     deployment_id.to_string(),
@@ -150,6 +158,12 @@ pub fn replace_order(
                 io::ErrorKind::InvalidInput,
                 format!("live replace rejected: {reason}"),
             )),
+            Ok(ReplaceOutcome::PartialFailure { reason }) => {
+                let message = format!("live replace partially failed after cancel: {reason}");
+                let _ = runtime.cancel_order(order_id);
+                let _ = runtime.record_order_error(order_id, message.clone());
+                Err(io::Error::other(message))
+            }
             Err(err) => {
                 let _ = runtime.record_order_error(order_id, err.to_string());
                 Err(io_error_from_execution_error(err))
@@ -159,7 +173,12 @@ pub fn replace_order(
         let next_revision = order.revision + 1;
         let venue_order_id = format!("paper-{order_id}-r{next_revision}");
         let updated = runtime
-            .replace_order(order_id, request.quantity, request.limit_price, venue_order_id)
+            .replace_order(
+                order_id,
+                request.quantity,
+                request.limit_price,
+                venue_order_id,
+            )
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
         Ok(build_order_control_response(
             deployment_id.to_string(),
@@ -171,10 +190,14 @@ pub fn replace_order(
 #[cfg(test)]
 mod tests {
     use super::{cancel_order, replace_order};
-    use ploy_connectivity::{CancellationOutcome, ExecutionError, StaticExecutionGateway};
-    use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState, OrderReplaceRequest};
+    use ploy_connectivity::{
+        CancellationOutcome, ExecutionError, ReplaceOutcome, StaticExecutionGateway,
+    };
+    use ploy_operator_contracts::{
+        DeploymentState, DesiredState, ObservedState, OrderReplaceRequest,
+    };
     use ploy_platform::DeploymentRecord;
-    use ploy_trading::{IntentPurpose, TradeSide, TradingIntent, TradingRuntime};
+    use ploy_trading::{IntentPurpose, OrderState, TradeSide, TradingIntent, TradingRuntime};
     use rust_decimal_macros::dec;
     use std::io::ErrorKind;
 
@@ -216,8 +239,14 @@ mod tests {
         let mut runtime = seeded_runtime();
         let gateway = StaticExecutionGateway::acknowledged("venue-1")
             .with_cancel_result(Ok(CancellationOutcome::Canceled));
-        let response = cancel_order(&mut runtime, &gateway, &live_deployment(), "example.live", "order-1")
-            .expect("cancel");
+        let response = cancel_order(
+            &mut runtime,
+            &gateway,
+            &live_deployment(),
+            "example.live",
+            "order-1",
+        )
+        .expect("cancel");
         assert_eq!(response.state, "canceled");
     }
 
@@ -234,7 +263,8 @@ mod tests {
             fee: dec!(0.01),
             timestamp: chrono::Utc::now(),
         });
-        let gateway = StaticExecutionGateway::failed(ExecutionError::Transport("offline".to_string()));
+        let gateway =
+            StaticExecutionGateway::failed(ExecutionError::Transport("offline".to_string()));
         let error = replace_order(
             &mut runtime,
             &gateway,
@@ -249,5 +279,37 @@ mod tests {
         )
         .expect_err("invalid quantity");
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn replace_partial_failure_marks_order_canceled_with_error() {
+        let mut runtime = seeded_runtime();
+        let gateway = StaticExecutionGateway::acknowledged("venue-1").with_replace_result(Ok(
+            ReplaceOutcome::PartialFailure {
+                reason: "submit rejected".to_string(),
+            },
+        ));
+
+        let error = replace_order(
+            &mut runtime,
+            &gateway,
+            &live_deployment(),
+            "example.live",
+            "order-1",
+            OrderReplaceRequest {
+                quantity: dec!(2),
+                limit_price: Some(dec!(0.47)),
+            },
+            dec!(2),
+        )
+        .expect_err("partial failure should be surfaced");
+
+        assert_eq!(error.kind(), ErrorKind::Other);
+        let order = runtime.order("order-1").expect("order");
+        assert_eq!(order.state, OrderState::Canceled);
+        assert_eq!(
+            order.last_error.as_deref(),
+            Some("live replace partially failed after cancel: submit rejected")
+        );
     }
 }
