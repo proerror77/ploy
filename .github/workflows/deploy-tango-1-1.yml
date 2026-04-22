@@ -71,6 +71,7 @@ jobs:
         run: |
           cargo build --release --locked \
             --target "${PLATFORM_TARGET}" \
+            --features db,polars-export \
             -p ploy-research --example factor_research
           strip "target/${PLATFORM_TARGET}/release/examples/factor_research" || true
 
