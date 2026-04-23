@@ -1,6 +1,7 @@
 pub mod attribution;
 pub mod backtest;
 pub mod backtesting;
+pub mod dataset;
 pub mod factors;
 pub mod factors_new;
 #[cfg(any(feature = "ml", feature = "rl"))]
@@ -9,6 +10,12 @@ pub mod replay;
 pub mod signal;
 
 pub use backtesting::{run_backtest, BacktestReport};
+pub use dataset::{
+    ChronologyAnchor, ChronologyOrdering, DatasetArtifacts, DatasetBuildManifest,
+    DatasetBuildStats, DatasetLabelContract, DatasetSkipCounts, DatasetSourceWindow,
+    DatasetSplit, DatasetSplitArtifactPaths, DatasetSplitAssignment, DatasetSplitCounts,
+    DatasetSplitPolicy, EventChronologyKey, EventIndexEntry,
+};
 pub use factors::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations,
     build_factor_observations_with_lob, factor_metrics, AggregatedFactorMetric, EventFactorSummary,
