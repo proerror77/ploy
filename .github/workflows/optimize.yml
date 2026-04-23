@@ -7,20 +7,28 @@ on:
         description: "Git ref"
         required: true
         default: "main"
-      start_date:
+      train_start:
         description: "Train start date (YYYY-MM-DD)"
         required: true
-        default: "2026-04-11"
-      end_date:
+        default: "2026-04-15"
+      train_end:
         description: "Train end date (YYYY-MM-DD)"
         required: true
-        default: "2026-04-17"
-      iterations:
-        description: "Number of TPE iterations"
+        default: "2026-04-19"
+      val_start:
+        description: "Validation start date (YYYY-MM-DD)"
         required: true
-        default: "200"
+        default: "2026-04-20"
+      val_end:
+        description: "Validation end date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-22"
+      trials:
+        description: "Number of optimization trials"
+        required: true
+        default: "300"
       data_dir:
-        description: "Local Parquet data dir"
+        description: "Local Parquet data dir (rsynced from tango)"
         required: false
         default: "/tmp/ploy-parquet"
 
@@ -66,17 +74,10 @@ jobs:
             --features ploy-strategy-bundles/parquet-feed \
             --example optimize_backtest
 
-      - name: Upload optimize_backtest binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: optimize_backtest-${{ github.sha }}
-          path: target/release/examples/optimize_backtest
-          retention-days: 1
-
   optimize:
     name: Run optimize on ploy-ci-1
     runs-on: [self-hosted, ploy-ci-1]
-    timeout-minutes: 60
+    timeout-minutes: 120
     environment: ploy-ci-1
     needs: [build]
 
@@ -86,17 +87,7 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
-      - name: Download optimize_backtest binary
-        uses: actions/download-artifact@v4
-        with:
-          name: optimize_backtest-${{ github.sha }}
-          path: target/release/examples
-
-      - name: Make binary executable
-        run: chmod +x target/release/examples/optimize_backtest
-
       - name: Sync Parquet data from Tango-1-1
-        if: ${{ github.event.inputs.data_dir != '' }}
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.TANGO_SSH_KEY }}" > ~/.ssh/tango_key
@@ -108,16 +99,13 @@ jobs:
             ${{ github.event.inputs.data_dir }}/
 
       - name: Run optimize
-        env:
-          START_DATE: ${{ github.event.inputs.start_date }}
-          END_DATE: ${{ github.event.inputs.end_date }}
-          DATA_DIR: ${{ github.event.inputs.data_dir }}
-          ITERATIONS: ${{ github.event.inputs.iterations }}
         run: |
+          . /home/runner/.cargo/env
           ./target/release/examples/optimize_backtest \
-            --config "config/strategies/02-pm5d-threelayer.unified.toml" \
-            --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
-            --start-date "${START_DATE}" \
-            --end-date "${END_DATE}" \
-            --data-dir "${DATA_DIR}" \
-            --iterations "${ITERATIONS}"
+            --strategy-variant three_layer \
+            --data-dir "${{ github.event.inputs.data_dir }}" \
+            --train-start "${{ github.event.inputs.train_start }}" \
+            --train-end "${{ github.event.inputs.train_end }}" \
+            --val-start "${{ github.event.inputs.val_start }}" \
+            --val-end "${{ github.event.inputs.val_end }}" \
+            --trials "${{ github.event.inputs.trials }}"
