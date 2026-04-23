@@ -23,6 +23,25 @@
 - 2026-04-23: Cloud-side reboot restored `ploy-ci-1`; ECS StartTime became `2026-04-23T06:47Z`, and GitHub runner returned `online`.
 - 2026-04-23: Bounded smoke run `24821322891` on branch `fix/optimize-resource-controls` succeeded with `BTCUSDT,ETHUSDT`, `5` trials, and one-day train/val; it loaded `9,505,974` updates per split, completed validation, and left the runner `online`.
 
+### Tick-preserving optimize redesign review
+
+- 2026-04-23: Team execution lane split is active under `execute-omx-plans-tick-preserv`. Documentation/integration lane owns ADR/runbook text and merge checklist only; source implementation remains with the workflow, optimizer, feed, and verification lanes.
+- 2026-04-23: Added `docs/architecture/pm5d-tick-preserving-optimize-guardrails.md` as the durable ADR/runbook for the redesign. The doc records the non-negotiable replay contract: no LOB or `aggTrade` downsampling, full-cadence Parquet replay, observable feed errors, and non-canonical labeling for smoke/max-update runs.
+- 2026-04-23: Integration checklist for the lead merge:
+  - workflow and optimizer CLI flags must match exactly;
+  - preflight/manifest must run before any heavy replay loop;
+  - Parquet optimizer mode must not build full-window train/validation `Vec<MarketUpdate>` or `Arc<[MarketUpdate]>`;
+  - DB eager replay must remain unchanged or be covered by explicit tests;
+  - `StreamingParquetFeed` background/DuckDB failures must become optimizer failures;
+  - replay parity tests must lock same-timestamp ordering, event lifecycle insertion, LOB `L2` then `L2Depth` emission, PM quote filtering, and proof that LOB/`aggTrade` are not omitted;
+  - smoke-limited runs must be labeled non-canonical in workflow output and job summaries.
+- 2026-04-23: Required bounded verification sequence before retrying the original Apr 15-22 six-symbol workload:
+  - preflight-only on the Apr 15-22 six-symbol window;
+  - two-symbol one-day train/validation smoke with five trials;
+  - narrow six-symbol smoke with one to three trials;
+  - post-run host-health evidence showing runner online/idle state, no lingering optimizer/DuckDB/build processes, memory/swap/disk state, and DuckDB temp cleanup.
+- 2026-04-23: Local documentation verification for the integration lane used only lightweight checks: Markdown file inspection, `git diff --check`, and status/diff review. No local Rust/DuckDB/Parquet build or replay workload was run.
+
 ## Host Role Split Follow-up (2026-04-20)
 
 ### Files
