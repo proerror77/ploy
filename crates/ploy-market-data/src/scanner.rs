@@ -69,6 +69,7 @@ pub fn spawn_market_scanner(
         // the live scanner, so we emit them now with official settlement outcomes.
         if let Some(ref db) = pool {
             recover_expired_open_positions(&tx, db).await;
+            recover_pending_open_positions(tx.clone(), db, &mut tracked, &mut subscribed_tokens, &mut quote_handles).await;
         }
 
         loop {
@@ -250,6 +251,133 @@ async fn recover_expired_open_positions(tx: &broadcast::Sender<MarketUpdate>, po
                 resolved_up_won,
             });
         }
+    }
+}
+
+/// On startup, find events that have NOT yet expired but already have open
+/// positions from a previous runner instance. Re-inject them into the scanner's
+/// `tracked` map and emit `EventDiscovered` so the strategy can manage them
+/// through to settlement.
+async fn recover_pending_open_positions(
+    tx: Arc<broadcast::Sender<MarketUpdate>>,
+    pool: &PgPool,
+    tracked: &mut HashMap<String, TrackedEvent>,
+    subscribed_tokens: &mut HashSet<String>,
+    quote_handles: &mut Vec<JoinHandle<()>>,
+) {
+    let lookback = Utc::now() - Duration::hours(RECOVERY_LOOKBACK_HOURS);
+
+    let rows: Vec<(String, String, String, String, String, DateTime<Utc>, Option<Decimal>)> =
+        match sqlx::query_as(
+            r#"
+            SELECT DISTINCT
+                f.event_id,
+                f.symbol,
+                m.raw_market->'markets'->0->>'clobTokenIds' AS clob_token_ids_json,
+                f.token_id,
+                f.market_side,
+                m.end_time,
+                m.price_to_beat
+            FROM strategy_runtime_fills f
+            JOIN pm_market_metadata m ON m.market_slug = f.event_id
+            WHERE f.fill_side = 'BUY'
+              AND f.fill_timestamp >= $1
+              AND m.end_time > NOW()
+              AND NOT EXISTS (
+                  SELECT 1 FROM strategy_runtime_fills s2
+                  WHERE s2.token_id = f.token_id
+                    AND s2.fill_side = 'SELL'
+              )
+            "#,
+        )
+        .bind(lookback)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!(error = %e, "Failed to query pending open positions for recovery");
+                return;
+            }
+        };
+
+    if rows.is_empty() {
+        debug!("Startup recovery: no pending (not-yet-expired) open positions found");
+        return;
+    }
+
+    info!(
+        count = rows.len(),
+        "Startup recovery: re-injecting pending open positions into scanner"
+    );
+
+    let mut new_tokens: Vec<U256> = Vec::new();
+    let mut seen_events: HashSet<String> = HashSet::new();
+
+    for (event_id, symbol, clob_json, _token_id, _market_side, end_time, price_to_beat) in rows {
+        if !seen_events.insert(event_id.clone()) {
+            continue;
+        }
+
+        let (up_token, down_token) = match parse_clob_token_pair(&clob_json) {
+            Some(pair) => pair,
+            None => {
+                warn!(event_id = %event_id, "Recovery: cannot parse clobTokenIds, skipping");
+                continue;
+            }
+        };
+
+        let Some(up_asset_id) = parse_token_id(&up_token) else { continue };
+        let Some(down_asset_id) = parse_token_id(&down_token) else { continue };
+
+        if subscribed_tokens.insert(up_token.clone()) {
+            new_tokens.push(up_asset_id);
+        }
+        if subscribed_tokens.insert(down_token.clone()) {
+            new_tokens.push(down_asset_id);
+        }
+
+        tracked.insert(event_id.clone(), TrackedEvent {
+            end_time,
+            symbol: symbol.clone(),
+            price_to_beat: price_to_beat.clone(),
+        });
+
+        info!(
+            event_id = %event_id,
+            symbol = %symbol,
+            end_time = %end_time,
+            "Recovery: re-emitting EventDiscovered for pending position",
+        );
+
+        let _ = tx.send(MarketUpdate::EventDiscovered {
+            event_id: Arc::from(event_id.as_str()),
+            symbol: Arc::from(symbol.as_str()),
+            up_token: Arc::from(up_token.as_str()),
+            down_token: Arc::from(down_token.as_str()),
+            end_time,
+            window_secs: 300,
+            price_to_beat,
+            resolved_up_won: None,
+        });
+    }
+
+    if !new_tokens.is_empty() {
+        info!(
+            tokens = new_tokens.len(),
+            "Recovery: subscribing to quote feeds for pending positions"
+        );
+        let handle = spawn_quote_feed(tx.clone(), new_tokens, Some(pool.clone()));
+        quote_handles.push(handle);
+    }
+}
+
+fn parse_clob_token_pair(raw: &str) -> Option<(String, String)> {
+    let parsed: Vec<String> = serde_json::from_str(raw).ok()?;
+    if parsed.len() == 2 {
+        Some((parsed[0].clone(), parsed[1].clone()))
+    } else {
+        None
     }
 }
 
