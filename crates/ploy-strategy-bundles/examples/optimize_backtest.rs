@@ -689,7 +689,6 @@ fn run_backtest(
     let snapshot = runtime.trading().snapshot(&BTreeMap::new());
     let cashflow = snapshot.fill_cashflow_summary();
     let net_pnl = cashflow.net_pnl().to_string().parse::<f64>().unwrap_or(0.0);
-    let trade_count = result.fills_recorded as usize / 2;
 
     let fills = &snapshot.fills;
     let mut by_token: HashMap<&str, Vec<&ploy_trading::FillRecord>> = HashMap::new();
@@ -714,6 +713,7 @@ fn run_backtest(
             }
         }
     }
+    let trade_count = per_trade_pnl.len();
 
     let sharpe = if per_trade_pnl.len() < 5 {
         -999.0
