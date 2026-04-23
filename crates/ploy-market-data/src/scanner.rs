@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use ploy_market_contracts::MarketUpdate;
-use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::gamma::types::request::MarketsRequest;
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -21,13 +21,13 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::crypto::discover_crypto_markets;
+use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::sports::discover_sports_markets;
 use crate::discovery::upsert_market_catalog;
 use crate::feeds::spawn_quote_feed;
 use crate::reference_prices::{
-    ReferencePriceRegistry, ReferencePriceSource, latest_reference_price,
+    latest_reference_price, ReferencePriceRegistry, ReferencePriceSource,
 };
 
 const SCAN_INTERVAL_SECS: u64 = 30;
@@ -39,6 +39,19 @@ const RECOVERY_LOOKBACK_HOURS: i64 = 48;
 struct TrackedEvent {
     end_time: chrono::DateTime<Utc>,
     symbol: String,
+    price_to_beat: Option<Decimal>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PendingOpenPositionRow {
+    event_id: String,
+    symbol: Option<String>,
+    clob_token_ids_json: Option<String>,
+    token_id: String,
+    market_side: Option<String>,
+    start_time: Option<DateTime<Utc>>,
+    end_time: DateTime<Utc>,
+    horizon: Option<String>,
     price_to_beat: Option<Decimal>,
 }
 
@@ -69,7 +82,14 @@ pub fn spawn_market_scanner(
         // the live scanner, so we emit them now with official settlement outcomes.
         if let Some(ref db) = pool {
             recover_expired_open_positions(&tx, db).await;
-            recover_pending_open_positions(tx.clone(), db, &mut tracked, &mut subscribed_tokens, &mut quote_handles).await;
+            recover_pending_open_positions(
+                tx.clone(),
+                db,
+                &mut tracked,
+                &mut subscribed_tokens,
+                &mut quote_handles,
+            )
+            .await;
         }
 
         loop {
@@ -267,16 +287,17 @@ async fn recover_pending_open_positions(
 ) {
     let lookback = Utc::now() - Duration::hours(RECOVERY_LOOKBACK_HOURS);
 
-    let rows: Vec<(String, String, String, String, String, DateTime<Utc>, Option<Decimal>)> =
-        match sqlx::query_as(
-            r#"
+    let rows: Vec<PendingOpenPositionRow> = match sqlx::query_as::<_, PendingOpenPositionRow>(
+        r#"
             SELECT DISTINCT
                 f.event_id,
-                f.symbol,
+                COALESCE(f.symbol, m.symbol) AS symbol,
                 m.raw_market->'markets'->0->>'clobTokenIds' AS clob_token_ids_json,
                 f.token_id,
                 f.market_side,
+                m.start_time,
                 m.end_time,
+                m.horizon,
                 m.price_to_beat
             FROM strategy_runtime_fills f
             JOIN pm_market_metadata m ON m.market_slug = f.event_id
@@ -289,17 +310,17 @@ async fn recover_pending_open_positions(
                     AND s2.fill_side = 'SELL'
               )
             "#,
-        )
-        .bind(lookback)
-        .fetch_all(pool)
-        .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                warn!(error = %e, "Failed to query pending open positions for recovery");
-                return;
-            }
-        };
+    )
+    .bind(lookback)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(error = %e, "Failed to query pending open positions for recovery");
+            return;
+        }
+    };
 
     if rows.is_empty() {
         debug!("Startup recovery: no pending (not-yet-expired) open positions found");
@@ -314,21 +335,47 @@ async fn recover_pending_open_positions(
     let mut new_tokens: Vec<U256> = Vec::new();
     let mut seen_events: HashSet<String> = HashSet::new();
 
-    for (event_id, symbol, clob_json, _token_id, _market_side, end_time, price_to_beat) in rows {
-        if !seen_events.insert(event_id.clone()) {
+    for row in rows {
+        if seen_events.contains(&row.event_id) {
             continue;
         }
+
+        let Some(symbol) = row.symbol else {
+            warn!(event_id = %row.event_id, "Recovery: missing symbol, skipping");
+            continue;
+        };
+
+        let Some(clob_json) = row.clob_token_ids_json else {
+            warn!(event_id = %row.event_id, "Recovery: missing clobTokenIds, skipping");
+            continue;
+        };
 
         let (up_token, down_token) = match parse_clob_token_pair(&clob_json) {
             Some(pair) => pair,
             None => {
-                warn!(event_id = %event_id, "Recovery: cannot parse clobTokenIds, skipping");
+                warn!(event_id = %row.event_id, "Recovery: cannot parse clobTokenIds, skipping");
                 continue;
             }
         };
 
-        let Some(up_asset_id) = parse_token_id(&up_token) else { continue };
-        let Some(down_asset_id) = parse_token_id(&down_token) else { continue };
+        let Some(up_asset_id) = parse_token_id(&up_token) else {
+            continue;
+        };
+        let Some(down_asset_id) = parse_token_id(&down_token) else {
+            continue;
+        };
+        let Some(window_secs) =
+            recovered_market_window_secs(row.start_time, row.end_time, row.horizon.as_deref())
+        else {
+            warn!(
+                event_id = %row.event_id,
+                horizon = ?row.horizon,
+                "Recovery: cannot infer market window, skipping"
+            );
+            continue;
+        };
+
+        seen_events.insert(row.event_id.clone());
 
         if subscribed_tokens.insert(up_token.clone()) {
             new_tokens.push(up_asset_id);
@@ -337,27 +384,33 @@ async fn recover_pending_open_positions(
             new_tokens.push(down_asset_id);
         }
 
-        tracked.insert(event_id.clone(), TrackedEvent {
-            end_time,
-            symbol: symbol.clone(),
-            price_to_beat: price_to_beat.clone(),
-        });
+        tracked.insert(
+            row.event_id.clone(),
+            TrackedEvent {
+                end_time: row.end_time,
+                symbol: symbol.clone(),
+                price_to_beat: row.price_to_beat.clone(),
+            },
+        );
 
         info!(
-            event_id = %event_id,
+            event_id = %row.event_id,
             symbol = %symbol,
-            end_time = %end_time,
+            token_id = %row.token_id,
+            market_side = ?row.market_side,
+            end_time = %row.end_time,
+            window_secs = window_secs,
             "Recovery: re-emitting EventDiscovered for pending position",
         );
 
         let _ = tx.send(MarketUpdate::EventDiscovered {
-            event_id: Arc::from(event_id.as_str()),
+            event_id: Arc::from(row.event_id.as_str()),
             symbol: Arc::from(symbol.as_str()),
             up_token: Arc::from(up_token.as_str()),
             down_token: Arc::from(down_token.as_str()),
-            end_time,
-            window_secs: 300,
-            price_to_beat,
+            end_time: row.end_time,
+            window_secs,
+            price_to_beat: row.price_to_beat,
             resolved_up_won: None,
         });
     }
@@ -370,6 +423,35 @@ async fn recover_pending_open_positions(
         let handle = spawn_quote_feed(tx.clone(), new_tokens, Some(pool.clone()));
         quote_handles.push(handle);
     }
+}
+
+fn recovered_market_window_secs(
+    start_time: Option<DateTime<Utc>>,
+    end_time: DateTime<Utc>,
+    horizon: Option<&str>,
+) -> Option<u64> {
+    if let Some(start_time) = start_time {
+        let seconds = (end_time - start_time).num_seconds();
+        if seconds > 0 {
+            return Some(seconds as u64);
+        }
+    }
+
+    parse_horizon_secs(horizon?)
+}
+
+fn parse_horizon_secs(horizon: &str) -> Option<u64> {
+    let horizon = horizon.trim().to_ascii_lowercase();
+    if let Some(minutes) = horizon.strip_suffix('m') {
+        return minutes.parse::<u64>().ok().map(|value| value * 60);
+    }
+    if let Some(hours) = horizon.strip_suffix('h') {
+        return hours.parse::<u64>().ok().map(|value| value * 60 * 60);
+    }
+    if let Some(seconds) = horizon.strip_suffix('s') {
+        return seconds.parse::<u64>().ok();
+    }
+    None
 }
 
 fn parse_clob_token_pair(raw: &str) -> Option<(String, String)> {
@@ -554,17 +636,42 @@ async fn upsert_market_metadata(
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
 
-    use super::{parse_token_id, should_refresh_sports_catalog};
+    use super::{
+        parse_horizon_secs, parse_token_id, recovered_market_window_secs,
+        should_refresh_sports_catalog,
+    };
 
     #[test]
     fn token_id_parser_accepts_decimal_strings() {
-        assert!(
-            parse_token_id(
-                "27239049953613250678046988034203198692578441444398010699401021233149338414941"
-            )
-            .is_some()
-        );
+        assert!(parse_token_id(
+            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
+        )
+        .is_some());
         assert!(parse_token_id("not-a-token").is_none());
+    }
+
+    #[test]
+    fn recovered_market_window_prefers_start_time_then_horizon() {
+        let start = Utc.with_ymd_and_hms(2026, 4, 6, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 4, 6, 0, 15, 0).unwrap();
+
+        assert_eq!(
+            recovered_market_window_secs(Some(start), end, Some("5m")),
+            Some(900)
+        );
+        assert_eq!(
+            recovered_market_window_secs(None, end, Some("15m")),
+            Some(900)
+        );
+        assert_eq!(recovered_market_window_secs(None, end, Some("bad")), None);
+    }
+
+    #[test]
+    fn parse_horizon_secs_supports_common_units() {
+        assert_eq!(parse_horizon_secs("5m"), Some(300));
+        assert_eq!(parse_horizon_secs("1h"), Some(3600));
+        assert_eq!(parse_horizon_secs("45s"), Some(45));
+        assert_eq!(parse_horizon_secs(""), None);
     }
 
     #[test]
