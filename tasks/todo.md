@@ -1,3 +1,18 @@
+# Remote Dry-Run Strategy Report (2026-04-24)
+
+## Files
+
+- `crates/ploy-daemon-host/src/http.rs`
+- `scripts/report_strategy.py`
+- `.github/workflows/deploy-tango-1-1.yml`
+
+## Tasks
+
+- [ ] Add a read-only remote HTML endpoint for the existing dry-run strategy report.
+- [ ] Let the report generator run directly on `tango-1-1` against its local PostgreSQL instead of SSHing back into the host.
+- [ ] Ship the report script in the tango deploy bundle so `ployd` can regenerate and serve the page on demand.
+- [ ] Deploy the change to `tango-1-1` and verify the report is reachable over the existing control-plane surface.
+
 # PM5D Settlement + Strategy Audit (2026-04-12)
 
 ## Optimize Workflow Recovery (2026-04-23)

@@ -214,6 +214,7 @@ The default workspace control plane is:
 - `GET /api/deployments/:id`
 - `POST /api/deployments/:id/control`
 - `GET /api/trading/state`
+- `GET /reports/strategy`
 - `POST /api/deployments/:id/intents`
 - `POST /api/deployments/:id/orders/:order_id/cancel`
 - `POST /api/deployments/:id/orders/:order_id/replace`
