@@ -43,8 +43,8 @@ use ploy_feed_loaders::{
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
     DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
-    ThreeLayerStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
-    StrategyLogic, StrategyRuntime,
+    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
+    StrategyRuntime, ThreeLayerStrategy,
 };
 use ploy_trading::TradeSide;
 use rust_decimal_macros::dec;
@@ -141,7 +141,7 @@ fn build_strategy(strategy_variant: &str, config: DirectionalConfig) -> Box<dyn 
 fn run_backtest(
     strategy_variant: &str,
     config: DirectionalConfig,
-    data: &[MarketUpdate],
+    data: Arc<[MarketUpdate]>,
 ) -> (f64, usize, f64) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -149,7 +149,7 @@ fn run_backtest(
         .unwrap();
 
     let strategy = build_strategy(strategy_variant, config);
-    let feed = HistoricalFeed::new(data.to_vec());
+    let feed = HistoricalFeed::shared(data);
     let executor = SimulatedExecutor::new(SimulatedExecutorConfig::default());
     let recorder = Box::new(NullRecorder);
     let runtime_config = RuntimeConfig {
@@ -250,17 +250,17 @@ fn make_directional_config(
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
         allowed_window_secs: vec![300, 900],
-    three_layer_min_direction_prob: 0.52,
-    three_layer_min_distance_over_sigma: 0.15,
-    three_layer_min_confirmation_score: 0.03,
-    three_layer_min_drift_confirmation: 0.0002,
-    three_layer_min_edge: 0.015,
-    three_layer_min_reward_risk: 0.9,
-    three_layer_take_profit_ask: 0.70,
-    three_layer_stop_distance_pct: 0.020,
-    three_layer_max_pm_lag_secs: 15,
-    three_layer_min_entry_score: 0.30,
-}
+        three_layer_min_direction_prob: 0.52,
+        three_layer_min_distance_over_sigma: 0.15,
+        three_layer_min_confirmation_score: 0.03,
+        three_layer_min_drift_confirmation: 0.0002,
+        three_layer_min_edge: 0.015,
+        three_layer_min_reward_risk: 0.9,
+        three_layer_take_profit_ask: 0.70,
+        three_layer_stop_distance_pct: 0.020,
+        three_layer_max_pm_lag_secs: 15,
+        three_layer_min_entry_score: 0.30,
+    }
 }
 
 struct ReversalSearchParams {
@@ -315,17 +315,17 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
         max_daily_trades: 1000,
         max_daily_loss_usd: None,
         allowed_window_secs: vec![300],
-    three_layer_min_direction_prob: 0.52,
-    three_layer_min_distance_over_sigma: 0.15,
-    three_layer_min_confirmation_score: 0.03,
-    three_layer_min_drift_confirmation: 0.0002,
-    three_layer_min_edge: 0.015,
-    three_layer_min_reward_risk: 0.9,
-    three_layer_take_profit_ask: 0.70,
-    three_layer_stop_distance_pct: 0.020,
-    three_layer_max_pm_lag_secs: 15,
-    three_layer_min_entry_score: 0.30,
-}
+        three_layer_min_direction_prob: 0.52,
+        three_layer_min_distance_over_sigma: 0.15,
+        three_layer_min_confirmation_score: 0.03,
+        three_layer_min_drift_confirmation: 0.0002,
+        three_layer_min_edge: 0.015,
+        three_layer_min_reward_risk: 0.9,
+        three_layer_take_profit_ask: 0.70,
+        three_layer_stop_distance_pct: 0.020,
+        three_layer_max_pm_lag_secs: 15,
+        three_layer_min_entry_score: 0.30,
+    }
 }
 
 struct ThreeLayerSearchParams {
@@ -471,10 +471,16 @@ fn main() {
         .unwrap_or_else(|| parse_date_end(&val_end));
 
     let (train_data, val_data) = if let Some(ref dir) = data_dir {
-        eprintln!("Loading training data from Parquet ({} → {})...", train_start, train_end);
+        eprintln!(
+            "Loading training data from Parquet ({} → {})...",
+            train_start, train_end
+        );
         let train = load_from_parquet_vec(dir, &symbols, train_from, train_to);
         eprintln!("  {} updates loaded", train.len());
-        eprintln!("Loading validation data from Parquet ({} → {})...", val_start, val_end);
+        eprintln!(
+            "Loading validation data from Parquet ({} → {})...",
+            val_start, val_end
+        );
         let val = load_from_parquet_vec(dir, &symbols, val_from, val_to);
         eprintln!("  {} updates loaded\n", val.len());
         (train, val)
@@ -516,15 +522,14 @@ fn main() {
         (train, val)
     };
 
-    let train_data = Arc::new(train_data);
+    let train_data: Arc<[MarketUpdate]> = Arc::from(train_data.into_boxed_slice());
+    let val_data: Arc<[MarketUpdate]> = Arc::from(val_data.into_boxed_slice());
     let symbols_ref = Arc::new(symbols.clone());
     let study: Study<f64> = Study::maximize(TpeSampler::new());
 
     if strategy_variant == "reversal" {
-        let p_max_distance =
-            FloatParam::new(0.015, 0.05).name("reversal_max_distance_pct");
-        let p_max_ask =
-            FloatParam::new(0.45, 0.85).name("reversal_max_ask_for_reversal");
+        let p_max_distance = FloatParam::new(0.015, 0.05).name("reversal_max_distance_pct");
+        let p_max_ask = FloatParam::new(0.45, 0.85).name("reversal_max_ask_for_reversal");
         let p_pm_lag = IntParam::new(20, 120).name("reversal_max_pm_lag_secs");
         let p_min_edge = FloatParam::new(-0.05, 0.01).name("min_edge");
 
@@ -552,7 +557,8 @@ fn main() {
                 };
 
                 let config = make_reversal_config(symbols_ref_c.as_slice(), &params);
-                let (net_pnl, trades, sharpe) = run_backtest("reversal", config, &train_ref);
+                let (net_pnl, trades, sharpe) =
+                    run_backtest("reversal", config, Arc::clone(&train_ref));
                 let score = if trades == 0 {
                     -100.0
                 } else if trades < 5 {
@@ -636,7 +642,8 @@ fn main() {
 
         eprintln!("\n=== Validation (held-out) ===");
         let val_config = make_reversal_config(symbols_ref.as_slice(), &best_params);
-        let (val_pnl, val_trades, val_sharpe) = run_backtest("reversal", val_config, &val_data);
+        let (val_pnl, val_trades, val_sharpe) =
+            run_backtest("reversal", val_config, Arc::clone(&val_data));
         eprintln!("Val Sharpe:  {val_sharpe:.3}");
         eprintln!("Val PnL:     ${val_pnl:.2}");
         eprintln!("Val Trades:  {val_trades}");
@@ -662,10 +669,7 @@ fn main() {
             "reversal_max_ask_for_reversal = {:.4}",
             best_params.max_ask_for_reversal
         );
-        eprintln!(
-            "reversal_max_pm_lag_secs = {}",
-            best_params.max_pm_lag_secs
-        );
+        eprintln!("reversal_max_pm_lag_secs = {}", best_params.max_pm_lag_secs);
         eprintln!("min_edge = {:.4}", best_params.min_edge);
         eprintln!("cooldown_secs = {}", best_params.cooldown_secs);
         eprintln!(
@@ -717,9 +721,8 @@ fn main() {
             (lcg_state as f64) / (u64::MAX as f64)
         };
 
-        let sample = |rng: &mut dyn FnMut() -> f64, lo: f64, hi: f64| -> f64 {
-            lo + rng() * (hi - lo)
-        };
+        let sample =
+            |rng: &mut dyn FnMut() -> f64, lo: f64, hi: f64| -> f64 { lo + rng() * (hi - lo) };
 
         let train_ref = Arc::clone(&train_data);
         let symbols_ref_c = Arc::clone(&symbols_ref);
@@ -757,7 +760,8 @@ fn main() {
             };
 
             let config = make_three_layer_config(symbols_ref_c.as_slice(), &params);
-            let (net_pnl, trades, sharpe) = run_backtest("three_layer", config, &train_ref);
+            let (net_pnl, trades, sharpe) =
+                run_backtest("three_layer", config, Arc::clone(&train_ref));
 
             // Sharpe = mean(pnl_per_trade) / std(pnl_per_trade) * sqrt(trades_per_year)
             // Penalty for < 5 trades already applied inside run_backtest (-999.0)
@@ -810,24 +814,52 @@ fn main() {
 
         eprintln!("\n=== Validation (held-out, out-of-sample) ===");
         let val_config = make_three_layer_config(symbols_ref.as_slice(), &best_params);
-        let (val_pnl, val_trades, val_sharpe) = run_backtest("three_layer", val_config, &val_data);
+        let (val_pnl, val_trades, val_sharpe) =
+            run_backtest("three_layer", val_config, Arc::clone(&val_data));
         eprintln!("Val Sharpe:  {val_sharpe:.3}");
         eprintln!("Val PnL:     ${val_pnl:.2}");
         eprintln!("Val Trades:  {val_trades}");
 
         eprintln!("\n=== Best Config (TOML) ===");
         eprintln!("# Paste into [strategy] section of your config file");
-        eprintln!("three_layer_min_direction_prob = {:.4}", best_params.min_direction_prob);
-        eprintln!("three_layer_min_distance_over_sigma = {:.4}", best_params.min_distance_over_sigma);
-        eprintln!("three_layer_min_confirmation_score = {:.4}", best_params.min_confirmation_score);
-        eprintln!("three_layer_min_drift_confirmation = {:.6}", best_params.min_drift_confirmation);
+        eprintln!(
+            "three_layer_min_direction_prob = {:.4}",
+            best_params.min_direction_prob
+        );
+        eprintln!(
+            "three_layer_min_distance_over_sigma = {:.4}",
+            best_params.min_distance_over_sigma
+        );
+        eprintln!(
+            "three_layer_min_confirmation_score = {:.4}",
+            best_params.min_confirmation_score
+        );
+        eprintln!(
+            "three_layer_min_drift_confirmation = {:.6}",
+            best_params.min_drift_confirmation
+        );
         eprintln!("three_layer_min_edge = {:.4}", best_params.min_edge);
-        eprintln!("three_layer_min_reward_risk = {:.4}", best_params.min_reward_risk);
-        eprintln!("three_layer_take_profit_ask = {:.4}", best_params.take_profit_ask);
-        eprintln!("three_layer_stop_distance_pct = {:.4}", best_params.stop_distance_pct);
+        eprintln!(
+            "three_layer_min_reward_risk = {:.4}",
+            best_params.min_reward_risk
+        );
+        eprintln!(
+            "three_layer_take_profit_ask = {:.4}",
+            best_params.take_profit_ask
+        );
+        eprintln!(
+            "three_layer_stop_distance_pct = {:.4}",
+            best_params.stop_distance_pct
+        );
         eprintln!("cooldown_secs = {}", best_params.cooldown_secs);
-        eprintln!("min_time_remaining_secs = {}", best_params.min_time_remaining_secs);
-        eprintln!("max_time_remaining_secs = {}", best_params.max_time_remaining_secs);
+        eprintln!(
+            "min_time_remaining_secs = {}",
+            best_params.min_time_remaining_secs
+        );
+        eprintln!(
+            "max_time_remaining_secs = {}",
+            best_params.max_time_remaining_secs
+        );
     } else {
         let p_min_prob = FloatParam::new(0.50, 0.72).name("min_probability");
         let p_min_edge = FloatParam::new(0.005, 0.06).name("min_edge");
@@ -868,7 +900,7 @@ fn main() {
                     max_time,
                 );
                 let (net_pnl, trades, sharpe) =
-                    run_backtest("directional", config, &train_ref);
+                    run_backtest("directional", config, Arc::clone(&train_ref));
 
                 eprintln!(
                     "  Trial {:>3}: sharpe={:>7.3}  pnl=${:>8.2}  trades={:>4}  p={:.3}  edge={:.4}  max={:.2}  cd={}s",
@@ -914,7 +946,7 @@ fn main() {
             best_max_time,
         );
         let (val_pnl, val_trades, val_sharpe) =
-            run_backtest("directional", val_config, &val_data);
+            run_backtest("directional", val_config, Arc::clone(&val_data));
         eprintln!("Val Sharpe:  {val_sharpe:.3}");
         eprintln!("Val PnL:     ${val_pnl:.2}");
         eprintln!("Val Trades:  {val_trades}");

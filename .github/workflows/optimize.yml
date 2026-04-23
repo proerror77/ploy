@@ -27,6 +27,10 @@ on:
         description: "Number of optimization trials"
         required: true
         default: "300"
+      symbols:
+        description: "Comma-separated symbols to optimize"
+        required: false
+        default: "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT"
       data_dir:
         description: "Local Parquet data dir (rsynced from tango)"
         required: false
@@ -138,4 +142,5 @@ jobs:
             --train-end "${{ github.event.inputs.train_end }}" \
             --val-start "${{ github.event.inputs.val_start }}" \
             --val-end "${{ github.event.inputs.val_end }}" \
+            --symbols "${{ github.event.inputs.symbols }}" \
             --trials "${{ github.event.inputs.trials }}"
