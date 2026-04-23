@@ -1,6 +1,6 @@
 # Event Dataset Verification Matrix
 
-Owner: `worker-4`
+Owner: `worker-1`
 Task: `8` verification lane for the event-id dataset slice
 
 ## Scope
@@ -82,3 +82,52 @@ When implementation lands, report evidence in this exact order:
   `examples/factor_research.rs` or the parquet/export surface.
 - If dataset work adds new binary/example entrypoints, extend this matrix rather
   than replacing the existing checks.
+
+## Verification run: current landed dataset slice
+
+Verified slice: `16710042..59f7f775`
+Comparison base for slice-scoped guards: `e5d39f89^`
+
+### Structured evidence
+
+1. `PASS Scope guard`
+   - `scripts/check_event_dataset_verification_lane.sh e5d39f89^`
+   - Output: `PASS: verification lane stayed within event dataset scope and left optimize/backtest hot paths untouched`
+2. `PASS cargo check -p ploy-research --tests`
+   - Command exited `0`
+3. `PASS cargo test -p ploy-research --lib`
+   - Output summary: `24 passed; 0 failed`
+4. `PASS dataset-focused tests`
+   - Discovery:
+     - `cargo test -p ploy-research --lib -- --list | grep -Ei 'dataset|split|manifest|chronolog|event[_-]?summary'`
+     - Matched 7 dataset tests under `dataset::chronology`, `dataset::contracts`, and `dataset::split`
+   - Targeted run:
+     - `cargo test -p ploy-research dataset:: --lib -- --nocapture`
+     - Output summary: `7 passed; 0 failed`
+   - Supporting task-grain evidence:
+     - `cargo test -p ploy-research --lib` also passed `factors::tests::derived_artifacts_filter_to_selected_events_and_preserve_task_grains`
+5. `PASS artifact evidence`
+   - Chronology contract lives in `crates/ploy-research/src/dataset/chronology.rs`
+   - Split contract + hard-failure policy live in `crates/ploy-research/src/dataset/split.rs`
+   - Manifest / event-index contract lives in `crates/ploy-research/src/dataset/contracts.rs`
+   - Event-summary / task-grain derived-view logic lives in `crates/ploy-research/src/factors.rs`
+   - Crate exports are wired through `crates/ploy-research/src/dataset/mod.rs` and `crates/ploy-research/src/lib.rs`
+6. `PASS hot-path regression guard`
+   - `git diff --name-only e5d39f89^..HEAD -- apps/ploy-backtest apps/ploy-replay crates/ploy-feed-loaders crates/ploy-strategy-bundles crates/ploy-strategy-runtime .github/workflows/optimize.yml Cargo.toml`
+   - Output: empty
+7. `PASS modified-file lint`
+   - `bash -n scripts/check_event_dataset_verification_lane.sh`
+   - Output: empty
+
+### Conditional check status
+
+- `SKIP example compile guard`
+  - `e5d39f89^..HEAD` did not touch `crates/ploy-research/examples/factor_research.rs`
+    or the parquet/export surface, so the conditional example check was not required
+    for this landed slice.
+
+### Conflict watch result
+
+- No new shared-file conflict required intervention from the verification lane.
+- Verification evidence was recorded without editing dataset implementation files
+  after they landed.
