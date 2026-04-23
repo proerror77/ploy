@@ -48,11 +48,11 @@ three_layer_stop_distance_pct = 0.0152
 three_layer_max_pm_lag_secs = 15
 
 [execution]
-use_spread = false
-spread_pct = 0.02
+use_spread = true
+spread_pct = 0.08
 enable_partial_fills = false
 min_fill_pct = 0.5
-enable_market_impact = false
+enable_market_impact = true
 impact_coefficient = 0.1
 default_depth_shares = 500
 
