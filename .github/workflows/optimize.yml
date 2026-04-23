@@ -30,7 +30,7 @@ on:
       symbols:
         description: "Comma-separated symbols to optimize"
         required: false
-        default: "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT"
+        default: "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT"
       data_dir:
         description: "Local Parquet data dir (rsynced from tango)"
         required: false
