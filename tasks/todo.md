@@ -11,12 +11,17 @@
 - [x] Confirm failed run `24818531147` is blocked by self-hosted runner workspace permissions before checkout.
 - [x] Add checkout-before-cleanup protection for root-owned `target/` residue on `ploy-ci-1`.
 - [x] Preserve the built `optimize_backtest` binary across build/run jobs with a short-lived artifact.
-- [ ] Land the workflow repair on `main`, rerun optimization, and verify the new run reaches the optimize step.
+- [x] Land the workflow repair on `main`, rerun optimization, and verify the new run reaches the optimize step.
+- [x] Recover `ploy-ci-1` after the full-width optimize run put the runner offline under memory pressure.
+- [x] Reduce optimize replay memory pressure and rerun with bounded symbols/trials before scaling back to the full universe.
 
 ### Evidence
 
 - 2026-04-23: Failed optimize run `24818531147` ended in `actions/checkout` with `EACCES` while removing `target/release/build/...`.
 - 2026-04-23: `.github/workflows/backtest.yml` already uses the same pre-checkout permission repair plus artifact handoff pattern.
+- 2026-04-23: Run `24820288647` proved checkout/artifact/data sync worked, then failed with `Run optimize` left in-progress and runner `offline`; journal showed memory pressure at 14:33 and 14:38 CST.
+- 2026-04-23: Cloud-side reboot restored `ploy-ci-1`; ECS StartTime became `2026-04-23T06:47Z`, and GitHub runner returned `online`.
+- 2026-04-23: Bounded smoke run `24821322891` on branch `fix/optimize-resource-controls` succeeded with `BTCUSDT,ETHUSDT`, `5` trials, and one-day train/val; it loaded `9,505,974` updates per split, completed validation, and left the runner `online`.
 
 ## Host Role Split Follow-up (2026-04-20)
 
