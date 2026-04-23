@@ -1,5 +1,23 @@
 # PM5D Settlement + Strategy Audit (2026-04-12)
 
+## Optimize Workflow Recovery (2026-04-23)
+
+### Files
+
+- `.github/workflows/optimize.yml`
+
+### Tasks
+
+- [x] Confirm failed run `24818531147` is blocked by self-hosted runner workspace permissions before checkout.
+- [x] Add checkout-before-cleanup protection for root-owned `target/` residue on `ploy-ci-1`.
+- [x] Preserve the built `optimize_backtest` binary across build/run jobs with a short-lived artifact.
+- [ ] Land the workflow repair on `main`, rerun optimization, and verify the new run reaches the optimize step.
+
+### Evidence
+
+- 2026-04-23: Failed optimize run `24818531147` ended in `actions/checkout` with `EACCES` while removing `target/release/build/...`.
+- 2026-04-23: `.github/workflows/backtest.yml` already uses the same pre-checkout permission repair plus artifact handoff pattern.
+
 ## Host Role Split Follow-up (2026-04-20)
 
 ### Files

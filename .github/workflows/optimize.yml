@@ -51,6 +51,13 @@ jobs:
     environment: ploy-ci-1
 
     steps:
+      - name: Repair runner workspace permissions
+        run: |
+          if [ -d "${GITHUB_WORKSPACE}" ]; then
+            sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
+            sudo rm -rf "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/.cargo-lock" || true
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -74,6 +81,13 @@ jobs:
             --features ploy-strategy-bundles/parquet-feed \
             --example optimize_backtest
 
+      - name: Upload optimize_backtest binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimize_backtest-${{ github.sha }}
+          path: target/release/examples/optimize_backtest
+          retention-days: 1
+
   optimize:
     name: Run optimize on ploy-ci-1
     runs-on: [self-hosted, ploy-ci-1]
@@ -82,10 +96,26 @@ jobs:
     needs: [build]
 
     steps:
+      - name: Repair runner workspace permissions
+        run: |
+          if [ -d "${GITHUB_WORKSPACE}" ]; then
+            sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
+            sudo rm -rf "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/.cargo-lock" || true
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Download optimize_backtest binary
+        uses: actions/download-artifact@v4
+        with:
+          name: optimize_backtest-${{ github.sha }}
+          path: target/release/examples
+
+      - name: Make binary executable
+        run: chmod +x target/release/examples/optimize_backtest
 
       - name: Sync Parquet data from Tango-1-1
         run: |
