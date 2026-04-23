@@ -52,7 +52,7 @@ use ploy_strategy_bundles::{
 use ploy_trading::TradeSide;
 use rust_decimal_macros::dec;
 use sqlx::postgres::PgPoolOptions;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
@@ -665,7 +665,16 @@ fn run_backtest(
 
     let strategy = build_strategy(strategy_variant, config);
     let feed = source.open()?;
-    let executor = SimulatedExecutor::new(SimulatedExecutorConfig::default());
+    let executor = SimulatedExecutor::new(SimulatedExecutorConfig {
+        use_spread: true,
+        spread_pct: dec!(0.08),
+        enable_partial_fills: false,
+        depth_multiple: dec!(5.0),
+        min_fill_pct: dec!(0.5),
+        enable_market_impact: true,
+        impact_coefficient: dec!(0.1),
+        default_depth_shares: 500,
+    });
     let recorder = Box::new(NullRecorder);
     let runtime_config = RuntimeConfig {
         mode: RuntimeMode::Backtest,
@@ -680,22 +689,31 @@ fn run_backtest(
     let snapshot = runtime.trading().snapshot(&BTreeMap::new());
     let cashflow = snapshot.fill_cashflow_summary();
     let net_pnl = cashflow.net_pnl().to_string().parse::<f64>().unwrap_or(0.0);
-    let trade_count = result.fills_recorded as usize / 2;
 
     let fills = &snapshot.fills;
+    let mut by_token: HashMap<&str, Vec<&ploy_trading::FillRecord>> = HashMap::new();
+    for fill in fills {
+        by_token
+            .entry(fill.token_id.as_str())
+            .or_default()
+            .push(fill);
+    }
     let mut per_trade_pnl = Vec::new();
-    let mut index = 0;
-    while index + 1 < fills.len() {
-        let entry = &fills[index];
-        let exit = &fills[index + 1];
-        if entry.side == TradeSide::Buy && exit.side == TradeSide::Sell {
-            let pnl = (exit.price - entry.price) * entry.quantity - entry.fee;
-            per_trade_pnl.push(pnl.to_string().parse::<f64>().unwrap_or(0.0));
-            index += 2;
-        } else {
-            index += 1;
+    for token_fills in by_token.values() {
+        let mut i = 0;
+        while i + 1 < token_fills.len() {
+            let entry = token_fills[i];
+            let exit = token_fills[i + 1];
+            if entry.side == TradeSide::Buy && exit.side == TradeSide::Sell {
+                let pnl = (exit.price - entry.price) * entry.quantity - entry.fee - exit.fee;
+                per_trade_pnl.push(pnl.to_string().parse::<f64>().unwrap_or(0.0));
+                i += 2;
+            } else {
+                i += 1;
+            }
         }
     }
+    let trade_count = per_trade_pnl.len();
 
     let sharpe = if per_trade_pnl.len() < 5 {
         -999.0
