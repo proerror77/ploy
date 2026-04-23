@@ -31,12 +31,24 @@ use std::thread;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use thiserror::Error;
 
 use super::options::HistoricalLoadOptions;
 use crate::traits::{Feed, MarketUpdate};
 
 /// Bounded channel capacity — limits how far ahead the background thread runs.
 const CHANNEL_CAPACITY: usize = 1000;
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum StreamingParquetFeedError {
+    #[error("StreamingParquetFeed background worker failed: {0}")]
+    Background(String),
+}
+
+enum FeedMessage {
+    Update(MarketUpdate),
+    Error(StreamingParquetFeedError),
+}
 
 /// Streaming Parquet feed backed by a DuckDB background thread.
 ///
@@ -46,7 +58,8 @@ const CHANNEL_CAPACITY: usize = 1000;
 /// than the channel buffer in memory. Events are loaded separately (~11K rows)
 /// and merged via two-pointer in the send loop.
 pub struct StreamingParquetFeed {
-    receiver: Receiver<MarketUpdate>,
+    receiver: Receiver<FeedMessage>,
+    error: Option<StreamingParquetFeedError>,
     /// Keep the thread handle so it is joined on drop (prevents leaks).
     _worker: thread::JoinHandle<()>,
 }
@@ -63,29 +76,57 @@ impl StreamingParquetFeed {
         to: DateTime<Utc>,
         options: &HistoricalLoadOptions,
     ) -> Self {
-        let (tx, rx) = mpsc::sync_channel::<MarketUpdate>(CHANNEL_CAPACITY);
+        let (tx, rx) = mpsc::sync_channel::<FeedMessage>(CHANNEL_CAPACITY);
 
         let data_dir = data_dir.to_string();
         let symbols = symbols.to_vec();
         let lob_sample_secs = options.lob_sample_secs;
 
         let worker = thread::spawn(move || {
+            let error_tx = tx.clone();
             if let Err(e) = run_background(&data_dir, &symbols, from, to, lob_sample_secs, tx) {
-                tracing::warn!(error = %e, "StreamingParquetFeed background thread error");
+                let error = StreamingParquetFeedError::Background(e.to_string());
+                tracing::error!(error = %error, "StreamingParquetFeed background thread error");
+                let _ = error_tx.send(FeedMessage::Error(error));
             }
         });
 
         Self {
             receiver: rx,
+            error: None,
             _worker: worker,
         }
+    }
+
+    /// Read the next update, returning any background DuckDB/row-conversion
+    /// failure instead of making it look like ordinary feed exhaustion.
+    pub fn next_result(&mut self) -> Result<Option<MarketUpdate>, StreamingParquetFeedError> {
+        if let Some(error) = self.error.clone() {
+            return Err(error);
+        }
+
+        match self.receiver.recv() {
+            Ok(FeedMessage::Update(update)) => Ok(Some(update)),
+            Ok(FeedMessage::Error(error)) => {
+                self.error = Some(error.clone());
+                Err(error)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub fn background_error(&self) -> Option<&StreamingParquetFeedError> {
+        self.error.as_ref()
     }
 }
 
 #[async_trait]
 impl Feed for StreamingParquetFeed {
     async fn next(&mut self) -> Option<MarketUpdate> {
-        self.receiver.recv().ok()
+        match self.next_result() {
+            Ok(update) => update,
+            Err(error) => panic!("{error}"),
+        }
     }
 }
 
@@ -104,13 +145,11 @@ fn run_background(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     lob_sample_secs: u32,
-    tx: SyncSender<MarketUpdate>,
+    tx: SyncSender<FeedMessage>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use chrono::Duration;
     use duckdb::Connection;
-    use rust_decimal::Decimal;
     use std::path::Path;
-    use std::sync::Arc;
     use tracing::info;
 
     const WARMUP_MINUTES: i64 = 30;
@@ -119,9 +158,17 @@ fn run_background(
         return Ok(());
     }
 
-    std::fs::create_dir_all("/tmp/duckdb_spill").ok();
+    let memory_limit =
+        std::env::var("PLOY_DUCKDB_MEMORY_LIMIT").unwrap_or_else(|_| "6GB".to_string());
+    let temp_dir =
+        std::env::var("PLOY_DUCKDB_TEMP_DIR").unwrap_or_else(|_| "/tmp/duckdb_spill".to_string());
+    std::fs::create_dir_all(&temp_dir).ok();
     let conn = Connection::open_in_memory()?;
-    conn.execute_batch("SET memory_limit='6GB'; SET temp_directory='/tmp/duckdb_spill';")?;
+    conn.execute_batch(&format!(
+        "SET memory_limit='{}'; SET temp_directory='{}';",
+        memory_limit.replace('\'', "''"),
+        temp_dir.replace('\'', "''")
+    ))?;
 
     let sym_filter = symbol_filter_sql(symbols);
     let spot_from = from - Duration::minutes(WARMUP_MINUTES);
@@ -148,6 +195,7 @@ fn run_background(
     if Path::new(&format!("{data_dir}/binance_price_ticks")).exists() {
         parts.push(format!(
             "SELECT epoch_us(trade_time)::BIGINT AS ts_us, \
+                    {SPOT_SOURCE_RANK} AS source_rank, \
                     'spot' AS typ, \
                     symbol AS s1, NULL AS s2, \
                     CAST(price AS DOUBLE) AS f1, 0.0 AS f2, 0.0 AS f3, 0.0 AS f4, \
@@ -165,6 +213,7 @@ fn run_background(
     if Path::new(&format!("{data_dir}/binance_agg_trade_ticks")).exists() {
         parts.push(format!(
             "SELECT epoch_us(trade_time)::BIGINT AS ts_us, \
+                    {AGG_SOURCE_RANK} AS source_rank, \
                     'agg' AS typ, \
                     symbol AS s1, NULL AS s2, \
                     CAST(price AS DOUBLE) AS f1, CAST(quantity AS DOUBLE) AS f2, \
@@ -184,6 +233,7 @@ fn run_background(
     if Path::new(&format!("{data_dir}/binance_lob_ticks")).exists() {
         parts.push(format!(
             "SELECT epoch_us(event_time)::BIGINT AS ts_us, \
+                    {LOB_SOURCE_RANK} AS source_rank, \
                     'lob' AS typ, \
                     symbol AS s1, NULL AS s2, \
                     CAST(COALESCE(obi_5, 0.0) AS DOUBLE) AS f1, \
@@ -201,10 +251,11 @@ fn run_background(
     // PM quotes — align with database.rs: DISTINCT ON per-second per-token, trusted sources only
     if Path::new(&format!("{data_dir}/clob_quote_ticks")).exists() {
         parts.push(format!(
-            "SELECT ts_us, typ, s1, s2, f1, f2, f3, f4, i1, b1 \
+            "SELECT ts_us, source_rank, typ, s1, s2, f1, f2, f3, f4, i1, b1 \
              FROM ( \
                  SELECT DISTINCT ON (date_trunc('second', received_at), token_id) \
                         EPOCH_US(received_at)::BIGINT AS ts_us, \
+                        {QUOTE_SOURCE_RANK} AS source_rank, \
                         'quote' AS typ, \
                         token_id AS s1, NULL AS s2, \
                         CAST(best_bid AS DOUBLE) AS f1, CAST(best_ask AS DOUBLE) AS f2, \
@@ -224,17 +275,14 @@ fn run_background(
     if parts.is_empty() {
         // No data tables found — just send events
         for (_, update) in &events {
-            if tx.send(update.clone()).is_err() {
+            if send_update(&tx, update.clone()).is_err() {
                 return Ok(());
             }
         }
         return Ok(());
     }
 
-    let union_sql = format!(
-        "SELECT * FROM ({}) ORDER BY ts_us",
-        parts.join(" UNION ALL ")
-    );
+    let union_sql = build_union_sql(&parts);
 
     // ── 3. Stream UNION ALL results, merging events via two-pointer ─────────
     let mut stmt = match conn.prepare(&union_sql) {
@@ -260,119 +308,38 @@ fn run_background(
 
     let mut total = 0usize;
     for row in rows {
-        let (ts_us, typ, s1, _s2, f1_opt, f2_opt, f3_opt, f4_opt, i1_opt, b1_opt) = match row {
-            Ok(r) => r,
-            Err(_e) => {
-                break;
-            }
-        };
-        let f1 = f1_opt.unwrap_or(0.0);
-        let f2 = f2_opt.unwrap_or(0.0);
-        let f3 = f3_opt.unwrap_or(0.0);
-        let f4 = f4_opt.unwrap_or(0.0);
-        let i1 = i1_opt.unwrap_or(0);
-        let b1 = b1_opt.unwrap_or(false);
+        let (ts_us, typ, s1, _s2, f1_opt, f2_opt, f3_opt, f4_opt, i1_opt, b1_opt) = row?;
 
         // Insert any events that should come before this row
-        while evt_idx < events.len() && events[evt_idx].0 <= ts_us {
-            if tx.send(events[evt_idx].1.clone()).is_err() {
+        while evt_idx < events.len() && should_send_event_before_row(events[evt_idx].0, ts_us) {
+            if send_update(&tx, events[evt_idx].1.clone()).is_err() {
                 return Ok(());
             }
             evt_idx += 1;
         }
 
-        let ts = DateTime::from_timestamp_micros(ts_us).unwrap_or_default();
-
-        match typ.as_str() {
-            "spot" => {
-                let symbol: Arc<str> = Arc::from(s1.unwrap_or_default());
-                let price = Decimal::try_from(f1).unwrap_or_default();
-                if tx
-                    .send(MarketUpdate::SpotPrice { symbol, price, ts })
-                    .is_err()
-                {
-                    return Ok(());
-                }
+        let row = StreamRow {
+            ts_us,
+            typ,
+            s1,
+            f1: f1_opt,
+            f2: f2_opt,
+            f3: f3_opt,
+            f4: f4_opt,
+            i1: i1_opt,
+            b1: b1_opt,
+        };
+        for update in market_updates_from_row(row) {
+            if send_update(&tx, update).is_err() {
+                return Ok(());
             }
-            "agg" => {
-                let symbol: Arc<str> = Arc::from(s1.unwrap_or_default());
-                let price = Decimal::try_from(f1).unwrap_or_default();
-                let quantity = Decimal::try_from(f2).unwrap_or_default();
-                if tx
-                    .send(MarketUpdate::AggTrade {
-                        symbol,
-                        agg_trade_id: i1 as u64,
-                        price,
-                        quantity,
-                        is_buyer_maker: b1,
-                        ts,
-                    })
-                    .is_err()
-                {
-                    return Ok(());
-                }
-            }
-            "lob" => {
-                let symbol: Arc<str> = Arc::from(s1.unwrap_or_default());
-                let obi = f1;
-                let spread_bps = f2 as u32;
-                let bid_depth_near = f3;
-                let ask_depth_near = f4;
-                // Send both L2 and L2Depth (matching original behavior)
-                if tx
-                    .send(MarketUpdate::L2 {
-                        symbol: Arc::clone(&symbol),
-                        obi,
-                        spread_bps,
-                        ts,
-                    })
-                    .is_err()
-                {
-                    return Ok(());
-                }
-                if tx
-                    .send(MarketUpdate::L2Depth {
-                        symbol,
-                        obi,
-                        spread_bps,
-                        bid_depth_near,
-                        ask_depth_near,
-                        ts,
-                    })
-                    .is_err()
-                {
-                    return Ok(());
-                }
-            }
-            "quote" => {
-                let token_id: Arc<str> = Arc::from(s1.unwrap_or_default());
-                let bid = f1_opt.and_then(|v| Decimal::try_from(v).ok());
-                let ask = f2_opt.and_then(|v| Decimal::try_from(v).ok());
-                if bid.is_none() && ask.is_none() {
-                    continue;
-                }
-                if tx
-                    .send(MarketUpdate::Quote {
-                        token_id,
-                        bid,
-                        ask,
-                        bid_size: None,
-                        ask_size: None,
-                        ts,
-                    })
-                    .is_err()
-                {
-                    return Ok(());
-                }
-            }
-            _ => continue,
         }
         total += 1;
     }
 
     // Send remaining events after the UNION ALL stream is exhausted
     while evt_idx < events.len() {
-        if tx.send(events[evt_idx].1.clone()).is_err() {
+        if send_update(&tx, events[evt_idx].1.clone()).is_err() {
             break;
         }
         evt_idx += 1;
@@ -386,6 +353,97 @@ fn run_background(
     Ok(())
 }
 
+#[cfg(feature = "parquet-feed")]
+fn send_update(
+    tx: &SyncSender<FeedMessage>,
+    update: MarketUpdate,
+) -> Result<(), mpsc::SendError<FeedMessage>> {
+    tx.send(FeedMessage::Update(update))
+}
+
+#[cfg(feature = "parquet-feed")]
+#[derive(Debug)]
+struct StreamRow {
+    ts_us: i64,
+    typ: String,
+    s1: Option<String>,
+    f1: Option<f64>,
+    f2: Option<f64>,
+    f3: Option<f64>,
+    f4: Option<f64>,
+    i1: Option<i64>,
+    b1: Option<bool>,
+}
+
+#[cfg(feature = "parquet-feed")]
+fn market_updates_from_row(row: StreamRow) -> Vec<MarketUpdate> {
+    use rust_decimal::Decimal;
+    use std::sync::Arc;
+
+    let ts = DateTime::from_timestamp_micros(row.ts_us).unwrap_or_default();
+    match row.typ.as_str() {
+        "spot" => {
+            let symbol: Arc<str> = Arc::from(row.s1.unwrap_or_default());
+            let price = Decimal::try_from(row.f1.unwrap_or(0.0)).unwrap_or_default();
+            vec![MarketUpdate::SpotPrice { symbol, price, ts }]
+        }
+        "agg" => {
+            let symbol: Arc<str> = Arc::from(row.s1.unwrap_or_default());
+            let price = Decimal::try_from(row.f1.unwrap_or(0.0)).unwrap_or_default();
+            let quantity = Decimal::try_from(row.f2.unwrap_or(0.0)).unwrap_or_default();
+            vec![MarketUpdate::AggTrade {
+                symbol,
+                agg_trade_id: row.i1.unwrap_or(0) as u64,
+                price,
+                quantity,
+                is_buyer_maker: row.b1.unwrap_or(false),
+                ts,
+            }]
+        }
+        "lob" => {
+            let symbol: Arc<str> = Arc::from(row.s1.unwrap_or_default());
+            let obi = row.f1.unwrap_or(0.0);
+            let spread_bps = row.f2.unwrap_or(0.0) as u32;
+            let bid_depth_near = row.f3.unwrap_or(0.0);
+            let ask_depth_near = row.f4.unwrap_or(0.0);
+            vec![
+                MarketUpdate::L2 {
+                    symbol: Arc::clone(&symbol),
+                    obi,
+                    spread_bps,
+                    ts,
+                },
+                MarketUpdate::L2Depth {
+                    symbol,
+                    obi,
+                    spread_bps,
+                    bid_depth_near,
+                    ask_depth_near,
+                    ts,
+                },
+            ]
+        }
+        "quote" => {
+            let token_id: Arc<str> = Arc::from(row.s1.unwrap_or_default());
+            let bid = row.f1.and_then(|v| Decimal::try_from(v).ok());
+            let ask = row.f2.and_then(|v| Decimal::try_from(v).ok());
+            if bid.is_none() && ask.is_none() {
+                Vec::new()
+            } else {
+                vec![MarketUpdate::Quote {
+                    token_id,
+                    bid,
+                    ask,
+                    bid_size: None,
+                    ask_size: None,
+                    ts,
+                }]
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Stub for when the feature flag is disabled.
 #[cfg(not(feature = "parquet-feed"))]
 fn run_background(
@@ -394,12 +452,45 @@ fn run_background(
     _from: DateTime<Utc>,
     _to: DateTime<Utc>,
     _lob_sample_secs: u32,
-    _tx: SyncSender<MarketUpdate>,
+    _tx: SyncSender<FeedMessage>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "parquet-feed")]
+const SPOT_SOURCE_RANK: u8 = 10;
+#[cfg(feature = "parquet-feed")]
+const AGG_SOURCE_RANK: u8 = 20;
+#[cfg(feature = "parquet-feed")]
+const LOB_SOURCE_RANK: u8 = 30;
+#[cfg(feature = "parquet-feed")]
+const QUOTE_SOURCE_RANK: u8 = 40;
+
+#[cfg(feature = "parquet-feed")]
+fn build_union_sql(parts: &[String]) -> String {
+    format!(
+        "SELECT ts_us, typ, s1, s2, f1, f2, f3, f4, i1, b1 \
+         FROM ({}) \
+         ORDER BY ts_us, source_rank, s1, i1, f1, f2, f3, f4",
+        parts.join(" UNION ALL ")
+    )
+}
+
+#[cfg(feature = "parquet-feed")]
+fn should_send_event_before_row(event_ts_us: i64, row_ts_us: i64) -> bool {
+    event_ts_us <= row_ts_us
+}
+
+#[cfg(feature = "parquet-feed")]
+fn event_sort_key(update: &MarketUpdate) -> (u8, String) {
+    match update {
+        MarketUpdate::EventDiscovered { event_id, .. } => (0, event_id.to_string()),
+        MarketUpdate::EventExpired { event_id, .. } => (1, event_id.to_string()),
+        _ => (2, String::new()),
+    }
+}
 
 /// Load event rows (EventDiscovered + EventExpired pairs) into a sorted Vec.
 ///
@@ -512,7 +603,9 @@ fn load_events_vec(
         ));
     }
 
-    events.sort_by_key(|(ts, _)| *ts);
+    events.sort_by(|(left_ts, left), (right_ts, right)| {
+        (*left_ts, event_sort_key(left)).cmp(&(*right_ts, event_sort_key(right)))
+    });
     Ok(events)
 }
 
@@ -527,4 +620,184 @@ fn symbol_filter_sql(symbols: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("AND symbol IN ({list})")
+}
+
+#[cfg(all(test, feature = "parquet-feed"))]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use rust_decimal_macros::dec;
+    use std::sync::Arc;
+
+    #[test]
+    fn next_result_returns_background_error() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(FeedMessage::Error(StreamingParquetFeedError::Background(
+            "duckdb exploded".to_string(),
+        )))
+        .unwrap();
+        drop(tx);
+
+        let worker = thread::spawn(|| {});
+        let mut feed = StreamingParquetFeed {
+            receiver: rx,
+            error: None,
+            _worker: worker,
+        };
+
+        let err = feed
+            .next_result()
+            .expect_err("stream error must be observable");
+        assert_eq!(
+            err,
+            StreamingParquetFeedError::Background("duckdb exploded".to_string())
+        );
+        assert_eq!(feed.background_error(), Some(&err));
+    }
+
+    #[test]
+    fn union_query_orders_same_timestamp_sources_deterministically() {
+        let sql = build_union_sql(&["SELECT 1 AS ts_us, 10 AS source_rank, 'spot' AS typ, 'BTCUSDT' AS s1, NULL AS s2, 1.0 AS f1, 0.0 AS f2, 0.0 AS f3, 0.0 AS f4, 0 AS i1, false AS b1".to_string()]);
+
+        assert!(sql.contains("SELECT ts_us, typ, s1, s2, f1, f2, f3, f4, i1, b1"));
+        assert!(sql.contains("ORDER BY ts_us, source_rank, s1, i1, f1, f2, f3, f4"));
+        assert!(SPOT_SOURCE_RANK < AGG_SOURCE_RANK);
+        assert!(AGG_SOURCE_RANK < LOB_SOURCE_RANK);
+        assert!(LOB_SOURCE_RANK < QUOTE_SOURCE_RANK);
+    }
+
+    #[test]
+    fn events_are_emitted_before_same_timestamp_rows() {
+        assert!(should_send_event_before_row(1_000, 1_000));
+        assert!(should_send_event_before_row(999, 1_000));
+        assert!(!should_send_event_before_row(1_001, 1_000));
+    }
+
+    #[test]
+    fn lifecycle_events_sort_discovered_before_expired_at_same_timestamp() {
+        let ts = Utc.timestamp_micros(1_000_000).unwrap();
+        let mut events = vec![
+            (
+                1_000_000,
+                MarketUpdate::EventExpired {
+                    event_id: Arc::from("event-a"),
+                    end_time: ts,
+                    resolved_up_won: None,
+                },
+            ),
+            (
+                1_000_000,
+                MarketUpdate::EventDiscovered {
+                    event_id: Arc::from("event-a"),
+                    symbol: Arc::from("BTCUSDT"),
+                    up_token: Arc::from("up"),
+                    down_token: Arc::from("down"),
+                    end_time: ts,
+                    window_secs: 300,
+                    price_to_beat: Some(dec!(50000)),
+                    resolved_up_won: None,
+                },
+            ),
+        ];
+
+        events.sort_by(|(left_ts, left), (right_ts, right)| {
+            (*left_ts, event_sort_key(left)).cmp(&(*right_ts, event_sort_key(right)))
+        });
+
+        assert!(matches!(events[0].1, MarketUpdate::EventDiscovered { .. }));
+        assert!(matches!(events[1].1, MarketUpdate::EventExpired { .. }));
+    }
+
+    #[test]
+    fn lob_row_emits_l2_then_l2_depth() {
+        let updates = market_updates_from_row(StreamRow {
+            ts_us: 1_000_000,
+            typ: "lob".to_string(),
+            s1: Some("BTCUSDT".to_string()),
+            f1: Some(0.25),
+            f2: Some(3.0),
+            f3: Some(12.5),
+            f4: Some(13.5),
+            i1: None,
+            b1: None,
+        });
+
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(updates[0], MarketUpdate::L2 { .. }));
+        assert!(matches!(updates[1], MarketUpdate::L2Depth { .. }));
+    }
+
+    #[test]
+    fn agg_row_emits_one_tick_level_trade() {
+        let updates = market_updates_from_row(StreamRow {
+            ts_us: 1_000_000,
+            typ: "agg".to_string(),
+            s1: Some("BTCUSDT".to_string()),
+            f1: Some(51000.0),
+            f2: Some(0.42),
+            f3: None,
+            f4: None,
+            i1: Some(123),
+            b1: Some(true),
+        });
+
+        assert_eq!(updates.len(), 1);
+        match &updates[0] {
+            MarketUpdate::AggTrade {
+                agg_trade_id,
+                is_buyer_maker,
+                ..
+            } => {
+                assert_eq!(*agg_trade_id, 123);
+                assert!(*is_buyer_maker);
+            }
+            other => panic!("expected AggTrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quote_row_without_bid_or_ask_is_filtered() {
+        let updates = market_updates_from_row(StreamRow {
+            ts_us: 1_000_000,
+            typ: "quote".to_string(),
+            s1: Some("token".to_string()),
+            f1: None,
+            f2: None,
+            f3: None,
+            f4: None,
+            i1: None,
+            b1: None,
+        });
+
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn sql_keeps_lob_and_aggtrade_full_cadence_but_filters_pm_quotes() {
+        let source = include_str!("parquet_stream.rs");
+        let agg_section = section_between(source, "// Agg trades", "// LOB");
+        let lob_section = section_between(source, "// LOB", "// PM quotes");
+        let quote_section = section_between(source, "// PM quotes", "if parts.is_empty()");
+
+        for section in [agg_section, lob_section] {
+            let lower = section.to_ascii_lowercase();
+            assert!(!lower.contains("date_trunc"));
+            assert!(!lower.contains("distinct on"));
+            assert!(!lower.contains("sample"));
+            assert!(!lower.contains("bucket"));
+        }
+        assert!(agg_section.contains("agg_trade_id"));
+        assert!(lob_section.contains("event_time"));
+        assert!(quote_section.contains(
+            "source IN ('polymarket_ws', 'polymarket_ws_collector', 'ploy_runner_live')"
+        ));
+        assert!(quote_section.contains("best_bid IS NOT NULL AND best_ask IS NOT NULL"));
+    }
+
+    fn section_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let start_idx = source.find(start).expect("start marker");
+        let tail = &source[start_idx..];
+        let end_idx = tail.find(end).expect("end marker");
+        &tail[..end_idx]
+    }
 }

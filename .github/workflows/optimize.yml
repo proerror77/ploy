@@ -1,4 +1,4 @@
-name: Optimize three_layer params
+name: Optimize three_layer params (tick-preserving)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ on:
       train_end:
         description: "Train end date (YYYY-MM-DD)"
         required: true
-        default: "2026-04-19"
+        default: "2026-04-15"
       val_start:
         description: "Validation start date (YYYY-MM-DD)"
         required: true
@@ -22,19 +22,55 @@ on:
       val_end:
         description: "Validation end date (YYYY-MM-DD)"
         required: true
-        default: "2026-04-22"
+        default: "2026-04-20"
       trials:
         description: "Number of optimization trials"
         required: true
-        default: "300"
+        default: "5"
       symbols:
         description: "Comma-separated symbols to optimize"
         required: false
-        default: "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT"
+        default: "BTCUSDT,ETHUSDT"
       data_dir:
         description: "Local Parquet data dir (rsynced from tango)"
         required: false
         default: "/tmp/ploy-parquet"
+      max_preflight_rows:
+        description: "Fail before replay when estimated train+val rows exceed this"
+        required: false
+        default: "15000000"
+      max_preflight_bytes:
+        description: "Fail before replay when local Parquet bytes exceed this (supports GiB)"
+        required: false
+        default: "80GiB"
+      max_symbols:
+        description: "Fail before replay when symbol count exceeds this"
+        required: false
+        default: "6"
+      max_days:
+        description: "Fail before replay when train start through validation end exceeds this many days"
+        required: false
+        default: "8"
+      allow_large_window:
+        description: "Override preflight guardrails after bounded smoke/host-health checks"
+        required: false
+        default: "false"
+      preflight_only:
+        description: "Only produce the manifest and exit before replay/optimization"
+        required: false
+        default: "false"
+      max_updates:
+        description: "Optional smoke-only runtime update cap; blank is canonical full replay"
+        required: false
+        default: ""
+      duckdb_memory_limit:
+        description: "DuckDB memory_limit for preflight/replay"
+        required: false
+        default: "6GB"
+      optimize_timeout_minutes:
+        description: "Process timeout for optimize_backtest"
+        required: false
+        default: "90"
 
 concurrency:
   group: optimize-${{ github.ref }}
@@ -132,9 +168,95 @@ jobs:
             root@172.16.0.204:/opt/ploy/data/parquet/ \
             ${{ github.event.inputs.data_dir }}/
 
-      - name: Run optimize
+      - name: Prepare DuckDB spill directory
         run: |
+          DUCKDB_TEMP_DIR="${RUNNER_TEMP:-/tmp}/ploy-optimize-duckdb-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf "${DUCKDB_TEMP_DIR}"
+          mkdir -p "${DUCKDB_TEMP_DIR}"
+          echo "PLOY_DUCKDB_TEMP_DIR=${DUCKDB_TEMP_DIR}" >> "${GITHUB_ENV}"
+          echo "PLOY_DUCKDB_MEMORY_LIMIT=${{ github.event.inputs.duckdb_memory_limit }}" >> "${GITHUB_ENV}"
+          echo "DuckDB spill directory: ${DUCKDB_TEMP_DIR}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Preflight Parquet manifest
+        run: |
+          set -euo pipefail
           . /home/runner/.cargo/env
+
+          health_summary() {
+            echo "## Optimize preflight host health" >> "${GITHUB_STEP_SUMMARY}"
+            {
+              echo '```'
+              date -u
+              free -h || true
+              df -h "${{ github.event.inputs.data_dir }}" "${PLOY_DUCKDB_TEMP_DIR}" || true
+              ps -eo pid,ppid,stat,%mem,%cpu,comm,args --sort=-%mem | head -25 || true
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+          trap 'status=$?; health_summary; rm -rf "${PLOY_DUCKDB_TEMP_DIR}"; exit ${status}' EXIT
+
+          extra_flags=()
+          if [ "${{ github.event.inputs.allow_large_window }}" = "true" ]; then
+            extra_flags+=(--allow-large-window)
+          fi
+          if [ -n "${{ github.event.inputs.max_updates }}" ]; then
+            extra_flags+=(--max-updates "${{ github.event.inputs.max_updates }}")
+          fi
+
+          ./target/release/examples/optimize_backtest \
+            --preflight-only \
+            --strategy-variant three_layer \
+            --data-dir "${{ github.event.inputs.data_dir }}" \
+            --train-start "${{ github.event.inputs.train_start }}" \
+            --train-end "${{ github.event.inputs.train_end }}" \
+            --val-start "${{ github.event.inputs.val_start }}" \
+            --val-end "${{ github.event.inputs.val_end }}" \
+            --symbols "${{ github.event.inputs.symbols }}" \
+            --trials "${{ github.event.inputs.trials }}" \
+            --max-preflight-rows "${{ github.event.inputs.max_preflight_rows }}" \
+            --max-preflight-bytes "${{ github.event.inputs.max_preflight_bytes }}" \
+            --max-symbols "${{ github.event.inputs.max_symbols }}" \
+            --max-days "${{ github.event.inputs.max_days }}" \
+            --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
+            --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
+            "${extra_flags[@]}"
+
+      - name: Run optimize
+        if: ${{ github.event.inputs.preflight_only != 'true' }}
+        run: |
+          set -euo pipefail
+          . /home/runner/.cargo/env
+          rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
+          mkdir -p "${PLOY_DUCKDB_TEMP_DIR}"
+
+          health_summary() {
+            echo "## Optimize host health" >> "${GITHUB_STEP_SUMMARY}"
+            {
+              echo '```'
+              date -u
+              free -h || true
+              df -h "${{ github.event.inputs.data_dir }}" "${PLOY_DUCKDB_TEMP_DIR}" || true
+              ps -eo pid,ppid,stat,%mem,%cpu,comm,args --sort=-%mem | head -25 || true
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+          cleanup() {
+            status=$?
+            health_summary
+            rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
+            exit "${status}"
+          }
+          trap cleanup EXIT
+
+          extra_flags=()
+          if [ "${{ github.event.inputs.allow_large_window }}" = "true" ]; then
+            extra_flags+=(--allow-large-window)
+          fi
+          if [ -n "${{ github.event.inputs.max_updates }}" ]; then
+            extra_flags+=(--max-updates "${{ github.event.inputs.max_updates }}")
+          fi
+
+          timeout --preserve-status "${{ github.event.inputs.optimize_timeout_minutes }}m" \
           ./target/release/examples/optimize_backtest \
             --strategy-variant three_layer \
             --data-dir "${{ github.event.inputs.data_dir }}" \
@@ -143,4 +265,11 @@ jobs:
             --val-start "${{ github.event.inputs.val_start }}" \
             --val-end "${{ github.event.inputs.val_end }}" \
             --symbols "${{ github.event.inputs.symbols }}" \
-            --trials "${{ github.event.inputs.trials }}"
+            --trials "${{ github.event.inputs.trials }}" \
+            --max-preflight-rows "${{ github.event.inputs.max_preflight_rows }}" \
+            --max-preflight-bytes "${{ github.event.inputs.max_preflight_bytes }}" \
+            --max-symbols "${{ github.event.inputs.max_symbols }}" \
+            --max-days "${{ github.event.inputs.max_days }}" \
+            --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
+            --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
+            "${extra_flags[@]}"

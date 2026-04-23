@@ -1,4 +1,7 @@
-//! Hyperparameter optimization for PM5D strategy variants using TPE (Bayesian).
+//! Hyperparameter optimization for PM5D strategy variants.
+//!
+//! Directional/reversal use TPE (Bayesian). The `three_layer` branch currently
+//! uses random sampling and is labeled that way in runtime output.
 //!
 //! Usage (PostgreSQL):
 //!   cargo run --release -p ploy-strategy-bundles --example optimize_backtest -- \
@@ -35,14 +38,14 @@
 //! When using --data-dir without explicit --val-start/--val-end, the last 40%
 //! of the train range is used as validation (train covers first 60%).
 
-use chrono::{NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
 use ploy_feed_loaders::{
     load_from_database_with_options, HistoricalLoadOptions as DbHistoricalLoadOptions,
 };
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
+    DirectionalStrategy, Feed, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
     RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
     StrategyRuntime, ThreeLayerStrategy,
 };
@@ -52,43 +55,192 @@ use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Load data from Parquet files into a Vec<MarketUpdate>.
-/// Uses StreamingParquetFeed (same code path as backtest) to ensure
-/// identical data processing — token ID normalization, event timing, etc.
-#[cfg(feature = "parquet-feed")]
-fn load_from_parquet_vec(
-    data_dir: &str,
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
+}
+
+fn flag_present(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+}
+
+fn parse_usize_flag(args: &[String], flag: &str, default: usize) -> usize {
+    flag_value(args, flag)
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(default)
+}
+
+fn parse_u64_flag(args: &[String], flag: &str, default: u64) -> u64 {
+    flag_value(args, flag)
+        .and_then(|raw| parse_bytes(&raw))
+        .unwrap_or(default)
+}
+
+fn parse_bytes(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let split_at = trimmed
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .unwrap_or(trimmed.len());
+    let (number, unit) = trimmed.split_at(split_at);
+    let value: f64 = number.parse().ok()?;
+    let multiplier = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "t" | "tb" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some((value * multiplier) as u64)
+}
+
+fn display_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes as f64 >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB)
+    } else if bytes as f64 >= MIB {
+        format!("{:.2} MiB", bytes as f64 / MIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn algorithm_label(strategy_variant: &str) -> &'static str {
+    match strategy_variant {
+        "three_layer" => "random_sampling",
+        _ => "TPE",
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreflightLimits {
+    max_rows: usize,
+    max_bytes: u64,
+    max_symbols: usize,
+    max_days: i64,
+    allow_large_window: bool,
+}
+
+#[derive(Debug, Default)]
+struct SourcePreflight {
+    source: &'static str,
+    rows: usize,
+    bytes: u64,
+}
+
+#[derive(Debug, Default)]
+struct SplitPreflight {
+    label: &'static str,
+    sources: Vec<SourcePreflight>,
+}
+
+impl SplitPreflight {
+    fn total_rows(&self) -> usize {
+        self.sources.iter().map(|source| source.rows).sum()
+    }
+
+    fn total_bytes(&self) -> u64 {
+        self.sources.iter().map(|source| source.bytes).sum()
+    }
+}
+
+#[derive(Debug, Default)]
+struct PreflightManifest {
+    splits: Vec<SplitPreflight>,
+}
+
+impl PreflightManifest {
+    fn total_rows(&self) -> usize {
+        self.splits.iter().map(SplitPreflight::total_rows).sum()
+    }
+
+    fn max_split_bytes(&self) -> u64 {
+        self.splits
+            .iter()
+            .map(SplitPreflight::total_bytes)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn print(&self) {
+        eprintln!("=== Parquet Preflight Manifest ===");
+        for split in &self.splits {
+            eprintln!(
+                "{}: rows={} bytes={}",
+                split.label,
+                split.total_rows(),
+                display_bytes(split.total_bytes())
+            );
+            for source in &split.sources {
+                eprintln!(
+                    "  {:<18} rows={:<12} bytes={}",
+                    source.source,
+                    source.rows,
+                    display_bytes(source.bytes)
+                );
+            }
+        }
+        eprintln!(
+            "Total estimated rows={} max_split_bytes={}",
+            self.total_rows(),
+            display_bytes(self.max_split_bytes())
+        );
+        eprintln!("Preflight preserves raw LOB and aggTrade cadence; it only counts rows.");
+        eprintln!();
+    }
+}
+
+fn validate_preflight(
+    manifest: &PreflightManifest,
     symbols: &[String],
     from: chrono::DateTime<Utc>,
     to: chrono::DateTime<Utc>,
-) -> Vec<MarketUpdate> {
-    use ploy_strategy_bundles::feed::parquet_stream::StreamingParquetFeed;
-    use ploy_strategy_bundles::traits::Feed;
-
-    let options = ploy_strategy_bundles::feed::HistoricalLoadOptions::default();
-    let mut feed = StreamingParquetFeed::new(data_dir, symbols, from, to, &options);
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-    let mut updates = Vec::new();
-    rt.block_on(async {
-        while let Some(update) = feed.next().await {
-            updates.push(update);
-        }
-    });
-    updates
-}
-
-#[cfg(not(feature = "parquet-feed"))]
-fn load_from_parquet_vec(
-    _data_dir: &str,
-    _symbols: &[String],
-    _from: chrono::DateTime<Utc>,
-    _to: chrono::DateTime<Utc>,
-) -> Vec<MarketUpdate> {
-    panic!("Parquet support requires --features parquet-feed")
-}
-
-fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
+    limits: &PreflightLimits,
+) -> std::result::Result<(), String> {
+    if limits.allow_large_window {
+        return Ok(());
+    }
+    let days = (to.date_naive() - from.date_naive()).num_days().abs() + 1;
+    let rows = manifest.total_rows();
+    let bytes = manifest.max_split_bytes();
+    let mut failures = Vec::new();
+    if rows > limits.max_rows {
+        failures.push(format!(
+            "estimated rows {rows} exceed --max-preflight-rows {}",
+            limits.max_rows
+        ));
+    }
+    if bytes > limits.max_bytes {
+        failures.push(format!(
+            "estimated bytes {} exceed --max-preflight-bytes {}",
+            display_bytes(bytes),
+            display_bytes(limits.max_bytes)
+        ));
+    }
+    if symbols.len() > limits.max_symbols {
+        failures.push(format!(
+            "symbol count {} exceeds --max-symbols {}",
+            symbols.len(),
+            limits.max_symbols
+        ));
+    }
+    if days > limits.max_days {
+        failures.push(format!(
+            "date span {days} days exceeds --max-days {}",
+            limits.max_days
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}; rerun with --allow-large-window only after bounded smoke/host-health checks",
+            failures.join("; ")
+        ))
+    }
 }
 
 fn parse_date_start(raw: &str) -> chrono::DateTime<Utc> {
@@ -115,6 +267,236 @@ fn parse_timestamp(raw: &str) -> chrono::DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
+#[cfg(feature = "parquet-feed")]
+fn parquet_preflight_manifest(
+    data_dir: &str,
+    symbols: &[String],
+    train_from: chrono::DateTime<Utc>,
+    train_to: chrono::DateTime<Utc>,
+    val_from: chrono::DateTime<Utc>,
+    val_to: chrono::DateTime<Utc>,
+) -> std::result::Result<PreflightManifest, Box<dyn std::error::Error>> {
+    let conn = open_duckdb_for_preflight()?;
+    Ok(PreflightManifest {
+        splits: vec![
+            split_preflight(&conn, "train", data_dir, symbols, train_from, train_to)?,
+            split_preflight(&conn, "val", data_dir, symbols, val_from, val_to)?,
+        ],
+    })
+}
+
+#[cfg(not(feature = "parquet-feed"))]
+fn parquet_preflight_manifest(
+    _data_dir: &str,
+    _symbols: &[String],
+    _train_from: chrono::DateTime<Utc>,
+    _train_to: chrono::DateTime<Utc>,
+    _val_from: chrono::DateTime<Utc>,
+    _val_to: chrono::DateTime<Utc>,
+) -> std::result::Result<PreflightManifest, Box<dyn std::error::Error>> {
+    Err("Parquet preflight requires --features parquet-feed".into())
+}
+
+#[cfg(feature = "parquet-feed")]
+fn open_duckdb_for_preflight() -> std::result::Result<duckdb::Connection, Box<dyn std::error::Error>>
+{
+    let memory_limit =
+        std::env::var("PLOY_DUCKDB_MEMORY_LIMIT").unwrap_or_else(|_| "6GB".to_string());
+    let temp_dir =
+        std::env::var("PLOY_DUCKDB_TEMP_DIR").unwrap_or_else(|_| "/tmp/duckdb_spill".to_string());
+    std::fs::create_dir_all(&temp_dir)?;
+    let conn = duckdb::Connection::open_in_memory()?;
+    conn.execute_batch(&format!(
+        "SET memory_limit='{}'; SET temp_directory='{}';",
+        memory_limit.replace('\'', "''"),
+        temp_dir.replace('\'', "''")
+    ))?;
+    Ok(conn)
+}
+
+#[cfg(feature = "parquet-feed")]
+fn split_preflight(
+    conn: &duckdb::Connection,
+    label: &'static str,
+    data_dir: &str,
+    symbols: &[String],
+    from: chrono::DateTime<Utc>,
+    to: chrono::DateTime<Utc>,
+) -> std::result::Result<SplitPreflight, Box<dyn std::error::Error>> {
+    use chrono::Duration;
+
+    const WARMUP_MINUTES: i64 = 30;
+    let from_str = from.to_rfc3339();
+    let to_str = to.to_rfc3339();
+    let spot_from_str = (from - Duration::minutes(WARMUP_MINUTES)).to_rfc3339();
+    let sym_filter = parquet_symbol_filter_sql(symbols);
+
+    Ok(SplitPreflight {
+        label,
+        sources: vec![
+            SourcePreflight {
+                source: "spot",
+                rows: count_parquet_rows(
+                    conn,
+                    data_dir,
+                    "binance_price_ticks",
+                    "trade_time",
+                    &spot_from_str,
+                    &to_str,
+                    &sym_filter,
+                )?,
+                bytes: parquet_dir_bytes(data_dir, "binance_price_ticks")?,
+            },
+            SourcePreflight {
+                source: "agg_trade",
+                rows: count_parquet_rows(
+                    conn,
+                    data_dir,
+                    "binance_agg_trade_ticks",
+                    "trade_time",
+                    &from_str,
+                    &to_str,
+                    &sym_filter,
+                )?,
+                bytes: parquet_dir_bytes(data_dir, "binance_agg_trade_ticks")?,
+            },
+            SourcePreflight {
+                source: "lob",
+                rows: count_parquet_rows(
+                    conn,
+                    data_dir,
+                    "binance_lob_ticks",
+                    "event_time",
+                    &from_str,
+                    &to_str,
+                    &sym_filter,
+                )?,
+                bytes: parquet_dir_bytes(data_dir, "binance_lob_ticks")?,
+            },
+            SourcePreflight {
+                source: "pm_quote",
+                rows: count_quote_rows(conn, data_dir, &from_str, &to_str)?,
+                bytes: parquet_dir_bytes(data_dir, "clob_quote_ticks")?,
+            },
+            SourcePreflight {
+                source: "pm_event",
+                rows: count_event_rows(conn, data_dir, symbols, &from_str, &to_str)?,
+                bytes: parquet_dir_bytes(data_dir, "pm_market_metadata")?,
+            },
+        ],
+    })
+}
+
+#[cfg(feature = "parquet-feed")]
+fn count_parquet_rows(
+    conn: &duckdb::Connection,
+    data_dir: &str,
+    source_dir: &str,
+    ts_col: &str,
+    from_str: &str,
+    to_str: &str,
+    sym_filter: &str,
+) -> std::result::Result<usize, Box<dyn std::error::Error>> {
+    let dir = format!("{data_dir}/{source_dir}");
+    if !std::path::Path::new(&dir).exists() {
+        return Ok(0);
+    }
+    let glob = format!("{dir}/*.parquet");
+    let sql = format!(
+        "SELECT count(*)::BIGINT FROM read_parquet('{glob}') \
+         WHERE {ts_col} >= TIMESTAMPTZ '{from_str}' \
+           AND {ts_col} <= TIMESTAMPTZ '{to_str}' \
+           {sym_filter}"
+    );
+    let rows: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
+    Ok(rows.max(0) as usize)
+}
+
+#[cfg(feature = "parquet-feed")]
+fn count_quote_rows(
+    conn: &duckdb::Connection,
+    data_dir: &str,
+    from_str: &str,
+    to_str: &str,
+) -> std::result::Result<usize, Box<dyn std::error::Error>> {
+    let dir = format!("{data_dir}/clob_quote_ticks");
+    if !std::path::Path::new(&dir).exists() {
+        return Ok(0);
+    }
+    let glob = format!("{dir}/*.parquet");
+    let sql = format!(
+        "SELECT count(*)::BIGINT FROM read_parquet('{glob}') \
+         WHERE received_at >= TIMESTAMPTZ '{from_str}' \
+           AND received_at <= TIMESTAMPTZ '{to_str}' \
+           AND source IN ('polymarket_ws', 'polymarket_ws_collector', 'ploy_runner_live') \
+           AND best_bid IS NOT NULL AND best_ask IS NOT NULL \
+           AND (best_bid > 0.01 AND best_bid < 0.99 OR best_ask > 0.01 AND best_ask < 0.99)"
+    );
+    let rows: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
+    Ok(rows.max(0) as usize)
+}
+
+#[cfg(feature = "parquet-feed")]
+fn count_event_rows(
+    conn: &duckdb::Connection,
+    data_dir: &str,
+    symbols: &[String],
+    from_str: &str,
+    to_str: &str,
+) -> std::result::Result<usize, Box<dyn std::error::Error>> {
+    let dir = format!("{data_dir}/pm_market_metadata");
+    if !std::path::Path::new(&dir).exists() {
+        return Ok(0);
+    }
+    let glob = format!("{dir}/*.parquet");
+    let sym_filter = parquet_symbol_filter_sql(symbols);
+    let sql = format!(
+        "SELECT count(*)::BIGINT * 2 FROM read_parquet('{glob}') \
+         WHERE end_time >= TIMESTAMPTZ '{from_str}' \
+           AND start_time <= TIMESTAMPTZ '{to_str}' \
+           {sym_filter} \
+           AND raw_market IS NOT NULL"
+    );
+    let rows: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
+    Ok(rows.max(0) as usize)
+}
+
+#[cfg(feature = "parquet-feed")]
+fn parquet_dir_bytes(
+    data_dir: &str,
+    source_dir: &str,
+) -> std::result::Result<u64, Box<dyn std::error::Error>> {
+    let dir = std::path::Path::new(data_dir).join(source_dir);
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "parquet")
+        {
+            bytes += entry.metadata()?.len();
+        }
+    }
+    Ok(bytes)
+}
+
+#[cfg(feature = "parquet-feed")]
+fn parquet_symbol_filter_sql(symbols: &[String]) -> String {
+    if symbols.is_empty() {
+        return String::new();
+    }
+    let list = symbols
+        .iter()
+        .map(|s| format!("'{}'", s.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("AND symbol IN ({list})")
+}
+
 fn canonical_strategy_variant(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "" | "directional" | "v1" | "v2" | "v3" | "pm5d_v1" | "pm5d_v2" | "pm5d_v3" => {
@@ -137,25 +519,158 @@ fn build_strategy(strategy_variant: &str, config: DirectionalConfig) -> Box<dyn 
     }
 }
 
-/// Run a single backtest and return (net_pnl, trade_count, sharpe).
+#[derive(Clone)]
+enum ReplaySource {
+    DbEager {
+        label: String,
+        updates: Arc<[MarketUpdate]>,
+    },
+    ParquetStream {
+        label: String,
+        data_dir: String,
+        symbols: Vec<String>,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    },
+}
+
+impl ReplaySource {
+    fn db_eager(label: &str, updates: Vec<MarketUpdate>) -> Self {
+        Self::DbEager {
+            label: label.to_string(),
+            updates: Arc::from(updates.into_boxed_slice()),
+        }
+    }
+
+    fn parquet_stream(
+        label: &str,
+        data_dir: &str,
+        symbols: &[String],
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Self {
+        Self::ParquetStream {
+            label: label.to_string(),
+            data_dir: data_dir.to_string(),
+            symbols: symbols.to_vec(),
+            from,
+            to,
+        }
+    }
+
+    fn label(&self) -> &str {
+        match self {
+            Self::DbEager { label, .. } | Self::ParquetStream { label, .. } => label,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::DbEager { .. } => "db-eager",
+            Self::ParquetStream { .. } => "parquet-stream",
+        }
+    }
+
+    fn update_hint(&self) -> Option<usize> {
+        match self {
+            Self::DbEager { updates, .. } => Some(updates.len()),
+            Self::ParquetStream { .. } => None,
+        }
+    }
+
+    fn validate(&self) -> std::result::Result<(), String> {
+        match self {
+            Self::DbEager { .. } => Ok(()),
+            Self::ParquetStream { data_dir, .. } => {
+                #[cfg(not(feature = "parquet-feed"))]
+                {
+                    let _ = data_dir;
+                    Err("--data-dir requires the `parquet-feed` feature".to_string())
+                }
+
+                #[cfg(feature = "parquet-feed")]
+                {
+                    if std::path::Path::new(data_dir).exists() {
+                        Ok(())
+                    } else {
+                        Err(format!("Parquet data directory does not exist: {data_dir}"))
+                    }
+                }
+            }
+        }
+    }
+
+    fn open(&self) -> std::result::Result<Box<dyn Feed>, String> {
+        match self {
+            Self::DbEager { updates, .. } => {
+                Ok(Box::new(HistoricalFeed::shared(Arc::clone(updates))))
+            }
+            Self::ParquetStream {
+                data_dir,
+                symbols,
+                from,
+                to,
+                ..
+            } => {
+                #[cfg(not(feature = "parquet-feed"))]
+                {
+                    let _ = (data_dir, symbols, from, to);
+                    Err("--data-dir requires the `parquet-feed` feature".to_string())
+                }
+
+                #[cfg(feature = "parquet-feed")]
+                {
+                    use ploy_strategy_bundles::feed::parquet_stream::StreamingParquetFeed;
+
+                    self.validate()?;
+                    let mut options = ploy_strategy_bundles::feed::HistoricalLoadOptions::default();
+                    // Optimizer replay is tick-preserving. Do not sample away LOB
+                    // or aggTrade rows; the strategy consumes both at live cadence.
+                    options.lob_sample_secs = 1;
+                    Ok(Box::new(StreamingParquetFeed::new(
+                        data_dir, symbols, *from, *to, &options,
+                    )))
+                }
+            }
+        }
+    }
+}
+
+struct BacktestOutcome {
+    net_pnl: f64,
+    trade_count: usize,
+    sharpe: f64,
+    updates_processed: u64,
+    elapsed_secs: f64,
+}
+
+fn source_hint(source: &ReplaySource) -> String {
+    source
+        .update_hint()
+        .map(|updates| updates.to_string())
+        .unwrap_or_else(|| "streaming".to_string())
+}
+
+/// Run a single backtest and return compact analyzer-style metrics.
 fn run_backtest(
     strategy_variant: &str,
     config: DirectionalConfig,
-    data: Arc<[MarketUpdate]>,
-) -> (f64, usize, f64) {
+    source: &ReplaySource,
+    max_updates: Option<u64>,
+) -> std::result::Result<BacktestOutcome, String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
+        .map_err(|error| format!("failed to create tokio runtime: {error}"))?;
 
     let strategy = build_strategy(strategy_variant, config);
-    let feed = HistoricalFeed::shared(data);
+    let feed = source.open()?;
     let executor = SimulatedExecutor::new(SimulatedExecutorConfig::default());
     let recorder = Box::new(NullRecorder);
     let runtime_config = RuntimeConfig {
         mode: RuntimeMode::Backtest,
         throttle_hz: None,
-        max_updates: None,
+        max_updates,
         skip_settlement_exits: false,
     };
 
@@ -200,7 +715,13 @@ fn run_backtest(
         }
     };
 
-    (net_pnl, trade_count, sharpe)
+    Ok(BacktestOutcome {
+        net_pnl,
+        trade_count,
+        sharpe,
+        updates_processed: result.updates_processed,
+        elapsed_secs: result.elapsed_secs,
+    })
 }
 
 fn make_directional_config(
@@ -424,6 +945,25 @@ fn main() {
     let n_trials: usize = flag_value(&args, "--trials")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(200);
+    let preflight_only =
+        flag_present(&args, "--preflight-only") || flag_present(&args, "--preflight");
+    let preflight_limits = PreflightLimits {
+        max_rows: parse_usize_flag(&args, "--max-preflight-rows", 15_000_000),
+        max_bytes: parse_u64_flag(&args, "--max-preflight-bytes", 80 * 1024 * 1024 * 1024),
+        max_symbols: parse_usize_flag(&args, "--max-symbols", 6),
+        max_days: parse_usize_flag(&args, "--max-days", 8) as i64,
+        allow_large_window: flag_present(&args, "--allow-large-window"),
+    };
+    if let Some(memory_limit) = flag_value(&args, "--duckdb-memory-limit") {
+        std::env::set_var("PLOY_DUCKDB_MEMORY_LIMIT", memory_limit);
+    }
+    if let Some(temp_dir) = flag_value(&args, "--duckdb-temp-dir") {
+        std::env::set_var("PLOY_DUCKDB_TEMP_DIR", temp_dir);
+    }
+    let max_updates: Option<u64> = flag_value(&args, "--max-updates").map(|raw| {
+        raw.parse()
+            .unwrap_or_else(|_| panic!("Invalid --max-updates: {raw}"))
+    });
     let symbols: Vec<String> = symbols_arg
         .split(',')
         .map(str::trim)
@@ -445,7 +985,15 @@ fn main() {
     );
     eprintln!("Symbols: {:?}", symbols);
     eprintln!("Official-only settlement: {}", require_official_settlement);
-    eprintln!("Trials: {n_trials}  Algorithm: TPE");
+    eprintln!(
+        "Trials: {n_trials}  Algorithm: {}",
+        algorithm_label(&strategy_variant)
+    );
+    if let Some(max_updates) = max_updates {
+        eprintln!(
+            "Smoke bound: max_updates={max_updates} (truncated replay; non-canonical result)"
+        );
+    }
     eprintln!();
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -470,27 +1018,36 @@ fn main() {
         .map(parse_timestamp)
         .unwrap_or_else(|| parse_date_end(&val_end));
 
-    let (train_data, val_data) = if let Some(ref dir) = data_dir {
-        eprintln!(
-            "Loading training data from Parquet ({} → {})...",
-            train_start, train_end
-        );
-        let train = load_from_parquet_vec(dir, &symbols, train_from, train_to);
-        eprintln!("  {} updates loaded", train.len());
-        eprintln!(
-            "Loading validation data from Parquet ({} → {})...",
-            val_start, val_end
-        );
-        let val = load_from_parquet_vec(dir, &symbols, val_from, val_to);
-        eprintln!("  {} updates loaded\n", val.len());
-        (train, val)
+    let (train_source, val_source) = if let Some(ref dir) = data_dir {
+        let manifest =
+            parquet_preflight_manifest(dir, &symbols, train_from, train_to, val_from, val_to)
+                .expect("Failed to build Parquet preflight manifest");
+        manifest.print();
+        if let Err(error) =
+            validate_preflight(&manifest, &symbols, train_from, val_to, &preflight_limits)
+        {
+            eprintln!("ERROR: optimize preflight rejected this request: {error}");
+            std::process::exit(2);
+        }
+        if preflight_only {
+            eprintln!("Preflight-only mode complete; exiting before replay/optimization.");
+            return;
+        }
+
+        (
+            ReplaySource::parquet_stream("train", dir, &symbols, train_from, train_to),
+            ReplaySource::parquet_stream("validation", dir, &symbols, val_from, val_to),
+        )
     } else {
         let db_url = db_url.as_deref().unwrap();
         let pool = rt
             .block_on(PgPoolOptions::new().max_connections(3).connect(db_url))
             .expect("DB connection failed");
 
-        eprintln!("Loading training data ({} → {})...", train_start, train_end);
+        eprintln!(
+            "Loading training data into db-eager replay ({} → {})...",
+            train_start, train_end
+        );
         let train = rt
             .block_on(load_from_database_with_options(
                 &pool,
@@ -505,7 +1062,10 @@ fn main() {
             .expect("Failed to load training data");
         eprintln!("  {} updates loaded", train.len());
 
-        eprintln!("Loading validation data ({} → {})...", val_start, val_end);
+        eprintln!(
+            "Loading validation data into db-eager replay ({} → {})...",
+            val_start, val_end
+        );
         let val = rt
             .block_on(load_from_database_with_options(
                 &pool,
@@ -519,11 +1079,25 @@ fn main() {
             ))
             .expect("Failed to load validation data");
         eprintln!("  {} updates loaded\n", val.len());
-        (train, val)
+        (
+            ReplaySource::db_eager("train", train),
+            ReplaySource::db_eager("validation", val),
+        )
     };
 
-    let train_data: Arc<[MarketUpdate]> = Arc::from(train_data.into_boxed_slice());
-    let val_data: Arc<[MarketUpdate]> = Arc::from(val_data.into_boxed_slice());
+    eprintln!(
+        "Replay source train: {} [{}] updates={}",
+        train_source.label(),
+        train_source.kind(),
+        source_hint(&train_source)
+    );
+    eprintln!(
+        "Replay source validation: {} [{}] updates={}",
+        val_source.label(),
+        val_source.kind(),
+        source_hint(&val_source)
+    );
+
     let symbols_ref = Arc::new(symbols.clone());
     let study: Study<f64> = Study::maximize(TpeSampler::new());
 
@@ -533,7 +1107,7 @@ fn main() {
         let p_pm_lag = IntParam::new(20, 120).name("reversal_max_pm_lag_secs");
         let p_min_edge = FloatParam::new(-0.05, 0.01).name("min_edge");
 
-        let train_ref = Arc::clone(&train_data);
+        let train_ref = train_source.clone();
         let symbols_ref_c = Arc::clone(&symbols_ref);
 
         let p_max_distance_c = p_max_distance.clone();
@@ -557,23 +1131,35 @@ fn main() {
                 };
 
                 let config = make_reversal_config(symbols_ref_c.as_slice(), &params);
-                let (net_pnl, trades, sharpe) =
-                    run_backtest("reversal", config, Arc::clone(&train_ref));
-                let score = if trades == 0 {
+                let outcome = match run_backtest("reversal", config, &train_ref, max_updates) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "  Trial {:>3}: source={} error={error}",
+                            trial.id(),
+                            train_ref.kind()
+                        );
+                        return Ok::<f64, Error>(-1_000_000.0);
+                    }
+                };
+                let score = if outcome.trade_count == 0 {
                     -100.0
-                } else if trades < 5 {
-                    net_pnl
+                } else if outcome.trade_count < 5 {
+                    outcome.net_pnl
                 } else {
-                    sharpe
+                    outcome.sharpe
                 };
 
                 eprintln!(
-                    "  Trial {:>3}: score={:>7.3} sharpe={:>7.3} pnl=${:>8.2} trades={:>4} dist={:.4} flip={} drift={:.5} lob={:.2} ask={:.3} lag={}",
+                    "  Trial {:>3}: source={} score={:>7.3} sharpe={:>7.3} pnl=${:>8.2} trades={:>4} updates={} elapsed={:.1}s dist={:.4} flip={} drift={:.5} lob={:.2} ask={:.3} lag={}",
                     trial.id(),
+                    train_ref.kind(),
                     score,
-                    sharpe,
-                    net_pnl,
-                    trades,
+                    outcome.sharpe,
+                    outcome.net_pnl,
+                    outcome.trade_count,
+                    outcome.updates_processed,
+                    outcome.elapsed_secs,
                     params.max_distance_pct,
                     params.max_drift_flip_age_secs,
                     params.min_post_flip_drift,
@@ -642,11 +1228,14 @@ fn main() {
 
         eprintln!("\n=== Validation (held-out) ===");
         let val_config = make_reversal_config(symbols_ref.as_slice(), &best_params);
-        let (val_pnl, val_trades, val_sharpe) =
-            run_backtest("reversal", val_config, Arc::clone(&val_data));
-        eprintln!("Val Sharpe:  {val_sharpe:.3}");
-        eprintln!("Val PnL:     ${val_pnl:.2}");
-        eprintln!("Val Trades:  {val_trades}");
+        let val_outcome = run_backtest("reversal", val_config, &val_source, max_updates)
+            .expect("Validation backtest failed");
+        eprintln!("Val Source:  {}", val_source.kind());
+        eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
+        eprintln!("Val PnL:     ${:.2}", val_outcome.net_pnl);
+        eprintln!("Val Trades:  {}", val_outcome.trade_count);
+        eprintln!("Val Updates: {}", val_outcome.updates_processed);
+        eprintln!("Val Elapsed: {:.1}s", val_outcome.elapsed_secs);
 
         eprintln!("\n=== Config Snippet ===");
         eprintln!(
@@ -724,7 +1313,7 @@ fn main() {
         let sample =
             |rng: &mut dyn FnMut() -> f64, lo: f64, hi: f64| -> f64 { lo + rng() * (hi - lo) };
 
-        let train_ref = Arc::clone(&train_data);
+        let train_ref = train_source.clone();
         let symbols_ref_c = Arc::clone(&symbols_ref);
         let mut best_score = f64::NEG_INFINITY;
         let mut best_params_opt: Option<ThreeLayerSearchParams> = None;
@@ -760,20 +1349,33 @@ fn main() {
             };
 
             let config = make_three_layer_config(symbols_ref_c.as_slice(), &params);
-            let (net_pnl, trades, sharpe) =
-                run_backtest("three_layer", config, Arc::clone(&train_ref));
+            let outcome = match run_backtest("three_layer", config, &train_ref, max_updates) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    eprintln!(
+                        "iter {:>3}/{}: source={} error={error}",
+                        iter + 1,
+                        n_trials,
+                        train_ref.kind()
+                    );
+                    continue;
+                }
+            };
 
             // Sharpe = mean(pnl_per_trade) / std(pnl_per_trade) * sqrt(trades_per_year)
             // Penalty for < 5 trades already applied inside run_backtest (-999.0)
-            let score = sharpe;
+            let score = outcome.sharpe;
 
             eprintln!(
-                "iter {:>3}/{}: sharpe={:>7.3} trades={:>4} pnl=${:>8.2} | params: dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} tp={:.3} stop={:.4} cd={}s",
+                "iter {:>3}/{}: source={} sharpe={:>7.3} trades={:>4} pnl=${:>8.2} updates={} elapsed={:.1}s | params: dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} tp={:.3} stop={:.4} cd={}s",
                 iter + 1,
                 n_trials,
-                sharpe,
-                trades,
-                net_pnl,
+                train_ref.kind(),
+                outcome.sharpe,
+                outcome.trade_count,
+                outcome.net_pnl,
+                outcome.updates_processed,
+                outcome.elapsed_secs,
                 min_direction_prob,
                 min_distance_over_sigma,
                 min_confirmation_score,
@@ -787,8 +1389,8 @@ fn main() {
 
             if score > best_score {
                 best_score = score;
-                best_pnl = net_pnl;
-                best_trades = trades;
+                best_pnl = outcome.net_pnl;
+                best_trades = outcome.trade_count;
                 best_params_opt = Some(ThreeLayerSearchParams {
                     min_direction_prob,
                     min_distance_over_sigma,
@@ -814,11 +1416,14 @@ fn main() {
 
         eprintln!("\n=== Validation (held-out, out-of-sample) ===");
         let val_config = make_three_layer_config(symbols_ref.as_slice(), &best_params);
-        let (val_pnl, val_trades, val_sharpe) =
-            run_backtest("three_layer", val_config, Arc::clone(&val_data));
-        eprintln!("Val Sharpe:  {val_sharpe:.3}");
-        eprintln!("Val PnL:     ${val_pnl:.2}");
-        eprintln!("Val Trades:  {val_trades}");
+        let val_outcome = run_backtest("three_layer", val_config, &val_source, max_updates)
+            .expect("Validation backtest failed");
+        eprintln!("Val Source:  {}", val_source.kind());
+        eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
+        eprintln!("Val PnL:     ${:.2}", val_outcome.net_pnl);
+        eprintln!("Val Trades:  {}", val_outcome.trade_count);
+        eprintln!("Val Updates: {}", val_outcome.updates_processed);
+        eprintln!("Val Elapsed: {:.1}s", val_outcome.elapsed_secs);
 
         eprintln!("\n=== Best Config (TOML) ===");
         eprintln!("# Paste into [strategy] section of your config file");
@@ -868,7 +1473,7 @@ fn main() {
         let p_min_time = IntParam::new(20, 120).name("min_time_remaining_secs");
         let p_max_time = IntParam::new(180, 300).name("max_time_remaining_secs");
 
-        let train_ref = Arc::clone(&train_data);
+        let train_ref = train_source.clone();
         let symbols_ref_c = Arc::clone(&symbols_ref);
         let p_min_prob_c = p_min_prob.clone();
         let p_min_edge_c = p_min_edge.clone();
@@ -899,22 +1504,34 @@ fn main() {
                     min_time,
                     max_time,
                 );
-                let (net_pnl, trades, sharpe) =
-                    run_backtest("directional", config, Arc::clone(&train_ref));
+                let outcome = match run_backtest("directional", config, &train_ref, max_updates) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "  Trial {:>3}: source={} error={error}",
+                            trial.id(),
+                            train_ref.kind()
+                        );
+                        return Ok::<f64, Error>(-1_000_000.0);
+                    }
+                };
 
                 eprintln!(
-                    "  Trial {:>3}: sharpe={:>7.3}  pnl=${:>8.2}  trades={:>4}  p={:.3}  edge={:.4}  max={:.2}  cd={}s",
+                    "  Trial {:>3}: source={} sharpe={:>7.3}  pnl=${:>8.2}  trades={:>4}  updates={} elapsed={:.1}s  p={:.3}  edge={:.4}  max={:.2}  cd={}s",
                     trial.id(),
-                    sharpe,
-                    net_pnl,
-                    trades,
+                    train_ref.kind(),
+                    outcome.sharpe,
+                    outcome.net_pnl,
+                    outcome.trade_count,
+                    outcome.updates_processed,
+                    outcome.elapsed_secs,
                     min_prob,
                     min_edge,
                     max_entry,
                     cooldown
                 );
 
-                Ok(sharpe)
+                Ok(outcome.sharpe)
             })
             .expect("Optimization failed");
 
@@ -945,11 +1562,14 @@ fn main() {
             best_min_time,
             best_max_time,
         );
-        let (val_pnl, val_trades, val_sharpe) =
-            run_backtest("directional", val_config, Arc::clone(&val_data));
-        eprintln!("Val Sharpe:  {val_sharpe:.3}");
-        eprintln!("Val PnL:     ${val_pnl:.2}");
-        eprintln!("Val Trades:  {val_trades}");
+        let val_outcome = run_backtest("directional", val_config, &val_source, max_updates)
+            .expect("Validation backtest failed");
+        eprintln!("Val Source:  {}", val_source.kind());
+        eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
+        eprintln!("Val PnL:     ${:.2}", val_outcome.net_pnl);
+        eprintln!("Val Trades:  {}", val_outcome.trade_count);
+        eprintln!("Val Updates: {}", val_outcome.updates_processed);
+        eprintln!("Val Elapsed: {:.1}s", val_outcome.elapsed_secs);
 
         eprintln!("\n=== Config Snippet ===");
         eprintln!("min_probability = {best_min_prob:.4}");
