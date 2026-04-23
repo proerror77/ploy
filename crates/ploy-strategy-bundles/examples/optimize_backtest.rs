@@ -694,7 +694,10 @@ fn run_backtest(
     let fills = &snapshot.fills;
     let mut by_token: HashMap<&str, Vec<&ploy_trading::FillRecord>> = HashMap::new();
     for fill in fills {
-        by_token.entry(fill.token_id.as_str()).or_default().push(fill);
+        by_token
+            .entry(fill.token_id.as_str())
+            .or_default()
+            .push(fill);
     }
     let mut per_trade_pnl = Vec::new();
     for token_fills in by_token.values() {
