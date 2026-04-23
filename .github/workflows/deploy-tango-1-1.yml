@@ -64,7 +64,9 @@ jobs:
         run: |
           cargo build --release --locked \
             --target "${PLATFORM_TARGET}" \
+            -p new-ployd \
             -p new-ploy-runner
+          strip "target/${PLATFORM_TARGET}/release/new-ployd" || true
           strip "target/${PLATFORM_TARGET}/release/new-ploy-runner" || true
 
       - name: Build factor-research
@@ -86,6 +88,7 @@ jobs:
         run: |
           rm -rf dist
           mkdir -p dist/bin dist/config/strategies dist/migrations dist/deployment/systemd dist/scripts
+          cp target/${PLATFORM_TARGET}/release/new-ployd dist/bin/ployd
           cp target/${PLATFORM_TARGET}/release/new-ploy-runner dist/bin/ploy-runner
           cp target/${PLATFORM_TARGET}/release/examples/factor_research dist/bin/factor-research
           cp target/${PLATFORM_TARGET}/release/examples/optimize_backtest dist/bin/optimize-backtest
@@ -95,6 +98,7 @@ jobs:
           cp scripts/binance_aggtrade_collector.py dist/scripts/binance_aggtrade_collector.py
           cp scripts/binance_price_collector.py dist/scripts/binance_price_collector.py
           cp scripts/binance_lob_collector.py dist/scripts/binance_lob_collector.py
+          cp scripts/report_strategy.py dist/scripts/report_strategy.py
           cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
           cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
           for migration in ${DEPLOY_MIGRATIONS}; do
@@ -289,6 +293,7 @@ jobs:
             tar -xzf "${DEPLOY_BUNDLE_NAME}"
 
             # Install artifacts into the live runtime root used by systemd.
+            install -m 0755 ./bin/ployd ${DEPLOY_ROOT}/bin/ployd
             install -m 0755 ./bin/ploy-runner ${DEPLOY_ROOT}/bin/ploy-runner
             install -m 0755 ./bin/factor-research ${DEPLOY_ROOT}/bin/factor-research
             install -m 0755 ./bin/optimize-backtest ${DEPLOY_ROOT}/bin/optimize-backtest
@@ -298,6 +303,7 @@ jobs:
             install -m 0755 ./scripts/binance_aggtrade_collector.py ${DEPLOY_ROOT}/scripts/binance_aggtrade_collector.py
             install -m 0755 ./scripts/binance_price_collector.py ${DEPLOY_ROOT}/scripts/binance_price_collector.py
             install -m 0755 ./scripts/binance_lob_collector.py ${DEPLOY_ROOT}/scripts/binance_lob_collector.py
+            install -m 0755 ./scripts/report_strategy.py ${DEPLOY_ROOT}/scripts/report_strategy.py
             install -m 0644 ./scripts/fix_binance_lob_partitions.sql ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
             install -m 0644 ./scripts/fix_deribit_partitions.sql ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
             for migration in ${DEPLOY_MIGRATIONS}; do

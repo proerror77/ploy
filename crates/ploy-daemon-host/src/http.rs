@@ -1,15 +1,15 @@
 use crate::events::EventBroker;
-use crate::runtime::{PloyDaemon, next_paper_intent_id};
+use crate::runtime::{next_paper_intent_id, PloyDaemon};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use ploy_operator_contracts::{
-    AgentRunRecord, AlertSnapshotEvent, AuditLogEntry, ControlPlaneErrorResponse,
-    DeploymentApplyRequest, DeploymentControlRequest, DeploymentDiagnosticsReport,
-    DeploymentSnapshotEvent, DiagnosticsEvidence, DiagnosticsFinding, IntentPurpose,
-    MetricsSnapshotEvent, OperatorEvent, OrderReplaceRequest, OversightSnapshotEvent,
-    PaperIntentRequest, PlatformDiagnosticsReport, ProposalCreateRequest, ProposalDecisionRequest,
-    ProposalSnapshotEvent, StatusUpdate, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
-    compute_oversight_report,
+    compute_oversight_report, AgentRunRecord, AlertSnapshotEvent, AuditLogEntry,
+    ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
+    DeploymentDiagnosticsReport, DeploymentSnapshotEvent, DiagnosticsEvidence, DiagnosticsFinding,
+    IntentPurpose, MetricsSnapshotEvent, OperatorEvent, OrderReplaceRequest,
+    OversightSnapshotEvent, PaperIntentRequest, PlatformDiagnosticsReport, ProposalCreateRequest,
+    ProposalDecisionRequest, ProposalSnapshotEvent, StatusUpdate, SystemSnapshotEvent,
+    SystemStatus, TradingSnapshotEvent,
 };
 use ploy_trading::{TradeSide, TradingIntent};
 use secrecy::{ExposeSecret, SecretString};
@@ -18,15 +18,14 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use crate::config::PlatformConfig;
-#[cfg(test)]
-use std::path::Path;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -154,6 +153,107 @@ pub fn route_request(path: &str, runtime_root: &Path) -> (u16, String) {
         Ok(body) => (200, body),
         Err(_) => json_error(503, "snapshot_unavailable", None),
     }
+}
+
+fn host_root_from_runtime_root(runtime_root: &Path) -> PathBuf {
+    runtime_root
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
+
+fn query_param(raw_path: &str, key: &str) -> Option<String> {
+    let (_, query) = raw_path.split_once('?')?;
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=')?;
+        if name == key && !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn build_strategy_report_html(state: &Arc<AppState>, since: Option<&str>) -> (u16, String) {
+    let host_root = match state.daemon.lock() {
+        Ok(daemon) => host_root_from_runtime_root(&daemon.config.runtime_root),
+        Err(_) => return html_error(503, "daemon lock poisoned"),
+    };
+
+    let script_path = host_root.join("scripts/report_strategy.py");
+    if !script_path.exists() {
+        return html_error(
+            500,
+            &format!(
+                "strategy report script not found: {}",
+                script_path.display()
+            ),
+        );
+    }
+
+    let report_path = host_root.join("reports/strategy_report.html");
+    if let Some(parent) = report_path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            return html_error(500, &format!("failed to create report directory: {err}"));
+        }
+    }
+
+    let mut command = Command::new("python3");
+    command
+        .arg(&script_path)
+        .arg("--host")
+        .arg("local")
+        .current_dir(&host_root)
+        .env("PLOY_RESEARCH_HOST", "local");
+    if let Some(since) = since {
+        command.arg("--since").arg(since);
+    }
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) => {
+            return html_error(
+                500,
+                &format!("failed to start strategy report generator: {err}"),
+            );
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let message = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            format!("report generator exited with status {}", output.status)
+        };
+        return html_error(500, &message);
+    }
+
+    match fs::read_to_string(&report_path) {
+        Ok(body) => (200, body),
+        Err(err) => html_error(
+            500,
+            &format!(
+                "strategy report was generated but could not be read from {}: {err}",
+                report_path.display()
+            ),
+        ),
+    }
+}
+
+fn html_error(status_code: u16, message: &str) -> (u16, String) {
+    let escaped = message
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    (
+        status_code,
+        format!(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Strategy Report Error</title></head><body><h1>Strategy Report Error</h1><p>{escaped}</p></body></html>"
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -306,7 +406,8 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
 
     let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
     let method = request_line.next().unwrap_or("GET");
-    let path = request_line.next().unwrap_or("/");
+    let raw_path = request_line.next().unwrap_or("/");
+    let path = raw_path.split('?').next().unwrap_or(raw_path);
     let client_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
     let (configured_token, operator_token, sidecar_token, cookie_secret) =
         match configured_auth(state) {
@@ -385,6 +486,56 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
             None,
         );
         return handle_event_stream(stream, state);
+    }
+    if method == "GET" && path == "/reports/strategy" {
+        if !access_allowed(
+            auth_level,
+            required_access,
+            configured_token.is_some(),
+            operator_token.is_some(),
+            sidecar_token.is_some(),
+        ) {
+            let response = auth_error_response(
+                required_access,
+                configured_token.is_some(),
+                operator_token.is_some(),
+                sidecar_token.is_some(),
+            );
+            audit_request(
+                state,
+                method,
+                path,
+                client_addr.as_deref(),
+                auth_level,
+                required_access,
+                response.0,
+                "denied",
+                response_message(&response.1),
+            );
+            return write_json_response(stream, response);
+        }
+
+        let response = build_strategy_report_html(state, query_param(raw_path, "since").as_deref());
+        audit_request(
+            state,
+            method,
+            path,
+            client_addr.as_deref(),
+            auth_level,
+            required_access,
+            response.0,
+            if response.0 < 400 {
+                "allowed"
+            } else {
+                "denied"
+            },
+            if response.0 < 400 {
+                None
+            } else {
+                Some("strategy report generation failed".to_string())
+            },
+        );
+        return write_html_response(stream, response);
     }
     let body = request
         .split_once("\r\n\r\n")
@@ -493,9 +644,14 @@ fn write_json_response(stream: TcpStream, response: (u16, String)) -> io::Result
     write_json_response_with_headers(stream, response, &[])
 }
 
-fn write_json_response_with_headers(
+fn write_html_response(stream: TcpStream, response: (u16, String)) -> io::Result<()> {
+    write_response_with_headers(stream, response, "text/html; charset=utf-8", &[])
+}
+
+fn write_response_with_headers(
     mut stream: TcpStream,
     response: (u16, String),
+    content_type: &str,
     headers: &[(String, String)],
 ) -> io::Result<()> {
     let (status_code, body) = response;
@@ -505,14 +661,23 @@ fn write_json_response_with_headers(
         .collect::<String>();
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n{}\
+        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: {}\r\nConnection: close\r\n{}\
          \r\n{}",
         status_code,
         status_text(status_code),
         body.len(),
+        content_type,
         extra_headers,
         body
     )
+}
+
+fn write_json_response_with_headers(
+    stream: TcpStream,
+    response: (u16, String),
+    headers: &[(String, String)],
+) -> io::Result<()> {
+    write_response_with_headers(stream, response, "application/json", headers)
 }
 
 fn configured_auth(
@@ -602,6 +767,7 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
         | ("GET", "/api/system/alerts")
         | ("GET", "/api/deployments")
         | ("GET", "/api/trading/state")
+        | ("GET", "/reports/strategy")
         | ("GET", "/api/events/stream") => RequiredAccess::ReadOnly,
         ("GET", "/api/audit/logs") => RequiredAccess::Admin,
         ("GET", "/api/system/diagnose") => RequiredAccess::ReadOnly,
@@ -1712,6 +1878,9 @@ fn handle_runtime_request(
                             "deployment_not_found",
                             Some(format!("deployment `{deployment_id}` was not found")),
                         ),
+                        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                            json_error(404, "deployment_not_found", Some(err.to_string()))
+                        }
                         Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
                             json_error(400, "invalid_request", Some(err.to_string()))
                         }
@@ -2018,10 +2187,10 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        ADMIN_SESSION_COOKIE_NAME, AppState, AuthLevel, RateLimiter, admin_session_cookie,
-        append_audit_entry, content_length, handle_api_request,
+        admin_session_cookie, append_audit_entry, content_length, handle_api_request,
         handle_authenticated_runtime_request, handle_runtime_request, header_end_offset,
-        request_auth_level, response_headers, route_request, snapshot_events,
+        request_auth_level, response_headers, route_request, snapshot_events, AppState, AuthLevel,
+        RateLimiter, ADMIN_SESSION_COOKIE_NAME,
     };
     use crate::events::EventBroker;
     use chrono::{Duration, Utc};
@@ -2268,13 +2437,11 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(
-            login_headers
-                .iter()
-                .any(|(name, value)| name == "Set-Cookie"
-                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
-                    && !value.contains("secret-token"))
-        );
+        assert!(login_headers
+            .iter()
+            .any(|(name, value)| name == "Set-Cookie"
+                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
+                && !value.contains("secret-token")));
 
         let logout_headers = response_headers(
             "POST",
@@ -2283,13 +2450,11 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(
-            logout_headers
-                .iter()
-                .any(|(name, value)| name == "Set-Cookie"
-                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
-                    && value.contains("Max-Age=0"))
-        );
+        assert!(logout_headers
+            .iter()
+            .any(|(name, value)| name == "Set-Cookie"
+                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
+                && value.contains("Max-Age=0")));
     }
 
     #[test]
@@ -2630,16 +2795,12 @@ mod tests {
         assert_eq!(alerts_code, 200);
         let alerts: Vec<ploy_operator_contracts::ActiveAlert> =
             serde_json::from_str(&alerts_body).expect("alerts json");
-        assert!(
-            alerts
-                .iter()
-                .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale)
-        );
-        assert!(
-            alerts
-                .iter()
-                .any(|alert| alert.source_id.contains("live_reconcile"))
-        );
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale));
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.source_id.contains("live_reconcile")));
     }
 
     #[test]
