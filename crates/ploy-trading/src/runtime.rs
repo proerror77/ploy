@@ -3,7 +3,7 @@ use crate::intents::{TradeSide, TradingIntent};
 use crate::orders::OrderLedger;
 use crate::pnl::PnlSnapshot;
 use crate::positions::{PositionLedger, PositionSnapshot};
-use crate::risk::{RiskSnapshot, snapshot_from_state};
+use crate::risk::{snapshot_from_state, RiskSnapshot};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -173,7 +173,9 @@ impl TradingRuntime {
         if self.fills.contains(&fill.fill_id) {
             return false;
         }
-        self.orders.apply_fill(&fill);
+        if self.orders.apply_fill(&fill).is_none() {
+            return false;
+        }
         self.positions.apply_fill(&fill);
         self.fills.record(fill);
         self.prune_inactive_intents();
@@ -378,9 +380,24 @@ mod tests {
         });
         assert!(runtime.intent("intent-1").is_some());
 
+        runtime.submit_intent(
+            TradingIntent {
+                intent_id: "intent-exit".to_string(),
+                deployment_id: "dep-1".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "token-1".to_string(),
+                side: TradeSide::Sell,
+                quantity: dec!(1),
+                limit_price: Some(dec!(0.60)),
+                purpose: IntentPurpose::Exit,
+                created_at: Utc::now(),
+            },
+            "order-exit",
+        );
+        runtime.acknowledge_order("order-exit", "venue-exit");
         runtime.record_fill(FillRecord {
             fill_id: "fill-2".to_string(),
-            order_id: "order-1".to_string(),
+            order_id: "order-exit".to_string(),
             token_id: "token-1".to_string(),
             side: TradeSide::Sell,
             quantity: dec!(1),

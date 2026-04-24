@@ -443,6 +443,13 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                         .await
                 }
                 OrderExecutionType::FAK | OrderExecutionType::FOK => {
+                    let price = execution_price_override(
+                        request.order_type,
+                        request.side,
+                        limit_price,
+                        request.aggressive_ticks,
+                    )
+                    .unwrap_or(limit_price);
                     let amount = normalize_execution_amount(request.quantity, limit_price, side)
                         .map_err(|err| {
                             ExecutionError::Validation(format!("build amount: {err}"))
@@ -451,6 +458,7 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                         .market_order()
                         .token_id(token_id)
                         .order_type(request.order_type.into_sdk())
+                        .price(price)
                         .amount(amount)
                         .side(side)
                         .build()
@@ -625,7 +633,7 @@ fn execution_price_override(
                 tick_size,
             ))
         }
-        OrderExecutionType::FAK | OrderExecutionType::FOK => None,
+        OrderExecutionType::FAK | OrderExecutionType::FOK => Some(limit_price),
     }
 }
 
@@ -830,12 +838,12 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
-        ExecutionRequest, LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
-        PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
-        TrackedOrder, WalletSignatureType, execution_price_override, normalize_aggressive_price,
-        normalize_execution_amount, normalize_order_notional, normalize_order_quantity,
-        polymarket_signature_type_from_env, tracked_trade_fill, trade_side, unique_token_ids,
+        execution_price_override, normalize_aggressive_price, normalize_execution_amount,
+        normalize_order_notional, normalize_order_quantity, polymarket_signature_type_from_env,
+        tracked_trade_fill, trade_side, unique_token_ids, CancellationOutcome, CancellationRequest,
+        ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
+        OrderExecutionType, PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome,
+        ReplaceRequest, StaticExecutionGateway, TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -960,18 +968,18 @@ mod tests {
     }
 
     #[test]
-    fn immediate_execution_uses_orderbook_pricing_instead_of_signal_cap() {
+    fn immediate_execution_keeps_a_hard_price_bound() {
         assert_eq!(
             execution_price_override(OrderExecutionType::GTC, TradeSide::Buy, dec!(0.417075), 2),
             Some(dec!(0.44))
         );
         assert_eq!(
             execution_price_override(OrderExecutionType::FAK, TradeSide::Buy, dec!(0.417075), 2),
-            None
+            Some(dec!(0.417075))
         );
         assert_eq!(
             execution_price_override(OrderExecutionType::FOK, TradeSide::Buy, dec!(0.417075), 2),
-            None
+            Some(dec!(0.417075))
         );
     }
 
@@ -1072,22 +1080,20 @@ mod tests {
                 Address::from_str("0x0000000000000000000000000000000000000001")
                     .expect("maker address"),
             )
-            .maker_orders(vec![
-                MakerOrder::builder()
-                    .order_id("venue-order-b")
-                    .owner(ApiKey::nil())
-                    .maker_address(
-                        Address::from_str("0x0000000000000000000000000000000000000002")
-                            .expect("second maker address"),
-                    )
-                    .matched_amount(dec!(2))
-                    .price(dec!(0.56))
-                    .fee_rate_bps(dec!(4))
-                    .asset_id(U256::from(1_u64))
-                    .outcome("YES")
-                    .side(polymarket_client_sdk::clob::types::Side::Sell)
-                    .build(),
-            ])
+            .maker_orders(vec![MakerOrder::builder()
+                .order_id("venue-order-b")
+                .owner(ApiKey::nil())
+                .maker_address(
+                    Address::from_str("0x0000000000000000000000000000000000000002")
+                        .expect("second maker address"),
+                )
+                .matched_amount(dec!(2))
+                .price(dec!(0.56))
+                .fee_rate_bps(dec!(4))
+                .asset_id(U256::from(1_u64))
+                .outcome("YES")
+                .side(polymarket_client_sdk::clob::types::Side::Sell)
+                .build()])
             .transaction_hash(B256::ZERO)
             .trader_side(TraderSide::Taker)
             .build();

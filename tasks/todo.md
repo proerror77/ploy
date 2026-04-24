@@ -1,3 +1,32 @@
+# Live Order Execution Management (2026-04-24)
+
+## Files
+
+- `crates/ploy-connectivity/src/lib.rs`
+- `crates/ploy-strategy-bundles/src/config.rs`
+- `crates/ploy-strategy-bundles/src/engine.rs`
+- `crates/ploy-strategy-runtime/src/live.rs`
+- `crates/ploy-strategy-runtime/src/recording.rs`
+- `crates/ploy-trading/src/orders.rs`
+
+## Tasks
+
+- [x] Add bounded live slippage controls so FAK/FOK execution cannot chase far beyond the strategy limit.
+- [x] Treat venue acknowledgement as a pending order state, not a fill, and remove synthetic live fills.
+- [x] Add live retry/terminal-unfilled handling for acknowledged FAK orders that do not produce fills after reconciliation.
+- [x] Harden order ledger transitions around cancel/reject/fill invariants.
+- [x] Restore active live venue orders from DB on startup so post-restart reconciliation can continue.
+- [x] Verify with focused Rust tests for slippage, ack-without-fill, retry, partial fill, and order-state invariants.
+
+## Review
+
+- 2026-04-24: Live FAK/FOK execution now carries a hard bounded price derived from the strategy limit plus `[live_execution].max_slippage_bps` instead of relying on orderbook-derived market pricing alone.
+- 2026-04-24: Live acknowledgements without fills remain pending/retryable orders; they no longer call `on_fill` with synthetic fills, so strategy counters/cooldowns only advance on real fills or explicit rejection.
+- 2026-04-24: Acknowledged live orders with no reconciled fill are retried for remaining quantity up to `[live_execution].max_attempts`, then marked terminal-unfilled and passed to `on_reject`.
+- 2026-04-24: Order ledger invariants now reject orphan/overfilled fills and prevent filled orders from being overwritten by later cancel/reject transitions.
+- 2026-04-24: Live startup now restores active acknowledged/partially-filled venue orders from `strategy_runtime_orders` plus their fills so reconciliation is not purely in-memory after a process restart.
+- 2026-04-24: Review hardening: unfilled live ACKs only advance after an actual reconcile attempt, retry attempts persist the previous venue order as terminal before submitting the next attempt, restored retry intent IDs continue from `_retryN` instead of compounding suffixes, and order persistence now accumulates partial fills instead of overwriting them during terminal updates.
+
 # PM5D Settlement + Strategy Audit (2026-04-12)
 
 ## Optimize Workflow Recovery (2026-04-23)
