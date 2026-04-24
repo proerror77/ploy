@@ -755,17 +755,13 @@ fn normalize_order_quantity(quantity: Decimal) -> Decimal {
     quantity.trunc_with_scale(2)
 }
 
-fn normalize_order_notional(quantity: Decimal, limit_price: Decimal) -> Decimal {
-    (quantity * limit_price).trunc_with_scale(2)
-}
-
 fn normalize_execution_amount(
     quantity: Decimal,
-    limit_price: Decimal,
+    _limit_price: Decimal,
     side: Side,
 ) -> Result<Amount, polymarket_client_sdk::error::Error> {
     match side {
-        Side::Buy => Amount::usdc(normalize_order_notional(quantity, limit_price)),
+        Side::Buy => Amount::shares(normalize_order_quantity(quantity)),
         Side::Sell => Amount::shares(normalize_order_quantity(quantity)),
         _ => unreachable!("invalid Polymarket side"),
     }
@@ -839,11 +835,11 @@ pub fn crate_marker() -> &'static str {
 mod tests {
     use super::{
         execution_price_override, normalize_aggressive_price, normalize_execution_amount,
-        normalize_order_notional, normalize_order_quantity, polymarket_signature_type_from_env,
-        tracked_trade_fill, trade_side, unique_token_ids, CancellationOutcome, CancellationRequest,
-        ExecutionError, ExecutionOutcome, ExecutionRequest, LiveExecutionGateway,
-        OrderExecutionType, PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome,
-        ReplaceRequest, StaticExecutionGateway, TrackedOrder, WalletSignatureType,
+        normalize_order_quantity, polymarket_signature_type_from_env, tracked_trade_fill,
+        trade_side, unique_token_ids, CancellationOutcome, CancellationRequest, ExecutionError,
+        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
+        PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest,
+        StaticExecutionGateway, TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -930,22 +926,14 @@ mod tests {
     }
 
     #[test]
-    fn normalize_order_notional_truncates_to_two_decimals() {
-        assert_eq!(
-            normalize_order_notional(dec!(24.467825), dec!(0.61305)),
-            dec!(15.00)
-        );
-    }
-
-    #[test]
-    fn normalize_execution_amount_uses_usdc_for_buy_and_shares_for_sell() {
+    fn normalize_execution_amount_uses_shares_for_immediate_orders() {
         let buy = normalize_execution_amount(dec!(24.467825), dec!(0.61305), Side::Buy)
             .expect("buy amount");
         let sell = normalize_execution_amount(dec!(24.467825), dec!(0.61305), Side::Sell)
             .expect("sell amount");
 
-        assert!(buy.is_usdc());
-        assert_eq!(buy.as_inner(), dec!(15.00));
+        assert!(buy.is_shares());
+        assert_eq!(buy.as_inner(), dec!(24.46));
         assert!(sell.is_shares());
         assert_eq!(sell.as_inner(), dec!(24.46));
     }

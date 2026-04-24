@@ -1,3 +1,39 @@
+# Live FAK Fill Accounting Repair (2026-04-25)
+
+## Files
+
+- `crates/ploy-connectivity/src/lib.rs`
+  - Owner: Polymarket FAK amount semantics and reconciled fill accounting.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: short event-safe rejection cooldown policy.
+
+## Tasks
+
+- [x] Confirm Tango logs show reconciled fills rejected locally as overfilled.
+- [x] Align Polymarket BUY FAK requests with local share quantity accounting.
+- [x] Shorten/remove event-killing account-level reject cooldowns.
+- [x] Add focused regression tests for BUY FAK amount semantics and cooldown policy.
+- [x] Run focused Rust tests and diff checks.
+
+## Review
+
+- 2026-04-25: Tango logs showed acknowledged BUY FAK orders receiving
+  reconciled fills with more shares than the local `requested_qty`, e.g. a
+  142.146411 share BTC order later reconciled as 173.666665 shares. The local
+  ledger rejected those as overfills, kept the order unfilled, and then retried.
+- 2026-04-25: Root cause was a unit mismatch: live BUY FAK used Polymarket
+  `Amount::usdc(quantity * limit_price)` while the local order lifecycle tracks
+  `quantity` as shares. BUY FAK now uses `Amount::shares(quantity)` so venue
+  fills and local order quantities share the same unit.
+- 2026-04-25: Rejection cooldowns are now event-safe: hard token cooldowns are
+  35 seconds, no-liquidity cooldown is 15 seconds, and account-level balance
+  pause is only 15 seconds for BUY balance/allowance rejects.
+- 2026-04-25: Verification passed:
+  `rtk cargo test -p ploy-connectivity --lib -- --nocapture`,
+  `rtk cargo test -p ploy-strategy-bundles --lib -- --nocapture`,
+  `rustfmt --edition 2021 --check crates/ploy-connectivity/src/lib.rs crates/ploy-strategy-bundles/src/strategies/three_layer.rs`,
+  and `git diff --check`.
+
 # Live Order Duplicate Suppression (2026-04-25)
 
 ## Files
