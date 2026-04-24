@@ -21,6 +21,11 @@ pub use dataset::{
     assign_chronological_event_splits, build_canonical_event_chronology,
     build_event_root_dataset, standard_event_root_dataset_artifacts,
 };
+#[cfg(feature = "polars-export")]
+pub use dataset::{
+    DatasetExportError, event_index_to_frame, event_summaries_to_frame,
+    export_event_root_dataset_parquet, split_assignments_to_frame,
+};
 pub use factors::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations,
     build_factor_observations_with_lob, factor_metrics, AggregatedFactorMetric, EventFactorSummary,

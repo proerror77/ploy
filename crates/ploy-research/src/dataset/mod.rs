@@ -1,6 +1,8 @@
 mod builder;
 mod chronology;
 mod contracts;
+#[cfg(feature = "polars-export")]
+mod export;
 mod split;
 
 pub use builder::{
@@ -16,5 +18,10 @@ pub use contracts::{
     DatasetSkipCounts, DatasetSourceWindow, DatasetSplit, DatasetSplitArtifactPaths,
     DatasetSplitAssignment, DatasetSplitCounts, DatasetSplitPolicy, EventChronologyKey,
     EventIndexEntry, REPRICING_LABEL_30S, SETTLEMENT_LABEL,
+};
+#[cfg(feature = "polars-export")]
+pub use export::{
+    DatasetExportError, event_index_to_frame, event_summaries_to_frame,
+    export_event_root_dataset_parquet, split_assignments_to_frame,
 };
 pub use split::{SplitBuildError, assign_chronological_event_splits};
