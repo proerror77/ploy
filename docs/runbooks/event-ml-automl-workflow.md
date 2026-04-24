@@ -69,9 +69,17 @@ The runner executes:
 2. `event_factor_attribution`
 3. `event_dataset_baseline`
 
-It stops on the first failed phase. Use `--dry-run` to print the commands
-without running them, or `--phases coverage,attribution,baseline` to run a
-subset in canonical order.
+It stops on the first failed phase. The attribution phase writes
+`factor_attributions.json`, `feature_whitelist.txt`, and
+`feature_whitelist.md`; if the user did not pass `--features`, the baseline
+phase consumes that whitelist automatically. The runner also writes
+`workflow_report.json` and `workflow_report.md` into the run directory.
+
+Use `--output-dir <dir>` to choose the artifact directory. Without it, the
+runner writes under `<dataset>/workflow_runs/event_ml_<timestamp>`.
+
+Use `--dry-run` to print the commands without running them, or
+`--phases coverage,attribution,baseline` to run a subset in canonical order.
 
 ## Phase 1 - Coverage Diagnostics
 
@@ -85,7 +93,7 @@ rtk cargo run -p ploy-research --example event_dataset_coverage \
   --features polars-export -- \
   --dataset /tmp/ploy-event-root-5sym-150-20260424 \
   --entry-secs 60 \
-  --tolerance-secs 30
+  --tolerances 30
 ```
 
 Outputs to record:
@@ -174,6 +182,12 @@ Artifacts:
 - rejected-feature list with reasons
 - entry-window selection
 - normalization metadata
+
+The current executable artifact path is:
+
+- `feature_whitelist.txt`: newline-delimited baseline feature schema
+- `feature_whitelist.md`: reviewable feature governance summary
+- `factor_attributions.json`: full train/validation/test attribution table
 
 Stop gate:
 
