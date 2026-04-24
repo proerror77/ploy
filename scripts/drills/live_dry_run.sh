@@ -210,14 +210,17 @@ if [[ -n "${STALE_SOURCES}" && "${STALE_SOURCES}" != "0" ]]; then
 fi
 
 log_step "config and credential presence"
-require_any_env_key "operator credential" \
+if env_has_any_key \
   "PLOY_ADMIN_TOKEN" \
   "PLOY_API_ADMIN_TOKEN" \
   "PLOY_API_KEY" \
   "PLOY_OPERATOR_TOKEN" \
-  "PLOY_API_OPERATOR_TOKEN"
-if ! env_has_key "PLOY_OPERATOR_TOKEN" && ! env_has_key "PLOY_API_OPERATOR_TOKEN"; then
-  warn "operator token not configured; dry-run will rely on admin credentials"
+  "PLOY_API_OPERATOR_TOKEN"; then
+  if ! env_has_key "PLOY_OPERATOR_TOKEN" && ! env_has_key "PLOY_API_OPERATOR_TOKEN"; then
+    warn "operator token not configured; dry-run will rely on admin credentials"
+  fi
+else
+  warn "operator credential not configured; dry-run will rely on local ployctl access"
 fi
 require_any_env_key "Polymarket private key" "POLYMARKET_PRIVATE_KEY" "PRIVATE_KEY"
 SIGNATURE_TYPE="$(first_env_value "POLY_SIGNATURE_TYPE" "POLYMARKET_SIGNATURE_TYPE" || true)"
