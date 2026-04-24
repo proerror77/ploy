@@ -41,6 +41,14 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+ployctl_capture() {
+  "$PLOYCTL" "$@" 2>&1
+}
+
+ployctl_quiet() {
+  "$PLOYCTL" "$@" >/dev/null 2>&1
+}
+
 extract_value() {
   local line="$1"
   local key="$2"
@@ -104,7 +112,7 @@ source_env_file() {
 cleanup() {
   if [[ "$DRILL_APPLIED" -eq 1 ]]; then
     note "stopping drill deployment ${DEPLOYMENT_ID}"
-    "$PLOYCTL" deployments stop "$DEPLOYMENT_ID" >/dev/null 2>&1 || true
+    ployctl_quiet deployments stop "$DEPLOYMENT_ID" || true
   fi
 }
 
@@ -167,10 +175,10 @@ source_env_file
 log_step "daemon baseline"
 [[ "$(systemctl is-active ployd)" == "active" ]] || fail "ployd.service is not active"
 curl -fsS "${ADDR}/health" >/dev/null
-STATUS_OUTPUT="$("${PLOYCTL}" system status)"
-METRICS_OUTPUT="$("${PLOYCTL}" system metrics)"
-ALERTS_OUTPUT="$("${PLOYCTL}" system alerts)"
-AUDIT_OUTPUT="$("${PLOYCTL}" system audit)"
+STATUS_OUTPUT="$(ployctl_capture system status)"
+METRICS_OUTPUT="$(ployctl_capture system metrics)"
+ALERTS_OUTPUT="$(ployctl_capture system alerts)"
+AUDIT_OUTPUT="$(ployctl_capture system audit)"
 printf '%s\n' "${STATUS_OUTPUT}"
 printf '%s\n' "${METRICS_OUTPUT}"
 printf '%s\n' "${ALERTS_OUTPUT}"
@@ -233,21 +241,21 @@ fi
 [[ -f "${RUNTIME_ROOT}/audit-log.jsonl" ]] || fail "missing audit log: ${RUNTIME_ROOT}/audit-log.jsonl"
 
 log_step "paper deployment drill"
-APPLY_OUTPUT="$("${PLOYCTL}" deployments apply "${MANIFEST}")"
+APPLY_OUTPUT="$(ployctl_capture deployments apply "${MANIFEST}")"
 DRILL_APPLIED=1
 printf '%s\n' "${APPLY_OUTPUT}"
-INSPECT_OUTPUT="$("${PLOYCTL}" deployments inspect "${DEPLOYMENT_ID}")"
+INSPECT_OUTPUT="$(ployctl_capture deployments inspect "${DEPLOYMENT_ID}")"
 printf '%s\n' "${INSPECT_OUTPUT}"
-"${PLOYCTL}" deployments pause "${DEPLOYMENT_ID}" >/dev/null
-"${PLOYCTL}" deployments resume "${DEPLOYMENT_ID}" >/dev/null
-"${PLOYCTL}" deployments stop "${DEPLOYMENT_ID}" >/dev/null
+ployctl_quiet deployments pause "${DEPLOYMENT_ID}"
+ployctl_quiet deployments resume "${DEPLOYMENT_ID}"
+ployctl_quiet deployments stop "${DEPLOYMENT_ID}"
 DRILL_APPLIED=0
 
-FINAL_INSPECT="$("${PLOYCTL}" deployments inspect "${DEPLOYMENT_ID}")"
+FINAL_INSPECT="$(ployctl_capture deployments inspect "${DEPLOYMENT_ID}")"
 printf '%s\n' "${FINAL_INSPECT}"
 
 log_step "trading readiness"
-TRADING_OUTPUT="$("${PLOYCTL}" trading status)"
+TRADING_OUTPUT="$(ployctl_capture trading status)"
 printf '%s\n' "${TRADING_OUTPUT}"
 
 LIVE_RECONCILE_FAILURES="$(extract_value "${STATUS_OUTPUT}" "live_reconcile_failures")"
