@@ -8309,6 +8309,10 @@ Goal: turn the agreed research sequence into a reusable workflow so future ML, D
 
 File ownership:
 - `docs/runbooks/event-ml-automl-workflow.md`
+- `crates/ploy-research/examples/event_ml_workflow.rs`
+- `crates/ploy-research/Cargo.toml`
+- `AGENTS.md`
+- `CLAUDE.md`
 - `tasks/todo.md`
 
 Checklist:
@@ -8316,6 +8320,9 @@ Checklist:
 - [x] Include exact Rust example commands for coverage diagnostics, attribution, and supervised baseline runs.
 - [x] Add stop gates that prevent moving to hyperparameter search, DL, or RL before event-held-out data and executable-price accounting are credible.
 - [x] Record the distinction between AutoML factor governance and hyperparameter tuning.
+- [x] Add an agent-triggerable skill and repo instructions so future agents route event ML work through this workflow.
+- [x] Add an executable `event_ml_workflow` runner for ordered coverage, attribution, and fixed-baseline execution.
 
 Review:
 - 2026-04-24: Added `docs/runbooks/event-ml-automl-workflow.md` as the reusable event ML research workflow. The workflow codifies the sequence `coverage diagnostics -> AutoML-style factor attribution -> governed feature set -> fixed baseline -> model family selection -> hyperparameter search -> walk-forward/executable-price backtest -> DL/RL gates -> dry-run handoff`. It explicitly treats AutoML as factor discovery/governance and hyperparameter search as later model-family tuning, with event-held-out splits, train-only normalization, one-event-one-trade accounting, and stop gates against validation overfit.
+- 2026-04-24: Added the local `event-ml-automl-workflow` skill under `~/.codex/skills/` and mirrored the trigger rule into `AGENTS.md` / `CLAUDE.md` so future agents route event ML, AutoML attribution, hyperparameter-search, and DL/RL requests through the workflow. Added `event_ml_workflow`, a Polars-gated runner that executes coverage diagnostics, AutoML-style attribution, and the fixed supervised baseline in order and stops on the first failed phase. The runner supports `--dry-run` and phase selection for focused execution.

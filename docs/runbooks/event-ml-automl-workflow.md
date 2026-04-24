@@ -50,6 +50,29 @@ Stop gate:
 - Do not train if feature normalization would need validation or test data.
 - Do not treat tiny selected-event counts as model-quality evidence.
 
+## Workflow Runner
+
+Use this runner when you want the agent or CI-style local execution to follow
+the first executable phases in order:
+
+```bash
+rtk cargo run -p ploy-research --example event_ml_workflow \
+  --features polars-export -- \
+  --dataset /tmp/ploy-event-root-5sym-150-20260424 \
+  --entry-secs 60 \
+  --tolerance-secs 30
+```
+
+The runner executes:
+
+1. `event_dataset_coverage`
+2. `event_factor_attribution`
+3. `event_dataset_baseline`
+
+It stops on the first failed phase. Use `--dry-run` to print the commands
+without running them, or `--phases coverage,attribution,baseline` to run a
+subset in canonical order.
+
 ## Phase 1 - Coverage Diagnostics
 
 Goal: decide whether the dataset is ready for ML, or whether feature coverage

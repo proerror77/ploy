@@ -174,6 +174,14 @@ When using a skill:
 - If a skill is missing/unreadable, state that and continue with best fallback.
 - Default to skill-driven execution when a matching skill exists; do not skip it.
 
+### Event ML AutoML Workflow
+
+- When the user mentions event ML, PM5D/5-minute event ML, AutoML factor attribution, factor registry, hyperparameter search, DL/RL planning for event-root datasets, or asks to continue the ML workflow, use the `event-ml-automl-workflow` skill if available.
+- If the skill is unavailable, follow [docs/runbooks/event-ml-automl-workflow.md](docs/runbooks/event-ml-automl-workflow.md) directly.
+- Prefer the executable runner for workflow execution:
+  `rtk cargo run -p ploy-research --example event_ml_workflow --features polars-export -- --dataset <event-root-dir>`.
+- Do not skip from raw event-root data straight to hyperparameter search, DL, or RL. The required order is coverage diagnostics, AutoML-style factor attribution, governed feature set, fixed baseline, model-family selection, hyperparameter search, walk-forward/executable-price backtest, then DL/RL gates.
+
 ### Installed Skills
 
 - `karpathy-guidelines` — invoke when writing, reviewing, or refactoring code to avoid overcomplication, make surgical changes, surface assumptions, and define verifiable success criteria.
