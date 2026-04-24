@@ -97,6 +97,7 @@ The runner executes:
 2. `event_factor_attribution`
 3. `event_dataset_baseline`
 4. bounded logistic hyperparameter search using `event_dataset_baseline`
+5. `event_ml_walk_forward`
 
 It stops on the first failed phase. The attribution phase writes
 `factor_attributions.json`, `feature_whitelist.txt`, and
@@ -105,13 +106,16 @@ phase consumes that whitelist automatically. The runner also writes
 `workflow_report.json` and `workflow_report.md` into the run directory.
 The hyperparameter phase writes candidate-level `baseline_metrics.json` files
 plus `hyperparameter_search.json` and `hyperparameter_search.md`.
+The walk-forward phase writes `walk_forward_report.json` and
+`walk_forward_report.md`. With only one workflow run, the report is expected to
+mark DL/RL readiness as `blocked`; that is a useful gate, not a runner failure.
 
 Use `--output-dir <dir>` to choose the artifact directory. Without it, the
 runner writes under `<dataset>/workflow_runs/event_ml_<timestamp>`.
 
 Use `--dry-run` to print the commands without running them, or
-`--phases coverage,attribution,baseline,hyperparameter` to run a subset in
-canonical order.
+`--phases coverage,attribution,baseline,hyperparameter,walk-forward` to run a
+subset in canonical order.
 
 ## Phase 1 - Coverage Diagnostics
 
@@ -363,6 +367,39 @@ Stop gate:
 ## Phase 7 - Walk-Forward And Backtest
 
 Goal: prove the result is not a single split artifact.
+
+Executable gate command for one or more completed workflow run directories:
+
+```bash
+rtk cargo run -p ploy-research --example event_ml_walk_forward -- \
+  --run-dir /tmp/ploy-event-ml-run-1 \
+  --run-dir /tmp/ploy-event-ml-run-2 \
+  --run-dir /tmp/ploy-event-ml-run-3 \
+  --output-dir /tmp/ploy-event-ml-walk-forward
+```
+
+The gate consumes:
+
+- `workflow_report.json`
+- `hyperparameter/hyperparameter_search.json`
+- the selected candidate's `baseline_metrics.json`
+
+The gate writes:
+
+- `walk_forward_report.json`
+- `walk_forward_report.md`
+
+Default readiness gates:
+
+- at least `3` workflow windows
+- each window has at least one test trade
+- executable entry accounting is present: cost, ROI, and average entry
+- window-level drawdown is reported
+- validation/test direction agreement is reported
+
+The workflow runner calls this gate automatically for its current run. A
+single-run report should remain `blocked` for DL/RL because it lacks rolling
+window evidence.
 
 Required once enough history exists:
 

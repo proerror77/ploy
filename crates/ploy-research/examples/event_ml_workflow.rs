@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +14,7 @@ enum Phase {
     Attribution,
     Baseline,
     Hyperparameter,
+    WalkForward,
 }
 
 impl Phase {
@@ -23,6 +24,7 @@ impl Phase {
             Phase::Attribution => Some("event_factor_attribution"),
             Phase::Baseline => Some("event_dataset_baseline"),
             Phase::Hyperparameter => None,
+            Phase::WalkForward => None,
         }
     }
 
@@ -32,6 +34,7 @@ impl Phase {
             Phase::Attribution => "AutoML-style factor attribution",
             Phase::Baseline => "fixed supervised baseline",
             Phase::Hyperparameter => "bounded logistic hyperparameter search",
+            Phase::WalkForward => "walk-forward executable-price gate",
         }
     }
 }
@@ -43,6 +46,7 @@ impl fmt::Display for Phase {
             Phase::Attribution => "attribution",
             Phase::Baseline => "baseline",
             Phase::Hyperparameter => "hyperparameter",
+            Phase::WalkForward => "walk_forward",
         })
     }
 }
@@ -60,6 +64,8 @@ struct Config {
     search_min_edge: Vec<f64>,
     search_learning_rate: Vec<f64>,
     search_epochs: usize,
+    walk_forward_min_windows: usize,
+    walk_forward_min_test_trades: usize,
     phases: Vec<Phase>,
     dry_run: bool,
 }
@@ -131,6 +137,17 @@ struct BaselineMetric {
     pnl: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct WalkForwardGateArtifact {
+    readiness: WalkForwardReadinessArtifact,
+}
+
+#[derive(Debug, Deserialize)]
+struct WalkForwardReadinessArtifact {
+    ready_for_dl_rl: bool,
+    status: String,
+}
+
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
     if has_flag(&args, "--help") || has_flag(&args, "-h") {
@@ -156,9 +173,7 @@ fn main() -> Result<()> {
     eprintln!();
     eprintln!("workflow_status=completed");
     eprintln!("workflow_run_dir={}", state.run_dir.display());
-    eprintln!(
-        "next_gates=model_family_selection -> hyperparameter_search -> walk_forward_backtest -> DL/RL only if justified"
-    );
+    eprintln!("next_gates=walk_forward_backtest -> DL/RL only if justified -> dry_run_handoff");
     Ok(())
 }
 
@@ -181,6 +196,7 @@ fn parse_config(args: &[String]) -> Result<Config> {
                 Phase::Attribution,
                 Phase::Baseline,
                 Phase::Hyperparameter,
+                Phase::WalkForward,
             ]
         });
     let dry_run = has_flag(args, "--dry-run");
@@ -188,6 +204,8 @@ fn parse_config(args: &[String]) -> Result<Config> {
     let search_min_edge = parse_f64_list_flag(args, "--search-min-edge", &[0.0, 0.02, 0.05])?;
     let search_learning_rate = parse_f64_list_flag(args, "--search-learning-rate", &[0.03, 0.05])?;
     let search_epochs = parse_usize_flag(args, "--search-epochs", 500)?;
+    let walk_forward_min_windows = parse_usize_flag(args, "--walk-forward-min-windows", 3)?;
+    let walk_forward_min_test_trades = parse_usize_flag(args, "--walk-forward-min-test-trades", 1)?;
 
     if entry_secs < 0 {
         bail!("--entry-secs must be non-negative");
@@ -210,6 +228,9 @@ fn parse_config(args: &[String]) -> Result<Config> {
     {
         bail!("--search-learning-rate values must be in [0, 1)");
     }
+    if walk_forward_min_windows == 0 {
+        bail!("--walk-forward-min-windows must be positive");
+    }
 
     Ok(Config {
         dataset,
@@ -223,6 +244,8 @@ fn parse_config(args: &[String]) -> Result<Config> {
         search_min_edge,
         search_learning_rate,
         search_epochs,
+        walk_forward_min_windows,
+        walk_forward_min_test_trades,
         phases,
         dry_run,
     })
@@ -296,6 +319,9 @@ fn parse_phases(raw: &str) -> Result<Vec<Phase>> {
             "attribution" | "factor-attribution" | "automl" => Phase::Attribution,
             "baseline" | "fixed-baseline" => Phase::Baseline,
             "hyperparameter" | "hyperparameter-search" | "search" => Phase::Hyperparameter,
+            "walk-forward" | "walk_forward" | "backtest" | "walk-forward-backtest" => {
+                Phase::WalkForward
+            }
             other => bail!("unknown workflow phase: {other}"),
         };
         phases.push(phase);
@@ -347,6 +373,9 @@ fn run_phase(phase: Phase, config: &Config, state: &mut WorkflowState) -> Result
     if phase == Phase::Hyperparameter {
         return run_hyperparameter_phase(config, state);
     }
+    if phase == Phase::WalkForward {
+        return run_walk_forward_phase(config, state);
+    }
 
     let args = phase_args(phase, config, state);
     let example = phase
@@ -393,6 +422,75 @@ fn run_phase(phase: Phase, config: &Config, state: &mut WorkflowState) -> Result
         label: phase.label(),
         command,
         status: "passed".to_string(),
+    });
+    Ok(())
+}
+
+fn run_walk_forward_phase(config: &Config, state: &mut WorkflowState) -> Result<()> {
+    let workflow_report = state.run_dir.join("workflow_report.json");
+    if !workflow_report.exists() && !config.dry_run {
+        write_workflow_report(config, state)?;
+    }
+    let output_dir = state.run_dir.join("walk_forward");
+    let args = vec![
+        "--run-dir".to_string(),
+        state.run_dir.display().to_string(),
+        "--output-dir".to_string(),
+        output_dir.display().to_string(),
+        "--min-windows".to_string(),
+        config.walk_forward_min_windows.to_string(),
+        "--min-test-trades-per-window".to_string(),
+        config.walk_forward_min_test_trades.to_string(),
+    ];
+    let command = shell_command_without_features("event_ml_walk_forward", &args);
+    eprintln!();
+    eprintln!(
+        "--- phase={} label=\"{}\" ---",
+        Phase::WalkForward,
+        Phase::WalkForward.label()
+    );
+    eprintln!("command={command}");
+
+    if config.dry_run {
+        state.records.push(PhaseRecord {
+            phase: Phase::WalkForward.to_string(),
+            label: Phase::WalkForward.label(),
+            command,
+            status: "dry_run".to_string(),
+        });
+        return Ok(());
+    }
+
+    let status = Command::new("cargo")
+        .args([
+            "run",
+            "-p",
+            "ploy-research",
+            "--example",
+            "event_ml_walk_forward",
+            "--",
+        ])
+        .args(&args)
+        .status()
+        .context("spawn walk-forward gate phase")?;
+    if !status.success() {
+        bail!("walk-forward gate failed with status {status}");
+    }
+
+    let report_path = output_dir.join("walk_forward_report.json");
+    let report_file =
+        File::open(&report_path).with_context(|| format!("open {}", report_path.display()))?;
+    let report: WalkForwardGateArtifact = serde_json::from_reader(report_file)
+        .with_context(|| format!("parse {}", report_path.display()))?;
+    eprintln!(
+        "walk_forward_readiness={} ready_for_dl_rl={}",
+        report.readiness.status, report.readiness.ready_for_dl_rl
+    );
+    state.records.push(PhaseRecord {
+        phase: Phase::WalkForward.to_string(),
+        label: Phase::WalkForward.label(),
+        command,
+        status: report.readiness.status,
     });
     Ok(())
 }
@@ -682,7 +780,7 @@ fn phase_args(phase: Phase, config: &Config, state: &WorkflowState) -> Vec<Strin
             args.push("--min-edge".to_string());
             args.push(config.min_edge.to_string());
         }
-        Phase::Hyperparameter => {}
+        Phase::Hyperparameter | Phase::WalkForward => {}
     }
 
     let features = match phase {
@@ -719,11 +817,10 @@ fn write_workflow_report(config: &Config, state: &WorkflowState) -> Result<()> {
         .map(split_features)
         .unwrap_or_default();
     let next_gates = [
-        "model_family_selection",
-        "hyperparameter_search",
         "walk_forward_backtest",
         "dl_gate_if_justified",
         "rl_gate_if_justified",
+        "dry_run_handoff",
     ];
     let report = WorkflowReport {
         dataset: &config.dataset,
@@ -821,6 +918,20 @@ fn shell_command(example: &str, args: &[String]) -> String {
     parts.join(" ")
 }
 
+fn shell_command_without_features(example: &str, args: &[String]) -> String {
+    let mut parts = vec![
+        "cargo".to_string(),
+        "run".to_string(),
+        "-p".to_string(),
+        "ploy-research".to_string(),
+        "--example".to_string(),
+        example.to_string(),
+        "--".to_string(),
+    ];
+    parts.extend(args.iter().map(|arg| shell_quote(arg)));
+    parts.join(" ")
+}
+
 fn shell_quote(value: &str) -> String {
     if value
         .chars()
@@ -849,12 +960,16 @@ Options:
   --min-edge <value>       Baseline trading edge threshold. Default: 0.0.
   --features <csv>         Override default feature list.
   --output-dir <dir>       Workflow artifact directory. Default: <dataset>/workflow_runs/event_ml_<timestamp>.
-  --phases <csv>           coverage,attribution,baseline,hyperparameter. Default: all four.
+  --phases <csv>           coverage,attribution,baseline,hyperparameter,walk-forward. Default: all five.
   --search-l2 <csv>        Logistic L2 values for bounded search. Default: 0,0.001,0.01.
   --search-min-edge <csv>  Min-edge values for bounded search. Default: 0,0.02,0.05.
   --search-learning-rate <csv>
                            Learning rates for bounded search. Default: 0.03,0.05.
   --search-epochs <n>      Epochs for bounded search candidates. Default: 500.
+  --walk-forward-min-windows <n>
+                           Minimum windows required before DL/RL readiness. Default: 3.
+  --walk-forward-min-test-trades <n>
+                           Minimum test trades per walk-forward window. Default: 1.
   --dry-run                Print commands without running phases.
 "
     );
@@ -880,7 +995,8 @@ mod tests {
                 Phase::Coverage,
                 Phase::Attribution,
                 Phase::Baseline,
-                Phase::Hyperparameter
+                Phase::Hyperparameter,
+                Phase::WalkForward,
             ]
         );
         assert_eq!(config.entry_secs, 60);
@@ -893,7 +1009,7 @@ mod tests {
             "--dataset",
             "/tmp/events",
             "--phases",
-            "coverage,automl,fixed-baseline,search",
+            "coverage,automl,fixed-baseline,search,walk-forward",
             "--dry-run",
         ]))
         .unwrap();
@@ -904,7 +1020,8 @@ mod tests {
                 Phase::Coverage,
                 Phase::Attribution,
                 Phase::Baseline,
-                Phase::Hyperparameter
+                Phase::Hyperparameter,
+                Phase::WalkForward,
             ]
         );
         assert!(config.dry_run);
@@ -929,16 +1046,12 @@ mod tests {
         };
         let phase_args = phase_args(Phase::Coverage, &config, &state);
 
-        assert!(
-            phase_args
-                .windows(2)
-                .any(|pair| pair == ["--tolerances", "15"])
-        );
-        assert!(
-            !phase_args
-                .windows(2)
-                .any(|pair| pair == ["--tolerance-secs", "15"])
-        );
+        assert!(phase_args
+            .windows(2)
+            .any(|pair| pair == ["--tolerances", "15"]));
+        assert!(!phase_args
+            .windows(2)
+            .any(|pair| pair == ["--tolerance-secs", "15"]));
     }
 
     #[test]
@@ -967,10 +1080,8 @@ mod tests {
 
         let phase_args = phase_args(Phase::Baseline, &config, &state);
 
-        assert!(
-            phase_args
-                .windows(2)
-                .any(|pair| pair == ["--features", "fair_prob_up,model_edge_up"])
-        );
+        assert!(phase_args
+            .windows(2)
+            .any(|pair| pair == ["--features", "fair_prob_up,model_edge_up"]));
     }
 }

@@ -28,9 +28,12 @@ pub use dataset::{
     export_event_root_dataset_parquet, split_assignments_to_frame,
 };
 pub use event_ml::{
-    canonical_event_ml_architecture, event_ml_architecture_markdown, gate_matrix,
-    ArchitectureArtifact, EventMlArchitecture, LaneReadiness, LaneStatus, LearningLane,
-    LearningLaneId, PhaseId, ReadinessGate, WorkflowPhase, EVENT_ML_ARCHITECTURE_VERSION,
+    build_walk_forward_report, canonical_event_ml_architecture, event_ml_architecture_markdown,
+    gate_matrix, walk_forward_report_markdown, ArchitectureArtifact, EventMlArchitecture,
+    LaneReadiness, LaneStatus, LearningLane, LearningLaneId, PhaseId, ReadinessGate,
+    WalkForwardAggregate, WalkForwardConfig, WalkForwardGate, WalkForwardGateStatus,
+    WalkForwardMetric, WalkForwardReadiness, WalkForwardReport, WalkForwardWindow, WorkflowPhase,
+    EVENT_ML_ARCHITECTURE_VERSION, WALK_FORWARD_REPORT_VERSION,
 };
 pub use factors::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations,

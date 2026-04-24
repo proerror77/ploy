@@ -1,6 +1,14 @@
+pub mod walk_forward;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+
+pub use walk_forward::{
+    build_walk_forward_report, walk_forward_report_markdown, WalkForwardAggregate,
+    WalkForwardConfig, WalkForwardGate, WalkForwardGateStatus, WalkForwardMetric,
+    WalkForwardReadiness, WalkForwardReport, WalkForwardWindow, WALK_FORWARD_REPORT_VERSION,
+};
 
 pub const EVENT_ML_ARCHITECTURE_VERSION: &str = "event-ml-architecture.v1";
 
