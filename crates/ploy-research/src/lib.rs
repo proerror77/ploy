@@ -1,6 +1,7 @@
 pub mod attribution;
 pub mod backtest;
 pub mod backtesting;
+pub mod dataset;
 pub mod factors;
 pub mod factors_new;
 #[cfg(any(feature = "ml", feature = "rl"))]
@@ -9,6 +10,22 @@ pub mod replay;
 pub mod signal;
 
 pub use backtesting::{run_backtest, BacktestReport};
+pub use dataset::{
+    CANONICAL_REGIME_VERSION, ChronologyAnchor, ChronologyOrdering, DATASET_MANIFEST_VERSION,
+    DatasetArtifacts, DatasetBuildError, DatasetBuildManifest, DatasetBuildStats,
+    DatasetLabelContract, DatasetSkipCounts, DatasetSourceWindow, DatasetSplit,
+    DatasetSplitArtifactPaths, DatasetSplitAssignment, DatasetSplitCounts,
+    DatasetSplitDerivedArtifacts, DatasetSplitPolicy, EventChronologyBuild, EventChronologyKey,
+    EventIndexEntry, EventMetadataChronologyInput, EventRootDatasetBuild,
+    EventRootDatasetBuildRequest, REPRICING_LABEL_30S, SETTLEMENT_LABEL, SplitBuildError,
+    assign_chronological_event_splits, build_canonical_event_chronology,
+    build_event_root_dataset, standard_event_root_dataset_artifacts,
+};
+#[cfg(feature = "polars-export")]
+pub use dataset::{
+    DatasetExportError, event_index_to_frame, event_summaries_to_frame,
+    export_event_root_dataset_parquet, split_assignments_to_frame,
+};
 pub use factors::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations,
     build_factor_observations_with_lob, factor_metrics, AggregatedFactorMetric, EventFactorSummary,

@@ -1,0 +1,27 @@
+mod builder;
+mod chronology;
+mod contracts;
+#[cfg(feature = "polars-export")]
+mod export;
+mod split;
+
+pub use builder::{
+    DatasetBuildError, DatasetSplitDerivedArtifacts, EventRootDatasetBuild,
+    EventRootDatasetBuildRequest, build_event_root_dataset, standard_event_root_dataset_artifacts,
+};
+pub use chronology::{
+    EventChronologyBuild, EventMetadataChronologyInput, build_canonical_event_chronology,
+};
+pub use contracts::{
+    CANONICAL_REGIME_VERSION, ChronologyAnchor, ChronologyOrdering, DATASET_MANIFEST_VERSION,
+    DatasetArtifacts, DatasetBuildManifest, DatasetBuildStats, DatasetLabelContract,
+    DatasetSkipCounts, DatasetSourceWindow, DatasetSplit, DatasetSplitArtifactPaths,
+    DatasetSplitAssignment, DatasetSplitCounts, DatasetSplitPolicy, EventChronologyKey,
+    EventIndexEntry, REPRICING_LABEL_30S, SETTLEMENT_LABEL,
+};
+#[cfg(feature = "polars-export")]
+pub use export::{
+    DatasetExportError, event_index_to_frame, event_summaries_to_frame,
+    export_event_root_dataset_parquet, split_assignments_to_frame,
+};
+pub use split::{SplitBuildError, assign_chronological_event_splits};
