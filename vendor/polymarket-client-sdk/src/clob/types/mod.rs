@@ -436,15 +436,19 @@ sol! {
         uint256 salt;
         address maker;
         address signer;
+        address taker;
         #[serde_as(as = "DisplayFromStr")]
         uint256 tokenId;
         #[serde_as(as = "DisplayFromStr")]
         uint256 makerAmount;
         #[serde_as(as = "DisplayFromStr")]
         uint256 takerAmount;
-        uint64  timestamp;
-        bytes32 metadata;
-        address builder;
+        #[serde_as(as = "DisplayFromStr")]
+        uint256 expiration;
+        #[serde_as(as = "DisplayFromStr")]
+        uint256 nonce;
+        #[serde_as(as = "DisplayFromStr")]
+        uint256 feeRateBps;
         uint8   side;
         uint8   signatureType;
     }
@@ -488,6 +492,7 @@ struct OrderWithSignature<'order> {
     salt: &'order U256,
     maker: &'order alloy::primitives::Address,
     signer: &'order alloy::primitives::Address,
+    taker: &'order alloy::primitives::Address,
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "tokenId")]
     token_id: &'order U256,
@@ -497,9 +502,13 @@ struct OrderWithSignature<'order> {
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "takerAmount")]
     taker_amount: &'order U256,
-    timestamp: u64,
-    metadata: &'order alloy::primitives::B256,
-    builder: &'order alloy::primitives::Address,
+    #[serde_as(as = "DisplayFromStr")]
+    expiration: &'order U256,
+    #[serde_as(as = "DisplayFromStr")]
+    nonce: &'order U256,
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "feeRateBps")]
+    fee_rate_bps: &'order U256,
     /// Side serialized as "BUY"/"SELL" string (CLOB API requirement)
     side: Side,
     #[serde(rename = "signatureType")]
@@ -522,12 +531,13 @@ impl Serialize for SignedOrder {
             salt: &self.order.salt,
             maker: &self.order.maker,
             signer: &self.order.signer,
+            taker: &self.order.taker,
             token_id: &self.order.tokenId,
             maker_amount: &self.order.makerAmount,
             taker_amount: &self.order.takerAmount,
-            timestamp: self.order.timestamp,
-            metadata: &self.order.metadata,
-            builder: &self.order.builder,
+            expiration: &self.order.expiration,
+            nonce: &self.order.nonce,
+            fee_rate_bps: &self.order.feeRateBps,
             side,
             signature_type: self.order.signatureType,
             signature: self.signature.to_string(),

@@ -1,3 +1,41 @@
+# Polymarket V1 Live Order Compatibility (2026-04-25)
+
+## Files
+
+- `vendor/polymarket-client-sdk/src/clob/client.rs`
+- `vendor/polymarket-client-sdk/src/clob/types/mod.rs`
+- `vendor/polymarket-client-sdk/src/clob/order_builder.rs`
+- `vendor/polymarket-client-sdk/examples/clob/authenticated.rs`
+- `vendor/polymarket-client-sdk/tests/clob.rs`
+- `vendor/polymarket-client-sdk/tests/order.rs`
+
+## Tasks
+
+- [x] Confirm live rejection reason against Tango logs and strategy runtime order history.
+- [x] Restore current production CLOB V1 order signing/body fields before Polymarket V2 cutover.
+- [x] Verify focused SDK/order tests and workspace checks without running heavy local workloads.
+- [ ] Prepare PR/CI deployment path for Tango, with no Rust build on the live host.
+
+## Review
+
+- 2026-04-25: Tango `ployd` logs and `strategy_runtime_orders` agree on
+  the failure mode: dry-run entries were recorded as `FILLED`, while live
+  entries were `REJECTED` by `POST /order` with
+  `error parsing fee rate bps () to int64`.
+- 2026-04-25: The vendored Rust CLOB SDK had already moved to V2 order signing
+  (`version = "2"`, `timestamp`, `metadata`, `builder`) even though
+  Polymarket production cutover is not until 2026-04-28. Restored the current
+  production V1 order fields (`taker`, `expiration`, `nonce`, `feeRateBps`)
+  and EIP-712 domain version.
+- 2026-04-25: Verification passed:
+  `rtk cargo test -p polymarket-client-sdk --features clob --test clob`,
+  `rtk cargo test -p polymarket-client-sdk --features clob --test order`,
+  `rtk cargo test -p ploy-connectivity`, `git diff --check`, and
+  `git diff --cached --check`.
+- 2026-04-25: `cargo fmt --check --package polymarket-client-sdk --package
+  ploy-connectivity` still reports unrelated pre-existing rustfmt drift in
+  `vendor/polymarket-client-sdk/src/rtds/*` and broader vendored SDK test files.
+
 # Dry-run / Live Order Parity UI (2026-04-25)
 
 ## Files
