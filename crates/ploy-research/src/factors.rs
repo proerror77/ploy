@@ -113,6 +113,37 @@ pub struct EventFactorSummary {
 }
 
 #[derive(Debug, Clone)]
+pub struct TaskGrainDerivedArtifacts {
+    pub event_ids: Vec<String>,
+    pub observation_rows: Vec<FactorObservation>,
+    pub event_summaries: Vec<EventFactorSummary>,
+}
+
+impl TaskGrainDerivedArtifacts {
+    pub fn observation_row_count(&self) -> usize {
+        self.observation_rows.len()
+    }
+
+    pub fn event_summary_count(&self) -> usize {
+        self.event_summaries.len()
+    }
+
+    pub fn repricing_label_row_count_30s(&self) -> usize {
+        self.observation_rows
+            .iter()
+            .filter(|row| row.future_up_ask_change_30s.is_some_and(f64::is_finite))
+            .count()
+    }
+
+    pub fn settlement_label_event_count(&self) -> usize {
+        self.event_summaries
+            .iter()
+            .filter(|row| row.settlement_up.is_finite())
+            .count()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct FactorMetric {
     pub label: String,
     pub factor: String,
@@ -1122,6 +1153,45 @@ pub fn build_event_summaries(rows: &[FactorObservation]) -> Vec<EventFactorSumma
         .collect()
 }
 
+pub fn build_task_grain_derived_artifacts_for_event_ids<I, S>(
+    rows: &[FactorObservation],
+    event_ids: I,
+) -> TaskGrainDerivedArtifacts
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let selected_event_ids: std::collections::BTreeSet<String> = event_ids
+        .into_iter()
+        .map(|event_id| event_id.as_ref().to_string())
+        .collect();
+
+    let mut observation_rows: Vec<FactorObservation> = rows
+        .iter()
+        .filter(|row| selected_event_ids.contains(&row.event_id))
+        .cloned()
+        .collect();
+    observation_rows.sort_by(|lhs, rhs| {
+        lhs.event_id
+            .cmp(&rhs.event_id)
+            .then(lhs.tick_ts.cmp(&rhs.tick_ts))
+            .then(lhs.symbol.cmp(&rhs.symbol))
+    });
+
+    let mut event_summaries = build_event_summaries(&observation_rows);
+    event_summaries.sort_by(|lhs, rhs| {
+        lhs.event_id
+            .cmp(&rhs.event_id)
+            .then(lhs.last_tick_ts.cmp(&rhs.last_tick_ts))
+            .then(lhs.symbol.cmp(&rhs.symbol))
+    });
+
+    TaskGrainDerivedArtifacts {
+        event_ids: selected_event_ids.into_iter().collect(),
+        observation_rows,
+        event_summaries,
+    }
+}
 pub fn factor_metrics(
     rows: &[FactorObservation],
     event_rows: &[EventFactorSummary],
