@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use ploy_research::DatasetBuildManifest;
 use polars::io::parquet::read::ParquetReader;
 use polars::prelude::*;
+use serde::Serialize;
 
 const DEFAULT_FEATURES: &[&str] = &[
     "signed_distance_to_beat",
@@ -45,6 +46,7 @@ struct Config {
     epochs: usize,
     learning_rate: f64,
     l2: f64,
+    output_json: Option<PathBuf>,
     features: Vec<String>,
 }
 
@@ -97,6 +99,46 @@ struct Metrics {
     avg_entry: f64,
 }
 
+#[derive(Debug, Serialize)]
+struct BaselineArtifact<'a> {
+    dataset: String,
+    entry_secs: i64,
+    tolerance_secs: i64,
+    min_edge: f64,
+    epochs: usize,
+    learning_rate: f64,
+    l2: f64,
+    features: &'a [String],
+    metrics: Vec<MetricArtifact>,
+    top_weights: Vec<ModelWeight<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct MetricArtifact {
+    split: &'static str,
+    source_rows: usize,
+    samples: usize,
+    positives: usize,
+    avg_time_remaining_secs: f64,
+    accuracy: f64,
+    logloss: f64,
+    brier: f64,
+    auc: Option<f64>,
+    avg_probability: f64,
+    trades: usize,
+    wins: usize,
+    pnl: f64,
+    cost: f64,
+    roi: f64,
+    avg_entry: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelWeight<'a> {
+    feature: &'a str,
+    weight: f64,
+}
+
 fn main() -> Result<()> {
     let config = parse_config()?;
     let manifest = read_manifest(&config.dataset_root)?;
@@ -147,6 +189,14 @@ fn main() -> Result<()> {
         [&train_metrics, &val_metrics, &test_metrics],
         &model,
     );
+    if let Some(path) = &config.output_json {
+        write_artifact(
+            path,
+            &config,
+            [&train_metrics, &val_metrics, &test_metrics],
+            &model,
+        )?;
+    }
 
     Ok(())
 }
@@ -164,6 +214,7 @@ fn parse_config() -> Result<Config> {
     let epochs = parse_usize_flag(&args, "--epochs", 500)?;
     let learning_rate = parse_f64_flag(&args, "--learning-rate", 0.05)?;
     let l2 = parse_f64_flag(&args, "--l2", 1e-3)?;
+    let output_json = flag_value(&args, "--output-json").map(PathBuf::from);
     let features = flag_value(&args, "--features")
         .map(|raw| {
             raw.split(',')
@@ -201,6 +252,7 @@ fn parse_config() -> Result<Config> {
         epochs,
         learning_rate,
         l2,
+        output_json,
         features,
     })
 }
@@ -742,6 +794,83 @@ fn print_report(
     );
 }
 
+fn write_artifact(
+    path: &Path,
+    config: &Config,
+    metrics: [&Metrics; 3],
+    model: &LogisticModel,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create output dir {}", parent.display()))?;
+    }
+    let artifact = BaselineArtifact {
+        dataset: config.dataset_root.display().to_string(),
+        entry_secs: config.entry_secs,
+        tolerance_secs: config.tolerance_secs,
+        min_edge: config.min_edge,
+        epochs: config.epochs,
+        learning_rate: config.learning_rate,
+        l2: config.l2,
+        features: &config.features,
+        metrics: metrics.into_iter().map(metric_artifact).collect(),
+        top_weights: top_weights(&config.features, model, 12),
+    };
+    let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+    serde_json::to_writer_pretty(file, &artifact)
+        .with_context(|| format!("write {}", path.display()))?;
+    eprintln!("artifact_baseline_metrics={}", path.display());
+    Ok(())
+}
+
+fn metric_artifact(metric: &Metrics) -> MetricArtifact {
+    MetricArtifact {
+        split: metric.split,
+        source_rows: metric.source_rows,
+        samples: metric.samples,
+        positives: metric.positives,
+        avg_time_remaining_secs: metric.avg_time_remaining_secs,
+        accuracy: metric.accuracy,
+        logloss: metric.logloss,
+        brier: metric.brier,
+        auc: metric.auc.is_finite().then_some(metric.auc),
+        avg_probability: metric.avg_probability,
+        trades: metric.trades,
+        wins: metric.wins,
+        pnl: metric.pnl,
+        cost: metric.cost,
+        roi: if metric.cost > 0.0 {
+            metric.pnl / metric.cost
+        } else {
+            0.0
+        },
+        avg_entry: metric.avg_entry,
+    }
+}
+
+fn top_weights<'a>(
+    features: &'a [String],
+    model: &LogisticModel,
+    limit: usize,
+) -> Vec<ModelWeight<'a>> {
+    let mut weighted_features = features
+        .iter()
+        .zip(&model.weights)
+        .map(|(feature, weight)| (feature.as_str(), *weight))
+        .collect::<Vec<_>>();
+    weighted_features.sort_by(|(_, left), (_, right)| {
+        right
+            .abs()
+            .partial_cmp(&left.abs())
+            .unwrap_or(Ordering::Equal)
+    });
+    weighted_features
+        .into_iter()
+        .take(limit)
+        .map(|(feature, weight)| ModelWeight { feature, weight })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,5 +933,31 @@ mod tests {
         let auc = auc_pairwise(&scored);
 
         assert!((auc - 0.875).abs() < 1e-9);
+    }
+
+    #[test]
+    fn metric_artifact_reports_roi_as_fraction() {
+        let metric = Metrics {
+            split: "test",
+            source_rows: 1,
+            samples: 1,
+            positives: 1,
+            avg_time_remaining_secs: 60.0,
+            accuracy: 1.0,
+            logloss: 0.1,
+            brier: 0.1,
+            auc: f64::NAN,
+            avg_probability: 0.7,
+            trades: 1,
+            wins: 1,
+            pnl: 0.25,
+            cost: 0.5,
+            avg_entry: 0.5,
+        };
+
+        let artifact = metric_artifact(&metric);
+
+        assert_eq!(artifact.auc, None);
+        assert_eq!(artifact.roi, 0.5);
     }
 }

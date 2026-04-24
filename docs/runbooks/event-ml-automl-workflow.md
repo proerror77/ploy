@@ -68,18 +68,22 @@ The runner executes:
 1. `event_dataset_coverage`
 2. `event_factor_attribution`
 3. `event_dataset_baseline`
+4. bounded logistic hyperparameter search using `event_dataset_baseline`
 
 It stops on the first failed phase. The attribution phase writes
 `factor_attributions.json`, `feature_whitelist.txt`, and
 `feature_whitelist.md`; if the user did not pass `--features`, the baseline
 phase consumes that whitelist automatically. The runner also writes
 `workflow_report.json` and `workflow_report.md` into the run directory.
+The hyperparameter phase writes candidate-level `baseline_metrics.json` files
+plus `hyperparameter_search.json` and `hyperparameter_search.md`.
 
 Use `--output-dir <dir>` to choose the artifact directory. Without it, the
 runner writes under `<dataset>/workflow_runs/event_ml_<timestamp>`.
 
 Use `--dry-run` to print the commands without running them, or
-`--phases coverage,attribution,baseline` to run a subset in canonical order.
+`--phases coverage,attribution,baseline,hyperparameter` to run a subset in
+canonical order.
 
 ## Phase 1 - Coverage Diagnostics
 
@@ -290,6 +294,31 @@ Examples of acceptable search spaces:
 - calibration threshold
 - entry threshold
 - small ensemble weights
+
+The current executable runner supports a bounded logistic search:
+
+```bash
+rtk cargo run -p ploy-research --example event_ml_workflow \
+  --features polars-export -- \
+  --dataset /tmp/ploy-event-root-5sym-150-20260424 \
+  --entry-secs 60 \
+  --tolerance-secs 30 \
+  --search-l2 0,0.001,0.01 \
+  --search-min-edge 0,0.02,0.05 \
+  --search-learning-rate 0.03,0.05
+```
+
+Selection rule:
+
+- maximize validation PnL
+- break ties with lower validation logloss
+- record test metrics, but never use test metrics for selection
+
+Artifacts:
+
+- `hyperparameter/candidate_*/baseline_metrics.json`
+- `hyperparameter/hyperparameter_search.json`
+- `hyperparameter/hyperparameter_search.md`
 
 Examples to avoid early:
 
