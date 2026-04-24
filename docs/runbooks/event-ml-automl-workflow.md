@@ -134,6 +134,24 @@ The current run is always included as one window. The extra run directories
 must point at distinct completed workflow runs; repeated run dirs or repeated
 dataset windows are treated as blocked evidence, not rolling validation.
 
+For a full multi-window run from multiple event-root datasets, prefer the
+rolling orchestrator:
+
+```bash
+rtk cargo run -p ploy-research --example event_ml_rolling_workflow \
+  --features polars-export -- \
+  --dataset /tmp/ploy-event-root-window-1 \
+  --dataset /tmp/ploy-event-root-window-2 \
+  --dataset /tmp/ploy-event-root-window-3 \
+  --output-root /tmp/ploy-event-ml-rolling
+```
+
+The orchestrator creates `window_001_event_ml`, `window_002_event_ml`, and so
+on under `--output-root`. Each window runs the canonical `event_ml_workflow`;
+later windows automatically receive earlier completed run dirs as
+`--walk-forward-run-dir` inputs. Duplicate dataset paths are rejected before any
+work starts.
+
 ## Phase 1 - Coverage Diagnostics
 
 Goal: decide whether the dataset is ready for ML, or whether feature coverage

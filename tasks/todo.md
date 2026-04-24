@@ -8427,3 +8427,24 @@ Checklist:
 
 Review:
 - 2026-04-24: Extended `event_ml_workflow` so a current workflow run can aggregate prior completed rolling windows with `--walk-forward-run-dir` or `--walk-forward-run-dirs`. The walk-forward builder now rejects duplicate run dirs and adds `unique_dataset_windows`, requiring distinct event-root dataset windows before DL/RL readiness can pass. This makes the next data job explicit: produce separate event-root workflow runs, then aggregate them through the gate.
+
+## Event ML Rolling Workflow Runner
+
+Goal: add one command that runs the canonical event ML workflow across multiple distinct event-root datasets and automatically passes completed prior run dirs into the walk-forward gate.
+
+File ownership:
+- `crates/ploy-research/examples/event_ml_rolling_workflow.rs`
+- `crates/ploy-research/Cargo.toml`
+- `docs/runbooks/event-ml-automl-workflow.md`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Add `event_ml_rolling_workflow` with repeated `--dataset` and CSV `--datasets` inputs.
+- [x] Create deterministic per-window output dirs under `--output-root`.
+- [x] Pass all prior completed window run dirs into the current `event_ml_workflow`.
+- [x] Reject duplicate dataset paths so one event-root cannot fake rolling windows.
+- [x] Support `--dry-run` and write rolling workflow JSON/Markdown artifacts.
+- [x] Verify parser, dry-run output, and focused cargo checks/tests.
+
+Review:
+- 2026-04-24: Added `event_ml_rolling_workflow`, a rolling orchestrator that accepts repeated `--dataset` or CSV `--datasets`, creates deterministic `window_NNN_event_ml` output dirs, runs the canonical `event_ml_workflow` for each event-root dataset, and passes prior completed window dirs into later windows as `--walk-forward-run-dir`. The runner rejects duplicate dataset paths before work starts, supports `--dry-run`, and writes `rolling_workflow_report.json` / `.md` under `--output-root`. This is the agent-facing entrypoint for producing the distinct workflow runs needed to satisfy the walk-forward gates.
