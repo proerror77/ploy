@@ -31,9 +31,34 @@ pub struct ExecutionReport {
     pub market_impact: Option<Decimal>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExecutionPolicy {
+    pub max_slippage_bps: Decimal,
+    pub max_attempts: u8,
+    pub reconcile_cycles_before_retry: u8,
+}
+
+impl Default for ExecutionPolicy {
+    fn default() -> Self {
+        Self {
+            max_slippage_bps: Decimal::ZERO,
+            max_attempts: 1,
+            reconcile_cycles_before_retry: 1,
+        }
+    }
+}
+
 /// Order executor — real exchange or execution simulator.
 #[async_trait]
 pub trait Executor: Send {
+    fn execution_policy(&self) -> ExecutionPolicy {
+        ExecutionPolicy::default()
+    }
+
+    fn last_reconcile_attempted(&self) -> bool {
+        true
+    }
+
     /// Submit a trading intent and return the execution report.
     /// `order_id` is the caller-assigned ID that must be used in the returned fill.
     async fn submit(&mut self, intent: &TradingIntent, order_id: &str) -> ExecutionReport;

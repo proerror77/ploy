@@ -211,8 +211,25 @@ impl RuntimeDbRecorder {
                 event_id = COALESCE(EXCLUDED.event_id, strategy_runtime_orders.event_id),
                 symbol = COALESCE(EXCLUDED.symbol, strategy_runtime_orders.symbol),
                 market_side = COALESCE(EXCLUDED.market_side, strategy_runtime_orders.market_side),
-                filled_quantity = EXCLUDED.filled_quantity,
-                avg_fill_price = COALESCE(EXCLUDED.avg_fill_price, strategy_runtime_orders.avg_fill_price),
+                filled_quantity = CASE
+                    WHEN EXCLUDED.filled_quantity > 0 THEN
+                        strategy_runtime_orders.filled_quantity + EXCLUDED.filled_quantity
+                    ELSE strategy_runtime_orders.filled_quantity
+                END,
+                avg_fill_price = CASE
+                    WHEN EXCLUDED.filled_quantity > 0 AND EXCLUDED.avg_fill_price IS NOT NULL THEN
+                        (
+                            COALESCE(
+                                strategy_runtime_orders.avg_fill_price,
+                                EXCLUDED.avg_fill_price
+                            ) * strategy_runtime_orders.filled_quantity
+                            + EXCLUDED.avg_fill_price * EXCLUDED.filled_quantity
+                        ) / NULLIF(
+                            strategy_runtime_orders.filled_quantity + EXCLUDED.filled_quantity,
+                            0
+                        )
+                    ELSE COALESCE(EXCLUDED.avg_fill_price, strategy_runtime_orders.avg_fill_price)
+                END,
                 status = EXCLUDED.status,
                 rejection_reason = COALESCE(EXCLUDED.rejection_reason, strategy_runtime_orders.rejection_reason),
                 slippage = COALESCE(EXCLUDED.slippage, strategy_runtime_orders.slippage),

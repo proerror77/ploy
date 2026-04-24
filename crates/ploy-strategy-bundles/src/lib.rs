@@ -34,8 +34,8 @@ pub use strategies::ReversalStrategy;
 pub use strategies::SweepStrategy;
 pub use strategies::ThreeLayerStrategy;
 pub use traits::{
-    ExecutionReport, Executor, NullRecorder, Recorder, SignalRecord, StrategyDecision,
-    StrategyLogic,
+    ExecutionPolicy, ExecutionReport, Executor, NullRecorder, Recorder, SignalRecord,
+    StrategyDecision, StrategyLogic,
 };
 
 pub const CRATE_MARKER: &str = "ploy-strategy-bundles";

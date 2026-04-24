@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use ploy_market_data::feeds::{
     spawn_chainlink_feed, spawn_db_aggtrade_feed, spawn_db_l2_feed, spawn_db_spot_feed,
     spawn_pyth_reference_feed, spawn_spot_feed,
@@ -8,7 +9,12 @@ use ploy_market_data::sports_feed::spawn_sports_feed;
 use ploy_strategy_bundles::{
     Feed, FullConfig, LiveFeed, RecordingFeed, RuntimeMode, StrategyLogic,
 };
-use sqlx::postgres::PgPoolOptions;
+use ploy_trading::{
+    FillRecord, IntentPurpose, OrderRecord, OrderState, PnlSnapshot, TradeSide, TradingIntent,
+    TradingRuntime, TradingRuntimeSnapshot,
+};
+use rust_decimal::Decimal;
+use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
 use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -17,8 +23,9 @@ use tracing::{error, info, warn};
 #[cfg(all(feature = "live", feature = "live-execution"))]
 mod execution {
     use async_trait::async_trait;
-    use ploy_strategy_bundles::ExecutionReport;
-    use ploy_trading::{FillRecord, TradingIntent};
+    use ploy_strategy_bundles::{ExecutionPolicy, ExecutionReport};
+    use ploy_trading::{FillRecord, TradeSide, TradingIntent};
+    use rust_decimal::Decimal;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tracing::{error, info};
@@ -27,18 +34,27 @@ mod execution {
     pub(super) struct LiveExecutor {
         gateway: Arc<ploy_connectivity::PolymarketExecutionGateway>,
         next_reconcile_at: Option<Instant>,
+        policy: ExecutionPolicy,
+        last_reconcile_attempted: bool,
     }
 
     impl LiveExecutor {
-        pub(super) fn new(gateway: Arc<ploy_connectivity::PolymarketExecutionGateway>) -> Self {
+        pub(super) fn new(
+            gateway: Arc<ploy_connectivity::PolymarketExecutionGateway>,
+            policy: ExecutionPolicy,
+        ) -> Self {
             Self {
                 gateway,
                 next_reconcile_at: None,
+                policy,
+                last_reconcile_attempted: false,
             }
         }
 
         fn build_request(&self, intent: &TradingIntent) -> ploy_connectivity::ExecutionRequest {
-            let limit_price = intent.limit_price.map(|price| price.round_dp(2));
+            let limit_price = intent
+                .limit_price
+                .map(|price| self.slippage_bounded_price(price, intent.side));
             let quantity = intent.quantity.trunc_with_scale(2);
             ploy_connectivity::ExecutionRequest {
                 order_id: intent.intent_id.clone(),
@@ -50,10 +66,29 @@ mod execution {
                 aggressive_ticks: 0,
             }
         }
+
+        fn slippage_bounded_price(&self, limit_price: Decimal, side: TradeSide) -> Decimal {
+            let tolerance = self.policy.max_slippage_bps / Decimal::from(10_000_u32);
+            let adjusted = match side {
+                TradeSide::Buy => limit_price * (Decimal::ONE + tolerance),
+                TradeSide::Sell => limit_price * (Decimal::ONE - tolerance),
+            };
+            adjusted
+                .clamp(Decimal::new(1, 2), Decimal::new(99, 2))
+                .round_dp(2)
+        }
     }
 
     #[async_trait]
     impl ploy_strategy_bundles::Executor for LiveExecutor {
+        fn execution_policy(&self) -> ExecutionPolicy {
+            self.policy
+        }
+
+        fn last_reconcile_attempted(&self) -> bool {
+            self.last_reconcile_attempted
+        }
+
         async fn submit(&mut self, intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
             use ploy_connectivity::{ExecutionOutcome, LiveExecutionGateway};
 
@@ -120,6 +155,7 @@ mod execution {
         ) -> Result<Vec<FillRecord>, String> {
             use ploy_connectivity::{LiveExecutionGateway, TrackedOrder};
 
+            self.last_reconcile_attempted = false;
             let now = Instant::now();
             if let Some(next_reconcile_at) = self.next_reconcile_at {
                 if now < next_reconcile_at {
@@ -156,6 +192,7 @@ mod execution {
                 .await
             {
                 Ok(Ok(fills)) => {
+                    self.last_reconcile_attempted = true;
                     self.next_reconcile_at = Some(now + Duration::from_secs(3));
                     Ok(fills)
                 }
@@ -173,7 +210,35 @@ mod execution {
 }
 
 use crate::recording::build_signal_recorder;
-use crate::{RuntimeModeConfig, database_unavailable_is_fatal};
+use crate::{database_unavailable_is_fatal, RuntimeModeConfig};
+
+#[derive(Debug, FromRow)]
+struct LiveOrderRestoreRow {
+    intent_id: String,
+    order_id: String,
+    deployment_id: String,
+    event_id: Option<String>,
+    token_id: String,
+    order_side: String,
+    quantity: Decimal,
+    limit_price: Option<Decimal>,
+    venue_order_id: Option<String>,
+    filled_quantity: Decimal,
+    status: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct LiveFillRestoreRow {
+    order_id: String,
+    fill_id: String,
+    token_id: String,
+    fill_side: String,
+    quantity: Decimal,
+    price: Decimal,
+    fee: Decimal,
+    fill_timestamp: DateTime<Utc>,
+}
 
 pub(crate) async fn run_live_or_dry_run_entry(
     config: &FullConfig,
@@ -185,6 +250,156 @@ pub(crate) async fn run_live_or_dry_run_entry(
     ploy_trading::TradingRuntimeSnapshot,
 ) {
     run_live_or_dry_run(config, symbols, strategy, runtime_config).await
+}
+
+async fn restore_active_live_trading_runtime(pool: &PgPool) -> Option<TradingRuntime> {
+    let orders = match sqlx::query_as::<_, LiveOrderRestoreRow>(
+        r#"
+        SELECT
+            intent_id,
+            order_id,
+            deployment_id,
+            event_id,
+            token_id,
+            order_side,
+            quantity,
+            limit_price,
+            venue_order_id,
+            filled_quantity,
+            status,
+            created_at
+        FROM strategy_runtime_orders
+        WHERE runtime_mode = 'live'
+          AND venue_order_id IS NOT NULL
+          AND status IN ('ACKNOWLEDGED', 'PARTIALLY_FILLED', 'acknowledged', 'partially_filled')
+        ORDER BY created_at DESC
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(error = %error, "Failed to restore active live orders from DB");
+            return None;
+        }
+    };
+
+    if orders.is_empty() {
+        return None;
+    }
+
+    let order_ids = orders
+        .iter()
+        .map(|order| order.order_id.clone())
+        .collect::<Vec<_>>();
+    let fills = match sqlx::query_as::<_, LiveFillRestoreRow>(
+        r#"
+        SELECT order_id, fill_id, token_id, fill_side, quantity, price, fee, fill_timestamp
+        FROM strategy_runtime_fills
+        WHERE runtime_mode = 'live'
+          AND order_id = ANY($1)
+        ORDER BY fill_timestamp ASC
+        "#,
+    )
+    .bind(&order_ids)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(error = %error, "Failed to restore live fills from DB");
+            Vec::new()
+        }
+    };
+
+    let intents = orders
+        .iter()
+        .map(|order| TradingIntent {
+            intent_id: order.intent_id.clone(),
+            deployment_id: order.deployment_id.clone(),
+            market_id: order.event_id.clone().unwrap_or_default(),
+            token_id: order.token_id.clone(),
+            side: trade_side_from_db(&order.order_side),
+            quantity: order.quantity,
+            limit_price: order.limit_price,
+            purpose: intent_purpose_from_side(&order.order_side),
+            created_at: order.created_at,
+        })
+        .collect::<Vec<_>>();
+    let order_records = orders
+        .into_iter()
+        .map(|order| OrderRecord {
+            order_id: order.order_id,
+            intent_id: order.intent_id,
+            deployment_id: order.deployment_id,
+            token_id: order.token_id,
+            requested_qty: order.quantity,
+            limit_price: order.limit_price,
+            venue_order_id: order.venue_order_id,
+            venue_order_history: Vec::new(),
+            revision: 0,
+            state: order_state_from_db(&order.status),
+            filled_qty: order.filled_quantity,
+            rejection_reason: None,
+            last_error: None,
+        })
+        .collect::<Vec<_>>();
+    let fill_records = fills
+        .into_iter()
+        .map(|fill| FillRecord {
+            fill_id: fill.fill_id,
+            order_id: fill.order_id,
+            token_id: fill.token_id,
+            side: trade_side_from_db(&fill.fill_side),
+            quantity: fill.quantity,
+            price: fill.price,
+            fee: fill.fee,
+            timestamp: fill.fill_timestamp,
+        })
+        .collect::<Vec<_>>();
+
+    info!(
+        orders = order_records.len(),
+        fills = fill_records.len(),
+        "Restored active live trading runtime from DB"
+    );
+
+    Some(TradingRuntime::restore(TradingRuntimeSnapshot {
+        intents,
+        orders: order_records,
+        fills: fill_records,
+        positions: Vec::new(),
+        pnl: PnlSnapshot::default(),
+        risk: Default::default(),
+    }))
+}
+
+fn trade_side_from_db(side: &str) -> TradeSide {
+    if side.eq_ignore_ascii_case("SELL") {
+        TradeSide::Sell
+    } else {
+        TradeSide::Buy
+    }
+}
+
+fn intent_purpose_from_side(side: &str) -> IntentPurpose {
+    if side.eq_ignore_ascii_case("SELL") {
+        IntentPurpose::Exit
+    } else {
+        IntentPurpose::Entry
+    }
+}
+
+fn order_state_from_db(status: &str) -> OrderState {
+    match status.to_ascii_uppercase().as_str() {
+        "PARTIALLY_FILLED" => OrderState::PartiallyFilled,
+        "FILLED" => OrderState::Filled,
+        "CANCELED" | "CANCELLED" => OrderState::Canceled,
+        "REJECTED" => OrderState::Rejected,
+        _ => OrderState::Acknowledged,
+    }
 }
 
 async fn run_live_or_dry_run(
@@ -291,13 +506,20 @@ async fn run_live_or_dry_run(
 
         #[cfg(feature = "live-execution")]
         {
-            let executor = build_live_executor();
-            let mut runtime = ploy_strategy_bundles::StrategyRuntime::new(
+            let executor = build_live_executor(config.live_execution_policy());
+            let trading = match db_pool.as_ref() {
+                Some(pool) => restore_active_live_trading_runtime(pool)
+                    .await
+                    .unwrap_or_default(),
+                None => TradingRuntime::default(),
+            };
+            let mut runtime = ploy_strategy_bundles::StrategyRuntime::new_with_trading(
                 strategy,
                 feed,
                 executor,
                 recorder,
                 runtime_config,
+                trading,
             );
             let result = runtime.run().await;
             let snapshot = runtime
@@ -336,7 +558,7 @@ async fn run_live_or_dry_run(
 }
 
 #[cfg(all(feature = "live", feature = "live-execution"))]
-fn build_live_executor() -> execution::LiveExecutor {
+fn build_live_executor(policy: ploy_strategy_bundles::ExecutionPolicy) -> execution::LiveExecutor {
     let gateway = Arc::new(ploy_connectivity::PolymarketExecutionGateway::from_env());
-    execution::LiveExecutor::new(gateway)
+    execution::LiveExecutor::new(gateway, policy)
 }

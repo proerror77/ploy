@@ -10,12 +10,12 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use ploy_trading::{PnlSnapshot, RiskSnapshot, TradingRuntime};
+use ploy_trading::{OrderState, PnlSnapshot, RiskSnapshot, TradingIntent, TradingRuntime};
 use rust_decimal::Decimal;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use ploy_trading::{FillRecord, IntentPurpose};
+use ploy_trading::IntentPurpose;
 use rust_decimal_macros::dec;
 
 use crate::traits::{Executor, Feed, MarketUpdate, Recorder, StrategyDecision, StrategyLogic};
@@ -57,6 +57,30 @@ pub struct RuntimeResult {
     pub elapsed_secs: f64,
 }
 
+#[derive(Debug, Clone)]
+struct PendingLiveOrder {
+    intent: TradingIntent,
+    attempts: u8,
+    reconciles_without_fill: u8,
+}
+
+fn retry_attempt_from_intent_id(intent_id: &str) -> u8 {
+    retry_suffix(intent_id).map_or(1, |(_, attempt)| attempt.max(1))
+}
+
+fn retry_root_intent_id(intent_id: &str) -> &str {
+    retry_suffix(intent_id).map_or(intent_id, |(root, _)| root)
+}
+
+fn retry_suffix(intent_id: &str) -> Option<(&str, u8)> {
+    let (root, suffix) = intent_id.rsplit_once("_retry")?;
+    if root.is_empty() || suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+
+    Some((root, suffix.parse().ok()?))
+}
+
 /// Unified strategy runtime.
 ///
 /// Generic over:
@@ -91,12 +115,30 @@ where
         recorder: Box<dyn Recorder>,
         config: RuntimeConfig,
     ) -> Self {
+        Self::new_with_trading(
+            strategy,
+            feed,
+            executor,
+            recorder,
+            config,
+            TradingRuntime::default(),
+        )
+    }
+
+    pub fn new_with_trading(
+        strategy: S,
+        feed: F,
+        executor: E,
+        recorder: Box<dyn Recorder>,
+        config: RuntimeConfig,
+        trading: TradingRuntime,
+    ) -> Self {
         Self {
             strategy,
             feed,
             executor,
             recorder,
-            trading: TradingRuntime::default(),
+            trading,
             config,
         }
     }
@@ -108,6 +150,7 @@ where
         let mut intents_submitted: u64 = 0;
         let mut fills_recorded: u64 = 0;
         let mut last_eval_ts: Option<DateTime<Utc>> = None;
+        let mut pending_live_orders = self.initial_pending_live_orders();
 
         info!(
             mode = ?self.config.mode,
@@ -197,7 +240,15 @@ where
                 intents_submitted += 1;
 
                 if let Some(fill) = report.fill.as_ref() {
-                    self.trading.record_fill(fill.clone());
+                    if !self.trading.record_fill(fill.clone()) {
+                        warn!(
+                            order_id = %order_id,
+                            fill_id = %fill.fill_id,
+                            qty = %fill.quantity,
+                            "Ignoring immediate duplicate, orphan, or overfilled fill",
+                        );
+                        continue;
+                    }
                     self.recorder
                         .record_fill(&strategy_name, &intent, signal_ref, fill, &report)
                         .await;
@@ -210,50 +261,61 @@ where
                         price = %fill.price,
                         "Fill recorded",
                     );
-                } else if !report.rejected && intent.purpose == IntentPurpose::Entry {
-                    // Live mode: executor acknowledged an entry but no immediate fill.
-                    // Arm cooldown/daily counter with a synthetic fill so the
-                    // strategy doesn't re-signal for the same symbol immediately.
-                    //
-                    // Do not synthesize fills for exits: a live exit acknowledge
-                    // without a real fill must not make the strategy believe the
-                    // position is closed.
-                    let synthetic = FillRecord {
-                        fill_id: format!("synthetic_{order_id}"),
-                        order_id: order_id.clone(),
-                        token_id: intent.token_id.clone(),
-                        side: intent.side.clone(),
-                        quantity: intent.quantity,
-                        price: intent.limit_price.unwrap_or_default(),
-                        fee: Decimal::ZERO,
-                        timestamp: intent.created_at,
-                    };
-                    self.strategy.on_fill(&synthetic);
+                } else if self.config.mode == RuntimeMode::Live && !report.rejected {
+                    pending_live_orders.insert(
+                        order_id.clone(),
+                        PendingLiveOrder {
+                            intent: intent.clone(),
+                            attempts: 1,
+                            reconciles_without_fill: 0,
+                        },
+                    );
                     debug!(
                         order_id = %order_id,
                         token = %intent.token_id,
-                        "Synthetic fill for cooldown (live acknowledged)",
+                        "Live order acknowledged without fill; waiting for reconciliation",
                     );
                 }
             }
 
-            match self.executor.reconcile_fills(self.trading.orders()).await {
+            let reconcile_completed = match self
+                .executor
+                .reconcile_fills(self.trading.orders())
+                .await
+            {
                 Ok(fills) => {
                     let strategy_name = self.strategy.name().to_string();
                     for fill in fills {
+                        let Some(order_before) = self.trading.order(&fill.order_id).cloned() else {
+                            warn!(
+                                order_id = %fill.order_id,
+                                fill_id = %fill.fill_id,
+                                "Ignoring reconciled fill for unknown order",
+                            );
+                            continue;
+                        };
+                        let Some(intent) = self.trading.intent(&order_before.intent_id).cloned()
+                        else {
+                            warn!(
+                                order_id = %fill.order_id,
+                                fill_id = %fill.fill_id,
+                                intent_id = %order_before.intent_id,
+                                "Ignoring reconciled fill for unknown intent",
+                            );
+                            continue;
+                        };
                         if !self.trading.record_fill(fill.clone()) {
+                            warn!(
+                                order_id = %fill.order_id,
+                                fill_id = %fill.fill_id,
+                                qty = %fill.quantity,
+                                "Ignoring duplicate, orphan, or overfilled reconciled fill",
+                            );
                             continue;
                         }
 
-                        let Some(order) = self.trading.order(&fill.order_id).cloned() else {
-                            continue;
-                        };
-                        let Some(intent) = self.trading.intent(&order.intent_id).cloned() else {
-                            continue;
-                        };
-
                         let report = crate::traits::ExecutionReport {
-                            order_id: order
+                            order_id: order_before
                                 .venue_order_id
                                 .clone()
                                 .unwrap_or_else(|| fill.order_id.clone()),
@@ -267,8 +329,20 @@ where
                         self.recorder
                             .record_fill(&strategy_name, &intent, None, &fill, &report)
                             .await;
+                        self.recorder
+                            .record_order(&strategy_name, &intent, None, &report, &fill.order_id)
+                            .await;
                         self.strategy.on_fill(&fill);
                         fills_recorded += 1;
+                        if self
+                            .trading
+                            .order(&fill.order_id)
+                            .is_some_and(|order| order.state == OrderState::Filled)
+                        {
+                            pending_live_orders.remove(&fill.order_id);
+                        } else if let Some(pending) = pending_live_orders.get_mut(&fill.order_id) {
+                            pending.reconciles_without_fill = 0;
+                        }
                         debug!(
                             order_id = %fill.order_id,
                             token = %fill.token_id,
@@ -277,10 +351,21 @@ where
                             "Reconciled fill recorded",
                         );
                     }
+                    self.executor.last_reconcile_attempted()
                 }
                 Err(error) => {
                     warn!(error = %error, "Fill reconciliation failed");
+                    false
                 }
+            };
+
+            if reconcile_completed {
+                self.process_live_unfilled_orders(
+                    &mut pending_live_orders,
+                    &mut intents_submitted,
+                    &mut fills_recorded,
+                )
+                .await;
             }
 
             // 3. Check update limit (backtest bound).
@@ -326,6 +411,175 @@ where
         &self.trading
     }
 
+    fn initial_pending_live_orders(&self) -> BTreeMap<String, PendingLiveOrder> {
+        if self.config.mode != RuntimeMode::Live {
+            return BTreeMap::new();
+        }
+
+        self.trading
+            .orders()
+            .orders()
+            .filter(|order| {
+                order.venue_order_id.is_some()
+                    && matches!(
+                        order.state,
+                        OrderState::Acknowledged | OrderState::PartiallyFilled
+                    )
+            })
+            .filter_map(|order| {
+                let intent = self.trading.intent(&order.intent_id)?.clone();
+                Some((
+                    order.order_id.clone(),
+                    PendingLiveOrder {
+                        intent,
+                        attempts: retry_attempt_from_intent_id(&order.intent_id),
+                        reconciles_without_fill: 0,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    async fn process_live_unfilled_orders(
+        &mut self,
+        pending_live_orders: &mut BTreeMap<String, PendingLiveOrder>,
+        intents_submitted: &mut u64,
+        fills_recorded: &mut u64,
+    ) {
+        if self.config.mode != RuntimeMode::Live || pending_live_orders.is_empty() {
+            return;
+        }
+
+        let policy = self.executor.execution_policy();
+        let strategy_name = self.strategy.name().to_string();
+        let order_ids = pending_live_orders.keys().cloned().collect::<Vec<_>>();
+
+        for order_id in order_ids {
+            let Some(mut pending) = pending_live_orders.remove(&order_id) else {
+                continue;
+            };
+            let Some(order) = self.trading.order(&order_id).cloned() else {
+                continue;
+            };
+
+            if !matches!(
+                order.state,
+                OrderState::Acknowledged | OrderState::PartiallyFilled
+            ) {
+                continue;
+            }
+
+            let remaining_qty = (order.requested_qty - order.filled_qty).max(Decimal::ZERO);
+            if remaining_qty <= Decimal::ZERO {
+                continue;
+            }
+
+            pending.reconciles_without_fill += 1;
+            if pending.reconciles_without_fill < policy.reconcile_cycles_before_retry {
+                pending_live_orders.insert(order_id, pending);
+                continue;
+            }
+
+            let terminal_reason = if pending.attempts >= policy.max_attempts {
+                format!(
+                    "live order unfilled after {} attempt(s); remaining_qty={remaining_qty}",
+                    pending.attempts
+                )
+            } else {
+                format!(
+                    "live FAK attempt unfilled; retrying remaining_qty={remaining_qty} after {} attempt(s)",
+                    pending.attempts
+                )
+            };
+            self.trading.cancel_order(&order_id);
+            let terminal_report = crate::traits::ExecutionReport {
+                order_id: order
+                    .venue_order_id
+                    .clone()
+                    .unwrap_or_else(|| order_id.clone()),
+                fill: None,
+                rejected: true,
+                rejection_reason: Some(terminal_reason.clone()),
+                slippage: None,
+                market_impact: None,
+            };
+            self.recorder
+                .record_order(
+                    &strategy_name,
+                    &pending.intent,
+                    None,
+                    &terminal_report,
+                    &order_id,
+                )
+                .await;
+
+            if pending.attempts >= policy.max_attempts {
+                self.strategy.on_reject(&pending.intent, &terminal_reason);
+                warn!(order_id = %order_id, reason = %terminal_reason, "Live order terminal unfilled");
+                continue;
+            }
+
+            let retry_attempt = pending.attempts + 1;
+            let mut retry_intent = pending.intent.clone();
+            retry_intent.intent_id = format!(
+                "{}_retry{retry_attempt}",
+                retry_root_intent_id(&pending.intent.intent_id)
+            );
+            retry_intent.quantity = remaining_qty;
+            retry_intent.created_at = Utc::now();
+            let retry_order_id = Uuid::new_v4().to_string();
+            let report = self.executor.submit(&retry_intent, &retry_order_id).await;
+            self.recorder
+                .record_order(
+                    &strategy_name,
+                    &retry_intent,
+                    None,
+                    &report,
+                    &retry_order_id,
+                )
+                .await;
+
+            if report.rejected && report.fill.is_none() {
+                let reason = report.rejection_reason.as_deref().unwrap_or("unknown");
+                warn!(
+                    order_id = %retry_order_id,
+                    attempt = retry_attempt,
+                    reason = %reason,
+                    "Live retry rejected",
+                );
+                self.strategy.on_reject(&retry_intent, reason);
+                continue;
+            }
+
+            self.trading
+                .submit_intent(retry_intent.clone(), retry_order_id.clone());
+            if !report.order_id.is_empty() && report.order_id != retry_order_id {
+                self.trading
+                    .acknowledge_order(&retry_order_id, report.order_id.clone());
+            }
+            *intents_submitted += 1;
+
+            if let Some(fill) = report.fill.as_ref() {
+                if self.trading.record_fill(fill.clone()) {
+                    self.recorder
+                        .record_fill(&strategy_name, &retry_intent, None, fill, &report)
+                        .await;
+                    self.strategy.on_fill(fill);
+                    *fills_recorded += 1;
+                }
+            } else {
+                pending_live_orders.insert(
+                    retry_order_id,
+                    PendingLiveOrder {
+                        intent: retry_intent,
+                        attempts: retry_attempt,
+                        reconciles_without_fill: 0,
+                    },
+                );
+            }
+        }
+    }
+
     /// Extract timestamp from a market update (for throttling).
     fn update_ts(update: &MarketUpdate) -> Option<DateTime<Utc>> {
         match update {
@@ -358,14 +612,32 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use super::{RuntimeConfig, RuntimeMode, StrategyRuntime};
+    use super::{
+        retry_attempt_from_intent_id, retry_root_intent_id, RuntimeConfig, RuntimeMode,
+        StrategyRuntime,
+    };
     use crate::traits::{
-        ExecutionReport, Executor, Feed, MarketUpdate, Recorder, SignalRecord, StrategyDecision,
-        StrategyLogic,
+        ExecutionPolicy, ExecutionReport, Executor, Feed, MarketUpdate, Recorder, SignalRecord,
+        StrategyDecision, StrategyLogic,
     };
 
     struct SingleUpdateFeed {
         next: Option<MarketUpdate>,
+    }
+
+    #[test]
+    fn retry_suffix_parsing_only_treats_numeric_suffix_as_attempt() {
+        assert_eq!(retry_attempt_from_intent_id("pm5d_BTCUSDT_UP"), 1);
+        assert_eq!(
+            retry_root_intent_id("pm5d_BTCUSDT_UP_retry"),
+            "pm5d_BTCUSDT_UP_retry"
+        );
+        assert_eq!(retry_attempt_from_intent_id("pm5d_BTCUSDT_UP_retry"), 1);
+        assert_eq!(
+            retry_root_intent_id("pm5d_BTCUSDT_UP_retry2"),
+            "pm5d_BTCUSDT_UP"
+        );
+        assert_eq!(retry_attempt_from_intent_id("pm5d_BTCUSDT_UP_retry2"), 2);
     }
 
     #[async_trait]
@@ -616,10 +888,63 @@ mod tests {
         }
     }
 
-    struct AcknowledgingExecutor;
+    #[derive(Clone)]
+    struct AcknowledgingExecutor {
+        policy: ExecutionPolicy,
+        submissions: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Default for AcknowledgingExecutor {
+        fn default() -> Self {
+            Self {
+                policy: ExecutionPolicy::default(),
+                submissions: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
 
     #[async_trait]
     impl Executor for AcknowledgingExecutor {
+        fn execution_policy(&self) -> ExecutionPolicy {
+            self.policy
+        }
+
+        async fn submit(&mut self, intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
+            self.submissions
+                .lock()
+                .unwrap()
+                .push(intent.intent_id.clone());
+            ExecutionReport {
+                order_id: "venue-order-1".into(),
+                fill: None,
+                rejected: false,
+                rejection_reason: None,
+                slippage: None,
+                market_impact: None,
+            }
+        }
+
+        async fn cancel(&mut self, _order_id: &str) -> bool {
+            true
+        }
+    }
+
+    struct SkippedReconcileExecutor;
+
+    #[async_trait]
+    impl Executor for SkippedReconcileExecutor {
+        fn execution_policy(&self) -> ExecutionPolicy {
+            ExecutionPolicy {
+                max_slippage_bps: Decimal::ZERO,
+                max_attempts: 1,
+                reconcile_cycles_before_retry: 1,
+            }
+        }
+
+        fn last_reconcile_attempted(&self) -> bool {
+            false
+        }
+
         async fn submit(&mut self, _intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
             ExecutionReport {
                 order_id: "venue-order-1".into(),
@@ -633,6 +958,13 @@ mod tests {
 
         async fn cancel(&mut self, _order_id: &str) -> bool {
             true
+        }
+
+        async fn reconcile_fills(
+            &mut self,
+            _orders: &OrderLedger,
+        ) -> Result<Vec<FillRecord>, String> {
+            Ok(Vec::new())
         }
     }
 
@@ -701,7 +1033,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acknowledged_orders_update_runtime_order_state_with_venue_id() {
+    async fn live_ack_without_fill_is_not_treated_as_filled() {
         let now = Utc::now();
         let signal = SignalRecord {
             strategy: "pm_5m_directional".into(),
@@ -744,7 +1076,7 @@ mod tests {
                 ts: now,
             }),
         };
-        let executor = AcknowledgingExecutor;
+        let executor = AcknowledgingExecutor::default();
         let config = RuntimeConfig {
             mode: RuntimeMode::Live,
             throttle_hz: None,
@@ -757,14 +1089,291 @@ mod tests {
         let snapshot = runtime.trading().snapshot(&BTreeMap::new());
 
         assert_eq!(snapshot.orders.len(), 1);
-        assert_eq!(
-            snapshot.orders[0].state,
-            ploy_trading::OrderState::Acknowledged
-        );
+        assert_eq!(snapshot.orders[0].state, ploy_trading::OrderState::Canceled);
         assert_eq!(
             snapshot.orders[0].venue_order_id.as_deref(),
             Some("venue-order-1")
         );
+        assert_eq!(snapshot.fills.len(), 0);
+        assert_eq!(snapshot.risk.active_orders, 0);
+    }
+
+    #[tokio::test]
+    async fn live_ack_without_completed_reconcile_stays_pending() {
+        let now = Utc::now();
+        let signal = SignalRecord {
+            strategy: "pm_5m_directional".into(),
+            event_id: Some("evt1".into()),
+            token_id: Some("token-up".into()),
+            intent_id: Some("pm5d_BTCUSDT_UP_wait".into()),
+            symbol: "BTCUSDT".into(),
+            direction: "UP".into(),
+            p_hat: 0.71,
+            edge: 0.08,
+            entry_price: dec!(0.30),
+            decision: "enter".into(),
+            ts: now,
+        };
+        let intent = TradingIntent {
+            intent_id: "pm5d_BTCUSDT_UP_wait".into(),
+            deployment_id: String::new(),
+            market_id: "evt1".into(),
+            token_id: "token-up".into(),
+            side: TradeSide::Buy,
+            quantity: dec!(10),
+            limit_price: Some(dec!(0.30)),
+            purpose: IntentPurpose::Entry,
+            created_at: now,
+        };
+        let recorder = Box::new(CollectingRecorder {
+            signals: Arc::new(Mutex::new(Vec::new())),
+            orders: Arc::new(Mutex::new(Vec::new())),
+            fills: Arc::new(Mutex::new(Vec::new())),
+        });
+        let strategy = RecordingStrategy {
+            emitted: false,
+            signal,
+            intent,
+        };
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let config = RuntimeConfig {
+            mode: RuntimeMode::Live,
+            throttle_hz: None,
+            max_updates: None,
+            skip_settlement_exits: true,
+        };
+
+        let mut runtime =
+            StrategyRuntime::new(strategy, feed, SkippedReconcileExecutor, recorder, config);
+        let _ = runtime.run().await;
+        let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+
+        assert_eq!(snapshot.orders.len(), 1);
+        assert_eq!(
+            snapshot.orders[0].state,
+            ploy_trading::OrderState::Acknowledged
+        );
+        assert_eq!(snapshot.risk.active_orders, 1);
+    }
+
+    #[tokio::test]
+    async fn live_unfilled_ack_retries_remaining_quantity_within_attempt_limit() {
+        let now = Utc::now();
+        let signal = SignalRecord {
+            strategy: "pm_5m_directional".into(),
+            event_id: Some("evt1".into()),
+            token_id: Some("token-up".into()),
+            intent_id: Some("pm5d_BTCUSDT_UP_retry".into()),
+            symbol: "BTCUSDT".into(),
+            direction: "UP".into(),
+            p_hat: 0.71,
+            edge: 0.08,
+            entry_price: dec!(0.30),
+            decision: "enter".into(),
+            ts: now,
+        };
+        let intent = TradingIntent {
+            intent_id: "pm5d_BTCUSDT_UP_retry".into(),
+            deployment_id: String::new(),
+            market_id: "evt1".into(),
+            token_id: "token-up".into(),
+            side: TradeSide::Buy,
+            quantity: dec!(10),
+            limit_price: Some(dec!(0.30)),
+            purpose: IntentPurpose::Entry,
+            created_at: now,
+        };
+        let submissions = Arc::new(Mutex::new(Vec::new()));
+        let executor = AcknowledgingExecutor {
+            policy: ExecutionPolicy {
+                max_slippage_bps: Decimal::ZERO,
+                max_attempts: 2,
+                reconcile_cycles_before_retry: 1,
+            },
+            submissions: submissions.clone(),
+        };
+        let recorder = Box::new(CollectingRecorder {
+            signals: Arc::new(Mutex::new(Vec::new())),
+            orders: Arc::new(Mutex::new(Vec::new())),
+            fills: Arc::new(Mutex::new(Vec::new())),
+        });
+        let strategy = RecordingStrategy {
+            emitted: false,
+            signal,
+            intent,
+        };
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let config = RuntimeConfig {
+            mode: RuntimeMode::Live,
+            throttle_hz: None,
+            max_updates: None,
+            skip_settlement_exits: true,
+        };
+
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
+        let _ = runtime.run().await;
+        let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+
+        assert_eq!(
+            submissions.lock().unwrap().as_slice(),
+            ["pm5d_BTCUSDT_UP_retry", "pm5d_BTCUSDT_UP_retry_retry2"]
+        );
+        assert_eq!(snapshot.orders.len(), 2);
+        assert_eq!(
+            snapshot
+                .orders
+                .iter()
+                .filter(|order| order.state == ploy_trading::OrderState::Canceled)
+                .count(),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .orders
+                .iter()
+                .filter(|order| order.state == ploy_trading::OrderState::Acknowledged)
+                .count(),
+            1
+        );
+        assert_eq!(snapshot.fills.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn restored_live_ack_order_is_managed_as_pending() {
+        let now = Utc::now();
+        let mut trading = ploy_trading::TradingRuntime::default();
+        trading.submit_intent(
+            TradingIntent {
+                intent_id: "restored-intent".into(),
+                deployment_id: "example.live".into(),
+                market_id: "evt1".into(),
+                token_id: "token-up".into(),
+                side: TradeSide::Buy,
+                quantity: dec!(10),
+                limit_price: Some(dec!(0.30)),
+                purpose: IntentPurpose::Entry,
+                created_at: now,
+            },
+            "restored-order",
+        );
+        trading.acknowledge_order("restored-order", "venue-restored");
+
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let recorder = Box::new(CollectingRecorder {
+            signals: Arc::new(Mutex::new(Vec::new())),
+            orders: Arc::new(Mutex::new(Vec::new())),
+            fills: Arc::new(Mutex::new(Vec::new())),
+        });
+        let config = RuntimeConfig {
+            mode: RuntimeMode::Live,
+            throttle_hz: None,
+            max_updates: None,
+            skip_settlement_exits: true,
+        };
+
+        let mut runtime = StrategyRuntime::new_with_trading(
+            NoopStrategy,
+            feed,
+            AcknowledgingExecutor::default(),
+            recorder,
+            config,
+            trading,
+        );
+        let _ = runtime.run().await;
+        let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+
+        assert_eq!(snapshot.orders.len(), 1);
+        assert_eq!(snapshot.orders[0].state, ploy_trading::OrderState::Canceled);
+        assert_eq!(snapshot.fills.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn restored_live_retry_order_continues_from_existing_attempt_suffix() {
+        let now = Utc::now();
+        let mut trading = ploy_trading::TradingRuntime::default();
+        trading.submit_intent(
+            TradingIntent {
+                intent_id: "pm5d_BTCUSDT_UP_retry2".into(),
+                deployment_id: "example.live".into(),
+                market_id: "evt1".into(),
+                token_id: "token-up".into(),
+                side: TradeSide::Buy,
+                quantity: dec!(10),
+                limit_price: Some(dec!(0.30)),
+                purpose: IntentPurpose::Entry,
+                created_at: now,
+            },
+            "restored-order",
+        );
+        trading.acknowledge_order("restored-order", "venue-restored");
+
+        let submissions = Arc::new(Mutex::new(Vec::new()));
+        let executor = AcknowledgingExecutor {
+            policy: ExecutionPolicy {
+                max_slippage_bps: Decimal::ZERO,
+                max_attempts: 3,
+                reconcile_cycles_before_retry: 1,
+            },
+            submissions: submissions.clone(),
+        };
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let recorder = Box::new(CollectingRecorder {
+            signals: Arc::new(Mutex::new(Vec::new())),
+            orders: Arc::new(Mutex::new(Vec::new())),
+            fills: Arc::new(Mutex::new(Vec::new())),
+        });
+        let config = RuntimeConfig {
+            mode: RuntimeMode::Live,
+            throttle_hz: None,
+            max_updates: None,
+            skip_settlement_exits: true,
+        };
+
+        let mut runtime = StrategyRuntime::new_with_trading(
+            NoopStrategy,
+            feed,
+            executor,
+            recorder,
+            config,
+            trading,
+        );
+        let _ = runtime.run().await;
+        let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+
+        assert_eq!(
+            submissions.lock().unwrap().as_slice(),
+            ["pm5d_BTCUSDT_UP_retry3"]
+        );
+        assert_eq!(snapshot.orders.len(), 2);
+        assert!(snapshot
+            .orders
+            .iter()
+            .any(|order| order.intent_id == "pm5d_BTCUSDT_UP_retry3"
+                && order.state == ploy_trading::OrderState::Acknowledged));
     }
 
     #[tokio::test]
@@ -799,7 +1408,7 @@ mod tests {
             orders: Arc::new(Mutex::new(Vec::new())),
             fills: Arc::new(Mutex::new(Vec::new())),
         });
-        let executor = AcknowledgingExecutor;
+        let executor = AcknowledgingExecutor::default();
         let config = RuntimeConfig {
             mode: RuntimeMode::Live,
             throttle_hz: None,

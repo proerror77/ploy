@@ -118,6 +118,10 @@ impl OrderLedger {
     pub fn reject(&mut self, order_id: &str, reason: impl Into<String>) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(order_id)?;
         let reason = reason.into();
+        if matches!(record.state, OrderState::Filled) {
+            record.last_error = Some(reason);
+            return Some(record);
+        }
         record.state = OrderState::Rejected;
         record.rejection_reason = Some(reason.clone());
         record.last_error = Some(reason);
@@ -136,6 +140,9 @@ impl OrderLedger {
 
     pub fn cancel(&mut self, order_id: &str) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(order_id)?;
+        if matches!(record.state, OrderState::Filled | OrderState::Rejected) {
+            return Some(record);
+        }
         record.state = OrderState::Canceled;
         record.last_error = None;
         Some(record)
@@ -143,6 +150,10 @@ impl OrderLedger {
 
     pub fn apply_fill(&mut self, fill: &FillRecord) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(&fill.order_id)?;
+        let remaining_qty = (record.requested_qty - record.filled_qty).max(Decimal::ZERO);
+        if fill.quantity > remaining_qty {
+            return None;
+        }
         record.filled_qty += fill.quantity;
         record.state = if record.filled_qty >= record.requested_qty {
             OrderState::Filled
@@ -178,7 +189,22 @@ mod tests {
     use super::{OrderLedger, OrderState};
     use crate::{IntentPurpose, TradeSide, TradingIntent};
     use chrono::Utc;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+
+    fn intent(token_id: &str) -> TradingIntent {
+        TradingIntent {
+            intent_id: format!("intent-{token_id}"),
+            deployment_id: "example.live".to_string(),
+            market_id: "market-1".to_string(),
+            token_id: token_id.to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(1),
+            limit_price: Some(dec!(0.45)),
+            purpose: IntentPurpose::Entry,
+            created_at: Utc::now(),
+        }
+    }
 
     #[test]
     fn replace_preserves_logical_order_and_tracks_revision_history() {
@@ -209,6 +235,54 @@ mod tests {
         assert_eq!(order.revision, 1);
         assert_eq!(order.requested_qty, dec!(3));
         assert_eq!(order.limit_price, Some(dec!(0.47)));
+        assert_eq!(order.state, OrderState::Acknowledged);
+    }
+
+    #[test]
+    fn terminal_filled_order_is_not_overwritten_by_cancel_or_reject() {
+        let mut ledger = OrderLedger::default();
+        ledger.insert_from_intent("order-1", &intent("token-a"));
+        ledger.acknowledge("order-1", "venue-1");
+        ledger.apply_fill(&crate::FillRecord {
+            fill_id: "fill-1".to_string(),
+            order_id: "order-1".to_string(),
+            token_id: "token-a".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(1),
+            price: dec!(0.5),
+            fee: dec!(0),
+            timestamp: Utc::now(),
+        });
+
+        ledger.cancel("order-1");
+        assert_eq!(ledger.order("order-1").unwrap().state, OrderState::Filled);
+
+        ledger.reject("order-1", "late rejection");
+        let order = ledger.order("order-1").unwrap();
+        assert_eq!(order.state, OrderState::Filled);
+        assert_eq!(order.last_error.as_deref(), Some("late rejection"));
+    }
+
+    #[test]
+    fn overfill_is_rejected() {
+        let mut ledger = OrderLedger::default();
+        ledger.insert_from_intent("order-1", &intent("token-a"));
+        ledger.acknowledge("order-1", "venue-1");
+
+        let result = ledger.apply_fill(&crate::FillRecord {
+            fill_id: "fill-1".to_string(),
+            order_id: "order-1".to_string(),
+            token_id: "token-a".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(2),
+            price: dec!(0.5),
+            fee: dec!(0),
+            timestamp: Utc::now(),
+        });
+
+        assert!(result.is_none());
+        let order = ledger.order("order-1").unwrap();
+        assert_eq!(order.filled_qty, Decimal::ZERO);
         assert_eq!(order.state, OrderState::Acknowledged);
     }
 }

@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use ploy_market_contracts::{InstrumentKind, PredictionFamily, VenueKind};
+use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::path::Path;
@@ -42,6 +43,8 @@ pub struct FullConfig {
     pub backtest_data: BacktestDataSection,
     #[serde(default)]
     pub execution: SimExecutionSection,
+    #[serde(default)]
+    pub live_execution: LiveExecutionSection,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,6 +160,36 @@ pub struct SimExecutionSection {
     pub default_depth_shares: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct LiveExecutionSection {
+    /// Maximum permitted price movement from the strategy limit for live FAK/FOK
+    /// execution. Buy orders cap at `limit * (1 + bps/10000)`; sell orders floor
+    /// at `limit * (1 - bps/10000)`.
+    #[serde(default = "default_live_max_slippage_bps")]
+    pub max_slippage_bps: u32,
+    /// Maximum total submission attempts for an acknowledged-but-unfilled FAK
+    /// order before the runtime marks the intent terminal and lets the strategy
+    /// cool down.
+    #[serde(default = "default_live_max_attempts")]
+    pub max_attempts: u8,
+    /// Number of reconciliation passes to wait before treating an acknowledged
+    /// FAK order with no new fill as terminal/unfilled for that attempt.
+    #[serde(default = "default_live_reconcile_cycles_before_retry")]
+    pub reconcile_cycles_before_retry: u8,
+}
+
+fn default_live_max_slippage_bps() -> u32 {
+    150
+}
+
+fn default_live_max_attempts() -> u8 {
+    2
+}
+
+fn default_live_reconcile_cycles_before_retry() -> u8 {
+    2
+}
+
 fn default_spread() -> f64 {
     0.02
 }
@@ -184,6 +217,16 @@ impl Default for SimExecutionSection {
             enable_market_impact: false,
             impact_coefficient: 0.1,
             default_depth_shares: 500,
+        }
+    }
+}
+
+impl Default for LiveExecutionSection {
+    fn default() -> Self {
+        Self {
+            max_slippage_bps: default_live_max_slippage_bps(),
+            max_attempts: default_live_max_attempts(),
+            reconcile_cycles_before_retry: default_live_reconcile_cycles_before_retry(),
         }
     }
 }
@@ -269,6 +312,15 @@ impl FullConfig {
             default_depth_shares: e.default_depth_shares,
         }
     }
+
+    pub fn live_execution_policy(&self) -> crate::traits::ExecutionPolicy {
+        crate::traits::ExecutionPolicy {
+            max_slippage_bps: Decimal::from_u32(self.live_execution.max_slippage_bps)
+                .unwrap_or_default(),
+            max_attempts: self.live_execution.max_attempts.max(1),
+            reconcile_cycles_before_retry: self.live_execution.reconcile_cycles_before_retry.max(1),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -327,6 +379,7 @@ enable_market_impact = true
         assert!(config.reference_data.capture_sports_state);
         assert!(config.backtest_data.include_reference_prices);
         assert!(config.backtest_data.include_sports_state);
+        assert_eq!(config.live_execution.max_slippage_bps, 150);
         assert!(!config.backtest_data.require_official_settlement);
         assert!((config.strategy.min_edge - 0.02).abs() < 1e-10);
         assert_eq!(config.strategy.stake_usd, Decimal::new(25, 0));
@@ -389,8 +442,33 @@ mode = "dryrun"
         assert!(!config.backtest_data.include_reference_prices);
         assert!(!config.backtest_data.include_sports_state);
         assert!(!config.backtest_data.require_official_settlement);
+        assert_eq!(config.live_execution.max_attempts, 2);
+        assert_eq!(config.live_execution.reconcile_cycles_before_retry, 2);
         assert!((config.strategy.min_edge - 0.02).abs() < 1e-10);
         assert!(!config.execution.use_spread);
+    }
+
+    #[test]
+    fn parses_live_execution_policy() {
+        let config = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "live"
+
+[strategy]
+
+[live_execution]
+max_slippage_bps = 75
+max_attempts = 3
+reconcile_cycles_before_retry = 2
+"#,
+        )
+        .unwrap();
+
+        let policy = config.live_execution_policy();
+        assert_eq!(policy.max_slippage_bps, Decimal::new(75, 0));
+        assert_eq!(policy.max_attempts, 3);
+        assert_eq!(policy.reconcile_cycles_before_retry, 2);
     }
 
     #[test]
