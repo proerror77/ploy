@@ -13,6 +13,7 @@ import {
   Shield,
   TrendingUp,
   ShieldAlert,
+  Gauge,
 } from 'lucide-react';
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -25,6 +26,7 @@ function getErrorMessage(error: unknown, fallback: string) {
 
 const navigation = [
   { name: '仪表盘', href: '/', icon: LayoutDashboard },
+  { name: '运营驾驶舱', href: '/cockpit', icon: Gauge },
   { name: '交易历史', href: '/trades', icon: History },
   { name: '实时日志', href: '/monitor', icon: Activity },
   { name: '部署控制', href: '/deployments', icon: Target },

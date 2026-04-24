@@ -243,6 +243,67 @@ fn build_strategy_report_html(state: &Arc<AppState>, since: Option<&str>) -> (u1
     }
 }
 
+fn build_market_data_health_json(state: &Arc<AppState>) -> (u16, String) {
+    let host_root = match state.daemon.lock() {
+        Ok(daemon) => host_root_from_runtime_root(&daemon.config.runtime_root),
+        Err(_) => return json_error(503, "daemon_lock_poisoned", None),
+    };
+
+    let script_path = host_root.join("scripts/report_market_data_health.py");
+    if !script_path.exists() {
+        return json_error(
+            500,
+            "market_data_health_script_missing",
+            Some(format!(
+                "market data health script not found: {}",
+                script_path.display()
+            )),
+        );
+    }
+
+    let output = match Command::new("python3")
+        .arg(&script_path)
+        .current_dir(&host_root)
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => {
+            return json_error(
+                500,
+                "market_data_health_script_failed",
+                Some(format!("failed to start market data health script: {err}")),
+            );
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let message = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            format!(
+                "market data health script exited with status {}",
+                output.status
+            )
+        };
+        return json_error(500, "market_data_health_unavailable", Some(message));
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if body.is_empty() {
+        return json_error(
+            500,
+            "market_data_health_empty",
+            Some("market data health script returned an empty response".to_string()),
+        );
+    }
+
+    (200, body)
+}
+
 fn html_error(status_code: u16, message: &str) -> (u16, String) {
     let escaped = message
         .replace('&', "&amp;")
@@ -765,6 +826,7 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
         ("GET", "/api/system/status")
         | ("GET", "/api/system/metrics")
         | ("GET", "/api/system/alerts")
+        | ("GET", "/api/market-data/health")
         | ("GET", "/api/deployments")
         | ("GET", "/api/trading/state")
         | ("GET", "/reports/strategy")
@@ -1648,6 +1710,7 @@ fn handle_runtime_request(
             ),
             Err(_) => json_error(503, "daemon_lock_poisoned", None),
         },
+        ("GET", "/api/market-data/health") => build_market_data_health_json(state),
         ("GET", "/api/deployments") => match state.daemon.lock() {
             Ok(daemon) => (
                 200,

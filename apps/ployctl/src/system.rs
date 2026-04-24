@@ -75,13 +75,29 @@ pub fn render_system_metrics(client: &ControlPlaneClient) -> Result<String, Stri
     };
 
     Ok(format!(
-        "deployments_total={} deployments_live={} deployments_degraded={} active_alerts={} stale_sources={} live_reconcile_failures={} last_trade_time={} last_live_reconcile_success_at={} heartbeats={}",
+        "deployments_total={} deployments_live={} deployments_degraded={} active_alerts={} stale_sources={} live_reconcile_failures={} host_cpu_pressure_percent={} host_load_average_1m={} process_memory_mb={} host_memory_available_mb={} last_trade_time={} last_live_reconcile_success_at={} heartbeats={}",
         metrics.total_deployments,
         metrics.live_deployments,
         metrics.degraded_deployments,
         metrics.active_alerts,
         metrics.stale_sources,
         metrics.live_reconcile_failures,
+        metrics
+            .host_cpu_pressure_milli_percent
+            .map(|value| format!("{:.1}", value as f64 / 1000.0))
+            .unwrap_or_else(|| "-".to_string()),
+        metrics
+            .host_load_average_1m_milli
+            .map(|value| format!("{:.2}", value as f64 / 1000.0))
+            .unwrap_or_else(|| "-".to_string()),
+        metrics
+            .process_memory_mb
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        metrics
+            .host_memory_available_mb
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
         metrics
             .last_trade_time
             .map(|value| value.to_rfc3339())
