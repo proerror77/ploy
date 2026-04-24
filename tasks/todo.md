@@ -8247,3 +8247,21 @@ Checklist:
 
 Review:
 - 2026-04-24: Added `event_dataset_baseline` as a `polars-export` example. It validates the dataset manifest, reads observation split Parquet files, selects at most one tradable row per event near `--entry-secs` (default `60`, default tolerance `30`), checks split event disjointness, trains a fixed logistic baseline with train-only normalization, and reports OOS metrics plus simple entry-price PnL. Local verification used the copied remote dataset `/tmp/ploy-event-root-5sym-150-20260424`; current data coverage near the 60-second entry is low (`38/7/9` selected train/val/test events with default tolerance), so this is a pipeline baseline, not model-quality evidence yet.
+
+## Event Dataset Coverage Diagnostics
+
+Goal: explain why the first ML baseline only selects a small fraction of event-held-out samples before starting DL/RL experiments.
+
+File ownership:
+- `crates/ploy-research/examples/event_dataset_coverage.rs`
+- `crates/ploy-research/Cargo.toml`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Add a Polars-gated Rust coverage diagnostic for event-root observation split Parquet files.
+- [x] Report base per-split event coverage for labels, tradable prices, finite selected features, and rows satisfying all three.
+- [x] Report coverage by configurable entry seconds and tolerances, including missing-window, invalid-label, invalid-price, and invalid-feature counts.
+- [x] Verify locally on the copied 150-event remote dataset and run focused example tests.
+
+Review:
+- 2026-04-24: Added `event_dataset_coverage` to quantify data readiness before more ML/DL/RL work. On `/tmp/ploy-event-root-5sym-150-20260424`, all train/val/test events have binary labels and valid prices somewhere in their observation rows, but finite default ML feature coverage is the bottleneck: base `all_any` is only `42/105`, `9/22`, and `9/23`. Per-feature event coverage shows most individual columns are present for nearly every event (`depth_acceleration` is the only default feature below full event coverage: `102/105`, `22/22`, `20/23`), so the main issue is simultaneous row completeness at the chosen observation row, not one globally absent feature. With default baseline entry `60s` and tolerance `30s`, selected coverage is `38/105`, `7/22`, and `9/23`; widening tolerances cannot exceed the row-complete ceiling. Next data work should either relax/impute the feature set intentionally or fix/export row-level feature completeness before treating baseline metrics as model-quality evidence.

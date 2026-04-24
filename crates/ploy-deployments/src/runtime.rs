@@ -186,7 +186,7 @@ impl DeploymentRuntime {
     fn existing_live_pid(&self) -> Option<u32> {
         let raw = fs::read_to_string(&self.spec.pid_file).ok()?;
         let pid: u32 = raw.trim().parse().ok()?;
-        if process_matches_spec(pid, &self.spec) {
+        if process_matches_spec_after_spawn(pid, &self.spec) {
             Some(pid)
         } else {
             let _ = fs::remove_file(&self.spec.pid_file);
@@ -221,6 +221,21 @@ fn process_alive_impl(_pid: u32) -> bool {
 
 fn process_matches_spec(pid: u32, spec: &WorkerLaunchSpec) -> bool {
     process_alive(pid) && process_identity_matches(pid, spec)
+}
+
+fn process_matches_spec_after_spawn(pid: u32, spec: &WorkerLaunchSpec) -> bool {
+    for attempt in 0..5 {
+        if process_matches_spec(pid, spec) {
+            return true;
+        }
+        if !process_alive(pid) {
+            return false;
+        }
+        if attempt < 4 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    false
 }
 
 #[cfg(target_os = "linux")]
