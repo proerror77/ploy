@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::fs::File;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -10,6 +11,7 @@ use ploy_research::{
 };
 use polars::io::parquet::read::ParquetReader;
 use polars::prelude::*;
+use serde::Serialize;
 
 const DEFAULT_FEATURES: &[&str] = &[
     "signed_distance_to_beat",
@@ -45,6 +47,10 @@ struct Config {
     entry_secs: i64,
     tolerance_secs: i64,
     top_n: usize,
+    output_dir: Option<PathBuf>,
+    whitelist_min_importance: f64,
+    whitelist_min_stability: f64,
+    whitelist_max_features: usize,
     features: Vec<String>,
 }
 
@@ -72,6 +78,40 @@ struct FactorAttribution {
     train_corr: f64,
     val_corr: f64,
     test_corr: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct AttributionArtifact<'a> {
+    dataset: String,
+    entry_secs: i64,
+    tolerance_secs: i64,
+    regime: String,
+    features_considered: usize,
+    selected_events: Vec<SplitCount>,
+    whitelist_min_importance: f64,
+    whitelist_min_stability: f64,
+    whitelist: Vec<&'a str>,
+    attributions: Vec<AttributionRow<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct SplitCount {
+    split: &'static str,
+    selected_events: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct AttributionRow<'a> {
+    feature: &'a str,
+    direction: i8,
+    importance: Option<f64>,
+    stability: Option<f64>,
+    train_auc_lift: Option<f64>,
+    val_auc_lift: Option<f64>,
+    test_auc_lift: Option<f64>,
+    train_corr: Option<f64>,
+    val_corr: Option<f64>,
+    test_corr: Option<f64>,
 }
 
 fn main() -> Result<()> {
@@ -133,6 +173,15 @@ fn main() -> Result<()> {
         &registry,
         regime,
     );
+    if let Some(output_dir) = &config.output_dir {
+        write_artifacts(
+            output_dir,
+            &config,
+            [&train, &val, &test],
+            &attributions,
+            regime,
+        )?;
+    }
 
     Ok(())
 }
@@ -146,6 +195,10 @@ fn parse_config() -> Result<Config> {
     let entry_secs = parse_i64_flag(&args, "--entry-secs", 60)?;
     let tolerance_secs = parse_i64_flag(&args, "--tolerance-secs", 30)?;
     let top_n = parse_usize_flag(&args, "--top-n", 12)?;
+    let output_dir = flag_value(&args, "--output-dir").map(PathBuf::from);
+    let whitelist_min_importance = parse_f64_flag(&args, "--whitelist-min-importance", 0.05)?;
+    let whitelist_min_stability = parse_f64_flag(&args, "--whitelist-min-stability", 0.0)?;
+    let whitelist_max_features = parse_usize_flag(&args, "--whitelist-max-features", top_n)?;
     let features = flag_value(&args, "--features")
         .map(|raw| parse_string_list(&raw))
         .filter(|features| !features.is_empty())
@@ -165,12 +218,25 @@ fn parse_config() -> Result<Config> {
     if top_n == 0 {
         bail!("--top-n must be positive");
     }
+    if whitelist_min_importance < 0.0 {
+        bail!("--whitelist-min-importance must be non-negative");
+    }
+    if whitelist_min_stability < 0.0 {
+        bail!("--whitelist-min-stability must be non-negative");
+    }
+    if whitelist_max_features == 0 {
+        bail!("--whitelist-max-features must be positive");
+    }
 
     Ok(Config {
         dataset_root,
         entry_secs,
         tolerance_secs,
         top_n,
+        output_dir,
+        whitelist_min_importance,
+        whitelist_min_stability,
+        whitelist_max_features,
         features,
     })
 }
@@ -195,6 +261,16 @@ fn parse_usize_flag(args: &[String], flag: &str, default: usize) -> Result<usize
     flag_value(args, flag)
         .map(|raw| {
             raw.parse::<usize>()
+                .with_context(|| format!("invalid {flag}: {raw}"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(default))
+}
+
+fn parse_f64_flag(args: &[String], flag: &str, default: f64) -> Result<f64> {
+    flag_value(args, flag)
+        .map(|raw| {
+            raw.parse::<f64>()
                 .with_context(|| format!("invalid {flag}: {raw}"))
         })
         .transpose()
@@ -525,6 +601,139 @@ fn format_split_count(split: &SplitDataset) -> String {
     format!("{}={}", split.name, split.samples.len())
 }
 
+fn write_artifacts(
+    output_dir: &Path,
+    config: &Config,
+    splits: [&SplitDataset; 3],
+    attributions: &[FactorAttribution],
+    regime: Regime,
+) -> Result<()> {
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("create output dir {}", output_dir.display()))?;
+
+    let whitelist = governed_feature_whitelist(attributions, config);
+    let artifact = AttributionArtifact {
+        dataset: config.dataset_root.display().to_string(),
+        entry_secs: config.entry_secs,
+        tolerance_secs: config.tolerance_secs,
+        regime: format!("{regime:?}"),
+        features_considered: config.features.len(),
+        selected_events: splits
+            .iter()
+            .map(|split| SplitCount {
+                split: split.name,
+                selected_events: split.samples.len(),
+            })
+            .collect(),
+        whitelist_min_importance: config.whitelist_min_importance,
+        whitelist_min_stability: config.whitelist_min_stability,
+        whitelist: whitelist.iter().map(|item| item.feature.as_str()).collect(),
+        attributions: attributions.iter().map(attribution_row).collect(),
+    };
+
+    let json_path = output_dir.join("factor_attributions.json");
+    let json_file =
+        File::create(&json_path).with_context(|| format!("create {}", json_path.display()))?;
+    serde_json::to_writer_pretty(json_file, &artifact)
+        .with_context(|| format!("write {}", json_path.display()))?;
+
+    let whitelist_path = output_dir.join("feature_whitelist.txt");
+    let mut whitelist_file = File::create(&whitelist_path)
+        .with_context(|| format!("create {}", whitelist_path.display()))?;
+    for item in &whitelist {
+        writeln!(whitelist_file, "{}", item.feature)
+            .with_context(|| format!("write {}", whitelist_path.display()))?;
+    }
+
+    let markdown_path = output_dir.join("feature_whitelist.md");
+    let mut markdown_file = File::create(&markdown_path)
+        .with_context(|| format!("create {}", markdown_path.display()))?;
+    writeln!(markdown_file, "# Event Feature Whitelist")?;
+    writeln!(markdown_file)?;
+    writeln!(
+        markdown_file,
+        "- dataset: `{}`",
+        config.dataset_root.display()
+    )?;
+    writeln!(markdown_file, "- entry_secs: `{}`", config.entry_secs)?;
+    writeln!(
+        markdown_file,
+        "- tolerance_secs: `{}`",
+        config.tolerance_secs
+    )?;
+    writeln!(
+        markdown_file,
+        "- rule: importance >= `{}` and stability > `{}`",
+        config.whitelist_min_importance, config.whitelist_min_stability
+    )?;
+    writeln!(markdown_file)?;
+    writeln!(
+        markdown_file,
+        "| feature | dir | importance | stability | train_auc | val_auc | test_auc |"
+    )?;
+    writeln!(
+        markdown_file,
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    )?;
+    for item in &whitelist {
+        writeln!(
+            markdown_file,
+            "| `{}` | {} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} |",
+            item.feature,
+            if item.direction >= 0 { "+" } else { "-" },
+            item.importance,
+            item.stability,
+            item.train_auc_lift,
+            item.val_auc_lift,
+            item.test_auc_lift
+        )?;
+    }
+
+    eprintln!(
+        "artifacts_dir={} whitelist_features={}",
+        output_dir.display(),
+        whitelist.len()
+    );
+    eprintln!("artifact_factor_attributions={}", json_path.display());
+    eprintln!("artifact_feature_whitelist={}", whitelist_path.display());
+    Ok(())
+}
+
+fn governed_feature_whitelist<'a>(
+    attributions: &'a [FactorAttribution],
+    config: &Config,
+) -> Vec<&'a FactorAttribution> {
+    attributions
+        .iter()
+        .filter(|item| {
+            item.importance.is_finite()
+                && item.stability.is_finite()
+                && item.importance >= config.whitelist_min_importance
+                && item.stability > config.whitelist_min_stability
+        })
+        .take(config.whitelist_max_features)
+        .collect()
+}
+
+fn attribution_row(item: &FactorAttribution) -> AttributionRow<'_> {
+    AttributionRow {
+        feature: &item.feature,
+        direction: item.direction,
+        importance: finite(item.importance),
+        stability: finite(item.stability),
+        train_auc_lift: finite(item.train_auc_lift),
+        val_auc_lift: finite(item.val_auc_lift),
+        test_auc_lift: finite(item.test_auc_lift),
+        train_corr: finite(item.train_corr),
+        val_corr: finite(item.val_corr),
+        test_corr: finite(item.test_corr),
+    }
+}
+
+fn finite(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,5 +787,51 @@ mod tests {
     #[test]
     fn parse_string_list_omits_empty_items() {
         assert_eq!(parse_string_list("a,, b, "), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn governed_whitelist_requires_stable_nonzero_signal() {
+        let config = Config {
+            dataset_root: PathBuf::from("/tmp/events"),
+            entry_secs: 60,
+            tolerance_secs: 30,
+            top_n: 12,
+            output_dir: None,
+            whitelist_min_importance: 0.05,
+            whitelist_min_stability: 0.0,
+            whitelist_max_features: 10,
+            features: vec![],
+        };
+        let attributions = vec![
+            FactorAttribution {
+                feature: "stable".to_string(),
+                direction: 1,
+                train_auc_lift: 0.2,
+                val_auc_lift: 0.1,
+                test_auc_lift: 0.1,
+                importance: 0.1,
+                stability: 0.5,
+                train_corr: 0.0,
+                val_corr: 0.0,
+                test_corr: 0.0,
+            },
+            FactorAttribution {
+                feature: "validation_only".to_string(),
+                direction: 1,
+                train_auc_lift: 0.2,
+                val_auc_lift: 0.2,
+                test_auc_lift: -0.2,
+                importance: 0.2,
+                stability: 0.0,
+                train_corr: 0.0,
+                val_corr: 0.0,
+                test_corr: 0.0,
+            },
+        ];
+
+        let whitelist = governed_feature_whitelist(&attributions, &config);
+
+        assert_eq!(whitelist.len(), 1);
+        assert_eq!(whitelist[0].feature, "stable");
     }
 }
