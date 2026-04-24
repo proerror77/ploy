@@ -1,3 +1,34 @@
+# Polymarket V1 Contract Config Follow-up (2026-04-25)
+
+## Files
+
+- `vendor/polymarket-client-sdk/src/lib.rs`
+- `vendor/polymarket-client-sdk/tests/clob.rs`
+
+## Tasks
+
+- [x] Confirm post-deploy live rejection moved from malformed `feeRateBps` to `invalid signature`.
+- [x] Restore Polygon mainnet CLOB contract config to the V1 exchange/collateral addresses used by current production signing.
+- [x] Add regression coverage for the Polygon V1 normal and neg-risk contract configs.
+- [x] Run focused SDK/connectivity tests and static diff checks.
+- [ ] Land PR through CI, deploy to Tango from `main`, and verify live rejection logs clear.
+
+## Review
+
+- 2026-04-25: The first V1 compatibility patch restored the CLOB V1 order body
+  and EIP-712 version, but `src/lib.rs` still pointed Polygon mainnet signing
+  at the V2 exchange contracts and pUSD collateral. Because EIP-712 signatures
+  bind the verifying contract, this explains the new `invalid signature`
+  rejection after the `feeRateBps` parse failure was removed.
+- 2026-04-25: Verification passed:
+  `rtk cargo test -p polymarket-client-sdk --features clob --lib`,
+  `rtk cargo test -p polymarket-client-sdk --features clob --test clob`,
+  `rtk cargo test -p polymarket-client-sdk --features clob --test order`,
+  `rtk cargo test -p ploy-connectivity`, and `git diff --check`.
+- 2026-04-25: `cargo fmt --check --package polymarket-client-sdk --package
+  ploy-connectivity` still reports unrelated vendored RTDS formatting drift in
+  `vendor/polymarket-client-sdk/src/rtds/*`; this fix did not touch those files.
+
 # Polymarket V1 Live Order Compatibility (2026-04-25)
 
 ## Files
