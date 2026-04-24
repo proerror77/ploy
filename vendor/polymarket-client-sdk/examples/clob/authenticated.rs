@@ -101,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
     let limit_order = client
         .limit_order()
         .token_id(token_id)
-        .order_type(OrderType::GTC)
+        .order_type(OrderType::GTD)
+        .expiration(Utc::now() + TimeDelta::days(2))
         .price(dec!(0.5))
         .size(Decimal::ONE_HUNDRED)
         .side(Side::Buy)

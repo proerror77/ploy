@@ -61,7 +61,7 @@ use crate::{
 };
 
 const ORDER_NAME: Option<Cow<'static, str>> = Some(Cow::Borrowed("Polymarket CTF Exchange"));
-const VERSION: Option<Cow<'static, str>> = Some(Cow::Borrowed("2"));
+const VERSION: Option<Cow<'static, str>> = Some(Cow::Borrowed("1"));
 
 const TERMINAL_CURSOR: &str = "LTE="; // base64("-1")
 
@@ -2116,6 +2116,9 @@ impl<K: Kind> Client<Authenticated<K>> {
             size: None,
             amount: None,
             side: None,
+            nonce: None,
+            expiration: None,
+            taker: None,
             order_type: None,
             post_only: Some(false),
             client: Client {
