@@ -1,3 +1,28 @@
+# Ploy Frontend Operator Cockpit (2026-04-24)
+
+## Files
+
+- `crates/ploy-operator-contracts/src/system.rs`
+- `crates/ploy-platform/src/system.rs`
+- `crates/ploy-daemon-host/src/runtime.rs`
+- `ploy-frontend/src/pages/OperatorCockpit.tsx`
+- `ploy-frontend/src/App.tsx`
+- `ploy-frontend/src/components/Layout.tsx`
+- `ploy-frontend/src/types/operator-contracts.ts`
+
+## Tasks
+
+- [x] Add lightweight host/process metrics to the operator metrics contract for CPU, memory, and load visibility.
+- [x] Build a read-only operator cockpit in `ploy-frontend` focused on current platform health, strategy state, account exposure, PnL, connectivity latency, and alert/log signals.
+- [x] Wire the page into existing routes/navigation without changing live-trading controls.
+- [x] Verify generated contracts, TypeScript, lint/build, and document remaining data gaps.
+
+## Review
+
+- 2026-04-24: Added `/cockpit` as a read-only Ploy Frontend operator cockpit, with `/dry-run` kept as a compatibility alias. It aggregates existing `system/status`, `system/metrics`, `system/alerts`, `deployments`, `trading/state`, and SSE events instead of depending on the pending `/api/strategies/running` endpoint.
+- 2026-04-24: Extended `PlatformMetrics` with lightweight Linux `/proc` host visibility: CPU pressure derived from 1-minute load average, load average, process RSS, and available memory. Generated schema/type snapshots were refreshed for frontend and sidecar.
+- 2026-04-24: Current latency display is freshness/heartbeat based, not a true network RTT measurement. A dedicated ping/echo or source-specific tick latency metric is still needed if exact exchange/API latency becomes a trading decision input.
+
 # Remote Dry-Run Strategy Report (2026-04-24)
 
 ## Files

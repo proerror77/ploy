@@ -111,3 +111,40 @@ export interface RiskData {
     state: string;
   }>;
 }
+
+export interface MarketDataHealthSource {
+  source_id: string;
+  table_name: string;
+  latest_at: string | null;
+  stale_after_seconds: number;
+  approx_rows: number;
+}
+
+export interface DeribitIvSample {
+  currency: string;
+  instrument_name: string;
+  mark_iv: string | number | null;
+  bid_iv: string | number | null;
+  ask_iv: string | number | null;
+  underlying_price: string | number | null;
+  fetched_at: string;
+}
+
+export interface DeribitGreeksSample {
+  currency: string;
+  instrument_name: string;
+  mark_iv: string | number | null;
+  delta: string | number | null;
+  gamma: string | number | null;
+  vega: string | number | null;
+  theta: string | number | null;
+  underlying_price: string | number | null;
+  fetched_at: string;
+}
+
+export interface MarketDataHealth {
+  generated_at: string;
+  sources: MarketDataHealthSource[];
+  deribit_iv_samples: DeribitIvSample[];
+  deribit_greeks_samples: DeribitGreeksSample[];
+}

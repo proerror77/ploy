@@ -243,6 +243,10 @@ mod tests {
                 active_alerts: 1,
                 stale_sources: 1,
                 live_reconcile_failures: 2,
+                host_cpu_pressure_milli_percent: Some(42_500),
+                host_load_average_1m_milli: Some(850),
+                process_memory_mb: Some(128),
+                host_memory_available_mb: Some(1024),
                 last_trade_time: None,
                 last_live_reconcile_success_at: None,
                 heartbeats: vec![HeartbeatStatus {

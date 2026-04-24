@@ -5,6 +5,7 @@ import { Layout } from '@/components/Layout';
 import { Dashboard } from '@/pages/Dashboard';
 import { TradeHistory } from '@/pages/TradeHistory';
 import { LiveMonitor } from '@/pages/LiveMonitor';
+import { OperatorCockpit } from '@/pages/OperatorCockpit';
 import { StrategyMonitor } from '@/pages/StrategyMonitor';
 import { SystemControl } from '@/pages/SystemControl';
 import { SecurityAudit } from '@/pages/SecurityAudit';
@@ -95,8 +96,10 @@ function App() {
         <Routes>
           <Route path="/" element={<Layout />}>
             <Route index element={<Dashboard />} />
+            <Route path="cockpit" element={<OperatorCockpit />} />
             <Route path="trades" element={<TradeHistory />} />
             <Route path="monitor" element={<LiveMonitor />} />
+            <Route path="dry-run" element={<OperatorCockpit />} />
             <Route path="deployments" element={<StrategyMonitor />} />
             <Route path="monitor-strategy" element={<StrategyMonitor />} />
             <Route path="nba-swing" element={<NBASwingMonitor />} />

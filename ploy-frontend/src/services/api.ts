@@ -14,6 +14,8 @@ import type {
   DeploymentState,
   PlatformMetrics,
   ActiveAlert,
+  TradingStateSnapshot,
+  MarketDataHealth,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -210,6 +212,14 @@ class ApiService {
 
   async getDeployments(): Promise<DeploymentSummary[]> {
     return this.fetch<DeploymentSummary[]>('/deployments');
+  }
+
+  async getTradingState(): Promise<TradingStateSnapshot[]> {
+    return this.fetch<TradingStateSnapshot[]>('/trading/state');
+  }
+
+  async getMarketDataHealth(): Promise<MarketDataHealth> {
+    return this.fetch<MarketDataHealth>('/market-data/health');
   }
 
   async updateDeploymentState(
