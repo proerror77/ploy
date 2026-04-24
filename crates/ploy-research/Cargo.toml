@@ -63,3 +63,8 @@ required-features = ["polars-export"]
 name = "event_factor_attribution"
 path = "examples/event_factor_attribution.rs"
 required-features = ["polars-export"]
+
+[[example]]
+name = "event_ml_workflow"
+path = "examples/event_ml_workflow.rs"
+required-features = ["polars-export"]
