@@ -47,6 +47,16 @@ extract_value() {
   printf '%s\n' "$line" | tr ' ' '\n' | awk -F= -v k="$key" '$1 == k { print $2 }'
 }
 
+strip_blank_lines() {
+  printf '%s\n' "$1" | tr -d '\r' | sed '/^[[:space:]]*$/d'
+}
+
+normalize_status_value() {
+  local value="$1"
+  value="${value%%@*}"
+  printf '%s\n' "$value"
+}
+
 env_has_key() {
   local key="$1"
   grep -Eq "^[[:space:]]*${key}=" "$ENV_FILE"
@@ -166,7 +176,7 @@ printf '%s\n' "${METRICS_OUTPUT}"
 printf '%s\n' "${ALERTS_OUTPUT}"
 printf '%s\n' "${AUDIT_OUTPUT}"
 
-SYSTEM_STATE="$(extract_value "${STATUS_OUTPUT}" "status")"
+SYSTEM_STATE="$(normalize_status_value "$(extract_value "${STATUS_OUTPUT}" "status")")"
 case "${SYSTEM_STATE}" in
   running)
     ;;
@@ -178,8 +188,9 @@ case "${SYSTEM_STATE}" in
     ;;
 esac
 
-if [[ "${ALERTS_OUTPUT}" != "none" ]]; then
-  if printf '%s\n' "${ALERTS_OUTPUT}" | grep -q ' critical '; then
+ALERTS_NORMALIZED="$(strip_blank_lines "${ALERTS_OUTPUT}")"
+if [[ "${ALERTS_NORMALIZED}" != "none" ]]; then
+  if printf '%s\n' "${ALERTS_NORMALIZED}" | grep -q ' critical '; then
     fail "critical alerts are active"
   fi
   warn "non-critical alerts are active"
