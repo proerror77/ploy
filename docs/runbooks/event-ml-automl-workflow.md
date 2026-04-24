@@ -25,6 +25,34 @@ The workflow assumes binary option accounting:
 - settlement, post-event rows, and future quote state are never allowed as
   features
 
+## Foundation Architecture Artifact
+
+Before adding a new model family, DL experiment, RL environment, or dry-run
+handoff, generate the foundation artifact:
+
+```bash
+rtk cargo run -p ploy-research --example event_ml_architecture -- \
+  --output-dir /tmp/ploy-event-ml-architecture
+```
+
+This writes:
+
+- `event_ml_architecture.json`
+- `event_ml_architecture.md`
+- `event_ml_gate_matrix.json`
+
+The artifact is the shared contract for agents and reviewers. It defines:
+
+- canonical workflow phases
+- supervised, DL, RL, and dry-run learning lanes
+- required artifacts between phases
+- readiness gates for each lane
+- stop rules that prevent premature DL/RL work
+
+The architecture layer is intentionally pure Rust and has no Polars, database,
+or training-framework requirement. It is the foundation contract; the workflow
+runner below is the executable data path.
+
 ## Phase 0 - Dataset Contract
 
 Goal: prove the dataset can be trusted as an ML input.

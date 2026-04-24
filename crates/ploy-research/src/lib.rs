@@ -2,6 +2,7 @@ pub mod attribution;
 pub mod backtest;
 pub mod backtesting;
 pub mod dataset;
+pub mod event_ml;
 pub mod factors;
 pub mod factors_new;
 #[cfg(any(feature = "ml", feature = "rl"))]
@@ -25,6 +26,11 @@ pub use dataset::{
 pub use dataset::{
     DatasetExportError, event_index_to_frame, event_summaries_to_frame,
     export_event_root_dataset_parquet, split_assignments_to_frame,
+};
+pub use event_ml::{
+    canonical_event_ml_architecture, event_ml_architecture_markdown, gate_matrix,
+    ArchitectureArtifact, EventMlArchitecture, LaneReadiness, LaneStatus, LearningLane,
+    LearningLaneId, PhaseId, ReadinessGate, WorkflowPhase, EVENT_ML_ARCHITECTURE_VERSION,
 };
 pub use factors::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations,
