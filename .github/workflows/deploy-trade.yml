@@ -83,6 +83,7 @@ jobs:
           scp config/strategies/02-pm5d.unified.toml ploy-trade-1:/opt/ploy/config/strategies/
           scp config/strategies/02-pm5d.live.toml ploy-trade-1:/opt/ploy/config/strategies/
           scp config/strategies/02-pm5d-threelayer.unified.toml ploy-trade-1:/opt/ploy/config/strategies/
+          scp config/strategies/02-pm5d-threelayer.live.toml ploy-trade-1:/opt/ploy/config/strategies/
 
           ssh ploy-trade-1 bash <<'REMOTE'
             set -euo pipefail

@@ -1,3 +1,28 @@
+# PM5D ThreeLayer Live Readiness (2026-04-24)
+
+## Files
+
+- `config/strategies/02-pm5d-threelayer.live.toml`
+- `config/deployments/pm5d.threelayer.live.json`
+- `scripts/drills/live_dry_run.sh`
+- `scripts/drills/pm5d_threelayer_live_gate.sh`
+- `.github/workflows/deploy-tango-1-1.yml`
+- `crates/ploy-strategy-bundles/src/config.rs`
+
+## Tasks
+
+- [x] Mirror the current `pm5d.threelayer.dryrun` strategy settings into a live-only config with only `[runtime].mode` changed.
+- [x] Add a paused live deployment manifest so applying it cannot start real orders until an explicit resume.
+- [x] Add a Tango-side live gate script that runs readiness checks and requires an explicit `--go-live` before resume.
+- [x] Ensure the Tango deploy workflow ships the live config, manifests, and drill scripts.
+- [x] Verify config parity and manifest parsing with targeted tests/checks.
+
+## Review
+
+- 2026-04-24: Remote registry read on `tango-1-1` showed current `pm5d.threelayer.dryrun` as `bundle_id=02-pm5d-threelayer.unified`, `account_id=acct-pm5d-dryrun`, `max_gross_exposure=5.00`, `runtime_mode=dryrun`, `desired_state=running`; live manifest mirrors those non-live fields and stays paused.
+- 2026-04-24: Local verification passed: `bash -n scripts/drills/live_dry_run.sh`, `bash -n scripts/drills/pm5d_threelayer_live_gate.sh`, JSON manifest parse, live/dry-run config parity check, workflow YAML parse, `git diff --check` for touched files, `rtk cargo test -p ploy-strategy-bundles threelayer_live_config_matches_dryrun_except_runtime_mode --lib`, and `rtk cargo test -p ploy-strategy-bundles roadmap_config_family_parses --lib`.
+- 2026-04-24: `cargo fmt --check --package ploy-strategy-bundles` still reports unrelated existing formatting drift in strategy/feed/test files outside this live-readiness slice.
+
 # Live Order Execution Management (2026-04-24)
 
 ## Files

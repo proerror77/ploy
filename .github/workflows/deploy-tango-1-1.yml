@@ -85,18 +85,21 @@ jobs:
       - name: Build deploy bundle
         run: |
           rm -rf dist
-          mkdir -p dist/bin dist/config/strategies dist/migrations dist/deployment/systemd dist/scripts
+          mkdir -p dist/bin dist/config/strategies dist/config/deployments dist/migrations dist/deployment/systemd dist/scripts dist/scripts/drills
           cp target/${PLATFORM_TARGET}/release/new-ploy-runner dist/bin/ploy-runner
           cp target/${PLATFORM_TARGET}/release/examples/factor_research dist/bin/factor-research
           cp target/${PLATFORM_TARGET}/release/examples/optimize_backtest dist/bin/optimize-backtest
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
           cp config/strategies/02-pm5d.live.toml dist/config/strategies/02-pm5d.live.toml
           cp config/strategies/02-pm5d-threelayer.unified.toml dist/config/strategies/02-pm5d-threelayer.unified.toml
+          cp config/strategies/02-pm5d-threelayer.live.toml dist/config/strategies/02-pm5d-threelayer.live.toml
+          cp config/deployments/*.json dist/config/deployments/
           cp scripts/binance_aggtrade_collector.py dist/scripts/binance_aggtrade_collector.py
           cp scripts/binance_price_collector.py dist/scripts/binance_price_collector.py
           cp scripts/binance_lob_collector.py dist/scripts/binance_lob_collector.py
           cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
           cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
+          cp scripts/drills/*.sh dist/scripts/drills/
           for migration in ${DEPLOY_MIGRATIONS}; do
             migration="$(printf '%s' "${migration}" | xargs)"
             [ -n "${migration}" ] || continue
@@ -176,7 +179,7 @@ jobs:
 
       - name: Prepare remote directories
         run: |
-          ssh tango-1-1 "mkdir -p ${DEPLOY_ROOT}/bin ${DEPLOY_ROOT}/config/strategies ${DEPLOY_ROOT}/migrations ${DEPLOY_ROOT}/scripts ${DEPLOY_ROOT}/tmp"
+          ssh tango-1-1 "mkdir -p ${DEPLOY_ROOT}/bin ${DEPLOY_ROOT}/config/strategies ${DEPLOY_ROOT}/config/deployments ${DEPLOY_ROOT}/migrations ${DEPLOY_ROOT}/scripts ${DEPLOY_ROOT}/scripts/drills ${DEPLOY_ROOT}/tmp"
 
       - name: Pull bundle from OSS and restart services
         run: |
@@ -295,11 +298,14 @@ jobs:
             install -m 0644 ./config/strategies/02-pm5d.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.unified.toml
             install -m 0644 ./config/strategies/02-pm5d.live.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.live.toml
             install -m 0644 ./config/strategies/02-pm5d-threelayer.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.unified.toml
+            install -m 0644 ./config/strategies/02-pm5d-threelayer.live.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.live.toml
+            install -m 0644 ./config/deployments/*.json ${DEPLOY_ROOT}/config/deployments/
             install -m 0755 ./scripts/binance_aggtrade_collector.py ${DEPLOY_ROOT}/scripts/binance_aggtrade_collector.py
             install -m 0755 ./scripts/binance_price_collector.py ${DEPLOY_ROOT}/scripts/binance_price_collector.py
             install -m 0755 ./scripts/binance_lob_collector.py ${DEPLOY_ROOT}/scripts/binance_lob_collector.py
             install -m 0644 ./scripts/fix_binance_lob_partitions.sql ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
             install -m 0644 ./scripts/fix_deribit_partitions.sql ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
+            install -m 0755 ./scripts/drills/*.sh ${DEPLOY_ROOT}/scripts/drills/
             for migration in ${DEPLOY_MIGRATIONS}; do
               migration="$(printf '%s' "\${migration}" | xargs)"
               [ -n "\${migration}" ] || continue
