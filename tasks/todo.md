@@ -3,7 +3,9 @@
 ## Files
 
 - `crates/ploy-strategy-bundles/src/engine.rs`
+  - Owner: live dust-remainder retry guard in reconciliation.
 - `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: in-flight/reject cooldown duplicate-intent gates.
 
 ## Tasks
 
