@@ -26,6 +26,7 @@ import { ws } from '@/services/websocket';
 import { useStore } from '@/store';
 import type {
   ActiveAlert,
+  DryRunPerformanceReport,
   DeploymentSummary,
   LogEntry,
   PlatformMetrics,
@@ -194,6 +195,13 @@ export function OperatorCockpit() {
     retry: false,
   });
 
+  const { data: dryRunPerformance, error: dryRunPerformanceError } = useQuery<DryRunPerformanceReport>({
+    queryKey: ['reports', 'dry-run'],
+    queryFn: () => api.getDryRunPerformance(),
+    refetchInterval: 30000,
+    retry: false,
+  });
+
   const { data: polledDeployments = [], isLoading: deploymentsLoading } = useQuery({
     queryKey: ['deployments'],
     queryFn: () => api.getDeployments(),
@@ -283,6 +291,16 @@ export function OperatorCockpit() {
     );
   }, [visibleTrading]);
 
+  const reportedSummary = dryRunPerformance?.summary;
+  const reportedNetPnl = reportedSummary ? toNumber(reportedSummary.realized_pnl) : totals.netPnl;
+  const reportedFees = reportedSummary ? toNumber(reportedSummary.total_fees) : totals.totalFees;
+  const reportedOpenPositions = reportedSummary?.open_positions ?? totals.openPositions;
+  const reportedOpenExposure = reportedSummary
+    ? toNumber(reportedSummary.open_exposure)
+    : totals.grossExposure;
+  const reportedFills = reportedSummary?.total_trades ?? totals.fills;
+  const reportedWinRate = reportedSummary == null ? null : toNumber(reportedSummary.win_rate_pct);
+
   const eventAge = lastEventAt == null ? null : Math.max(0, Math.round((Date.now() - lastEventAt) / 1000));
   const cpuPressure =
     metrics?.host_cpu_pressure_milli_percent == null
@@ -369,10 +387,14 @@ export function OperatorCockpit() {
         />
         <HealthCard
           title="Net PnL"
-          value={formatCurrency(totals.netPnl)}
-          detail={`realized ${formatCurrency(totals.realizedPnl)} · unreal ${formatCurrency(totals.unrealizedPnl)}`}
+          value={formatCurrency(reportedNetPnl)}
+          detail={
+            reportedSummary
+              ? `${reportedSummary.closed_trades} closed · fees ${formatCurrency(reportedFees)}`
+              : `realized ${formatCurrency(totals.realizedPnl)} · unreal ${formatCurrency(totals.unrealizedPnl)}`
+          }
           icon={<Banknote className="h-5 w-5" />}
-          health={pnlHealth(totals.netPnl)}
+          health={pnlHealth(reportedNetPnl)}
         />
         <HealthCard
           title="Buy & Run"
@@ -383,8 +405,8 @@ export function OperatorCockpit() {
         />
         <HealthCard
           title="Account Exposure"
-          value={formatCurrency(totals.grossExposure)}
-          detail={`${totals.openPositions} open positions · ${totals.pendingIntents} pending`}
+          value={formatCurrency(reportedOpenExposure)}
+          detail={`${reportedOpenPositions} open positions · ${totals.pendingIntents} pending`}
           icon={<WalletCards className="h-5 w-5" />}
           health={totals.pendingIntents > 5 ? 'watch' : 'good'}
         />
@@ -430,7 +452,8 @@ export function OperatorCockpit() {
                       (entry) => entry.deployment_id === deployment.deployment_id
                     );
                     const risk = snapshot?.risk;
-                    const pnl = toNumber(snapshot?.pnl.net_pnl);
+                    const isDryRun = isDryRunDeployment(deployment);
+                    const pnl = isDryRun ? reportedNetPnl : toNumber(snapshot?.pnl.net_pnl);
                     return (
                       <div
                         key={deployment.deployment_id}
@@ -451,9 +474,9 @@ export function OperatorCockpit() {
                           </div>
                         </div>
                         <div className={cn('font-medium', pnl < 0 ? 'text-destructive' : 'text-success')}>
-                          {snapshot ? formatCurrency(pnl) : '-'}
+                          {snapshot || isDryRun ? formatCurrency(pnl) : '-'}
                           <div className="text-xs font-normal text-muted-foreground">
-                            fees {formatCurrency(toNumber(snapshot?.pnl.total_fees))}
+                            fees {formatCurrency(isDryRun ? reportedFees : toNumber(snapshot?.pnl.total_fees))}
                           </div>
                         </div>
                         <div>
@@ -465,7 +488,7 @@ export function OperatorCockpit() {
                         <div>
                           <div>{deployment.account_id ?? 'default'}</div>
                           <div className="text-xs text-muted-foreground">
-                            {formatCurrency(toNumber(risk?.total_gross_exposure))}
+                            {formatCurrency(isDryRun ? reportedOpenExposure : toNumber(risk?.total_gross_exposure))}
                           </div>
                         </div>
                       </div>
@@ -487,11 +510,11 @@ export function OperatorCockpit() {
               <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
                 <div className="rounded-md border bg-white p-4">
                   <div className="text-xs text-muted-foreground">fills</div>
-                  <div className="mt-2 text-2xl font-semibold">{formatNumber(totals.fills)}</div>
+                  <div className="mt-2 text-2xl font-semibold">{formatNumber(reportedFills)}</div>
                 </div>
                 <div className="rounded-md border bg-white p-4">
                   <div className="text-xs text-muted-foreground">open positions</div>
-                  <div className="mt-2 text-2xl font-semibold">{formatNumber(totals.openPositions)}</div>
+                  <div className="mt-2 text-2xl font-semibold">{formatNumber(reportedOpenPositions)}</div>
                 </div>
                 <div className="rounded-md border bg-white p-4">
                   <div className="text-xs text-muted-foreground">pending intents</div>
@@ -508,6 +531,44 @@ export function OperatorCockpit() {
               </div>
 
               <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+                {dryRunPerformance ? (
+                  <div className="rounded-md border bg-white p-4">
+                    <div className="mb-3 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-medium">Dry-run DB report</div>
+                        <div className="text-xs text-muted-foreground">
+                          generated {compactTime(dryRunPerformance.generated_at)} · latest close{' '}
+                          {compactTime(reportedSummary?.latest_closed_at)}
+                        </div>
+                      </div>
+                      <Badge variant={reportedNetPnl >= 0 ? 'success' : 'destructive'}>
+                        {reportedWinRate == null ? '-' : `${reportedWinRate.toFixed(1)}%`}
+                      </Badge>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-sm">
+                      <div>
+                        <div className="text-xs text-muted-foreground">trades</div>
+                        <div className="font-medium">{reportedSummary?.total_trades ?? 0}</div>
+                      </div>
+                      <div>
+                        <div className="text-xs text-muted-foreground">wins/losses</div>
+                        <div className="font-medium">
+                          {reportedSummary?.wins ?? 0}/{reportedSummary?.losses ?? 0}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-xs text-muted-foreground">net pnl</div>
+                        <div className={cn('font-medium', reportedNetPnl < 0 ? 'text-destructive' : 'text-success')}>
+                          {formatCurrency(reportedNetPnl)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : dryRunPerformanceError ? (
+                  <div className="rounded-md border bg-white p-4 text-sm text-muted-foreground">
+                    Dry-run DB report endpoint is not available on the connected `ployd` yet.
+                  </div>
+                ) : null}
                 {visibleTrading.slice(0, 4).map((snapshot) => (
                   <div key={snapshot.deployment_id} className="rounded-md border bg-white p-4">
                     <div className="mb-3 flex items-start justify-between gap-3">

@@ -100,6 +100,7 @@ jobs:
           cp scripts/binance_lob_collector.py dist/scripts/binance_lob_collector.py
           cp scripts/report_strategy.py dist/scripts/report_strategy.py
           cp scripts/report_market_data_health.py dist/scripts/report_market_data_health.py
+          cp scripts/report_dryrun_summary.py dist/scripts/report_dryrun_summary.py
           cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
           cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
           for migration in ${DEPLOY_MIGRATIONS}; do
