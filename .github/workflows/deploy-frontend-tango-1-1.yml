@@ -87,15 +87,16 @@ jobs:
               mv "${DEPLOY_ROOT}/frontend" "${DEPLOY_ROOT}/frontend.prev"
             fi
             mv "${DEPLOY_ROOT}/frontend.next" "${DEPLOY_ROOT}/frontend"
+            chown -R root:root "${DEPLOY_ROOT}/frontend"
 
             install -m 0644 "${DEPLOY_ROOT}/tmp/ploy-frontend.nginx" /etc/nginx/sites-available/ploy-report
             ln -sfn /etc/nginx/sites-available/ploy-report /etc/nginx/sites-enabled/ploy-report
             nginx -t
             systemctl reload nginx
 
-            curl -fsS http://127.0.0.1/ >/dev/null
-            curl -fsS http://127.0.0.1/parity >/dev/null
-            curl -fsS http://127.0.0.1/api/system/status >/dev/null
+            curl -fsS --retry 5 --retry-all-errors --retry-delay 1 http://127.0.0.1/ >/dev/null
+            curl -fsS --retry 5 --retry-all-errors --retry-delay 1 http://127.0.0.1/parity >/dev/null
+            curl -fsS --retry 5 --retry-all-errors --retry-delay 1 http://127.0.0.1/api/system/status >/dev/null
           EOF
 
       - name: Deployment summary
