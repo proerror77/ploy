@@ -54,6 +54,10 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+ployctl_capture() {
+  "$PLOYCTL" "$@" 2>&1
+}
+
 strip_blank_lines() {
   printf '%s\n' "$1" | tr -d '\r' | sed '/^[[:space:]]*$/d'
 }
@@ -177,9 +181,9 @@ source_env_file
 log_step "daemon baseline"
 [[ "$(systemctl is-active ployd)" == "active" ]] || fail "ployd.service is not active"
 curl -fsS "${ADDR}/health" >/dev/null
-STATUS_OUTPUT="$("$PLOYCTL" system status)"
-ALERTS_OUTPUT="$("$PLOYCTL" system alerts)"
-TRADING_OUTPUT="$("$PLOYCTL" trading status)"
+STATUS_OUTPUT="$(ployctl_capture system status)"
+ALERTS_OUTPUT="$(ployctl_capture system alerts)"
+TRADING_OUTPUT="$(ployctl_capture trading status)"
 printf '%s\n' "$STATUS_OUTPUT"
 printf '%s\n' "$ALERTS_OUTPUT"
 printf '%s\n' "$TRADING_OUTPUT"
@@ -271,9 +275,9 @@ elif [[ "$RUN_DRY_RUN_DRILL" -eq 1 ]]; then
 fi
 
 log_step "apply paused live deployment"
-APPLY_OUTPUT="$("$PLOYCTL" deployments apply "$MANIFEST")"
+APPLY_OUTPUT="$(ployctl_capture deployments apply "$MANIFEST")"
 printf '%s\n' "$APPLY_OUTPUT"
-INSPECT_OUTPUT="$("$PLOYCTL" deployments inspect "$DEPLOYMENT_ID")"
+INSPECT_OUTPUT="$(ployctl_capture deployments inspect "$DEPLOYMENT_ID")"
 printf '%s\n' "$INSPECT_OUTPUT"
 case "$INSPECT_OUTPUT" in
   *"desired=Paused"*) ;;
@@ -291,9 +295,9 @@ if [[ "$GO_LIVE" -ne 1 ]]; then
 fi
 
 log_step "resume live deployment"
-RESUME_OUTPUT="$("$PLOYCTL" deployments resume "$DEPLOYMENT_ID")"
+RESUME_OUTPUT="$(ployctl_capture deployments resume "$DEPLOYMENT_ID")"
 printf '%s\n' "$RESUME_OUTPUT"
-FINAL_INSPECT="$("$PLOYCTL" deployments inspect "$DEPLOYMENT_ID")"
+FINAL_INSPECT="$(ployctl_capture deployments inspect "$DEPLOYMENT_ID")"
 printf '%s\n' "$FINAL_INSPECT"
 case "$FINAL_INSPECT" in
   *"desired=Running"*) ;;
