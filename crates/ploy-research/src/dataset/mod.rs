@@ -1,7 +1,12 @@
+mod builder;
 mod chronology;
 mod contracts;
 mod split;
 
+pub use builder::{
+    DatasetBuildError, DatasetSplitDerivedArtifacts, EventRootDatasetBuild,
+    EventRootDatasetBuildRequest, build_event_root_dataset, standard_event_root_dataset_artifacts,
+};
 pub use chronology::{
     EventChronologyBuild, EventMetadataChronologyInput, build_canonical_event_chronology,
 };

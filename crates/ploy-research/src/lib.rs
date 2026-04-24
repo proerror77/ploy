@@ -12,12 +12,14 @@ pub mod signal;
 pub use backtesting::{run_backtest, BacktestReport};
 pub use dataset::{
     CANONICAL_REGIME_VERSION, ChronologyAnchor, ChronologyOrdering, DATASET_MANIFEST_VERSION,
-    DatasetArtifacts, DatasetBuildManifest, DatasetBuildStats, DatasetLabelContract,
-    DatasetSkipCounts, DatasetSourceWindow, DatasetSplit, DatasetSplitArtifactPaths,
-    DatasetSplitAssignment, DatasetSplitCounts, DatasetSplitPolicy, EventChronologyBuild,
-    EventChronologyKey, EventIndexEntry, EventMetadataChronologyInput, REPRICING_LABEL_30S,
-    SETTLEMENT_LABEL, SplitBuildError, assign_chronological_event_splits,
-    build_canonical_event_chronology,
+    DatasetArtifacts, DatasetBuildError, DatasetBuildManifest, DatasetBuildStats,
+    DatasetLabelContract, DatasetSkipCounts, DatasetSourceWindow, DatasetSplit,
+    DatasetSplitArtifactPaths, DatasetSplitAssignment, DatasetSplitCounts,
+    DatasetSplitDerivedArtifacts, DatasetSplitPolicy, EventChronologyBuild, EventChronologyKey,
+    EventIndexEntry, EventMetadataChronologyInput, EventRootDatasetBuild,
+    EventRootDatasetBuildRequest, REPRICING_LABEL_30S, SETTLEMENT_LABEL, SplitBuildError,
+    assign_chronological_event_splits, build_canonical_event_chronology,
+    build_event_root_dataset, standard_event_root_dataset_artifacts,
 };
 pub use factors::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations,
