@@ -50,6 +50,7 @@ struct ObservationStatus {
     has_binary_label: bool,
     has_valid_price: bool,
     has_finite_features: bool,
+    feature_finite: Vec<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -221,9 +222,11 @@ fn load_split_coverage(
         let label = labels.get(row_idx).unwrap_or(f64::NAN);
         let up_ask = pm_up_ask.get(row_idx).unwrap_or(f64::NAN);
         let down_ask = pm_down_ask.get(row_idx).unwrap_or(f64::NAN);
-        let has_finite_features = feature_columns
+        let feature_finite = feature_columns
             .iter()
-            .all(|column| column.get(row_idx).is_some_and(f64::is_finite));
+            .map(|column| column.get(row_idx).is_some_and(f64::is_finite))
+            .collect::<Vec<_>>();
+        let has_finite_features = feature_finite.iter().all(|finite| *finite);
 
         events
             .entry(event_id.to_string())
@@ -233,6 +236,7 @@ fn load_split_coverage(
                 has_binary_label: is_binary_label(label),
                 has_valid_price: valid_entry_price(up_ask) && valid_entry_price(down_ask),
                 has_finite_features,
+                feature_finite,
             });
     }
 
@@ -292,6 +296,28 @@ fn print_report(manifest: &DatasetBuildManifest, config: &Config, splits: [&Spli
             base.has_price,
             base.has_features,
             base.has_all
+        );
+    }
+
+    eprintln!();
+    eprintln!("Finite feature coverage by split:");
+    eprintln!(
+        "{:<28} {:>12} {:>12} {:>12}",
+        "feature", "train", "val", "test"
+    );
+    for (feature_idx, feature) in config.features.iter().enumerate() {
+        let train = finite_feature_event_count(splits[0], feature_idx);
+        let val = finite_feature_event_count(splits[1], feature_idx);
+        let test = finite_feature_event_count(splits[2], feature_idx);
+        eprintln!(
+            "{:<28} {:>5}/{:<6} {:>5}/{:<6} {:>5}/{:<6}",
+            feature,
+            train,
+            splits[0].events.len(),
+            val,
+            splits[1].events.len(),
+            test,
+            splits[2].events.len()
         );
     }
 
@@ -372,6 +398,21 @@ fn base_coverage(split: &SplitCoverage) -> BaseCoverage {
         })
 }
 
+fn finite_feature_event_count(split: &SplitCoverage, feature_idx: usize) -> usize {
+    split
+        .events
+        .values()
+        .filter(|observations| {
+            observations.iter().any(|obs| {
+                obs.feature_finite
+                    .get(feature_idx)
+                    .copied()
+                    .unwrap_or(false)
+            })
+        })
+        .count()
+}
+
 fn coverage_stats(split: &SplitCoverage, entry_secs: i64, tolerance_secs: i64) -> CoverageStats {
     let mut stats = CoverageStats {
         split: split.name,
@@ -449,6 +490,7 @@ mod tests {
             has_binary_label,
             has_valid_price,
             has_finite_features,
+            feature_finite: vec![has_finite_features],
         }
     }
 
@@ -500,6 +542,36 @@ mod tests {
         assert_eq!(base.has_price, 2);
         assert_eq!(base.has_features, 1);
         assert_eq!(base.has_all, 1);
+    }
+
+    #[test]
+    fn finite_feature_event_count_counts_any_finite_row() {
+        let split = split(&[
+            (
+                "a",
+                vec![ObservationStatus {
+                    time_remaining_secs: 60,
+                    has_binary_label: true,
+                    has_valid_price: true,
+                    has_finite_features: false,
+                    feature_finite: vec![true, false],
+                }],
+            ),
+            (
+                "b",
+                vec![ObservationStatus {
+                    time_remaining_secs: 60,
+                    has_binary_label: true,
+                    has_valid_price: true,
+                    has_finite_features: false,
+                    feature_finite: vec![false, true],
+                }],
+            ),
+        ]);
+
+        assert_eq!(finite_feature_event_count(&split, 0), 1);
+        assert_eq!(finite_feature_event_count(&split, 1), 1);
+        assert_eq!(finite_feature_event_count(&split, 2), 0);
     }
 
     #[test]
