@@ -5,6 +5,7 @@ import { Layout } from '@/components/Layout';
 import { Dashboard } from '@/pages/Dashboard';
 import { TradeHistory } from '@/pages/TradeHistory';
 import { LiveMonitor } from '@/pages/LiveMonitor';
+import { LiveParity } from '@/pages/LiveParity';
 import { StrategyMonitor } from '@/pages/StrategyMonitor';
 import { SystemControl } from '@/pages/SystemControl';
 import { SecurityAudit } from '@/pages/SecurityAudit';
@@ -97,6 +98,7 @@ function App() {
             <Route index element={<Dashboard />} />
             <Route path="trades" element={<TradeHistory />} />
             <Route path="monitor" element={<LiveMonitor />} />
+            <Route path="parity" element={<LiveParity />} />
             <Route path="deployments" element={<StrategyMonitor />} />
             <Route path="monitor-strategy" element={<StrategyMonitor />} />
             <Route path="nba-swing" element={<NBASwingMonitor />} />

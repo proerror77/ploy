@@ -1,3 +1,41 @@
+# Dry-run / Live Order Parity UI (2026-04-25)
+
+## Files
+
+- `ploy-frontend/src/lib/liveParity.ts`
+- `ploy-frontend/src/components/LiveParityBanner.tsx`
+- `ploy-frontend/src/pages/LiveParity.tsx`
+- `ploy-frontend/src/services/api.ts`
+- `ploy-frontend/src/App.tsx`
+- `ploy-frontend/src/components/Layout.tsx`
+
+## Tasks
+
+- [x] Add a frontend parity model that pairs dry-run and live trading snapshots by deployment family.
+- [x] Show an in-app warning when dry-run has orders and live has no matching live order.
+- [x] Add an operator page with side-by-side order, intent, fill, and exposure comparison.
+- [x] Add a frontend-only Tango deploy path that does not restart live trading services.
+- [x] Validate the TypeScript build and frontend bundle.
+
+## Review
+
+- 2026-04-25: The parity model compares dry-run and live snapshots by normalized
+  deployment family, then flags dry-run orders without a matching live token and
+  side. This covers the requested case where dry-run enters but live fails to
+  place the corresponding order.
+- 2026-04-25: Added a frontend-only GitHub Actions deploy lane for Tango. It
+  builds `ploy-frontend`, installs static files under `/opt/ploy/frontend`,
+  updates nginx, reloads nginx, and deliberately avoids restarting `ployd`.
+- 2026-04-25: Local verification passed:
+  `npm run contracts:check --prefix ploy-frontend`,
+  `npm run build --prefix ploy-frontend`, `npm run lint --prefix ploy-frontend`,
+  `git diff --check`, and YAML parse for
+  `.github/workflows/deploy-frontend-tango-1-1.yml`.
+- 2026-04-25: Dev-server smoke with a Tango API tunnel returned HTTP 200 for
+  `/parity` and `/api/trading/state` returned three snapshots:
+  `example.live.dry-run`, `pm5d.threelayer.dryrun`, and
+  `pm5d.threelayer.live`, all currently at zero orders.
+
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 
 ## Files

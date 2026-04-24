@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 import { api } from '@/services/api';
+import { LiveParityBanner } from '@/components/LiveParityBanner';
 import { useStore } from '@/store';
 import {
   LayoutDashboard,
@@ -13,6 +14,7 @@ import {
   Shield,
   TrendingUp,
   ShieldAlert,
+  GitCompare,
 } from 'lucide-react';
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -27,6 +29,7 @@ const navigation = [
   { name: '仪表盘', href: '/', icon: LayoutDashboard },
   { name: '交易历史', href: '/trades', icon: History },
   { name: '实时日志', href: '/monitor', icon: Activity },
+  { name: 'Dry/Live 对比', href: '/parity', icon: GitCompare },
   { name: '部署控制', href: '/deployments', icon: Target },
   { name: 'NBA Legacy', href: '/nba-swing', icon: TrendingUp },
   { name: 'Risk Monitor', href: '/risk', icon: ShieldAlert },
@@ -212,6 +215,7 @@ export function Layout() {
 
       {/* Main content */}
       <div className="flex-1 overflow-auto">
+        <LiveParityBanner />
         <Outlet />
       </div>
     </div>
