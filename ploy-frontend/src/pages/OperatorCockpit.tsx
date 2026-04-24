@@ -80,6 +80,14 @@ function compactTime(timestamp?: string | null) {
   });
 }
 
+function formatSecondsBrief(value?: number | null) {
+  if (value == null || !Number.isFinite(value)) return '-';
+  const seconds = Math.max(0, Math.round(value));
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return minutes > 0 ? `${minutes}m${rest.toString().padStart(2, '0')}s` : `${rest}s`;
+}
+
 function ageSeconds(timestamp?: string | null) {
   if (!timestamp) return null;
   const created = new Date(timestamp).getTime();
@@ -300,6 +308,12 @@ export function OperatorCockpit() {
     : totals.grossExposure;
   const reportedFills = reportedSummary?.total_trades ?? totals.fills;
   const reportedWinRate = reportedSummary == null ? null : toNumber(reportedSummary.win_rate_pct);
+  const dryRunWindows = dryRunPerformance?.by_window ?? [];
+  const dryRunPairing = dryRunPerformance?.pairing;
+  const pairingHasMismatch =
+    dryRunPairing != null &&
+    (dryRunPairing.mixed_event_groups > 0 ||
+      dryRunPairing.current_view_rows !== dryRunPairing.side_aware_rows);
 
   const eventAge = lastEventAt == null ? null : Math.max(0, Math.round((Date.now() - lastEventAt) / 1000));
   const cpuPressure =
@@ -563,6 +577,47 @@ export function OperatorCockpit() {
                         </div>
                       </div>
                     </div>
+                    {dryRunWindows.length > 0 ? (
+                      <div className="mt-4 space-y-2">
+                        {dryRunWindows.map((window) => {
+                          const pnl = toNumber(window.realized_pnl);
+                          const winRate = toNumber(window.win_rate_pct);
+                          return (
+                            <div
+                              key={window.window_label}
+                              className="grid grid-cols-[0.45fr_0.8fr_0.8fr_0.8fr] items-center gap-2 rounded-md border px-3 py-2 text-xs"
+                            >
+                              <Badge variant="outline">{window.window_label}</Badge>
+                              <div>
+                                <span className="text-muted-foreground">trades </span>
+                                <span className="font-medium">{window.total_trades}</span>
+                              </div>
+                              <div>
+                                <span className="text-muted-foreground">win </span>
+                                <span className="font-medium">{winRate.toFixed(1)}%</span>
+                              </div>
+                              <div className={cn('text-right font-medium', pnl < 0 ? 'text-destructive' : 'text-success')}>
+                                {formatCurrency(pnl)}
+                              </div>
+                              <div className="col-span-4 text-muted-foreground">
+                                entry TTR {formatSecondsBrief(window.min_entry_ttr_secs)}-
+                                {formatSecondsBrief(window.max_entry_ttr_secs)} · avg entry{' '}
+                                {window.avg_entry == null ? '-' : toNumber(window.avg_entry).toFixed(4)}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                    {dryRunPairing ? (
+                      <div className="mt-3 flex items-center justify-between rounded-md border px-3 py-2 text-xs">
+                        <span className="text-muted-foreground">PnL pairing by Event ID</span>
+                        <Badge variant={pairingHasMismatch ? 'warning' : 'success'}>
+                          {dryRunPairing.mixed_event_groups} mixed · {dryRunPairing.current_view_rows}/
+                          {dryRunPairing.side_aware_rows}
+                        </Badge>
+                      </div>
+                    ) : null}
                   </div>
                 ) : dryRunPerformanceError ? (
                   <div className="rounded-md border bg-white p-4 text-sm text-muted-foreground">

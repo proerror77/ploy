@@ -169,14 +169,43 @@ export interface DryRunDailyRow {
   closed_trade_count: number;
   wins: number;
   losses: number;
+  confirmed_trade_count?: number;
   net_pnl: string | number;
   confirmed_pnl: string | number;
   fees: string | number;
   open_quantity: string | number;
 }
 
+export interface DryRunWindowRow {
+  window_secs: number | null;
+  window_label: string;
+  total_trades: number;
+  closed_trades: number;
+  wins: number;
+  losses: number;
+  win_rate_pct: string | number;
+  realized_pnl: string | number;
+  avg_pnl: string | number | null;
+  avg_entry: string | number | null;
+  min_entry_ttr_secs: number | null;
+  max_entry_ttr_secs: number | null;
+}
+
+export interface DryRunDailyWindowRow {
+  trading_day_cst: string;
+  window_secs: number | null;
+  window_label: string;
+  trade_count: number;
+  closed_trade_count: number;
+  wins: number;
+  losses: number;
+  net_pnl: string | number;
+}
+
 export interface DryRunSymbolRow {
   symbol: string;
+  window_secs?: number | null;
+  window_label?: string;
   trades: number;
   wins: number;
   losses: number;
@@ -186,30 +215,48 @@ export interface DryRunSymbolRow {
 
 export interface DryRunClosedTradeRow {
   symbol: string;
+  window_secs?: number | null;
+  window_label?: string;
   market_side: string;
   entry_price: string | number | null;
   exit_price: string | number | null;
   exit_type: string;
   quantity: string | number;
   net_pnl: string | number;
+  entry_time_remaining_secs?: number | null;
   opened_at: string;
   closed_at: string;
 }
 
 export interface DryRunOpenPositionRow {
   symbol: string;
+  window_secs?: number | null;
+  window_label?: string;
   market_side: string;
   entry_price: string | number | null;
   quantity: string | number;
   notional: string | number;
+  entry_time_remaining_secs?: number | null;
   opened_at: string;
+}
+
+export interface DryRunPairingReport {
+  pair_key: string;
+  mixed_event_groups: number;
+  fills_in_mixed_event_groups: number;
+  current_view_rows: number;
+  side_aware_rows: number;
 }
 
 export interface DryRunPerformanceReport {
   generated_at: string;
   summary: DryRunSummary;
+  by_window: DryRunWindowRow[];
   daily: DryRunDailyRow[];
+  daily_by_window: DryRunDailyWindowRow[];
   symbols: DryRunSymbolRow[];
+  symbols_by_window: DryRunSymbolRow[];
   recent_closed: DryRunClosedTradeRow[];
   open_positions: DryRunOpenPositionRow[];
+  pairing?: DryRunPairingReport;
 }
