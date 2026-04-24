@@ -54,6 +54,10 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+strip_blank_lines() {
+  printf '%s\n' "$1" | tr -d '\r' | sed '/^[[:space:]]*$/d'
+}
+
 env_has_key() {
   local key="$1"
   grep -Eq "^[[:space:]]*${key}=" "$ENV_FILE"
@@ -180,8 +184,9 @@ printf '%s\n' "$STATUS_OUTPUT"
 printf '%s\n' "$ALERTS_OUTPUT"
 printf '%s\n' "$TRADING_OUTPUT"
 
-if [[ "$ALERTS_OUTPUT" != "none" ]]; then
-  if printf '%s\n' "$ALERTS_OUTPUT" | grep -q ' critical '; then
+ALERTS_NORMALIZED="$(strip_blank_lines "$ALERTS_OUTPUT")"
+if [[ "$ALERTS_NORMALIZED" != "none" ]]; then
+  if printf '%s\n' "$ALERTS_NORMALIZED" | grep -q ' critical '; then
     fail "critical alerts are active"
   fi
   warn "non-critical alerts are active"
@@ -270,7 +275,10 @@ APPLY_OUTPUT="$("$PLOYCTL" deployments apply "$MANIFEST")"
 printf '%s\n' "$APPLY_OUTPUT"
 INSPECT_OUTPUT="$("$PLOYCTL" deployments inspect "$DEPLOYMENT_ID")"
 printf '%s\n' "$INSPECT_OUTPUT"
-printf '%s\n' "$INSPECT_OUTPUT" | grep -q 'desired=Paused' || fail "live deployment was not applied as paused"
+case "$INSPECT_OUTPUT" in
+  *"desired=Paused"*) ;;
+  *) fail "live deployment was not applied as paused" ;;
+esac
 
 if [[ "$GO_LIVE" -ne 1 ]]; then
   log_step "result"
@@ -287,7 +295,10 @@ RESUME_OUTPUT="$("$PLOYCTL" deployments resume "$DEPLOYMENT_ID")"
 printf '%s\n' "$RESUME_OUTPUT"
 FINAL_INSPECT="$("$PLOYCTL" deployments inspect "$DEPLOYMENT_ID")"
 printf '%s\n' "$FINAL_INSPECT"
-printf '%s\n' "$FINAL_INSPECT" | grep -q 'desired=Running' || fail "live deployment did not enter desired=Running"
+case "$FINAL_INSPECT" in
+  *"desired=Running"*) ;;
+  *) fail "live deployment did not enter desired=Running" ;;
+esac
 
 log_step "result"
 printf 'LIVE: %s resume command accepted. Watch ployctl trading status and worker logs immediately.\n' "$DEPLOYMENT_ID"
