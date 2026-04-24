@@ -592,10 +592,11 @@ venue = "sportsbook"
 
     #[test]
     fn roadmap_config_family_parses() {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let config_dir = manifest_dir.join("../../config/strategies");
+        let config_dir = strategy_config_dir();
 
         for file in [
+            "02-pm5d-threelayer.unified.toml",
+            "02-pm5d-threelayer.live.toml",
             "02-pm5d.v1-dryrun.toml",
             "02-pm5d.v1-live.toml",
             "02-pm5d.v2-dryrun.toml",
@@ -618,5 +619,43 @@ venue = "sportsbook"
                 "{file} should resolve to a runtime variant"
             );
         }
+    }
+
+    #[test]
+    fn threelayer_live_config_matches_dryrun_except_runtime_mode() {
+        let config_dir = strategy_config_dir();
+        let dryrun_path = config_dir.join("02-pm5d-threelayer.unified.toml");
+        let live_path = config_dir.join("02-pm5d-threelayer.live.toml");
+
+        let dryrun_body = std::fs::read_to_string(&dryrun_path).unwrap();
+        let live_body = std::fs::read_to_string(&live_path).unwrap();
+        let mut dryrun: toml::Value = toml::from_str(&dryrun_body).unwrap();
+        let live: toml::Value = toml::from_str(&live_body).unwrap();
+
+        assert_eq!(
+            dryrun
+                .get("runtime")
+                .and_then(|runtime| runtime.get("mode"))
+                .and_then(toml::Value::as_str),
+            Some("dryrun")
+        );
+        assert_eq!(
+            live.get("runtime")
+                .and_then(|runtime| runtime.get("mode"))
+                .and_then(toml::Value::as_str),
+            Some("live")
+        );
+
+        dryrun
+            .get_mut("runtime")
+            .and_then(toml::Value::as_table_mut)
+            .unwrap()
+            .insert("mode".to_string(), toml::Value::String("live".to_string()));
+        assert_eq!(dryrun, live);
+    }
+
+    fn strategy_config_dir() -> PathBuf {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join("../../config/strategies")
     }
 }

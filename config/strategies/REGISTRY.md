@@ -86,6 +86,7 @@ numeric ID used as filename prefix.
 | File | Format | Notes |
 |------|--------|-------|
 | `02-pm5d-threelayer.unified.toml` | **UNIFIED** | Three-gate entry filter on top of directional |
+| `02-pm5d-threelayer.live.toml` | **UNIFIED** | Live twin of unified dry-run config; only `[runtime].mode` differs |
 
 ### S03 — Pattern Memory
 | File | Format | Notes |

@@ -88,6 +88,24 @@ manually reviewed:
 - `ployctl trading status`
 - the most recent audit log entries
 
+## PM5D ThreeLayer Live Gate
+
+For the current PM5D ThreeLayer setup, stage the live deployment in paused mode:
+
+```bash
+/opt/ploy/scripts/drills/pm5d_threelayer_live_gate.sh
+```
+
+This verifies `02-pm5d-threelayer.live.toml` against the dry-run config, applies
+`pm5d.threelayer.live` with `desired_state=paused`, and stops before any live
+orders can be placed.
+
+Only after explicit operator approval, run:
+
+```bash
+/opt/ploy/scripts/drills/pm5d_threelayer_live_gate.sh --go-live
+```
+
 ## Not Covered By This Checklist
 
 This checklist does not:
