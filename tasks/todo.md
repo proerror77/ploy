@@ -8265,3 +8265,19 @@ Checklist:
 
 Review:
 - 2026-04-24: Added `event_dataset_coverage` to quantify data readiness before more ML/DL/RL work. On `/tmp/ploy-event-root-5sym-150-20260424`, all train/val/test events have binary labels and valid prices somewhere in their observation rows, but finite default ML feature coverage is the bottleneck: base `all_any` is only `42/105`, `9/22`, and `9/23`. Per-feature event coverage shows most individual columns are present for nearly every event (`depth_acceleration` is the only default feature below full event coverage: `102/105`, `22/22`, `20/23`), so the main issue is simultaneous row completeness at the chosen observation row, not one globally absent feature. With default baseline entry `60s` and tolerance `30s`, selected coverage is `38/105`, `7/22`, and `9/23`; widening tolerances cannot exceed the row-complete ceiling. Next data work should either relax/impute the feature set intentionally or fix/export row-level feature completeness before treating baseline metrics as model-quality evidence.
+
+## Event Dataset Baseline Feature Set
+
+Goal: make the supervised baseline use a tradable default feature set with enough event-held-out samples for the next ML iteration, without hiding missing data behind implicit imputation.
+
+File ownership:
+- `crates/ploy-research/examples/event_dataset_baseline.rs`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Diagnose feature-level blockers at the default `60s±30s` entry.
+- [x] Remove the sparse-at-entry `depth_acceleration` feature from the baseline default set while leaving it available through explicit `--features`.
+- [x] Re-run the baseline on the copied 150-event remote dataset.
+
+Review:
+- 2026-04-24: At `60s±30s`, tradable label/price rows exist for `95/105`, `19/22`, and `23/23` train/val/test events. The old 26-feature default selected only `38/7/9` because most dropped rows were missing only `depth_acceleration` at the selected entry row. The baseline default now uses the 25-feature tradable set excluding `depth_acceleration`; explicit `--features` can still include it for controlled experiments. On `/tmp/ploy-event-root-5sym-150-20260424`, the 25-feature run selected `95/19/23`; test metrics were accuracy `73.9%`, AUC `0.6818`, and simple PnL `-0.2367`. This is more suitable as a pipeline baseline but still not enough for DL/RL claims.

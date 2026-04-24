@@ -32,7 +32,6 @@ const DEFAULT_FEATURES: &[&str] = &[
     "depth_ratio",
     "depth_imbalance",
     "depth_far_ratio",
-    "depth_acceleration",
     "obi_10",
     "pm_lag_secs",
 ];
