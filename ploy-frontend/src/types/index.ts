@@ -148,3 +148,68 @@ export interface MarketDataHealth {
   deribit_iv_samples: DeribitIvSample[];
   deribit_greeks_samples: DeribitGreeksSample[];
 }
+
+export interface DryRunSummary {
+  total_trades: number;
+  closed_trades: number;
+  wins: number;
+  losses: number;
+  win_rate_pct: string | number;
+  realized_pnl: string | number;
+  total_fees: string | number;
+  open_positions: number;
+  open_exposure: string | number;
+  latest_opened_at: string | null;
+  latest_closed_at: string | null;
+}
+
+export interface DryRunDailyRow {
+  trading_day_cst: string;
+  trade_count: number;
+  closed_trade_count: number;
+  wins: number;
+  losses: number;
+  net_pnl: string | number;
+  confirmed_pnl: string | number;
+  fees: string | number;
+  open_quantity: string | number;
+}
+
+export interface DryRunSymbolRow {
+  symbol: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  net_pnl: string | number;
+  avg_entry: string | number | null;
+}
+
+export interface DryRunClosedTradeRow {
+  symbol: string;
+  market_side: string;
+  entry_price: string | number | null;
+  exit_price: string | number | null;
+  exit_type: string;
+  quantity: string | number;
+  net_pnl: string | number;
+  opened_at: string;
+  closed_at: string;
+}
+
+export interface DryRunOpenPositionRow {
+  symbol: string;
+  market_side: string;
+  entry_price: string | number | null;
+  quantity: string | number;
+  notional: string | number;
+  opened_at: string;
+}
+
+export interface DryRunPerformanceReport {
+  generated_at: string;
+  summary: DryRunSummary;
+  daily: DryRunDailyRow[];
+  symbols: DryRunSymbolRow[];
+  recent_closed: DryRunClosedTradeRow[];
+  open_positions: DryRunOpenPositionRow[];
+}
