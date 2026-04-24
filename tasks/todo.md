@@ -8360,3 +8360,25 @@ Review:
 - 2026-04-24: Added the local `event-ml-automl-workflow` skill under `~/.codex/skills/` and mirrored the trigger rule into `AGENTS.md` / `CLAUDE.md` so future agents route event ML, AutoML attribution, hyperparameter-search, and DL/RL requests through the workflow. Added `event_ml_workflow`, a Polars-gated runner that executes coverage diagnostics, AutoML-style attribution, and the fixed supervised baseline in order and stops on the first failed phase. The runner supports `--dry-run` and phase selection for focused execution.
 - 2026-04-24: Extended `event_factor_attribution` with `--output-dir` artifacts: `factor_attributions.json`, `feature_whitelist.txt`, and `feature_whitelist.md`. Extended `event_ml_workflow` to create a run directory, write `workflow_report.json` / `workflow_report.md`, and feed the AutoML-generated `feature_whitelist.txt` into the baseline phase when no explicit `--features` override is provided. This closes the first loop from data coverage to factor governance to fixed baseline with persisted evidence.
 - 2026-04-24: Extended `event_dataset_baseline` with `--output-json` so baseline metrics can be consumed by downstream workflow phases. Extended `event_ml_workflow` with a bounded logistic `hyperparameter` phase over `--search-l2`, `--search-min-edge`, `--search-learning-rate`, and `--search-epochs`. The phase writes candidate `baseline_metrics.json` files plus `hyperparameter_search.json` / `.md`, selects by validation PnL with validation logloss tie-break, and records test metrics without using them for selection.
+
+## Event ML Foundation Architecture
+
+Goal: create the reusable architecture contract that keeps supervised ML, DL, RL, and dry-run handoff on the same event-held-out workflow before adding heavier training code.
+
+File ownership:
+- `crates/ploy-research/src/event_ml/`
+- `crates/ploy-research/src/lib.rs`
+- `crates/ploy-research/examples/event_ml_architecture.rs`
+- `crates/ploy-research/Cargo.toml`
+- `docs/runbooks/event-ml-automl-workflow.md`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Add pure Rust architecture contract types for workflow phases, learning lanes, gates, artifacts, and handoff requirements.
+- [x] Add a cargo-run example that writes the architecture contract as JSON and Markdown.
+- [x] Make DL/RL readiness explicit gates, not implicit permission to train.
+- [x] Update the runbook so agents start from the architecture artifact before implementing new model families.
+- [x] Verify with focused `ploy-research` checks/tests and the architecture example.
+
+Review:
+- 2026-04-24: Added `event_ml` as a pure Rust architecture contract for the event-root ML foundation. The contract defines canonical phases, supervised/DL/RL/dry-run lanes, required artifacts, stop rules, and lane-specific readiness gates. DL and RL remain gated lanes: DL requires stable walk-forward evidence plus enough multi-day history and a no-future-row state contract; RL requires decision-time-only state, explicit action space, binary payout reward parity, quote/latency assumptions, and bankroll accounting before environment training. Added `event_ml_architecture`, a no-Polars example that writes `event_ml_architecture.json`, `event_ml_architecture.md`, and `event_ml_gate_matrix.json` for agents and reviewers before new model-family work starts.
