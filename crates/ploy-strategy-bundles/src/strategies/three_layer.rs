@@ -73,9 +73,9 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
 const DRIFT_WINDOW_SECS: f64 = 30.0;
 const VOL_WINDOW_SECS: f64 = 120.0;
 const MIN_VOL_POINTS: usize = 5;
-const BALANCE_REJECT_PAUSE_SECS: i64 = 5 * 60;
-const INVALID_AMOUNT_REJECT_PAUSE_SECS: i64 = 5 * 60;
-const NO_LIQUIDITY_REJECT_PAUSE_SECS: i64 = 30;
+const ACCOUNT_BALANCE_REJECT_PAUSE_SECS: i64 = 15;
+const HARD_TOKEN_REJECT_PAUSE_SECS: i64 = 35;
+const NO_LIQUIDITY_REJECT_PAUSE_SECS: i64 = 15;
 
 struct DriftTracker {
     history: VecDeque<(DateTime<Utc>, f64)>,
@@ -1122,23 +1122,22 @@ impl StrategyLogic for ThreeLayerStrategy {
         let no_liquidity = reason_lc.contains("no orders found")
             || reason_lc.contains("insufficient liquidity")
             || reason_lc.contains("no match");
-        let cooldown_secs = if balance_or_allowance {
-            BALANCE_REJECT_PAUSE_SECS
-        } else if invalid_amount {
-            INVALID_AMOUNT_REJECT_PAUSE_SECS
+        let token_cooldown_secs = if balance_or_allowance || invalid_amount {
+            HARD_TOKEN_REJECT_PAUSE_SECS
         } else if no_liquidity {
-            self.reject_cooldown_secs()
-                .max(NO_LIQUIDITY_REJECT_PAUSE_SECS)
+            NO_LIQUIDITY_REJECT_PAUSE_SECS
         } else {
             self.reject_cooldown_secs()
         };
-        let until = now + chrono::Duration::seconds(cooldown_secs);
+        let token_until = now + chrono::Duration::seconds(token_cooldown_secs);
 
-        if balance_or_allowance {
-            self.set_balance_exhausted_until(until);
+        if balance_or_allowance && intent.side == TradeSide::Buy {
+            self.set_balance_exhausted_until(
+                now + chrono::Duration::seconds(ACCOUNT_BALANCE_REJECT_PAUSE_SECS),
+            );
         }
 
-        self.set_token_reject_until(&intent.token_id, until);
+        self.set_token_reject_until(&intent.token_id, token_until);
 
         if intent.side == TradeSide::Buy {
             if let Some(symbol) = self.token_symbol.get(intent.token_id.as_str()).cloned() {
@@ -1151,7 +1150,7 @@ impl StrategyLogic for ThreeLayerStrategy {
             intent_id = %intent.intent_id,
             token_id = %intent.token_id,
             reason = %reason,
-            cooldown_secs,
+            cooldown_secs = token_cooldown_secs,
             "Order rejected; suppressing duplicate live intents during cooldown"
         );
     }
@@ -1315,6 +1314,20 @@ mod tests {
         }
     }
 
+    fn rejected_buy_intent(token_id: &str, now: DateTime<Utc>) -> TradingIntent {
+        TradingIntent {
+            intent_id: format!("buy-reject-{token_id}"),
+            deployment_id: "three-layer-live".into(),
+            market_id: "evt1".into(),
+            token_id: token_id.to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(10),
+            limit_price: Some(dec!(0.72)),
+            purpose: IntentPurpose::Entry,
+            created_at: now,
+        }
+    }
+
     #[test]
     fn reject_cooldown_suppresses_duplicate_live_exit() {
         use chrono::TimeZone;
@@ -1357,16 +1370,12 @@ mod tests {
         strategy.feed_time = Some(now);
         let intent = rejected_exit_intent("token-down", now);
 
-        strategy.on_reject(
-            &intent,
-            "not enough balance / allowance: available balance is lower than order size",
-        );
+        strategy.on_reject(&intent, "invalid amounts");
         let first_token_until = strategy
             .token_reject_until
             .get("token-down")
             .copied()
             .expect("token cooldown");
-        let first_balance_until = strategy.balance_exhausted_until.expect("balance pause");
 
         strategy.feed_time = Some(now + chrono::Duration::seconds(10));
         strategy.on_reject(&intent, "no orders found to match with FAK order");
@@ -1379,10 +1388,7 @@ mod tests {
                 .expect("token cooldown"),
             first_token_until
         );
-        assert_eq!(
-            strategy.balance_exhausted_until.expect("balance pause"),
-            first_balance_until
-        );
+        assert!(strategy.balance_exhausted_until.is_none());
     }
 
     #[test]
@@ -1401,8 +1407,9 @@ mod tests {
                 .get("token-down")
                 .copied()
                 .expect("token cooldown"),
-            now + chrono::Duration::seconds(INVALID_AMOUNT_REJECT_PAUSE_SECS)
+            now + chrono::Duration::seconds(HARD_TOKEN_REJECT_PAUSE_SECS)
         );
+        assert!(strategy.balance_exhausted_until.is_none());
 
         strategy.token_reject_until.clear();
         strategy.feed_time = Some(now);
@@ -1428,11 +1435,36 @@ mod tests {
                 .get("token-down")
                 .copied()
                 .expect("token cooldown"),
-            now + chrono::Duration::seconds(BALANCE_REJECT_PAUSE_SECS)
+            now + chrono::Duration::seconds(HARD_TOKEN_REJECT_PAUSE_SECS)
+        );
+        assert!(strategy.balance_exhausted_until.is_none());
+    }
+
+    #[test]
+    fn buy_balance_reject_uses_short_account_pause() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        let intent = rejected_buy_intent("token-up", now);
+
+        strategy.feed_time = Some(now);
+        strategy.on_reject(
+            &intent,
+            "not enough balance: available balance is lower than order size",
+        );
+
+        assert_eq!(
+            strategy
+                .token_reject_until
+                .get("token-up")
+                .copied()
+                .expect("token cooldown"),
+            now + chrono::Duration::seconds(HARD_TOKEN_REJECT_PAUSE_SECS)
         );
         assert_eq!(
             strategy.balance_exhausted_until.expect("balance pause"),
-            now + chrono::Duration::seconds(BALANCE_REJECT_PAUSE_SECS)
+            now + chrono::Duration::seconds(ACCOUNT_BALANCE_REJECT_PAUSE_SECS)
         );
     }
 
