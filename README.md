@@ -266,6 +266,8 @@ sqlx migrate run
 | `POLYMARKET_API_SECRET` | Yes | Polymarket CLOB API secret |
 | `POLYMARKET_PASSPHRASE` | Yes | Polymarket CLOB passphrase |
 | `POLYMARKET_FUNDER` | No | Proxy/Magic wallet address |
+| `RELAYER_API_KEY` | No | Polymarket Relayer API key for gasless account operations |
+| `RELAYER_API_KEY_ADDRESS` | No | Address that owns the relayer key |
 | `DATABASE_URL` | Yes | PostgreSQL connection string (overrides config) |
 | `ANTHROPIC_API_KEY` | No | Required for `agent` and AI-powered commands |
 | `ANTHROPIC_BASE_URL` | No | Optional Anthropic-compatible base URL (examples: MiniMax `https://api.minimaxi.com/anthropic` or `https://api.minimax.io/anthropic`) |
@@ -394,36 +396,19 @@ ploy analyze --event <event_id>                # Analyze multi-outcome market
 ploy paper --symbols BTCUSDT,ETHUSDT           # Paper mode using Binance underlyings (signals only, no PM orders)
 ```
 
-Live momentum mode now supports automatic post-settlement claims (redeem winning positions) when keys are configured:
+Post-settlement claiming is not handled by an in-process Ploy claimer daemon on
+the current workspace path. Use Polymarket account auto-claim for normal
+settlement, and keep only the official Relayer API credentials in the runtime
+secret store for gasless account operations:
 
 ```bash
-export CLAIMER_DAEMON_ENABLED=true             # explicit opt-in; default false in live mode
-export CLAIMER_CHECK_INTERVAL_SECS=300         # optional; defaults to 5 minutes
-export CLAIMER_MIN_CLAIM_SIZE=1                # optional (USDC)
-export CLAIMER_MAX_CLAIMS_PER_CYCLE=3          # optional hard cap per scan
-export CLAIMER_MAX_PAYOUT_PER_CYCLE_USDC=50    # optional hard cap per scan
-export CLAIMER_IGNORE_CONDITION_IDS=0xabc,0xdef # optional ignore list (prefix match)
-export CLAIMER_ALLOW_PRICE_FALLBACK=false      # safer default; only claim when API marks redeemable
-export POLYGON_RPC_URL=https://polygon-rpc.com # optional RPC override
+export RELAYER_API_KEY=xxx
+export RELAYER_API_KEY_ADDRESS=0x...
 ```
 
-Recommended for gasless redeem via Polymarket Builder Relayer:
-
-```bash
-# Official Rust relayer client path is enabled by default
-cargo run -- momentum --live
-
-export CLAIMER_RELAYER_ENABLED=true
-export POLY_BUILDER_API_KEY=xxx
-export POLY_BUILDER_SECRET=base64_secret
-export POLY_BUILDER_PASSPHRASE=xxx
-
-# Keep false in production to avoid falling back to direct on-chain redeem.
-# If true, fallback path requires native MATIC gas.
-export CLAIMER_RELAYER_FALLBACK_ONCHAIN=false
-```
-
-If relayer credentials are incomplete, claimer will warn and require native MATIC for direct on-chain fallback.
+Do not reintroduce `CLAIMER_*` or `POLY_BUILDER_*` env vars unless a new
+account-ops capability is added and verified. The retired `ploy-claimer` crate
+and live-runner daemon path must remain out of the default runtime.
 
 Example: split 100u capital into crypto/sports 50/50 and hard-stop each domain at 45u daily loss:
 
