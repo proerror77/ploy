@@ -72,3 +72,7 @@ required-features = ["polars-export"]
 [[example]]
 name = "event_ml_architecture"
 path = "examples/event_ml_architecture.rs"
+
+[[example]]
+name = "event_ml_walk_forward"
+path = "examples/event_ml_walk_forward.rs"

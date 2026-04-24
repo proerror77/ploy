@@ -8382,3 +8382,28 @@ Checklist:
 
 Review:
 - 2026-04-24: Added `event_ml` as a pure Rust architecture contract for the event-root ML foundation. The contract defines canonical phases, supervised/DL/RL/dry-run lanes, required artifacts, stop rules, and lane-specific readiness gates. DL and RL remain gated lanes: DL requires stable walk-forward evidence plus enough multi-day history and a no-future-row state contract; RL requires decision-time-only state, explicit action space, binary payout reward parity, quote/latency assumptions, and bankroll accounting before environment training. Added `event_ml_architecture`, a no-Polars example that writes `event_ml_architecture.json`, `event_ml_architecture.md`, and `event_ml_gate_matrix.json` for agents and reviewers before new model-family work starts.
+
+## Event ML Walk-Forward Gate
+
+Goal: add the executable-price walk-forward gate that blocks DL/RL until multiple workflow windows produce OOS accounting evidence.
+
+File ownership:
+- `crates/ploy-research/src/event_ml/walk_forward.rs`
+- `crates/ploy-research/src/event_ml/mod.rs`
+- `crates/ploy-research/src/lib.rs`
+- `crates/ploy-research/examples/event_ml_walk_forward.rs`
+- `crates/ploy-research/examples/event_ml_workflow.rs`
+- `crates/ploy-research/Cargo.toml`
+- `docs/runbooks/event-ml-automl-workflow.md`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Add a pure Rust walk-forward report builder that consumes completed workflow run artifacts.
+- [x] Add a cargo-run example that writes `walk_forward_report.json` and `walk_forward_report.md`.
+- [x] Aggregate test PnL, ROI, average entry, trade count, validation/test agreement, and window-level drawdown.
+- [x] Mark single-window evidence as `blocked` for DL/RL instead of treating it as ready.
+- [x] Wire the gate into `event_ml_workflow` after bounded hyperparameter search.
+- [x] Update runbook and skill guidance.
+
+Review:
+- 2026-04-24: Added `event_ml_walk_forward` plus `event_ml::walk_forward` to consume `workflow_report.json`, `hyperparameter/hyperparameter_search.json`, and the selected candidate's `baseline_metrics.json`. The report aggregates OOS test trades, PnL, ROI, weighted average entry, validation/test direction agreement, and window-level drawdown. The workflow runner now includes `walk_forward` after hyperparameter search and records readiness as `ready` or `blocked`; a single run is expected to be blocked by the `min_walk_forward_windows` gate, preserving the DL/RL deferral boundary.
