@@ -1,3 +1,33 @@
+# Live Order Duplicate Suppression (2026-04-25)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/engine.rs`
+  - Owner: live dust-remainder retry guard in reconciliation.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: in-flight/reject cooldown duplicate-intent gates.
+
+## Tasks
+
+- [x] Confirm the repeated live order pattern from Tango `strategy_runtime_orders`.
+- [x] Add a runtime dust/min-notional guard before retrying live FAK remainders.
+- [x] Add ThreeLayer rejection cooldowns for balance exhaustion, no-liquidity, and invalid-amount rejects.
+- [x] Add focused regression tests for duplicate suppression and dust handling.
+- [x] Run focused Rust tests and diff checks.
+
+## Review
+
+- 2026-04-25: Tango live records showed repeated `not enough balance / allowance`,
+  `no orders found to match with FAK order`, and dust `invalid amounts` attempts
+  for the same token/intention after live FAK acknowledgements or rejects.
+- 2026-04-25: Runtime now stops retrying sub-1-share or sub-1U live remainders,
+  and ThreeLayer now gates duplicate live intents while a token has an active
+  order or a recent venue rejection cooldown.
+- 2026-04-25: Verification passed:
+  `rtk cargo test -p ploy-strategy-bundles --lib -- --nocapture`,
+  `rustfmt --edition 2021 --check crates/ploy-strategy-bundles/src/engine.rs crates/ploy-strategy-bundles/src/strategies/three_layer.rs`,
+  and `git diff --check`.
+
 # Polymarket V1 Contract Config Follow-up (2026-04-25)
 
 ## Files
