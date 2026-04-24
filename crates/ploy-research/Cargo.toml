@@ -76,3 +76,7 @@ path = "examples/event_ml_architecture.rs"
 [[example]]
 name = "event_ml_walk_forward"
 path = "examples/event_ml_walk_forward.rs"
+
+[[example]]
+name = "event_ml_rolling_workflow"
+path = "examples/event_ml_rolling_workflow.rs"
