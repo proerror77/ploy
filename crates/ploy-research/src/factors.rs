@@ -1782,10 +1782,73 @@ pub fn export_observations_parquet(
 
 #[cfg(test)]
 mod tests {
-    use super::{FactorObservation, LabelField, attach_future_pm_labels, pearson_ic, spearman_ic};
+    use super::{
+        FactorObservation, LabelField, attach_future_pm_labels,
+        build_task_grain_derived_artifacts_for_event_ids, pearson_ic, spearman_ic,
+    };
     use chrono::Utc;
     #[cfg(feature = "db")]
     use serde_json::json;
+
+    fn test_factor_observation(
+        event_id: &str,
+        symbol: &str,
+        tick_ts_secs: i64,
+        settlement_up: f64,
+        future_up_ask_change_30s: Option<f64>,
+    ) -> FactorObservation {
+        FactorObservation {
+            event_id: event_id.into(),
+            symbol: symbol.into(),
+            tick_ts: chrono::DateTime::from_timestamp(tick_ts_secs, 0)
+                .unwrap()
+                .with_timezone(&Utc),
+            time_remaining_secs: 60,
+            signed_distance_to_beat: 0.0,
+            abs_distance_to_beat: 0.0,
+            drift_10s: 0.0,
+            drift_30s: 0.0,
+            flip_age_secs: 0.0,
+            post_flip_drift: 0.0,
+            sigma_horizon: 1.0,
+            fair_prob_up: 0.5,
+            fair_prob_up_clean: 0.5,
+            prob_disagreement: 0.0,
+            implied_sigma_horizon: 0.2,
+            vol_gap: 0.0,
+            distance_over_sigma: 0.0,
+            model_prob_up: 0.5,
+            model_edge_up: 0.0,
+            reward_risk_up: 1.0,
+            reward_risk_down: 1.0,
+            obi: 0.0,
+            spread_bps: 0.0,
+            microprice_offset_bps: 0.0,
+            bid_depth_near: 1.0,
+            ask_depth_near: 1.0,
+            depth_ratio: 1.0,
+            depth_imbalance: 0.0,
+            depth_far_ratio: 1.0,
+            depth_acceleration: 0.0,
+            obi_10: 0.0,
+            pm_up_bid: 0.49,
+            pm_up_ask: 0.50,
+            pm_up_bid_size: 1.0,
+            pm_up_ask_size: 1.0,
+            pm_down_bid: 0.49,
+            pm_down_ask: 0.50,
+            pm_down_bid_size: 1.0,
+            pm_down_ask_size: 1.0,
+            pm_lag_secs: 0.0,
+            settlement_up,
+            future_up_ask_change_30s,
+            future_up_ask_change_60s: None,
+            cum_obi_delta_5m: 0.0,
+            cum_depth_delta_5m: 0.0,
+            cum_mprice_drift_5m: 0.0,
+            cum_trade_imbalance_5m: 0.0,
+        }
+    }
 
     #[test]
     fn pearson_ic_detects_positive_relationship() {
@@ -1985,6 +2048,70 @@ mod tests {
             .find(|row| row.tick_ts == ts0)
             .expect("first row");
         assert_eq!(first.future_up_ask_change_30s, Some(0.15));
+    }
+
+    #[test]
+    fn derived_artifacts_filter_to_selected_events_and_preserve_task_grains() {
+        let rows = vec![
+            test_factor_observation("evt-b", "ETHUSDT", 20, 0.0, Some(-0.20)),
+            test_factor_observation("evt-a", "BTCUSDT", 30, 1.0, None),
+            test_factor_observation("evt-c", "SOLUSDT", 15, 1.0, Some(0.30)),
+            test_factor_observation("evt-a", "BTCUSDT", 10, 1.0, Some(0.10)),
+            test_factor_observation("evt-b", "BTCUSDT", 20, 0.0, None),
+        ];
+
+        let artifacts = build_task_grain_derived_artifacts_for_event_ids(&rows, ["evt-b", "evt-a"]);
+
+        assert_eq!(artifacts.event_ids, vec!["evt-a", "evt-b"]);
+        assert_eq!(artifacts.observation_row_count(), 4);
+        assert_eq!(artifacts.event_summary_count(), 2);
+        assert_eq!(artifacts.repricing_label_row_count_30s(), 2);
+        assert_eq!(artifacts.settlement_label_event_count(), 2);
+
+        let observation_keys: Vec<(&str, i64, &str)> = artifacts
+            .observation_rows
+            .iter()
+            .map(|row| {
+                (
+                    row.event_id.as_str(),
+                    row.tick_ts.timestamp(),
+                    row.symbol.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            observation_keys,
+            vec![
+                ("evt-a", 10, "BTCUSDT"),
+                ("evt-a", 30, "BTCUSDT"),
+                ("evt-b", 20, "BTCUSDT"),
+                ("evt-b", 20, "ETHUSDT"),
+            ]
+        );
+
+        let summary_keys: Vec<(&str, i64, &str)> = artifacts
+            .event_summaries
+            .iter()
+            .map(|row| {
+                (
+                    row.event_id.as_str(),
+                    row.last_tick_ts.timestamp(),
+                    row.symbol.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary_keys,
+            vec![("evt-a", 30, "BTCUSDT"), ("evt-b", 20, "BTCUSDT")]
+        );
+        assert_eq!(
+            artifacts
+                .event_summaries
+                .iter()
+                .map(|row| row.settlement_up)
+                .collect::<Vec<_>>(),
+            vec![1.0, 0.0]
+        );
     }
 
     #[cfg(feature = "db")]

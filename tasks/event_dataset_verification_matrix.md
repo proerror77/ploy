@@ -105,7 +105,8 @@ Comparison base for slice-scoped guards: `e5d39f89^`
      - `cargo test -p ploy-research dataset:: --lib -- --nocapture`
      - Output summary: `7 passed; 0 failed`
    - Supporting task-grain evidence:
-     - `cargo test -p ploy-research --lib` also passed `factors::tests::derived_artifacts_filter_to_selected_events_and_preserve_task_grains`
+     - `cargo test -p ploy-research derived_artifacts_filter_to_selected_events_and_preserve_task_grains --lib -- --nocapture`
+     - Output summary: `1 passed; 0 failed`
 5. `PASS artifact evidence`
    - Chronology contract lives in `crates/ploy-research/src/dataset/chronology.rs`
    - Split contract + hard-failure policy live in `crates/ploy-research/src/dataset/split.rs`

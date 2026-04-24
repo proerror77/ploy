@@ -31,6 +31,8 @@ failures=()
 allowed_paths=(
   "crates/ploy-research/"
   "scripts/check_event_dataset_scope.sh"
+  "scripts/check_event_dataset_verification_lane.sh"
+  "tasks/event_dataset_verification_matrix.md"
 )
 protected_prefixes=(
   "apps/ploy-backtest/"
