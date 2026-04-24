@@ -8228,3 +8228,22 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - [ ] Run `cargo build --timings` and record baseline HTML report for top-10 slowest crates.
 - [ ] Add `[profile.ci]` (inherits dev, debug=false, incremental=false) and update CI workflows to use it.
 - [ ] Audit `workspace.dependencies` feature sets — verify sqlx/tokio/polars features are minimal common set.
+
+## Event Dataset Supervised Baseline
+
+Goal: turn the landed event-root Parquet dataset into the first reproducible supervised-learning baseline without leaking event IDs across train/val/test.
+
+File ownership:
+- `crates/ploy-research/examples/event_dataset_baseline.rs`
+- `crates/ploy-research/Cargo.toml`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Add a Polars-gated Rust example that reads `event_manifest.json` plus split Parquet artifacts.
+- [x] Select one observation row per event near a configured entry time, defaulting to 60 seconds before settlement.
+- [x] Fit a fixed-hyperparameter logistic baseline using train-only normalization; no validation-set tuning in this slice.
+- [x] Report train/val/test sample counts, accuracy, logloss, Brier score, AUC, and simple binary-option PnL with entry-price accounting.
+- [x] Verify locally on the copied 150-event remote dataset and run focused example tests.
+
+Review:
+- 2026-04-24: Added `event_dataset_baseline` as a `polars-export` example. It validates the dataset manifest, reads observation split Parquet files, selects at most one tradable row per event near `--entry-secs` (default `60`, default tolerance `30`), checks split event disjointness, trains a fixed logistic baseline with train-only normalization, and reports OOS metrics plus simple entry-price PnL. Local verification used the copied remote dataset `/tmp/ploy-event-root-5sym-150-20260424`; current data coverage near the 60-second entry is low (`38/7/9` selected train/val/test events with default tolerance), so this is a pipeline baseline, not model-quality evidence yet.
