@@ -8302,3 +8302,20 @@ Checklist:
 
 Review:
 - 2026-04-24: Added `AutomlFactorAttribution` plus `register_automl_attributions()` so automatic attribution outputs can be inserted into `FactorRegistry` as `automl:<feature>` entries. Added `event_factor_attribution` to select the same `60s±30s` event-held-out samples as the supervised baseline, rank features by validation AUC lift, preserve train direction in the registry, and print train/val/test AUC lift plus correlation diagnostics. On `/tmp/ploy-event-root-5sym-150-20260424`, the top registry entries included `fair_prob_up`, `fair_prob_up_clean`, `reward_risk_down`, negative `model_edge_up`, and negative `reward_risk_up`; sample counts remained `95/19/23`. This is factor prioritization only, not a live-edge claim or hyperparameter search.
+
+## Event ML AutoML Workflow
+
+Goal: turn the agreed research sequence into a reusable workflow so future ML, DL, RL, and hyperparameter-search work starts from the same gates instead of ad-hoc trial order.
+
+File ownership:
+- `docs/runbooks/event-ml-automl-workflow.md`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Document the canonical order from event-root coverage through AutoML factor attribution, fixed baselines, hyperparameter search, walk-forward backtest, and DL/RL gates.
+- [x] Include exact Rust example commands for coverage diagnostics, attribution, and supervised baseline runs.
+- [x] Add stop gates that prevent moving to hyperparameter search, DL, or RL before event-held-out data and executable-price accounting are credible.
+- [x] Record the distinction between AutoML factor governance and hyperparameter tuning.
+
+Review:
+- 2026-04-24: Added `docs/runbooks/event-ml-automl-workflow.md` as the reusable event ML research workflow. The workflow codifies the sequence `coverage diagnostics -> AutoML-style factor attribution -> governed feature set -> fixed baseline -> model family selection -> hyperparameter search -> walk-forward/executable-price backtest -> DL/RL gates -> dry-run handoff`. It explicitly treats AutoML as factor discovery/governance and hyperparameter search as later model-family tuning, with event-held-out splits, train-only normalization, one-event-one-trade accounting, and stop gates against validation overfit.
