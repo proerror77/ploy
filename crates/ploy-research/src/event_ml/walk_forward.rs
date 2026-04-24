@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -142,6 +143,7 @@ pub fn build_walk_forward_report(config: &WalkForwardConfig) -> Result<WalkForwa
     if config.min_windows == 0 {
         bail!("min_windows must be positive");
     }
+    ensure_unique_run_dirs(&config.run_dirs)?;
 
     let mut windows = Vec::new();
     let mut selection_rules = Vec::new();
@@ -434,6 +436,17 @@ fn readiness_gates(
             stop_if_missing: "collect more event-root windows before DL/RL".to_string(),
         },
         WalkForwardGate {
+            id: "unique_dataset_windows".to_string(),
+            passed: unique_dataset_count(windows) >= config.min_windows,
+            evidence: format!(
+                "unique_datasets={} min_required={}",
+                unique_dataset_count(windows),
+                config.min_windows
+            ),
+            stop_if_missing:
+                "run distinct rolling event-root datasets instead of reusing one split".to_string(),
+        },
+        WalkForwardGate {
             id: "test_trades_present".to_string(),
             passed: windows
                 .iter()
@@ -472,6 +485,25 @@ fn readiness_gates(
                 .to_string(),
         },
     ]
+}
+
+fn ensure_unique_run_dirs(run_dirs: &[PathBuf]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for run_dir in run_dirs {
+        let key = run_dir.display().to_string();
+        if !seen.insert(key.clone()) {
+            bail!("duplicate walk-forward run dir: {key}");
+        }
+    }
+    Ok(())
+}
+
+fn unique_dataset_count(windows: &[WalkForwardWindow]) -> usize {
+    windows
+        .iter()
+        .map(|window| window.dataset.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 #[cfg(test)]
@@ -553,5 +585,42 @@ mod tests {
         assert!(gates
             .iter()
             .any(|gate| gate.id == "min_walk_forward_windows" && !gate.passed));
+    }
+
+    #[test]
+    fn duplicate_dataset_windows_do_not_satisfy_rolling_gate() {
+        let config = WalkForwardConfig {
+            run_dirs: vec![
+                PathBuf::from("/tmp/run-1"),
+                PathBuf::from("/tmp/run-2"),
+                PathBuf::from("/tmp/run-3"),
+            ],
+            min_windows: 3,
+            min_test_trades_per_window: 1,
+        };
+        let mut windows = vec![
+            window(1, 1.0, 1.0, 5, 0.4),
+            window(2, 1.0, 1.0, 5, 0.4),
+            window(3, 1.0, 1.0, 5, 0.4),
+        ];
+        for window in &mut windows {
+            window.dataset = "same-dataset".to_string();
+        }
+        let aggregate = aggregate_windows(&windows);
+        let gates = readiness_gates(&config, &windows, &aggregate);
+
+        assert!(gates
+            .iter()
+            .any(|gate| gate.id == "unique_dataset_windows" && !gate.passed));
+    }
+
+    #[test]
+    fn duplicate_run_dirs_are_rejected() {
+        let error =
+            ensure_unique_run_dirs(&[PathBuf::from("/tmp/run-1"), PathBuf::from("/tmp/run-1")])
+                .unwrap_err()
+                .to_string();
+
+        assert!(error.contains("duplicate walk-forward run dir"));
     }
 }

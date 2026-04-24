@@ -66,6 +66,7 @@ struct Config {
     search_epochs: usize,
     walk_forward_min_windows: usize,
     walk_forward_min_test_trades: usize,
+    walk_forward_extra_run_dirs: Vec<PathBuf>,
     phases: Vec<Phase>,
     dry_run: bool,
 }
@@ -206,6 +207,7 @@ fn parse_config(args: &[String]) -> Result<Config> {
     let search_epochs = parse_usize_flag(args, "--search-epochs", 500)?;
     let walk_forward_min_windows = parse_usize_flag(args, "--walk-forward-min-windows", 3)?;
     let walk_forward_min_test_trades = parse_usize_flag(args, "--walk-forward-min-test-trades", 1)?;
+    let walk_forward_extra_run_dirs = parse_walk_forward_extra_run_dirs(args);
 
     if entry_secs < 0 {
         bail!("--entry-secs must be non-negative");
@@ -246,6 +248,7 @@ fn parse_config(args: &[String]) -> Result<Config> {
         search_epochs,
         walk_forward_min_windows,
         walk_forward_min_test_trades,
+        walk_forward_extra_run_dirs,
         phases,
         dry_run,
     })
@@ -255,6 +258,13 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2)
         .find(|pair| pair[0] == flag)
         .map(|pair| pair[1].clone())
+}
+
+fn flag_values(args: &[String], flag: &str) -> Vec<String> {
+    args.windows(2)
+        .filter(|pair| pair[0] == flag)
+        .map(|pair| pair[1].clone())
+        .collect()
 }
 
 fn has_flag(args: &[String], flag: &str) -> bool {
@@ -307,6 +317,22 @@ fn parse_f64_list_flag(args: &[String], flag: &str, default: &[f64]) -> Result<V
         .map(|value| value.unwrap_or_else(|| default.to_vec()))
 }
 
+fn parse_walk_forward_extra_run_dirs(args: &[String]) -> Vec<PathBuf> {
+    let mut run_dirs = flag_values(args, "--walk-forward-run-dir")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    if let Some(raw) = flag_value(args, "--walk-forward-run-dirs") {
+        run_dirs.extend(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(PathBuf::from),
+        );
+    }
+    run_dirs
+}
+
 fn parse_phases(raw: &str) -> Result<Vec<Phase>> {
     let mut phases = Vec::new();
     for item in raw
@@ -355,6 +381,10 @@ fn print_workflow_header(config: &Config, state: &WorkflowState) {
         config.tolerance_secs,
         format_phases(&config.phases),
         config.dry_run
+    );
+    eprintln!(
+        "walk_forward_extra_run_dirs={}",
+        config.walk_forward_extra_run_dirs.len()
     );
     eprintln!(
         "order=coverage -> AutoML factor attribution -> governed feature set -> fixed baseline -> bounded hyperparameter search -> walk-forward/backtest -> DL/RL gates"
@@ -432,7 +462,7 @@ fn run_walk_forward_phase(config: &Config, state: &mut WorkflowState) -> Result<
         write_workflow_report(config, state)?;
     }
     let output_dir = state.run_dir.join("walk_forward");
-    let args = vec![
+    let mut args = vec![
         "--run-dir".to_string(),
         state.run_dir.display().to_string(),
         "--output-dir".to_string(),
@@ -442,6 +472,10 @@ fn run_walk_forward_phase(config: &Config, state: &mut WorkflowState) -> Result<
         "--min-test-trades-per-window".to_string(),
         config.walk_forward_min_test_trades.to_string(),
     ];
+    for run_dir in &config.walk_forward_extra_run_dirs {
+        args.push("--run-dir".to_string());
+        args.push(run_dir.display().to_string());
+    }
     let command = shell_command_without_features("event_ml_walk_forward", &args);
     eprintln!();
     eprintln!(
@@ -970,6 +1004,11 @@ Options:
                            Minimum windows required before DL/RL readiness. Default: 3.
   --walk-forward-min-test-trades <n>
                            Minimum test trades per walk-forward window. Default: 1.
+  --walk-forward-run-dir <dir>
+                           Add a completed workflow run dir to the walk-forward gate.
+                           Repeat for rolling windows from prior datasets.
+  --walk-forward-run-dirs <csv>
+                           Add comma-separated completed workflow run dirs.
   --dry-run                Print commands without running phases.
 "
     );
@@ -1010,6 +1049,10 @@ mod tests {
             "/tmp/events",
             "--phases",
             "coverage,automl,fixed-baseline,search,walk-forward",
+            "--walk-forward-run-dir",
+            "/tmp/run-a",
+            "--walk-forward-run-dirs",
+            "/tmp/run-b,/tmp/run-c",
             "--dry-run",
         ]))
         .unwrap();
@@ -1025,6 +1068,14 @@ mod tests {
             ]
         );
         assert!(config.dry_run);
+        assert_eq!(
+            config.walk_forward_extra_run_dirs,
+            vec![
+                PathBuf::from("/tmp/run-a"),
+                PathBuf::from("/tmp/run-b"),
+                PathBuf::from("/tmp/run-c")
+            ]
+        );
     }
 
     #[test]

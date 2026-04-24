@@ -117,6 +117,23 @@ Use `--dry-run` to print the commands without running them, or
 `--phases coverage,attribution,baseline,hyperparameter,walk-forward` to run a
 subset in canonical order.
 
+When you already have completed workflow runs from prior rolling event-root
+datasets, pass them into the current run so the final gate evaluates multiple
+windows:
+
+```bash
+rtk cargo run -p ploy-research --example event_ml_workflow \
+  --features polars-export -- \
+  --dataset /tmp/ploy-event-root-window-3 \
+  --output-dir /tmp/ploy-event-ml-window-3 \
+  --walk-forward-run-dir /tmp/ploy-event-ml-window-1 \
+  --walk-forward-run-dir /tmp/ploy-event-ml-window-2
+```
+
+The current run is always included as one window. The extra run directories
+must point at distinct completed workflow runs; repeated run dirs or repeated
+dataset windows are treated as blocked evidence, not rolling validation.
+
 ## Phase 1 - Coverage Diagnostics
 
 Goal: decide whether the dataset is ready for ML, or whether feature coverage
@@ -392,6 +409,7 @@ The gate writes:
 Default readiness gates:
 
 - at least `3` workflow windows
+- at least `3` distinct event-root dataset windows
 - each window has at least one test trade
 - executable entry accounting is present: cost, ROI, and average entry
 - window-level drawdown is reported

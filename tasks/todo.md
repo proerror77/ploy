@@ -8407,3 +8407,23 @@ Checklist:
 
 Review:
 - 2026-04-24: Added `event_ml_walk_forward` plus `event_ml::walk_forward` to consume `workflow_report.json`, `hyperparameter/hyperparameter_search.json`, and the selected candidate's `baseline_metrics.json`. The report aggregates OOS test trades, PnL, ROI, weighted average entry, validation/test direction agreement, and window-level drawdown. The workflow runner now includes `walk_forward` after hyperparameter search and records readiness as `ready` or `blocked`; a single run is expected to be blocked by the `min_walk_forward_windows` gate, preserving the DL/RL deferral boundary.
+
+## Event ML Rolling Window Inputs
+
+Goal: let the workflow runner evaluate current and prior completed rolling windows together without letting duplicate runs fake DL/RL readiness.
+
+File ownership:
+- `crates/ploy-research/examples/event_ml_workflow.rs`
+- `crates/ploy-research/src/event_ml/walk_forward.rs`
+- `docs/runbooks/event-ml-automl-workflow.md`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Add `--walk-forward-run-dir` and `--walk-forward-run-dirs` to `event_ml_workflow`.
+- [x] Include the current workflow run plus supplied prior runs in the walk-forward gate.
+- [x] Reject duplicate run dirs in the walk-forward builder.
+- [x] Block readiness when the windows do not come from distinct event-root datasets.
+- [x] Update runbook and skill guidance so agents do not duplicate a single run to pass the gate.
+
+Review:
+- 2026-04-24: Extended `event_ml_workflow` so a current workflow run can aggregate prior completed rolling windows with `--walk-forward-run-dir` or `--walk-forward-run-dirs`. The walk-forward builder now rejects duplicate run dirs and adds `unique_dataset_windows`, requiring distinct event-root dataset windows before DL/RL readiness can pass. This makes the next data job explicit: produce separate event-root workflow runs, then aggregate them through the gate.
