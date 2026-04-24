@@ -20,6 +20,9 @@ use rust_decimal_macros::dec;
 
 use crate::traits::{Executor, Feed, MarketUpdate, Recorder, StrategyDecision, StrategyLogic};
 
+const MIN_LIVE_RETRY_SHARES: Decimal = dec!(1.00);
+const MIN_LIVE_RETRY_NOTIONAL: Decimal = dec!(1.00);
+
 /// Operating mode for the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
@@ -79,6 +82,16 @@ fn retry_suffix(intent_id: &str) -> Option<(&str, u8)> {
     }
 
     Some((root, suffix.parse().ok()?))
+}
+
+fn live_retry_remainder_is_dust(remaining_qty: Decimal, limit_price: Option<Decimal>) -> bool {
+    if remaining_qty < MIN_LIVE_RETRY_SHARES {
+        return true;
+    }
+
+    limit_price
+        .map(|price| remaining_qty * price < MIN_LIVE_RETRY_NOTIONAL)
+        .unwrap_or(false)
 }
 
 /// Unified strategy runtime.
@@ -477,6 +490,36 @@ where
             pending.reconciles_without_fill += 1;
             if pending.reconciles_without_fill < policy.reconcile_cycles_before_retry {
                 pending_live_orders.insert(order_id, pending);
+                continue;
+            }
+
+            if live_retry_remainder_is_dust(remaining_qty, order.limit_price) {
+                let terminal_reason = format!(
+                    "live order remainder below retry threshold; remaining_qty={remaining_qty}"
+                );
+                self.trading.cancel_order(&order_id);
+                let terminal_report = crate::traits::ExecutionReport {
+                    order_id: order
+                        .venue_order_id
+                        .clone()
+                        .unwrap_or_else(|| order_id.clone()),
+                    fill: None,
+                    rejected: true,
+                    rejection_reason: Some(terminal_reason.clone()),
+                    slippage: None,
+                    market_impact: None,
+                };
+                self.recorder
+                    .record_order(
+                        &strategy_name,
+                        &pending.intent,
+                        None,
+                        &terminal_report,
+                        &order_id,
+                    )
+                    .await;
+                self.strategy.on_reject(&pending.intent, &terminal_reason);
+                warn!(order_id = %order_id, reason = %terminal_reason, "Live order terminal dust");
                 continue;
             }
 
@@ -1248,6 +1291,80 @@ mod tests {
             1
         );
         assert_eq!(snapshot.fills.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn live_unfilled_ack_does_not_retry_dust_remainder() {
+        let now = Utc::now();
+        let signal = SignalRecord {
+            strategy: "pm_5m_directional".into(),
+            event_id: Some("evt1".into()),
+            token_id: Some("token-up".into()),
+            intent_id: Some("pm5d_BTCUSDT_UP_dust".into()),
+            symbol: "BTCUSDT".into(),
+            direction: "UP".into(),
+            p_hat: 0.71,
+            edge: 0.08,
+            entry_price: dec!(0.30),
+            decision: "enter".into(),
+            ts: now,
+        };
+        let intent = TradingIntent {
+            intent_id: "pm5d_BTCUSDT_UP_dust".into(),
+            deployment_id: String::new(),
+            market_id: "evt1".into(),
+            token_id: "token-up".into(),
+            side: TradeSide::Buy,
+            quantity: dec!(0.02),
+            limit_price: Some(dec!(0.30)),
+            purpose: IntentPurpose::Entry,
+            created_at: now,
+        };
+        let submissions = Arc::new(Mutex::new(Vec::new()));
+        let executor = AcknowledgingExecutor {
+            policy: ExecutionPolicy {
+                max_slippage_bps: Decimal::ZERO,
+                max_attempts: 2,
+                reconcile_cycles_before_retry: 1,
+            },
+            submissions: submissions.clone(),
+        };
+        let recorder = Box::new(CollectingRecorder {
+            signals: Arc::new(Mutex::new(Vec::new())),
+            orders: Arc::new(Mutex::new(Vec::new())),
+            fills: Arc::new(Mutex::new(Vec::new())),
+        });
+        let strategy = RecordingStrategy {
+            emitted: false,
+            signal,
+            intent,
+        };
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let config = RuntimeConfig {
+            mode: RuntimeMode::Live,
+            throttle_hz: None,
+            max_updates: None,
+            skip_settlement_exits: true,
+        };
+
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
+        let _ = runtime.run().await;
+        let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+
+        assert_eq!(
+            submissions.lock().unwrap().as_slice(),
+            ["pm5d_BTCUSDT_UP_dust"]
+        );
+        assert_eq!(snapshot.orders.len(), 1);
+        assert_eq!(snapshot.orders[0].state, ploy_trading::OrderState::Canceled);
+        assert_eq!(snapshot.fills.len(), 0);
+        assert_eq!(snapshot.risk.active_orders, 0);
     }
 
     #[tokio::test]

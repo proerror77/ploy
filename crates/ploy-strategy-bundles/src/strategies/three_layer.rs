@@ -4,11 +4,11 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use super::common::event::EventWindow;
 use super::common::fees::crypto_fee_cost;
@@ -73,6 +73,9 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
 const DRIFT_WINDOW_SECS: f64 = 30.0;
 const VOL_WINDOW_SECS: f64 = 120.0;
 const MIN_VOL_POINTS: usize = 5;
+const BALANCE_REJECT_PAUSE_SECS: i64 = 5 * 60;
+const INVALID_AMOUNT_REJECT_PAUSE_SECS: i64 = 5 * 60;
+const NO_LIQUIDITY_REJECT_PAUSE_SECS: i64 = 30;
 
 struct DriftTracker {
     history: VecDeque<(DateTime<Utc>, f64)>,
@@ -257,7 +260,11 @@ fn norm_cdf(x: f64) -> f64 {
     let d = 0.3989422804014327 * (-x * x / 2.0).exp();
     let p =
         d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-    if x >= 0.0 { 1.0 - p } else { p }
+    if x >= 0.0 {
+        1.0 - p
+    } else {
+        p
+    }
 }
 
 /// Layer 1: Direction score (0.0 – 1.0).
@@ -373,6 +380,8 @@ pub struct ThreeLayerStrategy {
     token_event: HashMap<Arc<str>, Arc<str>>,
     events: HashMap<Arc<str>, Vec<EventWindow>>,
     last_entry: HashMap<Arc<str>, DateTime<Utc>>,
+    token_reject_until: HashMap<Arc<str>, DateTime<Utc>>,
+    balance_exhausted_until: Option<DateTime<Utc>>,
     daily_trade_count: u32,
     daily_trade_date: Option<chrono::NaiveDate>,
     feed_time: Option<DateTime<Utc>>,
@@ -391,6 +400,8 @@ impl ThreeLayerStrategy {
             token_event: HashMap::new(),
             events: HashMap::new(),
             last_entry: HashMap::new(),
+            token_reject_until: HashMap::new(),
+            balance_exhausted_until: None,
             daily_trade_count: 0,
             daily_trade_date: None,
             feed_time: None,
@@ -440,6 +451,31 @@ impl ThreeLayerStrategy {
         (self.config.stake_usd / entry_price).round_dp(6)
     }
 
+    fn reject_cooldown_secs(&self) -> i64 {
+        self.config.cooldown_secs.max(1) as i64
+    }
+
+    fn balance_pause_active(&self, now: DateTime<Utc>) -> bool {
+        self.balance_exhausted_until
+            .is_some_and(|until| now < until)
+    }
+
+    fn token_reject_active(&self, token_id: &str, now: DateTime<Utc>) -> bool {
+        self.token_reject_until
+            .get(token_id)
+            .is_some_and(|until| now < *until)
+    }
+
+    fn active_order_exists(orders: &OrderLedger, token_id: &str) -> bool {
+        orders.orders().any(|o| {
+            o.token_id == token_id
+                && matches!(
+                    o.state,
+                    OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
+                )
+        })
+    }
+
     fn try_entry(
         &mut self,
         symbol: &str,
@@ -447,6 +483,10 @@ impl ThreeLayerStrategy {
         positions: &PositionLedger,
         orders: &OrderLedger,
     ) -> Option<StrategyDecision> {
+        if self.balance_pause_active(now) {
+            debug!(symbol, "Balance exhausted pause active, skipping entry");
+            return None;
+        }
         if self.daily_trade_count >= self.config.max_daily_trades {
             return None;
         }
@@ -513,15 +553,10 @@ impl ThreeLayerStrategy {
             if positions.net_qty(token_id) > Decimal::ZERO {
                 continue;
             }
-            if orders.orders().any(|o| {
-                o.token_id.as_str() == &**token_id
-                    && matches!(
-                        o.state,
-                        OrderState::Pending
-                            | OrderState::Acknowledged
-                            | OrderState::PartiallyFilled
-                    )
-            }) {
+            if Self::active_order_exists(orders, token_id) {
+                continue;
+            }
+            if self.token_reject_active(token_id, now) {
                 continue;
             }
 
@@ -637,13 +672,23 @@ impl ThreeLayerStrategy {
         now: DateTime<Utc>,
         spot: Option<f64>,
         positions: &PositionLedger,
+        orders: &OrderLedger,
     ) -> Vec<StrategyDecision> {
         let mut decisions = Vec::new();
+        if self.balance_pause_active(now) {
+            return decisions;
+        }
 
         for event in self.events.get(symbol).into_iter().flatten() {
             for (token_id, is_up) in [(&event.up_token, true), (&event.down_token, false)] {
                 let qty = positions.net_qty(token_id);
                 if qty <= Decimal::ZERO {
+                    continue;
+                }
+                if Self::active_order_exists(orders, token_id) {
+                    continue;
+                }
+                if self.token_reject_active(token_id, now) {
                     continue;
                 }
 
@@ -707,43 +752,71 @@ impl ThreeLayerStrategy {
         up_won: bool,
         now: DateTime<Utc>,
         positions: &PositionLedger,
+        orders: &OrderLedger,
     ) -> Vec<StrategyDecision> {
         let mut exits = Vec::new();
+        if self.balance_pause_active(now) {
+            return exits;
+        }
 
         if positions.net_qty(&event.up_token) > Decimal::ZERO {
-            exits.push(StrategyDecision::Exit(TradingIntent {
-                intent_id: format!("tl_settle_{}_up", event.event_id),
-                deployment_id: String::new(),
-                market_id: event.event_id.to_string(),
-                token_id: event.up_token.to_string(),
-                side: TradeSide::Sell,
-                quantity: positions.net_qty(&event.up_token),
-                limit_price: Some(if up_won {
-                    Decimal::new(1, 0)
-                } else {
-                    Decimal::ZERO
-                }),
-                purpose: IntentPurpose::Exit,
-                created_at: now,
-            }));
+            if Self::active_order_exists(orders, &event.up_token) {
+                debug!(
+                    token_id = %event.up_token,
+                    "Active order exists, skipping settlement exit"
+                );
+            } else if self.token_reject_active(&event.up_token, now) {
+                debug!(
+                    token_id = %event.up_token,
+                    "Token reject cooldown active, skipping settlement exit"
+                );
+            } else {
+                exits.push(StrategyDecision::Exit(TradingIntent {
+                    intent_id: format!("tl_settle_{}_up", event.event_id),
+                    deployment_id: String::new(),
+                    market_id: event.event_id.to_string(),
+                    token_id: event.up_token.to_string(),
+                    side: TradeSide::Sell,
+                    quantity: positions.net_qty(&event.up_token),
+                    limit_price: Some(if up_won {
+                        Decimal::new(1, 0)
+                    } else {
+                        Decimal::ZERO
+                    }),
+                    purpose: IntentPurpose::Exit,
+                    created_at: now,
+                }));
+            }
         }
 
         if positions.net_qty(&event.down_token) > Decimal::ZERO {
-            exits.push(StrategyDecision::Exit(TradingIntent {
-                intent_id: format!("tl_settle_{}_down", event.event_id),
-                deployment_id: String::new(),
-                market_id: event.event_id.to_string(),
-                token_id: event.down_token.to_string(),
-                side: TradeSide::Sell,
-                quantity: positions.net_qty(&event.down_token),
-                limit_price: Some(if up_won {
-                    Decimal::ZERO
-                } else {
-                    Decimal::new(1, 0)
-                }),
-                purpose: IntentPurpose::Exit,
-                created_at: now,
-            }));
+            if Self::active_order_exists(orders, &event.down_token) {
+                debug!(
+                    token_id = %event.down_token,
+                    "Active order exists, skipping settlement exit"
+                );
+            } else if self.token_reject_active(&event.down_token, now) {
+                debug!(
+                    token_id = %event.down_token,
+                    "Token reject cooldown active, skipping settlement exit"
+                );
+            } else {
+                exits.push(StrategyDecision::Exit(TradingIntent {
+                    intent_id: format!("tl_settle_{}_down", event.event_id),
+                    deployment_id: String::new(),
+                    market_id: event.event_id.to_string(),
+                    token_id: event.down_token.to_string(),
+                    side: TradeSide::Sell,
+                    quantity: positions.net_qty(&event.down_token),
+                    limit_price: Some(if up_won {
+                        Decimal::ZERO
+                    } else {
+                        Decimal::new(1, 0)
+                    }),
+                    purpose: IntentPurpose::Exit,
+                    created_at: now,
+                }));
+            }
         }
 
         exits
@@ -803,7 +876,7 @@ impl StrategyLogic for ThreeLayerStrategy {
                 // Check exits first
                 let spot_opt = Some(price_f64);
                 let mut decisions =
-                    self.exit_decisions_for_symbol(symbol, *ts, spot_opt, positions);
+                    self.exit_decisions_for_symbol(symbol, *ts, spot_opt, positions, orders);
 
                 // Cooldown check before entry
                 if let Some(last) = self.last_entry.get(symbol) {
@@ -825,6 +898,7 @@ impl StrategyLogic for ThreeLayerStrategy {
                 ts,
                 ..
             } => {
+                self.feed_time = Some(*ts);
                 self.quotes.insert(
                     token_id.clone(),
                     QuoteState {
@@ -838,7 +912,7 @@ impl StrategyLogic for ThreeLayerStrategy {
                     return Vec::new();
                 };
                 let spot = self.spot.get(&symbol).and_then(|p| p.to_f64());
-                self.exit_decisions_for_symbol(&symbol, *ts, spot, positions)
+                self.exit_decisions_for_symbol(&symbol, *ts, spot, positions, orders)
             }
 
             MarketUpdate::AggTrade {
@@ -983,9 +1057,9 @@ impl StrategyLogic for ThreeLayerStrategy {
                             continue;
                         }
                         if let Some(up_won) = self.resolve_up_won(event, *resolved_up_won) {
-                            decisions.extend(
-                                self.build_settlement_exits(event, up_won, *end_time, positions),
-                            );
+                            decisions.extend(self.build_settlement_exits(
+                                event, up_won, *end_time, positions, orders,
+                            ));
                             resolved_events.push(event.event_id.clone());
                         }
                     }
@@ -1013,6 +1087,49 @@ impl StrategyLogic for ThreeLayerStrategy {
         }
     }
 
+    fn on_reject(&mut self, intent: &TradingIntent, reason: &str) {
+        let now = self.now();
+        let reason_lc = reason.to_ascii_lowercase();
+        let balance_or_allowance =
+            reason_lc.contains("not enough balance") || reason_lc.contains("allowance");
+        let invalid_amount =
+            reason_lc.contains("invalid amounts") || reason_lc.contains("below retry threshold");
+        let no_liquidity = reason_lc.contains("no orders found") || reason_lc.contains("no match");
+        let cooldown_secs = if balance_or_allowance {
+            BALANCE_REJECT_PAUSE_SECS
+        } else if invalid_amount {
+            INVALID_AMOUNT_REJECT_PAUSE_SECS
+        } else if no_liquidity {
+            self.reject_cooldown_secs()
+                .max(NO_LIQUIDITY_REJECT_PAUSE_SECS)
+        } else {
+            self.reject_cooldown_secs()
+        };
+        let until = now + chrono::Duration::seconds(cooldown_secs);
+
+        if balance_or_allowance {
+            self.balance_exhausted_until = Some(until);
+        }
+
+        self.token_reject_until
+            .insert(Arc::<str>::from(intent.token_id.as_str()), until);
+
+        if intent.side == TradeSide::Buy {
+            if let Some(symbol) = self.token_symbol.get(intent.token_id.as_str()).cloned() {
+                self.last_entry.insert(symbol, now);
+            }
+        }
+
+        warn!(
+            strategy = self.name(),
+            intent_id = %intent.intent_id,
+            token_id = %intent.token_id,
+            reason = %reason,
+            cooldown_secs,
+            "Order rejected; suppressing duplicate live intents during cooldown"
+        );
+    }
+
     fn name(&self) -> &str {
         "three_layer"
     }
@@ -1021,6 +1138,7 @@ impl StrategyLogic for ThreeLayerStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn regime_from_secs_boundaries() {
@@ -1092,6 +1210,121 @@ mod tests {
             max_entry_price: 0.85,
             min_entry_score: 0.30,
         }
+    }
+
+    fn discover_test_event(strategy: &mut ThreeLayerStrategy, now: DateTime<Utc>) {
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+        strategy.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: Arc::from("evt1"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("token-up"),
+                down_token: Arc::from("token-down"),
+                end_time: now + chrono::Duration::seconds(300),
+                window_secs: 300,
+                price_to_beat: Some(dec!(100000)),
+                resolved_up_won: None,
+            },
+            &positions,
+            &orders,
+        );
+    }
+
+    fn position_with_token(token_id: &str, now: DateTime<Utc>) -> PositionLedger {
+        let mut positions = PositionLedger::default();
+        positions.apply_fill(&FillRecord {
+            fill_id: format!("fill-{token_id}"),
+            order_id: format!("order-{token_id}"),
+            token_id: token_id.to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(10),
+            price: dec!(0.45),
+            fee: Decimal::ZERO,
+            timestamp: now,
+        });
+        positions
+    }
+
+    fn active_order_for_token(token_id: &str, now: DateTime<Utc>) -> OrderLedger {
+        let mut orders = OrderLedger::default();
+        let intent = TradingIntent {
+            intent_id: format!("intent-{token_id}"),
+            deployment_id: "three-layer-live".into(),
+            market_id: "evt1".into(),
+            token_id: token_id.to_string(),
+            side: TradeSide::Sell,
+            quantity: dec!(10),
+            limit_price: Some(dec!(0.72)),
+            purpose: IntentPurpose::Exit,
+            created_at: now,
+        };
+        orders.insert_from_intent(format!("order-{token_id}"), &intent);
+        orders.acknowledge(&format!("order-{token_id}"), format!("venue-{token_id}"));
+        orders
+    }
+
+    fn take_profit_quote(token_id: &str, ts: DateTime<Utc>) -> MarketUpdate {
+        MarketUpdate::Quote {
+            token_id: Arc::from(token_id),
+            bid: Some(dec!(0.72)),
+            ask: Some(dec!(0.75)),
+            bid_size: Some(dec!(100)),
+            ask_size: Some(dec!(100)),
+            ts,
+        }
+    }
+
+    #[test]
+    fn reject_cooldown_suppresses_duplicate_live_exit() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        discover_test_event(&mut strategy, now);
+        let positions = position_with_token("token-down", now);
+        let orders = OrderLedger::default();
+
+        let first_decisions =
+            strategy.on_update(&take_profit_quote("token-down", now), &positions, &orders);
+        let exit_intent = match first_decisions.as_slice() {
+            [StrategyDecision::Exit(intent)] => intent.clone(),
+            other => panic!("expected one take-profit exit, got {other:?}"),
+        };
+
+        strategy.on_reject(
+            &exit_intent,
+            "not enough balance / allowance: available balance is lower than order size",
+        );
+        let next_decisions = strategy.on_update(
+            &take_profit_quote("token-down", now + chrono::Duration::seconds(1)),
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            next_decisions.is_empty(),
+            "rejected token should not emit duplicate live exit"
+        );
+    }
+
+    #[test]
+    fn active_order_suppresses_duplicate_live_exit() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        discover_test_event(&mut strategy, now);
+        let positions = position_with_token("token-down", now);
+        let orders = active_order_for_token("token-down", now);
+
+        let decisions =
+            strategy.on_update(&take_profit_quote("token-down", now), &positions, &orders);
+
+        assert!(
+            decisions.is_empty(),
+            "active order should gate duplicate live exit"
+        );
     }
 
     #[test]
