@@ -58,3 +58,8 @@ required-features = ["polars-export"]
 name = "event_dataset_coverage"
 path = "examples/event_dataset_coverage.rs"
 required-features = ["polars-export"]
+
+[[example]]
+name = "event_factor_attribution"
+path = "examples/event_factor_attribution.rs"
+required-features = ["polars-export"]

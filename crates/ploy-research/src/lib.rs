@@ -50,7 +50,10 @@ pub fn crate_marker() -> &'static str {
 // `factors_new::Regime` alias.
 pub use attribution::{factor_pnl, regime_pnl, AttributionReport, RegimePnl};
 pub use backtest::{run_binary_backtest, BacktestMetrics, SimulatedFill};
-pub use factors_new::{scan_into_registry, FactorMeta, FactorRegistry};
+pub use factors_new::{
+    register_automl_attributions, scan_into_registry, AutomlFactorAttribution, FactorMeta,
+    FactorRegistry,
+};
 #[cfg(feature = "rl")]
 pub use model::rl::{BinaryEventEnv, DqnAgent, Environment, ReplayBuffer};
 #[cfg(any(feature = "ml", feature = "rl"))]

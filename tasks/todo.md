@@ -8281,3 +8281,24 @@ Checklist:
 
 Review:
 - 2026-04-24: At `60s±30s`, tradable label/price rows exist for `95/105`, `19/22`, and `23/23` train/val/test events. The old 26-feature default selected only `38/7/9` because most dropped rows were missing only `depth_acceleration` at the selected entry row. The baseline default now uses the 25-feature tradable set excluding `depth_acceleration`; explicit `--features` can still include it for controlled experiments. On `/tmp/ploy-event-root-5sym-150-20260424`, the 25-feature run selected `95/19/23`; test metrics were accuracy `73.9%`, AUC `0.6818`, and simple PnL `-0.2367`. This is more suitable as a pipeline baseline but still not enough for DL/RL claims.
+
+## Event Factor Attribution Registry
+
+Goal: add an AutoML-style automatic factor attribution path that ranks event-root features and registers the results in the factor registry without introducing hyperparameter search or new dependencies.
+
+File ownership:
+- `crates/ploy-research/src/factors_new/automl.rs`
+- `crates/ploy-research/src/factors_new/mod.rs`
+- `crates/ploy-research/src/lib.rs`
+- `crates/ploy-research/examples/event_factor_attribution.rs`
+- `crates/ploy-research/Cargo.toml`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Add a factor-registry adapter for AutoML-style attribution outputs.
+- [x] Add a Polars-gated event-root attribution example using the event-held-out train/val/test split artifacts.
+- [x] Rank factors by validation AUC lift, preserve train-derived direction, and include test/stability diagnostics.
+- [x] Verify locally on the copied 150-event remote dataset and run focused example/library tests.
+
+Review:
+- 2026-04-24: Added `AutomlFactorAttribution` plus `register_automl_attributions()` so automatic attribution outputs can be inserted into `FactorRegistry` as `automl:<feature>` entries. Added `event_factor_attribution` to select the same `60s±30s` event-held-out samples as the supervised baseline, rank features by validation AUC lift, preserve train direction in the registry, and print train/val/test AUC lift plus correlation diagnostics. On `/tmp/ploy-event-root-5sym-150-20260424`, the top registry entries included `fair_prob_up`, `fair_prob_up_clean`, `reward_risk_down`, negative `model_edge_up`, and negative `reward_risk_up`; sample counts remained `95/19/23`. This is factor prioritization only, not a live-edge claim or hyperparameter search.
