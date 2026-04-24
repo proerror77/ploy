@@ -201,7 +201,18 @@ fn process_alive(pid: u32) -> bool {
 
 #[cfg(target_os = "linux")]
 fn process_alive_impl(pid: u32) -> bool {
-    PathBuf::from(format!("/proc/{pid}")).exists()
+    let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+    if !proc_dir.exists() {
+        return false;
+    }
+
+    // Zombies still have a /proc entry until their parent reaps them, but they
+    // are no longer running and should not keep inherited-pid shutdown paths
+    // alive.
+    let Ok(stat) = fs::read_to_string(proc_dir.join("stat")) else {
+        return false;
+    };
+    stat.split_whitespace().nth(2) != Some("Z")
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -273,8 +284,8 @@ fn kill_pid(pid: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::DeploymentRuntime;
     use super::process_alive;
+    use super::DeploymentRuntime;
     use crate::protocol::WorkerLaunchSpec;
     #[cfg(target_os = "linux")]
     use crate::protocol::WorkerStatus;
@@ -343,6 +354,22 @@ mod tests {
     #[test]
     fn process_alive_detects_current_process_on_unix() {
         assert!(process_alive(std::process::id()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_alive_treats_zombie_as_not_running() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn child");
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        assert!(!process_alive(child.id()));
+
+        let _ = child.wait();
     }
 
     #[cfg(target_os = "linux")]
