@@ -846,7 +846,7 @@ evidence.
 - [x] Share Deribit feature loading through `ploy-research` instead of duplicating it in each example.
 - [x] Add a DB-backed `factor_walk_forward_v2` entrypoint for ploy-ci/Tango research runs.
 - [x] Add a workflow-dispatch lane for factor walk-forward artifacts.
-- [ ] Verify locally, then run a ploy-ci smoke against 2026-04-21..25.
+- [x] Verify locally, then run a ploy-ci smoke against 2026-04-21..25.
 
 ## Review
 
@@ -855,14 +855,20 @@ evidence.
   `rtk cargo check -p ploy-research --features db --example factor_review_v2`,
   `rtk cargo check -p ploy-research --no-default-features`, workflow YAML parse,
   `rustfmt --edition 2024 --check` on touched Rust files, and `git diff --check`.
-- 2026-04-26: ploy-ci smoke is pending after branch push because it requires the new workflow
-  on the remote branch.
+- 2026-04-26: ploy-ci smoke was run manually because a new workflow cannot be dispatched
+  from the default branch until it is merged.
 - 2026-04-26: First ploy-ci manual smoke completed, but exposed that `future_exit_*` diagnostic
   labels were being ranked as candidate factors. This is a look-ahead path for walk-forward
   selection, so candidate selection now excludes those descriptors while single-window review
   still reports them as exit diagnostics.
 - 2026-04-26: Walk-forward windows are no longer truncated before aggregation. `top_n` now limits
   output display only, so aggregate metrics are not biased by post-test top performer selection.
+- 2026-04-26: ploy-ci manual smoke on `c0b872c` completed with exit code 0 against Tango DB
+  (`2026-04-21..2026-04-25`, six symbols, 30s sampling, stake 15). Evidence:
+  `updates=3,273,137`, `lob snapshot rows=85,854`, `deribit_snapshots=28,642`,
+  `factor_observations=104,495`, `v2_rows=208,990`, `executable_pnl_rows=12,049`,
+  entry fill rate `5.77%`, rejection rate `94.23%`, swap stayed `0B`, and no
+  `future_exit_*` factor appeared in the walk-forward output.
 
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 
