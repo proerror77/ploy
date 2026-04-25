@@ -185,8 +185,9 @@ pub struct ResearchLobSnapshot {
 #[derive(Clone, Default)]
 struct EventState {
     event_id: String,
-    symbol: String,
+    start_time: Option<DateTime<Utc>>,
     end_time: Option<DateTime<Utc>>,
+    window_secs: Option<i64>,
     price_to_beat: Option<f64>,
     resolved_up_won: Option<bool>,
     up_token: String,
@@ -626,6 +627,7 @@ pub fn build_factor_observations_with_lob(
     let mut vol: HashMap<String, VolatilityState> = HashMap::new();
     let mut retbuf: HashMap<String, ReturnBuffer> = HashMap::new();
     let mut events: HashMap<String, EventState> = HashMap::new();
+    let mut events_by_symbol: HashMap<String, Vec<String>> = HashMap::new();
     let mut quotes: HashMap<String, (DateTime<Utc>, f64, f64, f64, f64)> = HashMap::new();
     let mut lob: HashMap<String, LobState> = HashMap::new();
     let mut lob_by_symbol: HashMap<String, Vec<&ResearchLobSnapshot>> = HashMap::new();
@@ -651,21 +653,29 @@ pub fn build_factor_observations_with_lob(
                 up_token,
                 down_token,
                 end_time,
+                window_secs,
                 price_to_beat,
                 resolved_up_won,
                 ..
             } => {
+                let event_id = event_id.to_string();
+                let symbol = symbol.to_string();
+                let resolved_up_won = final_outcomes.get(&*event_id).copied().or(*resolved_up_won);
+                events_by_symbol
+                    .entry(symbol.clone())
+                    .or_default()
+                    .push(event_id.clone());
                 events.insert(
-                    event_id.to_string(),
+                    event_id.clone(),
                     EventState {
-                        event_id: event_id.to_string(),
-                        symbol: symbol.to_string(),
+                        event_id,
+                        start_time: Some(
+                            *end_time - chrono::Duration::seconds(*window_secs as i64),
+                        ),
                         end_time: Some(*end_time),
+                        window_secs: Some(*window_secs as i64),
                         price_to_beat: price_to_beat.and_then(|value| value.to_f64()),
-                        resolved_up_won: final_outcomes
-                            .get(&**event_id)
-                            .copied()
-                            .or(*resolved_up_won),
+                        resolved_up_won,
                         up_token: up_token.to_string(),
                         down_token: down_token.to_string(),
                     },
@@ -843,10 +853,13 @@ pub fn build_factor_observations_with_lob(
                     }
                 }
 
-                for event in events.values() {
-                    if event.symbol != sym {
+                let Some(event_ids) = events_by_symbol.get(&sym) else {
+                    continue;
+                };
+                for event_id in event_ids {
+                    let Some(event) = events.get(event_id) else {
                         continue;
-                    }
+                    };
                     let Some(price_to_beat) = event.price_to_beat else {
                         continue;
                     };
@@ -859,6 +872,15 @@ pub fn build_factor_observations_with_lob(
                     let time_remaining = (end_time - *ts).num_seconds();
                     if time_remaining < 0 {
                         continue;
+                    }
+                    if let Some(window_secs) = event.window_secs {
+                        if time_remaining > window_secs {
+                            continue;
+                        }
+                    } else if let Some(start_time) = event.start_time {
+                        if *ts < start_time {
+                            continue;
+                        }
                     }
 
                     let (up_bid, up_ask, up_lag, up_bid_sz, up_ask_sz) = quotes
@@ -1808,12 +1830,15 @@ pub fn export_observations_parquet(
 #[cfg(test)]
 mod tests {
     use super::{
-        FactorObservation, LabelField, attach_future_pm_labels,
+        FactorObservation, LabelField, attach_future_pm_labels, build_factor_observations_with_lob,
         build_task_grain_derived_artifacts_for_event_ids, pearson_ic, spearman_ic,
     };
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
+    use ploy_market_contracts::MarketUpdate;
+    use rust_decimal::Decimal;
     #[cfg(feature = "db")]
     use serde_json::json;
+    use std::sync::Arc;
 
     fn test_factor_observation(
         event_id: &str,
@@ -1873,6 +1898,61 @@ mod tests {
             cum_mprice_drift_5m: 0.0,
             cum_trade_imbalance_5m: 0.0,
         }
+    }
+
+    #[test]
+    fn factor_observations_only_include_active_event_window() {
+        let start = Utc.timestamp_opt(700, 0).unwrap();
+        let end = Utc.timestamp_opt(1000, 0).unwrap();
+        let updates = vec![
+            MarketUpdate::EventDiscovered {
+                event_id: Arc::from("evt"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("up"),
+                down_token: Arc::from("down"),
+                end_time: end,
+                window_secs: 300,
+                price_to_beat: Some(Decimal::new(100, 0)),
+                resolved_up_won: None,
+            },
+            MarketUpdate::Quote {
+                token_id: Arc::from("up"),
+                bid: Some(Decimal::new(45, 2)),
+                ask: Some(Decimal::new(46, 2)),
+                bid_size: Some(Decimal::new(100, 0)),
+                ask_size: Some(Decimal::new(100, 0)),
+                ts: Utc.timestamp_opt(649, 0).unwrap(),
+            },
+            MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: Decimal::new(100, 0),
+                ts: Utc.timestamp_opt(650, 0).unwrap(),
+            },
+            MarketUpdate::Quote {
+                token_id: Arc::from("up"),
+                bid: Some(Decimal::new(45, 2)),
+                ask: Some(Decimal::new(46, 2)),
+                bid_size: Some(Decimal::new(100, 0)),
+                ask_size: Some(Decimal::new(100, 0)),
+                ts: Utc.timestamp_opt(709, 0).unwrap(),
+            },
+            MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: Decimal::new(100, 0),
+                ts: Utc.timestamp_opt(710, 0).unwrap(),
+            },
+            MarketUpdate::EventExpired {
+                event_id: Arc::from("evt"),
+                end_time: end,
+                resolved_up_won: Some(true),
+            },
+        ];
+
+        let rows = build_factor_observations_with_lob(&updates, &[], 30);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tick_ts, Utc.timestamp_opt(710, 0).unwrap());
+        assert!(rows[0].tick_ts >= start);
     }
 
     #[test]
