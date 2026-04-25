@@ -58,6 +58,7 @@ pub struct RuntimeResult {
     pub pnl: PnlSnapshot,
     pub risk: RiskSnapshot,
     pub elapsed_secs: f64,
+    pub strategy_diagnostics: Vec<(String, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -406,6 +407,7 @@ where
             pnl: snapshot.pnl,
             risk: snapshot.risk,
             elapsed_secs: elapsed,
+            strategy_diagnostics: self.strategy.diagnostics(),
         };
 
         info!(

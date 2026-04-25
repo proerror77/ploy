@@ -37,6 +37,7 @@
 //! When using --data-dir without explicit --val-start/--val-end, the last 40%
 //! of the train range is used as validation (train covers first 60%).
 
+use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
 use ploy_feed_loaders::{
@@ -44,15 +45,15 @@ use ploy_feed_loaders::{
 };
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    DirectionalStrategy, Feed, FullConfig, HistoricalFeed, MarketUpdate, NullRecorder,
-    ReversalStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
-    StrategyLogic, StrategyRuntime, ThreeLayerStrategy,
+    DirectionalStrategy, ExecutionReport, Feed, FullConfig, HistoricalFeed, MarketUpdate, Recorder,
+    ReversalStrategy, RuntimeConfig, RuntimeMode, SignalRecord, SimulatedExecutor,
+    SimulatedExecutorConfig, StrategyLogic, StrategyRuntime, ThreeLayerStrategy,
 };
-use ploy_trading::TradeSide;
+use ploy_trading::{FillRecord, TradeSide, TradingIntent};
 use rust_decimal_macros::dec;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const DEFAULT_THREE_LAYER_CONFIG: &str = "config/strategies/02-pm5d-threelayer.unified.toml";
 
@@ -661,6 +662,120 @@ struct BacktestOutcome {
     sharpe: f64,
     updates_processed: u64,
     elapsed_secs: f64,
+    intents_submitted: u64,
+    fills_recorded: u64,
+    diagnostics: BacktestDiagnostics,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BacktestDiagnostics {
+    signals_recorded: u64,
+    orders_recorded: u64,
+    orders_rejected: u64,
+    fills_recorded_by_recorder: u64,
+    rejection_reasons: BTreeMap<String, u64>,
+    strategy: Vec<(String, u64)>,
+}
+
+impl BacktestDiagnostics {
+    fn summary(&self) -> String {
+        let mut parts = vec![
+            format!("signals={}", self.signals_recorded),
+            format!("orders={}", self.orders_recorded),
+            format!("order_rejects={}", self.orders_rejected),
+            format!("recorder_fills={}", self.fills_recorded_by_recorder),
+        ];
+
+        let strategy = top_counts(&self.strategy, 8);
+        if !strategy.is_empty() {
+            parts.push(format!("strategy=[{}]", strategy));
+        }
+
+        let rejection_reasons = self
+            .rejection_reasons
+            .iter()
+            .map(|(key, value)| (key.clone(), *value))
+            .collect::<Vec<_>>();
+        let rejections = top_counts(&rejection_reasons, 4);
+        if !rejections.is_empty() {
+            parts.push(format!("rejects=[{}]", rejections));
+        }
+
+        parts.join(" ")
+    }
+}
+
+fn top_counts(counts: &[(String, u64)], limit: usize) -> String {
+    let mut ordered = counts
+        .iter()
+        .filter(|(_, value)| *value > 0)
+        .cloned()
+        .collect::<Vec<_>>();
+    ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ordered
+        .into_iter()
+        .take(limit)
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn print_backtest_diagnostics(label: &str, outcome: &BacktestOutcome) {
+    if outcome.trade_count > 0 && outcome.diagnostics.orders_rejected == 0 {
+        return;
+    }
+
+    eprintln!(
+        "      diag {label}: runtime_intents={} runtime_fills={} {}",
+        outcome.intents_submitted,
+        outcome.fills_recorded,
+        outcome.diagnostics.summary(),
+    );
+}
+
+struct DiagnosticRecorder {
+    diagnostics: Arc<Mutex<BacktestDiagnostics>>,
+}
+
+#[async_trait]
+impl Recorder for DiagnosticRecorder {
+    async fn record_signal(&mut self, _signal: &SignalRecord) {
+        self.diagnostics.lock().unwrap().signals_recorded += 1;
+    }
+
+    async fn record_order(
+        &mut self,
+        _strategy: &str,
+        _intent: &TradingIntent,
+        _signal: Option<&SignalRecord>,
+        report: &ExecutionReport,
+        _order_id: &str,
+    ) {
+        let mut diagnostics = self.diagnostics.lock().unwrap();
+        diagnostics.orders_recorded += 1;
+        if report.rejected {
+            diagnostics.orders_rejected += 1;
+            let reason = report
+                .rejection_reason
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_string();
+            *diagnostics.rejection_reasons.entry(reason).or_insert(0) += 1;
+        }
+    }
+
+    async fn record_fill(
+        &mut self,
+        _strategy: &str,
+        _intent: &TradingIntent,
+        _signal: Option<&SignalRecord>,
+        _fill: &FillRecord,
+        _report: &ExecutionReport,
+    ) {
+        self.diagnostics.lock().unwrap().fills_recorded_by_recorder += 1;
+    }
+
+    async fn flush(&mut self) {}
 }
 
 fn source_hint(source: &ReplaySource) -> String {
@@ -686,7 +801,10 @@ fn run_backtest(
     let strategy = build_strategy(strategy_variant, config);
     let feed = source.open()?;
     let executor = SimulatedExecutor::new(executor_config.clone());
-    let recorder = Box::new(NullRecorder);
+    let diagnostics = Arc::new(Mutex::new(BacktestDiagnostics::default()));
+    let recorder = Box::new(DiagnosticRecorder {
+        diagnostics: Arc::clone(&diagnostics),
+    });
     let runtime_config = RuntimeConfig {
         mode: RuntimeMode::Backtest,
         throttle_hz: None,
@@ -696,6 +814,8 @@ fn run_backtest(
 
     let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
     let result = rt.block_on(runtime.run());
+    let mut diagnostics = diagnostics.lock().unwrap().clone();
+    diagnostics.strategy = result.strategy_diagnostics.clone();
 
     let snapshot = runtime.trading().snapshot(&BTreeMap::new());
     let cashflow = snapshot.fill_cashflow_summary();
@@ -750,6 +870,9 @@ fn run_backtest(
         sharpe,
         updates_processed: result.updates_processed,
         elapsed_secs: result.elapsed_secs,
+        intents_submitted: result.intents_submitted,
+        fills_recorded: result.fills_recorded,
+        diagnostics,
     })
 }
 
@@ -1220,6 +1343,7 @@ fn main() {
                     params.max_ask_for_reversal,
                     params.max_pm_lag_secs,
                 );
+                print_backtest_diagnostics(&format!("trial {}", trial.id()), &outcome);
 
                 Ok::<f64, Error>(score)
             })
@@ -1295,6 +1419,7 @@ fn main() {
         eprintln!("Val Trades:  {}", val_outcome.trade_count);
         eprintln!("Val Updates: {}", val_outcome.updates_processed);
         eprintln!("Val Elapsed: {:.1}s", val_outcome.elapsed_secs);
+        print_backtest_diagnostics("validation", &val_outcome);
 
         eprintln!("\n=== Config Snippet ===");
         eprintln!(
@@ -1455,6 +1580,7 @@ fn main() {
                     params.stop_distance_pct,
                     params.cooldown_secs,
                 );
+                print_backtest_diagnostics(&format!("trial {}", trial.id()), &outcome);
 
                 Ok::<f64, Error>(score)
             })
@@ -1497,6 +1623,7 @@ fn main() {
         eprintln!("Val Trades:  {}", val_outcome.trade_count);
         eprintln!("Val Updates: {}", val_outcome.updates_processed);
         eprintln!("Val Elapsed: {:.1}s", val_outcome.elapsed_secs);
+        print_backtest_diagnostics("validation", &val_outcome);
 
         eprintln!("\n=== Best Config (TOML) ===");
         eprintln!("# Paste into [strategy] section of your config file");
@@ -1610,6 +1737,7 @@ fn main() {
                     max_entry,
                     cooldown
                 );
+                print_backtest_diagnostics(&format!("trial {}", trial.id()), &outcome);
 
                 Ok(outcome.sharpe)
             })
@@ -1656,6 +1784,7 @@ fn main() {
         eprintln!("Val Trades:  {}", val_outcome.trade_count);
         eprintln!("Val Updates: {}", val_outcome.updates_processed);
         eprintln!("Val Elapsed: {:.1}s", val_outcome.elapsed_secs);
+        print_backtest_diagnostics("validation", &val_outcome);
 
         eprintln!("\n=== Config Snippet ===");
         eprintln!("min_probability = {best_min_prob:.4}");
