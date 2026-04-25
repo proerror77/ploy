@@ -79,6 +79,7 @@ async fn run_backtest(
         require_official_settlement: config.backtest_data.require_official_settlement,
         include_l2: true,
         lob_sample_secs: 30,
+        spot_sample_secs: 1,
     };
 
     let updates =

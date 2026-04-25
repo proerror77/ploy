@@ -122,7 +122,15 @@ pub async fn load_from_database_with_options(
 
     // 1. Spot prices — load earlier for EWMA warm-up
     let spot_from = from - Duration::minutes(WARMUP_MINUTES);
-    load_spot_prices(pool, symbols, spot_from, to, &mut updates).await?;
+    load_spot_prices(
+        pool,
+        symbols,
+        spot_from,
+        to,
+        options.spot_sample_secs,
+        &mut updates,
+    )
+    .await?;
 
     // 1b. Aggregated trade flow — additive signal stream for roadmap work.
     load_agg_trades(pool, symbols, from, to, &mut updates).await?;
@@ -141,17 +149,39 @@ pub async fn load_from_database_with_options(
     )
     .await?;
 
-    // 3. Polymarket quotes — try clob_quote_ticks first, fall back to orderbook snapshots
+    // 3. Polymarket quotes — prefer persisted top-of-book rows when they carry
+    // executable size. Older `ploy_runner_live` quote rows are price-only; those
+    // are useful for rough direction studies but must not drive executable PnL.
     let token_map = load_token_mappings(pool, symbols, from, to).await?;
     let quote_count_before = updates.len();
-    load_pm_quotes(pool, &token_map, from, to, &mut updates).await?;
-    let quote_count_after = updates.len();
+    let quote_stats = load_pm_quotes(pool, &token_map, from, to, &mut updates).await?;
 
-    // If clob_quote_ticks had no real data, try extracting mid prices from
-    // clob_orderbook_snapshots (which stores full bid/ask depth as JSONB).
-    if quote_count_after == quote_count_before {
-        info!("No real quotes in clob_quote_ticks, falling back to orderbook snapshots");
-        load_pm_quotes_from_snapshots(pool, &token_map, from, to, &mut updates).await?;
+    // If clob_quote_ticks has no executable size, replace those price-only
+    // rows with quotes extracted from full order-book snapshots. This preserves
+    // point-in-time prices while grounding research labels in actual CLOB depth.
+    if quote_stats.rows == 0 || quote_stats.sized_rows == 0 {
+        if quote_stats.rows == 0 {
+            info!("No real quotes in clob_quote_ticks, falling back to orderbook snapshots");
+        } else {
+            info!(
+                rows = quote_stats.rows,
+                "clob_quote_ticks rows are price-only, replacing with orderbook snapshot depth"
+            );
+        }
+        updates.truncate(quote_count_before);
+        let snapshot_stats = load_pm_quotes_from_snapshots(
+            pool,
+            &token_map,
+            from,
+            to,
+            options.lob_sample_secs,
+            &mut updates,
+        )
+        .await?;
+        if snapshot_stats.rows == 0 && quote_stats.rows > 0 {
+            info!("No usable orderbook snapshots found, restoring price-only quote rows");
+            load_pm_quotes(pool, &token_map, from, to, &mut updates).await?;
+        }
     }
 
     // 4. L2 orderbook from binance_lob_ticks.
@@ -206,28 +236,49 @@ async fn load_spot_prices(
     symbols: &[String],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+    sample_secs: u32,
     updates: &mut Vec<MarketUpdate>,
 ) -> Result<(), sqlx::Error> {
+    let sample_secs = sample_secs.max(1) as i64;
     // Try sync_records first (has bn_mid_price)
     let rows: Vec<(DateTime<Utc>, String, Decimal)> = sqlx::query_as(
         r#"
         SELECT timestamp, symbol, bn_mid_price
-        FROM sync_records
-        WHERE symbol = ANY($1)
-          AND timestamp >= $2
-          AND timestamp <= $3
+        FROM (
+            SELECT DISTINCT ON (symbol, bucket)
+                   timestamp, symbol, bn_mid_price, bucket
+            FROM (
+                SELECT
+                    timestamp,
+                    symbol,
+                    bn_mid_price,
+                    to_timestamp(
+                        floor(EXTRACT(EPOCH FROM timestamp) / $4::double precision) * $4
+                    ) AS bucket
+                FROM sync_records
+                WHERE symbol = ANY($1)
+                  AND timestamp >= $2
+                  AND timestamp <= $3
+            ) ticks
+            ORDER BY symbol, bucket, timestamp DESC
+        ) sampled
         ORDER BY timestamp
         "#,
     )
     .bind(symbols)
     .bind(from)
     .bind(to)
+    .bind(sample_secs)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
 
     if !rows.is_empty() {
-        info!(count = rows.len(), "Loaded spot prices from sync_records");
+        info!(
+            count = rows.len(),
+            sample_secs,
+            "Loaded spot prices from sync_records"
+        );
         for (ts, symbol, price) in rows {
             updates.push(MarketUpdate::SpotPrice {
                 symbol: Arc::from(symbol),
@@ -242,22 +293,38 @@ async fn load_spot_prices(
     let rows: Vec<(DateTime<Utc>, String, Decimal)> = sqlx::query_as(
         r#"
         SELECT trade_time, symbol, price
-        FROM binance_price_ticks
-        WHERE symbol = ANY($1)
-          AND trade_time >= $2
-          AND trade_time <= $3
+        FROM (
+            SELECT DISTINCT ON (symbol, bucket)
+                   trade_time, symbol, price, bucket
+            FROM (
+                SELECT
+                    trade_time,
+                    symbol,
+                    price,
+                    to_timestamp(
+                        floor(EXTRACT(EPOCH FROM trade_time) / $4::double precision) * $4
+                    ) AS bucket
+                FROM binance_price_ticks
+                WHERE symbol = ANY($1)
+                  AND trade_time >= $2
+                  AND trade_time <= $3
+            ) ticks
+            ORDER BY symbol, bucket, trade_time DESC
+        ) sampled
         ORDER BY trade_time
         "#,
     )
     .bind(symbols)
     .bind(from)
     .bind(to)
+    .bind(sample_secs)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
 
     info!(
         count = rows.len(),
+        sample_secs,
         "Loaded spot prices from binance_price_ticks"
     );
     for (ts, symbol, price) in rows {
@@ -451,6 +518,12 @@ pub async fn load_sports_state_events(
 /// Map of token_id → (symbol, is_up_token)
 type TokenMap = std::collections::HashMap<String, (String, bool)>;
 
+#[derive(Debug, Default, Clone, Copy)]
+struct PmQuoteLoadStats {
+    rows: usize,
+    sized_rows: usize,
+}
+
 async fn load_token_mappings(
     pool: &PgPool,
     symbols: &[String],
@@ -506,10 +579,10 @@ async fn load_pm_quotes(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     updates: &mut Vec<MarketUpdate>,
-) -> Result<(), sqlx::Error> {
+) -> Result<PmQuoteLoadStats, sqlx::Error> {
     let token_ids: Vec<String> = token_map.keys().cloned().collect();
     if token_ids.is_empty() {
-        return Ok(());
+        return Ok(PmQuoteLoadStats::default());
     }
     let trusted_sources: Vec<&str> = TRUSTED_PM_RESEARCH_QUOTE_SOURCES.to_vec();
 
@@ -555,11 +628,21 @@ async fn load_pm_quotes(
     .await
     .unwrap_or_default();
 
+    let sized_rows = rows
+        .iter()
+        .filter(|(_, _, _, _, bid_size, ask_size)| {
+            bid_size.is_some_and(|size| size > Decimal::ZERO)
+                || ask_size.is_some_and(|size| size > Decimal::ZERO)
+        })
+        .count();
+
     info!(
         count = rows.len(),
+        sized_rows,
         sources = ?TRUSTED_PM_RESEARCH_QUOTE_SOURCES,
         "Loaded PM quotes from clob_quote_ticks (trusted sources, filtered: bid/ask in 0.02-0.98)"
     );
+    let row_count = rows.len();
     for (ts, token_id, bid, ask, bid_size, ask_size) in rows {
         updates.push(MarketUpdate::Quote {
             token_id: Arc::from(token_id),
@@ -571,7 +654,10 @@ async fn load_pm_quotes(
         });
     }
 
-    Ok(())
+    Ok(PmQuoteLoadStats {
+        rows: row_count,
+        sized_rows,
+    })
 }
 
 /// Fallback quote loader from `clob_orderbook_snapshots`.
@@ -588,77 +674,124 @@ async fn load_pm_quotes_from_snapshots(
     token_map: &TokenMap,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+    sample_secs: u32,
     updates: &mut Vec<MarketUpdate>,
-) -> Result<(), sqlx::Error> {
+) -> Result<PmQuoteLoadStats, sqlx::Error> {
     let token_ids: Vec<String> = token_map.keys().cloned().collect();
     if token_ids.is_empty() {
-        return Ok(());
+        return Ok(PmQuoteLoadStats::default());
     }
+    let sample_secs = sample_secs.max(1) as i64;
 
-    // For UP tokens: best_bid = MAX(bids), best_ask = best_bid + 0.01 (synthetic)
-    // For DOWN tokens: best_ask = MIN(asks), best_bid = best_ask - 0.01 (synthetic)
-    // Filter: only include prices in (0.01, 0.99) — exclude the extreme placeholders
-    // at exactly 0.01 and 0.99 which represent the full-book sentinel orders.
-    let rows: Vec<(DateTime<Utc>, String, Option<Decimal>, Option<Decimal>)> = sqlx::query_as(
+    // Extract executable top-of-book directly from JSONB depth. This intentionally
+    // avoids synthetic opposite-side prices: if a snapshot has only bids or only
+    // asks, only that executable side receives size. Downsample in SQL before
+    // expanding JSONB so full-day factor reviews do not materialize every CLOB
+    // snapshot into memory.
+    let rows: Vec<(
+        DateTime<Utc>,
+        String,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<Decimal>,
+    )> = sqlx::query_as(
         r#"
-        SELECT DISTINCT ON (date_trunc('second', received_at), token_id)
-               received_at,
-               token_id,
-               -- Best bid: highest bid price strictly between 0.01 and 0.99
-               (
-                   SELECT MAX((elem->>'price')::numeric)
-                   FROM jsonb_array_elements(bids) AS elem
-                   WHERE (elem->>'price')::numeric > 0.01
-                     AND (elem->>'price')::numeric < 0.99
-               ) AS best_bid,
-               -- Best ask: lowest ask price strictly between 0.01 and 0.99
-               (
-                   SELECT MIN((elem->>'price')::numeric)
-                   FROM jsonb_array_elements(asks) AS elem
-                   WHERE (elem->>'price')::numeric > 0.01
-                     AND (elem->>'price')::numeric < 0.99
-               ) AS best_ask
-        FROM clob_orderbook_snapshots
-        WHERE received_at >= $1
-          AND received_at <= $2
-          AND token_id = ANY($3)
-        HAVING (
-            SELECT MAX((elem->>'price')::numeric)
-            FROM jsonb_array_elements(bids) AS elem
-            WHERE (elem->>'price')::numeric > 0.01
-              AND (elem->>'price')::numeric < 0.99
-        ) IS NOT NULL
-        OR (
-            SELECT MIN((elem->>'price')::numeric)
-            FROM jsonb_array_elements(asks) AS elem
-            WHERE (elem->>'price')::numeric > 0.01
-              AND (elem->>'price')::numeric < 0.99
-        ) IS NOT NULL
-        ORDER BY date_trunc('second', received_at), token_id, received_at DESC
+        WITH sampled AS (
+            SELECT DISTINCT ON (snapshot.token_id, snapshot.bucket)
+                   snapshot.received_at,
+                   snapshot.token_id,
+                   snapshot.bids,
+                   snapshot.asks
+            FROM (
+                SELECT
+                    received_at,
+                    token_id,
+                    bids,
+                    asks,
+                    to_timestamp(
+                        floor(EXTRACT(EPOCH FROM received_at) / $4::double precision) * $4
+                    ) AS bucket
+                FROM clob_orderbook_snapshots
+                WHERE received_at >= $1
+                  AND received_at <= $2
+                  AND token_id = ANY($3)
+            ) snapshot
+            ORDER BY snapshot.token_id, snapshot.bucket, snapshot.received_at DESC
+        ),
+        extracted AS (
+            SELECT snapshot.received_at,
+                   snapshot.token_id,
+                   best_bid.price AS best_bid,
+                   best_ask.price AS best_ask,
+                   best_bid.size AS bid_size,
+                   best_ask.size AS ask_size
+            FROM sampled snapshot
+            LEFT JOIN LATERAL (
+                SELECT (elem->>'price')::numeric AS price,
+                       (elem->>'size')::numeric AS size
+                FROM jsonb_array_elements(COALESCE(snapshot.bids, '[]'::jsonb)) AS elem
+                WHERE (elem->>'price')::numeric > 0.01
+                  AND (elem->>'price')::numeric < 0.99
+                  AND (elem->>'size')::numeric > 0
+                ORDER BY price DESC
+                LIMIT 1
+            ) best_bid ON true
+            LEFT JOIN LATERAL (
+                SELECT (elem->>'price')::numeric AS price,
+                       (elem->>'size')::numeric AS size
+                FROM jsonb_array_elements(COALESCE(snapshot.asks, '[]'::jsonb)) AS elem
+                WHERE (elem->>'price')::numeric > 0.01
+                  AND (elem->>'price')::numeric < 0.99
+                  AND (elem->>'size')::numeric > 0
+                ORDER BY price ASC
+                LIMIT 1
+            ) best_ask ON true
+        )
+        SELECT received_at, token_id, best_bid, best_ask, bid_size, ask_size
+        FROM extracted
+        WHERE best_bid IS NOT NULL OR best_ask IS NOT NULL
+        ORDER BY received_at
         "#,
     )
     .bind(from)
     .bind(to)
     .bind(&token_ids)
+    .bind(sample_secs)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
 
+    let sized_rows = rows
+        .iter()
+        .filter(|(_, _, _, _, bid_size, ask_size)| {
+            bid_size.is_some_and(|size| size > Decimal::ZERO)
+                || ask_size.is_some_and(|size| size > Decimal::ZERO)
+        })
+        .count();
+
     info!(
         count = rows.len(),
-        "Loaded PM quotes from clob_orderbook_snapshots (real bid/ask extracted from JSONB depth)"
+        sized_rows,
+        sample_secs,
+        "Loaded PM quotes from clob_orderbook_snapshots (real bid/ask and size extracted from JSONB depth)"
     );
-    for (ts, token_id, bid, ask) in rows {
+    let row_count = rows.len();
+    for (ts, token_id, bid, ask, bid_size, ask_size) in rows {
         updates.push(MarketUpdate::Quote {
             token_id: Arc::from(token_id),
             bid,
             ask,
-            bid_size: None,
-            ask_size: None,
+            bid_size,
+            ask_size,
             ts,
         });
     }
-    Ok(())
+
+    Ok(PmQuoteLoadStats {
+        rows: row_count,
+        sized_rows,
+    })
 }
 
 // ── L2 Data ──────────────────────────────────────────────

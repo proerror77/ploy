@@ -17,6 +17,11 @@ pub struct HistoricalLoadOptions {
     /// Downsample `binance_lob_ticks` to one snapshot per N seconds per symbol.
     /// Defaults to 30 (one row per 30-second bucket). Set to 1 to disable downsampling.
     pub lob_sample_secs: u32,
+    /// Downsample high-frequency spot price ticks to one row per N seconds per symbol.
+    ///
+    /// Factor review jobs use coarser observation buckets and should not load
+    /// every `sync_records` tick into memory. Defaults to 1 second.
+    pub spot_sample_secs: u32,
 }
 
 impl Default for HistoricalLoadOptions {
@@ -28,6 +33,7 @@ impl Default for HistoricalLoadOptions {
             require_official_settlement: false,
             include_l2: true,
             lob_sample_secs: 30,
+            spot_sample_secs: 1,
         }
     }
 }
