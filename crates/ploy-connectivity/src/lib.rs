@@ -755,14 +755,18 @@ fn normalize_order_quantity(quantity: Decimal) -> Decimal {
     quantity.trunc_with_scale(2)
 }
 
+fn normalize_market_order_quantity(quantity: Decimal) -> Decimal {
+    quantity.trunc_with_scale(4)
+}
+
 fn normalize_execution_amount(
     quantity: Decimal,
     _limit_price: Decimal,
     side: Side,
 ) -> Result<Amount, polymarket_client_sdk::error::Error> {
     match side {
-        Side::Buy => Amount::shares(normalize_order_quantity(quantity)),
-        Side::Sell => Amount::shares(normalize_order_quantity(quantity)),
+        Side::Buy => Amount::shares(normalize_market_order_quantity(quantity)),
+        Side::Sell => Amount::shares(normalize_market_order_quantity(quantity)),
         _ => unreachable!("invalid Polymarket side"),
     }
 }
@@ -835,11 +839,12 @@ pub fn crate_marker() -> &'static str {
 mod tests {
     use super::{
         execution_price_override, normalize_aggressive_price, normalize_execution_amount,
-        normalize_order_quantity, polymarket_signature_type_from_env, tracked_trade_fill,
-        trade_side, unique_token_ids, CancellationOutcome, CancellationRequest, ExecutionError,
-        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
-        PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest,
-        StaticExecutionGateway, TrackedOrder, WalletSignatureType,
+        normalize_market_order_quantity, normalize_order_quantity,
+        polymarket_signature_type_from_env, tracked_trade_fill, trade_side, unique_token_ids,
+        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
+        ExecutionRequest, LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
+        PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
+        TrackedOrder, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -926,6 +931,18 @@ mod tests {
     }
 
     #[test]
+    fn normalize_market_order_quantity_truncates_to_market_taker_scale() {
+        assert_eq!(
+            normalize_market_order_quantity(dec!(24.467825)),
+            dec!(24.4678)
+        );
+        assert_eq!(
+            normalize_market_order_quantity(dec!(17.663163)),
+            dec!(17.6631)
+        );
+    }
+
+    #[test]
     fn normalize_execution_amount_uses_shares_for_immediate_orders() {
         let buy = normalize_execution_amount(dec!(24.467825), dec!(0.61305), Side::Buy)
             .expect("buy amount");
@@ -933,9 +950,9 @@ mod tests {
             .expect("sell amount");
 
         assert!(buy.is_shares());
-        assert_eq!(buy.as_inner(), dec!(24.46));
+        assert_eq!(buy.as_inner(), dec!(24.4678));
         assert!(sell.is_shares());
-        assert_eq!(sell.as_inner(), dec!(24.46));
+        assert_eq!(sell.as_inner(), dec!(24.4678));
     }
 
     #[test]

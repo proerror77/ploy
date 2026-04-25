@@ -5,16 +5,16 @@ use alloy::primitives::{Signature, U256};
 use bon::Builder;
 use rust_decimal_macros::dec;
 use serde::ser::{Error as _, SerializeStruct as _};
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde_repr::Serialize_repr;
-use serde_with::{DisplayFromStr, serde_as};
+use serde_with::{serde_as, DisplayFromStr};
 use strum_macros::Display;
 
-use crate::Result;
 use crate::auth::ApiKey;
-use crate::clob::order_builder::{LOT_SIZE_SCALE, USDC_DECIMALS};
+use crate::clob::order_builder::{MARKET_SHARE_DECIMALS, USDC_DECIMALS};
 use crate::error::Error;
 use crate::types::Decimal;
+use crate::Result;
 
 pub mod request;
 pub mod response;
@@ -192,9 +192,9 @@ impl Amount {
 
     pub fn shares(value: Decimal) -> Result<Amount> {
         let normalized = value.normalize();
-        if normalized.scale() > LOT_SIZE_SCALE {
+        if normalized.scale() > MARKET_SHARE_DECIMALS {
             return Err(Error::validation(format!(
-                "Unable to build Amount with {} decimal points, must be <= {LOT_SIZE_SCALE}",
+                "Unable to build Amount with {} decimal points, must be <= {MARKET_SHARE_DECIMALS}",
                 normalized.scale()
             )));
         }
@@ -598,12 +598,10 @@ mod tests {
     fn non_standard_decimal_to_tick_size_should_fail() {
         let result = TickSize::try_from(Decimal::ONE);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Unknown tick size: 1")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown tick size: 1"));
     }
 
     #[test]
@@ -616,19 +614,25 @@ mod tests {
         assert!(shares.is_shares());
         assert_eq!(shares.as_inner(), Decimal::ONE_HUNDRED);
 
+        let fractional_shares = Amount::shares(dec!(0.2345))?;
+        assert!(fractional_shares.is_shares());
+        assert_eq!(fractional_shares.as_inner(), dec!(0.2345));
+
         Ok(())
     }
 
     #[test]
     fn improper_shares_lot_size_should_fail() {
-        let Err(err) = Amount::shares(dec!(0.23400)) else {
+        let Err(err) = Amount::shares(dec!(0.23456)) else {
             panic!()
         };
 
         let message = err.downcast_ref::<Validation>().unwrap();
         assert_eq!(
             message.reason,
-            format!("Unable to build Amount with 3 decimal points, must be <= {LOT_SIZE_SCALE}")
+            format!(
+                "Unable to build Amount with 5 decimal points, must be <= {MARKET_SHARE_DECIMALS}"
+            )
         );
     }
 

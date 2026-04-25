@@ -1,3 +1,41 @@
+# Live Market Buy Precision Repair (2026-04-25)
+
+## Files
+
+- `vendor/polymarket-client-sdk/src/clob/order_builder.rs`
+  - Owner: venue precision encoding for market order maker/taker amounts.
+- `vendor/polymarket-client-sdk/src/clob/types/mod.rs`
+  - Owner: market share amount precision validation.
+- `vendor/polymarket-client-sdk/tests/order.rs`
+  - Owner: SDK market order precision regressions.
+- `crates/ploy-connectivity/src/lib.rs`
+  - Owner: live FAK/FOK amount normalization passed into the SDK.
+
+## Tasks
+
+- [x] Confirm Tango had live signals and dry-run orders after deploy.
+- [x] Confirm live orders were rejected by CLOB amount precision, not missing signals.
+- [x] Encode market BUY maker USDC at cent precision and taker shares at four decimals.
+- [x] Keep limit order lot-size normalization unchanged.
+- [x] Run focused SDK and connectivity tests.
+
+## Review
+
+- 2026-04-25: Tango logs showed `entry signal` for dry-run and live, with live
+  rejects from Polymarket: `invalid amounts, the market buy orders maker amount
+  supports a max accuracy of 2 decimals, taker amount a max of 4 decimals`.
+- 2026-04-25: DB evidence in the latest 30-minute window showed dry-run orders
+  filled while matching live BUY intents were rejected, e.g. BNBUSDT at 08:03
+  and BNBUSDT/BTCUSDT at 08:08 CST.
+- 2026-04-25: The SDK now quantizes market order USDC maker amounts to cents
+  and share taker amounts to four decimals. `ploy-connectivity` now preserves
+  four decimals for FAK/FOK share amounts while leaving limit-order quantity at
+  two decimals.
+- 2026-04-25: Verification passed:
+  `rtk cargo test -p ploy-connectivity --lib -- --nocapture`,
+  `cargo test -p polymarket-client-sdk --features clob --lib -- --nocapture`,
+  and `cargo test -p polymarket-client-sdk --features clob --test order -- --nocapture`.
+
 # Live FAK Fill Accounting Repair (2026-04-25)
 
 ## Files
