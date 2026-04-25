@@ -880,6 +880,13 @@ evidence.
   midnight, loaded symmetric pre-window Binance/LOB history, bounded legacy Deribit fallback
   with the same bucket sampling, merged IV/greeks snapshots by `(symbol, ts)`, and added an
   empty directed-score guard.
+- 2026-04-26: ploy-ci review-fix smoke on `26d67fc` completed with exit code 0 against Tango DB.
+  Evidence: right-open range printed as `2026-04-21 00:00:00 UTC -> 2026-04-26 00:00:00 UTC`,
+  `updates=3,307,273`, `lob snapshot rows=86,886`, `deribit_snapshots=28,726`,
+  `factor_observations=104,777`, `v2_rows=209,554`, `executable_pnl_rows=12,088`,
+  entry fill rate `5.77%`, rejection rate `94.23%`, swap stayed `0B`, and no
+  `future_exit_*` factor appeared in the walk-forward output. The ploy-ci runner was restored
+  to active afterward.
 
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 
