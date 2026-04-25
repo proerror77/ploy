@@ -17,16 +17,16 @@
 //! | `pm_token_settlements` | Settlement outcomes |
 
 use chrono::{DateTime, Duration, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
 use ploy_market_contracts::{
-    HistoricalLoadOptions, MarketUpdate, l2_updates_from_depth_totals, market_update_sort_ts,
-    normalize_token_id,
+    l2_updates_from_depth_totals, market_update_sort_ts, normalize_token_id, HistoricalLoadOptions,
+    MarketUpdate,
 };
 
 #[cfg(test)]
@@ -37,9 +37,10 @@ const WARMUP_MINUTES: i64 = 30;
 
 /// Historical research backtests only trust canonical historical PM quote captures.
 ///
-/// `ploy_runner_live` is a synthetic midpoint feed for live/dry-run operation, and
-/// the existing `polymarket_ws_collector` history before the next validated cutover
-/// is too polluted with placeholder `0.01/0.99` books to mix into research results.
+/// Older `ploy_runner_live` rows were synthetic midpoint quotes; newer rows carry
+/// filtered top-of-book sizes from REST `/book`. The existing
+/// `polymarket_ws_collector` history before the next validated cutover is too
+/// polluted with placeholder `0.01/0.99` books to mix into research results.
 /// Dry-run parity should use recorded replay mode instead of the historical DB path.
 const TRUSTED_PM_RESEARCH_QUOTE_SOURCES: &[&str] = &[
     "polymarket_ws",
@@ -984,7 +985,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        EventMetadataRow, MarketUpdate, build_event_updates, l2_updates_from_book, near_depth,
+        build_event_updates, l2_updates_from_book, near_depth, EventMetadataRow, MarketUpdate,
     };
 
     #[test]

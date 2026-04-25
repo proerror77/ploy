@@ -9,12 +9,13 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Timelike, Utc};
 use futures::StreamExt;
-use ploy_market_contracts::{MarketUpdate, l2_updates_from_depth_totals};
+use ploy_market_contracts::{l2_updates_from_depth_totals, MarketUpdate};
 use polymarket_client_sdk::rtds::{Client as RtdsClient, EquityPriceMessage};
 use polymarket_client_sdk::types::U256;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
+use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
@@ -22,12 +23,13 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, warn};
 
 use crate::reference_prices::{
-    ReferenceAssetClass, ReferencePriceKey, ReferencePriceRegistry, ReferencePriceSnapshot,
-    ReferencePriceSource, infer_pyth_asset_class, market_symbol_to_binance_symbol,
-    normalize_reference_symbol, pyth_symbol, upsert_reference_price,
+    infer_pyth_asset_class, market_symbol_to_binance_symbol, normalize_reference_symbol,
+    pyth_symbol, upsert_reference_price, ReferenceAssetClass, ReferencePriceKey,
+    ReferencePriceRegistry, ReferencePriceSnapshot, ReferencePriceSource,
 };
 
 const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
+const POLYMARKET_CLOB_HTTP_ENDPOINT: &str = "https://clob.polymarket.com";
 const NEAR_DEPTH_PCT_RANGE: f64 = 0.001;
 
 fn rtds_market_data_ws_config() -> PolymarketWsConfig {
@@ -38,6 +40,67 @@ fn rtds_market_data_ws_config() -> PolymarketWsConfig {
     config.heartbeat_timeout = StdDuration::from_secs(45);
     config.reconnect = ReconnectConfig::default();
     config
+}
+
+#[derive(Debug, Deserialize)]
+struct RestBookLevel {
+    price: String,
+    size: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestBook {
+    #[serde(default)]
+    bids: Vec<RestBookLevel>,
+    #[serde(default)]
+    asks: Vec<RestBookLevel>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BookQuote {
+    bid: Option<Decimal>,
+    ask: Option<Decimal>,
+    bid_size: Option<Decimal>,
+    ask_size: Option<Decimal>,
+}
+
+fn pm_tradeable_price(price: Decimal) -> bool {
+    price > rust_decimal_macros::dec!(0.02) && price < rust_decimal_macros::dec!(0.98)
+}
+
+fn parse_rest_book_level(level: &RestBookLevel) -> Option<(Decimal, Decimal)> {
+    let price = level.price.parse::<Decimal>().ok()?;
+    let size = level.size.parse::<Decimal>().ok()?;
+    if size <= Decimal::ZERO || !pm_tradeable_price(price) {
+        return None;
+    }
+    Some((price, size))
+}
+
+fn best_tradeable_bid_level(levels: &[RestBookLevel]) -> Option<(Decimal, Decimal)> {
+    levels
+        .iter()
+        .filter_map(parse_rest_book_level)
+        .max_by(|left, right| left.0.cmp(&right.0))
+}
+
+fn best_tradeable_ask_level(levels: &[RestBookLevel]) -> Option<(Decimal, Decimal)> {
+    levels
+        .iter()
+        .filter_map(parse_rest_book_level)
+        .min_by(|left, right| left.0.cmp(&right.0))
+}
+
+fn book_quote_from_rest(book: &RestBook) -> BookQuote {
+    let bid = best_tradeable_bid_level(&book.bids);
+    let ask = best_tradeable_ask_level(&book.asks);
+
+    BookQuote {
+        bid: bid.map(|(price, _)| price),
+        bid_size: bid.map(|(_, size)| size),
+        ask: ask.map(|(price, _)| price),
+        ask_size: ask.map(|(_, size)| size),
+    }
 }
 
 /// Spawn a task that subscribes to Binance spot prices via RTDS WebSocket
@@ -496,7 +559,7 @@ fn json_f64(value: &Value) -> Option<f64> {
 }
 
 /// Spawn a task that polls the Polymarket CLOB REST API for orderbook data
-/// and publishes `MarketUpdate::Quote` events.
+/// and publishes `MarketUpdate::Quote` events with top-of-book sizes.
 ///
 /// REST polling is more reliable than WS for the 5-min window lifecycle.
 /// Polls every 5 seconds per token batch.
@@ -520,74 +583,64 @@ pub fn spawn_quote_feed(
             for token in &token_ids {
                 let token_str = token.to_string();
 
-                // Use /midpoint API instead of /book to get the real market price.
-                // The /book endpoint returns extreme placeholder orders (bid=0.01, ask=0.99)
-                // when there is no real liquidity, which is useless for strategy evaluation.
-                // /midpoint returns the actual market consensus price.
-                let url = format!(
-                    "https://clob.polymarket.com/midpoint?token_id={}",
-                    token_str
-                );
+                let url = format!("{POLYMARKET_CLOB_HTTP_ENDPOINT}/book?token_id={token_str}");
 
                 match http.get(&url).send().await {
-                    Ok(resp) => {
-                        if let Ok(body) = resp.json::<serde_json::Value>().await {
-                            let mid = body["mid"].as_str().and_then(|p| p.parse::<Decimal>().ok());
-
-                            if let Some(mid_price) = mid {
-                                // Store mid as both bid and ask — strategy uses ask for entry.
-                                // A small synthetic spread (0.5%) is applied so bid < ask.
-                                let half_spread = mid_price * rust_decimal_macros::dec!(0.005);
-                                let bid = Some(
-                                    (mid_price - half_spread).max(rust_decimal_macros::dec!(0.01)),
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(book) = resp.json::<RestBook>().await {
+                            let quote = book_quote_from_rest(&book);
+                            let now = Utc::now();
+                            let update = MarketUpdate::Quote {
+                                token_id: Arc::from(token_str.as_str()),
+                                bid: quote.bid,
+                                ask: quote.ask,
+                                bid_size: quote.bid_size,
+                                ask_size: quote.ask_size,
+                                ts: now,
+                            };
+                            if tx.send(update).is_err() {
+                                warn!(
+                                    tokens = token_ids.len(),
+                                    "All receivers dropped, stopping quote poller"
                                 );
-                                let ask = Some(
-                                    (mid_price + half_spread).min(rust_decimal_macros::dec!(0.99)),
+                                return;
+                            }
+
+                            // Persist non-empty top-of-book quotes to DB for replay.
+                            if let Some(ref db) = pool {
+                                if quote.bid.is_some() || quote.ask.is_some() {
+                                    persist_quote(db, &token_str, quote, now).await;
+                                }
+                            }
+
+                            quoted_tokens += 1;
+                            if logged_quote_tokens.insert(token_str.clone()) {
+                                info!(
+                                    token = %token_str,
+                                    bid = ?quote.bid,
+                                    ask = ?quote.ask,
+                                    bid_size = ?quote.bid_size,
+                                    ask_size = ?quote.ask_size,
+                                    "First orderbook quote observed"
                                 );
-
-                                let now = Utc::now();
-                                let update = MarketUpdate::Quote {
-                                    token_id: Arc::from(token_str.as_str()),
-                                    bid,
-                                    ask,
-                                    bid_size: None,
-                                    ask_size: None,
-                                    ts: now,
-                                };
-                                if tx.send(update).is_err() {
-                                    warn!(
-                                        tokens = token_ids.len(),
-                                        "All receivers dropped, stopping quote poller"
-                                    );
-                                    return;
-                                }
-
-                                // Persist to DB for backtest replay.
-                                if let Some(ref db) = pool {
-                                    persist_quote(db, &token_str, bid, ask, now).await;
-                                }
-
-                                quoted_tokens += 1;
-                                if logged_quote_tokens.insert(token_str.clone()) {
-                                    info!(
-                                        token = %token_str,
-                                        mid = %mid_price,
-                                        bid = ?bid,
-                                        ask = ?ask,
-                                        "First midpoint quote observed"
-                                    );
-                                } else if quoted_tokens % 100 == 0 {
-                                    info!(
-                                        quotes = quoted_tokens,
-                                        tracked_tokens = logged_quote_tokens.len(),
-                                        "REST quote poller forwarded midpoint quotes"
-                                    );
-                                }
+                            } else if quoted_tokens % 100 == 0 {
+                                info!(
+                                    quotes = quoted_tokens,
+                                    tracked_tokens = logged_quote_tokens.len(),
+                                    "REST quote poller forwarded orderbook quotes"
+                                );
                             }
                         }
                     }
+                    Ok(resp) => {
+                        debug!(
+                            status = %resp.status(),
+                            token = %token_str,
+                            "REST orderbook fetch returned non-success status"
+                        );
+                    }
                     Err(e) => {
-                        debug!(error = %e, token = %token_str, "REST midpoint fetch failed");
+                        debug!(error = %e, token = %token_str, "REST orderbook fetch failed");
                     }
                 }
             }
@@ -921,20 +974,23 @@ async fn persist_spot_price(
 async fn persist_quote(
     pool: &PgPool,
     token_id: &str,
-    bid: Option<Decimal>,
-    ask: Option<Decimal>,
+    quote: BookQuote,
     received_at: DateTime<Utc>,
 ) {
     let result = sqlx::query(
         r#"
-        INSERT INTO clob_quote_ticks (token_id, best_bid, best_ask, received_at, source)
-        VALUES ($1, $2, $3, $4, 'ploy_runner_live')
+        INSERT INTO clob_quote_ticks (
+            token_id, best_bid, best_ask, bid_size, ask_size, received_at, source
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 'ploy_runner_live')
         ON CONFLICT DO NOTHING
         "#,
     )
     .bind(token_id)
-    .bind(bid)
-    .bind(ask)
+    .bind(quote.bid)
+    .bind(quote.ask)
+    .bind(quote.bid_size)
+    .bind(quote.ask_size)
     .bind(received_at)
     .execute(pool)
     .await;
@@ -1052,7 +1108,10 @@ fn parse_agg_trade_msg(v: &serde_json::Value) -> Option<AggTradeMsg> {
 
 #[cfg(test)]
 mod tests {
-    use super::{l2_updates_from_book, parse_agg_trade_msg, rtds_market_data_ws_config};
+    use super::{
+        book_quote_from_rest, l2_updates_from_book, parse_agg_trade_msg,
+        rtds_market_data_ws_config, RestBook,
+    };
     use chrono::Utc;
     use ploy_market_contracts::MarketUpdate;
     use rust_decimal::prelude::ToPrimitive;
@@ -1103,6 +1162,46 @@ mod tests {
                 && (ask_depth_near - 5.5).abs() < 1e-9
                 && *spread_bps == 11
         ));
+    }
+
+    #[test]
+    fn rest_book_quote_uses_tradeable_top_of_book_size() {
+        let book: RestBook = serde_json::from_value(json!({
+            "bids": [
+                {"price": "0.01", "size": "999"},
+                {"price": "0.47", "size": "12.5"},
+                {"price": "0.52", "size": "7.25"}
+            ],
+            "asks": [
+                {"price": "0.99", "size": "999"},
+                {"price": "0.54", "size": "20"},
+                {"price": "0.53", "size": "9.5"}
+            ]
+        }))
+        .unwrap();
+
+        let quote = book_quote_from_rest(&book);
+
+        assert_eq!(quote.bid, Some(dec!(0.52)));
+        assert_eq!(quote.bid_size, Some(dec!(7.25)));
+        assert_eq!(quote.ask, Some(dec!(0.53)));
+        assert_eq!(quote.ask_size, Some(dec!(9.5)));
+    }
+
+    #[test]
+    fn rest_book_quote_filters_placeholder_only_books() {
+        let book: RestBook = serde_json::from_value(json!({
+            "bids": [{"price": "0.01", "size": "999"}],
+            "asks": [{"price": "0.99", "size": "999"}]
+        }))
+        .unwrap();
+
+        let quote = book_quote_from_rest(&book);
+
+        assert_eq!(quote.bid, None);
+        assert_eq!(quote.bid_size, None);
+        assert_eq!(quote.ask, None);
+        assert_eq!(quote.ask_size, None);
     }
 
     #[test]

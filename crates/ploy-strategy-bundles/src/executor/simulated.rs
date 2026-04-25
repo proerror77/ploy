@@ -9,6 +9,8 @@
 //! Used by both backtest (`HistoricalFeed + SimulatedExecutor`) and
 //! dry-run (`LiveFeed + SimulatedExecutor`) modes.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
 use rust_decimal::Decimal;
@@ -16,7 +18,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::traits::{ExecutionReport, Executor};
+use crate::traits::{ExecutionReport, Executor, MarketUpdate};
 
 const MIN_BINARY_PRICE: Decimal = dec!(0.01);
 const MAX_BINARY_PRICE: Decimal = dec!(0.99);
@@ -40,6 +42,12 @@ pub struct SimulatedExecutorConfig {
     pub impact_coefficient: Decimal,
     /// Default market depth in shares when unknown.
     pub default_depth_shares: u64,
+    /// Require a fresh observed PM quote with executable size before filling.
+    ///
+    /// When enabled, BUY fills consume `ask_size` at `ask`, and SELL fills
+    /// consume `bid_size` at `bid`. This mirrors FAK-style top-of-book
+    /// execution more closely than synthetic fixed-depth fills.
+    pub require_lob_liquidity: bool,
 }
 
 impl Default for SimulatedExecutorConfig {
@@ -53,18 +61,31 @@ impl Default for SimulatedExecutorConfig {
             enable_market_impact: false,
             impact_coefficient: dec!(0.1),
             default_depth_shares: 500,
+            require_lob_liquidity: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct QuoteLiquidity {
+    bid: Option<Decimal>,
+    ask: Option<Decimal>,
+    bid_size: Option<Decimal>,
+    ask_size: Option<Decimal>,
 }
 
 /// Simulated executor that models realistic fills.
 pub struct SimulatedExecutor {
     config: SimulatedExecutorConfig,
+    quotes: HashMap<String, QuoteLiquidity>,
 }
 
 impl SimulatedExecutor {
     pub fn new(config: SimulatedExecutorConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            quotes: HashMap::new(),
+        }
     }
 
     fn clamp_price(price: Decimal) -> Decimal {
@@ -146,6 +167,69 @@ impl SimulatedExecutor {
         (fill_price, filled_qty, slippage, impact)
     }
 
+    fn simulate_lob_fill(
+        &self,
+        intent: &TradingIntent,
+        signal_price: Decimal,
+    ) -> Result<(Decimal, Decimal, Decimal, Decimal), String> {
+        let quote = self
+            .quotes
+            .get(&intent.token_id)
+            .ok_or_else(|| "No observed LOB quote".to_string())?;
+        let requested = intent.quantity.max(Decimal::ZERO);
+
+        match intent.side {
+            TradeSide::Buy => {
+                let ask = quote
+                    .ask
+                    .map(Self::clamp_price)
+                    .ok_or_else(|| "No executable ask quote".to_string())?;
+                let ask_size = quote
+                    .ask_size
+                    .ok_or_else(|| "No executable ask liquidity".to_string())?;
+                if ask_size <= Decimal::ZERO {
+                    return Err("No executable ask liquidity".into());
+                }
+
+                let limit = intent.limit_price.map(Self::clamp_price).unwrap_or(ask);
+                if ask > limit {
+                    return Err(format!("Best ask {ask} above limit {limit}"));
+                }
+
+                let filled_qty = requested.min(ask_size);
+                if filled_qty <= Decimal::ZERO {
+                    return Err("No liquidity".into());
+                }
+                let reference = Self::clamp_price(signal_price);
+                Ok((ask, filled_qty, ask - reference, Decimal::ZERO))
+            }
+            TradeSide::Sell => {
+                let bid = quote
+                    .bid
+                    .map(Self::clamp_price)
+                    .ok_or_else(|| "No executable bid quote".to_string())?;
+                let bid_size = quote
+                    .bid_size
+                    .ok_or_else(|| "No executable bid liquidity".to_string())?;
+                if bid_size <= Decimal::ZERO {
+                    return Err("No executable bid liquidity".into());
+                }
+
+                let limit = intent.limit_price.map(Self::clamp_price).unwrap_or(bid);
+                if bid < limit {
+                    return Err(format!("Best bid {bid} below limit {limit}"));
+                }
+
+                let filled_qty = requested.min(bid_size);
+                if filled_qty <= Decimal::ZERO {
+                    return Err("No liquidity".into());
+                }
+                let reference = Self::clamp_price(signal_price);
+                Ok((bid, filled_qty, reference - bid, Decimal::ZERO))
+            }
+        }
+    }
+
     /// Determine fill quantity given requested shares and market depth.
     fn fill_quantity(&self, requested: Decimal, depth: Decimal) -> (Decimal, bool) {
         if !self.config.enable_partial_fills || depth <= Decimal::ZERO {
@@ -172,6 +256,28 @@ impl SimulatedExecutor {
 
 #[async_trait]
 impl Executor for SimulatedExecutor {
+    fn observe_market_update(&mut self, update: &MarketUpdate) {
+        if let MarketUpdate::Quote {
+            token_id,
+            bid,
+            ask,
+            bid_size,
+            ask_size,
+            ..
+        } = update
+        {
+            self.quotes.insert(
+                token_id.to_string(),
+                QuoteLiquidity {
+                    bid: *bid,
+                    ask: *ask,
+                    bid_size: *bid_size,
+                    ask_size: *ask_size,
+                },
+            );
+        }
+    }
+
     async fn submit(&mut self, intent: &TradingIntent, order_id: &str) -> ExecutionReport {
         let signal_price = intent.limit_price.unwrap_or(dec!(0.50));
         let synthetic_mid = intent.limit_price.is_none();
@@ -180,12 +286,28 @@ impl Executor for SimulatedExecutor {
         let is_settlement = intent.purpose == IntentPurpose::Exit
             && (signal_price == Decimal::ZERO || signal_price == Decimal::ONE);
 
-        let (fill_price, filled_qty, slippage, impact) = if is_settlement {
-            (signal_price, intent.quantity, Decimal::ZERO, Decimal::ZERO)
+        let simulated = if is_settlement {
+            Ok((signal_price, intent.quantity, Decimal::ZERO, Decimal::ZERO))
+        } else if self.config.require_lob_liquidity {
+            self.simulate_lob_fill(intent, signal_price)
         } else {
-            match intent.side {
+            Ok(match intent.side {
                 TradeSide::Buy => self.simulate_buy(signal_price, intent.quantity, synthetic_mid),
                 TradeSide::Sell => self.simulate_sell(signal_price, intent.quantity, synthetic_mid),
+            })
+        };
+
+        let (fill_price, filled_qty, slippage, impact) = match simulated {
+            Ok(fill) => fill,
+            Err(reason) => {
+                return ExecutionReport {
+                    order_id: order_id.to_string(),
+                    fill: None,
+                    rejected: true,
+                    rejection_reason: Some(reason),
+                    slippage: None,
+                    market_impact: None,
+                };
             }
         };
 
@@ -252,6 +374,22 @@ mod tests {
         }
     }
 
+    fn quote_update(
+        bid: Option<Decimal>,
+        ask: Option<Decimal>,
+        bid_size: Option<Decimal>,
+        ask_size: Option<Decimal>,
+    ) -> MarketUpdate {
+        MarketUpdate::Quote {
+            token_id: "token-1".into(),
+            bid,
+            ask,
+            bid_size,
+            ask_size,
+            ts: Utc::now(),
+        }
+    }
+
     #[tokio::test]
     async fn buy_applies_quote_price_and_impact() {
         let config = SimulatedExecutorConfig {
@@ -310,6 +448,97 @@ mod tests {
         let fill = report.fill.unwrap();
         assert_eq!(fill.price, dec!(0.60));
         assert_eq!(report.slippage.unwrap(), Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn lob_buy_consumes_only_executable_ask_size() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update(
+            Some(dec!(0.49)),
+            Some(dec!(0.50)),
+            Some(dec!(50)),
+            Some(dec!(7.5)),
+        ));
+        let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(25));
+
+        let report = exec.submit(&intent, "test-order-lob-buy").await;
+        assert!(!report.rejected);
+        let fill = report.fill.expect("partial top-of-book fill");
+        assert_eq!(fill.price, dec!(0.50));
+        assert_eq!(fill.quantity, dec!(7.5));
+    }
+
+    #[tokio::test]
+    async fn lob_buy_rejects_when_ask_is_not_crossable() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update(
+            Some(dec!(0.49)),
+            Some(dec!(0.52)),
+            Some(dec!(50)),
+            Some(dec!(50)),
+        ));
+        let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(25));
+
+        let report = exec.submit(&intent, "test-order-lob-buy-reject").await;
+        assert!(report.rejected);
+        assert!(report.fill.is_none());
+        assert_eq!(
+            report.rejection_reason.as_deref(),
+            Some("Best ask 0.52 above limit 0.50")
+        );
+    }
+
+    #[tokio::test]
+    async fn lob_buy_rejects_when_size_is_missing() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update(
+            Some(dec!(0.49)),
+            Some(dec!(0.50)),
+            Some(dec!(50)),
+            None,
+        ));
+        let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(25));
+
+        let report = exec.submit(&intent, "test-order-lob-no-size").await;
+        assert!(report.rejected);
+        assert_eq!(
+            report.rejection_reason.as_deref(),
+            Some("No executable ask liquidity")
+        );
+    }
+
+    #[tokio::test]
+    async fn lob_sell_consumes_only_executable_bid_size() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update(
+            Some(dec!(0.54)),
+            Some(dec!(0.55)),
+            Some(dec!(6)),
+            Some(dec!(50)),
+        ));
+        let intent = test_intent(TradeSide::Sell, dec!(0.54), dec!(20));
+
+        let report = exec.submit(&intent, "test-order-lob-sell").await;
+        assert!(!report.rejected);
+        let fill = report.fill.expect("partial bid fill");
+        assert_eq!(fill.price, dec!(0.54));
+        assert_eq!(fill.quantity, dec!(6));
     }
 
     #[tokio::test]

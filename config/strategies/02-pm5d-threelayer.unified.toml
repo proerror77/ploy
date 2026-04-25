@@ -55,6 +55,7 @@ min_fill_pct = 0.5
 enable_market_impact = true
 impact_coefficient = 0.1
 default_depth_shares = 500
+require_lob_liquidity = true
 
 [reference_data]
 capture_sports_state = false

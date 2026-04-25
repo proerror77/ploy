@@ -51,6 +51,11 @@ impl Default for ExecutionPolicy {
 /// Order executor — real exchange or execution simulator.
 #[async_trait]
 pub trait Executor: Send {
+    /// Observe a market update before decisions are submitted.
+    ///
+    /// Simulated executors can use this to keep quote/liquidity state current.
+    fn observe_market_update(&mut self, _update: &MarketUpdate) {}
+
     fn execution_policy(&self) -> ExecutionPolicy {
         ExecutionPolicy::default()
     }
