@@ -1,3 +1,40 @@
+# Live Buy Notional Cap (2026-04-25)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/traits.rs`
+  - Owner: executor hook for pre-submit intent normalization.
+- `crates/ploy-strategy-bundles/src/engine.rs`
+  - Owner: using normalized intents for order recording and retry accounting.
+- `crates/ploy-strategy-runtime/src/live.rs`
+  - Owner: live BUY quantity cap under slippage-bounded execution price.
+
+## Tasks
+
+- [x] Confirm current live config still targets `stake_usd = 15.0`.
+- [x] Cap live BUY requested shares so `shares * slippage_bounded_price <= target_notional`.
+- [x] Ensure runtime requested quantity uses the capped quantity to prevent retry over-buying.
+- [x] Add regression tests for low-price BUY amount cap.
+- [x] Run focused Rust tests and static checks.
+- [ ] Land through PR/CI, deploy Tango, and verify post-deploy state.
+
+## Review
+
+- 2026-04-25: Current config targets `stake_usd = 15.0`, but live BUY orders
+  derive shares from the strategy entry price and then sign at a
+  slippage-bounded rounded price. That makes 15U a strategy target, not a hard
+  live signing cap.
+- 2026-04-25: Live execution now prepares BUY intents before submission by
+  capping requested shares to the target notional divided by the
+  slippage-bounded execution price. The strategy runtime records this prepared
+  quantity, so later FAK reconciliation retries cannot chase the original,
+  larger share count and exceed the 15U target.
+- 2026-04-25: Verification passed:
+  `rtk cargo test -p ploy-strategy-bundles --lib`,
+  `rtk cargo test -p ploy-strategy-runtime --features live,live-execution --lib`,
+  `rustfmt --edition 2021 --check crates/ploy-strategy-bundles/src/traits.rs crates/ploy-strategy-bundles/src/engine.rs crates/ploy-strategy-runtime/src/live.rs`,
+  and `git diff --check`.
+
 # Live Sell Balance Cap And Fee-Aware Fill Accounting (2026-04-25)
 
 ## Files

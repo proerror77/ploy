@@ -64,6 +64,15 @@ pub trait Executor: Send {
         true
     }
 
+    /// Normalize an intent immediately before submission.
+    ///
+    /// Live executors use this to align the runtime's requested quantity with
+    /// venue-specific signing constraints. Simulated executors should keep the
+    /// strategy intent unchanged.
+    fn prepare_intent(&self, intent: &TradingIntent) -> TradingIntent {
+        intent.clone()
+    }
+
     /// Submit a trading intent and return the execution report.
     /// `order_id` is the caller-assigned ID that must be used in the returned fill.
     async fn submit(&mut self, intent: &TradingIntent, order_id: &str) -> ExecutionReport;
