@@ -668,6 +668,52 @@
   `example.live.dry-run`, `pm5d.threelayer.dryrun`, and
   `pm5d.threelayer.live`, all currently at zero orders.
 
+# Event ML Rolling Evidence Workflow (2026-04-26)
+
+Goal: add one GitHub-dispatchable research lane that can generate a large
+event-root dataset from the remote research database, split it into distinct
+rolling event-root windows, run the canonical event ML workflow across those
+windows, and publish reports as artifacts.
+
+## Files
+
+- `.github/workflows/event-ml-rolling-evidence.yml`
+- `docs/runbooks/event-ml-automl-workflow.md`
+- `tasks/todo.md`
+
+## Tasks
+
+- [x] Add a manual GitHub Actions workflow on `ploy-ci-1` for event ML rolling
+  evidence generation.
+- [x] Build the required Rust examples once, then run export -> split ->
+  rolling workflow in order.
+- [x] Upload compact report artifacts without blindly uploading raw Parquet
+  datasets by default.
+- [x] Document the workflow command and default guardrails.
+- [x] Verify YAML parse and focused Rust checks for the workflow entrypoints.
+
+## Review
+
+- 2026-04-26: Added `event-ml-rolling-evidence.yml`, a manual workflow that
+  runs on `ploy-ci-1` against the remote research database. It builds the
+  relevant `ploy-research` examples, exports a source event-root dataset with
+  `factor_research --export-event-dataset`, splits it with
+  `event_dataset_rolling_windows`, then optionally runs
+  `event_ml_rolling_workflow`.
+- 2026-04-26: The workflow uploads compact JSON/Markdown/text reports by
+  default and keeps raw Parquet dataset upload behind
+  `upload_parquet_datasets=true`, so normal runs leave reviewable evidence
+  without turning artifact storage into the data lake.
+- 2026-04-26: Verification passed: Ruby YAML parse for
+  `.github/workflows/event-ml-rolling-evidence.yml`, `rtk cargo check -p
+  ploy-research --features db,polars-export` over the export/split/workflow
+  examples, `rtk cargo test -p ploy-research --example
+  event_dataset_rolling_windows --features polars-export -- --nocapture`, and
+  `rtk cargo test -p ploy-research --example event_ml_rolling_workflow
+  --features polars-export -- --nocapture`, and `rtk git diff --check`. The
+  `factor_research` example still emits existing unused-variable warnings
+  unrelated to this workflow.
+
 # Event Dataset Rolling Window Splitter (2026-04-25)
 
 Goal: turn one larger event-root dataset into multiple chronological, non-overlapping

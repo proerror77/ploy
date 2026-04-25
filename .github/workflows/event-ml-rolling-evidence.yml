@@ -1,0 +1,262 @@
+name: Event ML rolling evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref"
+        required: true
+        default: "main"
+      start_date:
+        description: "Dataset start date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-24"
+      end_date:
+        description: "Dataset end date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-25"
+      symbols:
+        description: "Comma-separated Binance symbols"
+        required: true
+        default: "BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,BNBUSDT,XRPUSDT"
+      source_windows:
+        description: "Maximum discovered 5-minute events to export"
+        required: true
+        default: "450"
+      child_window_events:
+        description: "Chronological events per child event-root dataset"
+        required: true
+        default: "150"
+      lob_sample_secs:
+        description: "Binance LOB sample interval for factor export"
+        required: false
+        default: "30"
+      max_quote_age_secs:
+        description: "Maximum PM quote age for factor observations"
+        required: false
+        default: "30"
+      entry_secs:
+        description: "Event ML entry seconds before settlement"
+        required: false
+        default: "60"
+      tolerance_secs:
+        description: "Entry row tolerance in seconds"
+        required: false
+        default: "30"
+      search_l2:
+        description: "Comma-separated logistic L2 grid"
+        required: false
+        default: "0,0.001,0.01"
+      search_min_edge:
+        description: "Comma-separated minimum edge grid"
+        required: false
+        default: "0,0.02,0.05"
+      search_learning_rate:
+        description: "Comma-separated learning-rate grid"
+        required: false
+        default: "0.03,0.05"
+      search_epochs:
+        description: "Logistic search epochs per candidate"
+        required: false
+        default: "500"
+      run_workflow:
+        description: "Run full event_ml_rolling_workflow after dataset split"
+        required: false
+        default: "true"
+      upload_parquet_datasets:
+        description: "Upload raw event-root Parquet datasets as artifacts"
+        required: false
+        default: "false"
+
+concurrency:
+  group: event-ml-rolling-evidence-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  event-ml:
+    name: Generate event ML rolling evidence on ploy-ci-1
+    runs-on: [self-hosted, ploy-ci-1]
+    timeout-minutes: 150
+    environment: ploy-ci-1
+
+    steps:
+      - name: Repair runner workspace permissions
+        run: |
+          if [ -d "${GITHUB_WORKSPACE}" ]; then
+            sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
+            sudo rm -rf "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/.cargo-lock" || true
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Add cargo to PATH
+        run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-targets: "true"
+          key: event-ml-rolling-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
+
+      - name: Build event ML examples
+        run: |
+          set -euo pipefail
+          . /home/runner/.cargo/env
+          cargo build --locked \
+            -p ploy-research \
+            --features db,polars-export \
+            --example factor_research \
+            --example event_dataset_rolling_windows \
+            --example event_ml_rolling_workflow \
+            --example event_ml_workflow \
+            --example event_dataset_coverage \
+            --example event_factor_attribution \
+            --example event_dataset_baseline \
+            --example event_ml_walk_forward
+
+      - name: Export large event-root dataset
+        run: |
+          set -euo pipefail
+          . /home/runner/.cargo/env
+          rm -rf artifacts/event-ml
+          mkdir -p artifacts/event-ml/source_event_root artifacts/event-ml/reports
+
+          cargo run --locked \
+            -p ploy-research \
+            --features db,polars-export \
+            --example factor_research -- \
+            --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
+            --symbols "${{ github.event.inputs.symbols }}" \
+            --start-date "${{ github.event.inputs.start_date }}" \
+            --end-date "${{ github.event.inputs.end_date }}" \
+            --discover-valid-5m-windows \
+            --max-windows "${{ github.event.inputs.source_windows }}" \
+            --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
+            --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
+            --export-event-dataset artifacts/event-ml/source_event_root \
+            | tee artifacts/event-ml/reports/source_export.txt
+
+      - name: Split source dataset into rolling windows
+        run: |
+          set -euo pipefail
+          . /home/runner/.cargo/env
+
+          cargo run --locked \
+            -p ploy-research \
+            --features polars-export \
+            --example event_dataset_rolling_windows -- \
+            --dataset artifacts/event-ml/source_event_root \
+            --window-events "${{ github.event.inputs.child_window_events }}" \
+            --output-root artifacts/event-ml/rolling_datasets \
+            | tee artifacts/event-ml/reports/rolling_dataset_split.txt
+
+      - name: Run canonical rolling ML workflow
+        if: ${{ github.event.inputs.run_workflow == 'true' }}
+        run: |
+          set -euo pipefail
+          . /home/runner/.cargo/env
+
+          DATASETS="$(paste -sd, artifacts/event-ml/rolling_datasets/rolling_datasets.txt)"
+          cargo run --locked \
+            -p ploy-research \
+            --features polars-export \
+            --example event_ml_rolling_workflow -- \
+            --datasets "${DATASETS}" \
+            --output-root artifacts/event-ml/rolling_workflow \
+            --entry-secs "${{ github.event.inputs.entry_secs }}" \
+            --tolerance-secs "${{ github.event.inputs.tolerance_secs }}" \
+            --search-l2 "${{ github.event.inputs.search_l2 }}" \
+            --search-min-edge "${{ github.event.inputs.search_min_edge }}" \
+            --search-learning-rate "${{ github.event.inputs.search_learning_rate }}" \
+            --search-epochs "${{ github.event.inputs.search_epochs }}" \
+            | tee artifacts/event-ml/reports/rolling_workflow.txt
+
+      - name: Collect compact reports
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/event-ml artifacts/event-ml-report-bundle
+          find artifacts/event-ml -type f \
+            \( -name '*.json' -o -name '*.md' -o -name '*.txt' \) \
+            ! -path '*/observations_*.parquet' \
+            ! -path '*/event_summaries_*.parquet' \
+            ! -path '*/event_index.parquet' \
+            ! -path '*/split_assignments.parquet' \
+            -print0 > /tmp/event-ml-report-files
+          if [ -s /tmp/event-ml-report-files ]; then
+            tar --null -T /tmp/event-ml-report-files -czf artifacts/event-ml-report-bundle/event-ml-reports.tar.gz
+          else
+            echo "No event ML reports were produced." > artifacts/event-ml-report-bundle/NO_REPORTS.txt
+          fi
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## Event ML rolling evidence"
+            echo ""
+            echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
+            echo "- Symbols: ${{ github.event.inputs.symbols }}"
+            echo "- Source windows: ${{ github.event.inputs.source_windows }}"
+            echo "- Child window events: ${{ github.event.inputs.child_window_events }}"
+            echo "- Run workflow: ${{ github.event.inputs.run_workflow }}"
+            echo ""
+
+            if [ -f artifacts/event-ml/source_event_root/event_manifest.json ]; then
+              echo "### Source dataset"
+              echo '```json'
+              jq '.stats' artifacts/event-ml/source_event_root/event_manifest.json || true
+              echo '```'
+            fi
+
+            if [ -f artifacts/event-ml/rolling_datasets/rolling_datasets_report.json ]; then
+              echo "### Rolling dataset split"
+              echo '```json'
+              jq '{exported_windows, skipped_events, windows: [.windows[] | {id, events, events_per_split}]}' artifacts/event-ml/rolling_datasets/rolling_datasets_report.json || true
+              echo '```'
+            fi
+
+            if [ -f artifacts/event-ml/rolling_workflow/rolling_workflow_report.json ]; then
+              echo "### Rolling workflow"
+              echo '```json'
+              jq '{dataset_count, min_windows, final_walk_forward_report, windows: [.windows[] | {id, status, prior_run_dirs: (.prior_run_dirs | length)}]}' artifacts/event-ml/rolling_workflow/rolling_workflow_report.json || true
+              echo '```'
+            fi
+
+            FINAL_WALK_FORWARD_REPORT="$(find artifacts/event-ml/rolling_workflow -path '*/walk_forward/walk_forward_report.json' 2>/dev/null | sort | tail -1 || true)"
+            if [ -n "${FINAL_WALK_FORWARD_REPORT}" ] && [ -f "${FINAL_WALK_FORWARD_REPORT}" ]; then
+              echo "### Final walk-forward readiness"
+              echo '```json'
+              jq '.readiness' "${FINAL_WALK_FORWARD_REPORT}" || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload compact report bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: event-ml-rolling-reports-${{ github.run_id }}
+          path: artifacts/event-ml-report-bundle/
+          retention-days: 14
+
+      - name: Upload Parquet datasets
+        if: ${{ github.event.inputs.upload_parquet_datasets == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: event-ml-rolling-datasets-${{ github.run_id }}
+          path: |
+            artifacts/event-ml/source_event_root/
+            artifacts/event-ml/rolling_datasets/
+          retention-days: 3
