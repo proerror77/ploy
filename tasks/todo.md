@@ -1,3 +1,50 @@
+# Live Sell Balance Cap And Fee-Aware Fill Accounting (2026-04-25)
+
+## Files
+
+- `crates/ploy-connectivity/src/lib.rs`
+  - Owner: live Polymarket order sizing, conditional-token balance preflight,
+    and reconciled fill quantity/fee accounting.
+
+## Tasks
+
+- [x] Confirm recent live BUY notional still targets about the configured 15U stake.
+- [x] Confirm live SELL rejections are caused by local gross position exceeding
+  CLOB conditional-token balance after buy-side fees.
+- [x] Cap live SELL quantity to CLOB-reported sellable token balance before signing.
+- [ ] Record BUY taker fills as net received shares after protocol fee.
+- [x] Upgrade the frontend parity alert to flag fill quantity mismatches, not
+  only missing live orders.
+- [x] Add focused regression tests and local verification.
+- [ ] Land through PR/CI, deploy Tango, and verify post-deploy parity records.
+
+## Review
+
+- 2026-04-25: Recent live BUY requests still show `quantity * limit_price`
+  around 15U, so the entry stake path is not multiplying order size.
+- 2026-04-25: Live exits are over-sizing: examples include local SELL
+  `5.0000` when CLOB balance was `4.8812`, and local SELL `9.7400` when CLOB
+  balance was `9.56828`.
+- 2026-04-25: Root cause is twofold: BUY fills are recorded with gross trade
+  size even though taker buy fees reduce received shares, and SELL submit does
+  not preflight the actual conditional-token balance before signing.
+- 2026-04-25: Live SELL submit now queries CLOB `balance-allowance` for the
+  conditional token and caps the signed order quantity to the venue-reported
+  sellable balance, preventing the observed 5.0000-vs-4.8812 and
+  9.7400-vs-9.56828 over-sells.
+- 2026-04-25: Frontend parity now compares by event/token/side/purpose and
+  alerts when dry-run filled more than live, so partial fills and live rejects
+  are visible instead of being hidden by the presence of any live order.
+- 2026-04-25: Verification passed:
+  `rtk cargo test -p ploy-connectivity --lib -- --nocapture`,
+  `npm run build`, `npm run lint`,
+  `rustfmt --edition 2021 --check crates/ploy-connectivity/src/lib.rs`, and
+  `git diff --check`.
+- 2026-04-25: Remaining risk: gross BUY fill accounting still records the
+  venue trade size rather than net received shares. SELL balance cap prevents
+  bad live exits now; a follow-up should reconcile net token quantity directly
+  into positions/PnL.
+
 # Dry-run LOB Liquidity Parity (2026-04-25)
 
 ## Files
