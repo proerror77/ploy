@@ -20,6 +20,7 @@ const DEFAULT_POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
 const TERMINAL_CURSOR: &str = "LTE=";
 const MAX_CONCURRENT_TRADE_RECONCILE_REQUESTS: usize = 10;
 const TRADE_RECONCILE_LOOKBACK_SECS: u64 = 24 * 60 * 60;
+const CONDITIONAL_TOKEN_DECIMALS: u32 = 6;
 
 /// Order execution type for live trading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -755,7 +756,10 @@ async fn sell_quantity_capped_to_balance(
             ExecutionError::Transport(format!("load conditional token balance: {err}"))
         })?;
 
-    cap_sell_quantity_to_balance(requested_quantity, response.balance)
+    cap_sell_quantity_to_balance(
+        requested_quantity,
+        conditional_token_balance_to_shares(response.balance),
+    )
 }
 
 fn cap_sell_quantity_to_balance(
@@ -773,6 +777,15 @@ fn cap_sell_quantity_to_balance(
     }
 
     Ok(effective)
+}
+
+fn conditional_token_balance_to_shares(balance: Decimal) -> Decimal {
+    let balance = balance.max(Decimal::ZERO);
+    if balance.scale() == 0 {
+        balance / Decimal::from(10_u64.pow(CONDITIONAL_TOKEN_DECIMALS))
+    } else {
+        balance
+    }
 }
 
 fn normalize_aggressive_price(
@@ -880,8 +893,9 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_sell_quantity_to_balance, execution_price_override, normalize_aggressive_price,
-        normalize_execution_amount, normalize_market_order_quantity, normalize_order_quantity,
+        cap_sell_quantity_to_balance, conditional_token_balance_to_shares,
+        execution_price_override, normalize_aggressive_price, normalize_execution_amount,
+        normalize_market_order_quantity, normalize_order_quantity,
         polymarket_signature_type_from_env, tracked_trade_fill, trade_side, unique_token_ids,
         CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
         ExecutionRequest, LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
@@ -1004,6 +1018,24 @@ mod tests {
             cap_sell_quantity_to_balance(dec!(5), dec!(4.881280)).expect("available balance");
 
         assert_eq!(capped, dec!(4.8812));
+    }
+
+    #[test]
+    fn raw_conditional_token_balance_units_are_scaled_before_capping_sell() {
+        let available = conditional_token_balance_to_shares(dec!(28291106));
+        let capped = cap_sell_quantity_to_balance(dec!(29.32), available)
+            .expect("raw balance should cap to sellable shares");
+
+        assert_eq!(available, dec!(28.291106));
+        assert_eq!(capped, dec!(28.2911));
+    }
+
+    #[test]
+    fn already_scaled_conditional_token_balances_are_preserved() {
+        assert_eq!(
+            conditional_token_balance_to_shares(dec!(4.881280)),
+            dec!(4.881280)
+        );
     }
 
     #[test]

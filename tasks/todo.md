@@ -8912,3 +8912,20 @@ Checklist:
 
 Review:
 - 2026-04-24: Added `event_ml_rolling_workflow`, a rolling orchestrator that accepts repeated `--dataset` or CSV `--datasets`, creates deterministic `window_NNN_event_ml` output dirs, runs the canonical `event_ml_workflow` for each event-root dataset, and passes prior completed window dirs into later windows as `--walk-forward-run-dir`. The runner rejects duplicate dataset paths before work starts, supports `--dry-run`, and writes `rolling_workflow_report.json` / `.md` under `--output-root`. This is the agent-facing entrypoint for producing the distinct workflow runs needed to satisfy the walk-forward gates.
+
+## Live Sell Balance Scaling
+
+Goal: prevent live settlement/take-profit SELL orders from exceeding the venue's actual conditional-token balance when Polymarket reports balances in raw 6-decimal units.
+
+File ownership:
+- `crates/ploy-connectivity/src/lib.rs`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Convert conditional-token balance responses from raw 6-decimal units before capping SELL quantity.
+- [x] Preserve already-scaled decimal balance handling for tests/future SDK normalization.
+- [x] Add regression tests for raw balance units matching the observed live rejection.
+- [x] Run focused connectivity tests and formatting/static checks.
+
+Review:
+- 2026-04-25: Fixed the live SELL cap path so conditional-token balances from Polymarket are converted from raw 6-decimal units before being compared with requested shares. This matches the observed venue rejection where balance `28291106` meant `28.291106` shares, not 28,291,106 shares. Added regression coverage for the raw-unit conversion and preserved already-scaled decimal balances.
