@@ -1,3 +1,35 @@
+# PM5D PM Quote Size Persistence Repair (2026-04-25)
+
+## Files
+
+- `crates/ploy-market-data/src/collector.rs`
+  - Owner: WebSocket quote collector persistence into `clob_quote_ticks`.
+- `scripts/repair_clob_quote_sizes_from_snapshots.sh`
+  - Owner: Tango-side historical quote-size repair from stored orderbook snapshots.
+
+## Tasks
+
+- [x] Confirm bounded optimize preflight sees quote rows but zero
+  `ask_size`/`bid_size` rows.
+- [x] Persist top-of-book sizes from collector orderbook updates into
+  `clob_quote_ticks`.
+- [x] Add a repair script that backfills old quote sizes from
+  `clob_orderbook_snapshots`.
+- [ ] Run focused local checks and land through PR/CI.
+- [ ] Repair/export the 2026-04-24 Tango Parquet partition and rerun bounded
+  optimize.
+
+## Review
+
+- 2026-04-25: Run `24926056851` failed preflight on main `eb9b00c` before
+  optimization. It found train `pm_quote` rows `778,682` and val rows `260,698`,
+  but both splits had `ask_size_rows=0` and `bid_size_rows=0`.
+- 2026-04-25: The WS collector already stores full book snapshots with level
+  sizes, but its derived `clob_quote_ticks` insert only wrote `best_bid` and
+  `best_ask`. Future collector rows now preserve the selected tradeable
+  top-of-book sizes. Historical rows can be repaired from the exact same
+  snapshot timestamp/token before re-exporting Parquet.
+
 # PM5D Optimize Quote Liquidity Preflight (2026-04-25)
 
 ## Files

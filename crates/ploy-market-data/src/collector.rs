@@ -124,24 +124,24 @@ fn is_tradeable_price(price: Decimal) -> bool {
     price > rust_decimal_macros::dec!(0.02) && price < rust_decimal_macros::dec!(0.98)
 }
 
-fn best_tradeable_bid<I>(prices: I) -> Option<Decimal>
+fn best_tradeable_bid_level<I>(levels: I) -> Option<(Decimal, Decimal)>
 where
-    I: IntoIterator<Item = Decimal>,
+    I: IntoIterator<Item = (Decimal, Decimal)>,
 {
-    prices
+    levels
         .into_iter()
-        .filter(|price| is_tradeable_price(*price))
-        .max()
+        .filter(|(price, size)| is_tradeable_price(*price) && *size > Decimal::ZERO)
+        .max_by(|left, right| left.0.cmp(&right.0))
 }
 
-fn best_tradeable_ask<I>(prices: I) -> Option<Decimal>
+fn best_tradeable_ask_level<I>(levels: I) -> Option<(Decimal, Decimal)>
 where
-    I: IntoIterator<Item = Decimal>,
+    I: IntoIterator<Item = (Decimal, Decimal)>,
 {
-    prices
+    levels
         .into_iter()
-        .filter(|price| is_tradeable_price(*price))
-        .min()
+        .filter(|(price, size)| is_tradeable_price(*price) && *size > Decimal::ZERO)
+        .min_by(|left, right| left.0.cmp(&right.0))
 }
 
 fn serialize_orderbook_levels(levels: &[OrderBookLevel]) -> String {
@@ -440,14 +440,22 @@ impl QuoteCollector {
                                     s.books_received += 1;
                                 }
 
-                                // Select the actual best tradeable prices, not just the first
-                                // non-placeholder level returned by the SDK.
-                                let real_bid =
-                                    best_tradeable_bid(book.bids.iter().map(|bid| bid.price));
-                                let real_ask =
-                                    best_tradeable_ask(book.asks.iter().map(|ask| ask.price));
+                                // Select the actual best tradeable levels, not just the first
+                                // non-placeholder level returned by the SDK. Preserve size so
+                                // LOB-aware replay can model executable top-of-book liquidity.
+                                let real_bid = best_tradeable_bid_level(
+                                    book.bids.iter().map(|bid| (bid.price, bid.size)),
+                                );
+                                let real_ask = best_tradeable_ask_level(
+                                    book.asks.iter().map(|ask| (ask.price, ask.size)),
+                                );
 
-                                let (best_bid, best_ask) = (real_bid, real_ask);
+                                let (best_bid, bid_size) = real_bid
+                                    .map(|(price, size)| (Some(price), Some(size)))
+                                    .unwrap_or((None, None));
+                                let (best_ask, ask_size) = real_ask
+                                    .map(|(price, size)| (Some(price), Some(size)))
+                                    .unwrap_or((None, None));
 
                                 // Get metadata
                                 let meta = {
@@ -464,6 +472,8 @@ impl QuoteCollector {
                                         &token_id,
                                         best_bid,
                                         best_ask,
+                                        bid_size,
+                                        ask_size,
                                     )
                                     .await
                                     {
@@ -961,6 +971,8 @@ async fn persist_book_update(
     token_id: &str,
     best_bid: Option<Decimal>,
     best_ask: Option<Decimal>,
+    bid_size: Option<Decimal>,
+    ask_size: Option<Decimal>,
 ) -> Result<PersistResult, sqlx::Error> {
     let received_at = Utc::now();
     let bids_json = serialize_orderbook_levels(&book.bids);
@@ -995,9 +1007,9 @@ async fn persist_book_update(
         sqlx::query(
             r#"
         INSERT INTO clob_quote_ticks (
-            token_id, side, best_bid, best_ask,
+            token_id, side, best_bid, best_ask, bid_size, ask_size,
             received_at, source, domain
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT DO NOTHING
         "#,
         )
@@ -1005,6 +1017,8 @@ async fn persist_book_update(
         .bind(&meta.side)
         .bind(best_bid)
         .bind(best_ask)
+        .bind(bid_size)
+        .bind(ask_size)
         .bind(received_at)
         .bind("polymarket_ws_collector")
         .bind("Crypto")
@@ -1026,7 +1040,7 @@ async fn persist_book_update(
 #[cfg(test)]
 mod tests {
     use super::{
-        best_tradeable_ask, best_tradeable_bid, book_timestamp, bridge_sdk_json,
+        best_tradeable_ask_level, best_tradeable_bid_level, book_timestamp, bridge_sdk_json,
         collector_market_data_ws_config, parse_official_market_settlements,
         serialize_orderbook_levels, snapshot_context, OfficialMarketSettlementPayload,
         OrderBookLevel, TokenMetadata,
@@ -1037,21 +1051,67 @@ mod tests {
 
     #[test]
     fn best_tradeable_bid_skips_placeholders_and_takes_highest_level() {
-        let prices = vec![dec!(0.01), dec!(0.45), dec!(0.62), dec!(0.99)];
-        assert_eq!(best_tradeable_bid(prices), Some(dec!(0.62)));
+        let levels = vec![
+            (dec!(0.01), dec!(100)),
+            (dec!(0.45), dec!(12)),
+            (dec!(0.62), dec!(4)),
+            (dec!(0.99), dec!(100)),
+        ];
+        assert_eq!(
+            best_tradeable_bid_level(levels),
+            Some((dec!(0.62), dec!(4)))
+        );
     }
 
     #[test]
     fn best_tradeable_ask_skips_placeholders_and_takes_lowest_level() {
-        let prices = vec![dec!(0.99), dec!(0.54), dec!(0.31), dec!(0.01)];
-        assert_eq!(best_tradeable_ask(prices), Some(dec!(0.31)));
+        let levels = vec![
+            (dec!(0.99), dec!(100)),
+            (dec!(0.54), dec!(12)),
+            (dec!(0.31), dec!(4)),
+            (dec!(0.01), dec!(100)),
+        ];
+        assert_eq!(
+            best_tradeable_ask_level(levels),
+            Some((dec!(0.31), dec!(4)))
+        );
     }
 
     #[test]
     fn best_tradeable_prices_return_none_when_only_placeholders_exist() {
-        let prices = vec![dec!(0.01), dec!(0.02), dec!(0.98), dec!(0.99)];
-        assert_eq!(best_tradeable_bid(prices.clone()), None);
-        assert_eq!(best_tradeable_ask(prices), None);
+        let levels = vec![
+            (dec!(0.01), dec!(100)),
+            (dec!(0.02), dec!(100)),
+            (dec!(0.98), dec!(100)),
+            (dec!(0.99), dec!(100)),
+        ];
+        assert_eq!(best_tradeable_bid_level(levels.clone()), None);
+        assert_eq!(best_tradeable_ask_level(levels), None);
+    }
+
+    #[test]
+    fn best_tradeable_levels_preserve_size() {
+        let bids = vec![
+            (dec!(0.01), dec!(100)),
+            (dec!(0.45), dec!(0)),
+            (dec!(0.52), dec!(6.25)),
+            (dec!(0.48), dec!(9.5)),
+        ];
+        let asks = vec![
+            (dec!(0.99), dec!(100)),
+            (dec!(0.44), dec!(0)),
+            (dec!(0.41), dec!(3.75)),
+            (dec!(0.49), dec!(8)),
+        ];
+
+        assert_eq!(
+            best_tradeable_bid_level(bids),
+            Some((dec!(0.52), dec!(6.25)))
+        );
+        assert_eq!(
+            best_tradeable_ask_level(asks),
+            Some((dec!(0.41), dec!(3.75)))
+        );
     }
 
     #[test]
