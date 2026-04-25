@@ -674,6 +674,7 @@ fn run_backtest(
         enable_market_impact: true,
         impact_coefficient: dec!(0.1),
         default_depth_shares: 500,
+        require_lob_liquidity: false,
     });
     let recorder = Box::new(NullRecorder);
     let runtime_config = RuntimeConfig {

@@ -1,3 +1,53 @@
+# Dry-run LOB Liquidity Parity (2026-04-25)
+
+## Files
+
+- `crates/ploy-market-data/src/feeds.rs`
+  - Owner: live/dry-run Polymarket quote feed and persisted quote sizes.
+- `crates/ploy-strategy-bundles/src/traits.rs`
+  - Owner: executor market-update observation hook.
+- `crates/ploy-strategy-bundles/src/engine.rs`
+  - Owner: forwarding every market update to the executor before throttled strategy evaluation.
+- `crates/ploy-strategy-bundles/src/executor/simulated.rs`
+  - Owner: LOB-aware dry-run fill simulation.
+- `crates/ploy-strategy-bundles/src/config.rs`
+  - Owner: TOML surface for requiring LOB liquidity.
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+  - Owner: explicit simulator config initializer compatibility.
+- `config/strategies/02-pm5d-threelayer.unified.toml`
+- `config/strategies/02-pm5d-threelayer.live.toml`
+
+## Tasks
+
+- [x] Replace dry-run midpoint-only quote generation with top-of-book quotes that include executable size.
+- [x] Let the simulated executor track latest quote liquidity per token.
+- [x] When enabled, require buy orders to consume ask liquidity and sell orders to consume bid liquidity instead of fixed synthetic depth.
+- [x] Enable the LOB-liquidity requirement for the PM5D ThreeLayer dry-run/live config pair without changing strategy parameters.
+- [x] Add focused tests for no-liquidity reject, partial top-of-book fills, quote-feed parsing, and config parsing.
+- [ ] Run focused Rust tests, open PR, and deploy through GitHub Actions after merge.
+
+## Review
+
+- 2026-04-25: Root cause confirmed: dry-run used REST `/midpoint` to synthesize
+  bid/ask with no size, and `SimulatedExecutor` filled from a fixed synthetic
+  `default_depth_shares=500` instead of observed LOB liquidity.
+- 2026-04-25: The live/dry-run quote feed now polls CLOB `/book`, filters
+  placeholder `0.01/0.99` levels, emits best bid/ask plus top-of-book size, and
+  persists non-empty sizes to `clob_quote_ticks`.
+- 2026-04-25: `SimulatedExecutor` now observes quote updates. When
+  `require_lob_liquidity=true`, BUY consumes only executable ask size at or
+  below limit and SELL consumes only executable bid size at or above limit;
+  missing size or uncrossable prices are rejected instead of filled.
+- 2026-04-25: Verification passed:
+  `rtk cargo test -p ploy-strategy-bundles --lib`,
+  `rtk cargo test -p ploy-market-data --lib`,
+  `rtk cargo test -p ploy-strategy-runtime --lib`,
+  `rustfmt --edition 2021 --check ...`, and `git diff --check`.
+- 2026-04-25: PR CI caught one explicit `SimulatedExecutorConfig`
+  initializer in `optimize_backtest`; it now opts out of LOB liquidity
+  explicitly because optimizer backtests still use the historical simulator
+  path unless their configs request LOB-aware execution.
+
 # Live Market Buy Precision Repair (2026-04-25)
 
 ## Files

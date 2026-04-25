@@ -158,6 +158,8 @@ pub struct SimExecutionSection {
     pub impact_coefficient: f64,
     #[serde(default = "default_depth_shares")]
     pub default_depth_shares: u64,
+    #[serde(default)]
+    pub require_lob_liquidity: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -217,6 +219,7 @@ impl Default for SimExecutionSection {
             enable_market_impact: false,
             impact_coefficient: 0.1,
             default_depth_shares: 500,
+            require_lob_liquidity: false,
         }
     }
 }
@@ -310,6 +313,7 @@ impl FullConfig {
             enable_market_impact: e.enable_market_impact,
             impact_coefficient: Decimal::try_from(e.impact_coefficient).unwrap_or_default(),
             default_depth_shares: e.default_depth_shares,
+            require_lob_liquidity: e.require_lob_liquidity,
         }
     }
 

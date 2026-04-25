@@ -173,6 +173,7 @@ where
 
         while let Some(update) = self.feed.next().await {
             updates_processed += 1;
+            self.executor.observe_market_update(&update);
 
             // Throttle: skip high-frequency price/quote updates if within the same time slot.
             // Event lifecycle updates (discovered/expired) always pass through.
