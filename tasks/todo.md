@@ -829,6 +829,65 @@ evidence.
   dataset dry-run was skipped because `/tmp/ploy-event-root-5sym-150-20260424`
   was not present.
 
+# PM5D Factor Walk-Forward V2 (2026-04-26)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/src/deribit.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: solo research lane
+- `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: solo research lane
+
+## Tasks
+
+- [x] Add a train-window threshold / future-window evaluation path for `FactorObservationV2`.
+- [x] Exclude future-exit diagnostic labels from walk-forward candidate selection.
+- [x] Keep walk-forward aggregation on all candidate factors; apply `top_n` only to report display.
+- [x] Share Deribit feature loading through `ploy-research` instead of duplicating it in each example.
+- [x] Add a DB-backed `factor_walk_forward_v2` entrypoint for ploy-ci/Tango research runs.
+- [x] Add a workflow-dispatch lane for factor walk-forward artifacts.
+- [x] Verify locally, then run a ploy-ci smoke against 2026-04-21..25.
+- [x] Address PR review fixes for workflow secrets, Deribit cardinality/merge behavior,
+  exclusive end-date slicing, and walk-forward empty-factor guards.
+
+## Review
+
+- 2026-04-26: Local verification passed: `rtk cargo test -p ploy-research factors_v2 --lib`,
+  `rtk cargo check -p ploy-research --features db --example factor_walk_forward_v2`,
+  `rtk cargo check -p ploy-research --features db --example factor_review_v2`,
+  `rtk cargo check -p ploy-research --no-default-features`, workflow YAML parse,
+  `rustfmt --edition 2024 --check` on touched Rust files, and `git diff --check`.
+- 2026-04-26: ploy-ci smoke was run manually because a new workflow cannot be dispatched
+  from the default branch until it is merged.
+- 2026-04-26: First ploy-ci manual smoke completed, but exposed that `future_exit_*` diagnostic
+  labels were being ranked as candidate factors. This is a look-ahead path for walk-forward
+  selection, so candidate selection now excludes those descriptors while single-window review
+  still reports them as exit diagnostics.
+- 2026-04-26: Walk-forward windows are no longer truncated before aggregation. `top_n` now limits
+  output display only, so aggregate metrics are not biased by post-test top performer selection.
+- 2026-04-26: ploy-ci manual smoke on `c0b872c` completed with exit code 0 against Tango DB
+  (`2026-04-21..2026-04-25`, six symbols, 30s sampling, stake 15). Evidence:
+  `updates=3,273,137`, `lob snapshot rows=85,854`, `deribit_snapshots=28,642`,
+  `factor_observations=104,495`, `v2_rows=208,990`, `executable_pnl_rows=12,049`,
+  entry fill rate `5.77%`, rejection rate `94.23%`, swap stayed `0B`, and no
+  `future_exit_*` factor appeared in the walk-forward output.
+- 2026-04-26: Code review fixes removed hardcoded workflow DB credentials in favor of
+  `PLOY_DB_URL`, preserved cargo target caching, made end-date slicing exclusive at next-day
+  midnight, loaded symmetric pre-window Binance/LOB history, bounded legacy Deribit fallback
+  with the same bucket sampling, merged IV/greeks snapshots by `(symbol, ts)`, and added an
+  empty directed-score guard.
+- 2026-04-26: ploy-ci review-fix smoke on `26d67fc` completed with exit code 0 against Tango DB.
+  Evidence: right-open range printed as `2026-04-21 00:00:00 UTC -> 2026-04-26 00:00:00 UTC`,
+  `updates=3,307,273`, `lob snapshot rows=86,886`, `deribit_snapshots=28,726`,
+  `factor_observations=104,777`, `v2_rows=209,554`, `executable_pnl_rows=12,088`,
+  entry fill rate `5.77%`, rejection rate `94.23%`, swap stayed `0B`, and no
+  `future_exit_*` factor appeared in the walk-forward output. The ploy-ci runner was restored
+  to active afterward.
+
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 
 ## Files
