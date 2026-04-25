@@ -119,6 +119,7 @@ async fn main() {
         end,
         &HistoricalLoadOptions {
             require_official_settlement: true,
+            include_l2: false,
             ..Default::default()
         },
     )

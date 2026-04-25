@@ -77,6 +77,7 @@ async fn run_backtest(
             .reference_symbols(&config.reference_data),
         include_sports_state: config.backtest_data.include_sports_state,
         require_official_settlement: config.backtest_data.require_official_settlement,
+        include_l2: true,
         lob_sample_secs: 30,
     };
 
