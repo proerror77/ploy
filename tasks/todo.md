@@ -9181,3 +9181,23 @@ Checklist:
 
 Review:
 - 2026-04-25: Post-guard optimize run `24924887117` proved official settlement replay no longer fails silently, but all 20 TPE trials still produced zero trades. Added optimizer diagnostics so the next bounded run reports runtime intents/fills, recorded signals/orders, executor rejection reasons, and ThreeLayer gate counters such as missing candidate events, missing PM quotes, stale quotes, edge-score filtering, and entry-score filtering. This keeps the next threshold discussion evidence-driven instead of guessing from `trades=0`.
+
+## Prefer Executable PM Quotes
+
+Goal: stop price-only PM quote rows from erasing or outranking book rows that carry executable top-of-book size in LOB-aware dry-run/backtest replay.
+
+File ownership:
+- `crates/ploy-strategy-bundles/src/executor/simulated.rs`
+- `crates/ploy-strategy-bundles/src/feed/parquet_stream.rs`
+- `crates/ploy-feed-loaders/src/database.rs`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Make the simulated executor preserve last observed bid/ask size when a later price-only quote arrives.
+- [x] Prefer positive ask/bid size rows during per-second quote de-duplication in Parquet streaming replay.
+- [x] Apply the same size-preference ordering to DB historical quote loading.
+- [x] Add focused regression coverage for price-only quote updates preserving executable liquidity.
+- [x] Verify formatting, focused tests, and relevant cargo checks.
+
+Review:
+- 2026-04-25: Diagnostic optimize run `24925353379` showed hundreds to thousands of entry signals per trial, but every simulated order was rejected with `No executable ask liquidity`. The replay SQL was selecting the newest quote per token/second, which can choose later price-only `best_bid_ask`/`price_change` rows over book rows with size. The simulator also overwrote known sizes with `None` when it observed price-only quotes. Fixed both paths so LOB-aware replay can use executable liquidity when the historical data contains it, while still rejecting when size was never observed.

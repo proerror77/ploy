@@ -511,6 +511,9 @@ async fn load_pm_quotes(
     // - UP token:   best_bid is the real price, best_ask may be NULL
     // - DOWN token: best_ask is the real price, best_bid may be NULL
     // Accept rows where EITHER bid OR ask is in the real price range (0.01, 0.99).
+    // Within each second, prefer book rows with executable size over later price-only
+    // best_bid_ask/price_change rows; otherwise LOB-aware replay sees valid prices
+    // but no executable top-of-book liquidity.
     let rows: Vec<(
         DateTime<Utc>,
         String,
@@ -532,7 +535,10 @@ async fn load_pm_quotes(
             OR
             (best_ask  IS NOT NULL AND best_ask  > 0.01 AND best_ask  < 0.99)
           )
-        ORDER BY date_trunc('second', received_at), token_id, received_at DESC
+        ORDER BY date_trunc('second', received_at), token_id,
+                 (ask_size IS NOT NULL AND ask_size > 0)::int DESC,
+                 (bid_size IS NOT NULL AND bid_size > 0)::int DESC,
+                 received_at DESC
         "#,
     )
     .bind(from)
