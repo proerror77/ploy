@@ -137,7 +137,8 @@ async fn main() {
             .expect("bulk lob snapshot load failed");
     eprintln!("lob_snapshots: {}", all_lob_snapshots.len());
 
-    let deribit_snapshots = load_deribit_feature_snapshots(&pool, &symbols, start, end).await;
+    let deribit_snapshots =
+        load_deribit_feature_snapshots(&pool, &symbols, start, end, observation_sample_secs).await;
     eprintln!("deribit_snapshots: {}", deribit_snapshots.len());
 
     let updates_slice_start = start - chrono::Duration::hours(1) - chrono::Duration::seconds(300);
@@ -171,6 +172,7 @@ async fn load_deribit_feature_snapshots(
     symbols: &[String],
     start: DateTime<Utc>,
     end: DateTime<Utc>,
+    sample_secs: i64,
 ) -> Vec<DeribitFeatureSnapshot> {
     let currencies: Vec<String> = symbols
         .iter()
@@ -180,33 +182,60 @@ async fn load_deribit_feature_snapshots(
         return Vec::new();
     }
 
+    let sample_secs = sample_secs.clamp(1, 300) as i32;
     let mut snapshots = Vec::new();
     let current_iv_rows: Vec<(
-        String,
         String,
         Option<f64>,
         Option<f64>,
         Option<f64>,
         Option<f64>,
         DateTime<Utc>,
-    )> = sqlx::query_as(
+    )> = match sqlx::query_as(
         r#"
-        SELECT currency, instrument_name, mark_iv, bid_iv, ask_iv, underlying_price, fetched_at
-        FROM deribit_iv_ticks
-        WHERE currency = ANY($1)
-          AND fetched_at >= $2
-          AND fetched_at <= $3
-        ORDER BY fetched_at
+        WITH currencies AS (
+            SELECT unnest($1::text[]) AS currency
+        ),
+        buckets AS (
+            SELECT generate_series($2::timestamptz, $3::timestamptz, make_interval(secs => $4::int)) AS bucket_ts
+        )
+        SELECT
+            c.currency,
+            d.mark_iv::double precision,
+            d.bid_iv::double precision,
+            d.ask_iv::double precision,
+            d.underlying_price::double precision,
+            b.bucket_ts
+        FROM currencies c
+        CROSS JOIN buckets b
+        JOIN LATERAL (
+            SELECT mark_iv, bid_iv, ask_iv, underlying_price
+            FROM deribit_iv_ticks d
+            WHERE d.currency = c.currency
+              AND d.creation_ts <= b.bucket_ts
+              AND d.creation_ts > b.bucket_ts - interval '5 minutes'
+              AND d.mark_iv IS NOT NULL
+            ORDER BY d.creation_ts DESC, d.open_interest DESC NULLS LAST
+            LIMIT 1
+        ) d ON true
+        ORDER BY b.bucket_ts
         "#,
     )
     .bind(&currencies)
     .bind(start)
     .bind(end)
+    .bind(sample_secs)
     .fetch_all(pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            eprintln!("deribit iv load failed: {err}");
+            Vec::new()
+        }
+    };
 
-    for (currency, _instrument, mark_iv, bid_iv, ask_iv, underlying_price, ts) in current_iv_rows {
+    for (currency, mark_iv, bid_iv, ask_iv, underlying_price, ts) in current_iv_rows {
         snapshots.push(DeribitFeatureSnapshot {
             symbol: deribit_currency_to_symbol(&currency),
             ts,
@@ -223,9 +252,13 @@ async fn load_deribit_feature_snapshots(
 
     if snapshots.is_empty() {
         let legacy_iv_rows: Vec<(String, Option<f64>, Option<f64>, DateTime<Utc>)> =
-            sqlx::query_as(
+            match sqlx::query_as(
                 r#"
-                SELECT currency, COALESCE(atm_iv, iv_close, iv_open), iv_close, timestamp
+                SELECT
+                    currency,
+                    COALESCE(atm_iv, iv_close, iv_open)::double precision,
+                    iv_close::double precision,
+                    timestamp
                 FROM deribit_iv_ticks
                 WHERE currency = ANY($1)
                   AND timestamp >= $2
@@ -238,7 +271,13 @@ async fn load_deribit_feature_snapshots(
             .bind(end)
             .fetch_all(pool)
             .await
-            .unwrap_or_default();
+            {
+                Ok(rows) => rows,
+                Err(err) => {
+                    eprintln!("legacy deribit iv load skipped: {err}");
+                    Vec::new()
+                }
+            };
         for (currency, atm_iv, iv_close, ts) in legacy_iv_rows {
             let mark_iv = atm_iv.or(iv_close).unwrap_or(f64::NAN);
             snapshots.push(DeribitFeatureSnapshot {
@@ -258,7 +297,6 @@ async fn load_deribit_feature_snapshots(
 
     let greeks_rows: Vec<(
         String,
-        String,
         Option<f64>,
         Option<f64>,
         Option<f64>,
@@ -266,26 +304,53 @@ async fn load_deribit_feature_snapshots(
         Option<f64>,
         Option<f64>,
         DateTime<Utc>,
-    )> = sqlx::query_as(
+    )> = match sqlx::query_as(
         r#"
-        SELECT currency, instrument_name, mark_iv, delta, gamma, vega, theta, underlying_price, fetched_at
-        FROM deribit_atm_greeks_ticks
-        WHERE currency = ANY($1)
-          AND fetched_at >= $2
-          AND fetched_at <= $3
-        ORDER BY fetched_at
+        WITH currencies AS (
+            SELECT unnest($1::text[]) AS currency
+        ),
+        buckets AS (
+            SELECT generate_series($2::timestamptz, $3::timestamptz, make_interval(secs => $4::int)) AS bucket_ts
+        )
+        SELECT
+            c.currency,
+            d.mark_iv::double precision,
+            d.delta::double precision,
+            d.gamma::double precision,
+            d.vega::double precision,
+            d.theta::double precision,
+            d.underlying_price::double precision,
+            b.bucket_ts
+        FROM currencies c
+        CROSS JOIN buckets b
+        JOIN LATERAL (
+            SELECT mark_iv, delta, gamma, vega, theta, underlying_price
+            FROM deribit_atm_greeks_ticks d
+            WHERE d.currency = c.currency
+              AND d.source_ts <= b.bucket_ts
+              AND d.source_ts > b.bucket_ts - interval '5 minutes'
+              AND d.mark_iv IS NOT NULL
+            ORDER BY d.source_ts DESC, d.open_interest DESC NULLS LAST
+            LIMIT 1
+        ) d ON true
+        ORDER BY b.bucket_ts
         "#,
     )
     .bind(&currencies)
     .bind(start)
     .bind(end)
+    .bind(sample_secs)
     .fetch_all(pool)
     .await
-    .unwrap_or_default();
-
-    for (currency, _instrument, mark_iv, delta, gamma, vega, theta, underlying_price, ts) in
-        greeks_rows
     {
+        Ok(rows) => rows,
+        Err(err) => {
+            eprintln!("deribit greeks load failed: {err}");
+            Vec::new()
+        }
+    };
+
+    for (currency, mark_iv, delta, gamma, vega, theta, underlying_price, ts) in greeks_rows {
         snapshots.push(DeribitFeatureSnapshot {
             symbol: deribit_currency_to_symbol(&currency),
             ts,
