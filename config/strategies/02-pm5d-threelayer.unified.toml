@@ -63,3 +63,4 @@ capture_sports_state = false
 [backtest_data]
 include_reference_prices = false
 include_sports_state = false
+require_official_settlement = true

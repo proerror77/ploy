@@ -658,6 +658,23 @@ venue = "sportsbook"
         assert_eq!(dryrun, live);
     }
 
+    #[test]
+    fn threelayer_configs_require_official_settlement_for_backtests() {
+        let config_dir = strategy_config_dir();
+
+        for file in [
+            "02-pm5d-threelayer.unified.toml",
+            "02-pm5d-threelayer.live.toml",
+        ] {
+            let path = config_dir.join(file);
+            let config = FullConfig::from_file(path.to_str().unwrap()).unwrap();
+            assert!(
+                config.backtest_data.require_official_settlement,
+                "{file} must not optimize against spot-fallback settlement"
+            );
+        }
+    }
+
     fn strategy_config_dir() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         manifest_dir.join("../../config/strategies")

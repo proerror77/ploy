@@ -693,9 +693,6 @@ impl ThreeLayerStrategy {
         orders: &OrderLedger,
     ) -> Vec<StrategyDecision> {
         let mut decisions = Vec::new();
-        if self.balance_pause_active(now) {
-            return decisions;
-        }
 
         for event in self.events.get(symbol).into_iter().flatten() {
             for (token_id, is_up) in [(&event.up_token, true), (&event.down_token, false)] {
@@ -714,23 +711,22 @@ impl ThreeLayerStrategy {
                     continue;
                 };
 
-                // Take profit
-                if let Some(quote) = self.quotes.get(token_id) {
-                    if let Some(ask) = quote.ask.and_then(|v| v.to_f64()) {
-                        if ask >= self.config.take_profit_ask {
-                            decisions.push(StrategyDecision::Exit(TradingIntent {
-                                intent_id: format!("tl_tp_{}_{}", token_id, now.timestamp_millis()),
-                                deployment_id: String::new(),
-                                market_id: event.event_id.to_string(),
-                                token_id: token_id.to_string(),
-                                side: TradeSide::Sell,
-                                quantity: qty,
-                                limit_price: Some(exit_bid),
-                                purpose: IntentPurpose::Exit,
-                                created_at: now,
-                            }));
-                            continue;
-                        }
+                // Take profit must be executable: SELL can only hit the bid.
+                // The config field keeps its historical name for TOML compatibility.
+                if let Some(bid) = exit_bid.to_f64() {
+                    if bid >= self.config.take_profit_ask {
+                        decisions.push(StrategyDecision::Exit(TradingIntent {
+                            intent_id: format!("tl_tp_{}_{}", token_id, now.timestamp_millis()),
+                            deployment_id: String::new(),
+                            market_id: event.event_id.to_string(),
+                            token_id: token_id.to_string(),
+                            side: TradeSide::Sell,
+                            quantity: qty,
+                            limit_price: Some(exit_bid),
+                            purpose: IntentPurpose::Exit,
+                            created_at: now,
+                        }));
+                        continue;
                     }
                 }
 
@@ -773,9 +769,6 @@ impl ThreeLayerStrategy {
         orders: &OrderLedger,
     ) -> Vec<StrategyDecision> {
         let mut exits = Vec::new();
-        if self.balance_pause_active(now) {
-            return exits;
-        }
 
         if positions.net_qty(&event.up_token) > Decimal::ZERO {
             if Self::active_order_exists(orders, &event.up_token) {
@@ -1485,6 +1478,98 @@ mod tests {
             decisions.is_empty(),
             "active order should gate duplicate live exit"
         );
+    }
+
+    #[test]
+    fn take_profit_requires_executable_bid_not_ask_only() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        discover_test_event(&mut strategy, now);
+        let positions = position_with_token("token-down", now);
+        let orders = OrderLedger::default();
+
+        let decisions = strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-down"),
+                bid: Some(dec!(0.62)),
+                ask: Some(dec!(0.75)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "a high ask alone is not an executable take-profit sell"
+        );
+    }
+
+    #[test]
+    fn balance_pause_blocks_entries_but_not_take_profit_exit() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        discover_test_event(&mut strategy, now);
+        strategy.balance_exhausted_until = Some(now + chrono::Duration::seconds(15));
+        let positions = position_with_token("token-down", now);
+        let orders = OrderLedger::default();
+
+        let decisions =
+            strategy.on_update(&take_profit_quote("token-down", now), &positions, &orders);
+
+        assert_eq!(
+            decisions.len(),
+            1,
+            "risk exits must not wait for buy balance cooldown"
+        );
+        match &decisions[0] {
+            StrategyDecision::Exit(intent) => {
+                assert_eq!(intent.token_id, "token-down");
+                assert_eq!(intent.limit_price, Some(dec!(0.72)));
+            }
+            other => panic!("expected take-profit exit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn balance_pause_does_not_block_official_settlement_exit() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        discover_test_event(&mut strategy, now);
+        strategy.balance_exhausted_until = Some(now + chrono::Duration::seconds(15));
+        let positions = position_with_token("token-down", now);
+        let orders = OrderLedger::default();
+
+        let decisions = strategy.on_update(
+            &MarketUpdate::EventExpired {
+                event_id: Arc::from("evt1"),
+                end_time: now,
+                resolved_up_won: Some(false),
+            },
+            &positions,
+            &orders,
+        );
+
+        assert_eq!(
+            decisions.len(),
+            1,
+            "settlement exits must ignore entry cooldowns"
+        );
+        match &decisions[0] {
+            StrategyDecision::Exit(intent) => {
+                assert_eq!(intent.token_id, "token-down");
+                assert_eq!(intent.limit_price, Some(Decimal::new(1, 0)));
+            }
+            other => panic!("expected settlement exit, got {other:?}"),
+        }
     }
 
     #[test]

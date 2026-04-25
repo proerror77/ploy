@@ -36,6 +36,7 @@ env:
     035_binance_agg_trade_ticks.sql
     036_research_valid_windows_matview.sql
     037_research_time_conditioned_factor_metrics.sql
+    038_track_record_official_residual_settlement.sql
 
 jobs:
   build-and-deploy:
@@ -99,6 +100,7 @@ jobs:
           cp scripts/binance_lob_collector.py dist/scripts/binance_lob_collector.py
           cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
           cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
+          cp scripts/repair_strategy_track_record_official_settlement.sql dist/scripts/repair_strategy_track_record_official_settlement.sql
           cp scripts/drills/*.sh dist/scripts/drills/
           for migration in ${DEPLOY_MIGRATIONS}; do
             migration="$(printf '%s' "${migration}" | xargs)"
@@ -305,6 +307,7 @@ jobs:
             install -m 0755 ./scripts/binance_lob_collector.py ${DEPLOY_ROOT}/scripts/binance_lob_collector.py
             install -m 0644 ./scripts/fix_binance_lob_partitions.sql ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
             install -m 0644 ./scripts/fix_deribit_partitions.sql ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
+            install -m 0644 ./scripts/repair_strategy_track_record_official_settlement.sql ${DEPLOY_ROOT}/scripts/repair_strategy_track_record_official_settlement.sql
             install -m 0755 ./scripts/drills/*.sh ${DEPLOY_ROOT}/scripts/drills/
             for migration in ${DEPLOY_MIGRATIONS}; do
               migration="$(printf '%s' "\${migration}" | xargs)"

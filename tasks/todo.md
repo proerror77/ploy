@@ -1,3 +1,55 @@
+# Official Settlement Dry-run Repair (2026-04-25)
+
+## Files
+
+- `migrations/*strategy_runtime_track_record*`
+  - Owner: dry-run/live track-record accounting with official settlement.
+- `config/strategies/02-pm5d-threelayer.unified.toml`
+  - Owner: PM5D ThreeLayer optimization/backtest settlement requirements.
+- `.github/workflows/optimize.yml`
+  - Owner: remote optimizer invocation defaults.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: ThreeLayer take-profit/stop-loss exit behavior and duplicate exit gating.
+- `scripts/repair_strategy_track_record_official_settlement.sql`
+  - Owner: Tango-side read/write data repair query with backup-first usage.
+
+## Tasks
+
+- [x] Confirm current track-record views, reporting consumers, and optimizer settlement gates.
+- [x] Make dry-run/live event track-record PnL ignore fake settlement prices and prefer official settlement for all settled events.
+- [x] Force PM5D ThreeLayer backtest/parameter optimization to require official settlement.
+- [x] Wire ThreeLayer quote/spot exits to existing take-profit/stop-loss parameters without creating duplicate exits.
+- [x] Run the Tango-safe repair SQL script backup-first and verify current dry-run data.
+- [ ] Run focused checks, land through PR/CI, deploy Tango, and verify post-deploy reports.
+
+## Review
+
+- 2026-04-25: Current track-record views only corrected recorded `settle_*`
+  fills, so live rows that skip synthetic settlement exits still showed large
+  residual positions and dry-run/live PnL could be read under the old recorded
+  sell notional. Added migration `038` so closed event records include official
+  Polymarket settlement payout for any residual quantity after real market
+  sells, while unresolved events remain open instead of being guessed.
+- 2026-04-25: Tango repair script backed up the existing event/daily view
+  definitions into `strategy_track_record_view_backups` and rebuilt both views.
+  Today's dry-run daily PnL changed from the old `+923.1492` raw view to
+  `-224.4960` official-corrected; live changed from `-327.4798` to `-19.7882`.
+  Three new 12:08 CST positions remain open because their tokens have no
+  official settlement rows yet.
+- 2026-04-25: PM5D ThreeLayer config and optimize workflow now require official
+  settlement for backtest/parameter optimization, so stop-loss/take-profit
+  tuning should be rerun against official settlements before changing stop
+  thresholds.
+- 2026-04-25: ThreeLayer take-profit exits now require executable bid >= the
+  configured threshold; a high ask alone no longer triggers a sell. Balance
+  exhaustion pauses still block new entries, but no longer block take-profit or
+  official settlement exits.
+- 2026-04-25: Verification passed: `rtk cargo test -p ploy-strategy-bundles
+  --lib -- --nocapture`, `rustfmt --edition 2021 --check
+  crates/ploy-strategy-bundles/src/strategies/three_layer.rs
+  crates/ploy-strategy-bundles/src/config.rs`, `git diff --check`, and YAML
+  parse for `optimize.yml` plus `deploy-tango-1-1.yml`.
+
 # Live Price Improvement Fill Accounting (2026-04-25)
 
 ## Files
