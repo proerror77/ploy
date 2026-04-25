@@ -829,6 +829,33 @@ evidence.
   dataset dry-run was skipped because `/tmp/ploy-event-root-5sym-150-20260424`
   was not present.
 
+# PM5D Factor Walk-Forward V2 (2026-04-26)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+- `crates/ploy-research/src/deribit.rs`
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+- `.github/workflows/factor-walk-forward-v2.yml`
+
+## Tasks
+
+- [x] Add a train-window threshold / future-window evaluation path for `FactorObservationV2`.
+- [x] Share Deribit feature loading through `ploy-research` instead of duplicating it in each example.
+- [x] Add a DB-backed `factor_walk_forward_v2` entrypoint for ploy-ci/Tango research runs.
+- [x] Add a workflow-dispatch lane for factor walk-forward artifacts.
+- [ ] Verify locally, then run a ploy-ci smoke against 2026-04-21..25.
+
+## Review
+
+- 2026-04-26: Local verification passed: `rtk cargo test -p ploy-research factors_v2 --lib`,
+  `rtk cargo check -p ploy-research --features db --example factor_walk_forward_v2`,
+  `rtk cargo check -p ploy-research --features db --example factor_review_v2`,
+  `rtk cargo check -p ploy-research --no-default-features`, workflow YAML parse,
+  `rustfmt --edition 2024 --check` on touched Rust files, and `git diff --check`.
+- 2026-04-26: ploy-ci smoke is pending after branch push because it requires the new workflow
+  on the remote branch.
+
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 
 ## Files

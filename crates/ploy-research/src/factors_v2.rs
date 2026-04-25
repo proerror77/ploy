@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use ploy_operator_contracts::Regime;
 
 use crate::factors::{FactorObservation, pearson_ic, spearman_ic};
@@ -278,6 +278,81 @@ pub struct FactorReviewV2Report {
     pub options: FactorReviewOptions,
     pub health: DataHealthReport,
     pub reviews: Vec<SingleFactorReview>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorWalkForwardOptions {
+    pub review: FactorReviewOptions,
+    pub train_window_days: i64,
+    pub test_window_days: i64,
+    pub step_days: i64,
+    pub top_n: usize,
+}
+
+impl Default for FactorWalkForwardOptions {
+    fn default() -> Self {
+        Self {
+            review: FactorReviewOptions::default(),
+            train_window_days: 2,
+            test_window_days: 1,
+            step_days: 1,
+            top_n: 20,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorSelectionMetrics {
+    pub n: usize,
+    pub selected_n: usize,
+    pub executable_fill_rate: f64,
+    pub rejection_rate: f64,
+    pub total_pnl_after_cost: f64,
+    pub avg_pnl_after_cost: f64,
+    pub sharpe: f64,
+    pub max_drawdown: f64,
+    pub by_symbol_positive_ratio: f64,
+    pub by_time_bucket_positive_ratio: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorWalkForwardWindow {
+    pub window_index: usize,
+    pub train_start: DateTime<Utc>,
+    pub train_end: DateTime<Utc>,
+    pub test_start: DateTime<Utc>,
+    pub test_end: DateTime<Utc>,
+    pub factor: String,
+    pub family: FactorFamily,
+    pub layer: ThreeLayerArchive,
+    pub direction: f64,
+    pub threshold: f64,
+    pub train_settlement_rank_ic: f64,
+    pub train_executable_pnl_rank_ic: f64,
+    pub train: FactorSelectionMetrics,
+    pub test: FactorSelectionMetrics,
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorWalkForwardAggregate {
+    pub factor: String,
+    pub family: FactorFamily,
+    pub layer: ThreeLayerArchive,
+    pub windows: usize,
+    pub positive_window_ratio: f64,
+    pub total_test_pnl_after_cost: f64,
+    pub avg_test_pnl_per_window: f64,
+    pub min_test_pnl_after_cost: f64,
+    pub avg_test_fill_rate: f64,
+    pub avg_test_rejection_rate: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorWalkForwardReport {
+    pub options: FactorWalkForwardOptions,
+    pub health: DataHealthReport,
+    pub windows: Vec<FactorWalkForwardWindow>,
+    pub aggregates: Vec<FactorWalkForwardAggregate>,
 }
 
 pub fn build_factor_observations_v2(
@@ -815,6 +890,161 @@ pub fn review_factors_v2_with_deribit(
     }
 }
 
+pub fn walk_forward_factors_v2_with_deribit(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: FactorWalkForwardOptions,
+) -> FactorWalkForwardReport {
+    let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    let health = build_data_health_report(source_rows, &v2_rows);
+    let train_duration = Duration::days(options.train_window_days.max(1));
+    let test_duration = Duration::days(options.test_window_days.max(1));
+    let step_duration = Duration::days(options.step_days.max(1));
+    let descriptors = factor_v2_descriptors();
+
+    let mut windows = Vec::new();
+    let mut train_start = start;
+    let mut window_index = 0usize;
+    while train_start + train_duration + test_duration <= end + Duration::seconds(1) {
+        let train_end = train_start + train_duration;
+        let test_start = train_end;
+        let test_end = test_start + test_duration;
+        let train_rows: Vec<&FactorObservationV2> = v2_rows
+            .iter()
+            .filter(|row| row.tick_ts >= train_start && row.tick_ts < train_end)
+            .collect();
+        let test_rows: Vec<&FactorObservationV2> = v2_rows
+            .iter()
+            .filter(|row| row.tick_ts >= test_start && row.tick_ts < test_end)
+            .collect();
+
+        if train_rows.len() >= options.review.min_observations
+            && test_rows.len() >= options.review.min_observations
+        {
+            let mut fitted: Vec<FactorWalkForwardWindow> = descriptors
+                .iter()
+                .filter_map(|descriptor| {
+                    fit_walk_forward_factor(
+                        &train_rows,
+                        &test_rows,
+                        *descriptor,
+                        &options.review,
+                        window_index,
+                        train_start,
+                        train_end,
+                        test_start,
+                        test_end,
+                    )
+                })
+                .collect();
+            fitted.sort_by(|a, b| {
+                b.test
+                    .total_pnl_after_cost
+                    .partial_cmp(&a.test.total_pnl_after_cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        b.test
+                            .sharpe
+                            .partial_cmp(&a.test.sharpe)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+            windows.extend(fitted.into_iter().take(options.top_n.max(1)));
+        }
+
+        window_index += 1;
+        train_start += step_duration;
+    }
+
+    let aggregates = aggregate_walk_forward_windows(&windows);
+    FactorWalkForwardReport {
+        options,
+        health,
+        windows,
+        aggregates,
+    }
+}
+
+pub fn format_factor_walk_forward_v2_report(report: &FactorWalkForwardReport) -> String {
+    let mut out = String::new();
+    out.push_str("=== Factor Walk-Forward V2 Data Health ===\n");
+    out.push_str(&format!(
+        "source_obs={} v2_rows={} settlement_labels={} executable_pnl_rows={} deribit_rows={}\n",
+        report.health.source_observations,
+        report.health.v2_rows,
+        report.health.settlement_label_rows,
+        report.health.executable_pnl_rows,
+        report.health.deribit_rows,
+    ));
+    out.push_str(&format!(
+        "entry_fill_rate={:.2}% rejection_rate={:.2}% exit_fill_rate={:.2}% avg_pm_lag_secs={:.2}\n",
+        report.health.entry_fill_rate() * 100.0,
+        report.health.rejection_rate() * 100.0,
+        report.health.exit_fill_rate() * 100.0,
+        report.health.avg_pm_lag_secs,
+    ));
+    out.push_str(&format!(
+        "stake_usd={:.2} train_days={} test_days={} step_days={} top_quantile={:.2}\n\n",
+        report.options.review.stake_usd,
+        report.options.train_window_days,
+        report.options.test_window_days,
+        report.options.step_days,
+        report.options.review.top_quantile,
+    ));
+
+    out.push_str("=== Walk-Forward Aggregates By Test PnL ===\n");
+    out.push_str("factor,family,layer,windows,pos_window_ratio,total_test_pnl,avg_window_pnl,min_window_pnl,avg_fill_rate,avg_reject_rate\n");
+    for aggregate in &report.aggregates {
+        out.push_str(&format!(
+            "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            aggregate.factor,
+            aggregate.family.as_str(),
+            aggregate.layer.as_str(),
+            aggregate.windows,
+            aggregate.positive_window_ratio,
+            aggregate.total_test_pnl_after_cost,
+            aggregate.avg_test_pnl_per_window,
+            aggregate.min_test_pnl_after_cost,
+            aggregate.avg_test_fill_rate,
+            aggregate.avg_test_rejection_rate,
+        ));
+    }
+
+    out.push_str("\n=== Walk-Forward Windows ===\n");
+    out.push_str("window,train_start,train_end,test_start,test_end,factor,family,layer,direction,threshold,train_ic,test_ic_proxy,train_selected,train_pnl,test_selected,test_fill,test_reject,test_pnl,test_avg_pnl,test_sharpe,test_max_dd,symbol_pos,time_bucket_pos\n");
+    for window in &report.windows {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{:.0},{:.8},{:.4},{:.4},{},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            window.window_index,
+            window.train_start,
+            window.train_end,
+            window.test_start,
+            window.test_end,
+            window.factor,
+            window.family.as_str(),
+            window.layer.as_str(),
+            window.direction,
+            window.threshold,
+            window.train_executable_pnl_rank_ic,
+            window.train_settlement_rank_ic,
+            window.train.selected_n,
+            window.train.total_pnl_after_cost,
+            window.test.selected_n,
+            window.test.executable_fill_rate,
+            window.test.rejection_rate,
+            window.test.total_pnl_after_cost,
+            window.test.avg_pnl_after_cost,
+            window.test.sharpe,
+            window.test.max_drawdown,
+            window.test.by_symbol_positive_ratio,
+            window.test.by_time_bucket_positive_ratio,
+        ));
+    }
+    out
+}
+
 pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usize) -> String {
     let mut out = String::new();
     out.push_str("=== Factor Review V2 Data Health ===\n");
@@ -869,6 +1099,193 @@ pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usiz
         ));
     }
     out
+}
+
+fn fit_walk_forward_factor(
+    train_rows: &[&FactorObservationV2],
+    test_rows: &[&FactorObservationV2],
+    descriptor: FactorV2Descriptor,
+    options: &FactorReviewOptions,
+    window_index: usize,
+    train_start: DateTime<Utc>,
+    train_end: DateTime<Utc>,
+    test_start: DateTime<Utc>,
+    test_end: DateTime<Utc>,
+) -> Option<FactorWalkForwardWindow> {
+    let scored: Vec<(&FactorObservationV2, f64)> = train_rows
+        .iter()
+        .filter_map(|row| {
+            let value = (descriptor.accessor)(row);
+            value.is_finite().then_some((*row, value))
+        })
+        .collect();
+    if scored.len() < options.min_observations {
+        return None;
+    }
+
+    let settlement_pairs: Vec<(f64, f64)> = scored
+        .iter()
+        .filter_map(|(row, score)| row.label_settlement_win.map(|label| (*score, label)))
+        .filter(|(score, label)| score.is_finite() && label.is_finite())
+        .collect();
+    let executable_pairs: Vec<(f64, f64)> = scored
+        .iter()
+        .filter_map(|(row, score)| row.label_executable_pnl_15u.map(|label| (*score, label)))
+        .filter(|(score, label)| score.is_finite() && label.is_finite())
+        .collect();
+    let train_settlement_rank_ic = pair_spearman(&settlement_pairs);
+    let train_executable_pnl_rank_ic = pair_spearman(&executable_pairs);
+    let direction = if train_executable_pnl_rank_ic.is_finite() {
+        train_executable_pnl_rank_ic.signum()
+    } else if train_settlement_rank_ic.is_finite() {
+        train_settlement_rank_ic.signum()
+    } else {
+        1.0
+    };
+    let direction = if direction.abs() <= EPS {
+        1.0
+    } else {
+        direction
+    };
+
+    let mut directed_scores: Vec<f64> = scored
+        .iter()
+        .map(|(_, score)| *score * direction)
+        .filter(|score| score.is_finite())
+        .collect();
+    directed_scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let selected_n = ((directed_scores.len() as f64) * options.top_quantile.clamp(0.01, 1.0))
+        .ceil()
+        .max(1.0) as usize;
+    let threshold = directed_scores[selected_n.min(directed_scores.len()) - 1];
+
+    let train = evaluate_factor_threshold(train_rows, descriptor, direction, threshold);
+    let test = evaluate_factor_threshold(test_rows, descriptor, direction, threshold);
+    Some(FactorWalkForwardWindow {
+        window_index,
+        train_start,
+        train_end,
+        test_start,
+        test_end,
+        factor: descriptor.name.to_string(),
+        family: descriptor.family,
+        layer: descriptor.layer,
+        direction,
+        threshold,
+        train_settlement_rank_ic,
+        train_executable_pnl_rank_ic,
+        train,
+        test,
+    })
+}
+
+fn evaluate_factor_threshold(
+    rows: &[&FactorObservationV2],
+    descriptor: FactorV2Descriptor,
+    direction: f64,
+    threshold: f64,
+) -> FactorSelectionMetrics {
+    let scored_n = rows
+        .iter()
+        .filter(|row| (descriptor.accessor)(row).is_finite())
+        .count();
+    let selected: Vec<&FactorObservationV2> = rows
+        .iter()
+        .copied()
+        .filter(|row| {
+            let value = (descriptor.accessor)(row);
+            value.is_finite() && value * direction >= threshold
+        })
+        .collect();
+    let filled: Vec<&FactorObservationV2> = selected
+        .iter()
+        .copied()
+        .filter(|row| row.label_executable_pnl_15u.is_some())
+        .collect();
+    let pnls: Vec<(DateTime<Utc>, f64)> = filled
+        .iter()
+        .filter_map(|row| row.label_executable_pnl_15u.map(|pnl| (row.tick_ts, pnl)))
+        .filter(|(_, pnl)| pnl.is_finite())
+        .collect();
+    let pnl_values: Vec<f64> = pnls.iter().map(|(_, pnl)| *pnl).collect();
+    let total_pnl = pnl_values.iter().sum::<f64>();
+    FactorSelectionMetrics {
+        n: scored_n,
+        selected_n: selected.len(),
+        executable_fill_rate: ratio(filled.len(), selected.len()),
+        rejection_rate: ratio(
+            selected
+                .iter()
+                .filter(|row| !row.label_executable_fillable)
+                .count(),
+            selected.len(),
+        ),
+        total_pnl_after_cost: total_pnl,
+        avg_pnl_after_cost: if pnl_values.is_empty() {
+            f64::NAN
+        } else {
+            total_pnl / pnl_values.len() as f64
+        },
+        sharpe: trade_sharpe(&pnl_values),
+        max_drawdown: max_drawdown(&pnls),
+        by_symbol_positive_ratio: positive_group_ratio(&filled, |row| row.symbol.clone()),
+        by_time_bucket_positive_ratio: positive_group_ratio(&filled, |row| {
+            row.regime.as_str().to_string()
+        }),
+    }
+}
+
+fn aggregate_walk_forward_windows(
+    windows: &[FactorWalkForwardWindow],
+) -> Vec<FactorWalkForwardAggregate> {
+    let mut grouped: BTreeMap<String, Vec<&FactorWalkForwardWindow>> = BTreeMap::new();
+    for window in windows {
+        grouped
+            .entry(window.factor.clone())
+            .or_default()
+            .push(window);
+    }
+    let mut aggregates = Vec::with_capacity(grouped.len());
+    for (factor, rows) in grouped {
+        let Some(first) = rows.first() else {
+            continue;
+        };
+        let total_test_pnl_after_cost = rows
+            .iter()
+            .map(|row| row.test.total_pnl_after_cost)
+            .sum::<f64>();
+        let min_test_pnl_after_cost = rows
+            .iter()
+            .map(|row| row.test.total_pnl_after_cost)
+            .fold(f64::INFINITY, f64::min);
+        let positive_windows = rows
+            .iter()
+            .filter(|row| row.test.total_pnl_after_cost > 0.0)
+            .count();
+        aggregates.push(FactorWalkForwardAggregate {
+            factor,
+            family: first.family,
+            layer: first.layer,
+            windows: rows.len(),
+            positive_window_ratio: ratio(positive_windows, rows.len()),
+            total_test_pnl_after_cost,
+            avg_test_pnl_per_window: total_test_pnl_after_cost / rows.len() as f64,
+            min_test_pnl_after_cost,
+            avg_test_fill_rate: mean(rows.iter().map(|row| row.test.executable_fill_rate)),
+            avg_test_rejection_rate: mean(rows.iter().map(|row| row.test.rejection_rate)),
+        });
+    }
+    aggregates.sort_by(|a, b| {
+        b.total_test_pnl_after_cost
+            .partial_cmp(&a.total_test_pnl_after_cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.positive_window_ratio
+                    .partial_cmp(&a.positive_window_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    aggregates
 }
 
 fn review_one_factor(
@@ -1767,6 +2184,56 @@ mod tests {
                 .reviews
                 .iter()
                 .any(|review| review.factor == "side_model_edge")
+        );
+    }
+
+    #[test]
+    fn walk_forward_uses_train_threshold_on_future_window() {
+        let base = Utc::now();
+        let mut observations = Vec::new();
+        for i in 0..72 {
+            let mut obs = base_obs();
+            obs.event_id = format!("event-{i}");
+            obs.tick_ts = base + chrono::Duration::hours(i);
+            obs.model_prob_up = if i % 2 == 0 { 0.78 } else { 0.22 };
+            obs.model_edge_up = obs.model_prob_up - obs.pm_up_ask - crypto_fee_cost(obs.pm_up_ask);
+            obs.settlement_up = if i % 2 == 0 { 1.0 } else { 0.0 };
+            observations.push(obs);
+        }
+
+        let report = walk_forward_factors_v2_with_deribit(
+            &observations,
+            &[],
+            base,
+            base + chrono::Duration::days(3) - chrono::Duration::seconds(1),
+            FactorWalkForwardOptions {
+                review: FactorReviewOptions {
+                    stake_usd: 15.0,
+                    min_observations: 10,
+                    top_quantile: 0.2,
+                },
+                train_window_days: 2,
+                test_window_days: 1,
+                step_days: 1,
+                top_n: 10,
+            },
+        );
+
+        assert!(!report.windows.is_empty());
+        let side_model = report
+            .windows
+            .iter()
+            .find(|window| window.factor == "side_model_prob")
+            .expect("side_model_prob window");
+        assert_eq!(side_model.window_index, 0);
+        assert!(side_model.threshold.is_finite());
+        assert!(side_model.test.selected_n > 0);
+        assert!(side_model.test.total_pnl_after_cost > 0.0);
+        assert!(
+            report
+                .aggregates
+                .iter()
+                .any(|aggregate| aggregate.factor == "side_model_prob")
         );
     }
 }

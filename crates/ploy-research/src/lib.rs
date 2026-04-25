@@ -2,6 +2,8 @@ pub mod attribution;
 pub mod backtest;
 pub mod backtesting;
 pub mod dataset;
+#[cfg(feature = "db")]
+pub mod deribit;
 pub mod event_ml;
 pub mod factors;
 pub mod factors_new;
@@ -28,6 +30,8 @@ pub use dataset::{
     DatasetExportError, event_index_to_frame, event_summaries_to_frame,
     export_event_root_dataset_parquet, split_assignments_to_frame,
 };
+#[cfg(feature = "db")]
+pub use deribit::load_deribit_feature_snapshots;
 pub use event_ml::{
     ArchitectureArtifact, EVENT_ML_ARCHITECTURE_VERSION, EventMlArchitecture, LaneReadiness,
     LaneStatus, LearningLane, LearningLaneId, PhaseId, ReadinessGate, WALK_FORWARD_REPORT_VERSION,
@@ -67,10 +71,13 @@ pub use factors_new::{
 };
 pub use factors_v2::{
     DataHealthReport, DeribitFeatureSnapshot, FactorFamily, FactorObservationV2,
-    FactorReviewOptions, FactorReviewV2Report, FactorV2Descriptor, ReviewSide, SingleFactorReview,
-    ThreeLayerArchive, build_data_health_report, build_factor_observations_v2,
+    FactorReviewOptions, FactorReviewV2Report, FactorSelectionMetrics, FactorV2Descriptor,
+    FactorWalkForwardAggregate, FactorWalkForwardOptions, FactorWalkForwardReport,
+    FactorWalkForwardWindow, ReviewSide, SingleFactorReview, ThreeLayerArchive,
+    build_data_health_report, build_factor_observations_v2,
     build_factor_observations_v2_with_deribit, factor_v2_descriptors,
-    format_factor_review_v2_report, review_factors_v2, review_factors_v2_with_deribit,
+    format_factor_review_v2_report, format_factor_walk_forward_v2_report, review_factors_v2,
+    review_factors_v2_with_deribit, walk_forward_factors_v2_with_deribit,
 };
 #[cfg(feature = "rl")]
 pub use model::rl::{BinaryEventEnv, DqnAgent, Environment, ReplayBuffer};

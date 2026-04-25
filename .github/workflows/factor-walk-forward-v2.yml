@@ -1,0 +1,157 @@
+name: Factor Walk-Forward V2
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref"
+        required: true
+        default: "main"
+      start_date:
+        description: "Review start date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-21"
+      end_date:
+        description: "Review end date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-25"
+      symbols:
+        description: "Comma-separated Binance symbols"
+        required: true
+        default: "BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,BNBUSDT,XRPUSDT"
+      stake_usd:
+        description: "Fixed notional per candidate"
+        required: true
+        default: "15"
+      train_window_days:
+        description: "Training window length in days"
+        required: false
+        default: "2"
+      test_window_days:
+        description: "Test window length in days"
+        required: false
+        default: "1"
+      step_days:
+        description: "Rolling step length in days"
+        required: false
+        default: "1"
+      lob_sample_secs:
+        description: "Binance and PM LOB sample interval"
+        required: false
+        default: "30"
+      observation_sample_secs:
+        description: "Factor observation output interval"
+        required: false
+        default: "30"
+      max_quote_age_secs:
+        description: "Maximum PM quote age"
+        required: false
+        default: "30"
+      top_n:
+        description: "Number of factor rows to keep per test window"
+        required: false
+        default: "20"
+      min_observations:
+        description: "Minimum observations for a factor"
+        required: false
+        default: "20"
+      top_quantile:
+        description: "Train-window selected quantile"
+        required: false
+        default: "0.2"
+
+concurrency:
+  group: factor-walk-forward-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  walk-forward:
+    name: Run factor walk-forward on ploy-ci-1
+    runs-on: [self-hosted, ploy-ci-1]
+    timeout-minutes: 60
+    environment: ploy-ci-1
+
+    steps:
+      - name: Repair runner workspace permissions
+        run: |
+          if [ -d "${GITHUB_WORKSPACE}" ]; then
+            sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
+            sudo rm -rf "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/.cargo-lock" || true
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Add cargo to PATH
+        run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-targets: "true"
+          key: factor-walk-forward-v2-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
+
+      - name: Build factor_walk_forward_v2
+        run: |
+          . /home/runner/.cargo/env
+          cargo build --release --locked \
+            -p ploy-research \
+            --features db \
+            --example factor_walk_forward_v2
+
+      - name: Run factor walk-forward
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/factor-walk-forward-v2
+          ./target/release/examples/factor_walk_forward_v2 \
+            --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
+            --symbols "${{ github.event.inputs.symbols }}" \
+            --start-date "${{ github.event.inputs.start_date }}" \
+            --end-date "${{ github.event.inputs.end_date }}" \
+            --stake-usd "${{ github.event.inputs.stake_usd }}" \
+            --train-window-days "${{ github.event.inputs.train_window_days }}" \
+            --test-window-days "${{ github.event.inputs.test_window_days }}" \
+            --step-days "${{ github.event.inputs.step_days }}" \
+            --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
+            --observation-sample-secs "${{ github.event.inputs.observation_sample_secs }}" \
+            --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
+            --min-observations "${{ github.event.inputs.min_observations }}" \
+            --top-quantile "${{ github.event.inputs.top_quantile }}" \
+            --top-n "${{ github.event.inputs.top_n }}" \
+            | tee artifacts/factor-walk-forward-v2/report.txt
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## Factor Walk-Forward V2"
+            echo ""
+            echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
+            echo "- Train/Test: ${{ github.event.inputs.train_window_days }}d / ${{ github.event.inputs.test_window_days }}d"
+            echo "- Symbols: ${{ github.event.inputs.symbols }}"
+            echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
+            echo ""
+            if [ -f artifacts/factor-walk-forward-v2/report.txt ]; then
+              echo '```'
+              sed -n '1,160p' artifacts/factor-walk-forward-v2/report.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: factor-walk-forward-v2-${{ github.run_id }}
+          path: artifacts/factor-walk-forward-v2/
+          retention-days: 14
