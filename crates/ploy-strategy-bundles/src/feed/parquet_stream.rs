@@ -81,10 +81,19 @@ impl StreamingParquetFeed {
         let data_dir = data_dir.to_string();
         let symbols = symbols.to_vec();
         let lob_sample_secs = options.lob_sample_secs;
+        let require_official_settlement = options.require_official_settlement;
 
         let worker = thread::spawn(move || {
             let error_tx = tx.clone();
-            if let Err(e) = run_background(&data_dir, &symbols, from, to, lob_sample_secs, tx) {
+            if let Err(e) = run_background(
+                &data_dir,
+                &symbols,
+                from,
+                to,
+                lob_sample_secs,
+                require_official_settlement,
+                tx,
+            ) {
                 let error = StreamingParquetFeedError::Background(e.to_string());
                 tracing::error!(error = %error, "StreamingParquetFeed background thread error");
                 let _ = error_tx.send(FeedMessage::Error(error));
@@ -145,6 +154,7 @@ fn run_background(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     lob_sample_secs: u32,
+    require_official_settlement: bool,
     tx: SyncSender<FeedMessage>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use chrono::Duration;
@@ -184,7 +194,14 @@ fn run_background(
     let quote_glob = format!("{data_dir}/clob_quote_ticks/*.parquet");
 
     // ── 1. Load events separately (small, ~11K rows) ────────────────────────
-    let events = load_events_vec(&conn, data_dir, symbols, &from_str, &to_str)?;
+    let events = load_events_vec(
+        &conn,
+        data_dir,
+        symbols,
+        &from_str,
+        &to_str,
+        require_official_settlement,
+    )?;
     info!(count = events.len(), "StreamingParquetFeed: loaded events");
     let mut evt_idx = 0;
 
@@ -454,6 +471,7 @@ fn run_background(
     _from: DateTime<Utc>,
     _to: DateTime<Utc>,
     _lob_sample_secs: u32,
+    _require_official_settlement: bool,
     _tx: SyncSender<FeedMessage>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
@@ -505,11 +523,23 @@ fn load_events_vec(
     symbols: &[String],
     from_str: &str,
     to_str: &str,
+    require_official_settlement: bool,
 ) -> Result<Vec<(i64, MarketUpdate)>, Box<dyn std::error::Error + Send + Sync>> {
     use super::options::normalize_token_id;
     use rust_decimal::Decimal;
     use std::path::Path;
     use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct EventRow {
+        market_slug: String,
+        symbol: String,
+        start_us: i64,
+        end_us: i64,
+        price_to_beat: Option<Decimal>,
+        up_token: String,
+        down_token: String,
+    }
 
     let dir = format!("{data_dir}/pm_market_metadata");
     if !Path::new(&dir).exists() {
@@ -545,7 +575,7 @@ fn load_events_vec(
         ))
     })?;
 
-    let mut events = Vec::new();
+    let mut event_rows = Vec::new();
     for row in rows {
         let (market_slug, symbol_opt, start_us, end_us, price_to_beat_f, up_opt, dn_opt) = row?;
         let symbol = match symbol_opt {
@@ -569,15 +599,55 @@ fn load_events_vec(
             _ => continue,
         };
 
-        let up_token: Arc<str> = Arc::from(normalize_token_id(&up_raw));
-        let down_token: Arc<str> = Arc::from(normalize_token_id(&dn_raw));
+        event_rows.push(EventRow {
+            market_slug,
+            symbol,
+            start_us,
+            end_us,
+            price_to_beat: price_to_beat_f.and_then(|f| Decimal::try_from(f).ok()),
+            up_token: normalize_token_id(&up_raw),
+            down_token: normalize_token_id(&dn_raw),
+        });
+    }
+
+    let settlement_prices = load_event_settlement_prices(conn, data_dir)?;
+    tracing::info!(
+        count = settlement_prices.len(),
+        require_official_settlement,
+        "StreamingParquetFeed: loaded event settlement prices"
+    );
+    if require_official_settlement && settlement_prices.is_empty() {
+        tracing::warn!(
+            "StreamingParquetFeed: official settlement required but no pm_token_settlements parquet rows were loaded"
+        );
+    }
+
+    let mut events = Vec::new();
+    for row in event_rows {
+        let resolved_up_won = resolve_up_won_from_settlements(
+            &settlement_prices,
+            &row.market_slug,
+            &row.up_token,
+            &row.down_token,
+        );
+        if require_official_settlement && resolved_up_won.is_none() {
+            continue;
+        }
+
+        let up_token: Arc<str> = Arc::from(row.up_token);
+        let down_token: Arc<str> = Arc::from(row.down_token);
+        if row.symbol.is_empty() || up_token.is_empty() || down_token.is_empty() {
+            continue;
+        }
+
+        let start_us = row.start_us;
+        let end_us = row.end_us;
         let start_time = DateTime::from_timestamp_micros(start_us).unwrap_or_default();
         let end_time = DateTime::from_timestamp_micros(end_us).unwrap_or_default();
         let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
-        let price_to_beat = price_to_beat_f.and_then(|f| Decimal::try_from(f).ok());
 
-        let event_id: Arc<str> = Arc::from(market_slug);
-        let symbol: Arc<str> = Arc::from(symbol);
+        let event_id: Arc<str> = Arc::from(row.market_slug);
+        let symbol: Arc<str> = Arc::from(row.symbol);
 
         // EventDiscovered fires at start_time
         events.push((
@@ -589,7 +659,7 @@ fn load_events_vec(
                 down_token,
                 end_time,
                 window_secs,
-                price_to_beat,
+                price_to_beat: row.price_to_beat,
                 resolved_up_won: None,
             },
         ));
@@ -600,7 +670,7 @@ fn load_events_vec(
             MarketUpdate::EventExpired {
                 event_id,
                 end_time,
-                resolved_up_won: None,
+                resolved_up_won,
             },
         ));
     }
@@ -609,6 +679,84 @@ fn load_events_vec(
         (*left_ts, event_sort_key(left)).cmp(&(*right_ts, event_sort_key(right)))
     });
     Ok(events)
+}
+
+#[cfg(feature = "parquet-feed")]
+fn load_event_settlement_prices(
+    conn: &duckdb::Connection,
+    data_dir: &str,
+) -> Result<
+    std::collections::HashMap<(String, String), rust_decimal::Decimal>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    use super::options::normalize_token_id;
+    use rust_decimal::Decimal;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    let dir = format!("{data_dir}/pm_token_settlements");
+    if !Path::new(&dir).exists() {
+        return Ok(HashMap::new());
+    }
+
+    let glob = format!("{dir}/*.parquet");
+    let sql = format!(
+        "SELECT market_slug, token_id, CAST(settled_price AS DOUBLE) \
+         FROM read_parquet('{glob}') \
+         WHERE resolved = TRUE \
+           AND market_slug IS NOT NULL \
+           AND token_id IS NOT NULL \
+           AND settled_price IS NOT NULL"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<f64>>(2)?,
+        ))
+    })?;
+
+    let mut prices = HashMap::new();
+    for row in rows {
+        let (market_slug, token_id, settled_price) = row?;
+        let (Some(market_slug), Some(token_id), Some(settled_price)) =
+            (market_slug, token_id, settled_price)
+        else {
+            continue;
+        };
+        let Ok(settled_price) = Decimal::try_from(settled_price) else {
+            continue;
+        };
+        prices.insert((market_slug, normalize_token_id(&token_id)), settled_price);
+    }
+
+    Ok(prices)
+}
+
+#[cfg(feature = "parquet-feed")]
+fn resolve_up_won_from_settlements(
+    settlement_prices: &std::collections::HashMap<(String, String), rust_decimal::Decimal>,
+    event_id: &str,
+    up_token: &str,
+    down_token: &str,
+) -> Option<bool> {
+    use rust_decimal::Decimal;
+
+    match (
+        settlement_prices
+            .get(&(event_id.to_string(), up_token.to_string()))
+            .copied(),
+        settlement_prices
+            .get(&(event_id.to_string(), down_token.to_string()))
+            .copied(),
+    ) {
+        (Some(up), Some(down)) if up != down => Some(up > down),
+        (Some(up), _) => Some(up > Decimal::new(5, 1)),
+        (_, Some(down)) => Some(down < Decimal::new(5, 1)),
+        _ => None,
+    }
 }
 
 #[cfg(feature = "parquet-feed")]
@@ -629,6 +777,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use rust_decimal_macros::dec;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[test]
@@ -807,6 +956,45 @@ mod tests {
     }
 
     #[test]
+    fn official_settlement_resolves_event_expiry_outcome() {
+        let mut prices = HashMap::new();
+        prices.insert(("event-a".to_string(), "up-token".to_string()), dec!(1));
+        prices.insert(("event-a".to_string(), "down-token".to_string()), dec!(0));
+        prices.insert(("event-b".to_string(), "up-token".to_string()), dec!(0));
+        prices.insert(("event-b".to_string(), "down-token".to_string()), dec!(1));
+
+        assert_eq!(
+            resolve_up_won_from_settlements(&prices, "event-a", "up-token", "down-token"),
+            Some(true)
+        );
+        assert_eq!(
+            resolve_up_won_from_settlements(&prices, "event-b", "up-token", "down-token"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn official_settlement_resolution_requires_token_evidence() {
+        let mut prices = HashMap::new();
+        prices.insert(("event-a".to_string(), "up-token".to_string()), dec!(1));
+        prices.insert(("event-b".to_string(), "up-token".to_string()), dec!(0.5));
+        prices.insert(("event-b".to_string(), "down-token".to_string()), dec!(0.5));
+
+        assert_eq!(
+            resolve_up_won_from_settlements(&prices, "event-a", "up-token", "down-token"),
+            Some(true)
+        );
+        assert_eq!(
+            resolve_up_won_from_settlements(&prices, "event-b", "up-token", "down-token"),
+            None
+        );
+        assert_eq!(
+            resolve_up_won_from_settlements(&prices, "event-c", "up-token", "down-token"),
+            None
+        );
+    }
+
+    #[test]
     fn sql_keeps_lob_and_aggtrade_full_cadence_but_filters_pm_quotes() {
         let source = include_str!("parquet_stream.rs");
         let agg_section = section_between(source, "// Agg trades", "// LOB");
@@ -828,6 +1016,8 @@ mod tests {
         assert!(quote_section.contains("best_bid IS NOT NULL AND best_ask IS NOT NULL"));
         assert!(quote_section.contains("CAST(bid_size AS DOUBLE) AS f3"));
         assert!(quote_section.contains("CAST(ask_size AS DOUBLE) AS f4"));
+        assert!(source.contains("pm_token_settlements"));
+        assert!(source.contains("if require_official_settlement && resolved_up_won.is_none()"));
     }
 
     fn section_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {

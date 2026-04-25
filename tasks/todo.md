@@ -1,3 +1,42 @@
+# PM5D Official Settlement Parquet Replay (2026-04-25)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/feed/parquet_stream.rs`
+  - Owner: Parquet streaming replay event lifecycle and official settlement parity with DB loader.
+- `scripts/check_optimize_verification_gates.sh`
+  - Owner: cheap local guard for PM5D replay prerequisites before remote optimizer runs.
+
+## Tasks
+
+- [x] Confirm DB loader official settlement behavior and current Parquet replay gap.
+- [x] Join `pm_token_settlements` into Parquet event expiry rows and honor `require_official_settlement`.
+- [x] Add regression coverage for token settlement resolution and unresolved event filtering.
+- [x] Run lightweight local checks without full local Parquet replay.
+- [ ] Land through PR/CI and rerun a bounded ploy-ci smoke on main.
+
+## Review
+
+- 2026-04-25: DB replay already loads `pm_token_settlements` and skips
+  unresolved events when `require_official_settlement=true`; Parquet streaming
+  replay previously emitted every `EventExpired` with `resolved_up_won=None`.
+  That made the optimizer's default Parquet path diverge from the official DB
+  replay path.
+- 2026-04-25: `StreamingParquetFeed` now carries
+  `require_official_settlement` into event loading, reads
+  `pm_token_settlements/*.parquet`, resolves up/down outcomes by token payout,
+  and drops unresolved events when official settlement is required. Event
+  discovery still hides the future outcome; only expiry receives
+  `resolved_up_won`.
+- 2026-04-25: Lightweight verification passed: `rustfmt --edition 2021
+  --check crates/ploy-strategy-bundles/src/feed/parquet_stream.rs`,
+  `bash -n scripts/check_optimize_verification_gates.sh`,
+  `./scripts/check_optimize_verification_gates.sh`, `rtk git diff --check`,
+  and `rtk cargo check -p ploy-strategy-bundles --features
+  ploy-strategy-bundles/parquet-feed --tests`. A targeted local
+  `cargo test ... parquet_stream` still cannot link on this Mac because
+  `-lduckdb` is unavailable; CI/runner must execute the tests.
+
 # Official Settlement Dry-run Repair (2026-04-25)
 
 ## Files

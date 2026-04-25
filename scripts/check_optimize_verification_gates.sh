@@ -132,6 +132,10 @@ if [[ -f "${stream_feed}" ]]; then
   require_text "${stream_feed}" "CAST(ask_size AS DOUBLE) AS f4" "streaming PM quote ask-size replay"
   require_text "${stream_feed}" "bid_size," "streaming MarketUpdate quote bid-size propagation"
   require_text "${stream_feed}" "ask_size," "streaming MarketUpdate quote ask-size propagation"
+  require_text "${stream_feed}" "pm_token_settlements" "streaming official settlement parquet input"
+  require_text "${stream_feed}" "require_official_settlement" "streaming official-only replay gate"
+  require_text "${stream_feed}" "resolve_up_won_from_settlements" "streaming settlement outcome resolver"
+  require_text "${stream_feed}" "resolved_up_won," "streaming EventExpired official outcome propagation"
 fi
 
 if [[ "${#failures[@]}" -gt 0 ]]; then
