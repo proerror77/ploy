@@ -1,3 +1,29 @@
+# PM5D Official Settlement Empty Replay Guard (2026-04-25)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/feed/parquet_stream.rs`
+  - Owner: official-only Parquet replay failure semantics when settlements do not match event metadata.
+
+## Tasks
+
+- [x] Confirm bounded TPE optimize still produces zero trades under official-only replay.
+- [x] Add a hard error when PM event metadata exists but no event rows match official settlement payouts.
+- [ ] Run focused verification and land through PR/CI.
+- [ ] Rerun bounded optimize to distinguish settlement mismatch from genuine no-signal behavior.
+
+## Review
+
+- 2026-04-25: Bounded 6-symbol TPE optimize run `24924570651` processed
+  2,304 train PM event rows and 8,278,373 train updates, but all 20 trials and
+  validation produced zero trades. That can be legitimate only if the strategy
+  has no signals; it should not also cover a silent official-settlement join
+  miss.
+- 2026-04-25: Parquet streaming replay now fails fast when
+  `require_official_settlement=true`, PM event metadata rows exist, and none of
+  them resolve against `pm_token_settlements`. This turns a broken official
+  replay source into an explicit error instead of a misleading zero-trade study.
+
 # PM5D ThreeLayer TPE Optimizer Alignment (2026-04-25)
 
 ## Files

@@ -622,6 +622,8 @@ fn load_events_vec(
         );
     }
 
+    let discovered_event_rows = event_rows.len();
+    let mut resolved_event_rows = 0usize;
     let mut events = Vec::new();
     for row in event_rows {
         let resolved_up_won = resolve_up_won_from_settlements(
@@ -632,6 +634,9 @@ fn load_events_vec(
         );
         if require_official_settlement && resolved_up_won.is_none() {
             continue;
+        }
+        if resolved_up_won.is_some() {
+            resolved_event_rows += 1;
         }
 
         let up_token: Arc<str> = Arc::from(row.up_token);
@@ -673,6 +678,15 @@ fn load_events_vec(
                 resolved_up_won,
             },
         ));
+    }
+
+    if require_official_settlement && discovered_event_rows > 0 && resolved_event_rows == 0 {
+        return Err(format!(
+            "official settlement required but no PM event metadata rows matched settlement payouts \
+             (event_rows={discovered_event_rows}, settlement_prices={})",
+            settlement_prices.len()
+        )
+        .into());
     }
 
     events.sort_by(|(left_ts, left), (right_ts, right)| {
@@ -1018,6 +1032,9 @@ mod tests {
         assert!(quote_section.contains("CAST(ask_size AS DOUBLE) AS f4"));
         assert!(source.contains("pm_token_settlements"));
         assert!(source.contains("if require_official_settlement && resolved_up_won.is_none()"));
+        assert!(
+            source.contains("official settlement required but no PM event metadata rows matched")
+        );
     }
 
     fn section_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
