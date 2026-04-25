@@ -1,7 +1,6 @@
 //! Hyperparameter optimization for PM5D strategy variants.
 //!
-//! Directional/reversal use TPE (Bayesian). The `three_layer` branch currently
-//! uses random sampling and is labeled that way in runtime output.
+//! Directional, reversal, and three_layer use TPE (Bayesian) sampling.
 //!
 //! Usage (PostgreSQL):
 //!   cargo run --release -p ploy-strategy-bundles --example optimize_backtest -- \
@@ -110,11 +109,8 @@ fn display_bytes(bytes: u64) -> String {
     }
 }
 
-fn algorithm_label(strategy_variant: &str) -> &'static str {
-    match strategy_variant {
-        "three_layer" => "random_sampling",
-        _ => "TPE",
-    }
+fn algorithm_label(_strategy_variant: &str) -> &'static str {
+    "TPE"
 }
 
 fn load_full_config_or_exit(path: &str) -> FullConfig {
@@ -1361,131 +1357,128 @@ fn main() {
             .as_ref()
             .expect("three_layer optimizer requires a config baseline");
         // ── three_layer parameter search ──────────────────────────────────────
-        // Simple LCG random number generator (no external rand crate needed).
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as u64;
-        let mut lcg_state = seed ^ 0x9e3779b97f4a7c15;
-
-        let mut lcg_next = move || -> f64 {
-            // Xorshift64 for better quality than plain LCG
-            lcg_state ^= lcg_state << 13;
-            lcg_state ^= lcg_state >> 7;
-            lcg_state ^= lcg_state << 17;
-            (lcg_state as f64) / (u64::MAX as f64)
-        };
-
-        let sample =
-            |rng: &mut dyn FnMut() -> f64, lo: f64, hi: f64| -> f64 { lo + rng() * (hi - lo) };
-
         let train_ref = train_source.clone();
         let symbols_ref_c = Arc::clone(&symbols_ref);
-        let mut best_score = f64::NEG_INFINITY;
-        let mut best_params_opt: Option<ThreeLayerSearchParams> = None;
-        let mut best_pnl = 0.0f64;
-        let mut best_trades = 0usize;
+        let executor_config_c = Arc::clone(&executor_config);
+        let base_config_c = Arc::clone(base_config);
 
-        for iter in 0..n_trials {
-            let min_direction_prob = sample(&mut lcg_next, 0.52, 0.70);
-            let min_distance_over_sigma = sample(&mut lcg_next, 0.10, 0.60);
-            let min_confirmation_score = sample(&mut lcg_next, 0.05, 0.30);
-            let min_drift_confirmation = sample(&mut lcg_next, 0.0001, 0.001);
-            let min_edge = sample(&mut lcg_next, 0.02, 0.06);
-            let min_reward_risk = sample(&mut lcg_next, 0.8, 2.0);
-            let take_profit_ask = sample(&mut lcg_next, 0.60, 0.85);
-            let stop_distance_pct = sample(&mut lcg_next, 0.010, 0.040);
-            let cooldown_secs = sample(&mut lcg_next, 30.0, 120.0) as i64;
-            let min_time_remaining_secs = sample(&mut lcg_next, 60.0, 150.0) as i64;
-            let max_time_remaining_secs =
-                min_time_remaining_secs + sample(&mut lcg_next, 30.0, 120.0) as i64;
+        let p_min_direction_prob =
+            FloatParam::new(0.52, 0.70).name("three_layer_min_direction_prob");
+        let p_min_distance_over_sigma =
+            FloatParam::new(0.10, 0.60).name("three_layer_min_distance_over_sigma");
+        let p_min_confirmation_score =
+            FloatParam::new(0.05, 0.30).name("three_layer_min_confirmation_score");
+        let p_min_drift_confirmation =
+            FloatParam::new(0.0001, 0.001).name("three_layer_min_drift_confirmation");
+        let p_min_edge = FloatParam::new(0.02, 0.06).name("three_layer_min_edge");
+        let p_min_reward_risk = FloatParam::new(0.8, 2.0).name("three_layer_min_reward_risk");
+        let p_take_profit_ask = FloatParam::new(0.60, 0.85).name("three_layer_take_profit_ask");
+        let p_stop_distance_pct =
+            FloatParam::new(0.010, 0.040).name("three_layer_stop_distance_pct");
+        let p_cooldown_secs = IntParam::new(30, 120).name("cooldown_secs");
+        let p_min_time_remaining_secs = IntParam::new(60, 150).name("min_time_remaining_secs");
+        let p_max_time_span_secs = IntParam::new(30, 120).name("three_layer_time_span_secs");
 
-            let params = ThreeLayerSearchParams {
-                min_direction_prob,
-                min_distance_over_sigma,
-                min_confirmation_score,
-                min_drift_confirmation,
-                min_edge,
-                min_reward_risk,
-                take_profit_ask,
-                stop_distance_pct,
-                cooldown_secs,
-                min_time_remaining_secs,
-                max_time_remaining_secs,
-            };
+        let p_min_direction_prob_c = p_min_direction_prob.clone();
+        let p_min_distance_over_sigma_c = p_min_distance_over_sigma.clone();
+        let p_min_confirmation_score_c = p_min_confirmation_score.clone();
+        let p_min_drift_confirmation_c = p_min_drift_confirmation.clone();
+        let p_min_edge_c = p_min_edge.clone();
+        let p_min_reward_risk_c = p_min_reward_risk.clone();
+        let p_take_profit_ask_c = p_take_profit_ask.clone();
+        let p_stop_distance_pct_c = p_stop_distance_pct.clone();
+        let p_cooldown_secs_c = p_cooldown_secs.clone();
+        let p_min_time_remaining_secs_c = p_min_time_remaining_secs.clone();
+        let p_max_time_span_secs_c = p_max_time_span_secs.clone();
 
-            let config =
-                make_three_layer_config(symbols_ref_c.as_slice(), &params, base_config.as_ref());
-            let outcome = match run_backtest(
-                "three_layer",
-                config,
-                &train_ref,
-                executor_config.as_ref(),
-                max_updates,
-            ) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    eprintln!(
-                        "iter {:>3}/{}: source={} error={error}",
-                        iter + 1,
-                        n_trials,
-                        train_ref.kind()
-                    );
-                    continue;
-                }
-            };
-
-            // Sharpe = mean(pnl_per_trade) / std(pnl_per_trade) * sqrt(trades_per_year)
-            // Penalty for < 5 trades already applied inside run_backtest (-999.0)
-            let score = outcome.sharpe;
-
-            eprintln!(
-                "iter {:>3}/{}: source={} sharpe={:>7.3} trades={:>4} pnl=${:>8.2} updates={} elapsed={:.1}s | params: dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} tp={:.3} stop={:.4} cd={}s",
-                iter + 1,
-                n_trials,
-                train_ref.kind(),
-                outcome.sharpe,
-                outcome.trade_count,
-                outcome.net_pnl,
-                outcome.updates_processed,
-                outcome.elapsed_secs,
-                min_direction_prob,
-                min_distance_over_sigma,
-                min_confirmation_score,
-                min_drift_confirmation,
-                min_edge,
-                min_reward_risk,
-                take_profit_ask,
-                stop_distance_pct,
-                cooldown_secs,
-            );
-
-            if score > best_score {
-                best_score = score;
-                best_pnl = outcome.net_pnl;
-                best_trades = outcome.trade_count;
-                best_params_opt = Some(ThreeLayerSearchParams {
-                    min_direction_prob,
-                    min_distance_over_sigma,
-                    min_confirmation_score,
-                    min_drift_confirmation,
-                    min_edge,
-                    min_reward_risk,
-                    take_profit_ask,
-                    stop_distance_pct,
-                    cooldown_secs,
+        study
+            .optimize(n_trials, move |trial: &mut Trial| {
+                let min_time_remaining_secs = p_min_time_remaining_secs_c.suggest(trial)?;
+                let params = ThreeLayerSearchParams {
+                    min_direction_prob: p_min_direction_prob_c.suggest(trial)?,
+                    min_distance_over_sigma: p_min_distance_over_sigma_c.suggest(trial)?,
+                    min_confirmation_score: p_min_confirmation_score_c.suggest(trial)?,
+                    min_drift_confirmation: p_min_drift_confirmation_c.suggest(trial)?,
+                    min_edge: p_min_edge_c.suggest(trial)?,
+                    min_reward_risk: p_min_reward_risk_c.suggest(trial)?,
+                    take_profit_ask: p_take_profit_ask_c.suggest(trial)?,
+                    stop_distance_pct: p_stop_distance_pct_c.suggest(trial)?,
+                    cooldown_secs: p_cooldown_secs_c.suggest(trial)?,
                     min_time_remaining_secs,
-                    max_time_remaining_secs,
-                });
-            }
-        }
+                    max_time_remaining_secs: min_time_remaining_secs
+                        + p_max_time_span_secs_c.suggest(trial)?,
+                };
 
-        let best_params = best_params_opt.expect("No completed trials");
+                let config = make_three_layer_config(
+                    symbols_ref_c.as_slice(),
+                    &params,
+                    base_config_c.as_ref(),
+                );
+                let outcome = match run_backtest(
+                    "three_layer",
+                    config,
+                    &train_ref,
+                    executor_config_c.as_ref(),
+                    max_updates,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "  Trial {:>3}: source={} error={error}",
+                            trial.id(),
+                            train_ref.kind()
+                        );
+                        return Ok::<f64, Error>(-1_000_000.0);
+                    }
+                };
+
+                // Sharpe = mean(pnl_per_trade) / std(pnl_per_trade) * sqrt(trades_per_year).
+                // Penalty for sparse trials is already applied inside run_backtest.
+                let score = outcome.sharpe;
+
+                eprintln!(
+                    "  Trial {:>3}: source={} sharpe={:>7.3} trades={:>4} pnl=${:>8.2} updates={} elapsed={:.1}s | params: dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} tp={:.3} stop={:.4} cd={}s",
+                    trial.id(),
+                    train_ref.kind(),
+                    outcome.sharpe,
+                    outcome.trade_count,
+                    outcome.net_pnl,
+                    outcome.updates_processed,
+                    outcome.elapsed_secs,
+                    params.min_direction_prob,
+                    params.min_distance_over_sigma,
+                    params.min_confirmation_score,
+                    params.min_drift_confirmation,
+                    params.min_edge,
+                    params.min_reward_risk,
+                    params.take_profit_ask,
+                    params.stop_distance_pct,
+                    params.cooldown_secs,
+                );
+
+                Ok::<f64, Error>(score)
+            })
+            .expect("Optimization failed");
+
+        let best = study.best_trial().expect("No completed trials");
+        let best_min_time_remaining_secs = best.get(&p_min_time_remaining_secs).unwrap_or(60);
+        let best_params = ThreeLayerSearchParams {
+            min_direction_prob: best.get(&p_min_direction_prob).unwrap_or(0.52),
+            min_distance_over_sigma: best.get(&p_min_distance_over_sigma).unwrap_or(0.15),
+            min_confirmation_score: best.get(&p_min_confirmation_score).unwrap_or(0.03),
+            min_drift_confirmation: best.get(&p_min_drift_confirmation).unwrap_or(0.0002),
+            min_edge: best.get(&p_min_edge).unwrap_or(0.02),
+            min_reward_risk: best.get(&p_min_reward_risk).unwrap_or(0.9),
+            take_profit_ask: best.get(&p_take_profit_ask).unwrap_or(0.70),
+            stop_distance_pct: best.get(&p_stop_distance_pct).unwrap_or(0.020),
+            cooldown_secs: best.get(&p_cooldown_secs).unwrap_or(30),
+            min_time_remaining_secs: best_min_time_remaining_secs,
+            max_time_remaining_secs: best_min_time_remaining_secs
+                + best.get(&p_max_time_span_secs).unwrap_or(60),
+        };
 
         eprintln!("\n=== Best Parameters (Training) ===");
-        eprintln!("Sharpe:                      {best_score:.3}");
-        eprintln!("PnL:                         ${best_pnl:.2}");
-        eprintln!("Trades:                      {best_trades}");
+        eprintln!("Sharpe:                      {:.3}", best.value);
 
         eprintln!("\n=== Validation (held-out, out-of-sample) ===");
         let val_config =

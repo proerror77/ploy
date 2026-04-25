@@ -1,3 +1,31 @@
+# PM5D ThreeLayer TPE Optimizer Alignment (2026-04-25)
+
+## Files
+
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+  - Owner: PM5D ThreeLayer parameter-search sampler and optimizer reporting.
+
+## Tasks
+
+- [x] Confirm ThreeLayer optimizer still uses manual random sampling.
+- [x] Move ThreeLayer parameter search onto the existing TPE sampler.
+- [x] Run focused compile/check verification.
+- [ ] Land through PR/CI and rerun bounded ploy-ci smoke.
+
+## Review
+
+- 2026-04-25: `optimize_backtest` still labeled ThreeLayer as
+  `random_sampling` and used a manual xorshift loop, while the same file already
+  used `Study::maximize(TpeSampler::new())` for directional/reversal.
+- 2026-04-25: ThreeLayer now uses the shared TPE study with explicit
+  `FloatParam`/`IntParam` search dimensions for direction probability,
+  distance, confirmation, drift, edge, reward/risk, take-profit, stop distance,
+  cooldown, and time remaining. Runtime output now reports `Algorithm: TPE`.
+- 2026-04-25: Lightweight verification passed: `rustfmt --edition 2021
+  --check crates/ploy-strategy-bundles/examples/optimize_backtest.rs`,
+  `rtk git diff --check`, and `rtk cargo check -p ploy-strategy-bundles
+  --features ploy-strategy-bundles/parquet-feed --example optimize_backtest`.
+
 # PM5D Official Settlement Parquet Replay (2026-04-25)
 
 ## Files
