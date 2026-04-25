@@ -8929,3 +8929,20 @@ Checklist:
 
 Review:
 - 2026-04-25: Fixed the live SELL cap path so conditional-token balances from Polymarket are converted from raw 6-decimal units before being compared with requested shares. This matches the observed venue rejection where balance `28291106` meant `28.291106` shares, not 28,291,106 shares. Added regression coverage for the raw-unit conversion and preserved already-scaled decimal balances.
+
+## Official Settlement Gate For Dry Run
+
+Goal: stop dry-run from booking fake settlement PnL when Polymarket official settlement lags the event end and local reference-price inference disagrees with the final outcome.
+
+File ownership:
+- `crates/ploy-market-data/src/scanner.rs`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Keep expired tracked markets pending until official `pm_token_settlements` identifies the winning UP/DOWN token.
+- [x] Fix startup recovery so `resolved_up_won` means the UP token won, not merely that the currently held token won.
+- [x] Validate UP-token winner mapping against the live DB evidence and focused market-data test suite.
+- [x] Run focused market-data tests and formatting/static checks.
+
+Review:
+- 2026-04-25: Changed the market scanner so tracked crypto events are not expired with locally inferred Chainlink/Pyth/Binance outcomes when database persistence is enabled. The scanner now waits for `pm_token_settlements` to identify the official winning token, and startup recovery maps that winning token back to whether the UP token won before emitting `EventExpired`. This prevents dry-run from booking settlement exits at 1.00 before Polymarket's official outcome arrives.

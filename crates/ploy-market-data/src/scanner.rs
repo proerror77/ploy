@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use ploy_market_contracts::MarketUpdate;
-use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::gamma::types::request::MarketsRequest;
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -21,14 +21,12 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::crypto::discover_crypto_markets;
+use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::sports::discover_sports_markets;
 use crate::discovery::upsert_market_catalog;
 use crate::feeds::spawn_quote_feed;
-use crate::reference_prices::{
-    ReferencePriceRegistry, ReferencePriceSource, latest_reference_price,
-};
+use crate::reference_prices::ReferencePriceRegistry;
 
 const SCAN_INTERVAL_SECS: u64 = 30;
 const SPORTS_DISCOVERY_REFRESH_SECS: i64 = 300;
@@ -69,13 +67,20 @@ pub fn spawn_market_scanner(
         // the live scanner, so we emit them now with official settlement outcomes.
         if let Some(ref db) = pool {
             recover_expired_open_positions(&tx, db).await;
-            recover_pending_open_positions(tx.clone(), db, &mut tracked, &mut subscribed_tokens, &mut quote_handles).await;
+            recover_pending_open_positions(
+                tx.clone(),
+                db,
+                &mut tracked,
+                &mut subscribed_tokens,
+                &mut quote_handles,
+            )
+            .await;
         }
 
         loop {
             let now = Utc::now();
 
-            expire_tracked_events(&tx, &mut tracked, &reference_prices, now).await;
+            expire_tracked_events(&tx, &mut tracked, pool.as_ref(), now).await;
 
             let mut request = MarketsRequest::default();
             request.end_date_min = Some(now);
@@ -188,21 +193,23 @@ async fn recover_expired_open_positions(tx: &broadcast::Sender<MarketUpdate>, po
     // Find open positions: BUY fills with no matching SELL, for events that
     // ended before now. Join pm_market_metadata for end_time and
     // pm_token_settlements for the official outcome.
-    let rows: Vec<(String, String, String, DateTime<Utc>, Option<bool>)> = match sqlx::query_as(
+    let rows: Vec<(String, String, DateTime<Utc>, Option<bool>)> = match sqlx::query_as(
         r#"
         SELECT DISTINCT
             f.event_id,
-            f.token_id,
             COALESCE(f.symbol, '') AS symbol,
             COALESCE(m.end_time, NOW() - INTERVAL '1 second') AS end_time,
             CASE
-                WHEN s.resolved AND s.settled_price >= 0.99 THEN true
-                WHEN s.resolved AND s.settled_price <= 0.01 THEN false
+                WHEN winner.token_id IS NOT NULL THEN
+                    winner.token_id = trim(both '"' from ((m.raw_market->'markets'->0->>'clobTokenIds')::jsonb->>0))
                 ELSE NULL
             END AS resolved_up_won
         FROM strategy_runtime_fills f
         LEFT JOIN pm_market_metadata m ON m.market_slug = f.event_id
-        LEFT JOIN pm_token_settlements s ON s.token_id = f.token_id
+        LEFT JOIN pm_token_settlements winner
+            ON winner.market_slug = f.event_id
+           AND winner.resolved
+           AND winner.settled_price >= 0.99
         WHERE f.fill_side = 'BUY'
           AND f.fill_timestamp >= $1
           AND COALESCE(m.end_time, NOW()) < NOW()
@@ -237,18 +244,25 @@ async fn recover_expired_open_positions(tx: &broadcast::Sender<MarketUpdate>, po
 
     // Group by event_id — one EventExpired per event is enough.
     let mut seen_events: HashSet<String> = HashSet::new();
-    for (event_id, _token_id, _symbol, end_time, resolved_up_won) in rows {
+    for (event_id, _symbol, end_time, resolved_up_won) in rows {
         if seen_events.insert(event_id.clone()) {
+            let Some(resolved_up_won) = resolved_up_won else {
+                debug!(
+                    event_id = %event_id,
+                    "Recovery: expired position settlement pending; waiting for official outcome",
+                );
+                continue;
+            };
             info!(
                 event_id = %event_id,
                 end_time = %end_time,
-                resolved_up_won = ?resolved_up_won,
+                resolved_up_won = resolved_up_won,
                 "Recovery: emitting EventExpired",
             );
             let _ = tx.send(MarketUpdate::EventExpired {
                 event_id: Arc::from(event_id.as_str()),
                 end_time,
-                resolved_up_won,
+                resolved_up_won: Some(resolved_up_won),
             });
         }
     }
@@ -267,9 +281,16 @@ async fn recover_pending_open_positions(
 ) {
     let lookback = Utc::now() - Duration::hours(RECOVERY_LOOKBACK_HOURS);
 
-    let rows: Vec<(String, String, String, String, String, DateTime<Utc>, Option<Decimal>)> =
-        match sqlx::query_as(
-            r#"
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        DateTime<Utc>,
+        Option<Decimal>,
+    )> = match sqlx::query_as(
+        r#"
             SELECT DISTINCT
                 f.event_id,
                 f.symbol,
@@ -289,17 +310,17 @@ async fn recover_pending_open_positions(
                     AND s2.fill_side = 'SELL'
               )
             "#,
-        )
-        .bind(lookback)
-        .fetch_all(pool)
-        .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                warn!(error = %e, "Failed to query pending open positions for recovery");
-                return;
-            }
-        };
+    )
+    .bind(lookback)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(error = %e, "Failed to query pending open positions for recovery");
+            return;
+        }
+    };
 
     if rows.is_empty() {
         debug!("Startup recovery: no pending (not-yet-expired) open positions found");
@@ -327,8 +348,12 @@ async fn recover_pending_open_positions(
             }
         };
 
-        let Some(up_asset_id) = parse_token_id(&up_token) else { continue };
-        let Some(down_asset_id) = parse_token_id(&down_token) else { continue };
+        let Some(up_asset_id) = parse_token_id(&up_token) else {
+            continue;
+        };
+        let Some(down_asset_id) = parse_token_id(&down_token) else {
+            continue;
+        };
 
         if subscribed_tokens.insert(up_token.clone()) {
             new_tokens.push(up_asset_id);
@@ -337,11 +362,14 @@ async fn recover_pending_open_positions(
             new_tokens.push(down_asset_id);
         }
 
-        tracked.insert(event_id.clone(), TrackedEvent {
-            end_time,
-            symbol: symbol.clone(),
-            price_to_beat: price_to_beat.clone(),
-        });
+        tracked.insert(
+            event_id.clone(),
+            TrackedEvent {
+                end_time,
+                symbol: symbol.clone(),
+                price_to_beat: price_to_beat.clone(),
+            },
+        );
 
         info!(
             event_id = %event_id,
@@ -384,7 +412,7 @@ fn parse_clob_token_pair(raw: &str) -> Option<(String, String)> {
 async fn expire_tracked_events(
     tx: &broadcast::Sender<MarketUpdate>,
     tracked: &mut HashMap<String, TrackedEvent>,
-    reference_prices: &ReferencePriceRegistry,
+    pool: Option<&PgPool>,
     now: DateTime<Utc>,
 ) {
     let expired: Vec<String> = tracked
@@ -394,10 +422,22 @@ async fn expire_tracked_events(
         .collect();
 
     for event_id in expired {
+        let resolved_up_won = match pool {
+            Some(pool) => official_event_outcome(pool, &event_id).await,
+            None => None,
+        };
+
+        if pool.is_some() && resolved_up_won.is_none() {
+            debug!(
+                event_id = %event_id,
+                "Expired event settlement pending; waiting for official Polymarket outcome",
+            );
+            continue;
+        }
+
         let Some(event) = tracked.remove(&event_id) else {
             continue;
         };
-        let resolved_up_won = infer_expired_event_outcome(&event, reference_prices).await;
         let end_time = event.end_time;
         let _ = tx.send(MarketUpdate::EventExpired {
             event_id: Arc::from(event_id.as_str()),
@@ -407,23 +447,34 @@ async fn expire_tracked_events(
     }
 }
 
-async fn infer_expired_event_outcome(
-    event: &TrackedEvent,
-    reference_prices: &ReferencePriceRegistry,
-) -> Option<bool> {
-    let price_to_beat = event.price_to_beat?;
-    for source in [
-        ReferencePriceSource::Chainlink,
-        ReferencePriceSource::Pyth,
-        ReferencePriceSource::Binance,
-    ] {
-        if let Some(snapshot) =
-            latest_reference_price(reference_prices, source, &event.symbol).await
-        {
-            return Some(snapshot.value >= price_to_beat);
+async fn official_event_outcome(pool: &PgPool, event_id: &str) -> Option<bool> {
+    match sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT winner.token_id = trim(both '"' from ((m.raw_market->'markets'->0->>'clobTokenIds')::jsonb->>0))
+        FROM pm_market_metadata m
+        JOIN pm_token_settlements winner
+          ON winner.market_slug = m.market_slug
+         AND winner.resolved
+         AND winner.settled_price >= 0.99
+        WHERE m.market_slug = $1
+        ORDER BY winner.resolved_at DESC NULLS LAST
+        LIMIT 1
+        "#,
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            warn!(
+                event_id,
+                error = %error,
+                "Failed to load official settlement outcome",
+            );
+            None
         }
     }
-    None
 }
 
 fn should_refresh_sports_catalog(
@@ -558,12 +609,10 @@ mod tests {
 
     #[test]
     fn token_id_parser_accepts_decimal_strings() {
-        assert!(
-            parse_token_id(
-                "27239049953613250678046988034203198692578441444398010699401021233149338414941"
-            )
-            .is_some()
-        );
+        assert!(parse_token_id(
+            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
+        )
+        .is_some());
         assert!(parse_token_id("not-a-token").is_none());
     }
 
