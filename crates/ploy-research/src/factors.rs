@@ -418,13 +418,13 @@ pub async fn load_research_lob_snapshots(
     load_research_lob_snapshots_sampled(pool, symbols, start, end, 5).await
 }
 
-/// Loads LOB snapshots from `binance_lob_ticks`, keeping only ticks whose Unix epoch
-/// timestamp is divisible by `sample_every_secs`. This reduces data transfer for
+/// Loads LOB snapshots from `binance_lob_ticks`, keeping one tick per symbol per
+/// `sample_every_secs` bucket. This reduces JSONB transfer for multi-day
 /// research runs at the cost of temporal resolution.
 ///
-/// Note: sampling is epoch-modulo based (`epoch % N = 0`), not uniform wall-clock
-/// spacing. For odd values of N (e.g. 7), sampled timestamps will not be evenly
-/// spaced. For most research use cases (N=5 or N=10), this is not a concern.
+/// This is a bucket sampler, not a full resampler: each bucket keeps the latest
+/// snapshot inside the bucket. It avoids transferring every high-frequency book
+/// row when the collector records more than one update per second.
 ///
 /// `sample_every_secs` is clamped to a minimum of 1 (no divide-by-zero).
 #[cfg(feature = "db")]
@@ -449,23 +449,48 @@ pub async fn load_research_lob_snapshots_sampled(
         Value,
     )> = sqlx::query_as(
         r#"
+        WITH buckets AS (
+            SELECT s.symbol, bucket_start
+            FROM unnest($1::text[]) AS s(symbol)
+            CROSS JOIN generate_series(
+                $2::timestamptz,
+                $3::timestamptz,
+                ($4::text || ' seconds')::interval
+            ) AS bucket_start
+        )
         SELECT
-            event_time,
-            symbol,
-            COALESCE(obi_5, 0) AS obi_5,
-            COALESCE(obi_10, 0) AS obi_10,
-            COALESCE(spread_bps, 0) AS spread_bps,
-            COALESCE(best_bid, 0) AS best_bid,
-            COALESCE(best_ask, 0) AS best_ask,
-            COALESCE(mid_price, 0) AS mid_price,
-            bids,
-            asks
-        FROM binance_lob_ticks
-        WHERE symbol = ANY($1)
-          AND event_time >= $2
-          AND event_time <= $3
-          AND EXTRACT(EPOCH FROM event_time)::bigint % $4 = 0
-        ORDER BY event_time
+            lob.event_time,
+            lob.symbol,
+            COALESCE(lob.obi_5, 0) AS obi_5,
+            COALESCE(lob.obi_10, 0) AS obi_10,
+            COALESCE(lob.spread_bps, 0) AS spread_bps,
+            COALESCE(lob.best_bid, 0) AS best_bid,
+            COALESCE(lob.best_ask, 0) AS best_ask,
+            COALESCE(lob.mid_price, 0) AS mid_price,
+            lob.bids,
+            lob.asks
+        FROM buckets
+        JOIN LATERAL (
+            SELECT
+                event_time,
+                symbol,
+                obi_5,
+                obi_10,
+                spread_bps,
+                best_bid,
+                best_ask,
+                mid_price,
+                bids,
+                asks
+            FROM binance_lob_ticks
+            WHERE symbol = buckets.symbol
+              AND event_time >= buckets.bucket_start
+              AND event_time < buckets.bucket_start + ($4::text || ' seconds')::interval
+              AND event_time <= $3
+            ORDER BY event_time DESC
+            LIMIT 1
+        ) AS lob ON true
+        ORDER BY lob.event_time
         "#,
     )
     .bind(symbols)
