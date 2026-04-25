@@ -18,12 +18,12 @@ export function LiveParityBanner() {
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex min-w-0 items-center gap-2 font-semibold text-destructive">
           <AlertTriangle className="h-4 w-4 shrink-0" />
-          <span>Dry-run 已下单，Live 未同步下单</span>
+          <span>Dry-run / Live 订单或成交不一致</span>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
           {report.alertPairs.slice(0, 3).map((pair) => (
             <Badge key={pair.key} variant="destructive">
-              {pair.key}: {pair.dryrunOnlyOrders.length}
+              {pair.key}: {pair.dryrunOnlyOrders.length + pair.executionMismatches.length}
             </Badge>
           ))}
           {report.alertPairs.length > 3 && (

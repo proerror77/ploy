@@ -101,7 +101,17 @@ function EmptyOrders() {
   );
 }
 
+function EmptyMismatches() {
+  return (
+    <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">
+      No dry-run/live fill mismatch
+    </div>
+  );
+}
+
 function PairCard({ pair }: { pair: LiveParityPair }) {
+  const alertCount = pair.dryrunOnlyOrders.length + pair.executionMismatches.length;
+
   return (
     <Card className={pair.status === 'alert' ? 'border-destructive/45' : undefined}>
       <CardHeader>
@@ -118,7 +128,7 @@ function PairCard({ pair }: { pair: LiveParityPair }) {
           {pair.status === 'alert' ? (
             <div className="flex items-center gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-sm font-semibold text-destructive">
               <AlertTriangle className="h-4 w-4" />
-              {pair.dryrunOnlyOrders.length} missing live
+              {alertCount} parity gaps
             </div>
           ) : (
             <div className="flex items-center gap-2 rounded-lg bg-success/10 px-3 py-2 text-sm font-semibold text-success">
@@ -156,7 +166,7 @@ function PairCard({ pair }: { pair: LiveParityPair }) {
                 <div>Side</div>
                 <div>State</div>
                 <div>Qty / Price</div>
-                <div>Token</div>
+                <div>Event / Token</div>
               </div>
               {pair.dryrunOnlyOrders.map((order) => (
                 <div
@@ -177,7 +187,49 @@ function PairCard({ pair }: { pair: LiveParityPair }) {
                     {order.limitPrice ?? 'market'}
                   </div>
                   <div className="truncate font-mono text-xs text-muted-foreground">
+                    {order.eventId}
+                    <br />
                     {order.tokenId}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5">
+          <div className="mb-3 text-sm font-semibold">Dry-run filled more than live</div>
+          {pair.executionMismatches.length === 0 ? (
+            <EmptyMismatches />
+          ) : (
+            <div className="overflow-hidden rounded-lg border">
+              <div className="grid grid-cols-[minmax(180px,1fr)_110px_110px_130px_minmax(160px,1fr)] bg-muted px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                <div>Event / Side</div>
+                <div>Dry fill</div>
+                <div>Live fill</div>
+                <div>Live state</div>
+                <div>Reason</div>
+              </div>
+              {pair.executionMismatches.map((mismatch) => (
+                <div
+                  key={mismatch.key}
+                  className="grid grid-cols-[minmax(180px,1fr)_110px_110px_130px_minmax(160px,1fr)] gap-0 border-t px-4 py-3 text-sm"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate font-medium">
+                      {mismatch.dryrun.eventId} {mismatch.dryrun.side}
+                    </div>
+                    <div className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                      {mismatch.dryrun.tokenId}
+                    </div>
+                  </div>
+                  <div className="font-mono text-xs">{mismatch.dryrun.filledQty}</div>
+                  <div className="font-mono text-xs">{mismatch.liveFilledQty}</div>
+                  <div>{mismatch.live?.state ?? 'missing'}</div>
+                  <div className="min-w-0">
+                    <div className="truncate text-xs text-muted-foreground">
+                      {mismatch.live?.rejectionReason ?? mismatch.message}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -280,6 +332,7 @@ export function LiveParity() {
             <span>{integer(report.dryrunOrders)} dry-run orders</span>
             <span>{integer(report.liveOrders)} live orders</span>
             <span>{integer(report.unmatchedDryrunOrders)} missing live orders</span>
+            <span>{integer(report.executionMismatches)} fill mismatches</span>
           </div>
         </div>
       </div>

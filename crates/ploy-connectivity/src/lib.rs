@@ -2,9 +2,9 @@ use alloy::signers::local::PrivateKeySigner;
 use ploy_trading::{FillRecord, TradeSide};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{Normal, Signer};
-use polymarket_client_sdk::clob::types::request::TradesRequest;
+use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, TradesRequest};
 use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
-use polymarket_client_sdk::clob::types::{Amount, OrderType, Side, SignatureType};
+use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType};
 use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::types::{Address, U256};
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
@@ -422,6 +422,11 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
 
         let result = self.runtime.block_on(async {
             let side = polymarket_side(request.side);
+            let quantity = if request.side == TradeSide::Sell {
+                sell_quantity_capped_to_balance(&client, token_id, request.quantity).await?
+            } else {
+                request.quantity
+            };
             let order = match request.order_type {
                 OrderExecutionType::GTC => {
                     let price = execution_price_override(
@@ -431,7 +436,7 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                         request.aggressive_ticks,
                     )
                     .expect("GTC orders must keep an explicit price");
-                    let normalized_quantity = normalize_order_quantity(request.quantity);
+                    let normalized_quantity = normalize_order_quantity(quantity);
                     client
                         .limit_order()
                         .token_id(token_id)
@@ -450,8 +455,8 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
                         request.aggressive_ticks,
                     )
                     .unwrap_or(limit_price);
-                    let amount = normalize_execution_amount(request.quantity, limit_price, side)
-                        .map_err(|err| {
+                    let amount =
+                        normalize_execution_amount(quantity, limit_price, side).map_err(|err| {
                             ExecutionError::Validation(format!("build amount: {err}"))
                         })?;
                     client
@@ -733,6 +738,43 @@ async fn load_trades_for_token(
     Ok(trades)
 }
 
+async fn sell_quantity_capped_to_balance(
+    client: &Client<Authenticated<Normal>>,
+    token_id: U256,
+    requested_quantity: Decimal,
+) -> Result<Decimal, ExecutionError> {
+    let response = client
+        .balance_allowance(
+            BalanceAllowanceRequest::builder()
+                .asset_type(AssetType::Conditional)
+                .token_id(token_id)
+                .build(),
+        )
+        .await
+        .map_err(|err| {
+            ExecutionError::Transport(format!("load conditional token balance: {err}"))
+        })?;
+
+    cap_sell_quantity_to_balance(requested_quantity, response.balance)
+}
+
+fn cap_sell_quantity_to_balance(
+    requested_quantity: Decimal,
+    available_balance: Decimal,
+) -> Result<Decimal, ExecutionError> {
+    let requested = normalize_market_order_quantity(requested_quantity.max(Decimal::ZERO));
+    let available = normalize_market_order_quantity(available_balance.max(Decimal::ZERO));
+    let effective = requested.min(available);
+
+    if effective <= Decimal::ZERO {
+        return Err(ExecutionError::Validation(format!(
+            "sell rejected before submit: no sellable conditional-token balance; requested={requested}, available={available}"
+        )));
+    }
+
+    Ok(effective)
+}
+
 fn normalize_aggressive_price(
     limit_price: Decimal,
     side: TradeSide,
@@ -838,8 +880,8 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        execution_price_override, normalize_aggressive_price, normalize_execution_amount,
-        normalize_market_order_quantity, normalize_order_quantity,
+        cap_sell_quantity_to_balance, execution_price_override, normalize_aggressive_price,
+        normalize_execution_amount, normalize_market_order_quantity, normalize_order_quantity,
         polymarket_signature_type_from_env, tracked_trade_fill, trade_side, unique_token_ids,
         CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
         ExecutionRequest, LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
@@ -852,6 +894,7 @@ mod tests {
     use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
     use polymarket_client_sdk::clob::types::{Side, TradeStatusType, TraderSide};
     use polymarket_client_sdk::types::{Address, B256, U256};
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::str::FromStr;
 
@@ -953,6 +996,25 @@ mod tests {
         assert_eq!(buy.as_inner(), dec!(24.4678));
         assert!(sell.is_shares());
         assert_eq!(sell.as_inner(), dec!(24.4678));
+    }
+
+    #[test]
+    fn sell_quantity_is_capped_to_conditional_token_balance() {
+        let capped =
+            cap_sell_quantity_to_balance(dec!(5), dec!(4.881280)).expect("available balance");
+
+        assert_eq!(capped, dec!(4.8812));
+    }
+
+    #[test]
+    fn sell_quantity_rejects_when_conditional_token_balance_is_zero() {
+        let error = cap_sell_quantity_to_balance(dec!(5), Decimal::ZERO)
+            .expect_err("zero balance should reject");
+
+        assert!(matches!(error, ExecutionError::Validation(_)));
+        assert!(error
+            .to_string()
+            .contains("no sellable conditional-token balance"));
     }
 
     #[test]

@@ -19,20 +19,34 @@ export interface SnapshotSummary {
 
 export interface ParityOrderRow {
   createdAt: string | null;
+  eventId: string;
+  filledQty: string;
   limitPrice: string | null;
   orderId: string;
+  purpose: string;
   quantity: string;
+  rejectionReason: string | null;
   side: string;
   state: string;
   tokenId: string;
+}
+
+export interface ParityExecutionMismatch {
+  dryrun: ParityOrderRow;
+  key: string;
+  live?: ParityOrderRow;
+  liveFilledQty: string;
+  message: string;
 }
 
 export interface LiveParityPair {
   dryrun?: TradingStateSnapshot;
   dryrunOnlyOrders: ParityOrderRow[];
   dryrunSummary: SnapshotSummary;
+  executionMismatches: ParityExecutionMismatch[];
   key: string;
   live?: TradingStateSnapshot;
+  liveOnlyOrders: ParityOrderRow[];
   liveSummary: SnapshotSummary;
   message: string;
   status: 'idle' | 'matched' | 'alert' | 'missing_dryrun' | 'missing_live';
@@ -41,6 +55,7 @@ export interface LiveParityPair {
 export interface LiveParityReport {
   alertPairs: LiveParityPair[];
   dryrunOrders: number;
+  executionMismatches: number;
   liveOrders: number;
   pairs: LiveParityPair[];
   unmatchedDryrunOrders: number;
@@ -106,44 +121,115 @@ function orderRow(
 ): ParityOrderRow {
   return {
     createdAt: intent?.created_at ?? null,
+    eventId: intent?.market_id ?? '',
+    filledQty: order.filled_qty,
     limitPrice: order.limit_price ?? null,
     orderId: order.order_id,
+    purpose: intent?.purpose ?? 'unknown',
     quantity: order.requested_qty,
+    rejectionReason: order.rejection_reason ?? order.last_error ?? null,
     side: intent?.side ?? 'unknown',
     state: order.state,
     tokenId: order.token_id,
   };
 }
 
-function orderCompareKey(
-  order: OrderSnapshot,
-  intent: TradingIntentSnapshot | undefined
-) {
-  return `${order.token_id}:${(intent?.side ?? 'unknown').toLowerCase()}`;
+function rowCompareKey(row: ParityOrderRow) {
+  return [
+    row.eventId || 'unknown-event',
+    row.tokenId,
+    row.side.toLowerCase(),
+    row.purpose.toLowerCase(),
+  ].join(':');
 }
 
-function dryrunOnlyOrders(dryrun?: TradingStateSnapshot, live?: TradingStateSnapshot) {
-  if (!dryrun) {
+function orderRows(snapshot?: TradingStateSnapshot) {
+  if (!snapshot) {
     return [];
   }
 
-  const dryrunIntents = intentById(dryrun);
-  const liveIntents = live ? intentById(live) : new Map<string, TradingIntentSnapshot>();
-  const liveOrderKeys = new Set(
-    (live?.orders ?? []).map((order) =>
-      orderCompareKey(order, liveIntents.get(order.intent_id))
-    )
-  );
-
-  return dryrun.orders
-    .filter(
-      (order) =>
-        !liveOrderKeys.has(orderCompareKey(order, dryrunIntents.get(order.intent_id)))
-    )
-    .map((order) => orderRow(order, dryrunIntents.get(order.intent_id)));
+  const intents = intentById(snapshot);
+  return snapshot.orders.map((order) => orderRow(order, intents.get(order.intent_id)));
 }
 
-function pairMessage(pair: Pick<LiveParityPair, 'dryrun' | 'dryrunOnlyOrders' | 'live'>) {
+function aggregateFilledByKey(rows: ParityOrderRow[]) {
+  const totals = new Map<string, number>();
+  for (const row of rows) {
+    const filled = Number(row.filledQty);
+    totals.set(rowCompareKey(row), (totals.get(rowCompareKey(row)) ?? 0) + (Number.isFinite(filled) ? filled : 0));
+  }
+  return totals;
+}
+
+function firstRowByKey(rows: ParityOrderRow[]) {
+  const map = new Map<string, ParityOrderRow>();
+  for (const row of rows) {
+    const key = rowCompareKey(row);
+    if (!map.has(key)) {
+      map.set(key, row);
+    }
+  }
+  return map;
+}
+
+function formatQuantity(value: number) {
+  if (!Number.isFinite(value)) {
+    return '0';
+  }
+
+  return value.toFixed(4).replace(/\.?0+$/u, '');
+}
+
+function dryrunOnlyOrders(dryrun?: TradingStateSnapshot, live?: TradingStateSnapshot) {
+  const dryRows = orderRows(dryrun);
+  const liveKeys = new Set(orderRows(live).map(rowCompareKey));
+
+  return dryRows.filter((row) => !liveKeys.has(rowCompareKey(row)));
+}
+
+function liveOnlyOrders(dryrun?: TradingStateSnapshot, live?: TradingStateSnapshot) {
+  const dryKeys = new Set(orderRows(dryrun).map(rowCompareKey));
+  return orderRows(live).filter((row) => !dryKeys.has(rowCompareKey(row)));
+}
+
+function executionMismatches(dryrun?: TradingStateSnapshot, live?: TradingStateSnapshot) {
+  const dryRows = orderRows(dryrun);
+  const liveRows = orderRows(live);
+  const liveFilled = aggregateFilledByKey(liveRows);
+  const liveFirst = firstRowByKey(liveRows);
+
+  return dryRows.flatMap((dryrunRow) => {
+    const key = rowCompareKey(dryrunRow);
+    const dryrunFilled = Number(dryrunRow.filledQty);
+    const liveFilledQty = liveFilled.get(key) ?? 0;
+    const dryrunHasFill = Number.isFinite(dryrunFilled) && dryrunFilled > 0;
+    const liveIsShort = dryrunHasFill && liveFilledQty + 0.0001 < dryrunFilled;
+
+    if (!liveIsShort) {
+      return [];
+    }
+
+    return [
+      {
+        dryrun: dryrunRow,
+        key,
+        live: liveFirst.get(key),
+        liveFilledQty: formatQuantity(liveFilledQty),
+        message:
+          liveFilledQty > 0
+            ? 'Live partial fill is below dry-run fill'
+            : 'Dry-run filled but live has no fill',
+      },
+    ];
+  });
+}
+
+function pairMessage(
+  pair: Pick<
+    LiveParityPair,
+    'dryrun' | 'dryrunOnlyOrders' | 'executionMismatches' | 'live'
+  >
+) {
   if (!pair.dryrun) {
     return 'No dry-run snapshot';
   }
@@ -156,6 +242,10 @@ function pairMessage(pair: Pick<LiveParityPair, 'dryrun' | 'dryrunOnlyOrders' | 
     return 'Dry-run order is missing from live';
   }
 
+  if (pair.executionMismatches.length > 0) {
+    return 'Live execution differs from dry-run';
+  }
+
   if (pair.dryrun.orders.length === 0 && pair.live.orders.length === 0) {
     return 'No orders yet';
   }
@@ -163,7 +253,12 @@ function pairMessage(pair: Pick<LiveParityPair, 'dryrun' | 'dryrunOnlyOrders' | 
   return 'Order paths match';
 }
 
-function pairStatus(pair: Pick<LiveParityPair, 'dryrun' | 'dryrunOnlyOrders' | 'live'>) {
+function pairStatus(
+  pair: Pick<
+    LiveParityPair,
+    'dryrun' | 'dryrunOnlyOrders' | 'executionMismatches' | 'live'
+  >
+) {
   if (!pair.dryrun) {
     return 'missing_dryrun' as const;
   }
@@ -173,6 +268,10 @@ function pairStatus(pair: Pick<LiveParityPair, 'dryrun' | 'dryrunOnlyOrders' | '
   }
 
   if (pair.dryrunOnlyOrders.length > 0) {
+    return 'alert' as const;
+  }
+
+  if (pair.executionMismatches.length > 0) {
     return 'alert' as const;
   }
 
@@ -205,12 +304,16 @@ export function buildLiveParityReport(
       const dryrun = bucket.dryrun;
       const live = bucket.live;
       const missingOrders = dryrunOnlyOrders(dryrun, live);
+      const liveOnly = liveOnlyOrders(dryrun, live);
+      const mismatches = executionMismatches(dryrun, live);
       const pair = {
         dryrun,
         dryrunOnlyOrders: missingOrders,
         dryrunSummary: summarize(dryrun),
+        executionMismatches: mismatches,
         key,
         live,
+        liveOnlyOrders: liveOnly,
         liveSummary: summarize(live),
       };
 
@@ -225,6 +328,10 @@ export function buildLiveParityReport(
   return {
     alertPairs: pairs.filter((pair) => pair.status === 'alert'),
     dryrunOrders: pairs.reduce((sum, pair) => sum + pair.dryrunSummary.orders, 0),
+    executionMismatches: pairs.reduce(
+      (sum, pair) => sum + pair.executionMismatches.length,
+      0
+    ),
     liveOrders: pairs.reduce((sum, pair) => sum + pair.liveSummary.orders, 0),
     pairs,
     unmatchedDryrunOrders: pairs.reduce(
