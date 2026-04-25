@@ -23,6 +23,11 @@ psql "${db_url}" \
 \echo 'Repairing clob_quote_ticks bid_size/ask_size from clob_orderbook_snapshots'
 \echo 'Window:' :start_ts 'to' :end_ts
 
+-- The quote table is a compressed TimescaleDB hypertable on Tango. A one-day
+-- repair can legitimately touch more than the default 100k decompressed tuple
+-- DML guard. Keep the override scoped to this psql session.
+SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0;
+
 WITH before_counts AS (
     SELECT
         count(*) AS quote_rows,
