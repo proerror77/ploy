@@ -601,6 +601,16 @@ pub fn build_factor_observations_with_lob(
     lob_snapshots: &[ResearchLobSnapshot],
     max_quote_age_secs: i64,
 ) -> Vec<FactorObservation> {
+    build_factor_observations_with_lob_sampled(updates, lob_snapshots, max_quote_age_secs, 0)
+}
+
+pub fn build_factor_observations_with_lob_sampled(
+    updates: &[MarketUpdate],
+    lob_snapshots: &[ResearchLobSnapshot],
+    max_quote_age_secs: i64,
+    observation_sample_secs: i64,
+) -> Vec<FactorObservation> {
+    let observation_sample_secs = observation_sample_secs.max(0);
     let mut final_outcomes: HashMap<String, bool> = HashMap::new();
     for update in updates {
         match update {
@@ -633,6 +643,7 @@ pub fn build_factor_observations_with_lob(
     let mut lob_by_symbol: HashMap<String, Vec<&ResearchLobSnapshot>> = HashMap::new();
     let mut lob_flow: HashMap<String, LobFlowAccumulator> = HashMap::new();
     let mut trade_flow: HashMap<String, TradeFlowAccumulator> = HashMap::new();
+    let mut last_observation_bucket: HashMap<String, i64> = HashMap::new();
     let mut rows = Vec::new();
 
     for snapshot in lob_snapshots {
@@ -851,6 +862,14 @@ pub fn build_factor_observations_with_lob(
                             },
                         );
                     }
+                }
+
+                if observation_sample_secs > 1 {
+                    let bucket = ts.timestamp() / observation_sample_secs;
+                    if last_observation_bucket.get(&sym).copied() == Some(bucket) {
+                        continue;
+                    }
+                    last_observation_bucket.insert(sym.clone(), bucket);
                 }
 
                 let Some(event_ids) = events_by_symbol.get(&sym) else {

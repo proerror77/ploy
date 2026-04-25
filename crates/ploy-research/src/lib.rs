@@ -39,7 +39,8 @@ pub use event_ml::{
 pub use factors::{
     AggregatedFactorMetric, EventFactorSummary, FactorMetric, FactorObservation,
     ResearchLobSnapshot, aggregate_factor_metrics, build_event_summaries,
-    build_factor_observations, build_factor_observations_with_lob, factor_metrics,
+    build_factor_observations, build_factor_observations_with_lob,
+    build_factor_observations_with_lob_sampled, factor_metrics,
 };
 #[cfg(feature = "polars-export")]
 pub use factors::{export_observations_parquet, observations_to_frame};
