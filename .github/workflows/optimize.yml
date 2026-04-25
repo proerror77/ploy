@@ -213,6 +213,7 @@ jobs:
             --val-end "${{ github.event.inputs.val_end }}" \
             --symbols "${{ github.event.inputs.symbols }}" \
             --trials "${{ github.event.inputs.trials }}" \
+            --require-official-settlement \
             --max-preflight-rows "${{ github.event.inputs.max_preflight_rows }}" \
             --max-preflight-bytes "${{ github.event.inputs.max_preflight_bytes }}" \
             --max-symbols "${{ github.event.inputs.max_symbols }}" \
@@ -266,6 +267,7 @@ jobs:
             --val-end "${{ github.event.inputs.val_end }}" \
             --symbols "${{ github.event.inputs.symbols }}" \
             --trials "${{ github.event.inputs.trials }}" \
+            --require-official-settlement \
             --max-preflight-rows "${{ github.event.inputs.max_preflight_rows }}" \
             --max-preflight-bytes "${{ github.event.inputs.max_preflight_bytes }}" \
             --max-symbols "${{ github.event.inputs.max_symbols }}" \
