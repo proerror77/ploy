@@ -6,21 +6,27 @@ use chrono::{DateTime, Utc};
 use rand::Rng as _;
 use rust_decimal::prelude::ToPrimitive as _;
 
-use crate::Result;
-use crate::auth::Kind as AuthKind;
 use crate::auth::state::Authenticated;
-use crate::clob::Client;
+use crate::auth::Kind as AuthKind;
 use crate::clob::types::request::OrderBookSummaryRequest;
 use crate::clob::types::{
     Amount, AmountInner, Order, OrderType, Side, SignableOrder, SignatureType,
 };
+use crate::clob::Client;
 use crate::error::Error;
 use crate::types::{Address, Decimal};
+use crate::Result;
 
 pub(crate) const USDC_DECIMALS: u32 = 6;
 
 /// Maximum number of decimal places for `size`
 pub(crate) const LOT_SIZE_SCALE: u32 = 2;
+
+/// Polymarket market BUY orders reject maker USDC beyond cents.
+pub(crate) const MARKET_USDC_DECIMALS: u32 = 2;
+
+/// Polymarket market orders allow taker share precision up to four decimals.
+pub(crate) const MARKET_SHARE_DECIMALS: u32 = 4;
 
 /// Placeholder type for compile-time checks on limit order builders
 #[non_exhaustive]
@@ -416,20 +422,23 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         let (taker_amount, maker_amount) = match (side, amount.0) {
             // Spend USDC to buy shares
             (Side::Buy, AmountInner::Usdc(_)) => {
-                let shares = (raw_amount / price).trunc_with_scale(decimals + LOT_SIZE_SCALE);
-                (shares, raw_amount)
+                let usdc = raw_amount.trunc_with_scale(MARKET_USDC_DECIMALS);
+                let shares = (usdc / price).trunc_with_scale(MARKET_SHARE_DECIMALS);
+                (shares, usdc)
             }
 
             // Buy N shares: use cutoff `price` derived from ask depth
             (Side::Buy, AmountInner::Shares(_)) => {
-                let usdc = (raw_amount * price).trunc_with_scale(decimals + LOT_SIZE_SCALE);
-                (raw_amount, usdc)
+                let shares = raw_amount.trunc_with_scale(MARKET_SHARE_DECIMALS);
+                let usdc = ceil_with_scale(shares * price, MARKET_USDC_DECIMALS);
+                (shares, usdc)
             }
 
             // Sell N shares for USDC
             (Side::Sell, AmountInner::Shares(_)) => {
-                let usdc = (raw_amount * price).trunc_with_scale(decimals + LOT_SIZE_SCALE);
-                (usdc, raw_amount)
+                let shares = raw_amount.trunc_with_scale(MARKET_SHARE_DECIMALS);
+                let usdc = (shares * price).trunc_with_scale(MARKET_USDC_DECIMALS);
+                (usdc, shares)
             }
 
             (Side::Sell, AmountInner::Usdc(_)) => {
@@ -477,6 +486,11 @@ fn to_fixed_u128(d: Decimal) -> u128 {
         .mantissa()
         .to_u128()
         .expect("The `build` call in `OrderBuilder<S, OrderKind, K>` ensures that only positive values are being multiplied/divided")
+}
+
+fn ceil_with_scale(d: Decimal, scale: u32) -> Decimal {
+    let factor = Decimal::from(10_u64.pow(scale));
+    (d * factor).ceil() / factor
 }
 
 /// Mask the salt to be <= 2^53 - 1, as the backend parses as an IEEE 754.

@@ -13,21 +13,21 @@ use chrono::{DateTime, Utc};
 use httpmock::MockServer;
 use polymarket_client_sdk::clob::types::response::OrderSummary;
 use polymarket_client_sdk::clob::types::{Amount, OrderType, Side, SignatureType, TickSize};
-use polymarket_client_sdk::types::{Address, Decimal, address};
+use polymarket_client_sdk::types::{address, Address, Decimal};
 use reqwest::StatusCode;
 use rust_decimal_macros::dec;
 
 use crate::common::{
-    USDC_DECIMALS, create_authenticated, ensure_requirements, to_decimal, token_1, token_2,
+    create_authenticated, ensure_requirements, to_decimal, token_1, token_2, USDC_DECIMALS,
 };
 
 /// Tests for the lifecycle of a [`Client`] as it moves from [`Unauthenticated`] to [`Authenticated`]
 mod lifecycle {
-    use alloy::signers::Signer as _;
     use alloy::signers::local::LocalSigner;
-    use polymarket_client_sdk::POLYGON;
+    use alloy::signers::Signer as _;
     use polymarket_client_sdk::clob::{Client, Config};
     use polymarket_client_sdk::error::Validation;
+    use polymarket_client_sdk::POLYGON;
     use serde_json::json;
 
     use super::*;
@@ -382,7 +382,7 @@ mod lifecycle {
     /// explicit funder.
     #[tokio::test]
     async fn funder_auto_derived_from_signer_for_proxy_types() -> anyhow::Result<()> {
-        use polymarket_client_sdk::{POLYGON, derive_proxy_wallet, derive_safe_wallet};
+        use polymarket_client_sdk::{derive_proxy_wallet, derive_safe_wallet, POLYGON};
 
         let server = MockServer::start();
         let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
@@ -2058,7 +2058,7 @@ mod market {
             assert_eq!(signable_order.order.taker, Address::ZERO);
             assert_eq!(signable_order.order.tokenId, token_1());
             assert_eq!(signable_order.order.makerAmount, U256::from(100_000_000));
-            assert_eq!(signable_order.order.takerAmount, U256::from(1_785_714_280));
+            assert_eq!(signable_order.order.takerAmount, U256::from(1_785_714_200));
             assert_eq!(signable_order.order.expiration, U256::from(0));
             assert_eq!(signable_order.order.nonce, U256::from(123));
             assert_eq!(signable_order.order.feeRateBps, U256::ZERO);
@@ -2109,7 +2109,7 @@ mod market {
             assert_eq!(signable_order.order.makerAmount, U256::from(100_000_000));
             assert_eq!(
                 signable_order.order.takerAmount,
-                U256::from(17_857_142_857_u64)
+                U256::from(17_857_142_800_u64)
             );
             assert_eq!(signable_order.order.expiration, U256::from(0));
             assert_eq!(signable_order.order.nonce, U256::from(123));
@@ -2149,8 +2149,8 @@ mod market {
         }
 
         #[tokio::test]
-        async fn market_buy_with_shares_fok_should_fail_on_insufficient_liquidity()
-        -> anyhow::Result<()> {
+        async fn market_buy_with_shares_fok_should_fail_on_insufficient_liquidity(
+        ) -> anyhow::Result<()> {
             let server = MockServer::start();
             let client = create_authenticated(&server).await?;
 
@@ -2187,8 +2187,8 @@ mod market {
         }
 
         #[tokio::test]
-        async fn market_buy_with_shares_should_succeed_and_encode_maker_as_usdc()
-        -> anyhow::Result<()> {
+        async fn market_buy_with_shares_should_succeed_and_encode_maker_as_usdc(
+        ) -> anyhow::Result<()> {
             let server = MockServer::start();
             let client = create_authenticated(&server).await?;
 
@@ -2259,6 +2259,36 @@ mod market {
             // maker = USDC, taker = shares
             assert_eq!(signable_order.order.makerAmount, U256::from(125_000_000)); // 250 * 0.5 = 125
             assert_eq!(signable_order.order.takerAmount, U256::from(250_000_000));
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn market_buy_with_share_amount_quantizes_to_venue_precision() -> anyhow::Result<()> {
+            let server = MockServer::start();
+            let client = create_authenticated(&server).await?;
+
+            ensure_requirements_for_market_price(
+                &server,
+                token_1(),
+                &[],
+                &[OrderSummary::builder()
+                    .price(dec!(0.7))
+                    .size(dec!(50))
+                    .build()],
+            );
+
+            let signable_order = client
+                .market_order()
+                .token_id(token_1())
+                .amount(Amount::shares(dec!(21.4285))?)
+                .side(Side::Buy)
+                .price(dec!(0.7))
+                .order_type(OrderType::FOK)
+                .build()
+                .await?;
+
+            assert_eq!(signable_order.order.makerAmount, U256::from(15_000_000));
+            assert_eq!(signable_order.order.takerAmount, U256::from(21_428_500));
             Ok(())
         }
     }
