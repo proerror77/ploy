@@ -265,7 +265,8 @@ fn run_background(
         ));
     }
 
-    // PM quotes — align with database.rs: DISTINCT ON per-second per-token, trusted sources only
+    // PM quotes — align with database.rs: DISTINCT ON per-second per-token, trusted sources only.
+    // Prefer book rows with executable size over later price-only rows in the same second.
     if Path::new(&format!("{data_dir}/clob_quote_ticks")).exists() {
         parts.push(format!(
             "SELECT ts_us, source_rank, typ, s1, s2, f1, f2, f3, f4, i1, b1 \
@@ -284,7 +285,10 @@ fn run_background(
                    AND source IN ('polymarket_ws', 'polymarket_ws_collector', 'ploy_runner_live') \
                    AND best_bid IS NOT NULL AND best_ask IS NOT NULL \
                    AND (best_bid > 0.01 AND best_bid < 0.99 OR best_ask > 0.01 AND best_ask < 0.99) \
-                 ORDER BY date_trunc('second', received_at), token_id, received_at DESC \
+                 ORDER BY date_trunc('second', received_at), token_id, \
+                          CASE WHEN ask_size IS NOT NULL AND ask_size > 0 THEN 1 ELSE 0 END DESC, \
+                          CASE WHEN bid_size IS NOT NULL AND bid_size > 0 THEN 1 ELSE 0 END DESC, \
+                          received_at DESC \
              )"
         ));
     }
@@ -1030,6 +1034,8 @@ mod tests {
         assert!(quote_section.contains("best_bid IS NOT NULL AND best_ask IS NOT NULL"));
         assert!(quote_section.contains("CAST(bid_size AS DOUBLE) AS f3"));
         assert!(quote_section.contains("CAST(ask_size AS DOUBLE) AS f4"));
+        assert!(quote_section.contains("CASE WHEN ask_size IS NOT NULL AND ask_size > 0"));
+        assert!(quote_section.contains("CASE WHEN bid_size IS NOT NULL AND bid_size > 0"));
         assert!(source.contains("pm_token_settlements"));
         assert!(source.contains("if require_official_settlement && resolved_up_won.is_none()"));
         assert!(

@@ -266,13 +266,18 @@ impl Executor for SimulatedExecutor {
             ..
         } = update
         {
+            let previous = self
+                .quotes
+                .get(token_id.as_ref())
+                .copied()
+                .unwrap_or_default();
             self.quotes.insert(
                 token_id.to_string(),
                 QuoteLiquidity {
                     bid: *bid,
                     ask: *ask,
-                    bid_size: *bid_size,
-                    ask_size: *ask_size,
+                    bid_size: bid_size.or(previous.bid_size),
+                    ask_size: ask_size.or(previous.ask_size),
                 },
             );
         }
@@ -517,6 +522,34 @@ mod tests {
             report.rejection_reason.as_deref(),
             Some("No executable ask liquidity")
         );
+    }
+
+    #[tokio::test]
+    async fn price_only_quote_does_not_erase_last_observed_liquidity() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update(
+            Some(dec!(0.49)),
+            Some(dec!(0.50)),
+            Some(dec!(50)),
+            Some(dec!(8)),
+        ));
+        exec.observe_market_update(&quote_update(
+            Some(dec!(0.48)),
+            Some(dec!(0.50)),
+            None,
+            None,
+        ));
+        let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(25));
+
+        let report = exec.submit(&intent, "test-order-lob-price-only").await;
+        assert!(!report.rejected);
+        let fill = report.fill.expect("last known top-of-book size");
+        assert_eq!(fill.price, dec!(0.50));
+        assert_eq!(fill.quantity, dec!(8));
     }
 
     #[tokio::test]
