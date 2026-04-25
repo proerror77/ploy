@@ -70,6 +70,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  PLOY_DB_URL: ${{ secrets.PLOY_DB_URL }}
 
 jobs:
   walk-forward:
@@ -83,7 +84,7 @@ jobs:
         run: |
           if [ -d "${GITHUB_WORKSPACE}" ]; then
             sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
-            sudo rm -rf "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/.cargo-lock" || true
+            sudo rm -f "${GITHUB_WORKSPACE}/.cargo-lock" || true
           fi
 
       - name: Checkout code
@@ -114,7 +115,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/factor-walk-forward-v2
           ./target/release/examples/factor_walk_forward_v2 \
-            --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
+            --db-url "${PLOY_DB_URL:?PLOY_DB_URL secret is required}" \
             --symbols "${{ github.event.inputs.symbols }}" \
             --start-date "${{ github.event.inputs.start_date }}" \
             --end-date "${{ github.event.inputs.end_date }}" \

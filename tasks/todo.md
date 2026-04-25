@@ -834,9 +834,13 @@ evidence.
 ## Files
 
 - `crates/ploy-research/src/factors_v2.rs`
+  - Owner: solo research lane
 - `crates/ploy-research/src/deribit.rs`
+  - Owner: solo research lane
 - `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: solo research lane
 - `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: solo research lane
 
 ## Tasks
 
@@ -847,6 +851,8 @@ evidence.
 - [x] Add a DB-backed `factor_walk_forward_v2` entrypoint for ploy-ci/Tango research runs.
 - [x] Add a workflow-dispatch lane for factor walk-forward artifacts.
 - [x] Verify locally, then run a ploy-ci smoke against 2026-04-21..25.
+- [x] Address PR review fixes for workflow secrets, Deribit cardinality/merge behavior,
+  exclusive end-date slicing, and walk-forward empty-factor guards.
 
 ## Review
 
@@ -869,6 +875,11 @@ evidence.
   `factor_observations=104,495`, `v2_rows=208,990`, `executable_pnl_rows=12,049`,
   entry fill rate `5.77%`, rejection rate `94.23%`, swap stayed `0B`, and no
   `future_exit_*` factor appeared in the walk-forward output.
+- 2026-04-26: Code review fixes removed hardcoded workflow DB credentials in favor of
+  `PLOY_DB_URL`, preserved cargo target caching, made end-date slicing exclusive at next-day
+  midnight, loaded symmetric pre-window Binance/LOB history, bounded legacy Deribit fallback
+  with the same bucket sampling, merged IV/greeks snapshots by `(symbol, ts)`, and added an
+  empty directed-score guard.
 
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 

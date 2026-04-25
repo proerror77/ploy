@@ -897,7 +897,9 @@ pub fn walk_forward_factors_v2_with_deribit(
     end: DateTime<Utc>,
     options: FactorWalkForwardOptions,
 ) -> FactorWalkForwardReport {
-    let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    let mut v2_rows =
+        build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    v2_rows.sort_by_key(|row| row.tick_ts);
     let health = build_data_health_report(source_rows, &v2_rows);
     let train_duration = Duration::days(options.train_window_days.max(1));
     let test_duration = Duration::days(options.test_window_days.max(1));
@@ -914,14 +916,14 @@ pub fn walk_forward_factors_v2_with_deribit(
         let train_end = train_start + train_duration;
         let test_start = train_end;
         let test_end = test_start + test_duration;
-        let train_rows: Vec<&FactorObservationV2> = v2_rows
-            .iter()
-            .filter(|row| row.tick_ts >= train_start && row.tick_ts < train_end)
-            .collect();
-        let test_rows: Vec<&FactorObservationV2> = v2_rows
-            .iter()
-            .filter(|row| row.tick_ts >= test_start && row.tick_ts < test_end)
-            .collect();
+        let train_rows: Vec<&FactorObservationV2> =
+            walk_forward_time_slice(&v2_rows, train_start, train_end)
+                .iter()
+                .collect();
+        let test_rows: Vec<&FactorObservationV2> =
+            walk_forward_time_slice(&v2_rows, test_start, test_end)
+                .iter()
+                .collect();
 
         if train_rows.len() >= options.review.min_observations
             && test_rows.len() >= options.review.min_observations
@@ -1162,6 +1164,9 @@ fn fit_walk_forward_factor(
         .map(|(_, score)| *score * direction)
         .filter(|score| score.is_finite())
         .collect();
+    if directed_scores.is_empty() {
+        return None;
+    }
     directed_scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     let selected_n = ((directed_scores.len() as f64) * options.top_quantile.clamp(0.01, 1.0))
         .ceil()
@@ -1193,6 +1198,16 @@ fn is_walk_forward_candidate_descriptor(descriptor: &FactorV2Descriptor) -> bool
     // They are intentionally reviewed in the single-window report, but using
     // them as train-time selection factors would leak future PM quote movement.
     !descriptor.name.starts_with("future_exit_")
+}
+
+fn walk_forward_time_slice(
+    rows: &[FactorObservationV2],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> &[FactorObservationV2] {
+    let lo = rows.partition_point(|row| row.tick_ts < start);
+    let hi = rows.partition_point(|row| row.tick_ts < end);
+    &rows[lo..hi]
 }
 
 fn evaluate_factor_threshold(

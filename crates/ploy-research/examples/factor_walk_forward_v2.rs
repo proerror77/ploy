@@ -31,7 +31,10 @@ fn parse_date_start(raw: &str) -> DateTime<Utc> {
 fn parse_date_end(raw: &str) -> DateTime<Utc> {
     let date = NaiveDate::parse_from_str(raw, "%Y-%m-%d")
         .unwrap_or_else(|_| panic!("invalid date: {raw}"));
-    Utc.from_utc_datetime(&date.and_hms_opt(23, 59, 59).unwrap())
+    let next_day = date
+        .succ_opt()
+        .unwrap_or_else(|| panic!("invalid end date: {raw}"));
+    Utc.from_utc_datetime(&next_day.and_hms_opt(0, 0, 0).unwrap())
 }
 
 fn parse_timestamp(raw: &str) -> DateTime<Utc> {
@@ -44,7 +47,7 @@ where
     F: Fn(&T) -> DateTime<Utc>,
 {
     let lo = items.partition_point(|item| ts_fn(item) < start);
-    let hi = items.partition_point(|item| ts_fn(item) <= end);
+    let hi = items.partition_point(|item| ts_fn(item) < end);
     &items[lo..hi]
 }
 
@@ -123,11 +126,12 @@ async fn main() {
         .await
         .expect("database connection failed");
 
+    let history_start = start - chrono::Duration::hours(1) - chrono::Duration::seconds(300);
     let historical_sample_secs = u32::try_from(lob_sample_secs.max(1)).unwrap_or(1);
     let all_updates = load_from_database_with_options(
         &pool,
         &symbols,
-        start,
+        history_start,
         end,
         &HistoricalLoadOptions {
             require_official_settlement: true,
@@ -142,7 +146,7 @@ async fn main() {
     eprintln!("updates: {}", all_updates.len());
 
     let all_lob_snapshots =
-        load_research_lob_snapshots_sampled(&pool, &symbols, start, end, lob_sample_secs)
+        load_research_lob_snapshots_sampled(&pool, &symbols, history_start, end, lob_sample_secs)
             .await
             .expect("bulk lob snapshot load failed");
     eprintln!("lob_snapshots: {}", all_lob_snapshots.len());
@@ -151,14 +155,10 @@ async fn main() {
         load_deribit_feature_snapshots(&pool, &symbols, start, end, observation_sample_secs).await;
     eprintln!("deribit_snapshots: {}", deribit_snapshots.len());
 
-    let updates_slice_start = start - chrono::Duration::hours(1) - chrono::Duration::seconds(300);
-    let updates_slice = slice_by_time(
-        &all_updates,
-        updates_slice_start,
-        end,
-        MarketUpdate::sort_ts,
-    );
-    let lob_slice = slice_by_time(&all_lob_snapshots, start, end, |snapshot| snapshot.ts);
+    let updates_slice = slice_by_time(&all_updates, history_start, end, MarketUpdate::sort_ts);
+    let lob_slice = slice_by_time(&all_lob_snapshots, history_start, end, |snapshot| {
+        snapshot.ts
+    });
 
     let observations: Vec<FactorObservation> = build_factor_observations_with_lob_sampled(
         updates_slice,
