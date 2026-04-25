@@ -23,6 +23,22 @@ on:
         description: "Validation end date (YYYY-MM-DD)"
         required: true
         default: "2026-04-20"
+      train_start_ts:
+        description: "Optional train start timestamp (RFC3339); overrides train_start"
+        required: false
+        default: ""
+      train_end_ts:
+        description: "Optional train end timestamp (RFC3339); overrides train_end"
+        required: false
+        default: ""
+      val_start_ts:
+        description: "Optional validation start timestamp (RFC3339); overrides val_start"
+        required: false
+        default: ""
+      val_end_ts:
+        description: "Optional validation end timestamp (RFC3339); overrides val_end"
+        required: false
+        default: ""
       trials:
         description: "Number of optimization trials"
         required: true
@@ -195,6 +211,20 @@ jobs:
           }
           trap 'status=$?; health_summary; rm -rf "${PLOY_DUCKDB_TEMP_DIR}"; exit ${status}' EXIT
 
+          time_flags=()
+          if [ -n "${{ github.event.inputs.train_start_ts }}" ]; then
+            time_flags+=(--train-start-ts "${{ github.event.inputs.train_start_ts }}")
+          fi
+          if [ -n "${{ github.event.inputs.train_end_ts }}" ]; then
+            time_flags+=(--train-end-ts "${{ github.event.inputs.train_end_ts }}")
+          fi
+          if [ -n "${{ github.event.inputs.val_start_ts }}" ]; then
+            time_flags+=(--val-start-ts "${{ github.event.inputs.val_start_ts }}")
+          fi
+          if [ -n "${{ github.event.inputs.val_end_ts }}" ]; then
+            time_flags+=(--val-end-ts "${{ github.event.inputs.val_end_ts }}")
+          fi
+
           extra_flags=()
           if [ "${{ github.event.inputs.allow_large_window }}" = "true" ]; then
             extra_flags+=(--allow-large-window)
@@ -222,6 +252,7 @@ jobs:
             --max-days "${{ github.event.inputs.max_days }}" \
             --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
             --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
+            "${time_flags[@]}" \
             "${extra_flags[@]}"
 
       - name: Run optimize
@@ -251,6 +282,20 @@ jobs:
           }
           trap cleanup EXIT
 
+          time_flags=()
+          if [ -n "${{ github.event.inputs.train_start_ts }}" ]; then
+            time_flags+=(--train-start-ts "${{ github.event.inputs.train_start_ts }}")
+          fi
+          if [ -n "${{ github.event.inputs.train_end_ts }}" ]; then
+            time_flags+=(--train-end-ts "${{ github.event.inputs.train_end_ts }}")
+          fi
+          if [ -n "${{ github.event.inputs.val_start_ts }}" ]; then
+            time_flags+=(--val-start-ts "${{ github.event.inputs.val_start_ts }}")
+          fi
+          if [ -n "${{ github.event.inputs.val_end_ts }}" ]; then
+            time_flags+=(--val-end-ts "${{ github.event.inputs.val_end_ts }}")
+          fi
+
           extra_flags=()
           if [ "${{ github.event.inputs.allow_large_window }}" = "true" ]; then
             extra_flags+=(--allow-large-window)
@@ -278,4 +323,5 @@ jobs:
             --max-days "${{ github.event.inputs.max_days }}" \
             --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
             --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
+            "${time_flags[@]}" \
             "${extra_flags[@]}"
