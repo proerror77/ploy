@@ -45,15 +45,17 @@ use ploy_feed_loaders::{
 };
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    DirectionalStrategy, Feed, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
-    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
-    StrategyRuntime, ThreeLayerStrategy,
+    DirectionalStrategy, Feed, FullConfig, HistoricalFeed, MarketUpdate, NullRecorder,
+    ReversalStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
+    StrategyLogic, StrategyRuntime, ThreeLayerStrategy,
 };
 use ploy_trading::TradeSide;
 use rust_decimal_macros::dec;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+
+const DEFAULT_THREE_LAYER_CONFIG: &str = "config/strategies/02-pm5d-threelayer.unified.toml";
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
@@ -112,6 +114,27 @@ fn algorithm_label(strategy_variant: &str) -> &'static str {
     match strategy_variant {
         "three_layer" => "random_sampling",
         _ => "TPE",
+    }
+}
+
+fn load_full_config_or_exit(path: &str) -> FullConfig {
+    FullConfig::from_file(path).unwrap_or_else(|error| {
+        eprintln!("ERROR: failed to load config {path}: {error}");
+        std::process::exit(1);
+    })
+}
+
+fn legacy_executor_config(require_lob_liquidity: bool) -> SimulatedExecutorConfig {
+    SimulatedExecutorConfig {
+        use_spread: true,
+        spread_pct: dec!(0.08),
+        enable_partial_fills: false,
+        depth_multiple: dec!(5.0),
+        min_fill_pct: dec!(0.5),
+        enable_market_impact: true,
+        impact_coefficient: dec!(0.1),
+        default_depth_shares: 500,
+        require_lob_liquidity,
     }
 }
 
@@ -656,6 +679,7 @@ fn run_backtest(
     strategy_variant: &str,
     config: DirectionalConfig,
     source: &ReplaySource,
+    executor_config: &SimulatedExecutorConfig,
     max_updates: Option<u64>,
 ) -> std::result::Result<BacktestOutcome, String> {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -665,17 +689,7 @@ fn run_backtest(
 
     let strategy = build_strategy(strategy_variant, config);
     let feed = source.open()?;
-    let executor = SimulatedExecutor::new(SimulatedExecutorConfig {
-        use_spread: true,
-        spread_pct: dec!(0.08),
-        enable_partial_fills: false,
-        depth_multiple: dec!(5.0),
-        min_fill_pct: dec!(0.5),
-        enable_market_impact: true,
-        impact_coefficient: dec!(0.1),
-        default_depth_shares: 500,
-        require_lob_liquidity: false,
-    });
+    let executor = SimulatedExecutor::new(executor_config.clone());
     let recorder = Box::new(NullRecorder);
     let runtime_config = RuntimeConfig {
         mode: RuntimeMode::Backtest,
@@ -882,56 +896,26 @@ struct ThreeLayerSearchParams {
     max_time_remaining_secs: i64,
 }
 
-fn make_three_layer_config(symbols: &[String], p: &ThreeLayerSearchParams) -> DirectionalConfig {
-    DirectionalConfig {
-        symbols: symbols.to_vec(),
-        symbol_profiles: std::collections::HashMap::new(),
-        vol_floor: 0.001,
-        min_probability: 0.55,
-        min_z_score: 0.20,
-        min_entry_price: 0.10,
-        max_entry_price: 0.85,
-        no_trade_zone_min: 0.45,
-        no_trade_zone_max: 0.55,
-        min_edge: p.min_edge,
-        min_deviation_pct: 0.005,
-        min_reversal_consistency: 0.55,
-        min_trend_consistency: 0.50,
-        min_trend_persistence_secs: 0,
-        take_profit_price_delta: 0.10,
-        stop_loss_price_delta: 0.05,
-        max_hold_secs: 120,
-        reversal_bonus_cap: 0.20,
-        use_multiscale_volatility: true,
-        use_price_structure_adjustment: true,
-        reversal_max_distance_pct: 0.015,
-        reversal_max_drift_flip_age_secs: 20,
-        reversal_min_post_flip_drift: 0.0001,
-        reversal_lob_depth_pct: 0.001,
-        reversal_min_lob_depth_ratio: 1.3,
-        reversal_max_ask_for_reversal: 0.25,
-        reversal_max_pm_lag_secs: 30,
-        reversal_take_profit_ask: 0.65,
-        reversal_stop_distance_pct: 0.025,
-        min_time_remaining_secs: p.min_time_remaining_secs as u64,
-        max_time_remaining_secs: p.max_time_remaining_secs as u64,
-        cooldown_secs: p.cooldown_secs as u64,
-        stake_usd: dec!(25),
-        max_positions: 30,
-        max_daily_trades: 1000,
-        max_daily_loss_usd: None,
-        allowed_window_secs: vec![300, 900],
-        three_layer_min_direction_prob: p.min_direction_prob,
-        three_layer_min_distance_over_sigma: p.min_distance_over_sigma,
-        three_layer_min_confirmation_score: p.min_confirmation_score,
-        three_layer_min_drift_confirmation: p.min_drift_confirmation,
-        three_layer_min_edge: p.min_edge,
-        three_layer_min_reward_risk: p.min_reward_risk,
-        three_layer_take_profit_ask: p.take_profit_ask,
-        three_layer_stop_distance_pct: p.stop_distance_pct,
-        three_layer_max_pm_lag_secs: 15,
-        three_layer_min_entry_score: 0.30,
-    }
+fn make_three_layer_config(
+    symbols: &[String],
+    p: &ThreeLayerSearchParams,
+    base: &DirectionalConfig,
+) -> DirectionalConfig {
+    let mut config = base.clone();
+    config.symbols = symbols.to_vec();
+    config.min_edge = p.min_edge;
+    config.min_time_remaining_secs = p.min_time_remaining_secs as u64;
+    config.max_time_remaining_secs = p.max_time_remaining_secs as u64;
+    config.cooldown_secs = p.cooldown_secs as u64;
+    config.three_layer_min_direction_prob = p.min_direction_prob;
+    config.three_layer_min_distance_over_sigma = p.min_distance_over_sigma;
+    config.three_layer_min_confirmation_score = p.min_confirmation_score;
+    config.three_layer_min_drift_confirmation = p.min_drift_confirmation;
+    config.three_layer_min_edge = p.min_edge;
+    config.three_layer_min_reward_risk = p.min_reward_risk;
+    config.three_layer_take_profit_ask = p.take_profit_ask;
+    config.three_layer_stop_distance_pct = p.stop_distance_pct;
+    config
 }
 
 fn main() {
@@ -948,6 +932,13 @@ fn main() {
     let strategy_variant = canonical_strategy_variant(
         &flag_value(&args, "--strategy-variant").unwrap_or_else(|| "directional".into()),
     );
+    let three_layer_full_config = if strategy_variant == "three_layer" {
+        let config_path =
+            flag_value(&args, "--config").unwrap_or_else(|| DEFAULT_THREE_LAYER_CONFIG.into());
+        Some((config_path.clone(), load_full_config_or_exit(&config_path)))
+    } else {
+        None
+    };
     let train_start = flag_value(&args, "--train-start").unwrap_or_else(|| "2026-04-01".into());
     let train_end = flag_value(&args, "--train-end").unwrap_or_else(|| "2026-04-03".into());
     let val_start = flag_value(&args, "--val-start").unwrap_or_else(|| "2026-04-04".into());
@@ -957,10 +948,26 @@ fn main() {
     let val_start_ts = flag_value(&args, "--val-start-ts");
     let val_end_ts = flag_value(&args, "--val-end-ts");
     let symbols_arg = flag_value(&args, "--symbols")
+        .or_else(|| {
+            three_layer_full_config
+                .as_ref()
+                .map(|(_, config)| config.strategy.symbols.join(","))
+        })
         .unwrap_or_else(|| "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT".into());
-    let require_official_settlement = args
-        .iter()
-        .any(|arg| arg == "--require-official-settlement");
+    let require_official_settlement = flag_present(&args, "--require-official-settlement")
+        || three_layer_full_config
+            .as_ref()
+            .map(|(_, config)| config.backtest_data.require_official_settlement)
+            .unwrap_or(false);
+    let require_lob_liquidity = if flag_present(&args, "--allow-synthetic-liquidity") {
+        false
+    } else {
+        flag_present(&args, "--require-lob-liquidity")
+            || three_layer_full_config
+                .as_ref()
+                .map(|(_, config)| config.execution.require_lob_liquidity)
+                .unwrap_or(false)
+    };
     let n_trials: usize = flag_value(&args, "--trials")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(200);
@@ -989,9 +996,27 @@ fn main() {
         .filter(|symbol| !symbol.is_empty())
         .map(ToOwned::to_owned)
         .collect();
+    let three_layer_base_config = three_layer_full_config.as_ref().map(|(_, config)| {
+        let mut strategy = config.strategy.clone();
+        strategy.symbols = symbols.clone();
+        strategy
+    });
+    let mut executor_config = three_layer_full_config
+        .as_ref()
+        .map(|(_, config)| config.sim_executor_config())
+        .unwrap_or_else(|| legacy_executor_config(require_lob_liquidity));
+    executor_config.require_lob_liquidity = require_lob_liquidity;
 
     eprintln!("=== PM5D Hyperparameter Optimization ===");
     eprintln!("Variant: {strategy_variant}");
+    if let Some((path, config)) = &three_layer_full_config {
+        eprintln!("Config baseline: {path}");
+        eprintln!("Baseline stake_usd: {}", config.strategy.stake_usd);
+        eprintln!(
+            "Baseline allowed_window_secs: {:?}",
+            config.strategy.allowed_window_secs
+        );
+    }
     eprintln!(
         "Train: {} → {}",
         train_start_ts.as_deref().unwrap_or(&train_start),
@@ -1004,6 +1029,10 @@ fn main() {
     );
     eprintln!("Symbols: {:?}", symbols);
     eprintln!("Official-only settlement: {}", require_official_settlement);
+    eprintln!(
+        "Executable LOB liquidity required: {}",
+        executor_config.require_lob_liquidity
+    );
     eprintln!(
         "Trials: {n_trials}  Algorithm: {}",
         algorithm_label(&strategy_variant)
@@ -1118,6 +1147,8 @@ fn main() {
     );
 
     let symbols_ref = Arc::new(symbols.clone());
+    let executor_config = Arc::new(executor_config);
+    let three_layer_base_config = three_layer_base_config.map(Arc::new);
     let study: Study<f64> = Study::maximize(TpeSampler::new());
 
     if strategy_variant == "reversal" {
@@ -1133,6 +1164,7 @@ fn main() {
         let p_max_ask_c = p_max_ask.clone();
         let p_pm_lag_c = p_pm_lag.clone();
         let p_min_edge_c = p_min_edge.clone();
+        let executor_config_c = Arc::clone(&executor_config);
 
         study
             .optimize(n_trials, move |trial: &mut Trial| {
@@ -1150,7 +1182,13 @@ fn main() {
                 };
 
                 let config = make_reversal_config(symbols_ref_c.as_slice(), &params);
-                let outcome = match run_backtest("reversal", config, &train_ref, max_updates) {
+                let outcome = match run_backtest(
+                    "reversal",
+                    config,
+                    &train_ref,
+                    executor_config_c.as_ref(),
+                    max_updates,
+                ) {
                     Ok(outcome) => outcome,
                     Err(error) => {
                         eprintln!(
@@ -1247,8 +1285,14 @@ fn main() {
 
         eprintln!("\n=== Validation (held-out) ===");
         let val_config = make_reversal_config(symbols_ref.as_slice(), &best_params);
-        let val_outcome = run_backtest("reversal", val_config, &val_source, max_updates)
-            .expect("Validation backtest failed");
+        let val_outcome = run_backtest(
+            "reversal",
+            val_config,
+            &val_source,
+            executor_config.as_ref(),
+            max_updates,
+        )
+        .expect("Validation backtest failed");
         eprintln!("Val Source:  {}", val_source.kind());
         eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
         eprintln!("Val PnL:     ${:.2}", val_outcome.net_pnl);
@@ -1313,6 +1357,9 @@ fn main() {
             );
         }
     } else if strategy_variant == "three_layer" {
+        let base_config = three_layer_base_config
+            .as_ref()
+            .expect("three_layer optimizer requires a config baseline");
         // ── three_layer parameter search ──────────────────────────────────────
         // Simple LCG random number generator (no external rand crate needed).
         let seed = std::time::SystemTime::now()
@@ -1367,8 +1414,15 @@ fn main() {
                 max_time_remaining_secs,
             };
 
-            let config = make_three_layer_config(symbols_ref_c.as_slice(), &params);
-            let outcome = match run_backtest("three_layer", config, &train_ref, max_updates) {
+            let config =
+                make_three_layer_config(symbols_ref_c.as_slice(), &params, base_config.as_ref());
+            let outcome = match run_backtest(
+                "three_layer",
+                config,
+                &train_ref,
+                executor_config.as_ref(),
+                max_updates,
+            ) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     eprintln!(
@@ -1434,9 +1488,16 @@ fn main() {
         eprintln!("Trades:                      {best_trades}");
 
         eprintln!("\n=== Validation (held-out, out-of-sample) ===");
-        let val_config = make_three_layer_config(symbols_ref.as_slice(), &best_params);
-        let val_outcome = run_backtest("three_layer", val_config, &val_source, max_updates)
-            .expect("Validation backtest failed");
+        let val_config =
+            make_three_layer_config(symbols_ref.as_slice(), &best_params, base_config.as_ref());
+        let val_outcome = run_backtest(
+            "three_layer",
+            val_config,
+            &val_source,
+            executor_config.as_ref(),
+            max_updates,
+        )
+        .expect("Validation backtest failed");
         eprintln!("Val Source:  {}", val_source.kind());
         eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
         eprintln!("Val PnL:     ${:.2}", val_outcome.net_pnl);
@@ -1500,6 +1561,7 @@ fn main() {
         let p_cooldown_c = p_cooldown.clone();
         let p_min_time_c = p_min_time.clone();
         let p_max_time_c = p_max_time.clone();
+        let executor_config_c = Arc::clone(&executor_config);
 
         study
             .optimize(n_trials, move |trial: &mut Trial| {
@@ -1523,7 +1585,13 @@ fn main() {
                     min_time,
                     max_time,
                 );
-                let outcome = match run_backtest("directional", config, &train_ref, max_updates) {
+                let outcome = match run_backtest(
+                    "directional",
+                    config,
+                    &train_ref,
+                    executor_config_c.as_ref(),
+                    max_updates,
+                ) {
                     Ok(outcome) => outcome,
                     Err(error) => {
                         eprintln!(
@@ -1581,8 +1649,14 @@ fn main() {
             best_min_time,
             best_max_time,
         );
-        let val_outcome = run_backtest("directional", val_config, &val_source, max_updates)
-            .expect("Validation backtest failed");
+        let val_outcome = run_backtest(
+            "directional",
+            val_config,
+            &val_source,
+            executor_config.as_ref(),
+            max_updates,
+        )
+        .expect("Validation backtest failed");
         eprintln!("Val Source:  {}", val_source.kind());
         eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
         eprintln!("Val PnL:     ${:.2}", val_outcome.net_pnl);

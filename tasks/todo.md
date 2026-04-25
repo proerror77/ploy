@@ -50,6 +50,36 @@
   crates/ploy-strategy-bundles/src/config.rs`, `git diff --check`, and YAML
   parse for `optimize.yml` plus `deploy-tango-1-1.yml`.
 
+# Optimizer Live-Architecture Parity (2026-04-25)
+
+## Files
+
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+  - Owner: PM5D ThreeLayer parameter optimization replay and simulated execution semantics.
+- `.github/workflows/optimize.yml`
+  - Owner: ploy-ci optimizer invocation flags.
+
+## Tasks
+
+- [x] Stop the in-flight optimizer run that used synthetic liquidity.
+- [x] Load PM5D ThreeLayer optimizer baseline from the unified dry-run/live TOML.
+- [x] Require LOB executable liquidity during optimizer train/validation replay.
+- [x] Verify the optimizer example builds and workflow passes the new flags.
+- [ ] Land through PR/CI and restart bounded official tuning on `ploy-ci-1`.
+
+## Review
+
+- 2026-04-25: Run `24922737633` was started on `main@a13e95e8` with official
+  settlement, but `optimize_backtest` still hard-coded
+  `require_lob_liquidity = false` and a `stake_usd = 25` ThreeLayer baseline.
+  That would tune against a synthetic-fill strategy instead of today's
+  dry-run/live `stake_usd = 15` LOB-aware architecture.
+- 2026-04-25: Optimizer now loads the PM5D ThreeLayer baseline from
+  `config/strategies/02-pm5d-threelayer.unified.toml`, prints the baseline
+  stake/window and LOB execution mode, and only overlays the sampled
+  ThreeLayer thresholds/time gates. The optimize workflow passes
+  `--require-lob-liquidity` in both preflight and full replay.
+
 # Live Price Improvement Fill Accounting (2026-04-25)
 
 ## Files
