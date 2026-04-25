@@ -12,6 +12,7 @@
 //!     --end-date 2026-04-24 \
 //!     --stake-usd 15 \
 //!     [--lob-sample-secs 5] \
+//!     [--observation-sample-secs 30] \
 //!     [--max-quote-age-secs 30] \
 //!     [--top-n 20]
 
@@ -20,7 +21,7 @@ use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
     DeribitFeatureSnapshot, FactorObservation, FactorReviewOptions,
-    build_factor_observations_with_lob, format_factor_review_v2_report,
+    build_factor_observations_with_lob_sampled, format_factor_review_v2_report,
     load_research_lob_snapshots_sampled, review_factors_v2_with_deribit,
 };
 use sqlx::postgres::PgPoolOptions;
@@ -85,6 +86,9 @@ async fn main() {
     let max_quote_age_secs: i64 = flag_value(&args, "--max-quote-age-secs")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(30);
+    let observation_sample_secs: i64 = flag_value(&args, "--observation-sample-secs")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(30);
     let top_n: usize = flag_value(&args, "--top-n")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(20);
@@ -101,8 +105,8 @@ async fn main() {
     };
 
     eprintln!(
-        "factor_review_v2: {} -> {} for {:?}, stake_usd={:.2}",
-        start, end, symbols, options.stake_usd
+        "factor_review_v2: {} -> {} for {:?}, stake_usd={:.2}, observation_sample_secs={}",
+        start, end, symbols, options.stake_usd, observation_sample_secs
     );
 
     let pool = PgPoolOptions::new()
@@ -145,8 +149,12 @@ async fn main() {
     );
     let lob_slice = slice_by_time(&all_lob_snapshots, start, end, |snapshot| snapshot.ts);
 
-    let observations: Vec<FactorObservation> =
-        build_factor_observations_with_lob(updates_slice, lob_slice, max_quote_age_secs);
+    let observations: Vec<FactorObservation> = build_factor_observations_with_lob_sampled(
+        updates_slice,
+        lob_slice,
+        max_quote_age_secs,
+        observation_sample_secs,
+    );
     eprintln!("factor_observations: {}", observations.len());
 
     if observations.is_empty() {

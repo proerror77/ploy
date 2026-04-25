@@ -26,7 +26,11 @@ on:
       lob_sample_secs:
         description: "Binance LOB sample interval"
         required: false
-        default: "5"
+        default: "30"
+      observation_sample_secs:
+        description: "Factor observation output interval"
+        required: false
+        default: "30"
       max_quote_age_secs:
         description: "Maximum PM quote age"
         required: false
@@ -104,6 +108,7 @@ jobs:
             --end-date "${{ github.event.inputs.end_date }}" \
             --stake-usd "${{ github.event.inputs.stake_usd }}" \
             --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
+            --observation-sample-secs "${{ github.event.inputs.observation_sample_secs }}" \
             --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
             --min-observations "${{ github.event.inputs.min_observations }}" \
             --top-quantile "${{ github.event.inputs.top_quantile }}" \
