@@ -1,3 +1,42 @@
+# PM5D Factor Review Book-Level Execution (2026-04-26)
+
+## Files
+
+- `crates/ploy-feed-loaders/src/database.rs`
+  - Owner: historical PM quote selection and orderbook-snapshot fallback.
+
+## Tasks
+
+- [x] Confirm `clob_quote_ticks` 2026-04-21/22/23 rows are price-only.
+- [x] Confirm `clob_orderbook_snapshots` has point-in-time bid/ask depth with sizes for the same period.
+- [x] Replace price-only historical quote rows with snapshot-derived top-of-book depth when quote sizes are absent.
+- [x] Run focused local checks and remote factor-review smoke.
+- [ ] Land via PR/CI and rerun 2026-04-21..25 executable factor review.
+
+## Review
+
+- 2026-04-26: `clob_quote_ticks` on 2026-04-21/22/23 has millions of quote rows
+  but zero executable size rows because the source is `ploy_runner_live`.
+  Existing loader treated those rows as sufficient and never fell back to
+  `clob_orderbook_snapshots`.
+- 2026-04-26: `clob_orderbook_snapshots` carries complete JSONB depth. A bounded
+  2026-04-22 sample extracted point-in-time best bid/ask plus size
+  (`0.19/0.20`, `932.83/288.62` shares), matching the book-level execution
+  semantics needed for 15U fill labels.
+- 2026-04-26: A first full-day snapshot fallback smoke exposed the OOM risk in
+  the naive loader: materializing every CLOB snapshot into replay memory is not
+  viable. The fallback now samples snapshots in SQL by token and
+  `lob_sample_secs` bucket before JSONB top-of-book extraction.
+- 2026-04-26: The same smoke showed `updates=10,456,974` after PM snapshots
+  were bounded, so spot ticks from `sync_records` were also too dense for
+  factor review. Historical loading now supports `spot_sample_secs`, and
+  `factor_review_v2` aligns spot sampling to the LOB observation bucket.
+- 2026-04-26: ploy-ci smoke on #175 commit `37d8e692` for 2026-04-22 completed:
+  `updates=234,614`, `lob_snapshots=17,280`, `source_obs=8,830`,
+  `v2_rows=17,660`, `entry_size_rows=16,338`, and
+  `executable_pnl_rows=5,861`. This confirms the prior zero-executable-label
+  days were a loader artifact, not absent PM depth.
+
 # PM5D PM Quote Size Persistence Repair (2026-04-25)
 
 ## Files

@@ -116,6 +116,7 @@ async fn main() {
         .await
         .expect("database connection failed");
 
+    let historical_sample_secs = u32::try_from(lob_sample_secs.max(1)).unwrap_or(1);
     let all_updates = load_from_database_with_options(
         &pool,
         &symbols,
@@ -124,6 +125,8 @@ async fn main() {
         &HistoricalLoadOptions {
             require_official_settlement: true,
             include_l2: false,
+            spot_sample_secs: historical_sample_secs,
+            lob_sample_secs: historical_sample_secs,
             ..Default::default()
         },
     )
