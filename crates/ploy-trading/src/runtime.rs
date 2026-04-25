@@ -174,12 +174,51 @@ impl TradingRuntime {
             return false;
         }
         if self.orders.apply_fill(&fill).is_none() {
-            return false;
+            if !self.buy_fill_is_price_improved_overfill(&fill) {
+                return false;
+            }
+            if self.orders.apply_price_improved_buy_fill(&fill).is_none() {
+                return false;
+            }
         }
         self.positions.apply_fill(&fill);
         self.fills.record(fill);
         self.prune_inactive_intents();
         true
+    }
+
+    fn buy_fill_is_price_improved_overfill(&self, fill: &FillRecord) -> bool {
+        if fill.side != TradeSide::Buy {
+            return false;
+        }
+
+        let Some(order) = self.orders.order(&fill.order_id) else {
+            return false;
+        };
+        let Some(limit_price) = order.limit_price else {
+            return false;
+        };
+        let Some(intent) = self.intent(&order.intent_id) else {
+            return false;
+        };
+        if intent.side != TradeSide::Buy {
+            return false;
+        }
+
+        let requested_notional = order.requested_qty.max(Decimal::ZERO) * limit_price;
+        let recorded_notional: Decimal = self
+            .fills
+            .all()
+            .iter()
+            .filter(|existing| existing.order_id == fill.order_id)
+            .map(|existing| {
+                existing.quantity.max(Decimal::ZERO) * existing.price.max(Decimal::ZERO)
+            })
+            .sum();
+        let fill_notional = fill.quantity.max(Decimal::ZERO) * fill.price.max(Decimal::ZERO);
+        let remaining_notional = (requested_notional - recorded_notional).max(Decimal::ZERO);
+
+        fill_notional <= remaining_notional + Decimal::new(2, 2)
     }
 
     pub fn last_fill_time(&self) -> Option<DateTime<Utc>> {
@@ -407,6 +446,81 @@ mod tests {
         });
         assert!(runtime.intent("intent-1").is_none());
         assert!(runtime.snapshot(&BTreeMap::new()).intents.is_empty());
+    }
+
+    #[test]
+    fn price_improved_buy_fill_can_exceed_requested_shares_within_notional_cap() {
+        let mut runtime = TradingRuntime::default();
+        runtime.submit_intent(
+            TradingIntent {
+                intent_id: "intent-buy".to_string(),
+                deployment_id: "dep-1".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "token-1".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(28.30),
+                limit_price: Some(dec!(0.53)),
+                purpose: IntentPurpose::Entry,
+                created_at: Utc::now(),
+            },
+            "order-buy",
+        );
+        runtime.acknowledge_order("order-buy", "venue-buy");
+
+        let recorded = runtime.record_fill(FillRecord {
+            fill_id: "fill-buy".to_string(),
+            order_id: "order-buy".to_string(),
+            token_id: "token-1".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(31.466665),
+            price: dec!(0.4767),
+            fee: dec!(0.12),
+            timestamp: Utc::now(),
+        });
+
+        assert!(recorded);
+        let order = runtime.order("order-buy").expect("order");
+        assert_eq!(order.state, OrderState::Filled);
+        assert_eq!(order.filled_qty, dec!(31.466665));
+        let snapshot = runtime.snapshot(&BTreeMap::new());
+        assert_eq!(snapshot.fills.len(), 1);
+        assert_eq!(snapshot.positions[0].net_qty, dec!(31.466665));
+    }
+
+    #[test]
+    fn price_improved_buy_overfill_still_rejects_above_notional_cap() {
+        let mut runtime = TradingRuntime::default();
+        runtime.submit_intent(
+            TradingIntent {
+                intent_id: "intent-buy".to_string(),
+                deployment_id: "dep-1".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "token-1".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(28.30),
+                limit_price: Some(dec!(0.53)),
+                purpose: IntentPurpose::Entry,
+                created_at: Utc::now(),
+            },
+            "order-buy",
+        );
+        runtime.acknowledge_order("order-buy", "venue-buy");
+
+        let recorded = runtime.record_fill(FillRecord {
+            fill_id: "fill-buy".to_string(),
+            order_id: "order-buy".to_string(),
+            token_id: "token-1".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(40),
+            price: dec!(0.53),
+            fee: Decimal::ZERO,
+            timestamp: Utc::now(),
+        });
+
+        assert!(!recorded);
+        let order = runtime.order("order-buy").expect("order");
+        assert_eq!(order.state, OrderState::Acknowledged);
+        assert_eq!(order.filled_qty, Decimal::ZERO);
     }
 
     #[test]

@@ -52,42 +52,39 @@ mod execution {
         }
 
         fn build_request(&self, intent: &TradingIntent) -> ploy_connectivity::ExecutionRequest {
-            let limit_price = intent
-                .limit_price
-                .map(|price| self.slippage_bounded_price(price, intent.side));
             let quantity = intent.quantity.trunc_with_scale(2);
             ploy_connectivity::ExecutionRequest {
                 order_id: intent.intent_id.clone(),
                 token_id: intent.token_id.clone(),
                 side: intent.side,
                 quantity,
-                limit_price,
+                limit_price: intent.limit_price,
                 order_type: ploy_connectivity::OrderExecutionType::FAK,
                 aggressive_ticks: 0,
             }
         }
 
-        fn prepared_quantity(&self, intent: &TradingIntent) -> Decimal {
+        fn prepared_quantity_and_price(
+            &self,
+            intent: &TradingIntent,
+        ) -> (Decimal, Option<Decimal>) {
             let normalized_quantity = intent.quantity.trunc_with_scale(2);
+            let Some(limit_price) = intent.limit_price else {
+                return (normalized_quantity, None);
+            };
+
+            let execution_price = self.slippage_bounded_price(limit_price, intent.side);
             if intent.side != TradeSide::Buy {
-                return normalized_quantity;
+                return (normalized_quantity, Some(execution_price));
             }
 
-            let Some(limit_price) = intent.limit_price else {
-                return normalized_quantity;
-            };
             if limit_price <= Decimal::ZERO || normalized_quantity <= Decimal::ZERO {
-                return normalized_quantity;
+                return (normalized_quantity, Some(execution_price));
             }
 
             let target_notional = (intent.quantity * limit_price).trunc_with_scale(6);
             if target_notional <= Decimal::ZERO {
-                return normalized_quantity;
-            }
-
-            let execution_price = self.slippage_bounded_price(limit_price, intent.side);
-            if execution_price <= Decimal::ZERO {
-                return normalized_quantity;
+                return (normalized_quantity, Some(execution_price));
             }
 
             let capped_quantity = (target_notional / execution_price).trunc_with_scale(2);
@@ -104,7 +101,7 @@ mod execution {
                 );
             }
 
-            prepared_quantity
+            (prepared_quantity, Some(execution_price))
         }
 
         fn slippage_bounded_price(&self, limit_price: Decimal, side: TradeSide) -> Decimal {
@@ -131,7 +128,9 @@ mod execution {
 
         fn prepare_intent(&self, intent: &TradingIntent) -> TradingIntent {
             let mut prepared = intent.clone();
-            prepared.quantity = self.prepared_quantity(intent);
+            let (quantity, limit_price) = self.prepared_quantity_and_price(intent);
+            prepared.quantity = quantity;
+            prepared.limit_price = limit_price;
             prepared
         }
 
@@ -295,6 +294,7 @@ mod execution {
             let request = executor.build_request(&prepared);
             let execution_price = request.limit_price.expect("bounded live price");
 
+            assert_eq!(prepared.limit_price, Some(Decimal::new(11, 2)));
             assert_eq!(execution_price, Decimal::new(11, 2));
             assert_eq!(prepared.quantity, Decimal::new(13_636, 2));
             assert_eq!(request.quantity, Decimal::new(13_636, 2));
@@ -309,6 +309,7 @@ mod execution {
             let prepared = executor.prepare_intent(&intent);
             let request = executor.build_request(&prepared);
 
+            assert_eq!(prepared.limit_price, Some(Decimal::new(10, 2)));
             assert_eq!(request.limit_price, Some(Decimal::new(10, 2)));
             assert_eq!(prepared.quantity, Decimal::new(15_000, 2));
             assert_eq!(request.quantity, Decimal::new(15_000, 2));

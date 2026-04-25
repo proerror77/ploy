@@ -154,12 +154,13 @@ impl OrderLedger {
         if fill.quantity > remaining_qty {
             return None;
         }
-        record.filled_qty += fill.quantity;
-        record.state = if record.filled_qty >= record.requested_qty {
-            OrderState::Filled
-        } else {
-            OrderState::PartiallyFilled
-        };
+        apply_fill_to_record(record, fill.quantity);
+        Some(record)
+    }
+
+    pub fn apply_price_improved_buy_fill(&mut self, fill: &FillRecord) -> Option<&OrderRecord> {
+        let record = self.orders.get_mut(&fill.order_id)?;
+        apply_fill_to_record(record, fill.quantity);
         Some(record)
     }
 
@@ -182,6 +183,15 @@ impl OrderLedger {
     pub fn orders(&self) -> impl Iterator<Item = &OrderRecord> {
         self.orders.values()
     }
+}
+
+fn apply_fill_to_record(record: &mut OrderRecord, quantity: Decimal) {
+    record.filled_qty += quantity;
+    record.state = if record.filled_qty >= record.requested_qty {
+        OrderState::Filled
+    } else {
+        OrderState::PartiallyFilled
+    };
 }
 
 #[cfg(test)]

@@ -1,3 +1,51 @@
+# Live Price Improvement Fill Accounting (2026-04-25)
+
+## Files
+
+- `crates/ploy-strategy-runtime/src/live.rs`
+  - Owner: live execution price recorded in prepared intents.
+- `crates/ploy-trading/src/runtime.rs`
+  - Owner: accepting BUY fills that exceed share quantity only because of
+    venue price improvement while staying inside signed notional.
+- `crates/ploy-trading/src/orders.rs`
+  - Owner: explicit overfill acceptance path used by the runtime.
+
+## Tasks
+
+- [x] Confirm whether multiple live strategies are running.
+- [x] Reconcile Polymarket wallet trades against local runtime orders.
+- [x] Identify why DOGE accumulated about 30U.
+- [x] Record live BUY orders with the actual slippage-bounded signing price.
+- [x] Accept price-improved BUY fills by notional instead of rejecting them as share overfills.
+- [x] Add regression tests for the DOGE-style overfill/retry failure.
+- [x] Run focused Rust tests and static checks.
+- [ ] Land through PR/CI, deploy Tango, and verify no further duplicate live BUY retry.
+
+## Review
+
+- 2026-04-25: Tango systemd has one `ployd` and no separate live strategy
+  service. Recent DB rows have only `runtime_mode=live, strategy_id=three_layer`.
+- 2026-04-25: Polymarket user activity shows DOGE Down had two live BUY trades
+  for the 10:05PM-10:10PM ET market: about 15.00U and 14.72U. The local DB
+  marked both corresponding orders as rejected because reconciled fills were
+  treated as overfilled and ignored.
+- 2026-04-25: Root cause is live BUY price improvement. The signed order has a
+  USDC notional cap, but if the venue fills at a better price, the returned
+  shares can exceed local `requested_qty`. The runtime rejects that fill by
+  share count, then retries the remaining quantity, creating duplicate live
+  buys.
+- 2026-04-25: The runtime now records live prepared orders at the actual
+  slippage-bounded signing price. BUY fills that exceed requested shares are
+  accepted only when their actual notional stays inside the remaining order
+  notional plus a small cent-rounding tolerance, then the order is marked filled
+  so FAK retry stops.
+- 2026-04-25: Verification passed:
+  `rtk cargo test -p ploy-trading --lib`,
+  `rtk cargo test -p ploy-strategy-runtime --features live,live-execution --lib`,
+  `rtk cargo test -p ploy-strategy-bundles --lib runtime_records_prepared_intent_quantity`,
+  `rustfmt --edition 2021 --check crates/ploy-strategy-runtime/src/live.rs crates/ploy-trading/src/runtime.rs crates/ploy-trading/src/orders.rs`,
+  and `git diff --check`.
+
 # Live Buy Notional Cap (2026-04-25)
 
 ## Files
