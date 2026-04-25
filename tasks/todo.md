@@ -1,3 +1,34 @@
+# PM5D Optimize Quote Liquidity Preflight (2026-04-25)
+
+## Files
+
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+  - Owner: optimizer preflight validation for executable PM quote liquidity.
+- `scripts/check_optimize_verification_gates.sh`
+  - Owner: cheap static guard for required optimizer preflight checks.
+
+## Tasks
+
+- [x] Confirm post-quote-preservation optimize still rejects all orders as
+  `No executable ask liquidity`.
+- [x] Add PM quote ask/bid size coverage to the Parquet preflight manifest.
+- [x] Fail preflight when LOB-required optimization has PM event/quote rows but
+  no executable ask-size rows.
+- [ ] Run focused verification and land through PR/CI.
+- [ ] Rerun bounded optimize after the preflight gate lands.
+
+## Review
+
+- 2026-04-25: Run `24925696366` used main `033782e` and still produced
+  hundreds of entry signals per trial, but zero fills. Diagnostics showed every
+  order was rejected by simulated execution as `No executable ask liquidity`.
+  That means the next blocker is quote-liquidity data quality/coverage, not the
+  strategy signal path.
+- 2026-04-25: Optimizer preflight now prints `pm_quote_liquidity` per split and
+  rejects LOB-required studies early when PM quote/event rows exist but no quote
+  row carries executable `ask_size`. `--allow-large-window` still bypasses only
+  resource-size guards, not data-quality guards.
+
 # PM5D Official Settlement Empty Replay Guard (2026-04-25)
 
 ## Files

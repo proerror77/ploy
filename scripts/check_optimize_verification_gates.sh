@@ -119,6 +119,9 @@ if [[ -f "${optimizer}" ]]; then
   require_text "${optimizer}" "--allow-large-window" "optimizer large-window override"
   require_text "${optimizer}" "--duckdb-memory-limit" "optimizer DuckDB memory limit"
   require_text "${optimizer}" "--duckdb-temp-dir" "optimizer DuckDB temp dir"
+  require_text "${optimizer}" "pm_quote_liquidity" "optimizer PM quote liquidity preflight output"
+  require_text "${optimizer}" "executable_ask_rows" "optimizer executable ask-size preflight"
+  require_text "${optimizer}" "zero quotes with executable ask_size" "optimizer no-liquidity hard gate"
 
   if grep -Eq "sample|downsample|bucket|stride" "${optimizer}"; then
     if ! grep -Fq "non-canonical" "${optimizer}"; then
