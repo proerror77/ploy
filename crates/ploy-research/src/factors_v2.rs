@@ -902,7 +902,10 @@ pub fn walk_forward_factors_v2_with_deribit(
     let train_duration = Duration::days(options.train_window_days.max(1));
     let test_duration = Duration::days(options.test_window_days.max(1));
     let step_duration = Duration::days(options.step_days.max(1));
-    let descriptors = factor_v2_descriptors();
+    let descriptors: Vec<FactorV2Descriptor> = factor_v2_descriptors()
+        .into_iter()
+        .filter(is_walk_forward_candidate_descriptor)
+        .collect();
 
     let mut windows = Vec::new();
     let mut train_start = start;
@@ -951,7 +954,7 @@ pub fn walk_forward_factors_v2_with_deribit(
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
             });
-            windows.extend(fitted.into_iter().take(options.top_n.max(1)));
+            windows.extend(fitted);
         }
 
         window_index += 1;
@@ -996,7 +999,7 @@ pub fn format_factor_walk_forward_v2_report(report: &FactorWalkForwardReport) ->
 
     out.push_str("=== Walk-Forward Aggregates By Test PnL ===\n");
     out.push_str("factor,family,layer,windows,pos_window_ratio,total_test_pnl,avg_window_pnl,min_window_pnl,avg_fill_rate,avg_reject_rate\n");
-    for aggregate in &report.aggregates {
+    for aggregate in report.aggregates.iter().take(report.options.top_n.max(1)) {
         out.push_str(&format!(
             "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
             aggregate.factor,
@@ -1013,8 +1016,14 @@ pub fn format_factor_walk_forward_v2_report(report: &FactorWalkForwardReport) ->
     }
 
     out.push_str("\n=== Walk-Forward Windows ===\n");
-    out.push_str("window,train_start,train_end,test_start,test_end,factor,family,layer,direction,threshold,train_ic,test_ic_proxy,train_selected,train_pnl,test_selected,test_fill,test_reject,test_pnl,test_avg_pnl,test_sharpe,test_max_dd,symbol_pos,time_bucket_pos\n");
+    out.push_str("window,train_start,train_end,test_start,test_end,factor,family,layer,direction,threshold,train_pnl_rank_ic,train_settle_rank_ic,train_selected,train_pnl,test_selected,test_fill,test_reject,test_pnl,test_avg_pnl,test_sharpe,test_max_dd,symbol_pos,time_bucket_pos\n");
+    let mut displayed_by_window: BTreeMap<usize, usize> = BTreeMap::new();
     for window in &report.windows {
+        let displayed = displayed_by_window.entry(window.window_index).or_insert(0);
+        if *displayed >= report.options.top_n.max(1) {
+            continue;
+        }
+        *displayed += 1;
         out.push_str(&format!(
             "{},{},{},{},{},{},{},{},{:.0},{:.8},{:.4},{:.4},{},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
             window.window_index,
@@ -1177,6 +1186,13 @@ fn fit_walk_forward_factor(
         train,
         test,
     })
+}
+
+fn is_walk_forward_candidate_descriptor(descriptor: &FactorV2Descriptor) -> bool {
+    // `future_exit_*` descriptors are diagnostic labels for exit feasibility.
+    // They are intentionally reviewed in the single-window report, but using
+    // them as train-time selection factors would leak future PM quote movement.
+    !descriptor.name.starts_with("future_exit_")
 }
 
 fn evaluate_factor_threshold(
@@ -2220,6 +2236,7 @@ mod tests {
         );
 
         assert!(!report.windows.is_empty());
+        assert!(report.windows.len() > report.options.top_n);
         let side_model = report
             .windows
             .iter()
@@ -2234,6 +2251,12 @@ mod tests {
                 .aggregates
                 .iter()
                 .any(|aggregate| aggregate.factor == "side_model_prob")
+        );
+        assert!(
+            report
+                .windows
+                .iter()
+                .all(|window| !window.factor.starts_with("future_exit_"))
         );
     }
 }

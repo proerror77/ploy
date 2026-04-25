@@ -841,6 +841,8 @@ evidence.
 ## Tasks
 
 - [x] Add a train-window threshold / future-window evaluation path for `FactorObservationV2`.
+- [x] Exclude future-exit diagnostic labels from walk-forward candidate selection.
+- [x] Keep walk-forward aggregation on all candidate factors; apply `top_n` only to report display.
 - [x] Share Deribit feature loading through `ploy-research` instead of duplicating it in each example.
 - [x] Add a DB-backed `factor_walk_forward_v2` entrypoint for ploy-ci/Tango research runs.
 - [x] Add a workflow-dispatch lane for factor walk-forward artifacts.
@@ -855,6 +857,12 @@ evidence.
   `rustfmt --edition 2024 --check` on touched Rust files, and `git diff --check`.
 - 2026-04-26: ploy-ci smoke is pending after branch push because it requires the new workflow
   on the remote branch.
+- 2026-04-26: First ploy-ci manual smoke completed, but exposed that `future_exit_*` diagnostic
+  labels were being ranked as candidate factors. This is a look-ahead path for walk-forward
+  selection, so candidate selection now excludes those descriptors while single-window review
+  still reports them as exit diagnostics.
+- 2026-04-26: Walk-forward windows are no longer truncated before aggregation. `top_n` now limits
+  output display only, so aggregate metrics are not biased by post-test top performer selection.
 
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 
