@@ -152,6 +152,36 @@ later windows automatically receive earlier completed run dirs as
 `--walk-forward-run-dir` inputs. Duplicate dataset paths are rejected before any
 work starts.
 
+When you have one larger event-root dataset and need to create distinct rolling
+dataset windows first, use the dataset splitter:
+
+```bash
+rtk cargo run -p ploy-research --example event_dataset_rolling_windows \
+  --features polars-export -- \
+  --dataset /tmp/ploy-event-root-large \
+  --window-events 150 \
+  --output-root /tmp/ploy-event-root-rolling
+```
+
+The splitter reads the source `event_index.parquet`, observation split Parquet,
+and event summary split Parquet, then writes child event-root datasets such as
+`event_root_window_001`, `event_root_window_002`, and so on. Each child dataset
+gets fresh chronological train / validation / test assignments inside that
+window, updated manifest stats, and the standard event-root artifact set. It
+also writes `rolling_datasets.txt`, which can be passed to the rolling workflow
+runner:
+
+```bash
+rtk cargo run -p ploy-research --example event_ml_rolling_workflow \
+  --features polars-export -- \
+  --datasets "$(paste -sd, /tmp/ploy-event-root-rolling/rolling_datasets.txt)" \
+  --output-root /tmp/ploy-event-ml-rolling
+```
+
+The default canonical split policy needs at least 134 events per child window
+so validation and test each retain at least 20 events. Final remainders smaller
+than that are skipped and recorded in `rolling_datasets_report.json`.
+
 ## Phase 1 - Coverage Diagnostics
 
 Goal: decide whether the dataset is ready for ML, or whether feature coverage

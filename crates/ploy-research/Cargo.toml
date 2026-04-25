@@ -60,6 +60,11 @@ path = "examples/event_dataset_coverage.rs"
 required-features = ["polars-export"]
 
 [[example]]
+name = "event_dataset_rolling_windows"
+path = "examples/event_dataset_rolling_windows.rs"
+required-features = ["polars-export"]
+
+[[example]]
 name = "event_factor_attribution"
 path = "examples/event_factor_attribution.rs"
 required-features = ["polars-export"]
