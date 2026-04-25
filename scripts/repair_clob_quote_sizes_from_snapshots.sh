@@ -39,7 +39,7 @@ WHERE received_at >= :'start_ts'::timestamptz
   AND source = 'polymarket_ws_collector';
 
 \echo 'Materializing snapshot top-of-book levels into a temp table'
-CREATE TEMP TABLE quote_size_repair ON COMMIT DROP AS
+CREATE TEMP TABLE quote_size_repair AS
 SELECT
     s.token_id,
     s.received_at,
