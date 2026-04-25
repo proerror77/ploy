@@ -85,3 +85,8 @@ path = "examples/event_ml_walk_forward.rs"
 [[example]]
 name = "event_ml_rolling_workflow"
 path = "examples/event_ml_rolling_workflow.rs"
+
+[[example]]
+name = "factor_review_v2"
+path = "examples/factor_review_v2.rs"
+required-features = ["db"]
