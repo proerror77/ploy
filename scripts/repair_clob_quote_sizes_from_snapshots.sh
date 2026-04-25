@@ -28,74 +28,97 @@ psql "${db_url}" \
 -- DML guard. Keep the override scoped to this psql session.
 SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0;
 
-WITH before_counts AS (
+\echo 'Before repair:'
+SELECT
+    count(*) AS quote_rows,
+    count(*) FILTER (WHERE ask_size IS NOT NULL AND ask_size > 0) AS ask_size_rows,
+    count(*) FILTER (WHERE bid_size IS NOT NULL AND bid_size > 0) AS bid_size_rows
+FROM clob_quote_ticks
+WHERE received_at >= :'start_ts'::timestamptz
+  AND received_at < :'end_ts'::timestamptz
+  AND source = 'polymarket_ws_collector';
+
+\echo 'Materializing snapshot top-of-book levels into a temp table'
+CREATE TEMP TABLE quote_size_repair ON COMMIT DROP AS
+SELECT
+    s.token_id,
+    s.received_at,
+    bid.price AS best_bid,
+    bid.size AS bid_size,
+    ask.price AS best_ask,
+    ask.size AS ask_size
+FROM clob_orderbook_snapshots s
+LEFT JOIN LATERAL (
     SELECT
-        count(*) AS quote_rows,
-        count(*) FILTER (WHERE ask_size IS NOT NULL AND ask_size > 0) AS ask_size_rows,
-        count(*) FILTER (WHERE bid_size IS NOT NULL AND bid_size > 0) AS bid_size_rows
-    FROM clob_quote_ticks
-    WHERE received_at >= :'start_ts'::timestamptz
-      AND received_at < :'end_ts'::timestamptz
-      AND source = 'polymarket_ws_collector'
-),
-candidates AS (
+        (level->>'price')::numeric AS price,
+        (level->>'size')::numeric AS size
+    FROM jsonb_array_elements(s.bids) AS level
+    WHERE (level->>'price')::numeric > 0.02
+      AND (level->>'price')::numeric < 0.98
+      AND (level->>'size')::numeric > 0
+    ORDER BY (level->>'price')::numeric DESC
+    LIMIT 1
+) bid ON true
+LEFT JOIN LATERAL (
     SELECT
-        q.id,
-        (
-            SELECT (level->>'size')::numeric
-            FROM clob_orderbook_snapshots s
-            CROSS JOIN LATERAL jsonb_array_elements(s.bids) AS level
-            WHERE s.token_id = q.token_id
-              AND s.received_at = q.received_at
-              AND q.best_bid IS NOT NULL
-              AND (level->>'price')::numeric = q.best_bid
-              AND (level->>'size')::numeric > 0
-            ORDER BY (level->>'size')::numeric DESC
-            LIMIT 1
-        ) AS repaired_bid_size,
-        (
-            SELECT (level->>'size')::numeric
-            FROM clob_orderbook_snapshots s
-            CROSS JOIN LATERAL jsonb_array_elements(s.asks) AS level
-            WHERE s.token_id = q.token_id
-              AND s.received_at = q.received_at
-              AND q.best_ask IS NOT NULL
-              AND (level->>'price')::numeric = q.best_ask
-              AND (level->>'size')::numeric > 0
-            ORDER BY (level->>'size')::numeric DESC
-            LIMIT 1
-        ) AS repaired_ask_size
-    FROM clob_quote_ticks q
-    WHERE q.received_at >= :'start_ts'::timestamptz
-      AND q.received_at < :'end_ts'::timestamptz
-      AND q.source = 'polymarket_ws_collector'
-      AND (q.bid_size IS NULL OR q.ask_size IS NULL)
-),
-updated AS (
+        (level->>'price')::numeric AS price,
+        (level->>'size')::numeric AS size
+    FROM jsonb_array_elements(s.asks) AS level
+    WHERE (level->>'price')::numeric > 0.02
+      AND (level->>'price')::numeric < 0.98
+      AND (level->>'size')::numeric > 0
+    ORDER BY (level->>'price')::numeric ASC
+    LIMIT 1
+) ask ON true
+WHERE s.received_at >= :'start_ts'::timestamptz
+  AND s.received_at < :'end_ts'::timestamptz
+  AND (bid.size IS NOT NULL OR ask.size IS NOT NULL);
+
+CREATE INDEX quote_size_repair_token_time_idx
+    ON quote_size_repair(token_id, received_at);
+ANALYZE quote_size_repair;
+
+\echo 'Temp repair rows:'
+SELECT
+    count(*) AS repair_rows,
+    count(*) FILTER (WHERE ask_size IS NOT NULL AND ask_size > 0) AS ask_size_rows,
+    count(*) FILTER (WHERE bid_size IS NOT NULL AND bid_size > 0) AS bid_size_rows
+FROM quote_size_repair;
+
+\echo 'Updating clob_quote_ticks from temp repair rows'
+WITH updated AS (
     UPDATE clob_quote_ticks q
     SET
-        bid_size = COALESCE(q.bid_size, c.repaired_bid_size),
-        ask_size = COALESCE(q.ask_size, c.repaired_ask_size)
-    FROM candidates c
-    WHERE q.id = c.id
-      AND (c.repaired_bid_size IS NOT NULL OR c.repaired_ask_size IS NOT NULL)
+        bid_size = CASE
+            WHEN q.bid_size IS NULL AND q.best_bid = r.best_bid THEN r.bid_size
+            ELSE q.bid_size
+        END,
+        ask_size = CASE
+            WHEN q.ask_size IS NULL AND q.best_ask = r.best_ask THEN r.ask_size
+            ELSE q.ask_size
+        END
+    FROM quote_size_repair r
+    WHERE q.token_id = r.token_id
+      AND q.received_at = r.received_at
+      AND q.source = 'polymarket_ws_collector'
+      AND q.received_at >= :'start_ts'::timestamptz
+      AND q.received_at < :'end_ts'::timestamptz
+      AND (
+        (q.bid_size IS NULL AND q.best_bid = r.best_bid AND r.bid_size IS NOT NULL)
+        OR
+        (q.ask_size IS NULL AND q.best_ask = r.best_ask AND r.ask_size IS NOT NULL)
+      )
     RETURNING q.id
-),
-after_counts AS (
-    SELECT
-        count(*) AS quote_rows,
-        count(*) FILTER (WHERE ask_size IS NOT NULL AND ask_size > 0) AS ask_size_rows,
-        count(*) FILTER (WHERE bid_size IS NOT NULL AND bid_size > 0) AS bid_size_rows
-    FROM clob_quote_ticks
-    WHERE received_at >= :'start_ts'::timestamptz
-      AND received_at < :'end_ts'::timestamptz
-      AND source = 'polymarket_ws_collector'
 )
+SELECT count(*) AS updated_rows FROM updated;
+
+\echo 'After repair:'
 SELECT
-    (SELECT quote_rows FROM before_counts) AS before_quote_rows,
-    (SELECT ask_size_rows FROM before_counts) AS before_ask_size_rows,
-    (SELECT bid_size_rows FROM before_counts) AS before_bid_size_rows,
-    (SELECT count(*) FROM updated) AS updated_rows,
-    (SELECT ask_size_rows FROM after_counts) AS after_ask_size_rows,
-    (SELECT bid_size_rows FROM after_counts) AS after_bid_size_rows;
+    count(*) AS quote_rows,
+    count(*) FILTER (WHERE ask_size IS NOT NULL AND ask_size > 0) AS ask_size_rows,
+    count(*) FILTER (WHERE bid_size IS NOT NULL AND bid_size > 0) AS bid_size_rows
+FROM clob_quote_ticks
+WHERE received_at >= :'start_ts'::timestamptz
+  AND received_at < :'end_ts'::timestamptz
+  AND source = 'polymarket_ws_collector';
 SQL
