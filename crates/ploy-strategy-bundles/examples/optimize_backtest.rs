@@ -152,9 +152,17 @@ struct SourcePreflight {
 }
 
 #[derive(Debug, Default)]
+struct QuoteLiquidityPreflight {
+    quote_rows: usize,
+    executable_ask_rows: usize,
+    executable_bid_rows: usize,
+}
+
+#[derive(Debug, Default)]
 struct SplitPreflight {
     label: &'static str,
     sources: Vec<SourcePreflight>,
+    quote_liquidity: QuoteLiquidityPreflight,
 }
 
 impl SplitPreflight {
@@ -202,6 +210,13 @@ impl PreflightManifest {
                     display_bytes(source.bytes)
                 );
             }
+            eprintln!(
+                "  {:<18} quotes={:<10} ask_size_rows={:<10} bid_size_rows={}",
+                "pm_quote_liquidity",
+                split.quote_liquidity.quote_rows,
+                split.quote_liquidity.executable_ask_rows,
+                split.quote_liquidity.executable_bid_rows
+            );
         }
         eprintln!(
             "Total estimated rows={} max_split_bytes={}",
@@ -219,39 +234,63 @@ fn validate_preflight(
     from: chrono::DateTime<Utc>,
     to: chrono::DateTime<Utc>,
     limits: &PreflightLimits,
+    require_lob_liquidity: bool,
 ) -> std::result::Result<(), String> {
-    if limits.allow_large_window {
-        return Ok(());
-    }
     let days = (to.date_naive() - from.date_naive()).num_days().abs() + 1;
     let rows = manifest.total_rows();
     let bytes = manifest.max_split_bytes();
     let mut failures = Vec::new();
-    if rows > limits.max_rows {
-        failures.push(format!(
-            "estimated rows {rows} exceed --max-preflight-rows {}",
-            limits.max_rows
-        ));
+    if !limits.allow_large_window {
+        if rows > limits.max_rows {
+            failures.push(format!(
+                "estimated rows {rows} exceed --max-preflight-rows {}",
+                limits.max_rows
+            ));
+        }
+        if bytes > limits.max_bytes {
+            failures.push(format!(
+                "estimated bytes {} exceed --max-preflight-bytes {}",
+                display_bytes(bytes),
+                display_bytes(limits.max_bytes)
+            ));
+        }
+        if symbols.len() > limits.max_symbols {
+            failures.push(format!(
+                "symbol count {} exceeds --max-symbols {}",
+                symbols.len(),
+                limits.max_symbols
+            ));
+        }
+        if days > limits.max_days {
+            failures.push(format!(
+                "date span {days} days exceeds --max-days {}",
+                limits.max_days
+            ));
+        }
     }
-    if bytes > limits.max_bytes {
-        failures.push(format!(
-            "estimated bytes {} exceed --max-preflight-bytes {}",
-            display_bytes(bytes),
-            display_bytes(limits.max_bytes)
-        ));
-    }
-    if symbols.len() > limits.max_symbols {
-        failures.push(format!(
-            "symbol count {} exceeds --max-symbols {}",
-            symbols.len(),
-            limits.max_symbols
-        ));
-    }
-    if days > limits.max_days {
-        failures.push(format!(
-            "date span {days} days exceeds --max-days {}",
-            limits.max_days
-        ));
+    if require_lob_liquidity {
+        for split in &manifest.splits {
+            let event_rows = split
+                .sources
+                .iter()
+                .find(|source| source.source == "pm_event")
+                .map(|source| source.rows)
+                .unwrap_or(0);
+            let quote_rows = split
+                .sources
+                .iter()
+                .find(|source| source.source == "pm_quote")
+                .map(|source| source.rows)
+                .unwrap_or(0);
+            if event_rows > 0 && quote_rows > 0 && split.quote_liquidity.executable_ask_rows == 0 {
+                failures.push(format!(
+                    "{} split has {quote_rows} PM quote rows and {event_rows} PM event rows, \
+                     but zero quotes with executable ask_size; --require-lob-liquidity would \
+                     reject every buy as non-executable",
+                    split.label
+                ));
+            }
+        }
     }
     if failures.is_empty() {
         Ok(())
@@ -353,6 +392,7 @@ fn split_preflight(
 
     Ok(SplitPreflight {
         label,
+        quote_liquidity: count_quote_liquidity(conn, data_dir, &from_str, &to_str)?,
         sources: vec![
             SourcePreflight {
                 source: "spot",
@@ -454,6 +494,39 @@ fn count_quote_rows(
     );
     let rows: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
     Ok(rows.max(0) as usize)
+}
+
+#[cfg(feature = "parquet-feed")]
+fn count_quote_liquidity(
+    conn: &duckdb::Connection,
+    data_dir: &str,
+    from_str: &str,
+    to_str: &str,
+) -> std::result::Result<QuoteLiquidityPreflight, Box<dyn std::error::Error>> {
+    let dir = format!("{data_dir}/clob_quote_ticks");
+    if !std::path::Path::new(&dir).exists() {
+        return Ok(QuoteLiquidityPreflight::default());
+    }
+    let glob = format!("{dir}/*.parquet");
+    let sql = format!(
+        "SELECT \
+           count(*)::BIGINT, \
+           coalesce(sum(CASE WHEN best_ask IS NOT NULL AND ask_size IS NOT NULL AND ask_size > 0 THEN 1 ELSE 0 END), 0)::BIGINT, \
+           coalesce(sum(CASE WHEN best_bid IS NOT NULL AND bid_size IS NOT NULL AND bid_size > 0 THEN 1 ELSE 0 END), 0)::BIGINT \
+         FROM read_parquet('{glob}') \
+         WHERE received_at >= TIMESTAMPTZ '{from_str}' \
+           AND received_at <= TIMESTAMPTZ '{to_str}' \
+           AND source IN ('polymarket_ws', 'polymarket_ws_collector', 'ploy_runner_live') \
+           AND best_bid IS NOT NULL AND best_ask IS NOT NULL \
+           AND (best_bid > 0.01 AND best_bid < 0.99 OR best_ask > 0.01 AND best_ask < 0.99)"
+    );
+    let (quote_rows, executable_ask_rows, executable_bid_rows): (i64, i64, i64) =
+        conn.query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    Ok(QuoteLiquidityPreflight {
+        quote_rows: quote_rows.max(0) as usize,
+        executable_ask_rows: executable_ask_rows.max(0) as usize,
+        executable_bid_rows: executable_bid_rows.max(0) as usize,
+    })
 }
 
 #[cfg(feature = "parquet-feed")]
@@ -1190,9 +1263,14 @@ fn main() {
             parquet_preflight_manifest(dir, &symbols, train_from, train_to, val_from, val_to)
                 .expect("Failed to build Parquet preflight manifest");
         manifest.print();
-        if let Err(error) =
-            validate_preflight(&manifest, &symbols, train_from, val_to, &preflight_limits)
-        {
+        if let Err(error) = validate_preflight(
+            &manifest,
+            &symbols,
+            train_from,
+            val_to,
+            &preflight_limits,
+            executor_config.require_lob_liquidity,
+        ) {
             eprintln!("ERROR: optimize preflight rejected this request: {error}");
             std::process::exit(2);
         }
