@@ -48,3 +48,8 @@ required-features = ["db", "polars-export"]
 name = "factor_scan"
 path = "examples/factor_scan.rs"
 required-features = ["db"]
+
+[[example]]
+name = "factor_review_v2"
+path = "examples/factor_review_v2.rs"
+required-features = ["db"]

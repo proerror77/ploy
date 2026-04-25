@@ -4,12 +4,13 @@ pub mod backtesting;
 pub mod dataset;
 pub mod factors;
 pub mod factors_new;
+pub mod factors_v2;
 #[cfg(any(feature = "ml", feature = "rl"))]
 pub mod model;
 pub mod replay;
 pub mod signal;
 
-pub use backtesting::{run_backtest, BacktestReport};
+pub use backtesting::{BacktestReport, run_backtest};
 pub use dataset::{
     CANONICAL_REGIME_VERSION, ChronologyAnchor, ChronologyOrdering, DATASET_MANIFEST_VERSION,
     DatasetArtifacts, DatasetBuildManifest, DatasetBuildStats, DatasetLabelContract,
@@ -20,9 +21,9 @@ pub use dataset::{
     build_canonical_event_chronology,
 };
 pub use factors::{
-    aggregate_factor_metrics, build_event_summaries, build_factor_observations,
-    build_factor_observations_with_lob, factor_metrics, AggregatedFactorMetric, EventFactorSummary,
-    FactorMetric, FactorObservation, ResearchLobSnapshot,
+    AggregatedFactorMetric, EventFactorSummary, FactorMetric, FactorObservation,
+    ResearchLobSnapshot, aggregate_factor_metrics, build_event_summaries,
+    build_factor_observations, build_factor_observations_with_lob, factor_metrics,
 };
 #[cfg(feature = "polars-export")]
 pub use factors::{export_observations_parquet, observations_to_frame};
@@ -41,9 +42,16 @@ pub fn crate_marker() -> &'static str {
 // Keep `Regime` as a single root-level export from operator contracts. The
 // factor registry uses the same type internally, but does not re-export its own
 // `factors_new::Regime` alias.
-pub use attribution::{factor_pnl, regime_pnl, AttributionReport, RegimePnl};
-pub use backtest::{run_binary_backtest, BacktestMetrics, SimulatedFill};
-pub use factors_new::{scan_into_registry, FactorMeta, FactorRegistry};
+pub use attribution::{AttributionReport, RegimePnl, factor_pnl, regime_pnl};
+pub use backtest::{BacktestMetrics, SimulatedFill, run_binary_backtest};
+pub use factors_new::{FactorMeta, FactorRegistry, scan_into_registry};
+pub use factors_v2::{
+    DataHealthReport, DeribitFeatureSnapshot, FactorFamily, FactorObservationV2,
+    FactorReviewOptions, FactorReviewV2Report, FactorV2Descriptor, ReviewSide, SingleFactorReview,
+    ThreeLayerArchive, build_data_health_report, build_factor_observations_v2,
+    build_factor_observations_v2_with_deribit, factor_v2_descriptors,
+    format_factor_review_v2_report, review_factors_v2, review_factors_v2_with_deribit,
+};
 #[cfg(feature = "rl")]
 pub use model::rl::{BinaryEventEnv, DqnAgent, Environment, ReplayBuffer};
 #[cfg(any(feature = "ml", feature = "rl"))]
