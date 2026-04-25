@@ -129,6 +129,11 @@ pub trait StrategyLogic: Send {
 
     /// Strategy name for logging and metrics.
     fn name(&self) -> &str;
+
+    /// Optional strategy-specific counters for backtest/optimizer diagnostics.
+    fn diagnostics(&self) -> Vec<(String, u64)> {
+        Vec::new()
+    }
 }
 
 /// Blanket impl so `Box<dyn StrategyLogic>` can be used as a generic `S: StrategyLogic`.
@@ -152,6 +157,10 @@ impl StrategyLogic for Box<dyn StrategyLogic> {
 
     fn name(&self) -> &str {
         (**self).name()
+    }
+
+    fn diagnostics(&self) -> Vec<(String, u64)> {
+        (**self).diagnostics()
     }
 }
 

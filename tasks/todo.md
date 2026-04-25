@@ -9160,3 +9160,24 @@ Checklist:
 
 Review:
 - 2026-04-25: Changed the market scanner so tracked crypto events are not expired with locally inferred Chainlink/Pyth/Binance outcomes when database persistence is enabled. The scanner now waits for `pm_token_settlements` to identify the official winning token, and startup recovery maps that winning token back to whether the UP token won before emitting `EventExpired`. This prevents dry-run from booking settlement exits at 1.00 before Polymarket's official outcome arrives.
+
+## Optimizer No-Trade Diagnostics
+
+Goal: make zero-trade PM5D optimization runs explain whether they had no signals, execution rejections, or strategy gate filtering before changing strategy thresholds.
+
+File ownership:
+- `crates/ploy-strategy-bundles/src/traits.rs`
+- `crates/ploy-strategy-bundles/src/engine.rs`
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Expose optional strategy diagnostics through the unified runtime result.
+- [x] Add ThreeLayer entry-gate counters without changing entry/exit decisions.
+- [x] Replace optimizer `NullRecorder` with a diagnostic recorder that counts signals, orders, fills, and rejection reasons.
+- [x] Print compact diagnostics for zero-trade or rejected-order trials and validation.
+- [x] Verify with formatting, focused cargo check, and a ThreeLayer diagnostics unit test.
+
+Review:
+- 2026-04-25: Post-guard optimize run `24924887117` proved official settlement replay no longer fails silently, but all 20 TPE trials still produced zero trades. Added optimizer diagnostics so the next bounded run reports runtime intents/fills, recorded signals/orders, executor rejection reasons, and ThreeLayer gate counters such as missing candidate events, missing PM quotes, stale quotes, edge-score filtering, and entry-score filtering. This keeps the next threshold discussion evidence-driven instead of guessing from `trades=0`.

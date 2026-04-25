@@ -385,6 +385,7 @@ pub struct ThreeLayerStrategy {
     daily_trade_count: u32,
     daily_trade_date: Option<chrono::NaiveDate>,
     feed_time: Option<DateTime<Utc>>,
+    diagnostics: HashMap<&'static str, u64>,
 }
 
 impl ThreeLayerStrategy {
@@ -405,7 +406,16 @@ impl ThreeLayerStrategy {
             daily_trade_count: 0,
             daily_trade_date: None,
             feed_time: None,
+            diagnostics: HashMap::new(),
         }
+    }
+
+    fn bump(&mut self, key: &'static str) {
+        self.bump_by(key, 1);
+    }
+
+    fn bump_by(&mut self, key: &'static str, value: u64) {
+        *self.diagnostics.entry(key).or_insert(0) += value;
     }
 
     fn now(&self) -> DateTime<Utc> {
@@ -501,40 +511,61 @@ impl ThreeLayerStrategy {
         positions: &PositionLedger,
         orders: &OrderLedger,
     ) -> Option<StrategyDecision> {
+        self.bump("entry_evaluations");
         if self.balance_pause_active(now) {
+            self.bump("skip_balance_pause");
             debug!(symbol, "Balance exhausted pause active, skipping entry");
             return None;
         }
         if self.daily_trade_count >= self.config.max_daily_trades {
+            self.bump("skip_max_daily_trades");
             return None;
         }
         if positions.positions().count() >= self.config.max_positions {
+            self.bump("skip_max_positions");
             return None;
         }
 
-        let spot_price = (*self.spot.get(symbol)?).to_f64()?;
+        let Some(spot_price) = self.spot.get(symbol).and_then(|price| price.to_f64()) else {
+            self.bump("skip_no_spot");
+            return None;
+        };
         if spot_price <= 0.0 {
+            self.bump("skip_bad_spot");
             return None;
         }
 
         // Cooldown check
         if let Some(last) = self.last_entry.get(symbol) {
             if (now - *last).num_seconds() < self.config.cooldown_secs as i64 {
+                self.bump("skip_symbol_cooldown");
                 return None;
             }
         }
 
         let candidates = self.candidate_events(symbol, now);
+        if candidates.is_empty() {
+            self.bump("skip_no_candidate_events");
+        } else {
+            self.bump_by("candidate_events", candidates.len() as u64);
+        }
         for event in &candidates {
             let time_remaining = (event.end_time - now).num_seconds();
-            let price_to_beat = event.price_to_beat?.to_f64()?;
+            let Some(price_to_beat) = event.price_to_beat.and_then(|price| price.to_f64()) else {
+                self.bump("skip_no_price_to_beat");
+                continue;
+            };
             if price_to_beat <= 0.0 {
+                self.bump("skip_bad_price_to_beat");
                 continue;
             }
 
             let regime = Regime::from_secs(time_remaining);
 
-            let drift_tracker = self.drift.get_mut(symbol)?;
+            let Some(drift_tracker) = self.drift.get_mut(symbol) else {
+                self.bump("skip_no_drift_tracker");
+                return None;
+            };
             let sigma_h = drift_tracker.sigma_horizon(time_remaining as f64);
             let drift_30s = drift_tracker.drift_30s();
 
@@ -551,14 +582,17 @@ impl ThreeLayerStrategy {
                 .unwrap_or(0.0);
 
             // Layer 1: Direction score
-            let (direction_sign, effective_p, direction_score) = evaluate_direction_score(
+            let Some((direction_sign, effective_p, direction_score)) = evaluate_direction_score(
                 distance_over_sigma,
                 sigma_h,
                 cum_mprice_drift_5m,
                 drift_30s,
                 regime,
                 &self.config,
-            )?;
+            ) else {
+                self.bump("skip_direction_score");
+                continue;
+            };
 
             let betting_up = direction_sign > 0.0;
             let (token_id, direction) = if betting_up {
@@ -569,20 +603,30 @@ impl ThreeLayerStrategy {
 
             // Skip if already positioned or have active order on this token
             if positions.net_qty(token_id) > Decimal::ZERO {
+                self.bump("skip_existing_position");
                 continue;
             }
             if Self::active_order_exists(orders, token_id) {
+                self.bump("skip_active_order");
                 continue;
             }
             if self.token_reject_active(token_id, now) {
+                self.bump("skip_token_reject_cooldown");
                 continue;
             }
 
             // Check quote freshness
-            let quote = self.quotes.get(token_id)?;
-            let ask = quote.ask?.to_f64()?;
+            let Some(quote) = self.quotes.get(token_id) else {
+                self.bump("skip_no_pm_quote");
+                continue;
+            };
+            let Some(ask) = quote.ask.and_then(|price| price.to_f64()) else {
+                self.bump("skip_no_pm_ask");
+                continue;
+            };
             let quote_age = (now - quote.ts).num_seconds();
             if quote_age > self.config.max_pm_lag_secs as i64 {
+                self.bump("skip_stale_pm_quote");
                 continue;
             }
 
@@ -598,14 +642,19 @@ impl ThreeLayerStrategy {
             );
 
             // Layer 3: Edge score
-            let (entry_price_f, edge, _rr, edge_score) =
-                evaluate_edge_score(effective_p, ask, regime, &self.config)?;
+            let Some((entry_price_f, edge, _rr, edge_score)) =
+                evaluate_edge_score(effective_p, ask, regime, &self.config)
+            else {
+                self.bump("skip_edge_score");
+                continue;
+            };
 
             // Composite scoring model
             let total_score =
                 direction_score * 0.50 + edge_score * 0.35 + confirmation_bonus * 0.15;
 
             if total_score < self.config.min_entry_score {
+                self.bump("skip_entry_score");
                 info!(
                     strategy = "three_layer",
                     symbol = %symbol,
@@ -621,9 +670,13 @@ impl ThreeLayerStrategy {
                 continue;
             }
 
-            let entry_price = Decimal::try_from(entry_price_f).ok()?;
+            let Some(entry_price) = Decimal::try_from(entry_price_f).ok() else {
+                self.bump("skip_bad_entry_price");
+                continue;
+            };
             let quantity = self.entry_quantity(entry_price);
             if quantity <= Decimal::ZERO {
+                self.bump("skip_zero_quantity");
                 continue;
             }
 
@@ -676,6 +729,7 @@ impl ThreeLayerStrategy {
                 "entry signal"
             );
 
+            self.bump("entry_signals");
             return Some(StrategyDecision::Enter {
                 intent,
                 signal: Some(signal),
@@ -1151,6 +1205,16 @@ impl StrategyLogic for ThreeLayerStrategy {
     fn name(&self) -> &str {
         "three_layer"
     }
+
+    fn diagnostics(&self) -> Vec<(String, u64)> {
+        let mut diagnostics = self
+            .diagnostics
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), *value))
+            .collect::<Vec<_>>();
+        diagnostics.sort_by(|a, b| a.0.cmp(&b.0));
+        diagnostics
+    }
 }
 
 #[cfg(test)]
@@ -1203,6 +1267,30 @@ mod tests {
             tracker.push(t, price);
         }
         assert!(tracker.drift_30s() > 0.0);
+    }
+
+    #[test]
+    fn diagnostics_count_entry_gate_reasons() {
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+
+        strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &PositionLedger::default(),
+            &OrderLedger::default(),
+        );
+
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("entry_evaluations"), Some(&1));
+        assert_eq!(diagnostics.get("skip_no_candidate_events"), Some(&1));
     }
 
     fn test_config() -> ThreeLayerConfig {
