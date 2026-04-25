@@ -80,6 +80,45 @@
   ThreeLayer thresholds/time gates. The optimize workflow passes
   `--require-lob-liquidity` in both preflight and full replay.
 
+# PM5D HFT-Style Replay Guard Repair (2026-04-25)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/feed/parquet_stream.rs`
+  - Owner: tick-preserving Parquet replay semantics and PM quote liquidity.
+- `.github/workflows/optimize.yml`
+  - Owner: bounded optimizer workflow dispatch controls for six-symbol smoke.
+- `scripts/check_optimize_verification_gates.sh`
+  - Owner: cheap local readiness guard before remote optimizer runs.
+
+## Tasks
+
+- [x] Confirm the prior tick-preserving architecture record and identify mismatches with current workflow/code.
+- [x] Preserve PM quote bid/ask sizes in `StreamingParquetFeed` so LOB-required fills can be simulated faithfully.
+- [x] Expose timestamp-window optimizer inputs so the documented narrow six-symbol smoke can run before any multi-day replay.
+- [x] Update cheap gate checks to catch missing timestamp controls and quote-size regression.
+- [x] Run lightweight verification without local heavy Parquet replay.
+
+## Review
+
+- 2026-04-25: Existing ADR/runbook already rejected LOB/aggTrade
+  downsampling, required preflight first, removed full-window Rust
+  `Vec<MarketUpdate>` materialization, and called out chunked k-way Parquet
+  merge as the next architecture if DuckDB global ordering remains too heavy.
+- 2026-04-25: Current main did not expose the documented timestamp-window
+  workflow inputs, so the narrow six-symbol smoke gate could not be dispatched.
+  The workflow now forwards optional RFC3339 timestamp overrides to both
+  preflight and optimize runs.
+- 2026-04-25: `StreamingParquetFeed` was dropping PM quote `bid_size` and
+  `ask_size`, which made `--require-lob-liquidity` replay unable to model
+  executable top-of-book liquidity. Streaming replay now preserves quote sizes
+  and has a regression test plus cheap source gate coverage.
+- 2026-04-25: The remaining architecture gap is throughput, not immediate Rust
+  heap safety: each optimization trial still reopens the Parquet stream and
+  asks DuckDB to globally order the same split. Before multi-day six-symbol
+  tuning, run the documented smoke sequence; if it remains too slow or spills
+  heavily, implement the planned chunked k-way/event-tape replay layer.
+
 # Live Price Improvement Fill Accounting (2026-04-25)
 
 ## Files

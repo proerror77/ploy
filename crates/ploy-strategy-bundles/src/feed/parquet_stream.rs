@@ -259,7 +259,7 @@ fn run_background(
                         'quote' AS typ, \
                         token_id AS s1, NULL AS s2, \
                         CAST(best_bid AS DOUBLE) AS f1, CAST(best_ask AS DOUBLE) AS f2, \
-                        0.0 AS f3, 0.0 AS f4, \
+                        CAST(bid_size AS DOUBLE) AS f3, CAST(ask_size AS DOUBLE) AS f4, \
                         CAST(0 AS BIGINT) AS i1, false AS b1 \
                  FROM read_parquet('{quote_glob}') \
                  WHERE received_at >= TIMESTAMPTZ '{from_str}' \
@@ -427,6 +427,8 @@ fn market_updates_from_row(row: StreamRow) -> Vec<MarketUpdate> {
             let token_id: Arc<str> = Arc::from(row.s1.unwrap_or_default());
             let bid = row.f1.and_then(|v| Decimal::try_from(v).ok());
             let ask = row.f2.and_then(|v| Decimal::try_from(v).ok());
+            let bid_size = row.f3.and_then(|v| Decimal::try_from(v).ok());
+            let ask_size = row.f4.and_then(|v| Decimal::try_from(v).ok());
             if bid.is_none() && ask.is_none() {
                 Vec::new()
             } else {
@@ -434,8 +436,8 @@ fn market_updates_from_row(row: StreamRow) -> Vec<MarketUpdate> {
                     token_id,
                     bid,
                     ask,
-                    bid_size: None,
-                    ask_size: None,
+                    bid_size,
+                    ask_size,
                     ts,
                 }]
             }
@@ -773,6 +775,38 @@ mod tests {
     }
 
     #[test]
+    fn quote_row_preserves_executable_sizes() {
+        let updates = market_updates_from_row(StreamRow {
+            ts_us: 1_000_000,
+            typ: "quote".to_string(),
+            s1: Some("token".to_string()),
+            f1: Some(0.5),
+            f2: Some(0.75),
+            f3: Some(12.0),
+            f4: Some(13.0),
+            i1: None,
+            b1: None,
+        });
+
+        assert_eq!(updates.len(), 1);
+        match &updates[0] {
+            MarketUpdate::Quote {
+                bid,
+                ask,
+                bid_size,
+                ask_size,
+                ..
+            } => {
+                assert_eq!(*bid, Some(dec!(0.5)));
+                assert_eq!(*ask, Some(dec!(0.75)));
+                assert_eq!(*bid_size, Some(dec!(12)));
+                assert_eq!(*ask_size, Some(dec!(13)));
+            }
+            other => panic!("expected Quote, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn sql_keeps_lob_and_aggtrade_full_cadence_but_filters_pm_quotes() {
         let source = include_str!("parquet_stream.rs");
         let agg_section = section_between(source, "// Agg trades", "// LOB");
@@ -792,6 +826,8 @@ mod tests {
             "source IN ('polymarket_ws', 'polymarket_ws_collector', 'ploy_runner_live')"
         ));
         assert!(quote_section.contains("best_bid IS NOT NULL AND best_ask IS NOT NULL"));
+        assert!(quote_section.contains("CAST(bid_size AS DOUBLE) AS f3"));
+        assert!(quote_section.contains("CAST(ask_size AS DOUBLE) AS f4"));
     }
 
     fn section_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
