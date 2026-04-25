@@ -714,6 +714,36 @@ windows, and publish reports as artifacts.
   `factor_research` example still emits existing unused-variable warnings
   unrelated to this workflow.
 
+# Event ML Window Discovery Fallback (2026-04-26)
+
+Goal: prevent the CI evidence workflow from treating an existing but empty
+`research_valid_windows` materialized view as authoritative when raw metadata
+can still discover valid event windows.
+
+## Files
+
+- `crates/ploy-research/examples/factor_research.rs`
+- `tasks/todo.md`
+
+## Tasks
+
+- [x] Fall back to raw valid-window discovery when the materialized view returns
+  zero rows.
+- [x] Verify the factor research example still builds.
+- [ ] Re-run the GitHub rolling evidence workflow from `main`.
+
+## Review
+
+- 2026-04-26: The first `event-ml-rolling-evidence.yml` run reached the remote
+  DB but failed during export because `research_valid_windows` existed and
+  returned zero rows for the requested range, which made the event-root builder
+  see `0` unique events. The discovery path now only trusts matview results when
+  they are non-empty; an empty matview falls back to the existing raw query.
+- 2026-04-26: Local verification passed: `rtk cargo check -p ploy-research
+  --features db,polars-export --example factor_research` and
+  `rtk git diff --check`. The example still emits pre-existing unused-variable
+  warnings unrelated to this fix.
+
 # Event Dataset Rolling Window Splitter (2026-04-25)
 
 Goal: turn one larger event-root dataset into multiple chronological, non-overlapping

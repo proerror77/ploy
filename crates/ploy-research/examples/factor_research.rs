@@ -204,12 +204,19 @@ async fn discover_valid_windows(
     .fetch_all(pool)
     .await;
 
-    if let Ok(rows) = matview_result {
-        eprintln!("discover_valid_windows: used matview ({} rows)", rows.len());
-        return rows;
+    match matview_result {
+        Ok(rows) if !rows.is_empty() => {
+            eprintln!("discover_valid_windows: used matview ({} rows)", rows.len());
+            return rows;
+        }
+        Ok(_) => {
+            eprintln!("discover_valid_windows: matview returned 0 rows, using raw query");
+        }
+        Err(error) => {
+            eprintln!("discover_valid_windows: matview not available ({error}), using raw query");
+        }
     }
 
-    eprintln!("discover_valid_windows: matview not available, using raw query");
     sqlx::query_as(
         r#"
         SELECT
