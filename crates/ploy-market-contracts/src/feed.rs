@@ -9,6 +9,11 @@ pub struct HistoricalLoadOptions {
     pub reference_symbols: Vec<String>,
     pub include_sports_state: bool,
     pub require_official_settlement: bool,
+    /// Include `binance_lob_ticks` as generic L2 market updates.
+    ///
+    /// Research jobs that load richer LOB snapshots separately can disable this
+    /// to avoid scanning the same large table twice.
+    pub include_l2: bool,
     /// Downsample `binance_lob_ticks` to one snapshot per N seconds per symbol.
     /// Defaults to 30 (one row per 30-second bucket). Set to 1 to disable downsampling.
     pub lob_sample_secs: u32,
@@ -21,6 +26,7 @@ impl Default for HistoricalLoadOptions {
             reference_symbols: Vec::new(),
             include_sports_state: false,
             require_official_settlement: false,
+            include_l2: true,
             lob_sample_secs: 30,
         }
     }

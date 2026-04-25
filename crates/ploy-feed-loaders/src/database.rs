@@ -17,16 +17,16 @@
 //! | `pm_token_settlements` | Settlement outcomes |
 
 use chrono::{DateTime, Duration, Utc};
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
 use ploy_market_contracts::{
-    l2_updates_from_depth_totals, market_update_sort_ts, normalize_token_id, HistoricalLoadOptions,
-    MarketUpdate,
+    HistoricalLoadOptions, MarketUpdate, l2_updates_from_depth_totals, market_update_sort_ts,
+    normalize_token_id,
 };
 
 #[cfg(test)]
@@ -154,16 +154,22 @@ pub async fn load_from_database_with_options(
         load_pm_quotes_from_snapshots(pool, &token_map, from, to, &mut updates).await?;
     }
 
-    // 4. L2 orderbook from binance_lob_ticks
-    load_l2_data(
-        pool,
-        symbols,
-        from,
-        to,
-        options.lob_sample_secs,
-        &mut updates,
-    )
-    .await?;
+    // 4. L2 orderbook from binance_lob_ticks.
+    //
+    // Some research consumers load richer LOB snapshots separately and do not
+    // need these generic updates. Keep the default enabled for strategy replay,
+    // but allow research jobs to avoid scanning the large LOB table twice.
+    if options.include_l2 {
+        load_l2_data(
+            pool,
+            symbols,
+            from,
+            to,
+            options.lob_sample_secs,
+            &mut updates,
+        )
+        .await?;
+    }
 
     if options.include_reference_prices {
         let reference_symbols = options.normalized_reference_symbols();
@@ -991,7 +997,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        build_event_updates, l2_updates_from_book, near_depth, EventMetadataRow, MarketUpdate,
+        EventMetadataRow, MarketUpdate, build_event_updates, l2_updates_from_book, near_depth,
     };
 
     #[test]
