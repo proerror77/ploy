@@ -228,6 +228,7 @@ where
                     self.recorder.record_signal(signal).await;
                 }
 
+                let intent = self.executor.prepare_intent(&intent);
                 let order_id = Uuid::new_v4().to_string();
 
                 let report = self.executor.submit(&intent, &order_id).await;
@@ -571,6 +572,7 @@ where
             );
             retry_intent.quantity = remaining_qty;
             retry_intent.created_at = Utc::now();
+            let retry_intent = self.executor.prepare_intent(&retry_intent);
             let retry_order_id = Uuid::new_v4().to_string();
             let report = self.executor.submit(&retry_intent, &retry_order_id).await;
             self.recorder
@@ -973,6 +975,37 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct PreparingExecutor {
+        prepared_quantity: Decimal,
+        submissions: Arc<Mutex<Vec<Decimal>>>,
+    }
+
+    #[async_trait]
+    impl Executor for PreparingExecutor {
+        fn prepare_intent(&self, intent: &TradingIntent) -> TradingIntent {
+            let mut prepared = intent.clone();
+            prepared.quantity = self.prepared_quantity;
+            prepared
+        }
+
+        async fn submit(&mut self, intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
+            self.submissions.lock().unwrap().push(intent.quantity);
+            ExecutionReport {
+                order_id: "venue-order-prepared".into(),
+                fill: None,
+                rejected: false,
+                rejection_reason: None,
+                slippage: None,
+                market_impact: None,
+            }
+        }
+
+        async fn cancel(&mut self, _order_id: &str) -> bool {
+            true
+        }
+    }
+
     struct SkippedReconcileExecutor;
 
     #[async_trait]
@@ -1074,6 +1107,72 @@ mod tests {
         assert_eq!(result.fills_recorded, 1);
         assert_eq!(order_store.lock().unwrap().len(), 1);
         assert_eq!(fill_store.lock().unwrap().as_slice(), ["fill-1"]);
+    }
+
+    #[tokio::test]
+    async fn runtime_records_prepared_intent_quantity() {
+        let now = Utc::now();
+        let signal = SignalRecord {
+            strategy: "pm_5m_directional".into(),
+            event_id: Some("evt1".into()),
+            token_id: Some("token-up".into()),
+            intent_id: Some("pm5d_BTCUSDT_UP_prepared".into()),
+            symbol: "BTCUSDT".into(),
+            direction: "UP".into(),
+            p_hat: 0.71,
+            edge: 0.08,
+            entry_price: dec!(0.30),
+            decision: "enter".into(),
+            ts: now,
+        };
+        let intent = TradingIntent {
+            intent_id: "pm5d_BTCUSDT_UP_prepared".into(),
+            deployment_id: String::new(),
+            market_id: "evt1".into(),
+            token_id: "token-up".into(),
+            side: TradeSide::Buy,
+            quantity: dec!(10),
+            limit_price: Some(dec!(0.30)),
+            purpose: IntentPurpose::Entry,
+            created_at: now,
+        };
+        let recorder = Box::new(CollectingRecorder {
+            signals: Arc::new(Mutex::new(Vec::new())),
+            orders: Arc::new(Mutex::new(Vec::new())),
+            fills: Arc::new(Mutex::new(Vec::new())),
+        });
+        let strategy = RecordingStrategy {
+            emitted: false,
+            signal,
+            intent,
+        };
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let submissions = Arc::new(Mutex::new(Vec::new()));
+        let executor = PreparingExecutor {
+            prepared_quantity: dec!(7.50),
+            submissions: submissions.clone(),
+        };
+        let config = RuntimeConfig {
+            mode: RuntimeMode::Live,
+            throttle_hz: None,
+            max_updates: Some(1),
+            skip_settlement_exits: false,
+        };
+
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
+        let result = runtime.run().await;
+
+        assert_eq!(result.intents_submitted, 1);
+        assert_eq!(submissions.lock().unwrap().as_slice(), [dec!(7.50)]);
+        let orders = runtime.trading().orders().orders().collect::<Vec<_>>();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].requested_qty, dec!(7.50));
     }
 
     #[tokio::test]

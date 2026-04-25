@@ -28,7 +28,7 @@ mod execution {
     use rust_decimal::Decimal;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use tracing::{error, info};
+    use tracing::{debug, error, info};
 
     #[derive(Clone)]
     pub(super) struct LiveExecutor {
@@ -67,6 +67,46 @@ mod execution {
             }
         }
 
+        fn prepared_quantity(&self, intent: &TradingIntent) -> Decimal {
+            let normalized_quantity = intent.quantity.trunc_with_scale(2);
+            if intent.side != TradeSide::Buy {
+                return normalized_quantity;
+            }
+
+            let Some(limit_price) = intent.limit_price else {
+                return normalized_quantity;
+            };
+            if limit_price <= Decimal::ZERO || normalized_quantity <= Decimal::ZERO {
+                return normalized_quantity;
+            }
+
+            let target_notional = (intent.quantity * limit_price).trunc_with_scale(6);
+            if target_notional <= Decimal::ZERO {
+                return normalized_quantity;
+            }
+
+            let execution_price = self.slippage_bounded_price(limit_price, intent.side);
+            if execution_price <= Decimal::ZERO {
+                return normalized_quantity;
+            }
+
+            let capped_quantity = (target_notional / execution_price).trunc_with_scale(2);
+            let prepared_quantity = normalized_quantity.min(capped_quantity);
+            if prepared_quantity < normalized_quantity {
+                debug!(
+                    intent_id = %intent.intent_id,
+                    original_quantity = %intent.quantity,
+                    prepared_quantity = %prepared_quantity,
+                    limit_price = %limit_price,
+                    execution_price = %execution_price,
+                    target_notional = %target_notional,
+                    "Capped live BUY quantity to strategy notional"
+                );
+            }
+
+            prepared_quantity
+        }
+
         fn slippage_bounded_price(&self, limit_price: Decimal, side: TradeSide) -> Decimal {
             let tolerance = self.policy.max_slippage_bps / Decimal::from(10_000_u32);
             let adjusted = match side {
@@ -87,6 +127,12 @@ mod execution {
 
         fn last_reconcile_attempted(&self) -> bool {
             self.last_reconcile_attempted
+        }
+
+        fn prepare_intent(&self, intent: &TradingIntent) -> TradingIntent {
+            let mut prepared = intent.clone();
+            prepared.quantity = self.prepared_quantity(intent);
+            prepared
         }
 
         async fn submit(&mut self, intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
@@ -205,6 +251,67 @@ mod execution {
                     Err(format!("reconcile task failed: {error}"))
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use chrono::Utc;
+        use ploy_strategy_bundles::Executor;
+        use ploy_trading::IntentPurpose;
+
+        fn test_executor(max_slippage_bps: Decimal) -> LiveExecutor {
+            LiveExecutor::new(
+                Arc::new(ploy_connectivity::PolymarketExecutionGateway::from_env()),
+                ExecutionPolicy {
+                    max_slippage_bps,
+                    max_attempts: 2,
+                    reconcile_cycles_before_retry: 2,
+                },
+            )
+        }
+
+        fn buy_intent(quantity: Decimal, limit_price: Decimal) -> TradingIntent {
+            TradingIntent {
+                intent_id: "intent-buy".into(),
+                deployment_id: "deployment".into(),
+                market_id: "event".into(),
+                token_id: "token".into(),
+                side: TradeSide::Buy,
+                quantity,
+                limit_price: Some(limit_price),
+                purpose: IntentPurpose::Entry,
+                created_at: Utc::now(),
+            }
+        }
+
+        #[test]
+        fn prepare_intent_caps_buy_quantity_to_slippage_bounded_notional() {
+            let executor = test_executor(Decimal::new(150, 0));
+            let intent = buy_intent(Decimal::new(142_857_143, 6), Decimal::new(105, 3));
+
+            let prepared = executor.prepare_intent(&intent);
+            let request = executor.build_request(&prepared);
+            let execution_price = request.limit_price.expect("bounded live price");
+
+            assert_eq!(execution_price, Decimal::new(11, 2));
+            assert_eq!(prepared.quantity, Decimal::new(13_636, 2));
+            assert_eq!(request.quantity, Decimal::new(13_636, 2));
+            assert!(prepared.quantity * execution_price <= Decimal::new(1_500, 2));
+        }
+
+        #[test]
+        fn prepare_intent_keeps_buy_quantity_when_slippage_price_does_not_raise_notional() {
+            let executor = test_executor(Decimal::new(150, 0));
+            let intent = buy_intent(Decimal::new(150, 0), Decimal::new(10, 2));
+
+            let prepared = executor.prepare_intent(&intent);
+            let request = executor.build_request(&prepared);
+
+            assert_eq!(request.limit_price, Some(Decimal::new(10, 2)));
+            assert_eq!(prepared.quantity, Decimal::new(15_000, 2));
+            assert_eq!(request.quantity, Decimal::new(15_000, 2));
         }
     }
 }
