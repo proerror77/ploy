@@ -306,6 +306,52 @@
   `example.live.dry-run`, `pm5d.threelayer.dryrun`, and
   `pm5d.threelayer.live`, all currently at zero orders.
 
+# Event Dataset Rolling Window Splitter (2026-04-25)
+
+Goal: turn one larger event-root dataset into multiple chronological, non-overlapping
+event-root windows that can feed `event_ml_rolling_workflow` without duplicating
+evidence.
+
+## Files
+
+- `crates/ploy-research/examples/event_dataset_rolling_windows.rs`
+- `crates/ploy-research/Cargo.toml`
+- `docs/runbooks/event-ml-automl-workflow.md`
+- `tasks/todo.md`
+
+## Tasks
+
+- [x] Add a Polars-gated splitter that reads `event_manifest.json` plus canonical
+  event-root Parquet artifacts.
+- [x] Reassign train/val/test splits independently inside each chronological
+  window using the existing canonical split policy.
+- [x] Write each child event-root dataset with updated manifest, event index,
+  split assignments, observation splits, and event summaries.
+- [x] Emit a machine-readable report and dataset list for the rolling workflow
+  runner.
+- [x] Verify dry planning, duplicate/leakage guards, manifest validation, and
+  focused cargo checks/tests.
+
+## Review
+
+- 2026-04-25: Added `event_dataset_rolling_windows`, a Polars-gated example
+  that slices one larger event-root dataset into chronological child
+  event-root directories. Each child window gets fresh canonical train/val/test
+  assignments, updated manifest stats, filtered observation/event-summary
+  Parquet files, and a standard event-root artifact set. The splitter also
+  writes `rolling_datasets_report.json`, `rolling_datasets_report.md`, and
+  `rolling_datasets.txt` so the output can feed `event_ml_rolling_workflow`
+  directly.
+- 2026-04-25: Verification passed: `rustfmt --check
+  crates/ploy-research/examples/event_dataset_rolling_windows.rs`, `rtk cargo
+  check -p ploy-research --example event_dataset_rolling_windows --features
+  polars-export`, `rtk cargo test -p ploy-research --example
+  event_dataset_rolling_windows --features polars-export -- --nocapture`, `rtk
+  cargo test -p ploy-research --example event_ml_rolling_workflow --features
+  polars-export -- --nocapture`, and `rtk git diff --check`. Local real
+  dataset dry-run was skipped because `/tmp/ploy-event-root-5sym-150-20260424`
+  was not present.
+
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 
 ## Files
