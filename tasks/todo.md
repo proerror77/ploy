@@ -769,6 +769,10 @@ can still discover valid event windows.
 - [x] Fall back to raw valid-window discovery when the materialized view returns
   zero rows.
 - [x] Verify the factor research example still builds.
+- [x] Harden the rolling evidence workflow default window and Polars build
+  settings for `ploy-ci-1`.
+- [x] Move Polars-heavy example compilation off `ploy-ci-1`; the self-hosted
+  runner should download binaries and only execute DB-adjacent evidence.
 - [ ] Re-run the GitHub rolling evidence workflow from `main`.
 
 ## Review
@@ -782,6 +786,16 @@ can still discover valid event windows.
   --features db,polars-export --example factor_research` and
   `rtk git diff --check`. The example still emits pre-existing unused-variable
   warnings unrelated to this fix.
+- 2026-04-26: The workflow default range now uses the matview-backed
+  `2026-04-09 -> 2026-04-11` window, which remote DB evidence showed has enough
+  valid 5-minute events for a `450/150` rolling smoke. Cargo/Polars builds are
+  pinned to single-job, no incremental, no dev debuginfo settings to reduce
+  runner memory and session-kill exposure before scaling the evidence job.
+- 2026-04-26: Remote retries showed `ploy-ci-1` is not a reliable Rust compile
+  surface for heavy Polars examples when other research jobs or session cleanup
+  are active. The workflow now builds the event ML example binaries on
+  GitHub-hosted `ubuntu-latest`, uploads them as an artifact, and makes
+  `ploy-ci-1` run only the downloaded binaries against the private DB.
 
 # Event Dataset Rolling Window Splitter (2026-04-25)
 

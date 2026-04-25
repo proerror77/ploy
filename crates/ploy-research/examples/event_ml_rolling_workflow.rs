@@ -26,7 +26,7 @@ fn main() -> Result<()> {
             .output_root
             .join(format!("window_{window_id:03}_event_ml"));
         let command_args = event_ml_workflow_args(&config, dataset, &output_dir, &prior_run_dirs);
-        let command = shell_command("event_ml_workflow", &command_args, true);
+        let command = event_ml_workflow_command_string(&command_args);
 
         eprintln!();
         eprintln!("--- rolling_window={window_id} ---");
@@ -40,18 +40,7 @@ fn main() -> Result<()> {
         } else {
             fs::create_dir_all(&output_dir)
                 .with_context(|| format!("create output dir {}", output_dir.display()))?;
-            let status = Command::new("cargo")
-                .args([
-                    "run",
-                    "-p",
-                    "ploy-research",
-                    "--example",
-                    "event_ml_workflow",
-                    "--features",
-                    "polars-export",
-                    "--",
-                ])
-                .args(&command_args)
+            let status = event_ml_workflow_command(&command_args)
                 .status()
                 .with_context(|| format!("spawn rolling window {window_id}"))?;
             ensure_success(window_id, status)?;
@@ -394,6 +383,50 @@ fn shell_command(example: &str, args: &[String], polars_export: bool) -> String 
     parts.push("--".to_string());
     parts.extend(args.iter().map(|arg| shell_quote(arg)));
     parts.join(" ")
+}
+
+fn event_ml_workflow_command(args: &[String]) -> Command {
+    if let Some(binary) = sibling_example_binary("event_ml_workflow") {
+        let mut command = Command::new(binary);
+        command.args(args);
+        command
+    } else {
+        let mut command = Command::new("cargo");
+        command.args([
+            "run",
+            "-p",
+            "ploy-research",
+            "--example",
+            "event_ml_workflow",
+            "--features",
+            "polars-export",
+            "--",
+        ]);
+        command.args(args);
+        command
+    }
+}
+
+fn event_ml_workflow_command_string(args: &[String]) -> String {
+    if let Some(binary) = sibling_example_binary("event_ml_workflow") {
+        let mut parts = vec![shell_quote(&binary.display().to_string())];
+        parts.extend(args.iter().map(|arg| shell_quote(arg)));
+        parts.join(" ")
+    } else {
+        shell_command("event_ml_workflow", args, true)
+    }
+}
+
+fn sibling_example_binary(example: &str) -> Option<PathBuf> {
+    let current = env::current_exe().ok()?;
+    let dir = current.parent()?;
+    let binary_name = if cfg!(windows) {
+        format!("{example}.exe")
+    } else {
+        example.to_string()
+    };
+    let candidate = dir.join(binary_name);
+    candidate.is_file().then_some(candidate)
 }
 
 fn shell_quote(value: &str) -> String {

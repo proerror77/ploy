@@ -190,26 +190,34 @@ database-backed research on a local machine:
 ```bash
 gh workflow run event-ml-rolling-evidence.yml \
   -f git_ref=main \
-  -f start_date=2026-04-24 \
-  -f end_date=2026-04-25 \
+  -f start_date=2026-04-09 \
+  -f end_date=2026-04-11 \
   -f symbols=BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,BNBUSDT,XRPUSDT \
   -f source_windows=450 \
   -f child_window_events=150 \
   -f run_workflow=true
 ```
 
-The workflow runs on `ploy-ci-1`, reads the remote research database at
-`172.16.0.204`, and performs:
+The workflow compiles the Polars-heavy Rust examples on a GitHub-hosted
+`ubuntu-latest` runner, then runs only the downloaded binaries on `ploy-ci-1`.
+The evidence job reads the remote research database at `172.16.0.204` and
+performs:
 
 1. `factor_research --export-event-dataset`
 2. `event_dataset_rolling_windows`
 3. `event_ml_rolling_workflow`
 
-It uploads a compact report artifact by default and deliberately avoids
-uploading raw Parquet datasets unless `upload_parquet_datasets=true` is passed.
+This keeps heavy Rust compilation off `ploy-ci-1`; that host is only the
+database-adjacent execution surface. The workflow uploads a compact report
+artifact by default and deliberately avoids uploading raw Parquet datasets
+unless `upload_parquet_datasets=true` is passed.
 Keep the default `source_windows=450` / `child_window_events=150` shape for the
 first full run because it should produce three distinct child datasets while
 keeping each child comfortably above the 134-event split-policy floor.
+The default date window is intentionally a matview-backed smoke range; moving
+to a newer range is valid, but expect the run to fall back to raw discovery and
+take materially longer unless `research_valid_windows` has been refreshed for
+that range.
 
 ## Phase 1 - Coverage Diagnostics
 

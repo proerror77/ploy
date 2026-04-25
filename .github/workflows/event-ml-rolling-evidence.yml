@@ -10,11 +10,11 @@ on:
       start_date:
         description: "Dataset start date (YYYY-MM-DD)"
         required: true
-        default: "2026-04-24"
+        default: "2026-04-09"
       end_date:
         description: "Dataset end date (YYYY-MM-DD)"
         required: true
-        default: "2026-04-25"
+        default: "2026-04-11"
       symbols:
         description: "Comma-separated Binance symbols"
         required: true
@@ -76,12 +76,78 @@ permissions:
   contents: read
 
 env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: "1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "1"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_DEV_OPT_LEVEL: "0"
+  RUSTFLAGS: "-C debuginfo=0"
+  POLARS_MAX_THREADS: "2"
 
 jobs:
+  build-event-ml-examples:
+    name: Build event ML examples on GitHub-hosted runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-targets: "true"
+          key: event-ml-rolling-build-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
+
+      - name: Build event ML examples
+        run: |
+          set -euo pipefail
+          cargo build --locked -j1 \
+            -p ploy-research \
+            --features db,polars-export \
+            --example factor_research
+          cargo build --locked -j1 \
+            -p ploy-research \
+            --features polars-export \
+            --example event_dataset_rolling_windows \
+            --example event_ml_rolling_workflow \
+            --example event_ml_workflow \
+            --example event_dataset_coverage \
+            --example event_factor_attribution \
+            --example event_dataset_baseline \
+            --example event_ml_walk_forward
+
+      - name: Package event ML examples
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/event-ml-bin
+          cp \
+            target/debug/examples/factor_research \
+            target/debug/examples/event_dataset_rolling_windows \
+            target/debug/examples/event_ml_rolling_workflow \
+            target/debug/examples/event_ml_workflow \
+            target/debug/examples/event_dataset_coverage \
+            target/debug/examples/event_factor_attribution \
+            target/debug/examples/event_dataset_baseline \
+            target/debug/examples/event_ml_walk_forward \
+            artifacts/event-ml-bin/
+          tar -C artifacts -czf event-ml-example-binaries.tar.gz event-ml-bin
+
+      - name: Upload event ML example binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: event-ml-example-binaries-${{ github.run_id }}
+          path: event-ml-example-binaries.tar.gz
+          retention-days: 3
+
   event-ml:
     name: Generate event ML rolling evidence on ploy-ci-1
+    needs: build-event-ml-examples
     runs-on: [self-hosted, ploy-ci-1]
     timeout-minutes: 150
     environment: ploy-ci-1
@@ -102,28 +168,18 @@ jobs:
       - name: Add cargo to PATH
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+      - name: Download event ML example binaries
+        uses: actions/download-artifact@v4
         with:
-          cache-on-failure: true
-          cache-targets: "true"
-          key: event-ml-rolling-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
+          name: event-ml-example-binaries-${{ github.run_id }}
 
-      - name: Build event ML examples
+      - name: Unpack event ML example binaries
         run: |
           set -euo pipefail
-          . /home/runner/.cargo/env
-          cargo build --locked \
-            -p ploy-research \
-            --features db,polars-export \
-            --example factor_research \
-            --example event_dataset_rolling_windows \
-            --example event_ml_rolling_workflow \
-            --example event_ml_workflow \
-            --example event_dataset_coverage \
-            --example event_factor_attribution \
-            --example event_dataset_baseline \
-            --example event_ml_walk_forward
+          rm -rf artifacts/event-ml-bin
+          mkdir -p artifacts
+          tar -xzf event-ml-example-binaries.tar.gz -C artifacts
+          chmod +x artifacts/event-ml-bin/*
 
       - name: Export large event-root dataset
         run: |
@@ -132,10 +188,7 @@ jobs:
           rm -rf artifacts/event-ml
           mkdir -p artifacts/event-ml/source_event_root artifacts/event-ml/reports
 
-          cargo run --locked \
-            -p ploy-research \
-            --features db,polars-export \
-            --example factor_research -- \
+          artifacts/event-ml-bin/factor_research \
             --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
             --symbols "${{ github.event.inputs.symbols }}" \
             --start-date "${{ github.event.inputs.start_date }}" \
@@ -152,10 +205,7 @@ jobs:
           set -euo pipefail
           . /home/runner/.cargo/env
 
-          cargo run --locked \
-            -p ploy-research \
-            --features polars-export \
-            --example event_dataset_rolling_windows -- \
+          artifacts/event-ml-bin/event_dataset_rolling_windows \
             --dataset artifacts/event-ml/source_event_root \
             --window-events "${{ github.event.inputs.child_window_events }}" \
             --output-root artifacts/event-ml/rolling_datasets \
@@ -168,10 +218,7 @@ jobs:
           . /home/runner/.cargo/env
 
           DATASETS="$(paste -sd, artifacts/event-ml/rolling_datasets/rolling_datasets.txt)"
-          cargo run --locked \
-            -p ploy-research \
-            --features polars-export \
-            --example event_ml_rolling_workflow -- \
+          artifacts/event-ml-bin/event_ml_rolling_workflow \
             --datasets "${DATASETS}" \
             --output-root artifacts/event-ml/rolling_workflow \
             --entry-secs "${{ github.event.inputs.entry_secs }}" \
