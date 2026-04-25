@@ -1,0 +1,136 @@
+name: Factor Review V2
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref"
+        required: true
+        default: "main"
+      start_date:
+        description: "Review start date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-24"
+      end_date:
+        description: "Review end date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-24"
+      symbols:
+        description: "Comma-separated Binance symbols"
+        required: true
+        default: "BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,BNBUSDT,XRPUSDT"
+      stake_usd:
+        description: "Fixed notional per candidate"
+        required: true
+        default: "15"
+      lob_sample_secs:
+        description: "Binance LOB sample interval"
+        required: false
+        default: "5"
+      max_quote_age_secs:
+        description: "Maximum PM quote age"
+        required: false
+        default: "30"
+      top_n:
+        description: "Number of factor rows to print"
+        required: false
+        default: "50"
+      min_observations:
+        description: "Minimum observations for a factor"
+        required: false
+        default: "20"
+      top_quantile:
+        description: "Selected quantile for execution metrics"
+        required: false
+        default: "0.2"
+
+concurrency:
+  group: factor-review-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  review:
+    name: Run factor review on ploy-ci-1
+    runs-on: [self-hosted, ploy-ci-1]
+    timeout-minutes: 60
+    environment: ploy-ci-1
+
+    steps:
+      - name: Repair runner workspace permissions
+        run: |
+          if [ -d "${GITHUB_WORKSPACE}" ]; then
+            sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
+            sudo rm -rf "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/.cargo-lock" || true
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Add cargo to PATH
+        run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-targets: "true"
+          key: factor-review-v2-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
+
+      - name: Build factor_review_v2
+        run: |
+          . /home/runner/.cargo/env
+          cargo build --release --locked \
+            -p ploy-research \
+            --features db \
+            --example factor_review_v2
+
+      - name: Run factor review
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/factor-review-v2
+          ./target/release/examples/factor_review_v2 \
+            --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
+            --symbols "${{ github.event.inputs.symbols }}" \
+            --start-date "${{ github.event.inputs.start_date }}" \
+            --end-date "${{ github.event.inputs.end_date }}" \
+            --stake-usd "${{ github.event.inputs.stake_usd }}" \
+            --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
+            --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
+            --min-observations "${{ github.event.inputs.min_observations }}" \
+            --top-quantile "${{ github.event.inputs.top_quantile }}" \
+            --top-n "${{ github.event.inputs.top_n }}" \
+            | tee artifacts/factor-review-v2/report.txt
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## Factor Review V2"
+            echo ""
+            echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
+            echo "- Symbols: ${{ github.event.inputs.symbols }}"
+            echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
+            echo ""
+            if [ -f artifacts/factor-review-v2/report.txt ]; then
+              echo '```'
+              sed -n '1,120p' artifacts/factor-review-v2/report.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: factor-review-v2-${{ github.run_id }}
+          path: artifacts/factor-review-v2/
+          retention-days: 14
