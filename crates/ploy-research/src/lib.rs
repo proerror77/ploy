@@ -70,14 +70,18 @@ pub use factors_new::{
     scan_into_registry,
 };
 pub use factors_v2::{
-    DataHealthReport, DeribitFeatureSnapshot, FactorFamily, FactorObservationV2,
-    FactorReviewOptions, FactorReviewV2Report, FactorSelectionMetrics, FactorV2Descriptor,
-    FactorWalkForwardAggregate, FactorWalkForwardOptions, FactorWalkForwardReport,
-    FactorWalkForwardWindow, ReviewSide, SingleFactorReview, ThreeLayerArchive,
-    build_data_health_report, build_factor_observations_v2,
-    build_factor_observations_v2_with_deribit, factor_v2_descriptors,
-    format_factor_review_v2_report, format_factor_walk_forward_v2_report, review_factors_v2,
-    review_factors_v2_with_deribit, walk_forward_factors_v2_with_deribit,
+    DataHealthReport, DeribitFeatureSnapshot, FactorComboComponent, FactorComboV1Aggregate,
+    FactorComboV1Options, FactorComboV1Report, FactorComboV1Window, FactorFamily,
+    FactorObservationV2, FactorReviewOptions, FactorReviewV2Report, FactorSelectionMetrics,
+    FactorStabilityDecision, FactorStabilityOptions, FactorStabilityReport, FactorStabilityRow,
+    FactorV2Descriptor, FactorWalkForwardAggregate, FactorWalkForwardOptions,
+    FactorWalkForwardReport, FactorWalkForwardWindow, ReviewSide, SingleFactorReview,
+    ThreeLayerArchive, build_data_health_report, build_factor_observations_v2,
+    build_factor_observations_v2_with_deribit, build_factor_stability_report,
+    factor_v2_descriptors, format_factor_combo_v1_report, format_factor_review_v2_report,
+    format_factor_stability_report, format_factor_walk_forward_v2_report, review_factors_v2,
+    review_factors_v2_with_deribit, walk_forward_factor_combo_v1_with_deribit,
+    walk_forward_factors_v2_with_deribit,
 };
 #[cfg(feature = "rl")]
 pub use model::rl::{BinaryEventEnv, DqnAgent, Environment, ReplayBuffer};

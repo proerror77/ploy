@@ -367,6 +367,142 @@ pub struct FactorWalkForwardReport {
     pub aggregates: Vec<FactorWalkForwardAggregate>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactorStabilityDecision {
+    Candidate,
+    Watchlist,
+    Reject,
+}
+
+impl FactorStabilityDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FactorStabilityDecision::Candidate => "candidate",
+            FactorStabilityDecision::Watchlist => "watchlist",
+            FactorStabilityDecision::Reject => "reject",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorStabilityOptions {
+    pub min_windows: usize,
+    pub min_positive_window_ratio: f64,
+    pub min_total_test_pnl_after_cost: f64,
+    pub min_avg_fill_rate: f64,
+    pub max_avg_rejection_rate: f64,
+    pub min_by_symbol_positive_ratio: f64,
+    pub min_by_time_bucket_positive_ratio: f64,
+    pub min_abs_executable_pnl_icir: f64,
+}
+
+impl Default for FactorStabilityOptions {
+    fn default() -> Self {
+        Self {
+            min_windows: 8,
+            min_positive_window_ratio: 0.65,
+            min_total_test_pnl_after_cost: 0.0,
+            min_avg_fill_rate: 0.08,
+            max_avg_rejection_rate: 0.92,
+            min_by_symbol_positive_ratio: 0.5,
+            min_by_time_bucket_positive_ratio: 0.5,
+            min_abs_executable_pnl_icir: 0.25,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorStabilityRow {
+    pub factor: String,
+    pub family: FactorFamily,
+    pub layer: ThreeLayerArchive,
+    pub windows: usize,
+    pub settlement_rank_ic_mean: f64,
+    pub settlement_rank_icir: f64,
+    pub executable_pnl_rank_ic_mean: f64,
+    pub executable_pnl_rank_icir: f64,
+    pub positive_window_ratio: f64,
+    pub total_test_pnl_after_cost: f64,
+    pub avg_test_pnl_per_window: f64,
+    pub min_test_pnl_after_cost: f64,
+    pub avg_test_fill_rate: f64,
+    pub avg_test_rejection_rate: f64,
+    pub avg_by_symbol_positive_ratio: f64,
+    pub avg_by_time_bucket_positive_ratio: f64,
+    pub decision: FactorStabilityDecision,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorStabilityReport {
+    pub options: FactorStabilityOptions,
+    pub rows: Vec<FactorStabilityRow>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorComboV1Options {
+    pub walk_forward: FactorWalkForwardOptions,
+    pub max_factors_per_family: usize,
+    pub max_total_factors: usize,
+    pub min_abs_train_executable_pnl_rank_ic: f64,
+}
+
+impl Default for FactorComboV1Options {
+    fn default() -> Self {
+        Self {
+            walk_forward: FactorWalkForwardOptions::default(),
+            max_factors_per_family: 2,
+            max_total_factors: 12,
+            min_abs_train_executable_pnl_rank_ic: 0.03,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorComboComponent {
+    pub factor: String,
+    pub family: FactorFamily,
+    pub layer: ThreeLayerArchive,
+    pub accessor: fn(&FactorObservationV2) -> f64,
+    pub direction: f64,
+    pub train_executable_pnl_rank_ic: f64,
+    pub train_mean: f64,
+    pub train_std: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorComboV1Window {
+    pub window_index: usize,
+    pub train_start: DateTime<Utc>,
+    pub train_end: DateTime<Utc>,
+    pub test_start: DateTime<Utc>,
+    pub test_end: DateTime<Utc>,
+    pub threshold: f64,
+    pub components: Vec<FactorComboComponent>,
+    pub train: FactorSelectionMetrics,
+    pub test: FactorSelectionMetrics,
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorComboV1Aggregate {
+    pub windows: usize,
+    pub positive_window_ratio: f64,
+    pub total_test_pnl_after_cost: f64,
+    pub avg_test_pnl_per_window: f64,
+    pub min_test_pnl_after_cost: f64,
+    pub avg_test_fill_rate: f64,
+    pub avg_test_rejection_rate: f64,
+    pub avg_component_count: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FactorComboV1Report {
+    pub options: FactorComboV1Options,
+    pub health: DataHealthReport,
+    pub windows: Vec<FactorComboV1Window>,
+    pub aggregate: FactorComboV1Aggregate,
+}
+
 pub fn build_factor_observations_v2(
     rows: &[FactorObservation],
     options: &FactorReviewOptions,
@@ -1047,6 +1183,183 @@ pub fn walk_forward_factors_v2_with_deribit(
     }
 }
 
+pub fn build_factor_stability_report(
+    report: &FactorWalkForwardReport,
+    options: FactorStabilityOptions,
+) -> FactorStabilityReport {
+    let mut grouped: BTreeMap<&str, Vec<&FactorWalkForwardWindow>> = BTreeMap::new();
+    for window in &report.windows {
+        grouped.entry(&window.factor).or_default().push(window);
+    }
+
+    let mut rows = Vec::with_capacity(grouped.len());
+    for (factor, windows) in grouped {
+        let Some(first) = windows.first() else {
+            continue;
+        };
+        let total_test_pnl_after_cost = windows
+            .iter()
+            .map(|window| window.test.total_pnl_after_cost)
+            .sum::<f64>();
+        let min_test_pnl_after_cost = windows
+            .iter()
+            .map(|window| window.test.total_pnl_after_cost)
+            .fold(f64::INFINITY, f64::min);
+        let positive_windows = windows
+            .iter()
+            .filter(|window| window.test.total_pnl_after_cost > 0.0)
+            .count();
+        let settlement_ics = windows
+            .iter()
+            .map(|window| window.train_settlement_rank_ic)
+            .filter(|value| value.is_finite())
+            .collect::<Vec<_>>();
+        let executable_ics = windows
+            .iter()
+            .map(|window| window.train_executable_pnl_rank_ic)
+            .filter(|value| value.is_finite())
+            .collect::<Vec<_>>();
+        let avg_by_symbol_positive_ratio = mean(
+            windows
+                .iter()
+                .map(|window| window.test.by_symbol_positive_ratio),
+        );
+        let avg_by_time_bucket_positive_ratio = mean(
+            windows
+                .iter()
+                .map(|window| window.test.by_time_bucket_positive_ratio),
+        );
+        let avg_test_fill_rate = mean(
+            windows
+                .iter()
+                .map(|window| window.test.executable_fill_rate),
+        );
+        let avg_test_rejection_rate = mean(windows.iter().map(|window| window.test.rejection_rate));
+        let positive_window_ratio = ratio(positive_windows, windows.len());
+        let settlement_rank_ic_mean = mean(settlement_ics.iter().copied());
+        let executable_pnl_rank_ic_mean = mean(executable_ics.iter().copied());
+        let settlement_rank_icir = icir(&settlement_ics);
+        let executable_pnl_rank_icir = icir(&executable_ics);
+        let (decision, reason) = stability_decision(
+            windows.len(),
+            positive_window_ratio,
+            total_test_pnl_after_cost,
+            avg_test_fill_rate,
+            avg_test_rejection_rate,
+            avg_by_symbol_positive_ratio,
+            avg_by_time_bucket_positive_ratio,
+            executable_pnl_rank_icir,
+            &options,
+        );
+        rows.push(FactorStabilityRow {
+            factor: factor.to_string(),
+            family: first.family,
+            layer: first.layer,
+            windows: windows.len(),
+            settlement_rank_ic_mean,
+            settlement_rank_icir,
+            executable_pnl_rank_ic_mean,
+            executable_pnl_rank_icir,
+            positive_window_ratio,
+            total_test_pnl_after_cost,
+            avg_test_pnl_per_window: total_test_pnl_after_cost / windows.len() as f64,
+            min_test_pnl_after_cost,
+            avg_test_fill_rate,
+            avg_test_rejection_rate,
+            avg_by_symbol_positive_ratio,
+            avg_by_time_bucket_positive_ratio,
+            decision,
+            reason,
+        });
+    }
+    rows.sort_by(|a, b| {
+        decision_rank(b.decision)
+            .cmp(&decision_rank(a.decision))
+            .then_with(|| {
+                b.total_test_pnl_after_cost
+                    .partial_cmp(&a.total_test_pnl_after_cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.positive_window_ratio
+                    .partial_cmp(&a.positive_window_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    FactorStabilityReport { options, rows }
+}
+
+pub fn walk_forward_factor_combo_v1_with_deribit(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: FactorComboV1Options,
+) -> FactorComboV1Report {
+    let mut v2_rows = build_factor_observations_v2_with_deribit(
+        source_rows,
+        deribit,
+        &options.walk_forward.review,
+    );
+    v2_rows.sort_by_key(|row| row.tick_ts);
+    let health = build_data_health_report(source_rows, &v2_rows);
+    let train_duration = Duration::days(options.walk_forward.train_window_days.max(1));
+    let test_duration = Duration::days(options.walk_forward.test_window_days.max(1));
+    let step_duration = Duration::days(options.walk_forward.step_days.max(1));
+    let descriptors: Vec<FactorV2Descriptor> = factor_v2_descriptors()
+        .into_iter()
+        .filter(is_walk_forward_candidate_descriptor)
+        .filter(|descriptor| {
+            factor_name_matches_filter(descriptor.name, &options.walk_forward.factor_name_filter)
+        })
+        .collect();
+
+    let mut windows = Vec::new();
+    let mut train_start = start;
+    let mut window_index = 0usize;
+    while train_start + train_duration + test_duration <= end + Duration::seconds(1) {
+        let train_end = train_start + train_duration;
+        let test_start = train_end;
+        let test_end = test_start + test_duration;
+        let train_rows: Vec<&FactorObservationV2> =
+            walk_forward_time_slice(&v2_rows, train_start, train_end)
+                .iter()
+                .collect();
+        let test_rows: Vec<&FactorObservationV2> =
+            walk_forward_time_slice(&v2_rows, test_start, test_end)
+                .iter()
+                .collect();
+
+        if train_rows.len() >= options.walk_forward.review.min_observations
+            && test_rows.len() >= options.walk_forward.review.min_observations
+        {
+            if let Some(window) = fit_combo_v1_window(
+                &train_rows,
+                &test_rows,
+                &descriptors,
+                &options,
+                window_index,
+                train_start,
+                train_end,
+                test_start,
+                test_end,
+            ) {
+                windows.push(window);
+            }
+        }
+
+        window_index += 1;
+        train_start += step_duration;
+    }
+    let aggregate = aggregate_combo_v1_windows(&windows);
+    FactorComboV1Report {
+        options,
+        health,
+        windows,
+        aggregate,
+    }
+}
+
 pub fn format_factor_walk_forward_v2_report(report: &FactorWalkForwardReport) -> String {
     let mut out = String::new();
     out.push_str("=== Factor Walk-Forward V2 Data Health ===\n");
@@ -1136,6 +1449,125 @@ pub fn format_factor_walk_forward_v2_report(report: &FactorWalkForwardReport) ->
     out
 }
 
+pub fn format_factor_stability_report(report: &FactorStabilityReport, top_n: usize) -> String {
+    let mut out = String::new();
+    out.push_str("=== Factor Stability Report ===\n");
+    out.push_str(&format!(
+        "min_windows={} min_pos_window_ratio={:.2} min_fill_rate={:.2} max_reject_rate={:.2} min_abs_pnl_icir={:.2}\n\n",
+        report.options.min_windows,
+        report.options.min_positive_window_ratio,
+        report.options.min_avg_fill_rate,
+        report.options.max_avg_rejection_rate,
+        report.options.min_abs_executable_pnl_icir,
+    ));
+    out.push_str("decision,factor,family,layer,windows,settle_ic_mean,settle_icir,pnl_ic_mean,pnl_icir,pos_window_ratio,total_test_pnl,avg_window_pnl,min_window_pnl,avg_fill_rate,avg_reject_rate,symbol_pos,time_bucket_pos,reason\n");
+    for row in report.rows.iter().take(top_n.max(1)) {
+        out.push_str(&format!(
+            "{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}\n",
+            row.decision.as_str(),
+            row.factor,
+            row.family.as_str(),
+            row.layer.as_str(),
+            row.windows,
+            row.settlement_rank_ic_mean,
+            row.settlement_rank_icir,
+            row.executable_pnl_rank_ic_mean,
+            row.executable_pnl_rank_icir,
+            row.positive_window_ratio,
+            row.total_test_pnl_after_cost,
+            row.avg_test_pnl_per_window,
+            row.min_test_pnl_after_cost,
+            row.avg_test_fill_rate,
+            row.avg_test_rejection_rate,
+            row.avg_by_symbol_positive_ratio,
+            row.avg_by_time_bucket_positive_ratio,
+            row.reason,
+        ));
+    }
+    out
+}
+
+pub fn format_factor_combo_v1_report(report: &FactorComboV1Report) -> String {
+    let mut out = String::new();
+    out.push_str("=== Factor Combo V1 Data Health ===\n");
+    out.push_str(&format!(
+        "source_obs={} v2_rows={} executable_pnl_rows={} deribit_rows={} entry_fill_rate={:.2}% rejection_rate={:.2}%\n",
+        report.health.source_observations,
+        report.health.v2_rows,
+        report.health.executable_pnl_rows,
+        report.health.deribit_rows,
+        report.health.entry_fill_rate() * 100.0,
+        report.health.rejection_rate() * 100.0,
+    ));
+    out.push_str(&format!(
+        "train_days={} test_days={} step_days={} top_quantile={:.2} max_family={} max_total={} min_abs_train_pnl_ic={:.4} factor_name_filter={}\n\n",
+        report.options.walk_forward.train_window_days,
+        report.options.walk_forward.test_window_days,
+        report.options.walk_forward.step_days,
+        report.options.walk_forward.review.top_quantile,
+        report.options.max_factors_per_family,
+        report.options.max_total_factors,
+        report.options.min_abs_train_executable_pnl_rank_ic,
+        report
+            .options
+            .walk_forward
+            .factor_name_filter
+            .as_deref()
+            .unwrap_or("<none>"),
+    ));
+    out.push_str("=== Combo V1 Aggregate ===\n");
+    out.push_str("windows,pos_window_ratio,total_test_pnl,avg_window_pnl,min_window_pnl,avg_fill_rate,avg_reject_rate,avg_component_count\n");
+    out.push_str(&format!(
+        "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.2}\n\n",
+        report.aggregate.windows,
+        report.aggregate.positive_window_ratio,
+        report.aggregate.total_test_pnl_after_cost,
+        report.aggregate.avg_test_pnl_per_window,
+        report.aggregate.min_test_pnl_after_cost,
+        report.aggregate.avg_test_fill_rate,
+        report.aggregate.avg_test_rejection_rate,
+        report.aggregate.avg_component_count,
+    ));
+
+    out.push_str("=== Combo V1 Windows ===\n");
+    out.push_str("window,train_start,train_end,test_start,test_end,threshold,components,train_selected,train_pnl,test_selected,test_fill,test_reject,test_pnl,test_avg_pnl,test_sharpe,test_max_dd,symbol_pos,time_bucket_pos\n");
+    for window in &report.windows {
+        let components = window
+            .components
+            .iter()
+            .map(|component| {
+                format!(
+                    "{}:{:.3}",
+                    component.factor, component.train_executable_pnl_rank_ic
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("+");
+        out.push_str(&format!(
+            "{},{},{},{},{},{:.8},{},{},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            window.window_index,
+            window.train_start,
+            window.train_end,
+            window.test_start,
+            window.test_end,
+            window.threshold,
+            components,
+            window.train.selected_n,
+            window.train.total_pnl_after_cost,
+            window.test.selected_n,
+            window.test.executable_fill_rate,
+            window.test.rejection_rate,
+            window.test.total_pnl_after_cost,
+            window.test.avg_pnl_after_cost,
+            window.test.sharpe,
+            window.test.max_drawdown,
+            window.test.by_symbol_positive_ratio,
+            window.test.by_time_bucket_positive_ratio,
+        ));
+    }
+    out
+}
+
 pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usize) -> String {
     let mut out = String::new();
     out.push_str("=== Factor Review V2 Data Health ===\n");
@@ -1190,6 +1622,339 @@ pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usiz
         ));
     }
     out
+}
+
+fn stability_decision(
+    windows: usize,
+    positive_window_ratio: f64,
+    total_test_pnl_after_cost: f64,
+    avg_test_fill_rate: f64,
+    avg_test_rejection_rate: f64,
+    avg_by_symbol_positive_ratio: f64,
+    avg_by_time_bucket_positive_ratio: f64,
+    executable_pnl_rank_icir: f64,
+    options: &FactorStabilityOptions,
+) -> (FactorStabilityDecision, String) {
+    if windows < options.min_windows {
+        return if total_test_pnl_after_cost > options.min_total_test_pnl_after_cost {
+            (
+                FactorStabilityDecision::Watchlist,
+                "too_few_windows_positive_pnl".to_string(),
+            )
+        } else {
+            (
+                FactorStabilityDecision::Reject,
+                "too_few_windows_nonpositive_pnl".to_string(),
+            )
+        };
+    }
+    if total_test_pnl_after_cost <= options.min_total_test_pnl_after_cost {
+        return (
+            FactorStabilityDecision::Reject,
+            "nonpositive_executable_pnl".to_string(),
+        );
+    }
+    if positive_window_ratio < options.min_positive_window_ratio {
+        return (
+            FactorStabilityDecision::Watchlist,
+            "positive_pnl_but_unstable_windows".to_string(),
+        );
+    }
+    if avg_test_fill_rate < options.min_avg_fill_rate {
+        return (
+            FactorStabilityDecision::Watchlist,
+            "positive_pnl_but_low_fill_rate".to_string(),
+        );
+    }
+    if avg_test_rejection_rate > options.max_avg_rejection_rate {
+        return (
+            FactorStabilityDecision::Watchlist,
+            "positive_pnl_but_high_rejection".to_string(),
+        );
+    }
+    if avg_by_symbol_positive_ratio < options.min_by_symbol_positive_ratio {
+        return (
+            FactorStabilityDecision::Watchlist,
+            "positive_pnl_but_symbol_unstable".to_string(),
+        );
+    }
+    if avg_by_time_bucket_positive_ratio < options.min_by_time_bucket_positive_ratio {
+        return (
+            FactorStabilityDecision::Watchlist,
+            "positive_pnl_but_regime_unstable".to_string(),
+        );
+    }
+    if !executable_pnl_rank_icir.is_finite()
+        || executable_pnl_rank_icir.abs() < options.min_abs_executable_pnl_icir
+    {
+        return (
+            FactorStabilityDecision::Watchlist,
+            "positive_pnl_but_low_executable_icir".to_string(),
+        );
+    }
+    (FactorStabilityDecision::Candidate, "passed".to_string())
+}
+
+fn decision_rank(decision: FactorStabilityDecision) -> usize {
+    match decision {
+        FactorStabilityDecision::Candidate => 3,
+        FactorStabilityDecision::Watchlist => 2,
+        FactorStabilityDecision::Reject => 1,
+    }
+}
+
+fn fit_combo_v1_window(
+    train_rows: &[&FactorObservationV2],
+    test_rows: &[&FactorObservationV2],
+    descriptors: &[FactorV2Descriptor],
+    options: &FactorComboV1Options,
+    window_index: usize,
+    train_start: DateTime<Utc>,
+    train_end: DateTime<Utc>,
+    test_start: DateTime<Utc>,
+    test_end: DateTime<Utc>,
+) -> Option<FactorComboV1Window> {
+    let mut by_family: BTreeMap<&'static str, Vec<FactorComboComponent>> = BTreeMap::new();
+    for descriptor in descriptors {
+        if let Some(component) = fit_combo_component(
+            train_rows,
+            *descriptor,
+            options.walk_forward.review.min_observations,
+            options.min_abs_train_executable_pnl_rank_ic,
+        ) {
+            by_family
+                .entry(component.family.as_str())
+                .or_default()
+                .push(component);
+        }
+    }
+
+    let mut components = Vec::new();
+    for family_components in by_family.values_mut() {
+        family_components.sort_by(|a, b| {
+            b.train_executable_pnl_rank_ic
+                .abs()
+                .partial_cmp(&a.train_executable_pnl_rank_ic.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        components.extend(
+            family_components
+                .iter()
+                .take(options.max_factors_per_family.max(1))
+                .cloned(),
+        );
+    }
+    components.sort_by(|a, b| {
+        b.train_executable_pnl_rank_ic
+            .abs()
+            .partial_cmp(&a.train_executable_pnl_rank_ic.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    components.truncate(options.max_total_factors.max(1));
+    if components.is_empty() {
+        return None;
+    }
+
+    let mut train_scores = train_rows
+        .iter()
+        .filter_map(|row| combo_v1_score(row, &components))
+        .filter(|score| score.is_finite())
+        .collect::<Vec<_>>();
+    if train_scores.len() < options.walk_forward.review.min_observations {
+        return None;
+    }
+    train_scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let selected_n = ((train_scores.len() as f64)
+        * options.walk_forward.review.top_quantile.clamp(0.01, 1.0))
+    .ceil()
+    .max(1.0) as usize;
+    let threshold = train_scores[selected_n.min(train_scores.len()) - 1];
+    let train = evaluate_combo_v1_threshold(train_rows, &components, threshold);
+    let test = evaluate_combo_v1_threshold(test_rows, &components, threshold);
+    Some(FactorComboV1Window {
+        window_index,
+        train_start,
+        train_end,
+        test_start,
+        test_end,
+        threshold,
+        components,
+        train,
+        test,
+    })
+}
+
+fn fit_combo_component(
+    rows: &[&FactorObservationV2],
+    descriptor: FactorV2Descriptor,
+    min_observations: usize,
+    min_abs_train_ic: f64,
+) -> Option<FactorComboComponent> {
+    let scored: Vec<(&FactorObservationV2, f64)> = rows
+        .iter()
+        .filter_map(|row| {
+            let value = (descriptor.accessor)(row);
+            value.is_finite().then_some((*row, value))
+        })
+        .collect();
+    if scored.len() < min_observations {
+        return None;
+    }
+    let executable_pairs: Vec<(f64, f64)> = scored
+        .iter()
+        .filter_map(|(row, score)| row.label_executable_pnl_15u.map(|label| (*score, label)))
+        .filter(|(score, label)| score.is_finite() && label.is_finite())
+        .collect();
+    if executable_pairs.len() < min_observations {
+        return None;
+    }
+    let train_executable_pnl_rank_ic = pair_spearman(&executable_pairs);
+    if !train_executable_pnl_rank_ic.is_finite()
+        || train_executable_pnl_rank_ic.abs() < min_abs_train_ic
+    {
+        return None;
+    }
+    let values = scored.iter().map(|(_, value)| *value).collect::<Vec<_>>();
+    let train_mean = mean(values.iter().copied());
+    let train_std = stddev(&values);
+    if !train_std.is_finite() || train_std <= EPS {
+        return None;
+    }
+    Some(FactorComboComponent {
+        factor: descriptor.name.to_string(),
+        family: descriptor.family,
+        layer: descriptor.layer,
+        accessor: descriptor.accessor,
+        direction: train_executable_pnl_rank_ic.signum(),
+        train_executable_pnl_rank_ic,
+        train_mean,
+        train_std,
+    })
+}
+
+fn evaluate_combo_v1_threshold(
+    rows: &[&FactorObservationV2],
+    components: &[FactorComboComponent],
+    threshold: f64,
+) -> FactorSelectionMetrics {
+    let scored_n = rows
+        .iter()
+        .filter(|row| combo_v1_score(row, components).is_some())
+        .count();
+    let selected: Vec<&FactorObservationV2> = rows
+        .iter()
+        .copied()
+        .filter(|row| {
+            combo_v1_score(row, components)
+                .map(|score| score >= threshold)
+                .unwrap_or(false)
+        })
+        .collect();
+    let filled: Vec<&FactorObservationV2> = selected
+        .iter()
+        .copied()
+        .filter(|row| row.label_executable_pnl_15u.is_some())
+        .collect();
+    let pnls: Vec<(DateTime<Utc>, f64)> = filled
+        .iter()
+        .filter_map(|row| row.label_executable_pnl_15u.map(|pnl| (row.tick_ts, pnl)))
+        .filter(|(_, pnl)| pnl.is_finite())
+        .collect();
+    let pnl_values: Vec<f64> = pnls.iter().map(|(_, pnl)| *pnl).collect();
+    let total_pnl = pnl_values.iter().sum::<f64>();
+    FactorSelectionMetrics {
+        n: scored_n,
+        selected_n: selected.len(),
+        executable_fill_rate: ratio(filled.len(), selected.len()),
+        rejection_rate: ratio(
+            selected
+                .iter()
+                .filter(|row| !row.label_executable_fillable)
+                .count(),
+            selected.len(),
+        ),
+        total_pnl_after_cost: total_pnl,
+        avg_pnl_after_cost: if pnl_values.is_empty() {
+            f64::NAN
+        } else {
+            total_pnl / pnl_values.len() as f64
+        },
+        sharpe: trade_sharpe(&pnl_values),
+        max_drawdown: max_drawdown(&pnls),
+        by_symbol_positive_ratio: positive_group_ratio(&filled, |row| row.symbol.clone()),
+        by_time_bucket_positive_ratio: positive_group_ratio(&filled, |row| {
+            row.regime.as_str().to_string()
+        }),
+    }
+}
+
+fn combo_v1_score(row: &FactorObservationV2, components: &[FactorComboComponent]) -> Option<f64> {
+    let mut by_family: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
+    for component in components {
+        let value = (component.accessor)(row);
+        if !value.is_finite() || !component.train_std.is_finite() || component.train_std <= EPS {
+            continue;
+        }
+        let z = ((value - component.train_mean) / component.train_std).clamp(-5.0, 5.0);
+        by_family
+            .entry(component.family.as_str())
+            .or_default()
+            .push(z * component.direction);
+    }
+    if by_family.is_empty() {
+        return None;
+    }
+    let family_scores = by_family
+        .values()
+        .map(|values| mean(values.iter().copied()))
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if family_scores.is_empty() {
+        None
+    } else {
+        Some(mean(family_scores.iter().copied()))
+    }
+}
+
+fn aggregate_combo_v1_windows(windows: &[FactorComboV1Window]) -> FactorComboV1Aggregate {
+    if windows.is_empty() {
+        return FactorComboV1Aggregate {
+            windows: 0,
+            positive_window_ratio: f64::NAN,
+            total_test_pnl_after_cost: 0.0,
+            avg_test_pnl_per_window: f64::NAN,
+            min_test_pnl_after_cost: f64::NAN,
+            avg_test_fill_rate: f64::NAN,
+            avg_test_rejection_rate: f64::NAN,
+            avg_component_count: f64::NAN,
+        };
+    }
+    let total_test_pnl_after_cost = windows
+        .iter()
+        .map(|window| window.test.total_pnl_after_cost)
+        .sum::<f64>();
+    let min_test_pnl_after_cost = windows
+        .iter()
+        .map(|window| window.test.total_pnl_after_cost)
+        .fold(f64::INFINITY, f64::min);
+    let positive_windows = windows
+        .iter()
+        .filter(|window| window.test.total_pnl_after_cost > 0.0)
+        .count();
+    FactorComboV1Aggregate {
+        windows: windows.len(),
+        positive_window_ratio: ratio(positive_windows, windows.len()),
+        total_test_pnl_after_cost,
+        avg_test_pnl_per_window: total_test_pnl_after_cost / windows.len() as f64,
+        min_test_pnl_after_cost,
+        avg_test_fill_rate: mean(
+            windows
+                .iter()
+                .map(|window| window.test.executable_fill_rate),
+        ),
+        avg_test_rejection_rate: mean(windows.iter().map(|window| window.test.rejection_rate)),
+        avg_component_count: mean(windows.iter().map(|window| window.components.len() as f64)),
+    }
 }
 
 fn fit_walk_forward_factor(
@@ -2243,6 +3008,30 @@ fn mean(values: impl Iterator<Item = f64>) -> f64 {
     }
 }
 
+fn stddev(values: &[f64]) -> f64 {
+    let vals = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if vals.len() < 2 {
+        return f64::NAN;
+    }
+    let avg = vals.iter().sum::<f64>() / vals.len() as f64;
+    let var = vals.iter().map(|value| (value - avg).powi(2)).sum::<f64>() / vals.len() as f64;
+    var.sqrt()
+}
+
+fn icir(values: &[f64]) -> f64 {
+    let avg = mean(values.iter().copied());
+    let std = stddev(values);
+    if avg.is_finite() && std.is_finite() && std > EPS {
+        avg / std
+    } else {
+        f64::NAN
+    }
+}
+
 fn ratio(num: usize, denom: usize) -> f64 {
     if denom == 0 {
         f64::NAN
@@ -2450,6 +3239,189 @@ mod tests {
                 .windows
                 .iter()
                 .all(|window| !window.factor.starts_with("future_exit_"))
+        );
+    }
+
+    #[test]
+    fn stability_report_rejects_too_short_negative_factors() {
+        let base = Utc::now();
+        let report = FactorWalkForwardReport {
+            options: FactorWalkForwardOptions::default(),
+            health: DataHealthReport {
+                source_observations: 0,
+                v2_rows: 0,
+                settlement_label_rows: 0,
+                entry_quote_rows: 0,
+                exit_quote_rows: 0,
+                entry_size_rows: 0,
+                exit_size_rows: 0,
+                entry_fillable_rows: 0,
+                exit_fillable_rows: 0,
+                executable_pnl_rows: 0,
+                deribit_rows: 0,
+                avg_pm_lag_secs: f64::NAN,
+                avg_entry_capacity_ratio: f64::NAN,
+                avg_exit_capacity_ratio: f64::NAN,
+            },
+            windows: vec![FactorWalkForwardWindow {
+                window_index: 0,
+                train_start: base,
+                train_end: base + chrono::Duration::days(1),
+                test_start: base + chrono::Duration::days(1),
+                test_end: base + chrono::Duration::days(2),
+                factor: "bad_factor".to_string(),
+                family: FactorFamily::Alpha,
+                layer: ThreeLayerArchive::DirectionProbabilityEdge,
+                direction: 1.0,
+                threshold: 0.0,
+                train_settlement_rank_ic: -0.1,
+                train_executable_pnl_rank_ic: -0.2,
+                train: FactorSelectionMetrics {
+                    n: 10,
+                    selected_n: 2,
+                    executable_fill_rate: 1.0,
+                    rejection_rate: 0.0,
+                    total_pnl_after_cost: 1.0,
+                    avg_pnl_after_cost: 0.5,
+                    sharpe: 1.0,
+                    max_drawdown: 0.0,
+                    by_symbol_positive_ratio: 1.0,
+                    by_time_bucket_positive_ratio: 1.0,
+                },
+                test: FactorSelectionMetrics {
+                    n: 10,
+                    selected_n: 2,
+                    executable_fill_rate: 1.0,
+                    rejection_rate: 0.0,
+                    total_pnl_after_cost: -1.0,
+                    avg_pnl_after_cost: -0.5,
+                    sharpe: -1.0,
+                    max_drawdown: 1.0,
+                    by_symbol_positive_ratio: 0.0,
+                    by_time_bucket_positive_ratio: 0.0,
+                },
+            }],
+            aggregates: Vec::new(),
+        };
+
+        let stability = build_factor_stability_report(&report, FactorStabilityOptions::default());
+        assert_eq!(stability.rows.len(), 1);
+        assert_eq!(stability.rows[0].decision, FactorStabilityDecision::Reject);
+        assert_eq!(stability.rows[0].reason, "too_few_windows_nonpositive_pnl");
+    }
+
+    #[test]
+    fn stability_report_watchlists_unstable_icir() {
+        let base = Utc::now();
+        let metrics = || FactorSelectionMetrics {
+            n: 20,
+            selected_n: 5,
+            executable_fill_rate: 1.0,
+            rejection_rate: 0.0,
+            total_pnl_after_cost: 2.0,
+            avg_pnl_after_cost: 0.4,
+            sharpe: 1.0,
+            max_drawdown: 0.0,
+            by_symbol_positive_ratio: 1.0,
+            by_time_bucket_positive_ratio: 1.0,
+        };
+        let windows = (0..8)
+            .map(|idx| FactorWalkForwardWindow {
+                window_index: idx,
+                train_start: base + chrono::Duration::days(idx as i64),
+                train_end: base + chrono::Duration::days(idx as i64 + 1),
+                test_start: base + chrono::Duration::days(idx as i64 + 1),
+                test_end: base + chrono::Duration::days(idx as i64 + 2),
+                factor: "flat_ic_factor".to_string(),
+                family: FactorFamily::Alpha,
+                layer: ThreeLayerArchive::DirectionProbabilityEdge,
+                direction: 1.0,
+                threshold: 0.0,
+                train_settlement_rank_ic: 0.2,
+                train_executable_pnl_rank_ic: 0.2,
+                train: metrics(),
+                test: metrics(),
+            })
+            .collect();
+        let report = FactorWalkForwardReport {
+            options: FactorWalkForwardOptions::default(),
+            health: DataHealthReport {
+                source_observations: 0,
+                v2_rows: 0,
+                settlement_label_rows: 0,
+                entry_quote_rows: 0,
+                exit_quote_rows: 0,
+                entry_size_rows: 0,
+                exit_size_rows: 0,
+                entry_fillable_rows: 0,
+                exit_fillable_rows: 0,
+                executable_pnl_rows: 0,
+                deribit_rows: 0,
+                avg_pm_lag_secs: f64::NAN,
+                avg_entry_capacity_ratio: f64::NAN,
+                avg_exit_capacity_ratio: f64::NAN,
+            },
+            windows,
+            aggregates: Vec::new(),
+        };
+
+        let stability = build_factor_stability_report(&report, FactorStabilityOptions::default());
+        assert_eq!(stability.rows.len(), 1);
+        assert_eq!(
+            stability.rows[0].decision,
+            FactorStabilityDecision::Watchlist
+        );
+        assert_eq!(
+            stability.rows[0].reason,
+            "positive_pnl_but_low_executable_icir"
+        );
+    }
+
+    #[test]
+    fn combo_v1_uses_train_normalized_factor_scores() {
+        let base = Utc::now();
+        let mut observations = Vec::new();
+        for i in 0..96 {
+            let mut obs = base_obs();
+            obs.event_id = format!("event-{i}");
+            obs.tick_ts = base + chrono::Duration::hours(i);
+            obs.model_prob_up = if i % 2 == 0 { 0.80 } else { 0.20 };
+            obs.model_edge_up = obs.model_prob_up - obs.pm_up_ask - crypto_fee_cost(obs.pm_up_ask);
+            obs.settlement_up = if i % 2 == 0 { 1.0 } else { 0.0 };
+            observations.push(obs);
+        }
+
+        let report = walk_forward_factor_combo_v1_with_deribit(
+            &observations,
+            &[],
+            base,
+            base + chrono::Duration::days(4) - chrono::Duration::seconds(1),
+            FactorComboV1Options {
+                walk_forward: FactorWalkForwardOptions {
+                    review: FactorReviewOptions {
+                        stake_usd: 15.0,
+                        min_observations: 10,
+                        top_quantile: 0.2,
+                    },
+                    train_window_days: 2,
+                    test_window_days: 1,
+                    step_days: 1,
+                    top_n: 10,
+                    factor_name_filter: Some("side_model_prob".to_string()),
+                },
+                max_factors_per_family: 1,
+                max_total_factors: 2,
+                min_abs_train_executable_pnl_rank_ic: 0.01,
+            },
+        );
+
+        assert!(!report.windows.is_empty());
+        assert!(report.aggregate.total_test_pnl_after_cost > 0.0);
+        assert!(
+            report
+                .windows
+                .iter()
+                .all(|window| !window.components.is_empty())
         );
     }
 }

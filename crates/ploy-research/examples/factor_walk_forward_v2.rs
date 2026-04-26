@@ -8,9 +8,11 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
-    FactorObservation, FactorReviewOptions, FactorWalkForwardOptions,
-    build_factor_observations_with_lob_sampled, format_factor_walk_forward_v2_report,
-    load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
+    FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
+    FactorWalkForwardOptions, build_factor_observations_with_lob_sampled,
+    build_factor_stability_report, format_factor_combo_v1_report, format_factor_stability_report,
+    format_factor_walk_forward_v2_report, load_deribit_feature_snapshots,
+    load_research_lob_snapshots_sampled, walk_forward_factor_combo_v1_with_deribit,
     walk_forward_factors_v2_with_deribit,
 };
 use sqlx::postgres::PgPoolOptions;
@@ -180,7 +182,24 @@ async fn main() {
         &deribit_snapshots,
         start,
         end,
-        options,
+        options.clone(),
     );
     println!("{}", format_factor_walk_forward_v2_report(&report));
+    let stability_report =
+        build_factor_stability_report(&report, FactorStabilityOptions::default());
+    println!(
+        "{}",
+        format_factor_stability_report(&stability_report, options.top_n)
+    );
+    let combo_report = walk_forward_factor_combo_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        start,
+        end,
+        FactorComboV1Options {
+            walk_forward: options,
+            ..Default::default()
+        },
+    );
+    println!("{}", format_factor_combo_v1_report(&combo_report));
 }

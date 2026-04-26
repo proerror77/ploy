@@ -938,6 +938,40 @@ evidence.
   positive-window ratio `0.3333`, average fill `8.04%`, rejection `91.96%`.
   Do not promote either gate to live until more symbols/days and walk-forward stability improve.
 
+# PM5D Factor Stability And Combo V1 (2026-04-26)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: solo research lane
+- `tasks/todo.md`
+  - Owner: solo research lane
+
+## Tasks
+
+- [x] Add a stability report that turns ICIR, walk-forward PnL, fill/rejection, and symbol/regime
+  stability into `reject` / `watchlist` / `candidate` decisions.
+- [x] Add a conservative combo v1 that uses train-only normalization and family-balanced signed
+  factor scores instead of directly using ICIR as weights.
+- [x] Print the stability and combo reports from the existing walk-forward example.
+- [ ] Verify locally, then run a bounded ploy-ci/Tango smoke before considering merge.
+
+## Review
+
+- 2026-04-26: Design rule: ICIR is a screening and stability metric, not a direct trading weight.
+  Combo selection must be trained only on each walk-forward training window and judged by executable
+  PnL in the following test window.
+- 2026-04-26: Implemented `FactorStabilityReport` and `FactorComboV1Report`. Stability decisions
+  combine window count, positive-window ratio, executable PnL, fill/rejection, symbol/regime
+  stability, and executable-PnL ICIR. Combo v1 selects factors per training window, balances by
+  family, uses train-only z-score normalization, and evaluates only on the next test window.
+- 2026-04-26: Local verification passed: targeted `rustfmt --check` for `factors_v2.rs` and
+  `factor_walk_forward_v2.rs`, `git diff --check`, `rtk cargo test -p ploy-research factors_v2 --lib`, full
+  `rtk cargo test -p ploy-research --lib`, `rtk cargo check -p ploy-research --no-default-features`,
+  and DB-feature `factor_walk_forward_v2` example check.
+
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 
 ## Files
