@@ -9653,3 +9653,38 @@ Checklist:
 Review:
 - Design rule: this lane tests fixed point-in-time rule predicates. It does not optimize thresholds from future labels and does not use `label_future_exit_*` as an input.
 - 2026-04-26: Six-symbol ploy-ci run `24948112641` succeeded on commit `f86f4f64` and emitted `Meta-Label Walk-Forward V1`. Only one OOS gated window met the liquidity/sample gates, so every positive result remains watchlist-level. In that OOS window `liquidity_gate_only` lost `-1209.7725`, while fixed point-in-time rules improved materially: `cex_obi_confirmation` `+478.0090`, `cex_obi_and_continuation` `+438.1082`, and `continuation_confirmation` `+297.8995`, all with 100% fill and 0% rejection inside the gate. This supports testing CEX microstructure/continuation meta-labels on longer windows before live promotion.
+
+# PM5D Meta-Label Readiness Gate (2026-04-26)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/src/lib.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: solo research lane
+- `tasks/todo.md`
+  - Owner: solo research lane
+
+## Tasks
+
+- [x] Add explicit meta-label readiness thresholds for minimum OOS windows, positive-window ratio,
+  executable PnL, fill rate, rejection rate, worst window, and average OOS sample count.
+- [x] Emit `candidate` / `watchlist` / `reject` decisions plus machine-readable reasons in the
+  Meta-Label Walk-Forward V1 aggregate section.
+- [x] Add regression coverage proving one-window positive OOS rules stay `watchlist` while
+  multi-window stable executable rules can become `candidate`.
+- [x] Run targeted formatting, unit tests, cargo checks, and diff checks before pushing.
+
+## Review
+
+- 2026-04-26: Implemented `MetaLabelWalkForwardAggregate` readiness decisions. A rule is only
+  `candidate` after enough OOS windows, positive executable PnL, stable positive-window ratio,
+  sufficient OOS sample count, high fill rate, low rejection rate, and bounded worst-window loss.
+  Positive one-window results remain `watchlist` with `too_few_oos_windows_positive_pnl`.
+- 2026-04-26: Local verification passed: targeted `rustfmt --check` for `factors_v2.rs` and
+  `factor_walk_forward_v2.rs`, `rustfmt --config skip_children=true --check` for `lib.rs`,
+  `rtk git diff --check`, `rtk cargo test -p ploy-research factors_v2 --lib`, full
+  `rtk cargo test -p ploy-research --lib`, `rtk cargo check -p ploy-research --no-default-features`,
+  and DB-feature `factor_walk_forward_v2` example check.

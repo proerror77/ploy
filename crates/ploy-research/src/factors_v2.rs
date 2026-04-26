@@ -720,6 +720,13 @@ pub struct MetaLabelWalkForwardOptions {
     pub test_window_days: i64,
     pub step_days: i64,
     pub min_rule_observations: usize,
+    pub min_candidate_windows: usize,
+    pub min_candidate_positive_window_ratio: f64,
+    pub min_candidate_total_test_pnl_after_cost: f64,
+    pub min_candidate_avg_test_selected: f64,
+    pub min_candidate_avg_fill_rate: f64,
+    pub max_candidate_avg_rejection_rate: f64,
+    pub min_candidate_worst_window_pnl_after_cost: f64,
     pub top_n: usize,
 }
 
@@ -732,6 +739,13 @@ impl Default for MetaLabelWalkForwardOptions {
             test_window_days: 1,
             step_days: 1,
             min_rule_observations: 20,
+            min_candidate_windows: 8,
+            min_candidate_positive_window_ratio: 0.65,
+            min_candidate_total_test_pnl_after_cost: 0.0,
+            min_candidate_avg_test_selected: 30.0,
+            min_candidate_avg_fill_rate: 0.95,
+            max_candidate_avg_rejection_rate: 0.05,
+            min_candidate_worst_window_pnl_after_cost: -150.0,
             top_n: 20,
         }
     }
@@ -761,6 +775,8 @@ pub struct MetaLabelWalkForwardAggregate {
     pub avg_test_selected: f64,
     pub avg_test_fill_rate: f64,
     pub avg_test_rejection_rate: f64,
+    pub decision: FactorStabilityDecision,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1962,7 +1978,7 @@ pub fn walk_forward_meta_label_v1_with_deribit(
         train_start += step_duration;
     }
 
-    let aggregates = aggregate_meta_label_windows(&windows);
+    let aggregates = aggregate_meta_label_windows(&windows, &options);
     MetaLabelWalkForwardReport {
         options,
         health,
@@ -2495,20 +2511,25 @@ pub fn format_meta_label_walk_forward_v1_report(report: &MetaLabelWalkForwardRep
         report.gate.rejection_rate * 100.0,
     ));
     out.push_str(&format!(
-        "train_days={} test_days={} step_days={} min_rule_obs={} stake_usd={:.2}\n\n",
+        "train_days={} test_days={} step_days={} min_rule_obs={} min_candidate_windows={} min_candidate_pos_window_ratio={:.2} min_candidate_avg_selected={:.2} stake_usd={:.2}\n\n",
         report.options.train_window_days,
         report.options.test_window_days,
         report.options.step_days,
         report.options.min_rule_observations,
+        report.options.min_candidate_windows,
+        report.options.min_candidate_positive_window_ratio,
+        report.options.min_candidate_avg_test_selected,
         report.options.review.stake_usd,
     ));
 
     out.push_str("=== Meta-Label Walk-Forward Aggregates ===\n");
-    out.push_str("rule,windows,pos_window_ratio,total_test_pnl,avg_window_pnl,min_window_pnl,avg_train_selected,avg_test_selected,avg_test_fill,avg_test_reject\n");
+    out.push_str("rule,decision,reason,windows,pos_window_ratio,total_test_pnl,avg_window_pnl,min_window_pnl,avg_train_selected,avg_test_selected,avg_test_fill,avg_test_reject\n");
     for aggregate in report.aggregates.iter().take(report.options.top_n.max(1)) {
         out.push_str(&format!(
-            "{},{},{:.4},{:.4},{:.4},{:.4},{:.2},{:.2},{:.4},{:.4}\n",
+            "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.2},{:.2},{:.4},{:.4}\n",
             aggregate.rule,
+            aggregate.decision.as_str(),
+            aggregate.reason,
             aggregate.windows,
             aggregate.positive_window_ratio,
             aggregate.total_test_pnl_after_cost,
@@ -3593,6 +3614,7 @@ fn evaluate_meta_label_rule(
 
 fn aggregate_meta_label_windows(
     windows: &[MetaLabelWalkForwardWindow],
+    options: &MetaLabelWalkForwardOptions,
 ) -> Vec<MetaLabelWalkForwardAggregate> {
     let mut grouped: BTreeMap<&str, Vec<&MetaLabelWalkForwardWindow>> = BTreeMap::new();
     for window in windows {
@@ -3617,6 +3639,28 @@ fn aggregate_meta_label_windows(
                 .iter()
                 .filter(|window| window.test.total_pnl_after_cost > 0.0)
                 .count();
+            let avg_test_selected = mean(
+                rule_windows
+                    .iter()
+                    .map(|window| window.test.selected_n as f64),
+            );
+            let avg_test_fill_rate = mean(
+                rule_windows
+                    .iter()
+                    .map(|window| window.test.executable_fill_rate),
+            );
+            let avg_test_rejection_rate =
+                mean(rule_windows.iter().map(|window| window.test.rejection_rate));
+            let (decision, reason) = meta_label_readiness_decision(
+                rule_windows.len(),
+                positive_windows,
+                total_test_pnl_after_cost,
+                min_test_pnl_after_cost,
+                avg_test_selected,
+                avg_test_fill_rate,
+                avg_test_rejection_rate,
+                options,
+            );
             MetaLabelWalkForwardAggregate {
                 rule: rule.to_string(),
                 windows: rule_windows.len(),
@@ -3629,26 +3673,22 @@ fn aggregate_meta_label_windows(
                         .iter()
                         .map(|window| window.train.selected_n as f64),
                 ),
-                avg_test_selected: mean(
-                    rule_windows
-                        .iter()
-                        .map(|window| window.test.selected_n as f64),
-                ),
-                avg_test_fill_rate: mean(
-                    rule_windows
-                        .iter()
-                        .map(|window| window.test.executable_fill_rate),
-                ),
-                avg_test_rejection_rate: mean(
-                    rule_windows.iter().map(|window| window.test.rejection_rate),
-                ),
+                avg_test_selected,
+                avg_test_fill_rate,
+                avg_test_rejection_rate,
+                decision,
+                reason,
             }
         })
         .collect::<Vec<_>>();
     out.sort_by(|a, b| {
-        b.total_test_pnl_after_cost
-            .partial_cmp(&a.total_test_pnl_after_cost)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        decision_rank(b.decision)
+            .cmp(&decision_rank(a.decision))
+            .then_with(|| {
+                b.total_test_pnl_after_cost
+                    .partial_cmp(&a.total_test_pnl_after_cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| {
                 b.positive_window_ratio
                     .partial_cmp(&a.positive_window_ratio)
@@ -3656,6 +3696,68 @@ fn aggregate_meta_label_windows(
             })
     });
     out
+}
+
+fn meta_label_readiness_decision(
+    windows: usize,
+    positive_windows: usize,
+    total_test_pnl_after_cost: f64,
+    min_test_pnl_after_cost: f64,
+    avg_test_selected: f64,
+    avg_test_fill_rate: f64,
+    avg_test_rejection_rate: f64,
+    options: &MetaLabelWalkForwardOptions,
+) -> (FactorStabilityDecision, String) {
+    if windows < options.min_candidate_windows {
+        return if total_test_pnl_after_cost > options.min_candidate_total_test_pnl_after_cost {
+            (
+                FactorStabilityDecision::Watchlist,
+                "too_few_oos_windows_positive_pnl".to_string(),
+            )
+        } else {
+            (
+                FactorStabilityDecision::Reject,
+                "too_few_oos_windows_nonpositive_pnl".to_string(),
+            )
+        };
+    }
+    if total_test_pnl_after_cost <= options.min_candidate_total_test_pnl_after_cost {
+        return (
+            FactorStabilityDecision::Reject,
+            "nonpositive_oos_executable_pnl".to_string(),
+        );
+    }
+    if ratio(positive_windows, windows) < options.min_candidate_positive_window_ratio {
+        return (
+            FactorStabilityDecision::Watchlist,
+            "positive_pnl_but_unstable_oos_windows".to_string(),
+        );
+    }
+    if avg_test_selected < options.min_candidate_avg_test_selected {
+        return (
+            FactorStabilityDecision::Watchlist,
+            "positive_pnl_but_low_oos_sample".to_string(),
+        );
+    }
+    if avg_test_fill_rate < options.min_candidate_avg_fill_rate {
+        return (
+            FactorStabilityDecision::Watchlist,
+            "positive_pnl_but_low_fill_rate".to_string(),
+        );
+    }
+    if avg_test_rejection_rate > options.max_candidate_avg_rejection_rate {
+        return (
+            FactorStabilityDecision::Watchlist,
+            "positive_pnl_but_high_rejection".to_string(),
+        );
+    }
+    if min_test_pnl_after_cost < options.min_candidate_worst_window_pnl_after_cost {
+        return (
+            FactorStabilityDecision::Watchlist,
+            "positive_pnl_but_large_worst_window_loss".to_string(),
+        );
+    }
+    (FactorStabilityDecision::Candidate, "passed".to_string())
 }
 
 fn fit_walk_forward_factor(
@@ -5107,6 +5209,8 @@ mod tests {
         assert_eq!(continuation.windows, 2);
         assert!((continuation.positive_window_ratio - 1.0).abs() < EPS);
         assert!(continuation.total_test_pnl_after_cost > 0.0);
+        assert_eq!(continuation.decision, FactorStabilityDecision::Watchlist);
+        assert_eq!(continuation.reason, "too_few_oos_windows_positive_pnl");
         assert!(report.windows.iter().any(|window| {
             window.rule == "continuation_confirmation"
                 && window.test.selected_n > 0
@@ -5116,6 +5220,40 @@ mod tests {
         let formatted = format_meta_label_walk_forward_v1_report(&report);
         assert!(formatted.contains("Meta-Label Walk-Forward V1"));
         assert!(formatted.contains("continuation_confirmation"));
+        assert!(formatted.contains("decision"));
+        assert!(formatted.contains("too_few_oos_windows_positive_pnl"));
+
+        let candidate_report = walk_forward_meta_label_v1_with_deribit(
+            &observations,
+            &[],
+            base,
+            base + chrono::Duration::days(4) - chrono::Duration::seconds(1),
+            MetaLabelWalkForwardOptions {
+                review: FactorReviewOptions {
+                    stake_usd: 15.0,
+                    min_observations: 10,
+                    top_quantile: 0.2,
+                },
+                train_window_days: 2,
+                test_window_days: 1,
+                step_days: 1,
+                min_rule_observations: 10,
+                min_candidate_windows: 2,
+                min_candidate_avg_test_selected: 10.0,
+                top_n: 10,
+                ..Default::default()
+            },
+        );
+        let candidate_continuation = candidate_report
+            .aggregates
+            .iter()
+            .find(|row| row.rule == "continuation_confirmation")
+            .expect("candidate continuation aggregate");
+        assert_eq!(
+            candidate_continuation.decision,
+            FactorStabilityDecision::Candidate
+        );
+        assert_eq!(candidate_continuation.reason, "passed");
     }
 
     #[test]
