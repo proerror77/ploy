@@ -9694,3 +9694,23 @@ Review:
   `cex_obi_and_continuation` `+438.1082`, and `continuation_confirmation` `+297.8995` all show
   `too_few_oos_windows_positive_pnl`; nonpositive rules are rejected. This confirms the report no
   longer lets a one-window profitable meta-label look deployable.
+- 2026-04-26: After recharging ploy-ci, restarted Aliyun instance
+  `i-6we7z44sfbfbnosbeymz`, restarted the GitHub runner service, and ran long-window ploy-ci
+  workflow `24950383475` on commit `4e987fc8` for `2026-04-15..2026-04-26` across
+  `BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,BNBUSDT,XRPUSDT`. The run succeeded in `18m43s` with
+  `source_obs=201251`, `v2_rows=402502`, `settlement_labels=402502`, `executable_pnl_rows=15960`,
+  `deribit_rows=110976`, baseline entry fill `3.97%`, baseline rejection `96.03%`, and liquidity
+  gate coverage `1.78%` with `100%` gated entry/roundtrip fill.
+- 2026-04-26: Long-window readiness result from run `24950383475`: no meta-label rule reached
+  `candidate`. `continuation_confirmation` remains the cleanest watchlist rule with `3/3` positive
+  OOS windows, `+212.0091` total OOS PnL, worst window `+22.4123`, `100%` fill, and `0%`
+  rejection, but it fails the eight-window readiness threshold. `cex_obi_confirmation` had larger
+  total OOS PnL (`+547.4000`) but failed stability with only `2/3` positive windows and worst
+  window `-45.4754`; `cex_obi_and_continuation` was nearly flat in its worst window (`-0.0630`).
+  `liquidity_gate_only` remains rejected (`-1442.4381`), confirming fillability alone is not an
+  edge.
+- 2026-04-26: The main remaining research bottleneck is qualifying OOS sample count, not runner
+  availability. The calendar span yields ten daily walk-forward windows, but only three meta-label
+  windows survive the strict liquidity/sample gates. Next research work should either add explicit
+  skipped-window diagnostics to the report or wait for more settled, fillable history before
+  relaxing readiness thresholds.
