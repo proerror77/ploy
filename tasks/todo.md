@@ -9688,3 +9688,9 @@ Review:
   `rtk git diff --check`, `rtk cargo test -p ploy-research factors_v2 --lib`, full
   `rtk cargo test -p ploy-research --lib`, `rtk cargo check -p ploy-research --no-default-features`,
   and DB-feature `factor_walk_forward_v2` example check.
+- 2026-04-26: Six-symbol ploy-ci run `24948546979` succeeded on commit `5aa67978`. Artifact
+  `report.txt` includes `rule,decision,reason,...` in `Meta-Label Walk-Forward Aggregates`.
+  Positive one-window rules are correctly gated as watchlist: `cex_obi_confirmation` `+478.0090`,
+  `cex_obi_and_continuation` `+438.1082`, and `continuation_confirmation` `+297.8995` all show
+  `too_few_oos_windows_positive_pnl`; nonpositive rules are rejected. This confirms the report no
+  longer lets a one-window profitable meta-label look deployable.
