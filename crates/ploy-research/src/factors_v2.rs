@@ -1222,9 +1222,32 @@ fn review_factor_rows(
     v2_rows: &[FactorObservationV2],
     options: FactorReviewOptions,
 ) -> FactorReviewV2Report {
+    review_factor_rows_with_descriptor_filter(source_rows, v2_rows, options, |_| true)
+}
+
+fn review_candidate_factor_rows(
+    source_rows: &[FactorObservation],
+    v2_rows: &[FactorObservationV2],
+    options: FactorReviewOptions,
+) -> FactorReviewV2Report {
+    review_factor_rows_with_descriptor_filter(
+        source_rows,
+        v2_rows,
+        options,
+        is_walk_forward_candidate_descriptor,
+    )
+}
+
+fn review_factor_rows_with_descriptor_filter(
+    source_rows: &[FactorObservation],
+    v2_rows: &[FactorObservationV2],
+    options: FactorReviewOptions,
+    descriptor_filter: fn(&FactorV2Descriptor) -> bool,
+) -> FactorReviewV2Report {
     let health = build_data_health_report(source_rows, v2_rows);
     let mut reviews: Vec<SingleFactorReview> = factor_v2_descriptors()
         .into_iter()
+        .filter(descriptor_filter)
         .filter_map(|descriptor| review_one_factor(v2_rows, descriptor, &options))
         .collect();
     reviews.sort_by(|a, b| {
@@ -1650,7 +1673,7 @@ pub fn liquidity_gated_alpha_v1_with_deribit(
         .filter(|row| liquidity_gate_v1_accepts(row, &options.gate))
         .cloned()
         .collect::<Vec<_>>();
-    let review = review_factor_rows(
+    let review = review_candidate_factor_rows(
         source_rows,
         &gated_rows,
         options.walk_forward.review.clone(),
@@ -4089,6 +4112,13 @@ mod tests {
         assert!(report.gate.selected_n < report.baseline_health.v2_rows);
         assert!((report.gate.entry_fill_rate - 1.0).abs() < EPS);
         assert!(!report.review.reviews.is_empty());
+        assert!(
+            report
+                .review
+                .reviews
+                .iter()
+                .all(|review| !review.factor.starts_with("future_exit_"))
+        );
         assert!(!report.walk_forward.windows.is_empty());
         assert!(
             report
