@@ -9648,7 +9648,8 @@ Checklist:
 - [x] Report per-rule OOS aggregates and per-window test performance.
 - [x] Print the report from `factor_walk_forward_v2`.
 - [x] Add focused regression coverage for continuation-confirmation OOS selection.
-- [ ] Verify locally and run the six-symbol ploy-ci smoke.
+- [x] Verify locally and run the six-symbol ploy-ci smoke.
 
 Review:
 - Design rule: this lane tests fixed point-in-time rule predicates. It does not optimize thresholds from future labels and does not use `label_future_exit_*` as an input.
+- 2026-04-26: Six-symbol ploy-ci run `24948112641` succeeded on commit `f86f4f64` and emitted `Meta-Label Walk-Forward V1`. Only one OOS gated window met the liquidity/sample gates, so every positive result remains watchlist-level. In that OOS window `liquidity_gate_only` lost `-1209.7725`, while fixed point-in-time rules improved materially: `cex_obi_confirmation` `+478.0090`, `cex_obi_and_continuation` `+438.1082`, and `continuation_confirmation` `+297.8995`, all with 100% fill and 0% rejection inside the gate. This supports testing CEX microstructure/continuation meta-labels on longer windows before live promotion.
