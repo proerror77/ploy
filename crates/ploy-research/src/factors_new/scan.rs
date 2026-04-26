@@ -1,38 +1,45 @@
-use crate::factors::{spearman_ic, FactorObservation};
+use crate::factors::{FactorObservation, spearman_ic};
 use crate::factors_new::registry::{FactorMeta, FactorRegistry};
 use ploy_operator_contracts::Regime;
 
 const MIN_OBS: usize = 10;
 
 const FACTOR_EXTRACTORS: &[(&str, fn(&FactorObservation) -> f64)] = &[
-    ("distance_over_sigma",    |o| o.distance_over_sigma),
-    ("model_prob_up",          |o| o.model_prob_up),
-    ("drift_30s",              |o| o.drift_30s),
-    ("drift_10s",              |o| o.drift_10s),
-    ("obi_10",                 |o| o.obi_10),
-    ("depth_imbalance",        |o| o.depth_imbalance),
-    ("cum_mprice_drift_5m",    |o| o.cum_mprice_drift_5m),
-    ("sigma_horizon",          |o| o.sigma_horizon),
-    ("vol_gap",                |o| o.vol_gap),
-    ("fair_prob_up_clean",     |o| o.fair_prob_up_clean),
-    ("pm_lag_secs",            |o| o.pm_lag_secs),
-    ("spread_bps",             |o| o.spread_bps),
-    ("microprice_offset_bps",  |o| o.microprice_offset_bps),
-    ("depth_far_ratio",        |o| o.depth_far_ratio),
-    ("cum_obi_delta_5m",       |o| o.cum_obi_delta_5m),
+    ("distance_over_sigma", |o| o.distance_over_sigma),
+    ("model_prob_up", |o| o.model_prob_up),
+    ("drift_30s", |o| o.drift_30s),
+    ("drift_10s", |o| o.drift_10s),
+    ("obi_10", |o| o.obi_10),
+    ("depth_imbalance", |o| o.depth_imbalance),
+    ("cum_mprice_drift_5m", |o| o.cum_mprice_drift_5m),
+    ("sigma_horizon", |o| o.sigma_horizon),
+    ("vol_gap", |o| o.vol_gap),
+    ("fair_prob_up_clean", |o| o.fair_prob_up_clean),
+    ("pm_lag_secs", |o| o.pm_lag_secs),
+    ("spread_bps", |o| o.spread_bps),
+    ("microprice_offset_bps", |o| o.microprice_offset_bps),
+    ("depth_far_ratio", |o| o.depth_far_ratio),
+    ("cum_obi_delta_5m", |o| o.cum_obi_delta_5m),
     ("cum_trade_imbalance_5m", |o| o.cum_trade_imbalance_5m),
+    ("cex_bar_return_30s", |o| o.cex_bar_return_30s),
+    ("cex_bar_return_60s", |o| o.cex_bar_return_60s),
+    ("cex_bar_volume_ratio_30s", |o| o.cex_bar_volume_ratio_30s),
+    ("cex_signed_volume_ratio_30s", |o| {
+        o.cex_signed_volume_ratio_30s
+    }),
+    ("cex_breakout_volume_score", |o| o.cex_breakout_volume_score),
 ];
 
 fn event_bucket_id(event_id: &str) -> i64 {
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     event_id.hash(&mut h);
     h.finish() as i64
 }
 
 const LABELS: &[(&str, fn(&FactorObservation) -> Option<f64>)] = &[
-    ("settlement_up",            |o| Some(o.settlement_up)),
+    ("settlement_up", |o| Some(o.settlement_up)),
     ("future_up_ask_change_30s", |o| o.future_up_ask_change_30s),
 ];
 
@@ -48,16 +55,21 @@ pub fn scan_into_registry(obs: &[FactorObservation], registry: &mut FactorRegist
 
         for (label_name, label_fn) in LABELS {
             for (factor_name, factor_fn) in FACTOR_EXTRACTORS {
-                let triples: Vec<(i64, f64, f64)> = regime_obs.iter()
-                    .filter_map(|o| label_fn(o).map(|y| {
-                        (event_bucket_id(&o.event_id), factor_fn(o), y)
-                    }))
+                let triples: Vec<(i64, f64, f64)> = regime_obs
+                    .iter()
+                    .filter_map(|o| {
+                        label_fn(o).map(|y| (event_bucket_id(&o.event_id), factor_fn(o), y))
+                    })
                     .collect();
-                if triples.len() < MIN_OBS { continue; }
+                if triples.len() < MIN_OBS {
+                    continue;
+                }
                 let xs: Vec<f64> = triples.iter().map(|t| t.1).collect();
                 let ys: Vec<f64> = triples.iter().map(|t| t.2).collect();
                 let ic = spearman_ic(&xs, &ys);
-                if ic.is_nan() { continue; }
+                if ic.is_nan() {
+                    continue;
+                }
                 let icir = crate::factors::bucket_icir(&triples, 3).unwrap_or(0.0);
                 registry.insert(FactorMeta {
                     name: factor_name.to_string(),
@@ -77,10 +89,14 @@ mod tests {
     use super::*;
     use crate::factors::FactorObservation;
     use crate::factors_new::registry::FactorRegistry;
-    use ploy_operator_contracts::Regime;
     use chrono::Utc;
+    use ploy_operator_contracts::Regime;
 
-    fn obs(time_remaining_secs: i64, distance_over_sigma: f64, settlement_up: f64) -> FactorObservation {
+    fn obs(
+        time_remaining_secs: i64,
+        distance_over_sigma: f64,
+        settlement_up: f64,
+    ) -> FactorObservation {
         FactorObservation {
             event_id: "e1".into(),
             symbol: "BTC".into(),
@@ -129,6 +145,14 @@ mod tests {
             cum_depth_delta_5m: 0.0,
             cum_mprice_drift_5m: 0.0,
             cum_trade_imbalance_5m: 0.0,
+            cex_bar_return_30s: 0.0,
+            cex_bar_return_60s: 0.0,
+            cex_bar_volume_ratio_30s: 0.0,
+            cex_bar_volume_trend_3: 0.0,
+            cex_signed_volume_ratio_30s: 0.0,
+            cex_consecutive_up_bars: 0.0,
+            cex_consecutive_down_bars: 0.0,
+            cex_breakout_volume_score: 0.0,
         }
     }
 
@@ -145,6 +169,9 @@ mod tests {
         let mut reg = FactorRegistry::new();
         scan_into_registry(&observations, &mut reg);
         let top = reg.top_n(Regime::Early, "settlement_up", 1);
-        assert!(!top.is_empty(), "registry should have at least one early factor");
+        assert!(
+            !top.is_empty(),
+            "registry should have at least one early factor"
+        );
     }
 }

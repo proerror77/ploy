@@ -62,6 +62,14 @@ pub struct FactorObservation {
     pub cum_depth_delta_5m: f64,
     pub cum_mprice_drift_5m: f64,
     pub cum_trade_imbalance_5m: f64,
+    pub cex_bar_return_30s: f64,
+    pub cex_bar_return_60s: f64,
+    pub cex_bar_volume_ratio_30s: f64,
+    pub cex_bar_volume_trend_3: f64,
+    pub cex_signed_volume_ratio_30s: f64,
+    pub cex_consecutive_up_bars: f64,
+    pub cex_consecutive_down_bars: f64,
+    pub cex_breakout_volume_score: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +118,14 @@ pub struct EventFactorSummary {
     pub cum_depth_delta_5m: f64,
     pub cum_mprice_drift_5m: f64,
     pub cum_trade_imbalance_5m: f64,
+    pub cex_bar_return_30s: f64,
+    pub cex_bar_return_60s: f64,
+    pub cex_bar_volume_ratio_30s: f64,
+    pub cex_bar_volume_trend_3: f64,
+    pub cex_signed_volume_ratio_30s: f64,
+    pub cex_consecutive_up_bars: f64,
+    pub cex_consecutive_down_bars: f64,
+    pub cex_breakout_volume_score: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -405,6 +421,217 @@ impl TradeFlowAccumulator {
     }
 }
 
+#[derive(Clone, Debug)]
+struct CandleBar {
+    bucket: i64,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: f64,
+    signed_volume: f64,
+}
+
+impl CandleBar {
+    fn new(bucket: i64, price: f64) -> Self {
+        Self {
+            bucket,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume: 0.0,
+            signed_volume: 0.0,
+        }
+    }
+
+    fn update_price(&mut self, price: f64) {
+        if !price.is_finite() || price <= 0.0 {
+            return;
+        }
+        self.high = self.high.max(price);
+        self.low = self.low.min(price);
+        self.close = price;
+    }
+
+    fn update_trade(&mut self, price: f64, quantity: f64, signed_quantity: f64) {
+        self.update_price(price);
+        if quantity.is_finite() && quantity > 0.0 {
+            self.volume += quantity;
+        }
+        if signed_quantity.is_finite() {
+            self.signed_volume += signed_quantity;
+        }
+    }
+
+    fn log_return(&self) -> f64 {
+        if self.open > 0.0 && self.close > 0.0 {
+            (self.close / self.open).ln()
+        } else {
+            f64::NAN
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct CandleContinuationFeatures {
+    bar_return_30s: f64,
+    bar_return_60s: f64,
+    volume_ratio_30s: f64,
+    volume_trend_3: f64,
+    signed_volume_ratio_30s: f64,
+    consecutive_up_bars: f64,
+    consecutive_down_bars: f64,
+    breakout_volume_score: f64,
+}
+
+/// Point-in-time 30s CEX candle accumulator.
+///
+/// The latest still-forming bar is intentionally included because live trading
+/// would know the partial current-bar price and trade volume at the observation
+/// timestamp. No future bars are read.
+struct CandleFlowAccumulator {
+    bars: VecDeque<CandleBar>,
+    bucket_secs: i64,
+    max_bars: usize,
+}
+
+impl CandleFlowAccumulator {
+    fn new(bucket_secs: i64, max_bars: usize) -> Self {
+        Self {
+            bars: VecDeque::new(),
+            bucket_secs: bucket_secs.max(1),
+            max_bars: max_bars.max(4),
+        }
+    }
+
+    fn push_price(&mut self, ts: DateTime<Utc>, price: f64) {
+        if !price.is_finite() || price <= 0.0 {
+            return;
+        }
+        let bar = self.current_bar_mut(ts, price);
+        bar.update_price(price);
+        self.prune();
+    }
+
+    fn push_trade(&mut self, ts: DateTime<Utc>, price: f64, quantity: f64, signed_quantity: f64) {
+        if !price.is_finite() || price <= 0.0 {
+            return;
+        }
+        let bar = self.current_bar_mut(ts, price);
+        bar.update_trade(price, quantity, signed_quantity);
+        self.prune();
+    }
+
+    fn features(&self) -> CandleContinuationFeatures {
+        let Some(last) = self.bars.back() else {
+            return CandleContinuationFeatures::default();
+        };
+        let bar_return_30s = last.log_return();
+        let bar_return_60s = if self.bars.len() >= 2 {
+            let prev = &self.bars[self.bars.len() - 2];
+            if prev.open > 0.0 && last.close > 0.0 {
+                (last.close / prev.open).ln()
+            } else {
+                f64::NAN
+            }
+        } else {
+            f64::NAN
+        };
+        let avg_prev_volume = self
+            .bars
+            .iter()
+            .rev()
+            .skip(1)
+            .take(5)
+            .filter(|bar| bar.volume.is_finite() && bar.volume > 0.0)
+            .map(|bar| bar.volume)
+            .collect::<Vec<_>>();
+        let avg_prev_volume = if avg_prev_volume.is_empty() {
+            f64::NAN
+        } else {
+            avg_prev_volume.iter().sum::<f64>() / avg_prev_volume.len() as f64
+        };
+        let volume_ratio_30s = if avg_prev_volume.is_finite() && avg_prev_volume > 0.0 {
+            last.volume / avg_prev_volume
+        } else {
+            f64::NAN
+        };
+        let signed_volume_ratio_30s = if last.volume > 0.0 {
+            last.signed_volume / last.volume
+        } else {
+            f64::NAN
+        };
+        let volume_trend_3 = self.volume_trend_3();
+        let consecutive_up_bars = self.consecutive_bars(1.0);
+        let consecutive_down_bars = self.consecutive_bars(-1.0);
+        let breakout_volume_score = if bar_return_30s.is_finite()
+            && volume_ratio_30s.is_finite()
+            && signed_volume_ratio_30s.is_finite()
+        {
+            bar_return_30s.signum() * bar_return_30s.abs() * volume_ratio_30s.max(0.0)
+                + signed_volume_ratio_30s
+        } else {
+            f64::NAN
+        };
+
+        CandleContinuationFeatures {
+            bar_return_30s,
+            bar_return_60s,
+            volume_ratio_30s,
+            volume_trend_3,
+            signed_volume_ratio_30s,
+            consecutive_up_bars,
+            consecutive_down_bars,
+            breakout_volume_score,
+        }
+    }
+
+    fn current_bar_mut(&mut self, ts: DateTime<Utc>, price: f64) -> &mut CandleBar {
+        let bucket = ts.timestamp().div_euclid(self.bucket_secs);
+        if self.bars.back().is_some_and(|bar| bar.bucket == bucket) {
+            return self.bars.back_mut().expect("back exists");
+        }
+        self.bars.push_back(CandleBar::new(bucket, price));
+        self.bars.back_mut().expect("bar inserted")
+    }
+
+    fn prune(&mut self) {
+        while self.bars.len() > self.max_bars {
+            self.bars.pop_front();
+        }
+    }
+
+    fn volume_trend_3(&self) -> f64 {
+        if self.bars.len() < 3 {
+            return f64::NAN;
+        }
+        let last = &self.bars[self.bars.len() - 1];
+        let prev = &self.bars[self.bars.len() - 2];
+        let prev2 = &self.bars[self.bars.len() - 3];
+        if last.volume > prev.volume && prev.volume > prev2.volume {
+            1.0
+        } else if last.volume < prev.volume && prev.volume < prev2.volume {
+            -1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn consecutive_bars(&self, wanted_sign: f64) -> f64 {
+        let mut count = 0usize;
+        for bar in self.bars.iter().rev() {
+            let sign = signum(bar.log_return());
+            if sign == wanted_sign {
+                count += 1;
+            } else if sign != 0.0 {
+                break;
+            }
+        }
+        count as f64
+    }
+}
+
 /// Load LOB snapshots for research, downsampled to one tick per `sample_every_secs` seconds.
 ///
 /// `binance_lob_ticks` records at ~1 Hz; for factor research 1 tick per 5 s is sufficient
@@ -643,6 +870,7 @@ pub fn build_factor_observations_with_lob_sampled(
     let mut lob_by_symbol: HashMap<String, Vec<&ResearchLobSnapshot>> = HashMap::new();
     let mut lob_flow: HashMap<String, LobFlowAccumulator> = HashMap::new();
     let mut trade_flow: HashMap<String, TradeFlowAccumulator> = HashMap::new();
+    let mut candle_flow: HashMap<String, CandleFlowAccumulator> = HashMap::new();
     let mut last_observation_bucket: HashMap<String, i64> = HashMap::new();
     let mut rows = Vec::new();
 
@@ -813,6 +1041,10 @@ pub fn build_factor_observations_with_lob_sampled(
                     }
                 }
                 spot.insert(sym.clone(), (*ts, spot_price));
+                candle_flow
+                    .entry(sym.clone())
+                    .or_insert_with(|| CandleFlowAccumulator::new(30, 16))
+                    .push_price(*ts, spot_price);
 
                 if let Some(snapshots) = lob_by_symbol.get(&sym) {
                     if let Some(snapshot) =
@@ -1032,6 +1264,10 @@ pub fn build_factor_observations_with_lob_sampled(
                         .flip_ts
                         .map(|flip_ts| (*ts - flip_ts).num_milliseconds() as f64 / 1000.0)
                         .unwrap_or(f64::NAN);
+                    let candle_features = candle_flow
+                        .get(&sym)
+                        .map(CandleFlowAccumulator::features)
+                        .unwrap_or_default();
 
                     rows.push(FactorObservation {
                         event_id: event.event_id.clone(),
@@ -1093,11 +1329,20 @@ pub fn build_factor_observations_with_lob_sampled(
                             .get(&sym)
                             .map(|f| f.cum_imbalance())
                             .unwrap_or(0.0),
+                        cex_bar_return_30s: candle_features.bar_return_30s,
+                        cex_bar_return_60s: candle_features.bar_return_60s,
+                        cex_bar_volume_ratio_30s: candle_features.volume_ratio_30s,
+                        cex_bar_volume_trend_3: candle_features.volume_trend_3,
+                        cex_signed_volume_ratio_30s: candle_features.signed_volume_ratio_30s,
+                        cex_consecutive_up_bars: candle_features.consecutive_up_bars,
+                        cex_consecutive_down_bars: candle_features.consecutive_down_bars,
+                        cex_breakout_volume_score: candle_features.breakout_volume_score,
                     });
                 }
             }
             MarketUpdate::AggTrade {
                 symbol,
+                price,
                 quantity,
                 is_buyer_maker,
                 ts,
@@ -1110,6 +1355,12 @@ pub fn build_factor_observations_with_lob_sampled(
                         .entry(symbol.to_string())
                         .or_insert_with(|| TradeFlowAccumulator::new(300.0))
                         .push(*ts, signed_qty);
+                    if let Some(price) = price.to_f64() {
+                        candle_flow
+                            .entry(symbol.to_string())
+                            .or_insert_with(|| CandleFlowAccumulator::new(30, 16))
+                            .push_trade(*ts, price, qty, signed_qty);
+                    }
                 }
             }
             _ => {}
@@ -1214,6 +1465,20 @@ pub fn build_event_summaries(rows: &[FactorObservation]) -> Vec<EventFactorSumma
                 cum_depth_delta_5m: mean(rows.iter().map(|row| row.cum_depth_delta_5m)),
                 cum_mprice_drift_5m: mean(rows.iter().map(|row| row.cum_mprice_drift_5m)),
                 cum_trade_imbalance_5m: mean(rows.iter().map(|row| row.cum_trade_imbalance_5m)),
+                cex_bar_return_30s: mean(rows.iter().map(|row| row.cex_bar_return_30s)),
+                cex_bar_return_60s: mean(rows.iter().map(|row| row.cex_bar_return_60s)),
+                cex_bar_volume_ratio_30s: mean(rows.iter().map(|row| row.cex_bar_volume_ratio_30s)),
+                cex_bar_volume_trend_3: mean(rows.iter().map(|row| row.cex_bar_volume_trend_3)),
+                cex_signed_volume_ratio_30s: mean(
+                    rows.iter().map(|row| row.cex_signed_volume_ratio_30s),
+                ),
+                cex_consecutive_up_bars: mean(rows.iter().map(|row| row.cex_consecutive_up_bars)),
+                cex_consecutive_down_bars: mean(
+                    rows.iter().map(|row| row.cex_consecutive_down_bars),
+                ),
+                cex_breakout_volume_score: mean(
+                    rows.iter().map(|row| row.cex_breakout_volume_score),
+                ),
             })
         })
         .collect()
@@ -1443,6 +1708,14 @@ pub fn observations_to_frame(rows: &[FactorObservation]) -> PolarsResult<DataFra
         "settlement_up" => rows.iter().map(|row| row.settlement_up).collect::<Vec<_>>(),
         "future_up_ask_change_30s" => rows.iter().map(|row| row.future_up_ask_change_30s.unwrap_or(f64::NAN)).collect::<Vec<_>>(),
         "future_up_ask_change_60s" => rows.iter().map(|row| row.future_up_ask_change_60s.unwrap_or(f64::NAN)).collect::<Vec<_>>(),
+        "cex_bar_return_30s" => rows.iter().map(|row| row.cex_bar_return_30s).collect::<Vec<_>>(),
+        "cex_bar_return_60s" => rows.iter().map(|row| row.cex_bar_return_60s).collect::<Vec<_>>(),
+        "cex_bar_volume_ratio_30s" => rows.iter().map(|row| row.cex_bar_volume_ratio_30s).collect::<Vec<_>>(),
+        "cex_bar_volume_trend_3" => rows.iter().map(|row| row.cex_bar_volume_trend_3).collect::<Vec<_>>(),
+        "cex_signed_volume_ratio_30s" => rows.iter().map(|row| row.cex_signed_volume_ratio_30s).collect::<Vec<_>>(),
+        "cex_consecutive_up_bars" => rows.iter().map(|row| row.cex_consecutive_up_bars).collect::<Vec<_>>(),
+        "cex_consecutive_down_bars" => rows.iter().map(|row| row.cex_consecutive_down_bars).collect::<Vec<_>>(),
+        "cex_breakout_volume_score" => rows.iter().map(|row| row.cex_breakout_volume_score).collect::<Vec<_>>(),
     ]
 }
 
@@ -1486,6 +1759,22 @@ fn row_factor_accessors() -> Vec<(&'static str, fn(&FactorObservation) -> f64)> 
         ("cum_depth_delta_5m", |row| row.cum_depth_delta_5m),
         ("cum_mprice_drift_5m", |row| row.cum_mprice_drift_5m),
         ("cum_trade_imbalance_5m", |row| row.cum_trade_imbalance_5m),
+        ("cex_bar_return_30s", |row| row.cex_bar_return_30s),
+        ("cex_bar_return_60s", |row| row.cex_bar_return_60s),
+        ("cex_bar_volume_ratio_30s", |row| {
+            row.cex_bar_volume_ratio_30s
+        }),
+        ("cex_bar_volume_trend_3", |row| row.cex_bar_volume_trend_3),
+        ("cex_signed_volume_ratio_30s", |row| {
+            row.cex_signed_volume_ratio_30s
+        }),
+        ("cex_consecutive_up_bars", |row| row.cex_consecutive_up_bars),
+        ("cex_consecutive_down_bars", |row| {
+            row.cex_consecutive_down_bars
+        }),
+        ("cex_breakout_volume_score", |row| {
+            row.cex_breakout_volume_score
+        }),
     ]
 }
 
@@ -1529,6 +1818,22 @@ fn event_factor_accessors() -> Vec<(&'static str, fn(&EventFactorSummary) -> f64
         ("cum_depth_delta_5m", |row| row.cum_depth_delta_5m),
         ("cum_mprice_drift_5m", |row| row.cum_mprice_drift_5m),
         ("cum_trade_imbalance_5m", |row| row.cum_trade_imbalance_5m),
+        ("cex_bar_return_30s", |row| row.cex_bar_return_30s),
+        ("cex_bar_return_60s", |row| row.cex_bar_return_60s),
+        ("cex_bar_volume_ratio_30s", |row| {
+            row.cex_bar_volume_ratio_30s
+        }),
+        ("cex_bar_volume_trend_3", |row| row.cex_bar_volume_trend_3),
+        ("cex_signed_volume_ratio_30s", |row| {
+            row.cex_signed_volume_ratio_30s
+        }),
+        ("cex_consecutive_up_bars", |row| row.cex_consecutive_up_bars),
+        ("cex_consecutive_down_bars", |row| {
+            row.cex_consecutive_down_bars
+        }),
+        ("cex_breakout_volume_score", |row| {
+            row.cex_breakout_volume_score
+        }),
     ]
 }
 fn mean(values: impl Iterator<Item = f64>) -> f64 {
@@ -1916,6 +2221,14 @@ mod tests {
             cum_depth_delta_5m: 0.0,
             cum_mprice_drift_5m: 0.0,
             cum_trade_imbalance_5m: 0.0,
+            cex_bar_return_30s: 0.0,
+            cex_bar_return_60s: 0.0,
+            cex_bar_volume_ratio_30s: 0.0,
+            cex_bar_volume_trend_3: 0.0,
+            cex_signed_volume_ratio_30s: 0.0,
+            cex_consecutive_up_bars: 0.0,
+            cex_consecutive_down_bars: 0.0,
+            cex_breakout_volume_score: 0.0,
         }
     }
 
@@ -1972,6 +2285,114 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tick_ts, Utc.timestamp_opt(710, 0).unwrap());
         assert!(rows[0].tick_ts >= start);
+    }
+
+    #[test]
+    fn factor_observations_include_point_in_time_continuation_candles() {
+        let end = Utc.timestamp_opt(1000, 0).unwrap();
+        let updates = vec![
+            MarketUpdate::EventDiscovered {
+                event_id: Arc::from("evt"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("up"),
+                down_token: Arc::from("down"),
+                end_time: end,
+                window_secs: 300,
+                price_to_beat: Some(Decimal::new(100, 0)),
+                resolved_up_won: None,
+            },
+            MarketUpdate::Quote {
+                token_id: Arc::from("up"),
+                bid: Some(Decimal::new(45, 2)),
+                ask: Some(Decimal::new(46, 2)),
+                bid_size: Some(Decimal::new(100, 0)),
+                ask_size: Some(Decimal::new(100, 0)),
+                ts: Utc.timestamp_opt(709, 0).unwrap(),
+            },
+            MarketUpdate::AggTrade {
+                symbol: Arc::from("BTCUSDT"),
+                agg_trade_id: 1,
+                price: Decimal::new(100, 0),
+                quantity: Decimal::new(10, 0),
+                is_buyer_maker: false,
+                ts: Utc.timestamp_opt(710, 0).unwrap(),
+            },
+            MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: Decimal::new(101, 0),
+                ts: Utc.timestamp_opt(719, 0).unwrap(),
+            },
+            MarketUpdate::AggTrade {
+                symbol: Arc::from("BTCUSDT"),
+                agg_trade_id: 2,
+                price: Decimal::new(101, 0),
+                quantity: Decimal::new(20, 0),
+                is_buyer_maker: false,
+                ts: Utc.timestamp_opt(735, 0).unwrap(),
+            },
+            MarketUpdate::Quote {
+                token_id: Arc::from("up"),
+                bid: Some(Decimal::new(45, 2)),
+                ask: Some(Decimal::new(46, 2)),
+                bid_size: Some(Decimal::new(100, 0)),
+                ask_size: Some(Decimal::new(100, 0)),
+                ts: Utc.timestamp_opt(748, 0).unwrap(),
+            },
+            MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: Decimal::new(102, 0),
+                ts: Utc.timestamp_opt(749, 0).unwrap(),
+            },
+            MarketUpdate::AggTrade {
+                symbol: Arc::from("BTCUSDT"),
+                agg_trade_id: 3,
+                price: Decimal::new(102, 0),
+                quantity: Decimal::new(40, 0),
+                is_buyer_maker: false,
+                ts: Utc.timestamp_opt(765, 0).unwrap(),
+            },
+            MarketUpdate::Quote {
+                token_id: Arc::from("up"),
+                bid: Some(Decimal::new(45, 2)),
+                ask: Some(Decimal::new(46, 2)),
+                bid_size: Some(Decimal::new(100, 0)),
+                ask_size: Some(Decimal::new(100, 0)),
+                ts: Utc.timestamp_opt(778, 0).unwrap(),
+            },
+            MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: Decimal::new(103, 0),
+                ts: Utc.timestamp_opt(779, 0).unwrap(),
+            },
+            MarketUpdate::EventExpired {
+                event_id: Arc::from("evt"),
+                end_time: end,
+                resolved_up_won: Some(true),
+            },
+        ];
+
+        let rows = build_factor_observations_with_lob(&updates, &[], 30);
+        let last = rows.last().expect("observation row");
+        assert!(
+            last.cex_bar_return_30s > 0.0,
+            "30s return={}",
+            last.cex_bar_return_30s
+        );
+        assert!(
+            last.cex_bar_return_60s > 0.0,
+            "60s return={}",
+            last.cex_bar_return_60s
+        );
+        assert!(
+            last.cex_bar_volume_ratio_30s > 1.0,
+            "volume ratio={}",
+            last.cex_bar_volume_ratio_30s
+        );
+        assert_eq!(last.cex_bar_volume_trend_3, 1.0);
+        assert!(last.cex_signed_volume_ratio_30s > 0.0);
+        assert!(last.cex_consecutive_up_bars >= 3.0);
+        assert_eq!(last.cex_consecutive_down_bars, 0.0);
+        assert!(last.cex_breakout_volume_score > 0.0);
     }
 
     #[test]
@@ -2061,6 +2482,14 @@ mod tests {
                     cum_depth_delta_5m: 0.0,
                     cum_mprice_drift_5m: 0.0,
                     cum_trade_imbalance_5m: 0.0,
+                    cex_bar_return_30s: 0.0,
+                    cex_bar_return_60s: 0.0,
+                    cex_bar_volume_ratio_30s: 0.0,
+                    cex_bar_volume_trend_3: 0.0,
+                    cex_signed_volume_ratio_30s: 0.0,
+                    cex_consecutive_up_bars: 0.0,
+                    cex_consecutive_down_bars: 0.0,
+                    cex_breakout_volume_score: 0.0,
                 },
                 FactorObservation {
                     event_id: "evt".into(),
@@ -2110,6 +2539,14 @@ mod tests {
                     cum_depth_delta_5m: 0.0,
                     cum_mprice_drift_5m: 0.0,
                     cum_trade_imbalance_5m: 0.0,
+                    cex_bar_return_30s: 0.0,
+                    cex_bar_return_60s: 0.0,
+                    cex_bar_volume_ratio_30s: 0.0,
+                    cex_bar_volume_trend_3: 0.0,
+                    cex_signed_volume_ratio_30s: 0.0,
+                    cex_consecutive_up_bars: 0.0,
+                    cex_consecutive_down_bars: 0.0,
+                    cex_breakout_volume_score: 0.0,
                 },
                 FactorObservation {
                     event_id: "evt".into(),
@@ -2159,6 +2596,14 @@ mod tests {
                     cum_depth_delta_5m: 0.0,
                     cum_mprice_drift_5m: 0.0,
                     cum_trade_imbalance_5m: 0.0,
+                    cex_bar_return_30s: 0.0,
+                    cex_bar_return_60s: 0.0,
+                    cex_bar_volume_ratio_30s: 0.0,
+                    cex_bar_volume_trend_3: 0.0,
+                    cex_signed_volume_ratio_30s: 0.0,
+                    cex_consecutive_up_bars: 0.0,
+                    cex_consecutive_down_bars: 0.0,
+                    cex_breakout_volume_score: 0.0,
                 },
             ]
         };

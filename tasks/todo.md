@@ -888,6 +888,56 @@ evidence.
   `future_exit_*` factor appeared in the walk-forward output. The ploy-ci runner was restored
   to active afterward.
 
+# PM5D Continuation Factor Gates (2026-04-26)
+
+## Files
+
+- `crates/ploy-research/src/factors.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: solo research lane
+- `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: solo research lane
+- `tasks/todo.md`
+  - Owner: solo research lane
+
+## Tasks
+
+- [x] Add point-in-time CEX candle/volume continuation factors from spot and aggTrade.
+- [x] Add side-aware V2 descriptors for continuation and continuation x executable-liquidity gates.
+- [x] Add factor-name filtering so continuation-only and continuation-gate reviews can run separately.
+- [x] Verify with local targeted tests and DB example checks.
+- [x] Run two ploy-ci/Tango walk-forward smokes:
+  - Direction A: continuation/candle-volume factor review.
+  - Direction B: continuation plus executable-liquidity/exit-feasibility gate review.
+
+## Review
+
+- 2026-04-26: Research rule for this lane: only use past CEX spot/aggTrade/LOB state at
+  decision time. Do not use `future_exit_*` labels for selection, and treat high rejection
+  rate as a first-class failure mode rather than a cosmetic metric.
+- 2026-04-26: Local verification passed for continuation factors: targeted point-in-time
+  continuation candle test, `factors_v2` tests, `cargo check -p ploy-research --no-default-features`,
+  DB-feature `factor_walk_forward_v2` example check, full `cargo test -p ploy-research --lib`,
+  `rustfmt --check`, and `git diff --check`.
+- 2026-04-26: Added `--factor-name-filter` to the walk-forward example/workflow so Direction A
+  can isolate continuation/candle-volume descriptors while Direction B isolates continuation
+  edge/liquidity gates on the same data range.
+- 2026-04-26: ploy-ci/Tango Direction A run `24944516097` completed green on branch
+  `research/continuation-factor-gates` with filter
+  `cex_bar,cex_signed,cex_consecutive,cex_breakout,cex_continuation_score`.
+  Health: `source_obs=105064`, `v2_rows=210128`, `executable_pnl_rows=12131`,
+  `deribit_rows=70614`, entry fill `5.77%`, rejection `94.23%`, exit fill `5.56%`.
+  Pure continuation factors were negative OOS: best aggregate
+  `cex_continuation_score_side` had total test PnL `-146.3491` over 3 windows.
+- 2026-04-26: ploy-ci/Tango Direction B run `24944549237` completed green with filter
+  `cex_continuation_edge_gate,cex_continuation_liquidity_gate`. Same health counts as A.
+  Gate composites were positive in aggregate but unstable: `cex_continuation_edge_gate`
+  total test PnL `254.6119`, positive-window ratio `0.3333`, average fill `15.21%`,
+  rejection `84.79%`; `cex_continuation_liquidity_gate` total test PnL `81.4682`,
+  positive-window ratio `0.3333`, average fill `8.04%`, rejection `91.96%`.
+  Do not promote either gate to live until more symbols/days and walk-forward stability improve.
+
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 
 ## Files

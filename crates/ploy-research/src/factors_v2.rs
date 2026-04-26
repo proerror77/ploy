@@ -148,6 +148,16 @@ pub struct FactorObservationV2 {
     pub microprice_momentum_30s_side: f64,
     pub trade_imbalance_delta_10s_side: f64,
     pub trade_imbalance_delta_30s_side: f64,
+    pub cex_bar_return_30s: f64,
+    pub cex_bar_return_60s: f64,
+    pub cex_bar_volume_ratio_30s: f64,
+    pub cex_bar_volume_trend_3: f64,
+    pub cex_signed_volume_ratio_30s: f64,
+    pub cex_consecutive_bar_side: f64,
+    pub cex_breakout_volume_side: f64,
+    pub cex_continuation_score_side: f64,
+    pub cex_continuation_edge_gate: f64,
+    pub cex_continuation_liquidity_gate: f64,
 
     pub entry_ask: f64,
     pub exit_bid: f64,
@@ -287,6 +297,7 @@ pub struct FactorWalkForwardOptions {
     pub test_window_days: i64,
     pub step_days: i64,
     pub top_n: usize,
+    pub factor_name_filter: Option<String>,
 }
 
 impl Default for FactorWalkForwardOptions {
@@ -297,6 +308,7 @@ impl Default for FactorWalkForwardOptions {
             test_window_days: 1,
             step_days: 1,
             top_n: 20,
+            factor_name_filter: None,
         }
     }
 }
@@ -528,6 +540,66 @@ pub fn factor_v2_descriptors() -> Vec<FactorV2Descriptor> {
             FactorFamily::CexAggTrade,
             ThreeLayerArchive::CexMicrostructureConfirmation,
             |r| r.trade_imbalance_delta_30s_side,
+        ),
+        descriptor(
+            "cex_bar_return_30s_side",
+            FactorFamily::CexAggTrade,
+            ThreeLayerArchive::CexMicrostructureConfirmation,
+            |r| r.cex_bar_return_30s * r.side.multiplier(),
+        ),
+        descriptor(
+            "cex_bar_return_60s_side",
+            FactorFamily::CexAggTrade,
+            ThreeLayerArchive::CexMicrostructureConfirmation,
+            |r| r.cex_bar_return_60s * r.side.multiplier(),
+        ),
+        descriptor(
+            "cex_bar_volume_ratio_30s",
+            FactorFamily::CexAggTrade,
+            ThreeLayerArchive::CexMicrostructureConfirmation,
+            |r| r.cex_bar_volume_ratio_30s,
+        ),
+        descriptor(
+            "cex_bar_volume_trend_3",
+            FactorFamily::CexAggTrade,
+            ThreeLayerArchive::CexMicrostructureConfirmation,
+            |r| r.cex_bar_volume_trend_3,
+        ),
+        descriptor(
+            "cex_signed_volume_ratio_30s_side",
+            FactorFamily::CexAggTrade,
+            ThreeLayerArchive::CexMicrostructureConfirmation,
+            |r| r.cex_signed_volume_ratio_30s * r.side.multiplier(),
+        ),
+        descriptor(
+            "cex_consecutive_bar_side",
+            FactorFamily::CexAggTrade,
+            ThreeLayerArchive::CexMicrostructureConfirmation,
+            |r| r.cex_consecutive_bar_side,
+        ),
+        descriptor(
+            "cex_breakout_volume_side",
+            FactorFamily::CexAggTrade,
+            ThreeLayerArchive::CexMicrostructureConfirmation,
+            |r| r.cex_breakout_volume_side,
+        ),
+        descriptor(
+            "cex_continuation_score_side",
+            FactorFamily::CexAggTrade,
+            ThreeLayerArchive::CexMicrostructureConfirmation,
+            |r| r.cex_continuation_score_side,
+        ),
+        descriptor(
+            "cex_continuation_edge_gate",
+            FactorFamily::CexAggTrade,
+            ThreeLayerArchive::CexMicrostructureConfirmation,
+            |r| r.cex_continuation_edge_gate,
+        ),
+        descriptor(
+            "cex_continuation_liquidity_gate",
+            FactorFamily::CexAggTrade,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.cex_continuation_liquidity_gate,
         ),
         descriptor(
             "entry_ask",
@@ -907,6 +979,9 @@ pub fn walk_forward_factors_v2_with_deribit(
     let descriptors: Vec<FactorV2Descriptor> = factor_v2_descriptors()
         .into_iter()
         .filter(is_walk_forward_candidate_descriptor)
+        .filter(|descriptor| {
+            factor_name_matches_filter(descriptor.name, &options.factor_name_filter)
+        })
         .collect();
 
     let mut windows = Vec::new();
@@ -991,12 +1066,17 @@ pub fn format_factor_walk_forward_v2_report(report: &FactorWalkForwardReport) ->
         report.health.avg_pm_lag_secs,
     ));
     out.push_str(&format!(
-        "stake_usd={:.2} train_days={} test_days={} step_days={} top_quantile={:.2}\n\n",
+        "stake_usd={:.2} train_days={} test_days={} step_days={} top_quantile={:.2} factor_name_filter={}\n\n",
         report.options.review.stake_usd,
         report.options.train_window_days,
         report.options.test_window_days,
         report.options.step_days,
         report.options.review.top_quantile,
+        report
+            .options
+            .factor_name_filter
+            .as_deref()
+            .unwrap_or("<none>"),
     ));
 
     out.push_str("=== Walk-Forward Aggregates By Test PnL ===\n");
@@ -1198,6 +1278,17 @@ fn is_walk_forward_candidate_descriptor(descriptor: &FactorV2Descriptor) -> bool
     // They are intentionally reviewed in the single-window report, but using
     // them as train-time selection factors would leak future PM quote movement.
     !descriptor.name.starts_with("future_exit_")
+}
+
+fn factor_name_matches_filter(name: &str, filter: &Option<String>) -> bool {
+    let Some(filter) = filter.as_deref() else {
+        return true;
+    };
+    filter
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .any(|part| name.contains(part))
 }
 
 fn walk_forward_time_slice(
@@ -1563,6 +1654,33 @@ fn side_row(row: &FactorObservation, side: ReviewSide, stake_usd: f64) -> Factor
     } else {
         f64::NAN
     };
+    let side_mult = side.multiplier();
+    let cex_consecutive_bar_side = match side {
+        ReviewSide::Up => row.cex_consecutive_up_bars,
+        ReviewSide::Down => row.cex_consecutive_down_bars,
+    };
+    let cex_breakout_volume_side = row.cex_breakout_volume_score * side_mult;
+    let cex_continuation_score_side = continuation_score(
+        row.cex_bar_return_30s * side_mult,
+        row.cex_bar_return_60s * side_mult,
+        row.cex_signed_volume_ratio_30s * side_mult,
+        row.cex_bar_volume_ratio_30s,
+        row.cex_bar_volume_trend_3,
+        cex_consecutive_bar_side,
+    );
+    let cex_continuation_edge_gate =
+        if side_model_edge.is_finite() && cex_continuation_score_side.is_finite() {
+            side_model_edge * cex_continuation_score_side.max(0.0)
+        } else {
+            f64::NAN
+        };
+    let executable_capacity_gate = entry_capacity_ratio.min(exit_capacity_ratio).min(2.0);
+    let cex_continuation_liquidity_gate =
+        if cex_continuation_score_side.is_finite() && executable_capacity_gate.is_finite() {
+            cex_continuation_score_side * executable_capacity_gate.max(0.0)
+        } else {
+            f64::NAN
+        };
 
     FactorObservationV2 {
         event_id: row.event_id.clone(),
@@ -1596,6 +1714,16 @@ fn side_row(row: &FactorObservation, side: ReviewSide, stake_usd: f64) -> Factor
         microprice_momentum_30s_side: f64::NAN,
         trade_imbalance_delta_10s_side: f64::NAN,
         trade_imbalance_delta_30s_side: f64::NAN,
+        cex_bar_return_30s: row.cex_bar_return_30s,
+        cex_bar_return_60s: row.cex_bar_return_60s,
+        cex_bar_volume_ratio_30s: row.cex_bar_volume_ratio_30s,
+        cex_bar_volume_trend_3: row.cex_bar_volume_trend_3,
+        cex_signed_volume_ratio_30s: row.cex_signed_volume_ratio_30s,
+        cex_consecutive_bar_side,
+        cex_breakout_volume_side,
+        cex_continuation_score_side,
+        cex_continuation_edge_gate,
+        cex_continuation_liquidity_gate,
         entry_ask,
         exit_bid,
         entry_ask_size,
@@ -1981,6 +2109,47 @@ fn diff(now: f64, before: f64) -> f64 {
     finite_diff(now, before).unwrap_or(f64::NAN)
 }
 
+fn continuation_score(
+    return_30s_side: f64,
+    return_60s_side: f64,
+    signed_volume_side: f64,
+    volume_ratio_30s: f64,
+    volume_trend_3: f64,
+    consecutive_bar_side: f64,
+) -> f64 {
+    let mut score = 0.0;
+    let mut weight = 0.0;
+    if return_30s_side.is_finite() {
+        score += 3_000.0 * return_30s_side;
+        weight += 1.0;
+    }
+    if return_60s_side.is_finite() {
+        score += 1_500.0 * return_60s_side;
+        weight += 1.0;
+    }
+    if signed_volume_side.is_finite() {
+        score += signed_volume_side;
+        weight += 1.0;
+    }
+    if volume_ratio_30s.is_finite() {
+        score += (volume_ratio_30s - 1.0).clamp(-2.0, 4.0) * 0.5;
+        weight += 1.0;
+    }
+    if volume_trend_3.is_finite() {
+        score += volume_trend_3 * 0.5;
+        weight += 1.0;
+    }
+    if consecutive_bar_side.is_finite() {
+        score += consecutive_bar_side.min(4.0) * 0.25;
+        weight += 1.0;
+    }
+    if weight > 0.0 {
+        score / weight
+    } else {
+        f64::NAN
+    }
+}
+
 fn descriptor(
     name: &'static str,
     family: FactorFamily,
@@ -2159,6 +2328,14 @@ mod tests {
             cum_depth_delta_5m: 0.1,
             cum_mprice_drift_5m: 0.2,
             cum_trade_imbalance_5m: 1.0,
+            cex_bar_return_30s: 0.002,
+            cex_bar_return_60s: 0.003,
+            cex_bar_volume_ratio_30s: 2.0,
+            cex_bar_volume_trend_3: 1.0,
+            cex_signed_volume_ratio_30s: 0.6,
+            cex_consecutive_up_bars: 2.0,
+            cex_consecutive_down_bars: 0.0,
+            cex_breakout_volume_score: 1.2,
         }
     }
 
@@ -2247,6 +2424,7 @@ mod tests {
                 test_window_days: 1,
                 step_days: 1,
                 top_n: 10,
+                factor_name_filter: None,
             },
         );
 

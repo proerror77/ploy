@@ -107,6 +107,14 @@ pub fn event_summaries_to_frame(rows: &[EventFactorSummary]) -> PolarsResult<Dat
         "cum_depth_delta_5m" => rows.iter().map(|row| row.cum_depth_delta_5m).collect::<Vec<_>>(),
         "cum_mprice_drift_5m" => rows.iter().map(|row| row.cum_mprice_drift_5m).collect::<Vec<_>>(),
         "cum_trade_imbalance_5m" => rows.iter().map(|row| row.cum_trade_imbalance_5m).collect::<Vec<_>>(),
+        "cex_bar_return_30s" => rows.iter().map(|row| row.cex_bar_return_30s).collect::<Vec<_>>(),
+        "cex_bar_return_60s" => rows.iter().map(|row| row.cex_bar_return_60s).collect::<Vec<_>>(),
+        "cex_bar_volume_ratio_30s" => rows.iter().map(|row| row.cex_bar_volume_ratio_30s).collect::<Vec<_>>(),
+        "cex_bar_volume_trend_3" => rows.iter().map(|row| row.cex_bar_volume_trend_3).collect::<Vec<_>>(),
+        "cex_signed_volume_ratio_30s" => rows.iter().map(|row| row.cex_signed_volume_ratio_30s).collect::<Vec<_>>(),
+        "cex_consecutive_up_bars" => rows.iter().map(|row| row.cex_consecutive_up_bars).collect::<Vec<_>>(),
+        "cex_consecutive_down_bars" => rows.iter().map(|row| row.cex_consecutive_down_bars).collect::<Vec<_>>(),
+        "cex_breakout_volume_score" => rows.iter().map(|row| row.cex_breakout_volume_score).collect::<Vec<_>>(),
     ]
 }
 
@@ -419,6 +427,14 @@ mod tests {
             cum_depth_delta_5m: 0.0,
             cum_mprice_drift_5m: 0.0,
             cum_trade_imbalance_5m: 0.0,
+            cex_bar_return_30s: 0.0,
+            cex_bar_return_60s: 0.0,
+            cex_bar_volume_ratio_30s: 0.0,
+            cex_bar_volume_trend_3: 0.0,
+            cex_signed_volume_ratio_30s: 0.0,
+            cex_consecutive_up_bars: 0.0,
+            cex_consecutive_down_bars: 0.0,
+            cex_breakout_volume_score: 0.0,
         }
     }
 }

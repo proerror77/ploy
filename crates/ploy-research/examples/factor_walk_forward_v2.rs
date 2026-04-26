@@ -106,17 +106,19 @@ async fn main() {
         top_n: flag_value(&args, "--top-n")
             .and_then(|raw| raw.parse().ok())
             .unwrap_or(20),
+        factor_name_filter: flag_value(&args, "--factor-name-filter"),
     };
 
     eprintln!(
-        "factor_walk_forward_v2: {} -> {} for {:?}, stake_usd={:.2}, train_days={}, test_days={}, observation_sample_secs={}",
+        "factor_walk_forward_v2: {} -> {} for {:?}, stake_usd={:.2}, train_days={}, test_days={}, observation_sample_secs={}, factor_name_filter={}",
         start,
         end,
         symbols,
         options.review.stake_usd,
         options.train_window_days,
         options.test_window_days,
-        observation_sample_secs
+        observation_sample_secs,
+        options.factor_name_filter.as_deref().unwrap_or("<none>")
     );
 
     let pool = PgPoolOptions::new()
