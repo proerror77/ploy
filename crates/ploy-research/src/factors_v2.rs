@@ -712,6 +712,66 @@ pub struct TradeFormationReviewReport {
     pub meta_label_rules: Vec<TradeFormationRuleRow>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MetaLabelWalkForwardOptions {
+    pub review: FactorReviewOptions,
+    pub gate: LiquidityGateV1Options,
+    pub train_window_days: i64,
+    pub test_window_days: i64,
+    pub step_days: i64,
+    pub min_rule_observations: usize,
+    pub top_n: usize,
+}
+
+impl Default for MetaLabelWalkForwardOptions {
+    fn default() -> Self {
+        Self {
+            review: FactorReviewOptions::default(),
+            gate: LiquidityGateV1Options::default(),
+            train_window_days: 2,
+            test_window_days: 1,
+            step_days: 1,
+            min_rule_observations: 20,
+            top_n: 20,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetaLabelWalkForwardWindow {
+    pub window_index: usize,
+    pub train_start: DateTime<Utc>,
+    pub train_end: DateTime<Utc>,
+    pub test_start: DateTime<Utc>,
+    pub test_end: DateTime<Utc>,
+    pub rule: String,
+    pub train: FactorSelectionMetrics,
+    pub test: FactorSelectionMetrics,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetaLabelWalkForwardAggregate {
+    pub rule: String,
+    pub windows: usize,
+    pub positive_window_ratio: f64,
+    pub total_test_pnl_after_cost: f64,
+    pub avg_test_pnl_per_window: f64,
+    pub min_test_pnl_after_cost: f64,
+    pub avg_train_selected: f64,
+    pub avg_test_selected: f64,
+    pub avg_test_fill_rate: f64,
+    pub avg_test_rejection_rate: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetaLabelWalkForwardReport {
+    pub options: MetaLabelWalkForwardOptions,
+    pub health: DataHealthReport,
+    pub gate: LiquidityGateV1Report,
+    pub windows: Vec<MetaLabelWalkForwardWindow>,
+    pub aggregates: Vec<MetaLabelWalkForwardAggregate>,
+}
+
 pub fn build_factor_observations_v2(
     rows: &[FactorObservation],
     options: &FactorReviewOptions,
@@ -1841,6 +1901,77 @@ pub fn review_trade_formation_v1_with_deribit(
     }
 }
 
+pub fn walk_forward_meta_label_v1_with_deribit(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    mut options: MetaLabelWalkForwardOptions,
+) -> MetaLabelWalkForwardReport {
+    options.gate.review = options.review.clone();
+    let mut v2_rows =
+        build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    v2_rows.sort_by_key(|row| row.tick_ts);
+    let health = build_data_health_report(source_rows, &v2_rows);
+    let gate = build_liquidity_gate_v1_report(source_rows, &v2_rows, options.gate.clone());
+    let mut windows = Vec::new();
+    let train_duration = Duration::days(options.train_window_days.max(1));
+    let test_duration = Duration::days(options.test_window_days.max(1));
+    let step_duration = Duration::days(options.step_days.max(1));
+    let mut train_start = start;
+    let mut window_index = 0usize;
+
+    while train_start + train_duration + test_duration <= end + Duration::seconds(1) {
+        let train_end = train_start + train_duration;
+        let test_start = train_end;
+        let test_end = test_start + test_duration;
+        let train_slice = walk_forward_time_slice(&v2_rows, train_start, train_end);
+        let test_slice = walk_forward_time_slice(&v2_rows, test_start, test_end);
+        let train_gated = train_slice
+            .iter()
+            .filter(|row| liquidity_gate_v1_accepts(row, &options.gate))
+            .collect::<Vec<_>>();
+        let test_gated = test_slice
+            .iter()
+            .filter(|row| liquidity_gate_v1_accepts(row, &options.gate))
+            .collect::<Vec<_>>();
+
+        if train_gated.len() >= options.review.min_observations
+            && test_gated.len() >= options.review.min_observations
+        {
+            for spec in meta_label_rule_specs() {
+                let train = evaluate_meta_label_rule(&train_gated, spec.predicate);
+                if train.selected_n < options.min_rule_observations {
+                    continue;
+                }
+                let test = evaluate_meta_label_rule(&test_gated, spec.predicate);
+                windows.push(MetaLabelWalkForwardWindow {
+                    window_index,
+                    train_start,
+                    train_end,
+                    test_start,
+                    test_end,
+                    rule: spec.name.to_string(),
+                    train,
+                    test,
+                });
+            }
+        }
+
+        window_index += 1;
+        train_start += step_duration;
+    }
+
+    let aggregates = aggregate_meta_label_windows(&windows);
+    MetaLabelWalkForwardReport {
+        options,
+        health,
+        gate,
+        windows,
+        aggregates,
+    }
+}
+
 pub fn format_factor_walk_forward_v2_report(report: &FactorWalkForwardReport) -> String {
     let mut out = String::new();
     out.push_str("=== Factor Walk-Forward V2 Data Health ===\n");
@@ -2344,6 +2475,81 @@ fn push_trade_formation_path_section(
     }
 }
 
+pub fn format_meta_label_walk_forward_v1_report(report: &MetaLabelWalkForwardReport) -> String {
+    let mut out = String::new();
+    out.push_str("=== Meta-Label Walk-Forward V1 Data Health ===\n");
+    out.push_str(&format!(
+        "source_obs={} v2_rows={} executable_pnl_rows={} baseline_entry_fill={:.2}% baseline_reject={:.2}%\n",
+        report.health.source_observations,
+        report.health.v2_rows,
+        report.health.executable_pnl_rows,
+        report.health.entry_fill_rate() * 100.0,
+        report.health.rejection_rate() * 100.0,
+    ));
+    out.push_str(&format!(
+        "gate_selected={} gate_coverage={:.4} gate_entry_fill={:.2}% gate_roundtrip_fill={:.2}% gate_reject={:.2}%\n",
+        report.gate.selected_n,
+        report.gate.coverage,
+        report.gate.entry_fill_rate * 100.0,
+        report.gate.roundtrip_fill_rate * 100.0,
+        report.gate.rejection_rate * 100.0,
+    ));
+    out.push_str(&format!(
+        "train_days={} test_days={} step_days={} min_rule_obs={} stake_usd={:.2}\n\n",
+        report.options.train_window_days,
+        report.options.test_window_days,
+        report.options.step_days,
+        report.options.min_rule_observations,
+        report.options.review.stake_usd,
+    ));
+
+    out.push_str("=== Meta-Label Walk-Forward Aggregates ===\n");
+    out.push_str("rule,windows,pos_window_ratio,total_test_pnl,avg_window_pnl,min_window_pnl,avg_train_selected,avg_test_selected,avg_test_fill,avg_test_reject\n");
+    for aggregate in report.aggregates.iter().take(report.options.top_n.max(1)) {
+        out.push_str(&format!(
+            "{},{},{:.4},{:.4},{:.4},{:.4},{:.2},{:.2},{:.4},{:.4}\n",
+            aggregate.rule,
+            aggregate.windows,
+            aggregate.positive_window_ratio,
+            aggregate.total_test_pnl_after_cost,
+            aggregate.avg_test_pnl_per_window,
+            aggregate.min_test_pnl_after_cost,
+            aggregate.avg_train_selected,
+            aggregate.avg_test_selected,
+            aggregate.avg_test_fill_rate,
+            aggregate.avg_test_rejection_rate,
+        ));
+    }
+
+    out.push_str("\n=== Meta-Label Walk-Forward Windows ===\n");
+    out.push_str("window,rule,train_start,train_end,test_start,test_end,train_selected,train_pnl,train_avg_pnl,train_sharpe,test_selected,test_fill,test_reject,test_pnl,test_avg_pnl,test_sharpe,test_max_dd,symbol_pos,time_bucket_pos\n");
+    for window in &report.windows {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            window.window_index,
+            window.rule,
+            window.train_start,
+            window.train_end,
+            window.test_start,
+            window.test_end,
+            window.train.selected_n,
+            window.train.total_pnl_after_cost,
+            window.train.avg_pnl_after_cost,
+            window.train.sharpe,
+            window.test.selected_n,
+            window.test.executable_fill_rate,
+            window.test.rejection_rate,
+            window.test.total_pnl_after_cost,
+            window.test.avg_pnl_after_cost,
+            window.test.sharpe,
+            window.test.max_drawdown,
+            window.test.by_symbol_positive_ratio,
+            window.test.by_time_bucket_positive_ratio,
+        ));
+    }
+    out
+}
+
 pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usize) -> String {
     let mut out = String::new();
     out.push_str("=== Factor Review V2 Data Health ===\n");
@@ -2483,37 +2689,17 @@ fn build_trade_formation_rule_rows(
     rows: &[&FactorObservationV2],
     min_observations: usize,
 ) -> Vec<TradeFormationRuleRow> {
-    let rules: Vec<(&str, fn(&FactorObservationV2) -> bool)> = vec![
-        ("liquidity_gate_only", |_| true),
-        ("strong_direction", strong_direction_rule),
-        ("cex_obi_confirmation", cex_obi_confirmation_rule),
-        ("continuation_confirmation", continuation_confirmation_rule),
-        ("deribit_iv_confirmation", deribit_iv_confirmation_rule),
-        ("strong_direction_and_cex_obi", |row| {
-            strong_direction_rule(row) && cex_obi_confirmation_rule(row)
-        }),
-        ("strong_direction_and_continuation", |row| {
-            strong_direction_rule(row) && continuation_confirmation_rule(row)
-        }),
-        ("cex_obi_and_continuation", |row| {
-            cex_obi_confirmation_rule(row) && continuation_confirmation_rule(row)
-        }),
-        ("strong_direction_cex_and_continuation", |row| {
-            strong_direction_rule(row)
-                && cex_obi_confirmation_rule(row)
-                && continuation_confirmation_rule(row)
-        }),
-    ];
-    let mut out = rules
+    let mut out = meta_label_rule_specs()
         .into_iter()
-        .filter_map(|(rule, predicate)| {
+        .filter_map(|spec| {
             let selected = rows
                 .iter()
                 .copied()
-                .filter(|row| predicate(row))
+                .filter(|row| (spec.predicate)(row))
                 .collect::<Vec<_>>();
-            (selected.len() >= min_observations)
-                .then(|| build_trade_formation_rule_row(rule.to_string(), &selected, rows.len()))
+            (selected.len() >= min_observations).then(|| {
+                build_trade_formation_rule_row(spec.name.to_string(), &selected, rows.len())
+            })
         })
         .collect::<Vec<_>>();
     out.sort_by(|a, b| {
@@ -2527,6 +2713,57 @@ fn build_trade_formation_rule_rows(
             })
     });
     out
+}
+
+#[derive(Clone, Copy)]
+struct MetaLabelRuleSpec {
+    name: &'static str,
+    predicate: fn(&FactorObservationV2) -> bool,
+}
+
+fn meta_label_rule_specs() -> Vec<MetaLabelRuleSpec> {
+    vec![
+        MetaLabelRuleSpec {
+            name: "liquidity_gate_only",
+            predicate: |_| true,
+        },
+        MetaLabelRuleSpec {
+            name: "strong_direction",
+            predicate: strong_direction_rule,
+        },
+        MetaLabelRuleSpec {
+            name: "cex_obi_confirmation",
+            predicate: cex_obi_confirmation_rule,
+        },
+        MetaLabelRuleSpec {
+            name: "continuation_confirmation",
+            predicate: continuation_confirmation_rule,
+        },
+        MetaLabelRuleSpec {
+            name: "deribit_iv_confirmation",
+            predicate: deribit_iv_confirmation_rule,
+        },
+        MetaLabelRuleSpec {
+            name: "strong_direction_and_cex_obi",
+            predicate: |row| strong_direction_rule(row) && cex_obi_confirmation_rule(row),
+        },
+        MetaLabelRuleSpec {
+            name: "strong_direction_and_continuation",
+            predicate: |row| strong_direction_rule(row) && continuation_confirmation_rule(row),
+        },
+        MetaLabelRuleSpec {
+            name: "cex_obi_and_continuation",
+            predicate: |row| cex_obi_confirmation_rule(row) && continuation_confirmation_rule(row),
+        },
+        MetaLabelRuleSpec {
+            name: "strong_direction_cex_and_continuation",
+            predicate: |row| {
+                strong_direction_rule(row)
+                    && cex_obi_confirmation_rule(row)
+                    && continuation_confirmation_rule(row)
+            },
+        },
+    ]
 }
 
 fn build_trade_formation_rule_row(
@@ -3304,6 +3541,121 @@ fn aggregate_combo_v1_windows(windows: &[FactorComboV1Window]) -> FactorComboV1A
         avg_test_rejection_rate: mean(windows.iter().map(|window| window.test.rejection_rate)),
         avg_component_count: mean(windows.iter().map(|window| window.components.len() as f64)),
     }
+}
+
+fn evaluate_meta_label_rule(
+    rows: &[&FactorObservationV2],
+    predicate: fn(&FactorObservationV2) -> bool,
+) -> FactorSelectionMetrics {
+    let selected = rows
+        .iter()
+        .copied()
+        .filter(|row| predicate(row))
+        .collect::<Vec<_>>();
+    let filled = selected
+        .iter()
+        .copied()
+        .filter(|row| row.label_executable_pnl_15u.is_some())
+        .collect::<Vec<_>>();
+    let pnls = filled
+        .iter()
+        .filter_map(|row| row.label_executable_pnl_15u.map(|pnl| (row.tick_ts, pnl)))
+        .filter(|(_, pnl)| pnl.is_finite())
+        .collect::<Vec<_>>();
+    let pnl_values = pnls.iter().map(|(_, pnl)| *pnl).collect::<Vec<_>>();
+    let total_pnl = pnl_values.iter().sum::<f64>();
+
+    FactorSelectionMetrics {
+        n: rows.len(),
+        selected_n: selected.len(),
+        executable_fill_rate: ratio(filled.len(), selected.len()),
+        rejection_rate: ratio(
+            selected
+                .iter()
+                .filter(|row| !row.label_executable_fillable)
+                .count(),
+            selected.len(),
+        ),
+        total_pnl_after_cost: total_pnl,
+        avg_pnl_after_cost: if pnl_values.is_empty() {
+            f64::NAN
+        } else {
+            total_pnl / pnl_values.len() as f64
+        },
+        sharpe: trade_sharpe(&pnl_values),
+        max_drawdown: max_drawdown(&pnls),
+        by_symbol_positive_ratio: positive_group_ratio(&filled, |row| row.symbol.clone()),
+        by_time_bucket_positive_ratio: positive_group_ratio(&filled, |row| {
+            row.regime.as_str().to_string()
+        }),
+    }
+}
+
+fn aggregate_meta_label_windows(
+    windows: &[MetaLabelWalkForwardWindow],
+) -> Vec<MetaLabelWalkForwardAggregate> {
+    let mut grouped: BTreeMap<&str, Vec<&MetaLabelWalkForwardWindow>> = BTreeMap::new();
+    for window in windows {
+        grouped
+            .entry(window.rule.as_str())
+            .or_default()
+            .push(window);
+    }
+
+    let mut out = grouped
+        .into_iter()
+        .map(|(rule, rule_windows)| {
+            let total_test_pnl_after_cost = rule_windows
+                .iter()
+                .map(|window| window.test.total_pnl_after_cost)
+                .sum::<f64>();
+            let min_test_pnl_after_cost = rule_windows
+                .iter()
+                .map(|window| window.test.total_pnl_after_cost)
+                .fold(f64::INFINITY, f64::min);
+            let positive_windows = rule_windows
+                .iter()
+                .filter(|window| window.test.total_pnl_after_cost > 0.0)
+                .count();
+            MetaLabelWalkForwardAggregate {
+                rule: rule.to_string(),
+                windows: rule_windows.len(),
+                positive_window_ratio: ratio(positive_windows, rule_windows.len()),
+                total_test_pnl_after_cost,
+                avg_test_pnl_per_window: total_test_pnl_after_cost / rule_windows.len() as f64,
+                min_test_pnl_after_cost,
+                avg_train_selected: mean(
+                    rule_windows
+                        .iter()
+                        .map(|window| window.train.selected_n as f64),
+                ),
+                avg_test_selected: mean(
+                    rule_windows
+                        .iter()
+                        .map(|window| window.test.selected_n as f64),
+                ),
+                avg_test_fill_rate: mean(
+                    rule_windows
+                        .iter()
+                        .map(|window| window.test.executable_fill_rate),
+                ),
+                avg_test_rejection_rate: mean(
+                    rule_windows.iter().map(|window| window.test.rejection_rate),
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|a, b| {
+        b.total_test_pnl_after_cost
+            .partial_cmp(&a.total_test_pnl_after_cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.positive_window_ratio
+                    .partial_cmp(&a.positive_window_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    out
 }
 
 fn fit_walk_forward_factor(
@@ -4699,6 +5051,71 @@ mod tests {
         let formatted = format_trade_formation_v1_report(&report);
         assert!(formatted.contains("Trade Formation Review V1"));
         assert!(formatted.contains("Meta-Label Rule Candidates"));
+    }
+
+    #[test]
+    fn meta_label_walk_forward_tests_fixed_rules_out_of_sample() {
+        let base = Utc::now();
+        let observations = (0..96)
+            .map(|idx| {
+                let mut obs = base_obs();
+                obs.event_id = format!("event-{idx}");
+                obs.tick_ts = base + chrono::Duration::hours(idx);
+                let up_wins = idx % 2 == 0;
+                obs.model_prob_up = if up_wins { 0.80 } else { 0.20 };
+                obs.model_edge_up =
+                    obs.model_prob_up - obs.pm_up_ask - crypto_fee_cost(obs.pm_up_ask);
+                obs.distance_over_sigma = if up_wins { 1.10 } else { -1.10 };
+                obs.obi_10 = if up_wins { 0.40 } else { -0.40 };
+                obs.depth_imbalance = if up_wins { 0.40 } else { -0.40 };
+                obs.cex_bar_return_30s = if up_wins { 0.004 } else { -0.004 };
+                obs.cex_bar_return_60s = if up_wins { 0.006 } else { -0.006 };
+                obs.cex_signed_volume_ratio_30s = if up_wins { 0.70 } else { -0.70 };
+                obs.cex_consecutive_up_bars = if up_wins { 3.0 } else { 0.0 };
+                obs.cex_consecutive_down_bars = if up_wins { 0.0 } else { 3.0 };
+                obs.cex_breakout_volume_score = if up_wins { 1.5 } else { -1.5 };
+                obs.settlement_up = if up_wins { 1.0 } else { 0.0 };
+                obs
+            })
+            .collect::<Vec<_>>();
+
+        let report = walk_forward_meta_label_v1_with_deribit(
+            &observations,
+            &[],
+            base,
+            base + chrono::Duration::days(4) - chrono::Duration::seconds(1),
+            MetaLabelWalkForwardOptions {
+                review: FactorReviewOptions {
+                    stake_usd: 15.0,
+                    min_observations: 10,
+                    top_quantile: 0.2,
+                },
+                train_window_days: 2,
+                test_window_days: 1,
+                step_days: 1,
+                min_rule_observations: 10,
+                top_n: 10,
+                ..Default::default()
+            },
+        );
+
+        let continuation = report
+            .aggregates
+            .iter()
+            .find(|row| row.rule == "continuation_confirmation")
+            .expect("continuation aggregate");
+        assert_eq!(continuation.windows, 2);
+        assert!((continuation.positive_window_ratio - 1.0).abs() < EPS);
+        assert!(continuation.total_test_pnl_after_cost > 0.0);
+        assert!(report.windows.iter().any(|window| {
+            window.rule == "continuation_confirmation"
+                && window.test.selected_n > 0
+                && window.test.total_pnl_after_cost > 0.0
+        }));
+
+        let formatted = format_meta_label_walk_forward_v1_report(&report);
+        assert!(formatted.contains("Meta-Label Walk-Forward V1"));
+        assert!(formatted.contains("continuation_confirmation"));
     }
 
     #[test]

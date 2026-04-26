@@ -9632,3 +9632,23 @@ Checklist:
 Review:
 - Design rule: `label_future_exit_*` fields are explanation labels only. They can describe why winners formed or exits became available, but they must not be used inside live gates, train-time rule predicates, or point-in-time meta-label rules.
 - 2026-04-26: Six-symbol ploy-ci run `24947659098` succeeded on commit `42eeabfa` and confirmed the new report is emitted. The 2026-04-21..2026-04-25 sample had `source_obs=105064`, `v2_rows=210128`, `executable_pnl_rows=12131`, liquidity gate `selected=6005` with 100% entry/roundtrip fill, and trade-formation split `profitable_gated=3640`, `losing_gated=2365`, `missed_winners=3428`. The first meta-label candidate worth OOS review is `continuation_confirmation` (`n=1690`, win_rate `0.6864`, total_pnl `668.9946`), while `liquidity_gate_only` remained negative (`total_pnl=-2112.4030`).
+
+## PM5D Meta-Label Walk-Forward V1
+
+Goal: turn the trade-formation rule candidates into an out-of-sample test so descriptive profitable paths do not get promoted into strategy logic without train/test evidence.
+
+File ownership:
+- `crates/ploy-research/src/factors_v2.rs`
+- `crates/ploy-research/src/lib.rs`
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Add pre-registered meta-label rule walk-forward on top of LiquidityGateV1.
+- [x] Report per-rule OOS aggregates and per-window test performance.
+- [x] Print the report from `factor_walk_forward_v2`.
+- [x] Add focused regression coverage for continuation-confirmation OOS selection.
+- [ ] Verify locally and run the six-symbol ploy-ci smoke.
+
+Review:
+- Design rule: this lane tests fixed point-in-time rule predicates. It does not optimize thresholds from future labels and does not use `label_future_exit_*` as an input.

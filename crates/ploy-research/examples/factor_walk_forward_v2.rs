@@ -10,16 +10,17 @@ use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
     FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
     FactorWalkForwardOptions, FillabilityReviewOptions, LiquidityGateV1Options,
-    LiquidityGatedAlphaV1Options, TradeFormationReviewOptions,
+    LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions, TradeFormationReviewOptions,
     build_factor_observations_with_lob_sampled, build_factor_stability_report,
     format_factor_combo_v1_report, format_factor_stability_report,
     format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
     format_liquidity_gate_v1_report, format_liquidity_gated_alpha_v1_report,
-    format_trade_formation_v1_report, liquidity_gate_v1_with_deribit,
-    liquidity_gated_alpha_v1_with_deribit, load_deribit_feature_snapshots,
-    load_research_lob_snapshots_sampled, review_fillability_v1_with_deribit,
-    review_trade_formation_v1_with_deribit, walk_forward_factor_combo_v1_with_deribit,
-    walk_forward_factors_v2_with_deribit,
+    format_meta_label_walk_forward_v1_report, format_trade_formation_v1_report,
+    liquidity_gate_v1_with_deribit, liquidity_gated_alpha_v1_with_deribit,
+    load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
+    review_fillability_v1_with_deribit, review_trade_formation_v1_with_deribit,
+    walk_forward_factor_combo_v1_with_deribit, walk_forward_factors_v2_with_deribit,
+    walk_forward_meta_label_v1_with_deribit,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -246,6 +247,28 @@ async fn main() {
         },
     );
     println!("{}", format_trade_formation_v1_report(&formation_report));
+    let meta_label_report = walk_forward_meta_label_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        start,
+        end,
+        MetaLabelWalkForwardOptions {
+            review: options.review.clone(),
+            gate: LiquidityGateV1Options {
+                review: options.review.clone(),
+                ..Default::default()
+            },
+            train_window_days: options.train_window_days,
+            test_window_days: options.test_window_days,
+            step_days: options.step_days,
+            top_n: options.top_n,
+            ..Default::default()
+        },
+    );
+    println!(
+        "{}",
+        format_meta_label_walk_forward_v1_report(&meta_label_report)
+    );
     let stability_report =
         build_factor_stability_report(&report, FactorStabilityOptions::default());
     println!(
