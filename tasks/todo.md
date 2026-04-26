@@ -956,7 +956,7 @@ evidence.
 - [x] Add a point-in-time `LiquidityGateV1` report that measures coverage and executable PnL after
   applying conservative live-available liquidity constraints.
 - [x] Print the fillability and liquidity-gate reports from the existing walk-forward example.
-- [ ] Verify locally, then run a bounded ploy-ci smoke to prove the reports render from the remote
+- [x] Verify locally, then run a bounded ploy-ci smoke to prove the reports render from the remote
   database path.
 
 ## Review
@@ -973,6 +973,16 @@ evidence.
   `factor_walk_forward_v2.rs`, `git diff --check`, `rtk cargo test -p ploy-research factors_v2 --lib`,
   full `rtk cargo test -p ploy-research --lib`, `rtk cargo check -p ploy-research --no-default-features`,
   and DB-feature `factor_walk_forward_v2` example check.
+- 2026-04-26: Bounded ploy-ci smoke succeeded: GitHub Actions run `24946137615` on
+  `research/continuation-factor-gates` completed successfully. Artifact `report.txt` contains the
+  new `Fillability Review V1` and `Liquidity Gate V1` sections for `BTCUSDT,ETHUSDT`,
+  `2026-04-22..2026-04-25`, `stake_usd=15`, `train=2d`, `test=1d`, `step=1d`.
+  Baseline data health: `source_obs=28262`, `v2_rows=56524`, entry fill `14.16%`, exit fill `13.43%`,
+  rejection `85.84%`. High-capacity buckets reached near-100% entry and round-trip fill, but most
+  were still negative executable PnL. Default LiquidityGateV1 selected `5024` rows, coverage `8.89%`,
+  entry/exit/round-trip fill `100%`, rejection `0%`, but total executable PnL `-1923.5867`. This
+  proves liquidity gating fixes execution feasibility but is not itself an alpha; alpha must be
+  re-ranked inside the gated region.
 
 # PM5D Factor Stability And Combo V1 (2026-04-26)
 
