@@ -642,6 +642,76 @@ pub struct LiquidityGatedAlphaV1Report {
     pub stability: FactorStabilityReport,
 }
 
+#[derive(Debug, Clone)]
+pub struct TradeFormationReviewOptions {
+    pub review: FactorReviewOptions,
+    pub gate: LiquidityGateV1Options,
+    pub min_path_observations: usize,
+    pub top_n: usize,
+}
+
+impl Default for TradeFormationReviewOptions {
+    fn default() -> Self {
+        Self {
+            review: FactorReviewOptions::default(),
+            gate: LiquidityGateV1Options::default(),
+            min_path_observations: 20,
+            top_n: 20,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeFormationPathRow {
+    pub path: String,
+    pub n: usize,
+    pub coverage: f64,
+    pub executable_rows: usize,
+    pub win_rate: f64,
+    pub settlement_win_rate: f64,
+    pub total_pnl_after_cost: f64,
+    pub avg_pnl_after_cost: f64,
+    pub sharpe: f64,
+    pub avg_side_model_prob: f64,
+    pub avg_side_distance_over_sigma: f64,
+    pub avg_obi_10_side: f64,
+    pub avg_obi_persistence_30s_side: f64,
+    pub avg_cex_continuation_score_side: f64,
+    pub avg_entry_capacity_ratio: f64,
+    pub avg_exit_capacity_ratio: f64,
+    pub avg_pm_spread_bps: f64,
+    pub avg_future_exit_pnl_30s: f64,
+    pub avg_future_exit_bid_change_30s: f64,
+    pub avg_future_exit_bid_change_60s: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeFormationRuleRow {
+    pub rule: String,
+    pub n: usize,
+    pub coverage: f64,
+    pub win_rate: f64,
+    pub total_pnl_after_cost: f64,
+    pub avg_pnl_after_cost: f64,
+    pub sharpe: f64,
+    pub avg_future_exit_pnl_30s: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeFormationReviewReport {
+    pub options: TradeFormationReviewOptions,
+    pub health: DataHealthReport,
+    pub gate: LiquidityGateV1Report,
+    pub gated_rows: usize,
+    pub profitable_gated_rows: usize,
+    pub losing_gated_rows: usize,
+    pub missed_winner_rows: usize,
+    pub profitable_paths: Vec<TradeFormationPathRow>,
+    pub losing_paths: Vec<TradeFormationPathRow>,
+    pub missed_winner_paths: Vec<TradeFormationPathRow>,
+    pub meta_label_rules: Vec<TradeFormationRuleRow>,
+}
+
 pub fn build_factor_observations_v2(
     rows: &[FactorObservation],
     options: &FactorReviewOptions,
@@ -1482,10 +1552,6 @@ pub fn walk_forward_factor_combo_v1_with_deribit(
         &options.walk_forward.review,
     );
     v2_rows.sort_by_key(|row| row.tick_ts);
-    let health = build_data_health_report(source_rows, &v2_rows);
-    let train_duration = Duration::days(options.walk_forward.train_window_days.max(1));
-    let test_duration = Duration::days(options.walk_forward.test_window_days.max(1));
-    let step_duration = Duration::days(options.walk_forward.step_days.max(1));
     let descriptors: Vec<FactorV2Descriptor> = factor_v2_descriptors()
         .into_iter()
         .filter(is_walk_forward_candidate_descriptor)
@@ -1494,7 +1560,22 @@ pub fn walk_forward_factor_combo_v1_with_deribit(
         })
         .collect();
 
+    walk_forward_factor_combo_from_v2_rows(source_rows, &v2_rows, &descriptors, start, end, options)
+}
+
+fn walk_forward_factor_combo_from_v2_rows(
+    source_rows: &[FactorObservation],
+    v2_rows: &[FactorObservationV2],
+    descriptors: &[FactorV2Descriptor],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: FactorComboV1Options,
+) -> FactorComboV1Report {
+    let health = build_data_health_report(source_rows, v2_rows);
     let mut windows = Vec::new();
+    let train_duration = Duration::days(options.walk_forward.train_window_days.max(1));
+    let test_duration = Duration::days(options.walk_forward.test_window_days.max(1));
+    let step_duration = Duration::days(options.walk_forward.step_days.max(1));
     let mut train_start = start;
     let mut window_index = 0usize;
     while train_start + train_duration + test_duration <= end + Duration::seconds(1) {
@@ -1694,6 +1775,69 @@ pub fn liquidity_gated_alpha_v1_with_deribit(
         review,
         walk_forward,
         stability,
+    }
+}
+
+pub fn review_trade_formation_v1_with_deribit(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    mut options: TradeFormationReviewOptions,
+) -> TradeFormationReviewReport {
+    options.gate.review = options.review.clone();
+    let mut v2_rows =
+        build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    v2_rows.sort_by_key(|row| row.tick_ts);
+    let health = build_data_health_report(source_rows, &v2_rows);
+    let gate = build_liquidity_gate_v1_report(source_rows, &v2_rows, options.gate.clone());
+    let gated = v2_rows
+        .iter()
+        .filter(|row| liquidity_gate_v1_accepts(row, &options.gate))
+        .collect::<Vec<_>>();
+    let rejected = v2_rows
+        .iter()
+        .filter(|row| !liquidity_gate_v1_accepts(row, &options.gate))
+        .collect::<Vec<_>>();
+    let profitable_gated = gated
+        .iter()
+        .copied()
+        .filter(|row| executable_pnl(row).is_some_and(|pnl| pnl > 0.0))
+        .collect::<Vec<_>>();
+    let losing_gated = gated
+        .iter()
+        .copied()
+        .filter(|row| executable_pnl(row).is_some_and(|pnl| pnl <= 0.0))
+        .collect::<Vec<_>>();
+    let missed_winners = rejected
+        .iter()
+        .copied()
+        .filter(|row| executable_pnl(row).is_some_and(|pnl| pnl > 0.0))
+        .collect::<Vec<_>>();
+    let profitable_paths = build_trade_formation_path_rows(
+        &profitable_gated,
+        gated.len(),
+        options.min_path_observations,
+    );
+    let losing_paths =
+        build_trade_formation_path_rows(&losing_gated, gated.len(), options.min_path_observations);
+    let missed_winner_paths = build_trade_formation_path_rows(
+        &missed_winners,
+        rejected.len(),
+        options.min_path_observations,
+    );
+    let meta_label_rules = build_trade_formation_rule_rows(&gated, options.min_path_observations);
+
+    TradeFormationReviewReport {
+        options,
+        health,
+        gate,
+        gated_rows: gated.len(),
+        profitable_gated_rows: profitable_gated.len(),
+        losing_gated_rows: losing_gated.len(),
+        missed_winner_rows: missed_winners.len(),
+        profitable_paths,
+        losing_paths,
+        missed_winner_paths,
+        meta_label_rules,
     }
 }
 
@@ -2098,6 +2242,108 @@ pub fn format_liquidity_gated_alpha_v1_report(
     out
 }
 
+pub fn format_trade_formation_v1_report(report: &TradeFormationReviewReport) -> String {
+    let mut out = String::new();
+    out.push_str("=== Trade Formation Review V1 Data Health ===\n");
+    out.push_str(&format!(
+        "source_obs={} v2_rows={} executable_pnl_rows={} baseline_entry_fill={:.2}% baseline_reject={:.2}%\n",
+        report.health.source_observations,
+        report.health.v2_rows,
+        report.health.executable_pnl_rows,
+        report.health.entry_fill_rate() * 100.0,
+        report.health.rejection_rate() * 100.0,
+    ));
+    out.push_str(&format!(
+        "gated_rows={} gate_coverage={:.4} gate_entry_fill={:.2}% gate_roundtrip_fill={:.2}% gate_reject={:.2}% profitable_gated={} losing_gated={} missed_winners={}\n",
+        report.gated_rows,
+        report.gate.coverage,
+        report.gate.entry_fill_rate * 100.0,
+        report.gate.roundtrip_fill_rate * 100.0,
+        report.gate.rejection_rate * 100.0,
+        report.profitable_gated_rows,
+        report.losing_gated_rows,
+        report.missed_winner_rows,
+    ));
+    out.push_str(&format!(
+        "stake_usd={:.2} min_path_obs={} top_n={}\n\n",
+        report.options.review.stake_usd, report.options.min_path_observations, report.options.top_n,
+    ));
+    push_trade_formation_path_section(
+        &mut out,
+        "Profitable Paths",
+        &report.profitable_paths,
+        report.options.top_n,
+    );
+    push_trade_formation_path_section(
+        &mut out,
+        "Losing Paths",
+        &report.losing_paths,
+        report.options.top_n,
+    );
+    push_trade_formation_path_section(
+        &mut out,
+        "Missed Winner Paths",
+        &report.missed_winner_paths,
+        report.options.top_n,
+    );
+
+    out.push_str("\n=== Meta-Label Rule Candidates ===\n");
+    out.push_str("rule,n,coverage,win_rate,total_pnl,avg_pnl,sharpe,avg_future_exit_pnl_30s\n");
+    for row in report
+        .meta_label_rules
+        .iter()
+        .take(report.options.top_n.max(1))
+    {
+        out.push_str(&format!(
+            "{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            row.rule,
+            row.n,
+            row.coverage,
+            row.win_rate,
+            row.total_pnl_after_cost,
+            row.avg_pnl_after_cost,
+            row.sharpe,
+            row.avg_future_exit_pnl_30s,
+        ));
+    }
+    out
+}
+
+fn push_trade_formation_path_section(
+    out: &mut String,
+    title: &str,
+    rows: &[TradeFormationPathRow],
+    top_n: usize,
+) {
+    out.push_str(&format!("\n=== {title} ===\n"));
+    out.push_str("path,n,coverage,executable_rows,win_rate,settle_win_rate,total_pnl,avg_pnl,sharpe,avg_model_prob,avg_distance_sigma,avg_obi10,avg_obi_persist,avg_continuation,avg_entry_cap,avg_exit_cap,avg_pm_spread,avg_future_exit_pnl_30s,avg_future_bid_chg_30s,avg_future_bid_chg_60s\n");
+    for row in rows.iter().take(top_n.max(1)) {
+        out.push_str(&format!(
+            "{},{},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.2},{:.4},{:.4},{:.4}\n",
+            row.path,
+            row.n,
+            row.coverage,
+            row.executable_rows,
+            row.win_rate,
+            row.settlement_win_rate,
+            row.total_pnl_after_cost,
+            row.avg_pnl_after_cost,
+            row.sharpe,
+            row.avg_side_model_prob,
+            row.avg_side_distance_over_sigma,
+            row.avg_obi_10_side,
+            row.avg_obi_persistence_30s_side,
+            row.avg_cex_continuation_score_side,
+            row.avg_entry_capacity_ratio,
+            row.avg_exit_capacity_ratio,
+            row.avg_pm_spread_bps,
+            row.avg_future_exit_pnl_30s,
+            row.avg_future_exit_bid_change_30s,
+            row.avg_future_exit_bid_change_60s,
+        ));
+    }
+}
+
 pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usize) -> String {
     let mut out = String::new();
     out.push_str("=== Factor Review V2 Data Health ===\n");
@@ -2152,6 +2398,266 @@ pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usiz
         ));
     }
     out
+}
+
+fn build_trade_formation_path_rows(
+    rows: &[&FactorObservationV2],
+    denominator: usize,
+    min_observations: usize,
+) -> Vec<TradeFormationPathRow> {
+    let mut buckets: BTreeMap<String, Vec<&FactorObservationV2>> = BTreeMap::new();
+    for row in rows {
+        buckets
+            .entry(trade_formation_path(row))
+            .or_default()
+            .push(row);
+    }
+    let mut out = buckets
+        .into_iter()
+        .filter_map(|(path, bucket_rows)| {
+            (bucket_rows.len() >= min_observations)
+                .then(|| build_trade_formation_path_row(path, &bucket_rows, denominator))
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|a, b| {
+        b.total_pnl_after_cost
+            .partial_cmp(&a.total_pnl_after_cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.n.cmp(&a.n))
+    });
+    out
+}
+
+fn build_trade_formation_path_row(
+    path: String,
+    rows: &[&FactorObservationV2],
+    denominator: usize,
+) -> TradeFormationPathRow {
+    let pnl_values = rows
+        .iter()
+        .filter_map(|row| executable_pnl(row))
+        .collect::<Vec<_>>();
+    let total_pnl = pnl_values.iter().sum::<f64>();
+    let wins = pnl_values.iter().filter(|pnl| **pnl > 0.0).count();
+    let settlement_wins = rows
+        .iter()
+        .filter(|row| row.label_settlement_win.is_some_and(|label| label >= 0.5))
+        .count();
+    TradeFormationPathRow {
+        path,
+        n: rows.len(),
+        coverage: ratio(rows.len(), denominator),
+        executable_rows: pnl_values.len(),
+        win_rate: ratio(wins, pnl_values.len()),
+        settlement_win_rate: ratio(settlement_wins, rows.len()),
+        total_pnl_after_cost: total_pnl,
+        avg_pnl_after_cost: if pnl_values.is_empty() {
+            f64::NAN
+        } else {
+            total_pnl / pnl_values.len() as f64
+        },
+        sharpe: trade_sharpe(&pnl_values),
+        avg_side_model_prob: mean(rows.iter().map(|row| row.side_model_prob)),
+        avg_side_distance_over_sigma: mean(rows.iter().map(|row| row.side_distance_over_sigma)),
+        avg_obi_10_side: mean(rows.iter().map(|row| row.obi_10 * row.side.multiplier())),
+        avg_obi_persistence_30s_side: mean(rows.iter().map(|row| row.obi_persistence_30s_side)),
+        avg_cex_continuation_score_side: mean(
+            rows.iter().map(|row| row.cex_continuation_score_side),
+        ),
+        avg_entry_capacity_ratio: mean(rows.iter().map(|row| row.entry_capacity_ratio)),
+        avg_exit_capacity_ratio: mean(rows.iter().map(|row| row.exit_capacity_ratio)),
+        avg_pm_spread_bps: mean(rows.iter().map(|row| row.pm_spread_bps)),
+        avg_future_exit_pnl_30s: mean(rows.iter().filter_map(|row| row.label_future_exit_pnl_30s)),
+        avg_future_exit_bid_change_30s: mean(
+            rows.iter()
+                .filter_map(|row| row.label_future_exit_bid_change_30s),
+        ),
+        avg_future_exit_bid_change_60s: mean(
+            rows.iter()
+                .filter_map(|row| row.label_future_exit_bid_change_60s),
+        ),
+    }
+}
+
+fn build_trade_formation_rule_rows(
+    rows: &[&FactorObservationV2],
+    min_observations: usize,
+) -> Vec<TradeFormationRuleRow> {
+    let rules: Vec<(&str, fn(&FactorObservationV2) -> bool)> = vec![
+        ("liquidity_gate_only", |_| true),
+        ("strong_direction", strong_direction_rule),
+        ("cex_obi_confirmation", cex_obi_confirmation_rule),
+        ("continuation_confirmation", continuation_confirmation_rule),
+        ("deribit_iv_confirmation", deribit_iv_confirmation_rule),
+        ("strong_direction_and_cex_obi", |row| {
+            strong_direction_rule(row) && cex_obi_confirmation_rule(row)
+        }),
+        ("strong_direction_and_continuation", |row| {
+            strong_direction_rule(row) && continuation_confirmation_rule(row)
+        }),
+        ("cex_obi_and_continuation", |row| {
+            cex_obi_confirmation_rule(row) && continuation_confirmation_rule(row)
+        }),
+        ("strong_direction_cex_and_continuation", |row| {
+            strong_direction_rule(row)
+                && cex_obi_confirmation_rule(row)
+                && continuation_confirmation_rule(row)
+        }),
+    ];
+    let mut out = rules
+        .into_iter()
+        .filter_map(|(rule, predicate)| {
+            let selected = rows
+                .iter()
+                .copied()
+                .filter(|row| predicate(row))
+                .collect::<Vec<_>>();
+            (selected.len() >= min_observations)
+                .then(|| build_trade_formation_rule_row(rule.to_string(), &selected, rows.len()))
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|a, b| {
+        b.total_pnl_after_cost
+            .partial_cmp(&a.total_pnl_after_cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.win_rate
+                    .partial_cmp(&a.win_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    out
+}
+
+fn build_trade_formation_rule_row(
+    rule: String,
+    rows: &[&FactorObservationV2],
+    denominator: usize,
+) -> TradeFormationRuleRow {
+    let pnl_values = rows
+        .iter()
+        .filter_map(|row| executable_pnl(row))
+        .collect::<Vec<_>>();
+    let total_pnl = pnl_values.iter().sum::<f64>();
+    let wins = pnl_values.iter().filter(|pnl| **pnl > 0.0).count();
+    TradeFormationRuleRow {
+        rule,
+        n: rows.len(),
+        coverage: ratio(rows.len(), denominator),
+        win_rate: ratio(wins, pnl_values.len()),
+        total_pnl_after_cost: total_pnl,
+        avg_pnl_after_cost: if pnl_values.is_empty() {
+            f64::NAN
+        } else {
+            total_pnl / pnl_values.len() as f64
+        },
+        sharpe: trade_sharpe(&pnl_values),
+        avg_future_exit_pnl_30s: mean(rows.iter().filter_map(|row| row.label_future_exit_pnl_30s)),
+    }
+}
+
+fn trade_formation_path(row: &FactorObservationV2) -> String {
+    format!(
+        "direction={}|cex={}|continuation={}|pm={}|deribit={}|time={}",
+        direction_bin(row),
+        cex_obi_bin(row),
+        continuation_bin(row),
+        pm_execution_bin(row),
+        deribit_bin(row),
+        time_remaining_bin(row),
+    )
+}
+
+fn executable_pnl(row: &FactorObservationV2) -> Option<f64> {
+    row.label_executable_pnl_15u.filter(|pnl| pnl.is_finite())
+}
+
+fn direction_bin(row: &FactorObservationV2) -> &'static str {
+    let distance = row.side_distance_over_sigma;
+    if row.side_model_prob >= 0.70 || distance >= 1.0 {
+        "strong_model"
+    } else if row.side_model_prob >= 0.60 || distance >= 0.50 {
+        "medium_model"
+    } else {
+        "weak_model"
+    }
+}
+
+fn cex_obi_bin(row: &FactorObservationV2) -> &'static str {
+    let obi_side = row.obi_10 * row.side.multiplier();
+    if row.obi_persistence_30s_side >= 0.75 && obi_side > 0.0 {
+        "persistent_obi"
+    } else if row.depth_imbalance * row.side.multiplier() >= 0.25 {
+        "depth_confirmed"
+    } else if row.obi_flip_count_60s >= 2.0 {
+        "obi_unstable"
+    } else {
+        "obi_neutral"
+    }
+}
+
+fn continuation_bin(row: &FactorObservationV2) -> &'static str {
+    if row.cex_continuation_score_side >= 0.75
+        || (row.cex_bar_return_30s * row.side.multiplier() > 0.0
+            && row.cex_signed_volume_ratio_30s * row.side.multiplier() > 0.0)
+    {
+        "continuation_confirmed"
+    } else if row.cex_continuation_score_side <= -0.75 {
+        "continuation_against"
+    } else {
+        "continuation_neutral"
+    }
+}
+
+fn pm_execution_bin(row: &FactorObservationV2) -> &'static str {
+    let min_cap = row.entry_capacity_ratio.min(row.exit_capacity_ratio);
+    if min_cap >= 5.0 && row.pm_spread_bps <= 300.0 {
+        "deep_tight"
+    } else if min_cap >= 1.0 && row.pm_spread_bps <= 500.0 {
+        "fillable_tight"
+    } else if min_cap >= 1.0 {
+        "fillable_wide"
+    } else {
+        "thin"
+    }
+}
+
+fn deribit_bin(row: &FactorObservationV2) -> &'static str {
+    if !row.deribit_iv_change_60s.is_finite() {
+        "deribit_missing"
+    } else if row.deribit_iv_change_60s >= 0.02 {
+        "iv_up"
+    } else if row.deribit_iv_change_60s <= -0.02 {
+        "iv_down"
+    } else {
+        "iv_flat"
+    }
+}
+
+fn time_remaining_bin(row: &FactorObservationV2) -> &'static str {
+    if row.time_remaining_secs >= 240 {
+        "early"
+    } else if row.time_remaining_secs >= 120 {
+        "middle"
+    } else {
+        "late"
+    }
+}
+
+fn strong_direction_rule(row: &FactorObservationV2) -> bool {
+    matches!(direction_bin(row), "strong_model")
+}
+
+fn cex_obi_confirmation_rule(row: &FactorObservationV2) -> bool {
+    matches!(cex_obi_bin(row), "persistent_obi" | "depth_confirmed")
+}
+
+fn continuation_confirmation_rule(row: &FactorObservationV2) -> bool {
+    matches!(continuation_bin(row), "continuation_confirmed")
+}
+
+fn deribit_iv_confirmation_rule(row: &FactorObservationV2) -> bool {
+    matches!(deribit_bin(row), "iv_up" | "iv_down")
 }
 
 struct FillabilityBucketSpec {
@@ -4127,6 +4633,72 @@ mod tests {
                 .iter()
                 .any(|row| row.factor == "side_model_prob")
         );
+    }
+
+    #[test]
+    fn trade_formation_review_discovers_profitable_paths_and_meta_rules() {
+        let base = Utc::now();
+        let observations = (0..96)
+            .map(|idx| {
+                let mut obs = base_obs();
+                obs.event_id = format!("event-{idx}");
+                obs.tick_ts = base + chrono::Duration::seconds(idx * 30);
+                let up_wins = idx % 2 == 0;
+                obs.model_prob_up = if up_wins { 0.80 } else { 0.20 };
+                obs.model_edge_up =
+                    obs.model_prob_up - obs.pm_up_ask - crypto_fee_cost(obs.pm_up_ask);
+                obs.distance_over_sigma = if up_wins { 1.10 } else { -1.10 };
+                obs.obi_10 = if up_wins { 0.40 } else { -0.40 };
+                obs.depth_imbalance = if up_wins { 0.40 } else { -0.40 };
+                obs.cex_bar_return_30s = if up_wins { 0.004 } else { -0.004 };
+                obs.cex_bar_return_60s = if up_wins { 0.006 } else { -0.006 };
+                obs.cex_signed_volume_ratio_30s = if up_wins { 0.70 } else { -0.70 };
+                obs.cex_consecutive_up_bars = if up_wins { 3.0 } else { 0.0 };
+                obs.cex_consecutive_down_bars = if up_wins { 0.0 } else { 3.0 };
+                obs.cex_breakout_volume_score = if up_wins { 1.5 } else { -1.5 };
+                obs.settlement_up = if up_wins { 1.0 } else { 0.0 };
+                obs
+            })
+            .collect::<Vec<_>>();
+
+        let report = review_trade_formation_v1_with_deribit(
+            &observations,
+            &[],
+            TradeFormationReviewOptions {
+                review: FactorReviewOptions {
+                    stake_usd: 15.0,
+                    min_observations: 10,
+                    top_quantile: 0.2,
+                },
+                min_path_observations: 10,
+                top_n: 10,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(report.gated_rows, 192);
+        assert_eq!(report.profitable_gated_rows, 96);
+        assert_eq!(report.losing_gated_rows, 96);
+        assert!(report.missed_winner_paths.is_empty());
+        assert!(report.profitable_paths.iter().any(|row| {
+            row.path.contains("direction=strong_model")
+                && (row.path.contains("cex=depth_confirmed")
+                    || row.path.contains("cex=persistent_obi"))
+                && row.path.contains("continuation=continuation_confirmed")
+                && row.total_pnl_after_cost > 0.0
+        }));
+        assert!(report.losing_paths.iter().any(|row| {
+            row.path.contains("direction=weak_model")
+                && row.path.contains("continuation=continuation_against")
+                && row.total_pnl_after_cost < 0.0
+        }));
+        assert!(report.meta_label_rules.iter().any(|row| {
+            row.rule == "strong_direction_cex_and_continuation" && row.win_rate > 0.99
+        }));
+
+        let formatted = format_trade_formation_v1_report(&report);
+        assert!(formatted.contains("Trade Formation Review V1"));
+        assert!(formatted.contains("Meta-Label Rule Candidates"));
     }
 
     #[test]

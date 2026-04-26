@@ -10,13 +10,15 @@ use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
     FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
     FactorWalkForwardOptions, FillabilityReviewOptions, LiquidityGateV1Options,
-    LiquidityGatedAlphaV1Options, build_factor_observations_with_lob_sampled,
-    build_factor_stability_report, format_factor_combo_v1_report, format_factor_stability_report,
+    LiquidityGatedAlphaV1Options, TradeFormationReviewOptions,
+    build_factor_observations_with_lob_sampled, build_factor_stability_report,
+    format_factor_combo_v1_report, format_factor_stability_report,
     format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
     format_liquidity_gate_v1_report, format_liquidity_gated_alpha_v1_report,
-    liquidity_gate_v1_with_deribit, liquidity_gated_alpha_v1_with_deribit,
-    load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
-    review_fillability_v1_with_deribit, walk_forward_factor_combo_v1_with_deribit,
+    format_trade_formation_v1_report, liquidity_gate_v1_with_deribit,
+    liquidity_gated_alpha_v1_with_deribit, load_deribit_feature_snapshots,
+    load_research_lob_snapshots_sampled, review_fillability_v1_with_deribit,
+    review_trade_formation_v1_with_deribit, walk_forward_factor_combo_v1_with_deribit,
     walk_forward_factors_v2_with_deribit,
 };
 use sqlx::postgres::PgPoolOptions;
@@ -230,6 +232,20 @@ async fn main() {
         "{}",
         format_liquidity_gated_alpha_v1_report(&gated_alpha_report, options.top_n)
     );
+    let formation_report = review_trade_formation_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        TradeFormationReviewOptions {
+            review: options.review.clone(),
+            gate: LiquidityGateV1Options {
+                review: options.review.clone(),
+                ..Default::default()
+            },
+            top_n: options.top_n,
+            ..Default::default()
+        },
+    );
+    println!("{}", format_trade_formation_v1_report(&formation_report));
     let stability_report =
         build_factor_stability_report(&report, FactorStabilityOptions::default());
     println!(

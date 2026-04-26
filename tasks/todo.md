@@ -9611,3 +9611,23 @@ Checklist:
 
 Review:
 - 2026-04-25: Diagnostic optimize run `24925353379` showed hundreds to thousands of entry signals per trial, but every simulated order was rejected with `No executable ask liquidity`. The replay SQL was selecting the newest quote per token/second, which can choose later price-only `best_bid_ask`/`price_change` rows over book rows with size. The simulator also overwrote known sizes with `None` when it observed price-only quotes. Fixed both paths so LOB-aware replay can use executable liquidity when the historical data contains it, while still rejecting when size was never observed.
+
+## PM5D Trade Formation Review V1
+
+Goal: move past raw factor lists by explaining how profitable, losing, and missed executable PM5D trades form across direction, CEX microstructure, PM liquidity, Deribit volatility, and event-time context.
+
+File ownership:
+- `crates/ploy-research/src/factors_v2.rs`
+- `crates/ploy-research/src/lib.rs`
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Add event-level trade-formation review buckets for profitable gated trades, losing gated trades, and rejected missed winners.
+- [x] Add point-in-time meta-label rule candidates on top of the liquidity gate.
+- [x] Print the trade-formation report from `factor_walk_forward_v2`.
+- [x] Add focused regression coverage for profitable path and meta-label discovery.
+- [ ] Verify locally and run the six-symbol ploy-ci smoke.
+
+Review:
+- Design rule: `label_future_exit_*` fields are explanation labels only. They can describe why winners formed or exits became available, but they must not be used inside live gates, train-time rule predicates, or point-in-time meta-label rules.
