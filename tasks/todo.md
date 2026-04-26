@@ -956,7 +956,7 @@ evidence.
 - [x] Add a conservative combo v1 that uses train-only normalization and family-balanced signed
   factor scores instead of directly using ICIR as weights.
 - [x] Print the stability and combo reports from the existing walk-forward example.
-- [ ] Verify locally, then run a bounded ploy-ci/Tango smoke before considering merge.
+- [x] Verify locally, then run a bounded ploy-ci/Tango smoke before considering merge.
 
 ## Review
 
@@ -971,6 +971,14 @@ evidence.
   `factor_walk_forward_v2.rs`, `git diff --check`, `rtk cargo test -p ploy-research factors_v2 --lib`, full
   `rtk cargo test -p ploy-research --lib`, `rtk cargo check -p ploy-research --no-default-features`,
   and DB-feature `factor_walk_forward_v2` example check.
+- 2026-04-26: Bounded ploy-ci smoke succeeded: GitHub Actions run `24945674586` on
+  `research/continuation-factor-gates` completed successfully. Artifact `report.txt` contains the
+  new `Factor Stability Report` and `Factor Combo V1` sections for `BTCUSDT,ETHUSDT`,
+  `2026-04-22..2026-04-25`, `stake_usd=15`, `train=2d`, `test=1d`, `step=1d`,
+  `factor_name_filter=side_model,cex_continuation,entry_capacity,exit_capacity,pm_lag`. Data health:
+  `source_obs=28262`, `v2_rows=56524`, `executable_pnl_rows=8005`, entry fill rate `14.16%`, rejection
+  `85.84%`. Combo V1 smoke aggregate: `windows=1`, `total_test_pnl=201.8782`, fill rate `15.24%`,
+  rejection `84.76%`. Treat this as pipeline/format validation, not a final live parameter conclusion.
 
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 
