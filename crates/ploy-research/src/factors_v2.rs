@@ -503,6 +503,120 @@ pub struct FactorComboV1Report {
     pub aggregate: FactorComboV1Aggregate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillabilityDecision {
+    Candidate,
+    Watchlist,
+    Reject,
+}
+
+impl FillabilityDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FillabilityDecision::Candidate => "candidate",
+            FillabilityDecision::Watchlist => "watchlist",
+            FillabilityDecision::Reject => "reject",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FillabilityReviewOptions {
+    pub review: FactorReviewOptions,
+    pub min_bucket_observations: usize,
+    pub min_entry_fill_rate: f64,
+    pub min_roundtrip_fill_rate: f64,
+    pub max_rejection_rate: f64,
+}
+
+impl Default for FillabilityReviewOptions {
+    fn default() -> Self {
+        Self {
+            review: FactorReviewOptions::default(),
+            min_bucket_observations: 50,
+            min_entry_fill_rate: 0.30,
+            min_roundtrip_fill_rate: 0.20,
+            max_rejection_rate: 0.70,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FillabilityBucketRow {
+    pub dimension: String,
+    pub bucket: String,
+    pub n: usize,
+    pub coverage: f64,
+    pub entry_fill_rate: f64,
+    pub exit_fill_rate: f64,
+    pub roundtrip_fill_rate: f64,
+    pub rejection_rate: f64,
+    pub avg_entry_capacity_ratio: f64,
+    pub avg_exit_capacity_ratio: f64,
+    pub avg_entry_liquidity_usd: f64,
+    pub avg_exit_liquidity_usd: f64,
+    pub avg_pm_spread_bps: f64,
+    pub avg_pm_lag_secs: f64,
+    pub avg_slippage_to_fill_bps: f64,
+    pub avg_roundtrip_cost_usd: f64,
+    pub total_executable_pnl_after_cost: f64,
+    pub avg_executable_pnl_after_cost: f64,
+    pub decision: FillabilityDecision,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct FillabilityReviewReport {
+    pub options: FillabilityReviewOptions,
+    pub health: DataHealthReport,
+    pub rows: Vec<FillabilityBucketRow>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiquidityGateV1Options {
+    pub review: FactorReviewOptions,
+    pub min_entry_capacity_ratio: f64,
+    pub min_exit_capacity_ratio: f64,
+    pub max_pm_lag_secs: f64,
+    pub max_pm_spread_bps: f64,
+    pub min_time_remaining_secs: i64,
+    pub min_entry_ask: f64,
+    pub max_entry_ask: f64,
+}
+
+impl Default for LiquidityGateV1Options {
+    fn default() -> Self {
+        Self {
+            review: FactorReviewOptions::default(),
+            min_entry_capacity_ratio: 1.0,
+            min_exit_capacity_ratio: 1.0,
+            max_pm_lag_secs: 30.0,
+            max_pm_spread_bps: 3_000.0,
+            min_time_remaining_secs: 45,
+            min_entry_ask: 0.02,
+            max_entry_ask: 0.95,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LiquidityGateV1Report {
+    pub options: LiquidityGateV1Options,
+    pub health: DataHealthReport,
+    pub selected_n: usize,
+    pub coverage: f64,
+    pub entry_fill_rate: f64,
+    pub exit_fill_rate: f64,
+    pub roundtrip_fill_rate: f64,
+    pub rejection_rate: f64,
+    pub avg_entry_capacity_ratio: f64,
+    pub avg_exit_capacity_ratio: f64,
+    pub avg_pm_spread_bps: f64,
+    pub avg_pm_lag_secs: f64,
+    pub avg_roundtrip_cost_usd: f64,
+    pub metrics: FactorSelectionMetrics,
+}
+
 pub fn build_factor_observations_v2(
     rows: &[FactorObservation],
     options: &FactorReviewOptions,
@@ -1360,6 +1474,111 @@ pub fn walk_forward_factor_combo_v1_with_deribit(
     }
 }
 
+pub fn review_fillability_v1_with_deribit(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    options: FillabilityReviewOptions,
+) -> FillabilityReviewReport {
+    let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    let health = build_data_health_report(source_rows, &v2_rows);
+    let mut rows = Vec::new();
+    for spec in fillability_bucket_specs() {
+        let mut buckets: BTreeMap<String, Vec<&FactorObservationV2>> = BTreeMap::new();
+        for row in &v2_rows {
+            if let Some(bucket) = (spec.bucket)(row) {
+                buckets.entry(bucket).or_default().push(row);
+            }
+        }
+        for (bucket, bucket_rows) in buckets {
+            rows.push(build_fillability_bucket_row(
+                spec.dimension,
+                bucket,
+                &bucket_rows,
+                v2_rows.len(),
+                &options,
+            ));
+        }
+    }
+    rows.sort_by(|a, b| {
+        fillability_decision_rank(b.decision)
+            .cmp(&fillability_decision_rank(a.decision))
+            .then_with(|| {
+                b.roundtrip_fill_rate
+                    .partial_cmp(&a.roundtrip_fill_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.entry_fill_rate
+                    .partial_cmp(&a.entry_fill_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.total_executable_pnl_after_cost
+                    .partial_cmp(&a.total_executable_pnl_after_cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    FillabilityReviewReport {
+        options,
+        health,
+        rows,
+    }
+}
+
+pub fn liquidity_gate_v1_with_deribit(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    options: LiquidityGateV1Options,
+) -> LiquidityGateV1Report {
+    let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    let health = build_data_health_report(source_rows, &v2_rows);
+    let selected = v2_rows
+        .iter()
+        .filter(|row| liquidity_gate_v1_accepts(row, &options))
+        .collect::<Vec<_>>();
+    let metrics = selection_metrics_for_rows(v2_rows.len(), &selected);
+    LiquidityGateV1Report {
+        options,
+        health,
+        selected_n: selected.len(),
+        coverage: ratio(selected.len(), v2_rows.len()),
+        entry_fill_rate: ratio(
+            selected
+                .iter()
+                .filter(|row| row.label_executable_fillable)
+                .count(),
+            selected.len(),
+        ),
+        exit_fill_rate: ratio(
+            selected
+                .iter()
+                .filter(|row| row.label_exit_fillable)
+                .count(),
+            selected.len(),
+        ),
+        roundtrip_fill_rate: ratio(
+            selected
+                .iter()
+                .filter(|row| row.label_executable_fillable && row.label_exit_fillable)
+                .count(),
+            selected.len(),
+        ),
+        rejection_rate: ratio(
+            selected
+                .iter()
+                .filter(|row| !row.label_executable_fillable)
+                .count(),
+            selected.len(),
+        ),
+        avg_entry_capacity_ratio: mean(selected.iter().map(|row| row.entry_capacity_ratio)),
+        avg_exit_capacity_ratio: mean(selected.iter().map(|row| row.exit_capacity_ratio)),
+        avg_pm_spread_bps: mean(selected.iter().map(|row| row.pm_spread_bps)),
+        avg_pm_lag_secs: mean(selected.iter().map(|row| row.pm_lag_secs)),
+        avg_roundtrip_cost_usd: mean(selected.iter().map(|row| row.roundtrip_cost_usd)),
+        metrics,
+    }
+}
+
 pub fn format_factor_walk_forward_v2_report(report: &FactorWalkForwardReport) -> String {
     let mut out = String::new();
     out.push_str("=== Factor Walk-Forward V2 Data Health ===\n");
@@ -1568,6 +1787,101 @@ pub fn format_factor_combo_v1_report(report: &FactorComboV1Report) -> String {
     out
 }
 
+pub fn format_fillability_review_v1_report(
+    report: &FillabilityReviewReport,
+    top_n: usize,
+) -> String {
+    let mut out = String::new();
+    out.push_str("=== Fillability Review V1 Data Health ===\n");
+    out.push_str(&format!(
+        "source_obs={} v2_rows={} executable_pnl_rows={} entry_fill_rate={:.2}% exit_fill_rate={:.2}% rejection_rate={:.2}%\n",
+        report.health.source_observations,
+        report.health.v2_rows,
+        report.health.executable_pnl_rows,
+        report.health.entry_fill_rate() * 100.0,
+        report.health.exit_fill_rate() * 100.0,
+        report.health.rejection_rate() * 100.0,
+    ));
+    out.push_str(&format!(
+        "stake_usd={:.2} min_bucket_obs={} min_entry_fill={:.2} min_roundtrip_fill={:.2} max_reject={:.2}\n\n",
+        report.options.review.stake_usd,
+        report.options.min_bucket_observations,
+        report.options.min_entry_fill_rate,
+        report.options.min_roundtrip_fill_rate,
+        report.options.max_rejection_rate,
+    ));
+    out.push_str("decision,dimension,bucket,n,coverage,entry_fill,exit_fill,roundtrip_fill,reject_rate,avg_entry_cap,avg_exit_cap,avg_entry_liq,avg_exit_liq,avg_pm_spread_bps,avg_pm_lag_secs,avg_slippage_bps,avg_roundtrip_cost,total_pnl,avg_pnl,reason\n");
+    for row in report.rows.iter().take(top_n.max(1)) {
+        out.push_str(&format!(
+            "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{}\n",
+            row.decision.as_str(),
+            row.dimension,
+            row.bucket,
+            row.n,
+            row.coverage,
+            row.entry_fill_rate,
+            row.exit_fill_rate,
+            row.roundtrip_fill_rate,
+            row.rejection_rate,
+            row.avg_entry_capacity_ratio,
+            row.avg_exit_capacity_ratio,
+            row.avg_entry_liquidity_usd,
+            row.avg_exit_liquidity_usd,
+            row.avg_pm_spread_bps,
+            row.avg_pm_lag_secs,
+            row.avg_slippage_to_fill_bps,
+            row.avg_roundtrip_cost_usd,
+            row.total_executable_pnl_after_cost,
+            row.avg_executable_pnl_after_cost,
+            row.reason,
+        ));
+    }
+    out
+}
+
+pub fn format_liquidity_gate_v1_report(report: &LiquidityGateV1Report) -> String {
+    let mut out = String::new();
+    out.push_str("=== Liquidity Gate V1 Report ===\n");
+    out.push_str(&format!(
+        "source_obs={} v2_rows={} selected={} coverage={:.4} stake_usd={:.2}\n",
+        report.health.source_observations,
+        report.health.v2_rows,
+        report.selected_n,
+        report.coverage,
+        report.options.review.stake_usd,
+    ));
+    out.push_str(&format!(
+        "min_entry_cap={:.2} min_exit_cap={:.2} max_pm_lag_secs={:.2} max_pm_spread_bps={:.2} min_time_remaining_secs={} entry_ask=[{:.2},{:.2}]\n",
+        report.options.min_entry_capacity_ratio,
+        report.options.min_exit_capacity_ratio,
+        report.options.max_pm_lag_secs,
+        report.options.max_pm_spread_bps,
+        report.options.min_time_remaining_secs,
+        report.options.min_entry_ask,
+        report.options.max_entry_ask,
+    ));
+    out.push_str("entry_fill,exit_fill,roundtrip_fill,reject_rate,avg_entry_cap,avg_exit_cap,avg_pm_spread_bps,avg_pm_lag_secs,avg_roundtrip_cost,total_pnl,avg_pnl,sharpe,max_dd,symbol_pos,time_bucket_pos\n");
+    out.push_str(&format!(
+        "{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.2},{:.2},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+        report.entry_fill_rate,
+        report.exit_fill_rate,
+        report.roundtrip_fill_rate,
+        report.rejection_rate,
+        report.avg_entry_capacity_ratio,
+        report.avg_exit_capacity_ratio,
+        report.avg_pm_spread_bps,
+        report.avg_pm_lag_secs,
+        report.avg_roundtrip_cost_usd,
+        report.metrics.total_pnl_after_cost,
+        report.metrics.avg_pnl_after_cost,
+        report.metrics.sharpe,
+        report.metrics.max_drawdown,
+        report.metrics.by_symbol_positive_ratio,
+        report.metrics.by_time_bucket_positive_ratio,
+    ));
+    out
+}
+
 pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usize) -> String {
     let mut out = String::new();
     out.push_str("=== Factor Review V2 Data Health ===\n");
@@ -1622,6 +1936,319 @@ pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usiz
         ));
     }
     out
+}
+
+struct FillabilityBucketSpec {
+    dimension: &'static str,
+    bucket: fn(&FactorObservationV2) -> Option<String>,
+}
+
+fn fillability_bucket_specs() -> Vec<FillabilityBucketSpec> {
+    vec![
+        FillabilityBucketSpec {
+            dimension: "symbol",
+            bucket: |row| Some(row.symbol.clone()),
+        },
+        FillabilityBucketSpec {
+            dimension: "side",
+            bucket: |row| Some(row.side.as_str().to_string()),
+        },
+        FillabilityBucketSpec {
+            dimension: "regime",
+            bucket: |row| Some(row.regime.as_str().to_string()),
+        },
+        FillabilityBucketSpec {
+            dimension: "time_remaining_secs",
+            bucket: |row| {
+                bucket_value(row.time_remaining_secs as f64, &[60.0, 120.0, 180.0, 240.0])
+            },
+        },
+        FillabilityBucketSpec {
+            dimension: "entry_ask",
+            bucket: |row| bucket_value(row.entry_ask, &[0.05, 0.10, 0.15, 0.25, 0.40, 0.60, 0.80]),
+        },
+        FillabilityBucketSpec {
+            dimension: "pm_spread_bps",
+            bucket: |row| {
+                bucket_value(
+                    row.pm_spread_bps,
+                    &[250.0, 500.0, 1_000.0, 2_000.0, 4_000.0],
+                )
+            },
+        },
+        FillabilityBucketSpec {
+            dimension: "pm_lag_secs",
+            bucket: |row| bucket_value(row.pm_lag_secs, &[1.0, 3.0, 10.0, 30.0, 60.0]),
+        },
+        FillabilityBucketSpec {
+            dimension: "entry_capacity_ratio",
+            bucket: |row| bucket_value(row.entry_capacity_ratio, &[0.25, 0.50, 1.0, 2.0, 5.0]),
+        },
+        FillabilityBucketSpec {
+            dimension: "exit_capacity_ratio",
+            bucket: |row| bucket_value(row.exit_capacity_ratio, &[0.25, 0.50, 1.0, 2.0, 5.0]),
+        },
+        FillabilityBucketSpec {
+            dimension: "min_entry_exit_capacity_ratio",
+            bucket: |row| {
+                bucket_value(
+                    row.entry_capacity_ratio.min(row.exit_capacity_ratio),
+                    &[0.25, 0.50, 1.0, 2.0, 5.0],
+                )
+            },
+        },
+        FillabilityBucketSpec {
+            dimension: "entry_liquidity_usd",
+            bucket: |row| {
+                bucket_value(
+                    row.entry_liquidity_usd,
+                    &[5.0, 10.0, 15.0, 30.0, 75.0, 150.0],
+                )
+            },
+        },
+        FillabilityBucketSpec {
+            dimension: "exit_liquidity_usd",
+            bucket: |row| {
+                bucket_value(
+                    row.exit_liquidity_usd,
+                    &[5.0, 10.0, 15.0, 30.0, 75.0, 150.0],
+                )
+            },
+        },
+        FillabilityBucketSpec {
+            dimension: "cex_spread_bps",
+            bucket: |row| bucket_value(row.cex_spread_bps, &[1.0, 3.0, 5.0, 10.0, 20.0]),
+        },
+        FillabilityBucketSpec {
+            dimension: "obi_10_side",
+            bucket: |row| {
+                bucket_value(
+                    row.obi_10 * row.side.multiplier(),
+                    &[-0.5, -0.1, 0.0, 0.1, 0.5],
+                )
+            },
+        },
+        FillabilityBucketSpec {
+            dimension: "depth_imbalance_side",
+            bucket: |row| {
+                bucket_value(
+                    row.depth_imbalance * row.side.multiplier(),
+                    &[-0.5, -0.1, 0.0, 0.1, 0.5],
+                )
+            },
+        },
+        FillabilityBucketSpec {
+            dimension: "cex_continuation_score_side",
+            bucket: |row| {
+                bucket_value(
+                    row.cex_continuation_score_side,
+                    &[-1.0, -0.25, 0.0, 0.25, 1.0, 2.0],
+                )
+            },
+        },
+        FillabilityBucketSpec {
+            dimension: "cex_bar_volume_ratio_30s",
+            bucket: |row| bucket_value(row.cex_bar_volume_ratio_30s, &[0.5, 1.0, 1.5, 2.5, 5.0]),
+        },
+        FillabilityBucketSpec {
+            dimension: "deribit_mark_iv",
+            bucket: |row| bucket_value(row.deribit_mark_iv, &[0.30, 0.50, 0.75, 1.00, 1.50]),
+        },
+        FillabilityBucketSpec {
+            dimension: "deribit_iv_change_30s",
+            bucket: |row| bucket_value(row.deribit_iv_change_30s, &[-0.05, -0.01, 0.0, 0.01, 0.05]),
+        },
+    ]
+}
+
+fn build_fillability_bucket_row(
+    dimension: &str,
+    bucket: String,
+    rows: &[&FactorObservationV2],
+    total_rows: usize,
+    options: &FillabilityReviewOptions,
+) -> FillabilityBucketRow {
+    let entry_filled = rows
+        .iter()
+        .filter(|row| row.label_executable_fillable)
+        .count();
+    let exit_filled = rows.iter().filter(|row| row.label_exit_fillable).count();
+    let roundtrip_filled = rows
+        .iter()
+        .filter(|row| row.label_executable_fillable && row.label_exit_fillable)
+        .count();
+    let executable_pnls = rows
+        .iter()
+        .filter_map(|row| row.label_executable_pnl_15u)
+        .filter(|pnl| pnl.is_finite())
+        .collect::<Vec<_>>();
+    let total_executable_pnl_after_cost = executable_pnls.iter().sum::<f64>();
+    let entry_fill_rate = ratio(entry_filled, rows.len());
+    let roundtrip_fill_rate = ratio(roundtrip_filled, rows.len());
+    let rejection_rate = 1.0 - entry_fill_rate;
+    let (decision, reason) = fillability_decision(
+        rows.len(),
+        entry_fill_rate,
+        roundtrip_fill_rate,
+        rejection_rate,
+        options,
+    );
+    FillabilityBucketRow {
+        dimension: dimension.to_string(),
+        bucket,
+        n: rows.len(),
+        coverage: ratio(rows.len(), total_rows),
+        entry_fill_rate,
+        exit_fill_rate: ratio(exit_filled, rows.len()),
+        roundtrip_fill_rate,
+        rejection_rate,
+        avg_entry_capacity_ratio: mean(rows.iter().map(|row| row.entry_capacity_ratio)),
+        avg_exit_capacity_ratio: mean(rows.iter().map(|row| row.exit_capacity_ratio)),
+        avg_entry_liquidity_usd: mean(rows.iter().map(|row| row.entry_liquidity_usd)),
+        avg_exit_liquidity_usd: mean(rows.iter().map(|row| row.exit_liquidity_usd)),
+        avg_pm_spread_bps: mean(rows.iter().map(|row| row.pm_spread_bps)),
+        avg_pm_lag_secs: mean(rows.iter().map(|row| row.pm_lag_secs)),
+        avg_slippage_to_fill_bps: mean(rows.iter().map(|row| row.slippage_to_fill_15u_bps)),
+        avg_roundtrip_cost_usd: mean(rows.iter().map(|row| row.roundtrip_cost_usd)),
+        total_executable_pnl_after_cost,
+        avg_executable_pnl_after_cost: if executable_pnls.is_empty() {
+            f64::NAN
+        } else {
+            total_executable_pnl_after_cost / executable_pnls.len() as f64
+        },
+        decision,
+        reason,
+    }
+}
+
+fn fillability_decision(
+    n: usize,
+    entry_fill_rate: f64,
+    roundtrip_fill_rate: f64,
+    rejection_rate: f64,
+    options: &FillabilityReviewOptions,
+) -> (FillabilityDecision, String) {
+    if n < options.min_bucket_observations {
+        return (
+            FillabilityDecision::Reject,
+            "too_few_observations".to_string(),
+        );
+    }
+    if entry_fill_rate < options.min_entry_fill_rate {
+        return (
+            FillabilityDecision::Reject,
+            "low_entry_fill_rate".to_string(),
+        );
+    }
+    if rejection_rate > options.max_rejection_rate {
+        return (
+            FillabilityDecision::Reject,
+            "high_rejection_rate".to_string(),
+        );
+    }
+    if roundtrip_fill_rate < options.min_roundtrip_fill_rate {
+        return (
+            FillabilityDecision::Watchlist,
+            "entry_fill_ok_but_roundtrip_weak".to_string(),
+        );
+    }
+    (FillabilityDecision::Candidate, "passed".to_string())
+}
+
+fn fillability_decision_rank(decision: FillabilityDecision) -> usize {
+    match decision {
+        FillabilityDecision::Candidate => 3,
+        FillabilityDecision::Watchlist => 2,
+        FillabilityDecision::Reject => 1,
+    }
+}
+
+fn liquidity_gate_v1_accepts(row: &FactorObservationV2, options: &LiquidityGateV1Options) -> bool {
+    valid_price(row.entry_ask)
+        && row.entry_ask >= options.min_entry_ask
+        && row.entry_ask <= options.max_entry_ask
+        && row.time_remaining_secs >= options.min_time_remaining_secs
+        && row.pm_lag_secs.is_finite()
+        && row.pm_lag_secs <= options.max_pm_lag_secs
+        && row.pm_spread_bps.is_finite()
+        && row.pm_spread_bps <= options.max_pm_spread_bps
+        && row.entry_capacity_ratio.is_finite()
+        && row.entry_capacity_ratio >= options.min_entry_capacity_ratio
+        && row.exit_capacity_ratio.is_finite()
+        && row.exit_capacity_ratio >= options.min_exit_capacity_ratio
+}
+
+fn selection_metrics_for_rows(
+    total_rows: usize,
+    selected: &[&FactorObservationV2],
+) -> FactorSelectionMetrics {
+    let filled = selected
+        .iter()
+        .copied()
+        .filter(|row| row.label_executable_pnl_15u.is_some())
+        .collect::<Vec<_>>();
+    let pnls = filled
+        .iter()
+        .filter_map(|row| row.label_executable_pnl_15u.map(|pnl| (row.tick_ts, pnl)))
+        .filter(|(_, pnl)| pnl.is_finite())
+        .collect::<Vec<_>>();
+    let pnl_values = pnls.iter().map(|(_, pnl)| *pnl).collect::<Vec<_>>();
+    let total_pnl = pnl_values.iter().sum::<f64>();
+    FactorSelectionMetrics {
+        n: total_rows,
+        selected_n: selected.len(),
+        executable_fill_rate: ratio(filled.len(), selected.len()),
+        rejection_rate: ratio(
+            selected
+                .iter()
+                .filter(|row| !row.label_executable_fillable)
+                .count(),
+            selected.len(),
+        ),
+        total_pnl_after_cost: total_pnl,
+        avg_pnl_after_cost: if pnl_values.is_empty() {
+            f64::NAN
+        } else {
+            total_pnl / pnl_values.len() as f64
+        },
+        sharpe: trade_sharpe(&pnl_values),
+        max_drawdown: max_drawdown(&pnls),
+        by_symbol_positive_ratio: positive_group_ratio(&filled, |row| row.symbol.clone()),
+        by_time_bucket_positive_ratio: positive_group_ratio(&filled, |row| {
+            row.regime.as_str().to_string()
+        }),
+    }
+}
+
+fn bucket_value(value: f64, edges: &[f64]) -> Option<String> {
+    if !value.is_finite() {
+        return None;
+    }
+    let first = *edges.first()?;
+    if value < first {
+        return Some(format!("lt_{}", bucket_num(first)));
+    }
+    for pair in edges.windows(2) {
+        let lo = pair[0];
+        let hi = pair[1];
+        if value >= lo && value < hi {
+            return Some(format!("{}_{}", bucket_num(lo), bucket_num(hi)));
+        }
+    }
+    edges
+        .last()
+        .map(|last| format!("gte_{}", bucket_num(*last)))
+}
+
+fn bucket_num(value: f64) -> String {
+    let raw = if value.abs() >= 100.0 {
+        format!("{value:.0}")
+    } else if value.abs() >= 10.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value:.2}")
+    };
+    raw.replace('-', "m").replace('.', "p")
 }
 
 fn stability_decision(
@@ -3160,6 +3787,66 @@ mod tests {
         assert_eq!(health.entry_fillable_rows, 0);
         assert_eq!(health.executable_pnl_rows, 0);
         assert!((health.rejection_rate() - 1.0).abs() < EPS);
+    }
+
+    #[test]
+    fn fillability_review_marks_capacity_bucket_candidate() {
+        let observations = (0..40).map(|_| base_obs()).collect::<Vec<_>>();
+        let report = review_fillability_v1_with_deribit(
+            &observations,
+            &[],
+            FillabilityReviewOptions {
+                min_bucket_observations: 10,
+                min_entry_fill_rate: 0.30,
+                min_roundtrip_fill_rate: 0.20,
+                max_rejection_rate: 0.70,
+                ..Default::default()
+            },
+        );
+
+        let capacity = report
+            .rows
+            .iter()
+            .find(|row| {
+                row.dimension == "min_entry_exit_capacity_ratio" && row.bucket == "1p00_2p00"
+            })
+            .expect("capacity bucket");
+        assert_eq!(capacity.decision, FillabilityDecision::Candidate);
+        assert!((capacity.entry_fill_rate - 1.0).abs() < EPS);
+        assert!((capacity.roundtrip_fill_rate - 1.0).abs() < EPS);
+    }
+
+    #[test]
+    fn liquidity_gate_v1_selects_only_point_in_time_capacity() {
+        let observations = (0..20)
+            .map(|idx| {
+                let mut obs = base_obs();
+                if idx % 2 == 1 {
+                    obs.pm_up_ask_size = 1.0;
+                    obs.pm_up_bid_size = 1.0;
+                    obs.pm_down_ask_size = 1.0;
+                    obs.pm_down_bid_size = 1.0;
+                }
+                obs
+            })
+            .collect::<Vec<_>>();
+        let report = liquidity_gate_v1_with_deribit(
+            &observations,
+            &[],
+            LiquidityGateV1Options {
+                review: FactorReviewOptions {
+                    stake_usd: 15.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(report.health.v2_rows, 40);
+        assert_eq!(report.selected_n, 20);
+        assert!((report.coverage - 0.5).abs() < EPS);
+        assert!((report.entry_fill_rate - 1.0).abs() < EPS);
+        assert!((report.roundtrip_fill_rate - 1.0).abs() < EPS);
     }
 
     #[test]

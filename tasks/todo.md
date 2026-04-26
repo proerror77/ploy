@@ -938,6 +938,42 @@ evidence.
   positive-window ratio `0.3333`, average fill `8.04%`, rejection `91.96%`.
   Do not promote either gate to live until more symbols/days and walk-forward stability improve.
 
+# PM5D Fillability-First Review And Liquidity Gate V1 (2026-04-26)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: solo research lane
+- `tasks/todo.md`
+  - Owner: solo research lane
+
+## Tasks
+
+- [x] Add a fillability review that bins PM/CEX/Deribit/execution context and ranks buckets by
+  entry fill, round-trip fill, rejection, coverage, slippage/cost, and executable PnL.
+- [x] Add a point-in-time `LiquidityGateV1` report that measures coverage and executable PnL after
+  applying conservative live-available liquidity constraints.
+- [x] Print the fillability and liquidity-gate reports from the existing walk-forward example.
+- [ ] Verify locally, then run a bounded ploy-ci smoke to prove the reports render from the remote
+  database path.
+
+## Review
+
+- 2026-04-26: Design rule: do fillability-first. Alpha factors are only useful inside a
+  live-executable region. The gate may use current PM quote, current PM depth/capacity, quote lag,
+  spread, time remaining, and current CEX/Deribit regime, but must not use settlement or future
+  exit labels to decide whether to trade.
+- 2026-04-26: Implemented `FillabilityReviewV1` and `LiquidityGateV1`. Fillability review bins
+  symbol/side/regime/time remaining, PM price/spread/lag/capacity/liquidity, CEX LOB/aggTrade
+  continuation and volume context, and Deribit IV context. LiquidityGateV1 uses only point-in-time
+  live-available fields: entry/exit capacity, PM lag, PM spread, time remaining, and entry ask band.
+- 2026-04-26: Local verification passed: targeted `rustfmt --check` for `factors_v2.rs` and
+  `factor_walk_forward_v2.rs`, `git diff --check`, `rtk cargo test -p ploy-research factors_v2 --lib`,
+  full `rtk cargo test -p ploy-research --lib`, `rtk cargo check -p ploy-research --no-default-features`,
+  and DB-feature `factor_walk_forward_v2` example check.
+
 # PM5D Factor Stability And Combo V1 (2026-04-26)
 
 ## Files

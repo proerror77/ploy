@@ -9,10 +9,13 @@ use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
     FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
-    FactorWalkForwardOptions, build_factor_observations_with_lob_sampled,
-    build_factor_stability_report, format_factor_combo_v1_report, format_factor_stability_report,
-    format_factor_walk_forward_v2_report, load_deribit_feature_snapshots,
-    load_research_lob_snapshots_sampled, walk_forward_factor_combo_v1_with_deribit,
+    FactorWalkForwardOptions, FillabilityReviewOptions, LiquidityGateV1Options,
+    build_factor_observations_with_lob_sampled, build_factor_stability_report,
+    format_factor_combo_v1_report, format_factor_stability_report,
+    format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
+    format_liquidity_gate_v1_report, liquidity_gate_v1_with_deribit,
+    load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
+    review_fillability_v1_with_deribit, walk_forward_factor_combo_v1_with_deribit,
     walk_forward_factors_v2_with_deribit,
 };
 use sqlx::postgres::PgPoolOptions;
@@ -185,6 +188,30 @@ async fn main() {
         options.clone(),
     );
     println!("{}", format_factor_walk_forward_v2_report(&report));
+    let fillability_report = review_fillability_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        FillabilityReviewOptions {
+            review: options.review.clone(),
+            ..Default::default()
+        },
+    );
+    println!(
+        "{}",
+        format_fillability_review_v1_report(&fillability_report, options.top_n)
+    );
+    let liquidity_gate_report = liquidity_gate_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        LiquidityGateV1Options {
+            review: options.review.clone(),
+            ..Default::default()
+        },
+    );
+    println!(
+        "{}",
+        format_liquidity_gate_v1_report(&liquidity_gate_report)
+    );
     let stability_report =
         build_factor_stability_report(&report, FactorStabilityOptions::default());
     println!(
