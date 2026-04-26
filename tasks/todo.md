@@ -991,6 +991,15 @@ evidence.
   `rtk cargo test -p ploy-research factors_v2 --lib`, full `rtk cargo test -p ploy-research --lib`,
   `rtk cargo check -p ploy-research --no-default-features`, and DB-feature
   `factor_walk_forward_v2` example check.
+- 2026-04-26: Gated-alpha smoke succeeded: GitHub Actions run `24946744696` on
+  `research/continuation-factor-gates` completed successfully. Artifact `report.txt` confirms no
+  `future_exit_*` labels appear in `Liquidity-Gated Single-Factor Reviews`. Gate health stayed
+  `5024` rows, coverage `8.89%`, entry/round-trip fill `100%`, rejection `0%`. Inside that
+  executable region, top walk-forward test PnL candidates were `side_model_prob` `1189.3706`,
+  `cex_continuation_edge_gate` `195.5518`, `cex_continuation_score_side` `165.0970`,
+  `cex_continuation_liquidity_gate` `160.1531`, `side_model_edge` `26.1325`, and
+  `entry_capacity_ratio` `20.1903`. All remain `watchlist` because this bounded smoke has only one
+  gated test window; require broader multi-symbol/multi-day runs before promotion.
 
 # PM5D Factor Stability And Combo V1 (2026-04-26)
 
