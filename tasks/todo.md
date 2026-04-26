@@ -1000,6 +1000,24 @@ evidence.
   `cex_continuation_liquidity_gate` `160.1531`, `side_model_edge` `26.1325`, and
   `entry_capacity_ratio` `20.1903`. All remain `watchlist` because this bounded smoke has only one
   gated test window; require broader multi-symbol/multi-day runs before promotion.
+- 2026-04-26: Six-symbol ploy-ci run `24947015110` on `research/continuation-factor-gates`
+  completed successfully for `2026-04-21..2026-04-25`, `stake_usd=15`, `train=2d`, `test=1d`,
+  `step=1d`, and no factor-name filter. Baseline had `source_obs=105064`, `v2_rows=210128`,
+  `executable_pnl_rows=12131`, entry fill `5.77%`, exit fill `5.56%`, rejection `94.23%`.
+  `LiquidityGateV1` selected `6005` rows, coverage `2.86%`, entry/round-trip fill `100%`,
+  rejection `0%`, but raw gated-region PnL was `-2112.4030`, confirming the gate is execution
+  feasibility rather than alpha. Inside the gated region, single-factor review ranked
+  `side_distance_over_sigma` and `side_model_prob` first at `11864.7859` total PnL each, followed
+  by `abs_distance_to_beat` `1789.6649`, `entry_size_change_30s` `375.2320`,
+  `cex_signed_volume_ratio_30s_side`/`cex_breakout_volume_side` `326.9961`,
+  `side_model_edge` `239.6759`, `cex_bar_return_30s_side` `239.3301`,
+  `cum_trade_imbalance_5m_side` `239.2184`, `cex_continuation_edge_gate` `151.0650`,
+  `cex_continuation_liquidity_gate` `143.0696`, and `deribit_iv_change_60s` `139.1614`.
+  Liquidity-gated walk-forward still had only one OOS gated test window; top watchlist factors were
+  `side_distance_over_sigma`/`side_model_prob` `1341.2387`, `depth_imbalance_side` `620.3623`,
+  `obi_persistence_30s_side` `496.2592`, `obi_10_side` `366.1758`, and `drift_30s` `356.8128`,
+  all with fill `100%` and rejection `0%`. Do not promote to live until longer dated windows produce
+  multiple gated OOS windows and stability decisions can move beyond `too_few_windows_positive_pnl`.
 
 # PM5D Factor Stability And Combo V1 (2026-04-26)
 
