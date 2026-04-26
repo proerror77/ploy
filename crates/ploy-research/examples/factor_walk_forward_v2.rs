@@ -10,10 +10,11 @@ use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
     FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
     FactorWalkForwardOptions, FillabilityReviewOptions, LiquidityGateV1Options,
-    build_factor_observations_with_lob_sampled, build_factor_stability_report,
-    format_factor_combo_v1_report, format_factor_stability_report,
+    LiquidityGatedAlphaV1Options, build_factor_observations_with_lob_sampled,
+    build_factor_stability_report, format_factor_combo_v1_report, format_factor_stability_report,
     format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
-    format_liquidity_gate_v1_report, liquidity_gate_v1_with_deribit,
+    format_liquidity_gate_v1_report, format_liquidity_gated_alpha_v1_report,
+    liquidity_gate_v1_with_deribit, liquidity_gated_alpha_v1_with_deribit,
     load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
     review_fillability_v1_with_deribit, walk_forward_factor_combo_v1_with_deribit,
     walk_forward_factors_v2_with_deribit,
@@ -211,6 +212,23 @@ async fn main() {
     println!(
         "{}",
         format_liquidity_gate_v1_report(&liquidity_gate_report)
+    );
+    let gated_alpha_report = liquidity_gated_alpha_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        start,
+        end,
+        LiquidityGatedAlphaV1Options {
+            gate: LiquidityGateV1Options {
+                review: options.review.clone(),
+                ..Default::default()
+            },
+            walk_forward: options.clone(),
+        },
+    );
+    println!(
+        "{}",
+        format_liquidity_gated_alpha_v1_report(&gated_alpha_report, options.top_n)
     );
     let stability_report =
         build_factor_stability_report(&report, FactorStabilityOptions::default());

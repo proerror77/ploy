@@ -955,6 +955,8 @@ evidence.
   entry fill, round-trip fill, rejection, coverage, slippage/cost, and executable PnL.
 - [x] Add a point-in-time `LiquidityGateV1` report that measures coverage and executable PnL after
   applying conservative live-available liquidity constraints.
+- [x] Add a liquidity-gated alpha review that re-ranks factors only after the point-in-time
+  liquidity gate has selected tradeable rows.
 - [x] Print the fillability and liquidity-gate reports from the existing walk-forward example.
 - [x] Verify locally, then run a bounded ploy-ci smoke to prove the reports render from the remote
   database path.
@@ -983,6 +985,12 @@ evidence.
   entry/exit/round-trip fill `100%`, rejection `0%`, but total executable PnL `-1923.5867`. This
   proves liquidity gating fixes execution feasibility but is not itself an alpha; alpha must be
   re-ranked inside the gated region.
+- 2026-04-26: Implemented `LiquidityGatedAlphaV1`, which first applies `LiquidityGateV1`, then
+  re-runs single-factor review, walk-forward aggregates, and stability only on gated tradeable rows.
+  Local verification passed: targeted `rustfmt --check`, `git diff --check`,
+  `rtk cargo test -p ploy-research factors_v2 --lib`, full `rtk cargo test -p ploy-research --lib`,
+  `rtk cargo check -p ploy-research --no-default-features`, and DB-feature
+  `factor_walk_forward_v2` example check.
 
 # PM5D Factor Stability And Combo V1 (2026-04-26)
 

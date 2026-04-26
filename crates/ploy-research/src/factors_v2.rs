@@ -617,6 +617,31 @@ pub struct LiquidityGateV1Report {
     pub metrics: FactorSelectionMetrics,
 }
 
+#[derive(Debug, Clone)]
+pub struct LiquidityGatedAlphaV1Options {
+    pub gate: LiquidityGateV1Options,
+    pub walk_forward: FactorWalkForwardOptions,
+}
+
+impl Default for LiquidityGatedAlphaV1Options {
+    fn default() -> Self {
+        Self {
+            gate: LiquidityGateV1Options::default(),
+            walk_forward: FactorWalkForwardOptions::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LiquidityGatedAlphaV1Report {
+    pub options: LiquidityGatedAlphaV1Options,
+    pub baseline_health: DataHealthReport,
+    pub gate: LiquidityGateV1Report,
+    pub review: FactorReviewV2Report,
+    pub walk_forward: FactorWalkForwardReport,
+    pub stability: FactorStabilityReport,
+}
+
 pub fn build_factor_observations_v2(
     rows: &[FactorObservation],
     options: &FactorReviewOptions,
@@ -1189,10 +1214,18 @@ pub fn review_factors_v2_with_deribit(
     options: FactorReviewOptions,
 ) -> FactorReviewV2Report {
     let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options);
-    let health = build_data_health_report(source_rows, &v2_rows);
+    review_factor_rows(source_rows, &v2_rows, options)
+}
+
+fn review_factor_rows(
+    source_rows: &[FactorObservation],
+    v2_rows: &[FactorObservationV2],
+    options: FactorReviewOptions,
+) -> FactorReviewV2Report {
+    let health = build_data_health_report(source_rows, v2_rows);
     let mut reviews: Vec<SingleFactorReview> = factor_v2_descriptors()
         .into_iter()
-        .filter_map(|descriptor| review_one_factor(&v2_rows, descriptor, &options))
+        .filter_map(|descriptor| review_one_factor(v2_rows, descriptor, &options))
         .collect();
     reviews.sort_by(|a, b| {
         b.selected_total_pnl_after_cost
@@ -1221,8 +1254,18 @@ pub fn walk_forward_factors_v2_with_deribit(
 ) -> FactorWalkForwardReport {
     let mut v2_rows =
         build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    walk_forward_factor_rows(source_rows, &mut v2_rows, start, end, options)
+}
+
+fn walk_forward_factor_rows(
+    source_rows: &[FactorObservation],
+    v2_rows: &mut [FactorObservationV2],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: FactorWalkForwardOptions,
+) -> FactorWalkForwardReport {
     v2_rows.sort_by_key(|row| row.tick_ts);
-    let health = build_data_health_report(source_rows, &v2_rows);
+    let health = build_data_health_report(source_rows, v2_rows);
     let train_duration = Duration::days(options.train_window_days.max(1));
     let test_duration = Duration::days(options.test_window_days.max(1));
     let step_duration = Duration::days(options.step_days.max(1));
@@ -1531,7 +1574,15 @@ pub fn liquidity_gate_v1_with_deribit(
     options: LiquidityGateV1Options,
 ) -> LiquidityGateV1Report {
     let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
-    let health = build_data_health_report(source_rows, &v2_rows);
+    build_liquidity_gate_v1_report(source_rows, &v2_rows, options)
+}
+
+fn build_liquidity_gate_v1_report(
+    source_rows: &[FactorObservation],
+    v2_rows: &[FactorObservationV2],
+    options: LiquidityGateV1Options,
+) -> LiquidityGateV1Report {
+    let health = build_data_health_report(source_rows, v2_rows);
     let selected = v2_rows
         .iter()
         .filter(|row| liquidity_gate_v1_accepts(row, &options))
@@ -1576,6 +1627,50 @@ pub fn liquidity_gate_v1_with_deribit(
         avg_pm_lag_secs: mean(selected.iter().map(|row| row.pm_lag_secs)),
         avg_roundtrip_cost_usd: mean(selected.iter().map(|row| row.roundtrip_cost_usd)),
         metrics,
+    }
+}
+
+pub fn liquidity_gated_alpha_v1_with_deribit(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    mut options: LiquidityGatedAlphaV1Options,
+) -> LiquidityGatedAlphaV1Report {
+    options.gate.review = options.walk_forward.review.clone();
+    let v2_rows = build_factor_observations_v2_with_deribit(
+        source_rows,
+        deribit,
+        &options.walk_forward.review,
+    );
+    let baseline_health = build_data_health_report(source_rows, &v2_rows);
+    let gate = build_liquidity_gate_v1_report(source_rows, &v2_rows, options.gate.clone());
+    let gated_rows = v2_rows
+        .iter()
+        .filter(|row| liquidity_gate_v1_accepts(row, &options.gate))
+        .cloned()
+        .collect::<Vec<_>>();
+    let review = review_factor_rows(
+        source_rows,
+        &gated_rows,
+        options.walk_forward.review.clone(),
+    );
+    let mut walk_rows = gated_rows.clone();
+    let walk_forward = walk_forward_factor_rows(
+        source_rows,
+        &mut walk_rows,
+        start,
+        end,
+        options.walk_forward.clone(),
+    );
+    let stability = build_factor_stability_report(&walk_forward, FactorStabilityOptions::default());
+    LiquidityGatedAlphaV1Report {
+        options,
+        baseline_health,
+        gate,
+        review,
+        walk_forward,
+        stability,
     }
 }
 
@@ -1879,6 +1974,104 @@ pub fn format_liquidity_gate_v1_report(report: &LiquidityGateV1Report) -> String
         report.metrics.by_symbol_positive_ratio,
         report.metrics.by_time_bucket_positive_ratio,
     ));
+    out
+}
+
+pub fn format_liquidity_gated_alpha_v1_report(
+    report: &LiquidityGatedAlphaV1Report,
+    top_n: usize,
+) -> String {
+    let mut out = String::new();
+    out.push_str("=== Liquidity-Gated Alpha V1 Data Health ===\n");
+    out.push_str(&format!(
+        "baseline_v2_rows={} baseline_entry_fill={:.2}% baseline_reject={:.2}% gated_rows={} gate_coverage={:.4} gate_entry_fill={:.2}% gate_roundtrip_fill={:.2}% gate_reject={:.2}%\n",
+        report.baseline_health.v2_rows,
+        report.baseline_health.entry_fill_rate() * 100.0,
+        report.baseline_health.rejection_rate() * 100.0,
+        report.gate.selected_n,
+        report.gate.coverage,
+        report.gate.entry_fill_rate * 100.0,
+        report.gate.roundtrip_fill_rate * 100.0,
+        report.gate.rejection_rate * 100.0,
+    ));
+    out.push_str(&format!(
+        "stake_usd={:.2} train_days={} test_days={} step_days={} top_quantile={:.2} factor_name_filter={}\n\n",
+        report.options.walk_forward.review.stake_usd,
+        report.options.walk_forward.train_window_days,
+        report.options.walk_forward.test_window_days,
+        report.options.walk_forward.step_days,
+        report.options.walk_forward.review.top_quantile,
+        report
+            .options
+            .walk_forward
+            .factor_name_filter
+            .as_deref()
+            .unwrap_or("<none>"),
+    ));
+
+    out.push_str("=== Liquidity-Gated Single-Factor Reviews ===\n");
+    out.push_str("factor,family,layer,n,coverage,settle_rank_ic,pnl_rank_ic,selected_n,fill_rate,reject_rate,total_pnl,avg_pnl,sharpe,max_dd,symbol_pos,time_bucket_pos\n");
+    for review in report.review.reviews.iter().take(top_n.max(1)) {
+        out.push_str(&format!(
+            "{},{},{},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            review.factor,
+            review.family.as_str(),
+            review.layer.as_str(),
+            review.n,
+            review.coverage,
+            review.settlement_rank_ic,
+            review.executable_pnl_rank_ic,
+            review.selected_n,
+            review.selected_executable_fill_rate,
+            review.selected_rejection_rate,
+            review.selected_total_pnl_after_cost,
+            review.selected_avg_pnl_after_cost,
+            review.selected_sharpe,
+            review.selected_max_drawdown,
+            review.by_symbol_positive_ratio,
+            review.by_time_bucket_positive_ratio,
+        ));
+    }
+
+    out.push_str("\n=== Liquidity-Gated Walk-Forward Aggregates ===\n");
+    out.push_str("factor,family,layer,windows,pos_window_ratio,total_test_pnl,avg_window_pnl,min_window_pnl,avg_fill_rate,avg_reject_rate\n");
+    for aggregate in report.walk_forward.aggregates.iter().take(top_n.max(1)) {
+        out.push_str(&format!(
+            "{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            aggregate.factor,
+            aggregate.family.as_str(),
+            aggregate.layer.as_str(),
+            aggregate.windows,
+            aggregate.positive_window_ratio,
+            aggregate.total_test_pnl_after_cost,
+            aggregate.avg_test_pnl_per_window,
+            aggregate.min_test_pnl_after_cost,
+            aggregate.avg_test_fill_rate,
+            aggregate.avg_test_rejection_rate,
+        ));
+    }
+
+    out.push_str("\n=== Liquidity-Gated Factor Stability ===\n");
+    out.push_str("decision,factor,family,layer,windows,pnl_ic_mean,pnl_icir,pos_window_ratio,total_test_pnl,avg_fill_rate,avg_reject_rate,symbol_pos,time_bucket_pos,reason\n");
+    for row in report.stability.rows.iter().take(top_n.max(1)) {
+        out.push_str(&format!(
+            "{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}\n",
+            row.decision.as_str(),
+            row.factor,
+            row.family.as_str(),
+            row.layer.as_str(),
+            row.windows,
+            row.executable_pnl_rank_ic_mean,
+            row.executable_pnl_rank_icir,
+            row.positive_window_ratio,
+            row.total_test_pnl_after_cost,
+            row.avg_test_fill_rate,
+            row.avg_test_rejection_rate,
+            row.avg_by_symbol_positive_ratio,
+            row.avg_by_time_bucket_positive_ratio,
+            row.reason,
+        ));
+    }
     out
 }
 
@@ -3847,6 +4040,63 @@ mod tests {
         assert!((report.coverage - 0.5).abs() < EPS);
         assert!((report.entry_fill_rate - 1.0).abs() < EPS);
         assert!((report.roundtrip_fill_rate - 1.0).abs() < EPS);
+    }
+
+    #[test]
+    fn liquidity_gated_alpha_v1_reviews_only_tradeable_rows() {
+        let base = Utc::now();
+        let observations = (0..96)
+            .map(|idx| {
+                let mut obs = base_obs();
+                obs.event_id = format!("event-{idx}");
+                obs.tick_ts = base + chrono::Duration::hours(idx);
+                obs.model_prob_up = if idx % 2 == 0 { 0.80 } else { 0.20 };
+                obs.model_edge_up =
+                    obs.model_prob_up - obs.pm_up_ask - crypto_fee_cost(obs.pm_up_ask);
+                obs.settlement_up = if idx % 2 == 0 { 1.0 } else { 0.0 };
+                if idx % 3 == 0 {
+                    obs.pm_up_ask_size = 1.0;
+                    obs.pm_up_bid_size = 1.0;
+                    obs.pm_down_ask_size = 1.0;
+                    obs.pm_down_bid_size = 1.0;
+                }
+                obs
+            })
+            .collect::<Vec<_>>();
+
+        let report = liquidity_gated_alpha_v1_with_deribit(
+            &observations,
+            &[],
+            base,
+            base + chrono::Duration::days(4) - chrono::Duration::seconds(1),
+            LiquidityGatedAlphaV1Options {
+                gate: LiquidityGateV1Options::default(),
+                walk_forward: FactorWalkForwardOptions {
+                    review: FactorReviewOptions {
+                        stake_usd: 15.0,
+                        min_observations: 10,
+                        top_quantile: 0.2,
+                    },
+                    train_window_days: 2,
+                    test_window_days: 1,
+                    step_days: 1,
+                    top_n: 10,
+                    factor_name_filter: Some("side_model_prob".to_string()),
+                },
+            },
+        );
+
+        assert!(report.gate.selected_n < report.baseline_health.v2_rows);
+        assert!((report.gate.entry_fill_rate - 1.0).abs() < EPS);
+        assert!(!report.review.reviews.is_empty());
+        assert!(!report.walk_forward.windows.is_empty());
+        assert!(
+            report
+                .stability
+                .rows
+                .iter()
+                .any(|row| row.factor == "side_model_prob")
+        );
     }
 
     #[test]
