@@ -18,9 +18,9 @@ use ploy_research::{
     format_meta_label_walk_forward_v1_report, format_trade_formation_v1_report,
     liquidity_gate_v1_with_deribit, liquidity_gated_alpha_v1_with_deribit,
     load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
-    review_fillability_v1_with_deribit, review_trade_formation_v1_with_deribit,
-    walk_forward_factor_combo_v1_with_deribit, walk_forward_factors_v2_with_deribit,
-    walk_forward_meta_label_v1_with_deribit,
+    load_research_pm_book_snapshots_sampled, review_fillability_v1_with_deribit,
+    review_trade_formation_v1_with_deribit, walk_forward_factor_combo_v1_with_deribit,
+    walk_forward_factors_v2_with_deribit_and_pm_books, walk_forward_meta_label_v1_with_deribit,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -162,6 +162,17 @@ async fn main() {
             .expect("bulk lob snapshot load failed");
     eprintln!("lob_snapshots: {}", all_lob_snapshots.len());
 
+    let all_pm_book_snapshots = load_research_pm_book_snapshots_sampled(
+        &pool,
+        &symbols,
+        history_start,
+        end,
+        lob_sample_secs,
+    )
+    .await
+    .expect("bulk PM book snapshot load failed");
+    eprintln!("pm_book_snapshots: {}", all_pm_book_snapshots.len());
+
     let deribit_snapshots =
         load_deribit_feature_snapshots(&pool, &symbols, start, end, observation_sample_secs).await;
     eprintln!("deribit_snapshots: {}", deribit_snapshots.len());
@@ -184,9 +195,10 @@ async fn main() {
         return;
     }
 
-    let report = walk_forward_factors_v2_with_deribit(
+    let report = walk_forward_factors_v2_with_deribit_and_pm_books(
         &observations,
         &deribit_snapshots,
+        &all_pm_book_snapshots,
         start,
         end,
         options.clone(),

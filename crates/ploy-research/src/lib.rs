@@ -42,14 +42,17 @@ pub use event_ml::{
 };
 pub use factors::{
     AggregatedFactorMetric, EventFactorSummary, FactorMetric, FactorObservation,
-    ResearchLobSnapshot, aggregate_factor_metrics, build_event_summaries,
-    build_factor_observations, build_factor_observations_with_lob,
+    ResearchLobSnapshot, ResearchPmBookLevel, ResearchPmBookSnapshot, aggregate_factor_metrics,
+    build_event_summaries, build_factor_observations, build_factor_observations_with_lob,
     build_factor_observations_with_lob_sampled, factor_metrics,
 };
 #[cfg(feature = "polars-export")]
 pub use factors::{export_observations_parquet, observations_to_frame};
 #[cfg(feature = "db")]
-pub use factors::{load_research_lob_snapshots, load_research_lob_snapshots_sampled};
+pub use factors::{
+    load_research_lob_snapshots, load_research_lob_snapshots_sampled,
+    load_research_pm_book_snapshots_sampled,
+};
 pub use replay::replay_fills;
 
 pub const CRATE_MARKER: &str = "ploy-research";
@@ -82,15 +85,17 @@ pub use factors_v2::{
     MetaLabelWalkForwardWindow, ReviewSide, SingleFactorReview, ThreeLayerArchive,
     TradeFormationPathRow, TradeFormationReviewOptions, TradeFormationReviewReport,
     TradeFormationRuleRow, build_data_health_report, build_factor_observations_v2,
-    build_factor_observations_v2_with_deribit, build_factor_stability_report,
+    build_factor_observations_v2_with_deribit,
+    build_factor_observations_v2_with_deribit_and_pm_books, build_factor_stability_report,
     factor_v2_descriptors, format_factor_combo_v1_report, format_factor_review_v2_report,
     format_factor_stability_report, format_factor_walk_forward_v2_report,
     format_fillability_review_v1_report, format_liquidity_gate_v1_report,
     format_liquidity_gated_alpha_v1_report, format_meta_label_walk_forward_v1_report,
     format_trade_formation_v1_report, liquidity_gate_v1_with_deribit,
     liquidity_gated_alpha_v1_with_deribit, review_factors_v2, review_factors_v2_with_deribit,
-    review_fillability_v1_with_deribit, review_trade_formation_v1_with_deribit,
-    walk_forward_factor_combo_v1_with_deribit, walk_forward_factors_v2_with_deribit,
+    review_factors_v2_with_deribit_and_pm_books, review_fillability_v1_with_deribit,
+    review_trade_formation_v1_with_deribit, walk_forward_factor_combo_v1_with_deribit,
+    walk_forward_factors_v2_with_deribit, walk_forward_factors_v2_with_deribit_and_pm_books,
     walk_forward_meta_label_v1_with_deribit,
 };
 #[cfg(feature = "rl")]

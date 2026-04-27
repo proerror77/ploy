@@ -3,10 +3,11 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::{DateTime, Duration, Utc};
 use ploy_operator_contracts::Regime;
 
-use crate::factors::{FactorObservation, pearson_ic, spearman_ic};
+use crate::factors::{FactorObservation, ResearchPmBookSnapshot, pearson_ic, spearman_ic};
 
 const DEFAULT_STAKE_USD: f64 = 15.0;
 const DEFAULT_TOP_QUANTILE: f64 = 0.2;
+const PM_BOOK_MAX_AGE_SECS: i64 = 30;
 const EPS: f64 = 1e-9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,8 +202,17 @@ pub struct FactorObservationV2 {
     pub exit_liquidity_usd: f64,
     pub liquidity_shortfall_usd: f64,
     pub slippage_to_fill_15u_bps: f64,
+    pub entry_sweep_avg_price_15u: f64,
+    pub exit_sweep_avg_price_15u: f64,
+    pub entry_sweep_shares_15u: f64,
+    pub exit_sweep_shares_15u: f64,
+    pub entry_sweep_levels_15u: f64,
+    pub exit_sweep_levels_15u: f64,
+    pub entry_sweep_slippage_bps: f64,
+    pub exit_sweep_slippage_bps: f64,
     pub roundtrip_cost_usd: f64,
     pub roundtrip_pnl_now_15u: Option<f64>,
+    pub roundtrip_pnl_now_full_depth_15u: Option<f64>,
 
     pub portfolio_stake_usd: f64,
     pub portfolio_event_exposure_usd: f64,
@@ -212,8 +222,11 @@ pub struct FactorObservationV2 {
 
     pub label_settlement_win: Option<f64>,
     pub label_executable_pnl_15u: Option<f64>,
+    pub label_full_depth_executable_pnl_15u: Option<f64>,
     pub label_executable_fillable: bool,
     pub label_exit_fillable: bool,
+    pub label_full_depth_entry_fillable: bool,
+    pub label_full_depth_exit_fillable: bool,
     pub label_future_exit_bid_change_30s: Option<f64>,
     pub label_future_exit_bid_change_60s: Option<f64>,
     pub label_future_exit_pnl_30s: Option<f64>,
@@ -239,11 +252,16 @@ pub struct DataHealthReport {
     pub exit_size_rows: usize,
     pub entry_fillable_rows: usize,
     pub exit_fillable_rows: usize,
+    pub entry_full_depth_fillable_rows: usize,
+    pub exit_full_depth_fillable_rows: usize,
     pub executable_pnl_rows: usize,
+    pub full_depth_executable_pnl_rows: usize,
     pub deribit_rows: usize,
     pub avg_pm_lag_secs: f64,
     pub avg_entry_capacity_ratio: f64,
     pub avg_exit_capacity_ratio: f64,
+    pub avg_entry_sweep_slippage_bps: f64,
+    pub avg_exit_sweep_slippage_bps: f64,
 }
 
 impl DataHealthReport {
@@ -257,6 +275,14 @@ impl DataHealthReport {
 
     pub fn rejection_rate(&self) -> f64 {
         1.0 - self.entry_fill_rate()
+    }
+
+    pub fn full_depth_entry_fill_rate(&self) -> f64 {
+        ratio(self.entry_full_depth_fillable_rows, self.v2_rows)
+    }
+
+    pub fn full_depth_exit_fill_rate(&self) -> f64 {
+        ratio(self.exit_full_depth_fillable_rows, self.v2_rows)
     }
 }
 
@@ -800,11 +826,23 @@ pub fn build_factor_observations_v2_with_deribit(
     deribit: &[DeribitFeatureSnapshot],
     options: &FactorReviewOptions,
 ) -> Vec<FactorObservationV2> {
+    build_factor_observations_v2_with_deribit_and_pm_books(rows, deribit, &[], options)
+}
+
+pub fn build_factor_observations_v2_with_deribit_and_pm_books(
+    rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    options: &FactorReviewOptions,
+) -> Vec<FactorObservationV2> {
     let stake_usd = options.stake_usd;
+    let book_index = build_pm_book_index(pm_books);
     let mut out = Vec::with_capacity(rows.len() * 2);
     for row in rows {
-        out.push(side_row(row, ReviewSide::Up, stake_usd));
-        out.push(side_row(row, ReviewSide::Down, stake_usd));
+        let up_book = latest_pm_book(&book_index, &row.event_id, ReviewSide::Up, row.tick_ts);
+        let down_book = latest_pm_book(&book_index, &row.event_id, ReviewSide::Down, row.tick_ts);
+        out.push(side_row(row, ReviewSide::Up, stake_usd, up_book));
+        out.push(side_row(row, ReviewSide::Down, stake_usd, down_book));
     }
     enrich_rolling_features(&mut out, deribit);
     out
@@ -1051,6 +1089,42 @@ pub fn factor_v2_descriptors() -> Vec<FactorV2Descriptor> {
             FactorFamily::PmLiquidity,
             ThreeLayerArchive::PmExecutableLiquidityRiskGate,
             |r| r.exit_bid_size,
+        ),
+        descriptor(
+            "entry_sweep_slippage_bps",
+            FactorFamily::Execution,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.entry_sweep_slippage_bps,
+        ),
+        descriptor(
+            "exit_sweep_slippage_bps",
+            FactorFamily::Execution,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.exit_sweep_slippage_bps,
+        ),
+        descriptor(
+            "entry_sweep_levels_15u",
+            FactorFamily::PmLiquidity,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.entry_sweep_levels_15u,
+        ),
+        descriptor(
+            "exit_sweep_levels_15u",
+            FactorFamily::PmLiquidity,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.exit_sweep_levels_15u,
+        ),
+        descriptor(
+            "entry_full_depth_fillable_15u",
+            FactorFamily::Execution,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| bool_num(r.label_full_depth_entry_fillable),
+        ),
+        descriptor(
+            "exit_full_depth_fillable_15u",
+            FactorFamily::Execution,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| bool_num(r.label_full_depth_exit_fillable),
         ),
         descriptor(
             "up_down_ask_sum",
@@ -1333,13 +1407,30 @@ pub fn build_data_health_report(
             .filter(|row| row.label_executable_fillable)
             .count(),
         exit_fillable_rows: v2_rows.iter().filter(|row| row.label_exit_fillable).count(),
+        entry_full_depth_fillable_rows: v2_rows
+            .iter()
+            .filter(|row| row.label_full_depth_entry_fillable)
+            .count(),
+        exit_full_depth_fillable_rows: v2_rows
+            .iter()
+            .filter(|row| row.label_full_depth_exit_fillable)
+            .count(),
         executable_pnl_rows: v2_rows
             .iter()
             .filter(|row| row.label_executable_pnl_15u.is_some_and(f64::is_finite))
             .count(),
+        full_depth_executable_pnl_rows: v2_rows
+            .iter()
+            .filter(|row| {
+                row.label_full_depth_executable_pnl_15u
+                    .is_some_and(f64::is_finite)
+            })
+            .count(),
         avg_pm_lag_secs: mean(v2_rows.iter().map(|row| row.pm_lag_secs)),
         avg_entry_capacity_ratio: mean(v2_rows.iter().map(|row| row.entry_capacity_ratio)),
         avg_exit_capacity_ratio: mean(v2_rows.iter().map(|row| row.exit_capacity_ratio)),
+        avg_entry_sweep_slippage_bps: mean(v2_rows.iter().map(|row| row.entry_sweep_slippage_bps)),
+        avg_exit_sweep_slippage_bps: mean(v2_rows.iter().map(|row| row.exit_sweep_slippage_bps)),
         deribit_rows: v2_rows
             .iter()
             .filter(|row| row.deribit_mark_iv.is_finite())
@@ -1360,6 +1451,21 @@ pub fn review_factors_v2_with_deribit(
     options: FactorReviewOptions,
 ) -> FactorReviewV2Report {
     let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options);
+    review_factor_rows(source_rows, &v2_rows, options)
+}
+
+pub fn review_factors_v2_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    options: FactorReviewOptions,
+) -> FactorReviewV2Report {
+    let v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options,
+    );
     review_factor_rows(source_rows, &v2_rows, options)
 }
 
@@ -1423,6 +1529,23 @@ pub fn walk_forward_factors_v2_with_deribit(
 ) -> FactorWalkForwardReport {
     let mut v2_rows =
         build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    walk_forward_factor_rows(source_rows, &mut v2_rows, start, end, options)
+}
+
+pub fn walk_forward_factors_v2_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: FactorWalkForwardOptions,
+) -> FactorWalkForwardReport {
+    let mut v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.review,
+    );
     walk_forward_factor_rows(source_rows, &mut v2_rows, start, end, options)
 }
 
@@ -2597,6 +2720,14 @@ pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usiz
         report.health.avg_pm_lag_secs,
     ));
     out.push_str(&format!(
+        "full_depth_entry_fill_rate={:.2}% full_depth_exit_fill_rate={:.2}% full_depth_pnl_rows={} avg_entry_sweep_slip_bps={:.2} avg_exit_sweep_slip_bps={:.2}\n",
+        report.health.full_depth_entry_fill_rate() * 100.0,
+        report.health.full_depth_exit_fill_rate() * 100.0,
+        report.health.full_depth_executable_pnl_rows,
+        report.health.avg_entry_sweep_slippage_bps,
+        report.health.avg_exit_sweep_slippage_bps,
+    ));
+    out.push_str(&format!(
         "stake_usd={:.2} top_quantile={:.2} min_observations={}\n\n",
         report.options.stake_usd, report.options.top_quantile, report.options.min_observations,
     ));
@@ -2827,7 +2958,22 @@ fn trade_formation_path(row: &FactorObservationV2) -> String {
 }
 
 fn executable_pnl(row: &FactorObservationV2) -> Option<f64> {
-    row.label_executable_pnl_15u.filter(|pnl| pnl.is_finite())
+    row.label_full_depth_executable_pnl_15u
+        .or(row.label_executable_pnl_15u)
+        .filter(|pnl| pnl.is_finite())
+}
+
+fn entry_fillable(row: &FactorObservationV2) -> bool {
+    row.label_full_depth_entry_fillable || row.label_executable_fillable
+}
+
+fn exit_fillable(row: &FactorObservationV2) -> bool {
+    row.label_full_depth_exit_fillable || row.label_exit_fillable
+}
+
+fn roundtrip_fillable(row: &FactorObservationV2) -> bool {
+    (row.label_full_depth_entry_fillable && row.label_full_depth_exit_fillable)
+        || (row.label_executable_fillable && row.label_exit_fillable)
 }
 
 fn direction_bin(row: &FactorObservationV2) -> &'static str {
@@ -3048,19 +3194,12 @@ fn build_fillability_bucket_row(
     total_rows: usize,
     options: &FillabilityReviewOptions,
 ) -> FillabilityBucketRow {
-    let entry_filled = rows
-        .iter()
-        .filter(|row| row.label_executable_fillable)
-        .count();
-    let exit_filled = rows.iter().filter(|row| row.label_exit_fillable).count();
-    let roundtrip_filled = rows
-        .iter()
-        .filter(|row| row.label_executable_fillable && row.label_exit_fillable)
-        .count();
+    let entry_filled = rows.iter().filter(|row| entry_fillable(row)).count();
+    let exit_filled = rows.iter().filter(|row| exit_fillable(row)).count();
+    let roundtrip_filled = rows.iter().filter(|row| roundtrip_fillable(row)).count();
     let executable_pnls = rows
         .iter()
-        .filter_map(|row| row.label_executable_pnl_15u)
-        .filter(|pnl| pnl.is_finite())
+        .filter_map(|row| executable_pnl(row))
         .collect::<Vec<_>>();
     let total_executable_pnl_after_cost = executable_pnls.iter().sum::<f64>();
     let entry_fill_rate = ratio(entry_filled, rows.len());
@@ -3165,12 +3304,11 @@ fn selection_metrics_for_rows(
     let filled = selected
         .iter()
         .copied()
-        .filter(|row| row.label_executable_pnl_15u.is_some())
+        .filter(|row| executable_pnl(row).is_some())
         .collect::<Vec<_>>();
     let pnls = filled
         .iter()
-        .filter_map(|row| row.label_executable_pnl_15u.map(|pnl| (row.tick_ts, pnl)))
-        .filter(|(_, pnl)| pnl.is_finite())
+        .filter_map(|row| executable_pnl(row).map(|pnl| (row.tick_ts, pnl)))
         .collect::<Vec<_>>();
     let pnl_values = pnls.iter().map(|(_, pnl)| *pnl).collect::<Vec<_>>();
     let total_pnl = pnl_values.iter().sum::<f64>();
@@ -3179,10 +3317,7 @@ fn selection_metrics_for_rows(
         selected_n: selected.len(),
         executable_fill_rate: ratio(filled.len(), selected.len()),
         rejection_rate: ratio(
-            selected
-                .iter()
-                .filter(|row| !row.label_executable_fillable)
-                .count(),
+            selected.iter().filter(|row| !entry_fillable(row)).count(),
             selected.len(),
         ),
         total_pnl_after_cost: total_pnl,
@@ -3409,7 +3544,7 @@ fn fit_combo_component(
     }
     let executable_pairs: Vec<(f64, f64)> = scored
         .iter()
-        .filter_map(|(row, score)| row.label_executable_pnl_15u.map(|label| (*score, label)))
+        .filter_map(|(row, score)| executable_pnl(row).map(|label| (*score, label)))
         .filter(|(score, label)| score.is_finite() && label.is_finite())
         .collect();
     if executable_pairs.len() < min_observations {
@@ -3460,12 +3595,11 @@ fn evaluate_combo_v1_threshold(
     let filled: Vec<&FactorObservationV2> = selected
         .iter()
         .copied()
-        .filter(|row| row.label_executable_pnl_15u.is_some())
+        .filter(|row| executable_pnl(row).is_some())
         .collect();
     let pnls: Vec<(DateTime<Utc>, f64)> = filled
         .iter()
-        .filter_map(|row| row.label_executable_pnl_15u.map(|pnl| (row.tick_ts, pnl)))
-        .filter(|(_, pnl)| pnl.is_finite())
+        .filter_map(|row| executable_pnl(row).map(|pnl| (row.tick_ts, pnl)))
         .collect();
     let pnl_values: Vec<f64> = pnls.iter().map(|(_, pnl)| *pnl).collect();
     let total_pnl = pnl_values.iter().sum::<f64>();
@@ -3474,10 +3608,7 @@ fn evaluate_combo_v1_threshold(
         selected_n: selected.len(),
         executable_fill_rate: ratio(filled.len(), selected.len()),
         rejection_rate: ratio(
-            selected
-                .iter()
-                .filter(|row| !row.label_executable_fillable)
-                .count(),
+            selected.iter().filter(|row| !entry_fillable(row)).count(),
             selected.len(),
         ),
         total_pnl_after_cost: total_pnl,
@@ -3576,12 +3707,11 @@ fn evaluate_meta_label_rule(
     let filled = selected
         .iter()
         .copied()
-        .filter(|row| row.label_executable_pnl_15u.is_some())
+        .filter(|row| executable_pnl(row).is_some())
         .collect::<Vec<_>>();
     let pnls = filled
         .iter()
-        .filter_map(|row| row.label_executable_pnl_15u.map(|pnl| (row.tick_ts, pnl)))
-        .filter(|(_, pnl)| pnl.is_finite())
+        .filter_map(|row| executable_pnl(row).map(|pnl| (row.tick_ts, pnl)))
         .collect::<Vec<_>>();
     let pnl_values = pnls.iter().map(|(_, pnl)| *pnl).collect::<Vec<_>>();
     let total_pnl = pnl_values.iter().sum::<f64>();
@@ -3591,10 +3721,7 @@ fn evaluate_meta_label_rule(
         selected_n: selected.len(),
         executable_fill_rate: ratio(filled.len(), selected.len()),
         rejection_rate: ratio(
-            selected
-                .iter()
-                .filter(|row| !row.label_executable_fillable)
-                .count(),
+            selected.iter().filter(|row| !entry_fillable(row)).count(),
             selected.len(),
         ),
         total_pnl_after_cost: total_pnl,
@@ -3789,7 +3916,7 @@ fn fit_walk_forward_factor(
         .collect();
     let executable_pairs: Vec<(f64, f64)> = scored
         .iter()
-        .filter_map(|(row, score)| row.label_executable_pnl_15u.map(|label| (*score, label)))
+        .filter_map(|(row, score)| executable_pnl(row).map(|label| (*score, label)))
         .filter(|(score, label)| score.is_finite() && label.is_finite())
         .collect();
     let train_settlement_rank_ic = pair_spearman(&settlement_pairs);
@@ -3890,12 +4017,11 @@ fn evaluate_factor_threshold(
     let filled: Vec<&FactorObservationV2> = selected
         .iter()
         .copied()
-        .filter(|row| row.label_executable_pnl_15u.is_some())
+        .filter(|row| executable_pnl(row).is_some())
         .collect();
     let pnls: Vec<(DateTime<Utc>, f64)> = filled
         .iter()
-        .filter_map(|row| row.label_executable_pnl_15u.map(|pnl| (row.tick_ts, pnl)))
-        .filter(|(_, pnl)| pnl.is_finite())
+        .filter_map(|row| executable_pnl(row).map(|pnl| (row.tick_ts, pnl)))
         .collect();
     let pnl_values: Vec<f64> = pnls.iter().map(|(_, pnl)| *pnl).collect();
     let total_pnl = pnl_values.iter().sum::<f64>();
@@ -3904,10 +4030,7 @@ fn evaluate_factor_threshold(
         selected_n: selected.len(),
         executable_fill_rate: ratio(filled.len(), selected.len()),
         rejection_rate: ratio(
-            selected
-                .iter()
-                .filter(|row| !row.label_executable_fillable)
-                .count(),
+            selected.iter().filter(|row| !entry_fillable(row)).count(),
             selected.len(),
         ),
         total_pnl_after_cost: total_pnl,
@@ -4002,11 +4125,7 @@ fn review_one_factor(
         .collect();
     let executable_pairs: Vec<(f64, f64)> = scored
         .iter()
-        .filter_map(|(idx, score)| {
-            rows[*idx]
-                .label_executable_pnl_15u
-                .map(|label| (*score, label))
-        })
+        .filter_map(|(idx, score)| executable_pnl(&rows[*idx]).map(|label| (*score, label)))
         .filter(|(score, label)| score.is_finite() && label.is_finite())
         .collect();
 
@@ -4044,12 +4163,11 @@ fn review_one_factor(
     let filled: Vec<&FactorObservationV2> = selected
         .iter()
         .copied()
-        .filter(|row| row.label_executable_pnl_15u.is_some())
+        .filter(|row| executable_pnl(row).is_some())
         .collect();
     let pnls: Vec<(DateTime<Utc>, f64)> = filled
         .iter()
-        .filter_map(|row| row.label_executable_pnl_15u.map(|pnl| (row.tick_ts, pnl)))
-        .filter(|(_, pnl)| pnl.is_finite())
+        .filter_map(|row| executable_pnl(row).map(|pnl| (row.tick_ts, pnl)))
         .collect();
     let pnl_values: Vec<f64> = pnls.iter().map(|(_, pnl)| *pnl).collect();
     let total_pnl = pnl_values.iter().sum::<f64>();
@@ -4066,10 +4184,7 @@ fn review_one_factor(
         executable_pnl_rank_ic,
         selected_n: selected.len(),
         selected_rejection_rate: ratio(
-            selected
-                .iter()
-                .filter(|row| !row.label_executable_fillable)
-                .count(),
+            selected.iter().filter(|row| !entry_fillable(row)).count(),
             selected.len(),
         ),
         selected_executable_fill_rate: ratio(filled.len(), selected.len()),
@@ -4089,7 +4204,150 @@ fn review_one_factor(
     })
 }
 
-fn side_row(row: &FactorObservation, side: ReviewSide, stake_usd: f64) -> FactorObservationV2 {
+type PmBookIndex<'a> = HashMap<(String, String), Vec<&'a ResearchPmBookSnapshot>>;
+
+#[derive(Debug, Clone, Copy)]
+struct SweepFill {
+    fillable: bool,
+    avg_price: f64,
+    shares: f64,
+    levels_used: f64,
+    slippage_bps: f64,
+}
+
+impl Default for SweepFill {
+    fn default() -> Self {
+        Self {
+            fillable: false,
+            avg_price: f64::NAN,
+            shares: f64::NAN,
+            levels_used: f64::NAN,
+            slippage_bps: f64::NAN,
+        }
+    }
+}
+
+fn build_pm_book_index(pm_books: &[ResearchPmBookSnapshot]) -> PmBookIndex<'_> {
+    let mut index: PmBookIndex<'_> = HashMap::new();
+    for book in pm_books {
+        index
+            .entry((book.event_id.clone(), book.side.to_ascii_uppercase()))
+            .or_default()
+            .push(book);
+    }
+    for books in index.values_mut() {
+        books.sort_by_key(|book| book.ts);
+    }
+    index
+}
+
+fn latest_pm_book<'a>(
+    index: &'a PmBookIndex<'a>,
+    event_id: &str,
+    side: ReviewSide,
+    tick_ts: DateTime<Utc>,
+) -> Option<&'a ResearchPmBookSnapshot> {
+    let key = (event_id.to_string(), book_side_key(side).to_string());
+    let books = index.get(&key)?;
+    let pos = books.partition_point(|book| book.ts <= tick_ts);
+    let book = *books.get(pos.checked_sub(1)?)?;
+    let age_secs = (tick_ts - book.ts).num_seconds();
+    (age_secs >= 0 && age_secs <= PM_BOOK_MAX_AGE_SECS).then_some(book)
+}
+
+fn book_side_key(side: ReviewSide) -> &'static str {
+    match side {
+        ReviewSide::Up => "UP",
+        ReviewSide::Down => "DOWN",
+    }
+}
+
+fn sweep_buy_to_stake(
+    levels: &[crate::factors::ResearchPmBookLevel],
+    reference_price: f64,
+    stake_usd: f64,
+) -> SweepFill {
+    if !valid_price(reference_price) || !stake_usd.is_finite() || stake_usd <= 0.0 {
+        return SweepFill::default();
+    }
+    let mut remaining = stake_usd;
+    let mut spent = 0.0;
+    let mut shares = 0.0;
+    let mut levels_used = 0.0;
+    for level in levels
+        .iter()
+        .filter(|level| valid_price(level.price) && level.size.is_finite() && level.size > 0.0)
+    {
+        if remaining <= EPS {
+            break;
+        }
+        let level_notional = level.price * level.size;
+        let take_notional = remaining.min(level_notional);
+        if take_notional <= EPS {
+            continue;
+        }
+        spent += take_notional;
+        shares += take_notional / level.price;
+        remaining -= take_notional;
+        levels_used += 1.0;
+    }
+    if remaining > EPS || shares <= EPS {
+        return SweepFill::default();
+    }
+    let avg_price = spent / shares;
+    SweepFill {
+        fillable: true,
+        avg_price,
+        shares,
+        levels_used,
+        slippage_bps: ((avg_price - reference_price).max(0.0) / reference_price) * 10_000.0,
+    }
+}
+
+fn sweep_sell_shares(
+    levels: &[crate::factors::ResearchPmBookLevel],
+    reference_price: f64,
+    shares_to_sell: f64,
+) -> SweepFill {
+    if !valid_price(reference_price) || !shares_to_sell.is_finite() || shares_to_sell <= 0.0 {
+        return SweepFill::default();
+    }
+    let mut remaining = shares_to_sell;
+    let mut proceeds = 0.0;
+    let mut sold = 0.0;
+    let mut levels_used = 0.0;
+    for level in levels
+        .iter()
+        .filter(|level| valid_price(level.price) && level.size.is_finite() && level.size > 0.0)
+    {
+        if remaining <= EPS {
+            break;
+        }
+        let take_shares = remaining.min(level.size);
+        proceeds += take_shares * level.price;
+        sold += take_shares;
+        remaining -= take_shares;
+        levels_used += 1.0;
+    }
+    if remaining > EPS || sold <= EPS {
+        return SweepFill::default();
+    }
+    let avg_price = proceeds / sold;
+    SweepFill {
+        fillable: true,
+        avg_price,
+        shares: sold,
+        levels_used,
+        slippage_bps: ((reference_price - avg_price).max(0.0) / reference_price) * 10_000.0,
+    }
+}
+
+fn side_row(
+    row: &FactorObservation,
+    side: ReviewSide,
+    stake_usd: f64,
+    pm_book: Option<&ResearchPmBookSnapshot>,
+) -> FactorObservationV2 {
     let (
         side_model_prob,
         side_fair_prob,
@@ -4190,12 +4448,39 @@ fn side_row(row: &FactorObservation, side: ReviewSide, stake_usd: f64) -> Factor
     } else {
         f64::NAN
     };
-    let slippage_to_fill_15u_bps = if entry_fillable { 0.0 } else { f64::NAN };
+    let entry_sweep = pm_book
+        .map(|book| sweep_buy_to_stake(&book.asks, entry_ask, stake_usd))
+        .unwrap_or_default();
+    let exit_sweep = if entry_sweep.fillable {
+        pm_book
+            .map(|book| sweep_sell_shares(&book.bids, exit_bid, entry_sweep.shares))
+            .unwrap_or_default()
+    } else {
+        SweepFill::default()
+    };
+    let slippage_to_fill_15u_bps = if entry_sweep.fillable {
+        entry_sweep.slippage_bps
+    } else if entry_fillable {
+        0.0
+    } else {
+        f64::NAN
+    };
     let roundtrip_pnl_now_15u = if entry_fillable && exit_fillable && valid_price(exit_bid) {
         Some(entry_shares * exit_bid - stake_usd - entry_fee_usd)
     } else {
         None
     };
+    let full_depth_entry_fee_usd = if entry_sweep.fillable && valid_price(entry_sweep.avg_price) {
+        entry_sweep.shares * crypto_fee_cost(entry_sweep.avg_price)
+    } else {
+        f64::NAN
+    };
+    let roundtrip_pnl_now_full_depth_15u =
+        if entry_sweep.fillable && exit_sweep.fillable && full_depth_entry_fee_usd.is_finite() {
+            Some(entry_sweep.shares * exit_sweep.avg_price - stake_usd - full_depth_entry_fee_usd)
+        } else {
+            None
+        };
     let roundtrip_cost_usd = if let Some(pnl) = roundtrip_pnl_now_15u {
         -pnl
     } else if valid_price(entry_ask) && valid_price(exit_bid) && entry_shares.is_finite() {
@@ -4208,6 +4493,18 @@ fn side_row(row: &FactorObservation, side: ReviewSide, stake_usd: f64) -> Factor
             stake_usd * (1.0 / entry_ask - 1.0) - stake_usd * fee_per_share / entry_ask
         } else {
             -stake_usd - stake_usd * fee_per_share / entry_ask
+        })
+    } else {
+        None
+    };
+    let full_depth_executable_pnl = if entry_sweep.fillable
+        && settlement_win.is_finite()
+        && full_depth_entry_fee_usd.is_finite()
+    {
+        Some(if settlement_win >= 0.5 {
+            entry_sweep.shares - stake_usd - full_depth_entry_fee_usd
+        } else {
+            -stake_usd - full_depth_entry_fee_usd
         })
     } else {
         None
@@ -4332,8 +4629,17 @@ fn side_row(row: &FactorObservation, side: ReviewSide, stake_usd: f64) -> Factor
         exit_liquidity_usd,
         liquidity_shortfall_usd,
         slippage_to_fill_15u_bps,
+        entry_sweep_avg_price_15u: entry_sweep.avg_price,
+        exit_sweep_avg_price_15u: exit_sweep.avg_price,
+        entry_sweep_shares_15u: entry_sweep.shares,
+        exit_sweep_shares_15u: exit_sweep.shares,
+        entry_sweep_levels_15u: entry_sweep.levels_used,
+        exit_sweep_levels_15u: exit_sweep.levels_used,
+        entry_sweep_slippage_bps: entry_sweep.slippage_bps,
+        exit_sweep_slippage_bps: exit_sweep.slippage_bps,
         roundtrip_cost_usd,
         roundtrip_pnl_now_15u,
+        roundtrip_pnl_now_full_depth_15u,
         portfolio_stake_usd: stake_usd,
         portfolio_event_exposure_usd: stake_usd,
         same_event_observation_count: f64::NAN,
@@ -4341,8 +4647,11 @@ fn side_row(row: &FactorObservation, side: ReviewSide, stake_usd: f64) -> Factor
         side_is_up: bool_num(side == ReviewSide::Up),
         label_settlement_win: settlement_win.is_finite().then_some(settlement_win),
         label_executable_pnl_15u: executable_pnl,
+        label_full_depth_executable_pnl_15u: full_depth_executable_pnl,
         label_executable_fillable: entry_fillable,
         label_exit_fillable: exit_fillable,
+        label_full_depth_entry_fillable: entry_sweep.fillable,
+        label_full_depth_exit_fillable: exit_sweep.fillable,
         label_future_exit_bid_change_30s: None,
         label_future_exit_bid_change_60s: None,
         label_future_exit_pnl_30s: None,
@@ -4756,10 +5065,8 @@ where
 {
     let mut groups: BTreeMap<String, f64> = BTreeMap::new();
     for row in rows {
-        if let Some(pnl) = row.label_executable_pnl_15u {
-            if pnl.is_finite() {
-                *groups.entry(key_fn(row)).or_default() += pnl;
-            }
+        if let Some(pnl) = executable_pnl(row) {
+            *groups.entry(key_fn(row)).or_default() += pnl;
         }
     }
     if groups.is_empty() {
@@ -4963,6 +5270,50 @@ mod tests {
         assert_eq!(health.entry_fillable_rows, 0);
         assert_eq!(health.executable_pnl_rows, 0);
         assert!((health.rejection_rate() - 1.0).abs() < EPS);
+    }
+
+    #[test]
+    fn full_depth_sweep_labels_cross_multiple_pm_levels_without_changing_top_book_label() {
+        let mut obs = base_obs();
+        obs.pm_up_ask_size = 10.0;
+        obs.pm_down_ask_size = 10.0;
+        let ts = obs.tick_ts;
+        let books = vec![ResearchPmBookSnapshot {
+            event_id: "evt".into(),
+            token_id: "up-token".into(),
+            side: "UP".into(),
+            ts,
+            bids: vec![crate::factors::ResearchPmBookLevel {
+                price: 0.49,
+                size: 40.0,
+            }],
+            asks: vec![
+                crate::factors::ResearchPmBookLevel {
+                    price: 0.50,
+                    size: 10.0,
+                },
+                crate::factors::ResearchPmBookLevel {
+                    price: 0.51,
+                    size: 25.0,
+                },
+            ],
+        }];
+
+        let rows = build_factor_observations_v2_with_deribit_and_pm_books(
+            &[obs],
+            &[],
+            &books,
+            &FactorReviewOptions::default(),
+        );
+        let up = rows.iter().find(|row| row.side == ReviewSide::Up).unwrap();
+
+        assert!(!up.label_executable_fillable);
+        assert!(up.label_full_depth_entry_fillable);
+        assert!(up.label_full_depth_exit_fillable);
+        assert!(up.label_executable_pnl_15u.is_none());
+        assert!(up.label_full_depth_executable_pnl_15u.unwrap() > 0.0);
+        assert_eq!(up.entry_sweep_levels_15u, 2.0);
+        assert!(up.entry_sweep_slippage_bps > 0.0);
     }
 
     #[test]
@@ -5351,11 +5702,16 @@ mod tests {
                 exit_size_rows: 0,
                 entry_fillable_rows: 0,
                 exit_fillable_rows: 0,
+                entry_full_depth_fillable_rows: 0,
+                exit_full_depth_fillable_rows: 0,
                 executable_pnl_rows: 0,
+                full_depth_executable_pnl_rows: 0,
                 deribit_rows: 0,
                 avg_pm_lag_secs: f64::NAN,
                 avg_entry_capacity_ratio: f64::NAN,
                 avg_exit_capacity_ratio: f64::NAN,
+                avg_entry_sweep_slippage_bps: f64::NAN,
+                avg_exit_sweep_slippage_bps: f64::NAN,
             },
             windows: vec![FactorWalkForwardWindow {
                 window_index: 0,
@@ -5449,11 +5805,16 @@ mod tests {
                 exit_size_rows: 0,
                 entry_fillable_rows: 0,
                 exit_fillable_rows: 0,
+                entry_full_depth_fillable_rows: 0,
+                exit_full_depth_fillable_rows: 0,
                 executable_pnl_rows: 0,
+                full_depth_executable_pnl_rows: 0,
                 deribit_rows: 0,
                 avg_pm_lag_secs: f64::NAN,
                 avg_entry_capacity_ratio: f64::NAN,
                 avg_exit_capacity_ratio: f64::NAN,
+                avg_entry_sweep_slippage_bps: f64::NAN,
+                avg_exit_sweep_slippage_bps: f64::NAN,
             },
             windows,
             aggregates: Vec::new(),

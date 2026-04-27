@@ -12,13 +12,14 @@
 //!     --end-date 2026-04-26
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
-    build_data_health_report, build_factor_observations_v2_with_deribit,
+    FactorObservation, FactorReviewOptions, build_data_health_report,
+    build_factor_observations_v2_with_deribit_and_pm_books,
     build_factor_observations_with_lob_sampled, factor_v2_descriptors,
-    load_deribit_feature_snapshots, load_research_lob_snapshots_sampled, FactorObservation,
-    FactorReviewOptions,
+    load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
+    load_research_pm_book_snapshots_sampled,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeSet;
@@ -514,6 +515,15 @@ async fn main() {
         load_research_lob_snapshots_sampled(&pool, &symbols, history_start, end, lob_sample_secs)
             .await
             .expect("lob snapshot load failed");
+    let pm_book_snapshots = load_research_pm_book_snapshots_sampled(
+        &pool,
+        &symbols,
+        history_start,
+        end,
+        lob_sample_secs,
+    )
+    .await
+    .expect("PM book snapshot load failed");
     let deribit_snapshots =
         load_deribit_feature_snapshots(&pool, &symbols, start, end, observation_sample_secs).await;
     let updates_slice = slice_by_time(&updates, history_start, end, MarketUpdate::sort_ts);
@@ -528,9 +538,10 @@ async fn main() {
         stake_usd,
         ..Default::default()
     };
-    let v2_rows = build_factor_observations_v2_with_deribit(
+    let v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
         &observations,
         &deribit_snapshots,
+        &pm_book_snapshots,
         &review_options,
     );
     let health = build_data_health_report(&observations, &v2_rows);
@@ -579,7 +590,7 @@ async fn main() {
 
     println!("\n=== Factor V2 Data Health ===");
     println!(
-        "source_obs={},v2_rows={},settlement_labels={},entry_quote_rows={},entry_size_rows={},entry_fill_rate={:.4},exit_fill_rate={:.4},executable_pnl_rows={},deribit_rows={},avg_pm_lag_secs={:.2}",
+        "source_obs={},v2_rows={},settlement_labels={},entry_quote_rows={},entry_size_rows={},entry_fill_rate={:.4},exit_fill_rate={:.4},full_depth_entry_fill_rate={:.4},full_depth_exit_fill_rate={:.4},executable_pnl_rows={},full_depth_executable_pnl_rows={},deribit_rows={},avg_pm_lag_secs={:.2},avg_entry_sweep_slip_bps={:.2},avg_exit_sweep_slip_bps={:.2}",
         health.source_observations,
         health.v2_rows,
         health.settlement_label_rows,
@@ -587,9 +598,14 @@ async fn main() {
         health.entry_size_rows,
         health.entry_fill_rate(),
         health.exit_fill_rate(),
+        health.full_depth_entry_fill_rate(),
+        health.full_depth_exit_fill_rate(),
         health.executable_pnl_rows,
+        health.full_depth_executable_pnl_rows,
         health.deribit_rows,
-        health.avg_pm_lag_secs
+        health.avg_pm_lag_secs,
+        health.avg_entry_sweep_slippage_bps,
+        health.avg_exit_sweep_slippage_bps
     );
 
     println!("\n=== Factor Descriptor Coverage ===");
@@ -616,9 +632,19 @@ async fn main() {
 
     println!("\n=== Known Utilization Gaps ===");
     println!("gap,status,next_action");
-    println!("pm_full_depth,partial,wire clob_orderbook_snapshots multi-level depth/shape factors after freshness stays stable");
-    println!("pm_trade_prints,collector_added_factor_pending,deploy collect-pm-trades and then wire trade imbalance/burst factors into Factor V2");
-    println!("deribit_greeks,conditional,only promote delta/gamma/vega/theta when deribit_atm_greeks_ticks has fresh source_ts in-window");
-    println!("reference_prices,not_used,keep out of PM5D crypto factor review unless adding Chainlink/Pyth cross-source lag features");
-    println!("binance_klines,not_used,current continuation features are rebuilt point-in-time from spot/aggTrade streams");
+    println!(
+        "pm_full_depth,used_for_sweep_labels,compare top-of-book live parity labels against full-depth sweep labels before changing live order aggressiveness"
+    );
+    println!(
+        "pm_trade_prints,collector_added_factor_pending,deploy collect-pm-trades and then wire trade imbalance/burst factors into Factor V2"
+    );
+    println!(
+        "deribit_greeks,conditional,only promote delta/gamma/vega/theta when deribit_atm_greeks_ticks has fresh source_ts in-window"
+    );
+    println!(
+        "reference_prices,not_used,keep out of PM5D crypto factor review unless adding Chainlink/Pyth cross-source lag features"
+    );
+    println!(
+        "binance_klines,not_used,current continuation features are rebuilt point-in-time from spot/aggTrade streams"
+    );
 }

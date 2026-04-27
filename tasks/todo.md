@@ -9785,3 +9785,34 @@ Review:
 - 2026-04-27: Added `collector_data_utilization`, a DB-backed research report that separates collector freshness from Factor V2 utilization. A small Tango read-only window (`2026-04-27T09:45:00Z..10:05:00Z`) reported fresh Binance spot/aggTrade/LOB, fresh PM quotes/snapshots, fresh Deribit IV, zero current `clob_trade_ticks`, and stale/unusable Deribit Greeks.
 - 2026-04-27: Fixed base factor observation generation so a fresh DOWN quote can produce an observation even when the UP ask is stale; stale side values are now represented as `NaN` instead of dropping the whole event.
 - 2026-04-27: Added `collect-pm-trades`, which reads active crypto market `conditionId` from `pm_market_catalog`, polls Polymarket Data API `/trades`, and persists de-duplicated prints to `clob_trade_ticks`. Added `ploy-pm-trade-collector.service` and deploy/healthcheck wiring so the service can start after the next main deploy.
+
+# PM5D Full-Depth Execution Labels (2026-04-27)
+
+## Files
+
+- `crates/ploy-research/src/factors.rs`
+  - Owner: DB-backed PM full-depth snapshot loader
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: Factor V2 full-depth sweep labels and descriptors
+- `crates/ploy-research/examples/factor_review_v2.rs`
+  - Owner: single-factor review CLI wiring
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: walk-forward CLI wiring
+- `crates/ploy-research/examples/collector_data_utilization.rs`
+  - Owner: data-utilization report wiring
+- `crates/ploy-research/src/lib.rs`
+  - Owner: public research API exports
+
+## Tasks
+
+- [x] Load point-in-time PM full-depth books from `clob_orderbook_snapshots` with bucket sampling and token/event side mapping.
+- [x] Add Factor V2 full-depth 15U sweep metrics: fillability, levels used, average fill price, entry/exit slippage, and full-depth executable PnL.
+- [x] Keep existing top-of-book executable labels as the live-parity baseline while making factor review and walk-forward prefer full-depth executable PnL when PM book data is present.
+- [x] Wire full-depth books into `factor_review_v2`, `factor_walk_forward_v2`, and `collector_data_utilization`.
+- [x] Add regression coverage for multi-level fillability that is rejected by top-of-book but fillable by full-depth sweep.
+- [x] Verify targeted lib tests, full `ploy-research` lib tests, DB example compile checks, and diff hygiene.
+
+## Review
+
+- 2026-04-27: Factor V2 now distinguishes live-parity top-of-book fillability from full-depth sweep fillability. Factor review and walk-forward use full-depth executable PnL when available, while still preserving the top-of-book labels for live-parity comparison.
+- 2026-04-27: Verification passed: `rtk cargo test -p ploy-research factors_v2 --lib`, `rtk cargo test -p ploy-research --lib`, `rtk cargo check -p ploy-research --features db --example factor_review_v2 --example factor_walk_forward_v2 --example collector_data_utilization`, and `rtk git diff --check`.
