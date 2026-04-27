@@ -1,0 +1,23 @@
+[Unit]
+Description=Ploy Deribit ATM Greeks Collector
+After=postgresql.service network-online.target ploy-deribit-iv-collector.service
+Wants=network-online.target ploy-deribit-iv-collector.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ploy
+Environment=DERIBIT_GREEKS_CURRENCIES=BTC,ETH,SOL
+Environment=DERIBIT_GREEKS_POLL_SECS=30
+Environment=DERIBIT_GREEKS_HTTP_TIMEOUT_SECS=20
+ExecStart=/usr/bin/env bash -lc 'if [ -f /opt/ploy/.env ]; then set -a; . /opt/ploy/.env >/dev/null 2>&1; set +a; fi; exec /usr/bin/python3 /opt/ploy/scripts/deribit_atm_greeks_collector.py'
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+MemoryHigh=1280M
+MemoryMax=1536M
+OOMPolicy=kill
+
+[Install]
+WantedBy=multi-user.target
