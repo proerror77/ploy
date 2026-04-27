@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
@@ -70,7 +70,7 @@ jobs:
           shared-key: release-platform-${{ env.PLATFORM_TARGET }}-release-rust-${{ steps.cache_meta.outputs.rustc_version }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache sccache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/sccache
           key: ${{ runner.os }}-sccache-release-platform-${{ env.PLATFORM_TARGET }}-release-rust-${{ steps.cache_meta.outputs.rustc_version }}-sccache-${{ steps.cache_meta.outputs.sccache_version }}-${{ hashFiles('**/Cargo.lock') }}
@@ -125,7 +125,7 @@ jobs:
         run: sccache --show-stats || true
 
       - name: Upload platform bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ploy-platform-bundle
           path: |
@@ -142,7 +142,7 @@ jobs:
 
     steps:
       - name: Download platform bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ploy-platform-bundle
           path: dist

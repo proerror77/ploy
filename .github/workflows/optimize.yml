@@ -115,7 +115,7 @@ jobs:
           fi
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
@@ -138,7 +138,7 @@ jobs:
             --example optimize_backtest
 
       - name: Upload optimize_backtest binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: optimize_backtest-${{ github.sha }}
           path: target/release/examples/optimize_backtest
@@ -160,12 +160,12 @@ jobs:
           fi
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
       - name: Download optimize_backtest binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: optimize_backtest-${{ github.sha }}
           path: target/release/examples
