@@ -1,3 +1,30 @@
+# PM5D Three-Layer Execution Liquidity Gates (2026-04-27)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: three-layer live/dry-run entry and exit gating.
+
+## Tasks
+
+- [x] Require top-of-book ask size to cover the fixed entry stake before emitting a 15U buy intent.
+- [x] Require top-of-book bid size to cover the current position before emitting TP/SL sell intents.
+- [x] Add regression tests for insufficient PM quote size suppressing fake executable orders.
+- [x] Run targeted three-layer strategy tests and diff checks.
+
+## Review
+
+- 2026-04-27: Three-layer now stores PM quote sizes from `MarketUpdate::Quote`
+  and refuses entry when the ask size is missing or smaller than the fixed
+  stake-derived quantity.
+- 2026-04-27: TP/SL exits now require top bid size to cover the open position
+  before emitting a sell intent, preventing dry-run/live from reporting exits
+  that the current PM book cannot fill.
+- 2026-04-27: Local checks passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-three-layer-execution-gates rtk cargo test -p ploy-strategy-bundles three_layer --lib`
+  and
+  `CARGO_TARGET_DIR=/tmp/ploy-three-layer-execution-gates rtk cargo test -p ploy-strategy-bundles --lib`.
+
 # PM5D Factor Review Book-Level Execution (2026-04-26)
 
 ## Files
