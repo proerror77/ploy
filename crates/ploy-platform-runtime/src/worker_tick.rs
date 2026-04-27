@@ -195,6 +195,19 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    fn test_working_directory() -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ploy-platform-runtime-workdir-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create test working directory");
+        path
+    }
+
     fn test_runner_binary() -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -220,7 +233,7 @@ mod tests {
             worker_heartbeat_stale_after_ms: 15_000,
             runner_binary: test_runner_binary(),
             strategy_config_root: PathBuf::from("config/strategies"),
-            working_directory: std::env::current_dir().expect("cwd"),
+            working_directory: test_working_directory(),
         }
     }
 
@@ -228,6 +241,7 @@ mod tests {
     fn tick_boots_running_workers_and_updates_status() {
         let mut control_plane = ControlPlane::default();
         let mut supervisor = WorkerSupervisor::default();
+        let config = config();
         control_plane.deployments.upsert(DeploymentRecord {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
@@ -239,7 +253,7 @@ mod tests {
             observed_state: ObservedState::Starting,
         });
 
-        tick_workers(&mut control_plane, &mut supervisor, &config());
+        tick_workers(&mut control_plane, &mut supervisor, &config);
         assert!(supervisor.status("example.paper").is_some());
     }
 
@@ -270,6 +284,7 @@ mod tests {
 
     #[test]
     fn build_launch_spec_resolves_strategy_config_path_and_dry_run_flag() {
+        let config = config();
         let spec = super::build_worker_launch_spec(
             &DeploymentRecord {
                 deployment_id: "pm5d.v2.paper".to_string(),
@@ -281,7 +296,7 @@ mod tests {
                 desired_state: DesiredState::Running,
                 observed_state: ObservedState::Starting,
             },
-            &config(),
+            &config,
         );
 
         assert!(spec
@@ -299,6 +314,7 @@ mod tests {
     fn repeated_ticks_do_not_respawn_running_worker() {
         let mut control_plane = ControlPlane::default();
         let mut supervisor = WorkerSupervisor::default();
+        let config = config();
         control_plane.deployments.upsert(DeploymentRecord {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
@@ -310,13 +326,13 @@ mod tests {
             observed_state: ObservedState::Starting,
         });
 
-        tick_workers(&mut control_plane, &mut supervisor, &config());
+        tick_workers(&mut control_plane, &mut supervisor, &config);
         let first_pid = supervisor
             .status("example.paper")
             .and_then(|status| status.pid)
             .expect("first pid");
 
-        tick_workers(&mut control_plane, &mut supervisor, &config());
+        tick_workers(&mut control_plane, &mut supervisor, &config);
         let second_pid = supervisor
             .status("example.paper")
             .and_then(|status| status.pid)
@@ -329,6 +345,7 @@ mod tests {
     fn running_desired_state_restarts_paused_worker() {
         let mut control_plane = ControlPlane::default();
         let mut supervisor = WorkerSupervisor::default();
+        let config = config();
         control_plane.deployments.upsert(DeploymentRecord {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
@@ -340,10 +357,10 @@ mod tests {
             observed_state: ObservedState::Starting,
         });
 
-        tick_workers(&mut control_plane, &mut supervisor, &config());
+        tick_workers(&mut control_plane, &mut supervisor, &config);
         supervisor.pause("example.paper");
 
-        tick_workers(&mut control_plane, &mut supervisor, &config());
+        tick_workers(&mut control_plane, &mut supervisor, &config);
         let status = supervisor.status("example.paper").expect("status");
         assert!(matches!(
             status.observed_state,

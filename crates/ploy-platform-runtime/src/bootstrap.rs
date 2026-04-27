@@ -46,6 +46,19 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    fn test_working_directory() -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ploy-platform-bootstrap-workdir-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create test working directory");
+        path
+    }
+
     fn test_runner_binary() -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -71,7 +84,7 @@ mod tests {
             worker_heartbeat_stale_after_ms: 15_000,
             runner_binary: test_runner_binary(),
             strategy_config_root: PathBuf::from("config/strategies"),
-            working_directory: std::env::current_dir().expect("cwd"),
+            working_directory: test_working_directory(),
         }
     }
 
@@ -80,6 +93,7 @@ mod tests {
         let mut registry = DeploymentRegistry::default();
         let mut supervisor = WorkerSupervisor::default();
         let mut trading = BTreeMap::<String, TradingRuntime>::new();
+        let config = config();
 
         apply_loaded_registry_state(
             vec![DeploymentRecord {
@@ -95,7 +109,7 @@ mod tests {
             &mut registry,
             &mut supervisor,
             &mut trading,
-            &config(),
+            &config,
         );
 
         assert!(registry.get("example.paper").is_some());
@@ -108,6 +122,7 @@ mod tests {
         let mut registry = DeploymentRegistry::default();
         let mut supervisor = WorkerSupervisor::default();
         let mut trading = BTreeMap::<String, TradingRuntime>::new();
+        let config = config();
 
         let records = vec![DeploymentRecord {
             deployment_id: "example.paper".to_string(),
@@ -125,7 +140,7 @@ mod tests {
             &mut registry,
             &mut supervisor,
             &mut trading,
-            &config(),
+            &config,
         );
         let first_pid = supervisor
             .status("example.paper")
@@ -137,7 +152,7 @@ mod tests {
             &mut registry,
             &mut supervisor,
             &mut trading,
-            &config(),
+            &config,
         );
         let second_pid = supervisor
             .status("example.paper")
