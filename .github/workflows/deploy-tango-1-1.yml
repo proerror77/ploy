@@ -144,6 +144,7 @@ jobs:
           cp scripts/binance_aggtrade_collector.py dist/scripts/binance_aggtrade_collector.py
           cp scripts/binance_price_collector.py dist/scripts/binance_price_collector.py
           cp scripts/binance_lob_collector.py dist/scripts/binance_lob_collector.py
+          cp scripts/deribit_atm_greeks_collector.py dist/scripts/deribit_atm_greeks_collector.py
           cp scripts/report_strategy.py dist/scripts/report_strategy.py
           cp scripts/report_market_data_health.py dist/scripts/report_market_data_health.py
           cp scripts/report_dryrun_summary.py dist/scripts/report_dryrun_summary.py
@@ -159,6 +160,7 @@ jobs:
           done
           cp deployment/systemd/ploy-binance-aggtrade-collector.service dist/deployment/systemd/ploy-binance-aggtrade-collector.service
           cp deployment/systemd/ploy-binance-lob-collector.service dist/deployment/systemd/ploy-binance-lob-collector.service
+          cp deployment/systemd/ploy-deribit-greeks-collector.service dist/deployment/systemd/ploy-deribit-greeks-collector.service
           cp deployment/systemd/ploy-pm-trade-collector.service dist/deployment/systemd/ploy-pm-trade-collector.service
           cp deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf dist/deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf
           cp deployment/systemd/ploy-quote-collector.hardening.conf dist/deployment/systemd/ploy-quote-collector.hardening.conf
@@ -366,6 +368,7 @@ jobs:
             install -m 0755 ./scripts/binance_aggtrade_collector.py ${DEPLOY_ROOT}/scripts/binance_aggtrade_collector.py
             install -m 0755 ./scripts/binance_price_collector.py ${DEPLOY_ROOT}/scripts/binance_price_collector.py
             install -m 0755 ./scripts/binance_lob_collector.py ${DEPLOY_ROOT}/scripts/binance_lob_collector.py
+            install -m 0755 ./scripts/deribit_atm_greeks_collector.py ${DEPLOY_ROOT}/scripts/deribit_atm_greeks_collector.py
             install -m 0755 ./scripts/report_strategy.py ${DEPLOY_ROOT}/scripts/report_strategy.py
             install -m 0755 ./scripts/report_market_data_health.py ${DEPLOY_ROOT}/scripts/report_market_data_health.py
             install -m 0755 ./scripts/report_dryrun_summary.py ${DEPLOY_ROOT}/scripts/report_dryrun_summary.py
@@ -383,6 +386,7 @@ jobs:
             install -d /etc/systemd/system/ploy-quote-collector.service.d
             install -m 0644 ./deployment/systemd/ploy-binance-aggtrade-collector.service /etc/systemd/system/ploy-binance-aggtrade-collector.service
             install -m 0644 ./deployment/systemd/ploy-binance-lob-collector.service /etc/systemd/system/ploy-binance-lob-collector.service
+            install -m 0644 ./deployment/systemd/ploy-deribit-greeks-collector.service /etc/systemd/system/ploy-deribit-greeks-collector.service
             install -m 0644 ./deployment/systemd/ploy-pm-trade-collector.service /etc/systemd/system/ploy-pm-trade-collector.service
             install -m 0644 ./deployment/systemd/ploy-quote-collector.hardening.conf /etc/systemd/system/ploy-quote-collector.service.d/hardening.conf
             systemctl daemon-reload
@@ -413,6 +417,8 @@ jobs:
             if service_exists ploy-deribit-iv-collector.service; then
               systemctl restart ploy-deribit-iv-collector.service
             fi
+            systemctl enable --now ploy-deribit-greeks-collector.service
+            systemctl restart ploy-deribit-greeks-collector.service
             if service_exists ploy-quote-collector.service; then
               systemctl enable --now ploy-quote-collector.service
               systemctl restart ploy-quote-collector.service
@@ -440,6 +446,8 @@ jobs:
             if service_exists ploy-deribit-iv-collector.service; then
               systemctl is-active --quiet ploy-deribit-iv-collector.service
             fi
+            systemctl is-active --quiet ploy-deribit-greeks-collector.service
+            require_service_guardrails ploy-deribit-greeks-collector.service
             if service_exists ployd.service; then
               systemctl is-active --quiet ployd.service
               curl -fsS http://127.0.0.1:8081/health
@@ -471,6 +479,11 @@ jobs:
                 3
             fi
             wait_for_recent_rows \
+              "SELECT EXISTS (SELECT 1 FROM deribit_atm_greeks_ticks WHERE fetched_at >= NOW() - INTERVAL '15 minutes')" \
+              "deribit_atm_greeks_ticks is not fresh after deploy" \
+              20 \
+              3
+            wait_for_recent_rows \
               "SELECT EXISTS (SELECT 1 FROM clob_trade_ticks WHERE received_at >= NOW() - INTERVAL '5 minutes')" \
               "clob_trade_ticks is not receiving PM trade prints after deploy" \
               20 \
@@ -495,6 +508,10 @@ jobs:
                 "deribit iv collector still lacks active partitions"
             fi
             assert_no_recent_logs \
+              "ploy-deribit-greeks-collector.service" \
+              "Traceback|psql failed|column \"option_type\" does not exist|column \"strike\" does not exist" \
+              "deribit greeks collector failed after deploy"
+            assert_no_recent_logs \
               "ploy-pm-trade-collector.service" \
               "no partition of relation \"clob_trade_ticks\"" \
               "pm trade collector still lacks active partitions"
@@ -508,6 +525,7 @@ jobs:
             if service_exists ploy-deribit-iv-collector.service; then
               systemctl status ploy-deribit-iv-collector.service --no-pager
             fi
+            systemctl status ploy-deribit-greeks-collector.service --no-pager
             if service_exists ployd.service; then
               systemctl status ployd.service --no-pager
             fi
@@ -525,6 +543,7 @@ jobs:
             if service_exists ploy-deribit-iv-collector.service; then
               journalctl -u ploy-deribit-iv-collector.service -n 20 --no-pager
             fi
+            journalctl -u ploy-deribit-greeks-collector.service -n 20 --no-pager
             if service_exists ployd.service; then
               journalctl -u ployd.service -n 20 --no-pager
             fi

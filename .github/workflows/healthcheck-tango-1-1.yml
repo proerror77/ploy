@@ -82,12 +82,14 @@ jobs:
             systemctl is-active --quiet ploy-binance-price-collector.service
             systemctl is-active --quiet ploy-binance-lob-collector.service
             systemctl is-active --quiet ploy-deribit-iv-collector.service
+            systemctl is-active --quiet ploy-deribit-greeks-collector.service
             systemctl is-active --quiet ployd.service
             systemctl is-active --quiet ploy-quote-collector.service
             if service_exists ploy-pm-trade-collector.service; then
               systemctl is-active --quiet ploy-pm-trade-collector.service
             fi
             require_service_guardrails ploy-binance-lob-collector.service
+            require_service_guardrails ploy-deribit-greeks-collector.service
             require_service_guardrails ployd.service
             require_service_guardrails ploy-quote-collector.service
             if service_exists ploy-pm-trade-collector.service; then
@@ -120,6 +122,11 @@ jobs:
               echo "deribit_iv_ticks has not advanced within the last 15 minutes" >&2
               exit 1
             fi
+            if [ "$(PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
+              "SELECT EXISTS (SELECT 1 FROM deribit_atm_greeks_ticks WHERE fetched_at >= NOW() - INTERVAL '15 minutes')")" != "t" ]; then
+              echo "deribit_atm_greeks_ticks has not advanced within the last 15 minutes" >&2
+              exit 1
+            fi
             if journalctl -u ploy-binance-price-collector.service --since '15 minutes ago' --no-pager \
               | grep -qE "uq_binance_price_ticks_symbol_second|duplicate key value"; then
               echo "binance price collector still reports duplicate-write churn" >&2
@@ -128,6 +135,11 @@ jobs:
             if journalctl -u ploy-deribit-iv-collector.service --since '15 minutes ago' --no-pager \
               | grep -qE "no partition of relation \"deribit_iv_ticks\""; then
               echo "deribit iv collector still reports missing partitions" >&2
+              exit 1
+            fi
+            if journalctl -u ploy-deribit-greeks-collector.service --since '15 minutes ago' --no-pager \
+              | grep -qE "Traceback|psql failed|column \"option_type\" does not exist|column \"strike\" does not exist"; then
+              echo "deribit greeks collector failed within the last 15 minutes" >&2
               exit 1
             fi
 
@@ -151,12 +163,17 @@ jobs:
               PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
                 "SELECT coalesce(max(fetched_at)::text, 'none') FROM deribit_iv_ticks"
             )
+            latest_deribit_greeks=$(
+              PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
+                "SELECT coalesce(max(fetched_at)::text, 'none') FROM deribit_atm_greeks_ticks"
+            )
 
             echo "postgres=$(systemctl show -P ActiveState postgresql@16-main)"
             echo "aggtrade=$(systemctl show -P ActiveState ploy-binance-aggtrade-collector.service)"
             echo "price=$(systemctl show -P ActiveState ploy-binance-price-collector.service)"
             echo "lob=$(systemctl show -P ActiveState ploy-binance-lob-collector.service)"
             echo "deribit=$(systemctl show -P ActiveState ploy-deribit-iv-collector.service)"
+            echo "deribit_greeks=$(systemctl show -P ActiveState ploy-deribit-greeks-collector.service)"
             echo "ployd=$(systemctl show -P ActiveState ployd.service)"
             echo "collector=$(systemctl show -P ActiveState ploy-quote-collector.service)"
             if service_exists ploy-pm-trade-collector.service; then
@@ -166,6 +183,7 @@ jobs:
             echo "latest_price=${latest_price}"
             echo "latest_lob=${latest_lob}"
             echo "latest_deribit=${latest_deribit}"
+            echo "latest_deribit_greeks=${latest_deribit_greeks}"
             echo "latest_signal=${latest_signal}"
           EOF
 
@@ -180,5 +198,6 @@ jobs:
             echo "- binance_price_ticks must advance within the last 10 minutes"
             echo "- binance_lob_ticks must advance within the last 15 minutes"
             echo "- deribit_iv_ticks must advance within the last 15 minutes"
+            echo "- deribit_atm_greeks_ticks must advance within the last 15 minutes"
             echo "- ployd must not log degraded persistence messages in the last 15 minutes"
           } >> "$GITHUB_STEP_SUMMARY"
