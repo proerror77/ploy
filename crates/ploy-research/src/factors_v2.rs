@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::{DateTime, Duration, Utc};
 use ploy_operator_contracts::Regime;
 
-use crate::factors::{FactorObservation, ResearchPmBookSnapshot, pearson_ic, spearman_ic};
+use crate::factors::{pearson_ic, spearman_ic, FactorObservation, ResearchPmBookSnapshot};
 
 const DEFAULT_STAKE_USD: f64 = 15.0;
 const DEFAULT_TOP_QUANTILE: f64 = 0.2;
@@ -2129,6 +2129,7 @@ pub fn format_factor_walk_forward_v2_report(report: &FactorWalkForwardReport) ->
         report.health.exit_fill_rate() * 100.0,
         report.health.avg_pm_lag_secs,
     ));
+    push_full_depth_health_line(&mut out, &report.health);
     out.push_str(&format!(
         "stake_usd={:.2} train_days={} test_days={} step_days={} top_quantile={:.2} factor_name_filter={}\n\n",
         report.options.review.stake_usd,
@@ -2250,6 +2251,7 @@ pub fn format_factor_combo_v1_report(report: &FactorComboV1Report) -> String {
         report.health.entry_fill_rate() * 100.0,
         report.health.rejection_rate() * 100.0,
     ));
+    push_full_depth_health_line(&mut out, &report.health);
     out.push_str(&format!(
         "train_days={} test_days={} step_days={} top_quantile={:.2} max_family={} max_total={} min_abs_train_pnl_ic={:.4} factor_name_filter={}\n\n",
         report.options.walk_forward.train_window_days,
@@ -2334,6 +2336,7 @@ pub fn format_fillability_review_v1_report(
         report.health.exit_fill_rate() * 100.0,
         report.health.rejection_rate() * 100.0,
     ));
+    push_full_depth_health_line(&mut out, &report.health);
     out.push_str(&format!(
         "stake_usd={:.2} min_bucket_obs={} min_entry_fill={:.2} min_roundtrip_fill={:.2} max_reject={:.2}\n\n",
         report.options.review.stake_usd,
@@ -2382,6 +2385,7 @@ pub fn format_liquidity_gate_v1_report(report: &LiquidityGateV1Report) -> String
         report.coverage,
         report.options.review.stake_usd,
     ));
+    push_full_depth_health_line(&mut out, &report.health);
     out.push_str(&format!(
         "min_entry_cap={:.2} min_exit_cap={:.2} max_pm_lag_secs={:.2} max_pm_spread_bps={:.2} min_time_remaining_secs={} entry_ask=[{:.2},{:.2}]\n",
         report.options.min_entry_capacity_ratio,
@@ -2431,6 +2435,7 @@ pub fn format_liquidity_gated_alpha_v1_report(
         report.gate.roundtrip_fill_rate * 100.0,
         report.gate.rejection_rate * 100.0,
     ));
+    push_full_depth_health_line(&mut out, &report.baseline_health);
     out.push_str(&format!(
         "stake_usd={:.2} train_days={} test_days={} step_days={} top_quantile={:.2} factor_name_filter={}\n\n",
         report.options.walk_forward.review.stake_usd,
@@ -2523,6 +2528,7 @@ pub fn format_trade_formation_v1_report(report: &TradeFormationReviewReport) -> 
         report.health.entry_fill_rate() * 100.0,
         report.health.rejection_rate() * 100.0,
     ));
+    push_full_depth_health_line(&mut out, &report.health);
     out.push_str(&format!(
         "gated_rows={} gate_coverage={:.4} gate_entry_fill={:.2}% gate_roundtrip_fill={:.2}% gate_reject={:.2}% profitable_gated={} losing_gated={} missed_winners={}\n",
         report.gated_rows,
@@ -2625,6 +2631,7 @@ pub fn format_meta_label_walk_forward_v1_report(report: &MetaLabelWalkForwardRep
         report.health.entry_fill_rate() * 100.0,
         report.health.rejection_rate() * 100.0,
     ));
+    push_full_depth_health_line(&mut out, &report.health);
     out.push_str(&format!(
         "gate_selected={} gate_coverage={:.4} gate_entry_fill={:.2}% gate_roundtrip_fill={:.2}% gate_reject={:.2}%\n",
         report.gate.selected_n,
@@ -2719,22 +2726,53 @@ pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usiz
         report.health.exit_fill_rate() * 100.0,
         report.health.avg_pm_lag_secs,
     ));
-    out.push_str(&format!(
-        "full_depth_entry_fill_rate={:.2}% full_depth_exit_fill_rate={:.2}% full_depth_pnl_rows={} avg_entry_sweep_slip_bps={:.2} avg_exit_sweep_slip_bps={:.2}\n",
-        report.health.full_depth_entry_fill_rate() * 100.0,
-        report.health.full_depth_exit_fill_rate() * 100.0,
-        report.health.full_depth_executable_pnl_rows,
-        report.health.avg_entry_sweep_slippage_bps,
-        report.health.avg_exit_sweep_slippage_bps,
-    ));
+    push_full_depth_health_line(&mut out, &report.health);
     out.push_str(&format!(
         "stake_usd={:.2} top_quantile={:.2} min_observations={}\n\n",
         report.options.stake_usd, report.options.top_quantile, report.options.min_observations,
     ));
 
-    out.push_str("=== Top Single-Factor Reviews By Executable PnL ===\n");
+    let top_n = top_n.max(1);
+    out.push_str("=== Top Tradable Single-Factor Reviews By Executable PnL ===\n");
+    push_single_factor_review_rows(
+        &mut out,
+        report
+            .reviews
+            .iter()
+            .filter(|review| !is_future_exit_diagnostic_factor(&review.factor))
+            .take(top_n),
+    );
+
+    let diagnostics = report
+        .reviews
+        .iter()
+        .filter(|review| is_future_exit_diagnostic_factor(&review.factor))
+        .take(top_n.min(10))
+        .collect::<Vec<_>>();
+    if !diagnostics.is_empty() {
+        out.push_str("\n=== Future Exit Diagnostics Not Tradable Factors ===\n");
+        push_single_factor_review_rows(&mut out, diagnostics);
+    }
+    out
+}
+
+fn push_full_depth_health_line(out: &mut String, health: &DataHealthReport) {
+    out.push_str(&format!(
+        "full_depth_entry_fill_rate={:.2}% full_depth_exit_fill_rate={:.2}% full_depth_pnl_rows={} avg_entry_sweep_slip_bps={:.2} avg_exit_sweep_slip_bps={:.2}\n",
+        health.full_depth_entry_fill_rate() * 100.0,
+        health.full_depth_exit_fill_rate() * 100.0,
+        health.full_depth_executable_pnl_rows,
+        health.avg_entry_sweep_slippage_bps,
+        health.avg_exit_sweep_slippage_bps,
+    ));
+}
+
+fn push_single_factor_review_rows<'a, I>(out: &mut String, reviews: I)
+where
+    I: IntoIterator<Item = &'a SingleFactorReview>,
+{
     out.push_str("factor,family,layer,n,coverage,settle_rank_ic,pnl_rank_ic,selected_n,fill_rate,reject_rate,total_pnl,avg_pnl,sharpe,max_dd,symbol_pos,time_bucket_pos\n");
-    for review in report.reviews.iter().take(top_n) {
+    for review in reviews {
         out.push_str(&format!(
             "{},{},{},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
             review.factor,
@@ -2755,7 +2793,6 @@ pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usiz
             review.by_time_bucket_positive_ratio,
         ));
     }
-    out
 }
 
 fn build_trade_formation_path_rows(
@@ -3972,7 +4009,11 @@ fn is_walk_forward_candidate_descriptor(descriptor: &FactorV2Descriptor) -> bool
     // `future_exit_*` descriptors are diagnostic labels for exit feasibility.
     // They are intentionally reviewed in the single-window report, but using
     // them as train-time selection factors would leak future PM quote movement.
-    !descriptor.name.starts_with("future_exit_")
+    !is_future_exit_diagnostic_factor(descriptor.name)
+}
+
+fn is_future_exit_diagnostic_factor(name: &str) -> bool {
+    name.starts_with("future_exit_")
 }
 
 fn factor_name_matches_filter(name: &str, filter: &Option<String>) -> bool {
@@ -4975,7 +5016,11 @@ fn normalized_iv(value: f64) -> f64 {
     if !value.is_finite() {
         return f64::NAN;
     }
-    if value > 2.0 { value / 100.0 } else { value }
+    if value > 2.0 {
+        value / 100.0
+    } else {
+        value
+    }
 }
 
 fn finite_diff(now: f64, before: f64) -> Option<f64> {
@@ -5165,7 +5210,11 @@ fn signum(value: f64) -> f64 {
 }
 
 fn bool_num(value: bool) -> f64 {
-    if value { 1.0 } else { 0.0 }
+    if value {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 fn crypto_fee_cost(entry_price: f64) -> f64 {
@@ -5423,21 +5472,17 @@ mod tests {
         assert!(report.gate.selected_n < report.baseline_health.v2_rows);
         assert!((report.gate.entry_fill_rate - 1.0).abs() < EPS);
         assert!(!report.review.reviews.is_empty());
-        assert!(
-            report
-                .review
-                .reviews
-                .iter()
-                .all(|review| !review.factor.starts_with("future_exit_"))
-        );
+        assert!(report
+            .review
+            .reviews
+            .iter()
+            .all(|review| !review.factor.starts_with("future_exit_")));
         assert!(!report.walk_forward.windows.is_empty());
-        assert!(
-            report
-                .stability
-                .rows
-                .iter()
-                .any(|row| row.factor == "side_model_prob")
-        );
+        assert!(report
+            .stability
+            .rows
+            .iter()
+            .any(|row| row.factor == "side_model_prob"));
     }
 
     #[test]
@@ -5621,12 +5666,110 @@ mod tests {
 
         let report = review_factors_v2(&observations, FactorReviewOptions::default());
         assert!(report.health.entry_fill_rate() > 0.99);
-        assert!(
-            report
-                .reviews
-                .iter()
-                .any(|review| review.factor == "side_model_edge")
-        );
+        assert!(report
+            .reviews
+            .iter()
+            .any(|review| review.factor == "side_model_edge"));
+    }
+
+    #[test]
+    fn factor_review_report_separates_future_exit_diagnostics() {
+        let health = DataHealthReport {
+            source_observations: 10,
+            v2_rows: 20,
+            settlement_label_rows: 20,
+            entry_quote_rows: 20,
+            exit_quote_rows: 20,
+            entry_size_rows: 20,
+            exit_size_rows: 20,
+            entry_fillable_rows: 2,
+            exit_fillable_rows: 2,
+            entry_full_depth_fillable_rows: 12,
+            exit_full_depth_fillable_rows: 8,
+            executable_pnl_rows: 2,
+            full_depth_executable_pnl_rows: 8,
+            deribit_rows: 0,
+            avg_pm_lag_secs: 1.0,
+            avg_entry_capacity_ratio: 1.0,
+            avg_exit_capacity_ratio: 1.0,
+            avg_entry_sweep_slippage_bps: 250.0,
+            avg_exit_sweep_slippage_bps: 125.0,
+        };
+        let review = |factor: &str, pnl: f64| SingleFactorReview {
+            factor: factor.to_string(),
+            family: FactorFamily::Exit,
+            layer: ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            n: 20,
+            coverage: 1.0,
+            settlement_pearson_ic: 0.1,
+            settlement_rank_ic: 0.1,
+            executable_pnl_pearson_ic: 0.2,
+            executable_pnl_rank_ic: 0.2,
+            selected_n: 4,
+            selected_rejection_rate: 0.1,
+            selected_executable_fill_rate: 0.9,
+            selected_avg_slippage_bps: 10.0,
+            selected_total_pnl_after_cost: pnl,
+            selected_avg_pnl_after_cost: pnl / 4.0,
+            selected_sharpe: 1.0,
+            selected_max_drawdown: 1.0,
+            by_symbol_positive_ratio: 1.0,
+            by_time_bucket_positive_ratio: 1.0,
+        };
+        let report = FactorReviewV2Report {
+            options: FactorReviewOptions::default(),
+            health,
+            reviews: vec![
+                review("future_exit_pnl_30s", 100.0),
+                review("side_model_edge", 10.0),
+            ],
+        };
+
+        let text = format_factor_review_v2_report(&report, 10);
+        let tradable_section = text
+            .split("=== Future Exit Diagnostics Not Tradable Factors ===")
+            .next()
+            .expect("tradable section");
+        assert!(tradable_section.contains("side_model_edge"));
+        assert!(!tradable_section.contains("future_exit_pnl_30s"));
+        assert!(text.contains("=== Future Exit Diagnostics Not Tradable Factors ==="));
+        assert!(text.contains("future_exit_pnl_30s"));
+        assert!(text.contains("full_depth_pnl_rows=8"));
+    }
+
+    #[test]
+    fn walk_forward_report_prints_full_depth_health() {
+        let report = FactorWalkForwardReport {
+            options: FactorWalkForwardOptions::default(),
+            health: DataHealthReport {
+                source_observations: 10,
+                v2_rows: 20,
+                settlement_label_rows: 20,
+                entry_quote_rows: 20,
+                exit_quote_rows: 20,
+                entry_size_rows: 20,
+                exit_size_rows: 20,
+                entry_fillable_rows: 2,
+                exit_fillable_rows: 2,
+                entry_full_depth_fillable_rows: 12,
+                exit_full_depth_fillable_rows: 8,
+                executable_pnl_rows: 2,
+                full_depth_executable_pnl_rows: 8,
+                deribit_rows: 0,
+                avg_pm_lag_secs: 1.0,
+                avg_entry_capacity_ratio: 1.0,
+                avg_exit_capacity_ratio: 1.0,
+                avg_entry_sweep_slippage_bps: 250.0,
+                avg_exit_sweep_slippage_bps: 125.0,
+            },
+            windows: Vec::new(),
+            aggregates: Vec::new(),
+        };
+
+        let text = format_factor_walk_forward_v2_report(&report);
+        assert!(text.contains("full_depth_entry_fill_rate=60.00%"));
+        assert!(text.contains("full_depth_exit_fill_rate=40.00%"));
+        assert!(text.contains("full_depth_pnl_rows=8"));
     }
 
     #[test]
@@ -5673,18 +5816,14 @@ mod tests {
         assert!(side_model.threshold.is_finite());
         assert!(side_model.test.selected_n > 0);
         assert!(side_model.test.total_pnl_after_cost > 0.0);
-        assert!(
-            report
-                .aggregates
-                .iter()
-                .any(|aggregate| aggregate.factor == "side_model_prob")
-        );
-        assert!(
-            report
-                .windows
-                .iter()
-                .all(|window| !window.factor.starts_with("future_exit_"))
-        );
+        assert!(report
+            .aggregates
+            .iter()
+            .any(|aggregate| aggregate.factor == "side_model_prob"));
+        assert!(report
+            .windows
+            .iter()
+            .all(|window| !window.factor.starts_with("future_exit_")));
     }
 
     #[test]
@@ -5872,11 +6011,9 @@ mod tests {
 
         assert!(!report.windows.is_empty());
         assert!(report.aggregate.total_test_pnl_after_cost > 0.0);
-        assert!(
-            report
-                .windows
-                .iter()
-                .all(|window| !window.components.is_empty())
-        );
+        assert!(report
+            .windows
+            .iter()
+            .all(|window| !window.components.is_empty()));
     }
 }
