@@ -9952,3 +9952,26 @@ Review:
   diagnostic section, and includes full-depth sweep health across the walk-forward/combo/meta
   report surfaces.
 - 2026-04-28: Verification passed: `CARGO_TARGET_DIR=/tmp/ploy-factor-report-retry rtk cargo test -p ploy-research factors_v2 --lib`, `CARGO_TARGET_DIR=/tmp/ploy-factor-report-retry rtk cargo check -p ploy-research --features db --example factor_review_v2 --example factor_walk_forward_v2`, and `rtk git diff --check`.
+
+# PM Full-Depth Loader Performance (2026-04-28)
+
+## Files
+
+- `crates/ploy-research/src/factors.rs`
+  - Owner: PM full-depth orderbook loader SQL and regression guard
+- `tasks/todo.md`
+  - Owner: session tracker
+
+## Tasks
+
+- [x] Cancel the slow walk-forward retry before it keeps occupying `ploy-ci-1`.
+- [x] Verify the running backtest was on Aliyun `ploy-ci-1`, not local macOS.
+- [x] Replace the PM book sampler full time-range scan with token/event-window indexed sampling.
+- [x] Verify the SQL shape avoids `DISTINCT ON` over the 41GB `clob_orderbook_snapshots` table.
+- [x] Run focused tests/checks.
+- [ ] Open/merge PR, then rerun Factor Review and Walk-Forward on `ploy-ci-1`.
+
+## Review
+
+- 2026-04-28: Replaced the old PM book sampler `DISTINCT ON (token_id, bucket)` time-range scan with an event-bounded lateral bucket lookup that constrains `clob_orderbook_snapshots` by `token_id` and `received_at`. Tango smoke on a 15-minute six-symbol window returned 308 sampled rows in about 2.1s and used `Index Only Scan using idx_clob_orderbook_snapshots_token_time`.
+- 2026-04-28: Verification passed: `CARGO_TARGET_DIR=/tmp/ploy-pm-book-loader-indexed rtk cargo test -p ploy-research pm_book_sampler_uses_token_window_index_lookup --lib`, `CARGO_TARGET_DIR=/tmp/ploy-pm-book-loader-indexed rtk cargo check -p ploy-research --features db --lib`, and `rtk git diff --check`. The previous slow Factor Walk-Forward V2 retry `25017670831` is cancelled, and `ploy-ci-1` has no active `factor_walk_forward_v2` worker.
