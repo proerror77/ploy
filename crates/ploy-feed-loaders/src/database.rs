@@ -17,16 +17,16 @@
 //! | `pm_token_settlements` | Settlement outcomes |
 
 use chrono::{DateTime, Duration, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
 use ploy_market_contracts::{
-    HistoricalLoadOptions, MarketUpdate, l2_updates_from_depth_totals, market_update_sort_ts,
-    normalize_token_id,
+    l2_updates_from_depth_totals, market_update_sort_ts, normalize_token_id, HistoricalLoadOptions,
+    MarketUpdate,
 };
 
 #[cfg(test)]
@@ -34,6 +34,81 @@ use serde_json::Value;
 
 /// How far before `from` to load spot prices for EWMA volatility warm-up.
 const WARMUP_MINUTES: i64 = 30;
+
+const SYNC_RECORDS_SPOT_SAMPLED_QUERY: &str = r#"
+        WITH buckets AS (
+            SELECT s.symbol, bucket_start
+            FROM unnest($1::text[]) AS s(symbol)
+            CROSS JOIN generate_series(
+                $2::timestamptz,
+                $3::timestamptz,
+                make_interval(secs => $4::int)
+            ) AS bucket_start
+        )
+        SELECT spot.timestamp, spot.symbol, spot.bn_mid_price
+        FROM buckets
+        JOIN LATERAL (
+            SELECT timestamp, symbol, bn_mid_price
+            FROM sync_records
+            WHERE symbol = buckets.symbol
+              AND timestamp >= buckets.bucket_start
+              AND timestamp < buckets.bucket_start + make_interval(secs => $4::int)
+              AND timestamp <= $3
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ) AS spot ON true
+        ORDER BY spot.timestamp
+        "#;
+
+const BINANCE_PRICE_SAMPLED_QUERY: &str = r#"
+        WITH buckets AS (
+            SELECT s.symbol, bucket_start
+            FROM unnest($1::text[]) AS s(symbol)
+            CROSS JOIN generate_series(
+                $2::timestamptz,
+                $3::timestamptz,
+                make_interval(secs => $4::int)
+            ) AS bucket_start
+        )
+        SELECT spot.trade_time, spot.symbol, spot.price
+        FROM buckets
+        JOIN LATERAL (
+            SELECT trade_time, symbol, price
+            FROM binance_price_ticks
+            WHERE symbol = buckets.symbol
+              AND trade_time >= buckets.bucket_start
+              AND trade_time < buckets.bucket_start + make_interval(secs => $4::int)
+              AND trade_time <= $3
+            ORDER BY trade_time DESC
+            LIMIT 1
+        ) AS spot ON true
+        ORDER BY spot.trade_time
+        "#;
+
+const BINANCE_AGG_TRADE_SAMPLED_QUERY: &str = r#"
+        WITH buckets AS (
+            SELECT s.symbol, bucket_start
+            FROM unnest($1::text[]) AS s(symbol)
+            CROSS JOIN generate_series(
+                $2::timestamptz,
+                $3::timestamptz,
+                interval '5 seconds'
+            ) AS bucket_start
+        )
+        SELECT agg.trade_time, agg.symbol, agg.agg_trade_id, agg.price, agg.quantity, agg.is_buyer_maker
+        FROM buckets
+        JOIN LATERAL (
+            SELECT trade_time, symbol, agg_trade_id, price, quantity, is_buyer_maker
+            FROM binance_agg_trade_ticks
+            WHERE symbol = buckets.symbol
+              AND trade_time >= buckets.bucket_start
+              AND trade_time < buckets.bucket_start + interval '5 seconds'
+              AND trade_time <= $3
+            ORDER BY trade_time ASC
+            LIMIT 1
+        ) AS agg ON true
+        ORDER BY agg.trade_time
+        "#;
 
 /// Historical research backtests only trust canonical historical PM quote captures.
 ///
@@ -241,43 +316,20 @@ async fn load_spot_prices(
 ) -> Result<(), sqlx::Error> {
     let sample_secs = sample_secs.max(1) as i64;
     // Try sync_records first (has bn_mid_price)
-    let rows: Vec<(DateTime<Utc>, String, Decimal)> = sqlx::query_as(
-        r#"
-        SELECT timestamp, symbol, bn_mid_price
-        FROM (
-            SELECT DISTINCT ON (symbol, bucket)
-                   timestamp, symbol, bn_mid_price, bucket
-            FROM (
-                SELECT
-                    timestamp,
-                    symbol,
-                    bn_mid_price,
-                    to_timestamp(
-                        floor(EXTRACT(EPOCH FROM timestamp) / $4::double precision) * $4
-                    ) AS bucket
-                FROM sync_records
-                WHERE symbol = ANY($1)
-                  AND timestamp >= $2
-                  AND timestamp <= $3
-            ) ticks
-            ORDER BY symbol, bucket, timestamp DESC
-        ) sampled
-        ORDER BY timestamp
-        "#,
-    )
-    .bind(symbols)
-    .bind(from)
-    .bind(to)
-    .bind(sample_secs)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    let rows: Vec<(DateTime<Utc>, String, Decimal)> =
+        sqlx::query_as(SYNC_RECORDS_SPOT_SAMPLED_QUERY)
+            .bind(symbols)
+            .bind(from)
+            .bind(to)
+            .bind(sample_secs)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
 
     if !rows.is_empty() {
         info!(
             count = rows.len(),
-            sample_secs,
-            "Loaded spot prices from sync_records"
+            sample_secs, "Loaded spot prices from sync_records"
         );
         for (ts, symbol, price) in rows {
             updates.push(MarketUpdate::SpotPrice {
@@ -290,42 +342,18 @@ async fn load_spot_prices(
     }
 
     // Fallback: binance_price_ticks
-    let rows: Vec<(DateTime<Utc>, String, Decimal)> = sqlx::query_as(
-        r#"
-        SELECT trade_time, symbol, price
-        FROM (
-            SELECT DISTINCT ON (symbol, bucket)
-                   trade_time, symbol, price, bucket
-            FROM (
-                SELECT
-                    trade_time,
-                    symbol,
-                    price,
-                    to_timestamp(
-                        floor(EXTRACT(EPOCH FROM trade_time) / $4::double precision) * $4
-                    ) AS bucket
-                FROM binance_price_ticks
-                WHERE symbol = ANY($1)
-                  AND trade_time >= $2
-                  AND trade_time <= $3
-            ) ticks
-            ORDER BY symbol, bucket, trade_time DESC
-        ) sampled
-        ORDER BY trade_time
-        "#,
-    )
-    .bind(symbols)
-    .bind(from)
-    .bind(to)
-    .bind(sample_secs)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    let rows: Vec<(DateTime<Utc>, String, Decimal)> = sqlx::query_as(BINANCE_PRICE_SAMPLED_QUERY)
+        .bind(symbols)
+        .bind(from)
+        .bind(to)
+        .bind(sample_secs)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
 
     info!(
         count = rows.len(),
-        sample_secs,
-        "Loaded spot prices from binance_price_ticks"
+        sample_secs, "Loaded spot prices from binance_price_ticks"
     );
     for (ts, symbol, price) in rows {
         updates.push(MarketUpdate::SpotPrice {
@@ -348,25 +376,14 @@ async fn load_agg_trades(
     // Downsample to one row per 5-second bucket per symbol to avoid OOM.
     // AggTrade volume can reach millions of rows per hour; the strategy only
     // needs the signed trade imbalance signal, not tick-level granularity.
-    let rows: Vec<(DateTime<Utc>, String, i64, Decimal, Decimal, bool)> = sqlx::query_as(
-        r#"
-        SELECT DISTINCT ON (symbol, date_trunc('seconds', trade_time) - INTERVAL '1 second' * (EXTRACT(EPOCH FROM trade_time)::bigint % 5))
-               trade_time, symbol, agg_trade_id, price, quantity, is_buyer_maker
-        FROM binance_agg_trade_ticks
-        WHERE symbol = ANY($1)
-          AND trade_time >= $2
-          AND trade_time <= $3
-        ORDER BY symbol,
-                 date_trunc('seconds', trade_time) - INTERVAL '1 second' * (EXTRACT(EPOCH FROM trade_time)::bigint % 5),
-                 trade_time
-        "#,
-    )
-    .bind(symbols)
-    .bind(from)
-    .bind(to)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    let rows: Vec<(DateTime<Utc>, String, i64, Decimal, Decimal, bool)> =
+        sqlx::query_as(BINANCE_AGG_TRADE_SAMPLED_QUERY)
+            .bind(symbols)
+            .bind(from)
+            .bind(to)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
 
     info!(
         count = rows.len(),
@@ -1130,8 +1147,40 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        EventMetadataRow, MarketUpdate, build_event_updates, l2_updates_from_book, near_depth,
+        build_event_updates, l2_updates_from_book, near_depth, EventMetadataRow, MarketUpdate,
+        BINANCE_AGG_TRADE_SAMPLED_QUERY, BINANCE_PRICE_SAMPLED_QUERY,
+        SYNC_RECORDS_SPOT_SAMPLED_QUERY,
     };
+
+    #[test]
+    fn binance_samplers_use_bucketed_index_lookups() {
+        for query in [
+            SYNC_RECORDS_SPOT_SAMPLED_QUERY,
+            BINANCE_PRICE_SAMPLED_QUERY,
+            BINANCE_AGG_TRADE_SAMPLED_QUERY,
+        ] {
+            assert!(
+                query.contains("generate_series"),
+                "sampled Binance loaders should generate bounded buckets"
+            );
+            assert!(
+                query.contains("JOIN LATERAL"),
+                "sampled Binance loaders should perform one indexable lookup per bucket"
+            );
+            assert!(
+                !query.contains("DISTINCT ON"),
+                "sampled Binance loaders must not sort full time ranges by bucket"
+            );
+            assert!(
+                !query.contains("EXTRACT(EPOCH FROM"),
+                "sampled Binance loaders should avoid computed bucket expressions over full tables"
+            );
+        }
+
+        assert!(BINANCE_PRICE_SAMPLED_QUERY.contains("trade_time >= buckets.bucket_start"));
+        assert!(BINANCE_PRICE_SAMPLED_QUERY.contains("ORDER BY trade_time DESC"));
+        assert!(BINANCE_AGG_TRADE_SAMPLED_QUERY.contains("ORDER BY trade_time ASC"));
+    }
 
     #[test]
     fn official_settlement_backfill_repairs_event_expiry_outcome() {
