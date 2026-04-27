@@ -198,6 +198,22 @@ pub struct ResearchLobSnapshot {
     pub ask_depth_inner: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResearchPmBookLevel {
+    pub price: f64,
+    pub size: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResearchPmBookSnapshot {
+    pub event_id: String,
+    pub token_id: String,
+    pub side: String,
+    pub ts: DateTime<Utc>,
+    pub bids: Vec<ResearchPmBookLevel>,
+    pub asks: Vec<ResearchPmBookLevel>,
+}
+
 #[derive(Clone, Default)]
 struct EventState {
     event_id: String,
@@ -766,6 +782,109 @@ pub async fn load_research_lob_snapshots_sampled(
             },
         )
         .collect())
+}
+
+#[cfg(feature = "db")]
+pub async fn load_research_pm_book_snapshots_sampled(
+    pool: &PgPool,
+    symbols: &[String],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    sample_every_secs: i32,
+) -> Result<Vec<ResearchPmBookSnapshot>, sqlx::Error> {
+    let sample_every_secs = sample_every_secs.max(1);
+    let rows: Vec<(String, String, String, DateTime<Utc>, Value, Value)> = sqlx::query_as(
+        r#"
+        WITH token_map AS (
+            SELECT DISTINCT
+                m.market_slug,
+                trim(both '"' from token.value::text) AS token_id,
+                CASE token.ordinality WHEN 1 THEN 'UP' ELSE 'DOWN' END AS side
+            FROM pm_market_metadata m
+            CROSS JOIN LATERAL jsonb_array_elements(
+                (m.raw_market->'markets'->0->>'clobTokenIds')::jsonb
+            ) WITH ORDINALITY AS token(value, ordinality)
+            WHERE m.symbol = ANY($1)
+              AND m.end_time >= $2
+              AND m.start_time <= $3
+              AND m.raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
+        ),
+        sampled AS (
+            SELECT DISTINCT ON (o.token_id, bucket)
+                t.market_slug,
+                t.token_id,
+                t.side,
+                o.received_at,
+                o.bids,
+                o.asks,
+                bucket
+            FROM (
+                SELECT
+                    token_id,
+                    received_at,
+                    bids,
+                    asks,
+                    to_timestamp(
+                        floor(EXTRACT(EPOCH FROM received_at) / $4::double precision) * $4
+                    ) AS bucket
+                FROM clob_orderbook_snapshots
+                WHERE received_at >= $2
+                  AND received_at <= $3
+            ) o
+            JOIN token_map t ON t.token_id = o.token_id
+            ORDER BY o.token_id, bucket, o.received_at DESC
+        )
+        SELECT market_slug, token_id, side, received_at, bids, asks
+        FROM sampled
+        ORDER BY received_at
+        "#,
+    )
+    .bind(symbols)
+    .bind(start)
+    .bind(end)
+    .bind(sample_every_secs)
+    .fetch_all(pool)
+    .await?;
+
+    eprintln!(
+        "pm book snapshot rows: {} (sample_every_secs={})",
+        rows.len(),
+        sample_every_secs
+    );
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(event_id, token_id, side, ts, bids, asks)| ResearchPmBookSnapshot {
+                event_id,
+                token_id,
+                side,
+                ts,
+                bids: book_levels_from_json(&bids, true),
+                asks: book_levels_from_json(&asks, false),
+            },
+        )
+        .collect())
+}
+
+#[cfg(feature = "db")]
+fn book_levels_from_json(levels: &Value, descending: bool) -> Vec<ResearchPmBookLevel> {
+    let mut out = levels
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(parse_depth_level)
+        .filter(|(price, size)| {
+            price.is_finite() && *price > 0.01 && *price < 0.99 && size.is_finite() && *size > 0.0
+        })
+        .map(|(price, size)| ResearchPmBookLevel { price, size })
+        .collect::<Vec<_>>();
+    if descending {
+        out.sort_by(|a, b| b.price.total_cmp(&a.price));
+    } else {
+        out.sort_by(|a, b| a.price.total_cmp(&b.price));
+    }
+    out
 }
 
 #[cfg(feature = "db")]
@@ -1675,11 +1794,7 @@ pub fn aggregate_factor_metrics(windows: &[Vec<FactorMetric>]) -> Vec<Aggregated
                     let std = (vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
                         / vals.len() as f64)
                         .sqrt();
-                    if std <= 1e-9 {
-                        None
-                    } else {
-                        Some(mean / std)
-                    }
+                    if std <= 1e-9 { None } else { Some(mean / std) }
                 }
             };
             AggregatedFactorMetric {
@@ -2146,11 +2261,7 @@ pub(crate) fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Op
                 return None;
             }
             let ic = spearman_ic(&xs, &ys);
-            if ic.is_finite() {
-                Some(ic)
-            } else {
-                None
-            }
+            if ic.is_finite() { Some(ic) } else { None }
         })
         .collect();
 
@@ -2191,9 +2302,8 @@ pub fn export_observations_parquet(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_future_pm_labels, build_factor_observations_with_lob,
+        FactorObservation, LabelField, attach_future_pm_labels, build_factor_observations_with_lob,
         build_task_grain_derived_artifacts_for_event_ids, pearson_ic, spearman_ic,
-        FactorObservation, LabelField,
     };
     use chrono::{TimeZone, Utc};
     use ploy_market_contracts::MarketUpdate;
