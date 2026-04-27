@@ -109,6 +109,7 @@ jobs:
           done
           cp deployment/systemd/ploy-binance-aggtrade-collector.service dist/deployment/systemd/ploy-binance-aggtrade-collector.service
           cp deployment/systemd/ploy-binance-lob-collector.service dist/deployment/systemd/ploy-binance-lob-collector.service
+          cp deployment/systemd/ploy-pm-trade-collector.service dist/deployment/systemd/ploy-pm-trade-collector.service
           cp deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf dist/deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf
           cp deployment/systemd/ploy-quote-collector.hardening.conf dist/deployment/systemd/ploy-quote-collector.hardening.conf
           tar -C dist -czf "${DEPLOY_BUNDLE_NAME}" .
@@ -318,6 +319,7 @@ jobs:
             install -d /etc/systemd/system/ploy-quote-collector.service.d
             install -m 0644 ./deployment/systemd/ploy-binance-aggtrade-collector.service /etc/systemd/system/ploy-binance-aggtrade-collector.service
             install -m 0644 ./deployment/systemd/ploy-binance-lob-collector.service /etc/systemd/system/ploy-binance-lob-collector.service
+            install -m 0644 ./deployment/systemd/ploy-pm-trade-collector.service /etc/systemd/system/ploy-pm-trade-collector.service
             install -m 0644 ./deployment/systemd/ploy-quote-collector.hardening.conf /etc/systemd/system/ploy-quote-collector.service.d/hardening.conf
             systemctl daemon-reload
 
@@ -350,6 +352,8 @@ jobs:
               systemctl enable --now ploy-quote-collector.service
               systemctl restart ploy-quote-collector.service
             fi
+            systemctl enable --now ploy-pm-trade-collector.service
+            systemctl restart ploy-pm-trade-collector.service
             if service_exists ployd.service; then
               systemctl restart ployd.service
             fi
@@ -363,6 +367,8 @@ jobs:
               systemctl is-active --quiet ploy-quote-collector.service
               require_service_guardrails ploy-quote-collector.service
             fi
+            systemctl is-active --quiet ploy-pm-trade-collector.service
+            require_service_guardrails ploy-pm-trade-collector.service
             if service_exists ploy-binance-price-collector.service; then
               systemctl is-active --quiet ploy-binance-price-collector.service
             fi
@@ -399,6 +405,11 @@ jobs:
                 20 \
                 3
             fi
+            wait_for_recent_rows \
+              "SELECT EXISTS (SELECT 1 FROM clob_trade_ticks WHERE received_at >= NOW() - INTERVAL '5 minutes')" \
+              "clob_trade_ticks is not receiving PM trade prints after deploy" \
+              20 \
+              3
 
             if service_exists ployd.service; then
               assert_no_recent_logs \
@@ -434,6 +445,7 @@ jobs:
             if service_exists ploy-quote-collector.service; then
               systemctl status ploy-quote-collector.service --no-pager
             fi
+            systemctl status ploy-pm-trade-collector.service --no-pager
 
             # Show recent logs
             journalctl -u ploy-binance-aggtrade-collector.service -n 20 --no-pager
@@ -450,6 +462,7 @@ jobs:
             if service_exists ploy-quote-collector.service; then
               journalctl -u ploy-quote-collector.service -n 20 --no-pager
             fi
+            journalctl -u ploy-pm-trade-collector.service -n 20 --no-pager
           EOF
 
       - name: Deployment summary
@@ -459,7 +472,7 @@ jobs:
           echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Transport: \`GitHub Actions -> OSS -> ECS\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- OSS object: \`${{ steps.upload_bundle_to_oss.outputs.bundle_object }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Services: \`ployd\` (if installed), \`ploy-binance-aggtrade-collector\`, \`ploy-binance-price-collector\`, \`ploy-binance-lob-collector\`, \`ploy-deribit-iv-collector\`, \`ploy-quote-collector\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Services: \`ployd\` (if installed), \`ploy-binance-aggtrade-collector\`, \`ploy-binance-price-collector\`, \`ploy-binance-lob-collector\`, \`ploy-deribit-iv-collector\`, \`ploy-quote-collector\`, \`ploy-pm-trade-collector\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Migrations: \`${DEPLOY_MIGRATIONS}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Postgres pre/postflight: required" >> "$GITHUB_STEP_SUMMARY"

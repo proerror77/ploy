@@ -1134,7 +1134,7 @@ pub fn build_factor_observations_with_lob_sampled(
                         }
                     }
 
-                    let (up_bid, up_ask, up_lag, up_bid_sz, up_ask_sz) = quotes
+                    let (mut up_bid, mut up_ask, up_lag, mut up_bid_sz, mut up_ask_sz) = quotes
                         .get(&event.up_token)
                         .map(|(quote_ts, bid, ask, bid_sz, ask_sz)| {
                             (
@@ -1146,17 +1146,46 @@ pub fn build_factor_observations_with_lob_sampled(
                             )
                         })
                         .unwrap_or((f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN));
-                    let (down_bid, down_ask, down_bid_sz, down_ask_sz) = quotes
-                        .get(&event.down_token)
-                        .map(|(_, bid, ask, bid_sz, ask_sz)| (*bid, *ask, *bid_sz, *ask_sz))
-                        .unwrap_or((f64::NAN, f64::NAN, f64::NAN, f64::NAN));
+                    let (mut down_bid, mut down_ask, down_lag, mut down_bid_sz, mut down_ask_sz) =
+                        quotes
+                            .get(&event.down_token)
+                            .map(|(quote_ts, bid, ask, bid_sz, ask_sz)| {
+                                (
+                                    *bid,
+                                    *ask,
+                                    (*ts - *quote_ts).num_seconds() as f64,
+                                    *bid_sz,
+                                    *ask_sz,
+                                )
+                            })
+                            .unwrap_or((f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN));
 
-                    if !up_lag.is_finite() || up_lag < 0.0 || up_lag > max_quote_age_secs as f64 {
+                    let up_quote_fresh =
+                        up_lag.is_finite() && up_lag >= 0.0 && up_lag <= max_quote_age_secs as f64;
+                    let down_quote_fresh = down_lag.is_finite()
+                        && down_lag >= 0.0
+                        && down_lag <= max_quote_age_secs as f64;
+                    if !up_quote_fresh {
+                        up_bid = f64::NAN;
+                        up_ask = f64::NAN;
+                        up_bid_sz = f64::NAN;
+                        up_ask_sz = f64::NAN;
+                    }
+                    if !down_quote_fresh {
+                        down_bid = f64::NAN;
+                        down_ask = f64::NAN;
+                        down_bid_sz = f64::NAN;
+                        down_ask_sz = f64::NAN;
+                    }
+                    if !up_ask.is_finite() && !down_ask.is_finite() {
                         continue;
                     }
-                    if !up_ask.is_finite() {
-                        continue;
-                    }
+                    let pm_lag_secs = match (up_quote_fresh, down_quote_fresh) {
+                        (true, true) => up_lag.min(down_lag),
+                        (true, false) => up_lag,
+                        (false, true) => down_lag,
+                        (false, false) => f64::NAN,
+                    };
 
                     let lob_state = lob.get(&sym).cloned().unwrap_or_default();
                     let depth_ratio = if lob_state.ask_depth_near > 0.0 {
@@ -1309,7 +1338,7 @@ pub fn build_factor_observations_with_lob_sampled(
                         pm_down_ask: down_ask,
                         pm_down_bid_size: down_bid_sz,
                         pm_down_ask_size: down_ask_sz,
-                        pm_lag_secs: up_lag,
+                        pm_lag_secs,
                         settlement_up: if resolved_up_won { 1.0 } else { 0.0 },
                         future_up_ask_change_30s: None,
                         future_up_ask_change_60s: None,
@@ -1646,7 +1675,11 @@ pub fn aggregate_factor_metrics(windows: &[Vec<FactorMetric>]) -> Vec<Aggregated
                     let std = (vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
                         / vals.len() as f64)
                         .sqrt();
-                    if std <= 1e-9 { None } else { Some(mean / std) }
+                    if std <= 1e-9 {
+                        None
+                    } else {
+                        Some(mean / std)
+                    }
                 }
             };
             AggregatedFactorMetric {
@@ -2113,7 +2146,11 @@ pub(crate) fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Op
                 return None;
             }
             let ic = spearman_ic(&xs, &ys);
-            if ic.is_finite() { Some(ic) } else { None }
+            if ic.is_finite() {
+                Some(ic)
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -2154,8 +2191,9 @@ pub fn export_observations_parquet(
 #[cfg(test)]
 mod tests {
     use super::{
-        FactorObservation, LabelField, attach_future_pm_labels, build_factor_observations_with_lob,
+        attach_future_pm_labels, build_factor_observations_with_lob,
         build_task_grain_derived_artifacts_for_event_ids, pearson_ic, spearman_ic,
+        FactorObservation, LabelField,
     };
     use chrono::{TimeZone, Utc};
     use ploy_market_contracts::MarketUpdate;
@@ -2285,6 +2323,56 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tick_ts, Utc.timestamp_opt(710, 0).unwrap());
         assert!(rows[0].tick_ts >= start);
+    }
+
+    #[test]
+    fn factor_observations_keep_down_side_when_up_quote_is_stale() {
+        let end = Utc.timestamp_opt(1000, 0).unwrap();
+        let updates = vec![
+            MarketUpdate::EventDiscovered {
+                event_id: Arc::from("evt"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("up"),
+                down_token: Arc::from("down"),
+                end_time: end,
+                window_secs: 300,
+                price_to_beat: Some(Decimal::new(100, 0)),
+                resolved_up_won: None,
+            },
+            MarketUpdate::Quote {
+                token_id: Arc::from("up"),
+                bid: Some(Decimal::new(45, 2)),
+                ask: Some(Decimal::new(46, 2)),
+                bid_size: Some(Decimal::new(100, 0)),
+                ask_size: Some(Decimal::new(100, 0)),
+                ts: Utc.timestamp_opt(700, 0).unwrap(),
+            },
+            MarketUpdate::Quote {
+                token_id: Arc::from("down"),
+                bid: Some(Decimal::new(53, 2)),
+                ask: Some(Decimal::new(54, 2)),
+                bid_size: Some(Decimal::new(100, 0)),
+                ask_size: Some(Decimal::new(100, 0)),
+                ts: Utc.timestamp_opt(749, 0).unwrap(),
+            },
+            MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: Decimal::new(99, 0),
+                ts: Utc.timestamp_opt(750, 0).unwrap(),
+            },
+            MarketUpdate::EventExpired {
+                event_id: Arc::from("evt"),
+                end_time: end,
+                resolved_up_won: Some(false),
+            },
+        ];
+
+        let rows = build_factor_observations_with_lob(&updates, &[], 30);
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].pm_up_ask.is_nan());
+        assert_eq!(rows[0].pm_down_ask, 0.54);
+        assert_eq!(rows[0].pm_lag_secs, 1.0);
     }
 
     #[test]

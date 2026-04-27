@@ -9714,3 +9714,47 @@ Review:
   windows survive the strict liquidity/sample gates. Next research work should either add explicit
   skipped-window diagnostics to the report or wait for more settled, fillable history before
   relaxing readiness thresholds.
+
+# Collector Recovery And Data Utilization (2026-04-26)
+
+## Files
+
+- `crates/ploy-market-data/src/collector.rs`
+  - Owner: collector health/backpressure lane
+- `crates/ploy-market-data/src/pm_trades.rs`
+  - Owner: PM trade-print collection lane
+- `crates/ploy-runner-host/src/ops.rs`
+  - Owner: collector runtime defaults lane
+- `crates/ploy-research/src/factors.rs`
+  - Owner: side-aware observation/data utilization follow-up lane
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: factor utilization/reporting follow-up lane
+- `crates/ploy-research/examples/*`
+  - Owner: collector utilization report follow-up lane
+- `deployment/systemd/ploy-pm-trade-collector.service`
+  - Owner: PM trade collector deploy lane
+- `.github/workflows/deploy-tango-1-1.yml`
+  - Owner: Tango deploy lane
+- `tasks/todo.md`
+  - Owner: session tracker
+
+## Tasks
+
+- [x] Verify Tango `ploy-quote-collector` is currently writing fresh `clob_orderbook_snapshots`.
+- [x] Add bounded DB persistence/backpressure to `ploy-quote-collector`.
+- [x] Add collector self-health checks for stale book/snapshot writes so systemd can restart it.
+- [x] Add focused regression coverage for collector config/health behavior.
+- [x] Add collector data utilization report covering table freshness, source coverage, Factor V2 NaN rates, and skipped-row reasons.
+- [x] Add PM public trade-print collector entrypoint and deploy unit for `clob_trade_ticks`.
+- [ ] Add PM full-depth and PM trade-print factor inputs once collector freshness is verified.
+- [x] Mark stale Deribit Greeks unusable unless the Greeks collector/table becomes fresh.
+- [x] Fix side-aware observation generation so DOWN opportunities are not gated by UP ask freshness.
+- [x] Verify formatting, targeted tests, and current remote collector freshness pre-deploy.
+- [ ] Deploy CI-built artifact to Tango and verify `ploy-pm-trade-collector` writes fresh rows.
+
+## Review
+
+- 2026-04-27: Restored PM quote collector reliability in code with bounded persistence, stale self-health, and env-tunable worker/queue defaults. Tango's currently deployed collector was still writing fresh `clob_orderbook_snapshots` and `clob_quote_ticks` during the check, but the new code path still needs CI deploy before it is active on-host.
+- 2026-04-27: Added `collector_data_utilization`, a DB-backed research report that separates collector freshness from Factor V2 utilization. A small Tango read-only window (`2026-04-27T09:45:00Z..10:05:00Z`) reported fresh Binance spot/aggTrade/LOB, fresh PM quotes/snapshots, fresh Deribit IV, zero current `clob_trade_ticks`, and stale/unusable Deribit Greeks.
+- 2026-04-27: Fixed base factor observation generation so a fresh DOWN quote can produce an observation even when the UP ask is stale; stale side values are now represented as `NaN` instead of dropping the whole event.
+- 2026-04-27: Added `collect-pm-trades`, which reads active crypto market `conditionId` from `pm_market_catalog`, polls Polymarket Data API `/trades`, and persists de-duplicated prints to `clob_trade_ticks`. Added `ploy-pm-trade-collector.service` and deploy/healthcheck wiring so the service can start after the next main deploy.

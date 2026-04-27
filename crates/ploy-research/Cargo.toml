@@ -95,3 +95,8 @@ required-features = ["db"]
 name = "factor_walk_forward_v2"
 path = "examples/factor_walk_forward_v2.rs"
 required-features = ["db"]
+
+[[example]]
+name = "collector_data_utilization"
+path = "examples/collector_data_utilization.rs"
+required-features = ["db"]

@@ -6,6 +6,8 @@ pub mod diagnostics;
 pub mod discovery;
 #[cfg(feature = "live")]
 pub mod feeds;
+#[cfg(feature = "live")]
+pub mod pm_trades;
 pub mod reference_prices;
 #[cfg(feature = "live")]
 pub mod scanner;
