@@ -50,6 +50,14 @@ pub struct PlatformMetrics {
     pub active_alerts: usize,
     pub stale_sources: usize,
     pub live_reconcile_failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_cpu_pressure_milli_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_load_average_1m_milli: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_memory_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_memory_available_mb: Option<u64>,
     pub last_trade_time: Option<DateTime<Utc>>,
     pub last_live_reconcile_success_at: Option<DateTime<Utc>>,
     pub heartbeats: Vec<HeartbeatStatus>,

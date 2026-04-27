@@ -6,7 +6,9 @@ Guidelines for contributing to the Ploy Polymarket trading bot.
 
 ### Prerequisites
 
-- **Rust** (stable toolchain) -- install via [rustup](https://rustup.rs/)
+- **Rust** via [rustup](https://rustup.rs/). The repository pins the exact
+  toolchain in `rust-toolchain.toml`; run `rustup show active-toolchain` after
+  checkout to confirm your shell is using it.
 - **PostgreSQL 15+** -- used for event registry, position tracking, and audit logs
 - **pkg-config**, **libssl-dev**, **libpq-dev** (Linux) or equivalent (macOS: `brew install postgresql openssl`)
 - **Node.js 18+** (only if working on the NBA Swing frontend)
@@ -99,6 +101,10 @@ A separate release/deploy path can still build release artifacts, but the defaul
 The default platform deployment workflow is `.github/workflows/release-platform.yml`.
 Legacy single-binary workflows remain in `.github/workflows/`, but they are not
 the default release path for the workspace runtime.
+
+For build-only release verification without touching a remote host, dispatch
+`release-platform.yml` with `deploy=false`. The deploy workflows keep
+`deploy=true` as their default for the established operator path.
 
 ## Running Tests
 

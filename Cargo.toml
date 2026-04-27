@@ -100,10 +100,11 @@ rust_decimal.workspace = true
 
 [profile.release]
 lto = "thin"
-codegen-units = 4
+codegen-units = 1
 panic = "abort"
-strip = true
+strip = "symbols"
 opt-level = 2
+split-debuginfo = "packed"
 
 [profile.dev]
 debug = 1

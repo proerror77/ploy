@@ -1,3 +1,113 @@
+# Merge Remote Dry-Run Report To Main (2026-04-28)
+
+## Files
+
+- `.github/workflows/deploy-tango-1-1.yml`
+- `.github/workflows/healthcheck-tango-1-1.yml`
+- `ploy-frontend/src/App.tsx`
+- `ploy-frontend/src/components/Layout.tsx`
+- `ploy-frontend/src/services/api.ts`
+- `tasks/todo.md`
+  - Owner: integration conflict resolution and verification notes.
+
+## Tasks
+
+- [x] Merge `origin/fix/remote-dryrun-report` into a clean branch from `origin/main`.
+- [x] Resolve research/factor conflicts by preserving main's newer factor-review implementation.
+- [x] Combine operator cockpit frontend routes/API with main's Dry/Live parity surface.
+- [x] Combine Tango deploy build hygiene with main's latest collector/deployment bundle changes.
+- [x] Run lightweight local static verification.
+- [ ] Push integration PR to `main` and use CI/build-only workflows for heavy verification.
+
+## Review
+
+- 2026-04-28: Conflict resolution intentionally kept main's newer PM full-depth
+  factor-review and event-dataset code, while adding the remote dry-run
+  cockpit/API/report delivery surface and release-build hygiene from
+  `fix/remote-dryrun-report`.
+- 2026-04-28: Local verification passed: targeted `rustfmt --check`,
+  `actionlint`, workflow YAML parse, contract drift checks, `cargo metadata
+  --no-deps --locked`, frontend build, sidecar build, Python report
+  `py_compile`, `bash -n`, `shellcheck`, and `git diff --check`.
+
+# Rust Release Build Hygiene (2026-04-27)
+
+## Files
+
+- `Cargo.toml`
+- `rust-toolchain.toml`
+- `.github/actionlint.yaml`
+- `.github/workflows/auto-review.yml`
+- `.github/workflows/backtest.yml`
+- `.github/workflows/test.yml`
+- `.github/workflows/release-platform.yml`
+- `.github/workflows/deploy-tango-1-1.yml`
+- `.github/workflows/deploy-trade.yml`
+- `.github/workflows/build-push-acr.yml`
+- `.github/workflows/healthcheck-tango-1-1.yml`
+- `.github/workflows/optimize.yml`
+- `docs/CONTRIBUTING.md`
+- `docs/runbooks/platform-deploy.md`
+- `README.md`
+
+## Tasks
+
+- [x] Tighten the release profile for shipped binaries without changing dev/fast iteration profiles.
+- [x] Enable release/deploy CI lanes to use the repo's `sccache` wrapper and fast linker path.
+- [x] Add deterministic build environment and artifact checksum checks where bundles/binaries are deployed.
+- [x] Verify workflow syntax and diff hygiene without running heavy local Rust builds.
+
+## Review
+
+- 2026-04-27: Release profile now keeps `thin` LTO but uses one codegen unit, symbol stripping, and packed split debuginfo for shipped binaries; dev and fast profiles remain optimized for iteration.
+- 2026-04-27: `release-platform`, `deploy-tango-1-1`, `deploy-trade`, and `build-push-acr` now install/cache `sccache`, try `mold` before falling back through the repo fast-linker, and set `SOURCE_DATE_EPOCH` from the checked-out commit time with UTC/C locale settings.
+- 2026-04-27: Platform and Tango deploy bundles now use deterministic tar/gzip flags (`--sort=name`, fixed `--mtime`, numeric owner/group, `gzip -n`) before SHA256 generation; platform upload verifies the checksum before deploy upload and again on the remote host, while direct trade deploy verifies the remote runner binary checksum after copy.
+- 2026-04-27: Release/deploy cache keys now include target, `release` profile, `rustc` version, `sccache` version for sccache caches, and `Cargo.lock` hash. This closes the main cache-hygiene gap from the original build checklist.
+- 2026-04-27: Added `rust-toolchain.toml` pinned to Rust `1.91` (currently resolves to `1.91.1` with cargo/clippy/rustfmt) and switched active GitHub workflows from implicit `dtolnay/rust-toolchain@stable` to `@master`, so CI uses the repository toolchain file instead of floating latest stable.
+- 2026-04-27: Added `deploy` workflow_dispatch inputs to platform, Tango, and trade deploy workflows. Defaults remain `true`; setting `deploy=false` gives a build/package/checksum-only verification path without restarting remote services.
+- 2026-04-27: Added `.github/actionlint.yaml` for self-hosted labels (`ploy-ci-1`, `tango-1-1`) and cleaned existing shellcheck findings in `backtest.yml`, `optimize.yml`, and `healthcheck-tango-1-1.yml` so full active-workflow `actionlint` passes.
+- 2026-04-27: Verification used full active-workflow `actionlint`, YAML parsing, `rustup show active-toolchain`, `cargo metadata --no-deps --locked`, and `git diff --check`; no heavy local Rust build was run.
+
+# Ploy Frontend Operator Cockpit (2026-04-24)
+
+## Files
+
+- `crates/ploy-operator-contracts/src/system.rs`
+- `crates/ploy-platform/src/system.rs`
+- `crates/ploy-daemon-host/src/runtime.rs`
+- `ploy-frontend/src/pages/OperatorCockpit.tsx`
+- `ploy-frontend/src/App.tsx`
+- `ploy-frontend/src/components/Layout.tsx`
+- `ploy-frontend/src/types/operator-contracts.ts`
+
+## Tasks
+
+- [x] Add lightweight host/process metrics to the operator metrics contract for CPU, memory, and load visibility.
+- [x] Build a read-only operator cockpit in `ploy-frontend` focused on current platform health, strategy state, account exposure, PnL, connectivity latency, and alert/log signals.
+- [x] Wire the page into existing routes/navigation without changing live-trading controls.
+- [x] Verify generated contracts, TypeScript, lint/build, and document remaining data gaps.
+
+## Review
+
+- 2026-04-24: Added `/cockpit` as a read-only Ploy Frontend operator cockpit, with `/dry-run` kept as a compatibility alias. It aggregates existing `system/status`, `system/metrics`, `system/alerts`, `deployments`, `trading/state`, and SSE events instead of depending on the pending `/api/strategies/running` endpoint.
+- 2026-04-24: Extended `PlatformMetrics` with lightweight Linux `/proc` host visibility: CPU pressure derived from 1-minute load average, load average, process RSS, and available memory. Generated schema/type snapshots were refreshed for frontend and sidecar.
+- 2026-04-24: Current latency display is freshness/heartbeat based, not a true network RTT measurement. A dedicated ping/echo or source-specific tick latency metric is still needed if exact exchange/API latency becomes a trading decision input.
+
+# Remote Dry-Run Strategy Report (2026-04-24)
+
+## Files
+
+- `crates/ploy-daemon-host/src/http.rs`
+- `scripts/report_strategy.py`
+- `.github/workflows/deploy-tango-1-1.yml`
+
+## Tasks
+
+- [ ] Add a read-only remote HTML endpoint for the existing dry-run strategy report.
+- [ ] Let the report generator run directly on `tango-1-1` against its local PostgreSQL instead of SSHing back into the host.
+- [ ] Ship the report script in the tango deploy bundle so `ployd` can regenerate and serve the page on demand.
+- [ ] Deploy the change to `tango-1-1` and verify the report is reachable over the existing control-plane surface.
+
 # PM5D Three-Layer Execution Liquidity Gates (2026-04-27)
 
 ## Files

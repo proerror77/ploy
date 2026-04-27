@@ -3,9 +3,17 @@ use ploy_operator_contracts::{
     ActiveAlert, AlertKind, AlertSeverity, HeartbeatState, HeartbeatStatus, PlatformMetrics,
     SystemControlResponse, SystemStatus,
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fs};
 
 const MAX_ERROR_TIMESTAMPS: usize = 3_600;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct HostMetrics {
+    cpu_pressure_milli_percent: Option<u32>,
+    load_average_1m_milli: Option<u32>,
+    process_memory_mb: Option<u64>,
+    memory_available_mb: Option<u64>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimePhase {
@@ -287,6 +295,7 @@ impl SystemService {
         live_deployments: usize,
         degraded_deployments: usize,
     ) -> PlatformMetrics {
+        let host_metrics = collect_host_metrics();
         PlatformMetrics {
             total_deployments,
             live_deployments,
@@ -294,6 +303,10 @@ impl SystemService {
             active_alerts: self.active_alerts().len(),
             stale_sources: self.stale_source_count(),
             live_reconcile_failures: self.live_reconcile_failures,
+            host_cpu_pressure_milli_percent: host_metrics.cpu_pressure_milli_percent,
+            host_load_average_1m_milli: host_metrics.load_average_1m_milli,
+            process_memory_mb: host_metrics.process_memory_mb,
+            host_memory_available_mb: host_metrics.memory_available_mb,
             last_trade_time: self.last_trade_time,
             last_live_reconcile_success_at: self.last_live_reconcile_success_at,
             heartbeats: self.heartbeat_statuses(),
@@ -343,6 +356,57 @@ impl SystemService {
             message: format!("system {action} accepted"),
         }
     }
+}
+
+fn collect_host_metrics() -> HostMetrics {
+    let load_average_1m = read_load_average_1m();
+    let cpu_pressure_milli_percent = load_average_1m.and_then(|load| {
+        let cpus = std::thread::available_parallelism().ok()?.get() as f64;
+        if cpus <= 0.0 {
+            return None;
+        }
+        Some((((load / cpus) * 100_000.0).clamp(0.0, 999_000.0)).round() as u32)
+    });
+
+    HostMetrics {
+        cpu_pressure_milli_percent,
+        load_average_1m_milli: load_average_1m.map(|value| (value * 1000.0).round() as u32),
+        process_memory_mb: read_status_kb("/proc/self/status", "VmRSS:").map(kib_to_mb),
+        memory_available_mb: read_meminfo_kb("MemAvailable:").map(kib_to_mb),
+    }
+}
+
+fn read_load_average_1m() -> Option<f64> {
+    let content = fs::read_to_string("/proc/loadavg").ok()?;
+    content.split_whitespace().next()?.parse::<f64>().ok()
+}
+
+fn read_status_kb(path: &str, key: &str) -> Option<u64> {
+    let content = fs::read_to_string(path).ok()?;
+    parse_kb_line(&content, key)
+}
+
+fn read_meminfo_kb(key: &str) -> Option<u64> {
+    let content = fs::read_to_string("/proc/meminfo").ok()?;
+    parse_kb_line(&content, key)
+}
+
+fn parse_kb_line(content: &str, key: &str) -> Option<u64> {
+    content.lines().find_map(|line| {
+        let line = line.trim();
+        if !line.starts_with(key) {
+            return None;
+        }
+        line[key.len()..]
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    })
+}
+
+fn kib_to_mb(kib: u64) -> u64 {
+    kib / 1024
 }
 
 fn alert_severity(source_kind: &str) -> AlertSeverity {

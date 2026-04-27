@@ -744,6 +744,30 @@
             "$ref": "#/definitions/HeartbeatStatus"
           }
         },
+        "host_cpu_pressure_milli_percent": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "host_load_average_1m_milli": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "host_memory_available_mb": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "last_live_reconcile_success_at": {
           "type": [
             "string",
@@ -766,6 +790,14 @@
         "live_reconcile_failures": {
           "type": "integer",
           "format": "uint32",
+          "minimum": 0.0
+        },
+        "process_memory_mb": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
           "minimum": 0.0
         },
         "stale_sources": {
