@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -49,7 +49,7 @@ jobs:
           shared-key: auto-review
 
       - name: Cache sccache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/sccache
           key: ${{ runner.os }}-sccache-auto-review-${{ hashFiles('**/Cargo.lock') }}
@@ -86,7 +86,7 @@ jobs:
 
       - name: Create or update auto-review comment
         if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           FMT_STATUS: ${{ steps.fmt.outputs.status }}
           CLIPPY_STATUS: ${{ steps.clippy.outputs.status }}

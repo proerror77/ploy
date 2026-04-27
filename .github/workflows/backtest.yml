@@ -51,7 +51,7 @@ jobs:
           fi
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
@@ -74,7 +74,7 @@ jobs:
             --example run_backtest
 
       - name: Upload run_backtest binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: run_backtest-${{ github.sha }}
           path: target/release/examples/run_backtest
@@ -89,12 +89,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
       - name: Download run_backtest binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: run_backtest-${{ github.sha }}
           path: target/release/examples

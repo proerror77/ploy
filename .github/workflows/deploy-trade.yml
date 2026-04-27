@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
@@ -65,7 +65,7 @@ jobs:
           echo "sccache_version=$(sccache --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
 
       - name: Cache cargo registry and build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -78,7 +78,7 @@ jobs:
             ${{ runner.os }}-cargo-trade-
 
       - name: Cache sccache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/sccache
           key: ${{ runner.os }}-sccache-deploy-trade-${{ env.PLATFORM_TARGET }}-release-rust-${{ steps.cache_meta.outputs.rustc_version }}-sccache-${{ steps.cache_meta.outputs.sccache_version }}-${{ hashFiles('**/Cargo.lock') }}

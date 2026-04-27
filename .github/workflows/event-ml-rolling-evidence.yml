@@ -95,7 +95,7 @@ jobs:
           fi
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
@@ -245,7 +245,7 @@ jobs:
 
       - name: Upload compact report bundle
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: event-ml-rolling-reports-${{ github.run_id }}
           path: artifacts/event-ml-report-bundle/
@@ -253,7 +253,7 @@ jobs:
 
       - name: Upload Parquet datasets
         if: ${{ github.event.inputs.upload_parquet_datasets == 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: event-ml-rolling-datasets-${{ github.run_id }}
           path: |

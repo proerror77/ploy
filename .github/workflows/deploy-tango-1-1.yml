@@ -56,7 +56,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
@@ -88,7 +88,7 @@ jobs:
           shared-key: deploy-tango-1-1-${{ env.PLATFORM_TARGET }}-release-rust-${{ steps.cache_meta.outputs.rustc_version }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache sccache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/sccache
           key: ${{ runner.os }}-sccache-deploy-tango-1-1-${{ env.PLATFORM_TARGET }}-release-rust-${{ steps.cache_meta.outputs.rustc_version }}-sccache-${{ steps.cache_meta.outputs.sccache_version }}-${{ hashFiles('**/Cargo.lock') }}
