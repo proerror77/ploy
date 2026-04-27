@@ -8,10 +8,19 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
-    FactorObservation, FactorReviewOptions, FactorWalkForwardOptions,
-    build_factor_observations_with_lob_sampled, format_factor_walk_forward_v2_report,
+    FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
+    FactorWalkForwardOptions, FillabilityReviewOptions, LiquidityGateV1Options,
+    LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions, TradeFormationReviewOptions,
+    build_factor_observations_with_lob_sampled, build_factor_stability_report,
+    format_factor_combo_v1_report, format_factor_stability_report,
+    format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
+    format_liquidity_gate_v1_report, format_liquidity_gated_alpha_v1_report,
+    format_meta_label_walk_forward_v1_report, format_trade_formation_v1_report,
+    liquidity_gate_v1_with_deribit, liquidity_gated_alpha_v1_with_deribit,
     load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
-    walk_forward_factors_v2_with_deribit,
+    review_fillability_v1_with_deribit, review_trade_formation_v1_with_deribit,
+    walk_forward_factor_combo_v1_with_deribit, walk_forward_factors_v2_with_deribit,
+    walk_forward_meta_label_v1_with_deribit,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -106,17 +115,19 @@ async fn main() {
         top_n: flag_value(&args, "--top-n")
             .and_then(|raw| raw.parse().ok())
             .unwrap_or(20),
+        factor_name_filter: flag_value(&args, "--factor-name-filter"),
     };
 
     eprintln!(
-        "factor_walk_forward_v2: {} -> {} for {:?}, stake_usd={:.2}, train_days={}, test_days={}, observation_sample_secs={}",
+        "factor_walk_forward_v2: {} -> {} for {:?}, stake_usd={:.2}, train_days={}, test_days={}, observation_sample_secs={}, factor_name_filter={}",
         start,
         end,
         symbols,
         options.review.stake_usd,
         options.train_window_days,
         options.test_window_days,
-        observation_sample_secs
+        observation_sample_secs,
+        options.factor_name_filter.as_deref().unwrap_or("<none>")
     );
 
     let pool = PgPoolOptions::new()
@@ -178,7 +189,101 @@ async fn main() {
         &deribit_snapshots,
         start,
         end,
-        options,
+        options.clone(),
     );
     println!("{}", format_factor_walk_forward_v2_report(&report));
+    let fillability_report = review_fillability_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        FillabilityReviewOptions {
+            review: options.review.clone(),
+            ..Default::default()
+        },
+    );
+    println!(
+        "{}",
+        format_fillability_review_v1_report(&fillability_report, options.top_n)
+    );
+    let liquidity_gate_report = liquidity_gate_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        LiquidityGateV1Options {
+            review: options.review.clone(),
+            ..Default::default()
+        },
+    );
+    println!(
+        "{}",
+        format_liquidity_gate_v1_report(&liquidity_gate_report)
+    );
+    let gated_alpha_report = liquidity_gated_alpha_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        start,
+        end,
+        LiquidityGatedAlphaV1Options {
+            gate: LiquidityGateV1Options {
+                review: options.review.clone(),
+                ..Default::default()
+            },
+            walk_forward: options.clone(),
+        },
+    );
+    println!(
+        "{}",
+        format_liquidity_gated_alpha_v1_report(&gated_alpha_report, options.top_n)
+    );
+    let formation_report = review_trade_formation_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        TradeFormationReviewOptions {
+            review: options.review.clone(),
+            gate: LiquidityGateV1Options {
+                review: options.review.clone(),
+                ..Default::default()
+            },
+            top_n: options.top_n,
+            ..Default::default()
+        },
+    );
+    println!("{}", format_trade_formation_v1_report(&formation_report));
+    let meta_label_report = walk_forward_meta_label_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        start,
+        end,
+        MetaLabelWalkForwardOptions {
+            review: options.review.clone(),
+            gate: LiquidityGateV1Options {
+                review: options.review.clone(),
+                ..Default::default()
+            },
+            train_window_days: options.train_window_days,
+            test_window_days: options.test_window_days,
+            step_days: options.step_days,
+            top_n: options.top_n,
+            ..Default::default()
+        },
+    );
+    println!(
+        "{}",
+        format_meta_label_walk_forward_v1_report(&meta_label_report)
+    );
+    let stability_report =
+        build_factor_stability_report(&report, FactorStabilityOptions::default());
+    println!(
+        "{}",
+        format_factor_stability_report(&stability_report, options.top_n)
+    );
+    let combo_report = walk_forward_factor_combo_v1_with_deribit(
+        &observations,
+        &deribit_snapshots,
+        start,
+        end,
+        FactorComboV1Options {
+            walk_forward: options,
+            ..Default::default()
+        },
+    );
+    println!("{}", format_factor_combo_v1_report(&combo_report));
 }

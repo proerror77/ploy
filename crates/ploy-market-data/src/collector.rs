@@ -8,6 +8,7 @@
 //! Run with: `ploy-runner collect-quotes --symbols BTCUSDT,ETHUSDT,SOLUSDT --timeframe 5m`
 
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -23,7 +24,8 @@ use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectC
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tokio::sync::RwLock;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 
@@ -39,6 +41,9 @@ pub struct CollectorConfig {
     pub symbols: Vec<String>,
     pub timeframe: String,
     pub refresh_interval_secs: u64,
+    pub persist_queue_capacity: usize,
+    pub persist_workers: usize,
+    pub stale_after_secs: u64,
 }
 
 /// Metadata for a tracked token.
@@ -65,7 +70,12 @@ struct CollectorStats {
     books_received: u64,
     snapshots_inserted: u64,
     quotes_inserted: u64,
+    persist_errors: u64,
+    dropped_books: u64,
     last_refresh: Option<DateTime<Utc>>,
+    last_book_at: Option<DateTime<Utc>>,
+    last_snapshot_at: Option<DateTime<Utc>>,
+    last_quote_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -88,6 +98,18 @@ struct SnapshotContext {
 struct PersistResult {
     snapshot_inserted: bool,
     quote_inserted: bool,
+}
+
+#[derive(Debug)]
+struct BookPersistJob {
+    timeframe: String,
+    meta: TokenMetadata,
+    book: BookUpdate,
+    token_id: String,
+    best_bid: Option<Decimal>,
+    best_ask: Option<Decimal>,
+    bid_size: Option<Decimal>,
+    ask_size: Option<Decimal>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +141,10 @@ enum OfficialMarketSettlementStatus {
 
 const POLYMARKET_CLOB_WS_ENDPOINT: &str = "wss://ws-subscriptions-clob.polymarket.com";
 const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
+const HEALTH_CHECK_INTERVAL_SECS: u64 = 15;
+const DEFAULT_PERSIST_QUEUE_CAPACITY: usize = 4_096;
+const DEFAULT_PERSIST_WORKERS: usize = 4;
+const DEFAULT_STALE_AFTER_SECS: u64 = 120;
 
 fn is_tradeable_price(price: Decimal) -> bool {
     price > rust_decimal_macros::dec!(0.02) && price < rust_decimal_macros::dec!(0.98)
@@ -321,11 +347,27 @@ fn collector_market_data_ws_config() -> PolymarketWsConfig {
     config
 }
 
+impl CollectorConfig {
+    #[must_use]
+    pub fn with_safe_defaults(mut self) -> Self {
+        if self.persist_queue_capacity == 0 {
+            self.persist_queue_capacity = DEFAULT_PERSIST_QUEUE_CAPACITY;
+        }
+        if self.persist_workers == 0 {
+            self.persist_workers = DEFAULT_PERSIST_WORKERS;
+        }
+        if self.stale_after_secs == 0 {
+            self.stale_after_secs = DEFAULT_STALE_AFTER_SECS;
+        }
+        self
+    }
+}
+
 impl QuoteCollector {
     /// Create a new quote collector.
     pub fn new(config: CollectorConfig, pool: PgPool) -> Self {
         Self {
-            config,
+            config: config.with_safe_defaults(),
             pool,
             subscribed_tokens: Arc::new(RwLock::new(HashSet::new())),
             token_metadata: Arc::new(RwLock::new(HashMap::new())),
@@ -350,6 +392,8 @@ impl QuoteCollector {
 
         // Spawn settlement collector (market_resolved WS events)
         let _settlement_handle = self.spawn_settlement_collector();
+
+        let persist_tx = self.spawn_persist_workers();
 
         loop {
             // Refresh subscriptions and get current token list
@@ -377,6 +421,7 @@ impl QuoteCollector {
             }
 
             info!(tokens = asset_ids.len(), "Subscribing to orderbook updates");
+            let active_asset_count = asset_ids.len();
 
             // Create WebSocket client and subscribe
             let client = ClobWsClient::new(
@@ -394,6 +439,9 @@ impl QuoteCollector {
             };
 
             let mut stream = Box::pin(stream);
+            let mut health_tick =
+                tokio::time::interval(StdDuration::from_secs(HEALTH_CHECK_INTERVAL_SECS));
+            health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
             info!("WebSocket connected, listening for quotes...");
 
@@ -403,6 +451,9 @@ impl QuoteCollector {
 
             loop {
                 tokio::select! {
+                    _ = health_tick.tick() => {
+                        self.check_runtime_health(active_asset_count).await?;
+                    }
                     _ = tokio::time::sleep_until(refresh_deadline) => {
                         info!("Refresh interval reached, reconnecting...");
                         break;
@@ -438,6 +489,7 @@ impl QuoteCollector {
                                 {
                                     let mut s = self.stats.write().await;
                                     s.books_received += 1;
+                                    s.last_book_at = Some(Utc::now());
                                 }
 
                                 // Select the actual best tradeable levels, not just the first
@@ -464,38 +516,27 @@ impl QuoteCollector {
                                 };
 
                                 if let Some(meta) = meta {
-                                    match persist_book_update(
-                                        &self.pool,
-                                        &self.config.timeframe,
-                                        &meta,
-                                        &book,
-                                        &token_id,
+                                    let job = BookPersistJob {
+                                        timeframe: self.config.timeframe.clone(),
+                                        meta,
+                                        book,
+                                        token_id: token_id.clone(),
                                         best_bid,
                                         best_ask,
                                         bid_size,
                                         ask_size,
-                                    )
-                                    .await
-                                    {
-                                        Ok(result) => {
-                                            let active_tokens = self.subscribed_tokens.read().await.len();
+                                    };
 
-                                            let mut s = self.stats.write().await;
-                                            s.snapshots_inserted += u64::from(result.snapshot_inserted);
-                                            s.quotes_inserted += u64::from(result.quote_inserted);
-
-                                            if s.books_received % 100 == 0 {
-                                                info!(
-                                                    books_received = s.books_received,
-                                                    snapshots_inserted = s.snapshots_inserted,
-                                                    quotes_inserted = s.quotes_inserted,
-                                                    active_tokens,
-                                                    "Quote collector stats"
-                                                );
-                                            }
+                                    match persist_tx.try_send(job) {
+                                        Ok(()) => {}
+                                        Err(TrySendError::Full(_job)) => {
+                                            self.note_dropped_book(&token_id).await;
                                         }
-                                        Err(e) => {
-                                            warn!(error = %e, token = %token_id, "Failed to persist book update");
+                                        Err(TrySendError::Closed(_job)) => {
+                                            return Err(Box::new(io::Error::new(
+                                                io::ErrorKind::BrokenPipe,
+                                                "quote collector persistence queue closed",
+                                            )));
                                         }
                                     }
                                 } else {
@@ -514,6 +555,163 @@ impl QuoteCollector {
                 }
             }
         }
+    }
+
+    fn spawn_persist_workers(&self) -> mpsc::Sender<BookPersistJob> {
+        let capacity = self.config.persist_queue_capacity;
+        let worker_count = self.config.persist_workers.max(1);
+        let (tx, rx) = mpsc::channel::<BookPersistJob>(capacity);
+        let rx = Arc::new(Mutex::new(rx));
+
+        for worker_id in 0..worker_count {
+            let pool = self.pool.clone();
+            let stats = self.stats.clone();
+            let rx = rx.clone();
+            tokio::spawn(async move {
+                loop {
+                    let job = {
+                        let mut rx = rx.lock().await;
+                        rx.recv().await
+                    };
+                    let Some(job) = job else {
+                        break;
+                    };
+
+                    let token_id = job.token_id.clone();
+                    match persist_book_update(
+                        &pool,
+                        &job.timeframe,
+                        &job.meta,
+                        &job.book,
+                        &job.token_id,
+                        job.best_bid,
+                        job.best_ask,
+                        job.bid_size,
+                        job.ask_size,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            let mut s = stats.write().await;
+                            s.snapshots_inserted += u64::from(result.snapshot_inserted);
+                            s.quotes_inserted += u64::from(result.quote_inserted);
+                            let now = Utc::now();
+                            if result.snapshot_inserted {
+                                s.last_snapshot_at = Some(now);
+                            }
+                            if result.quote_inserted {
+                                s.last_quote_at = Some(now);
+                            }
+
+                            if s.books_received % 100 == 0 {
+                                info!(
+                                    books_received = s.books_received,
+                                    snapshots_inserted = s.snapshots_inserted,
+                                    quotes_inserted = s.quotes_inserted,
+                                    persist_errors = s.persist_errors,
+                                    dropped_books = s.dropped_books,
+                                    worker_id,
+                                    "Quote collector stats"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            let mut s = stats.write().await;
+                            s.persist_errors = s.persist_errors.saturating_add(1);
+                            let persist_errors = s.persist_errors;
+                            drop(s);
+
+                            warn!(
+                                error = %e,
+                                token = %token_id,
+                                worker_id,
+                                persist_errors,
+                                "Failed to persist book update"
+                            );
+                        }
+                    }
+                }
+            });
+        }
+
+        tx
+    }
+
+    async fn note_dropped_book(&self, token_id: &str) {
+        let mut stats = self.stats.write().await;
+        stats.dropped_books = stats.dropped_books.saturating_add(1);
+        let dropped_books = stats.dropped_books;
+        drop(stats);
+
+        if dropped_books <= 5 || dropped_books % 100 == 0 {
+            warn!(
+                token = %token_id,
+                dropped_books,
+                queue_capacity = self.config.persist_queue_capacity,
+                "Quote collector persistence queue full; dropping orderbook update"
+            );
+        }
+    }
+
+    async fn check_runtime_health(
+        &self,
+        active_tokens: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if active_tokens == 0 {
+            return Ok(());
+        }
+
+        let now = Utc::now();
+        let stale_after = chrono::Duration::seconds(self.config.stale_after_secs as i64);
+        let stats = self.stats.read().await;
+        let dropped_books = stats.dropped_books;
+        let persist_errors = stats.persist_errors;
+        let snapshots_inserted = stats.snapshots_inserted;
+        let books_received = stats.books_received;
+        let last_refresh = stats.last_refresh;
+        let last_book_at = stats.last_book_at;
+        let last_snapshot_at = stats.last_snapshot_at;
+        drop(stats);
+
+        let last_seen = if snapshots_inserted > 0 {
+            last_snapshot_at
+        } else if books_received > 0 {
+            last_refresh
+        } else {
+            last_book_at.or(last_refresh)
+        };
+
+        if let Some(last_seen) = last_seen {
+            let age = now - last_seen;
+            if age > stale_after {
+                return Err(Box::new(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "quote collector stale: active_tokens={active_tokens} last_seen_at={} age_secs={} stale_after_secs={} books_received={} snapshots_inserted={} persist_errors={} dropped_books={}",
+                        last_seen.to_rfc3339(),
+                        age.num_seconds(),
+                        self.config.stale_after_secs,
+                        books_received,
+                        snapshots_inserted,
+                        persist_errors,
+                        dropped_books
+                    ),
+                )));
+            }
+        }
+
+        if dropped_books > 0 || persist_errors > 0 {
+            warn!(
+                active_tokens,
+                dropped_books,
+                persist_errors,
+                books_received,
+                snapshots_inserted,
+                "Quote collector health degraded but not stale"
+            );
+        }
+
+        Ok(())
     }
 
     /// Refresh market subscriptions by querying database for active markets.
@@ -1042,8 +1240,8 @@ mod tests {
     use super::{
         best_tradeable_ask_level, best_tradeable_bid_level, book_timestamp, bridge_sdk_json,
         collector_market_data_ws_config, parse_official_market_settlements,
-        serialize_orderbook_levels, snapshot_context, OfficialMarketSettlementPayload,
-        OrderBookLevel, TokenMetadata,
+        serialize_orderbook_levels, snapshot_context, CollectorConfig,
+        OfficialMarketSettlementPayload, OrderBookLevel, TokenMetadata,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;
@@ -1160,6 +1358,23 @@ mod tests {
         assert_eq!(config.heartbeat_interval, Duration::from_secs(15));
         assert_eq!(config.heartbeat_timeout, Duration::from_secs(45));
         assert!(config.reconnect.max_attempts.is_none());
+    }
+
+    #[test]
+    fn collector_config_fills_safe_backpressure_defaults() {
+        let config = CollectorConfig {
+            symbols: vec!["BTCUSDT".to_string()],
+            timeframe: "5m".to_string(),
+            refresh_interval_secs: 300,
+            persist_queue_capacity: 0,
+            persist_workers: 0,
+            stale_after_secs: 0,
+        }
+        .with_safe_defaults();
+
+        assert_eq!(config.persist_queue_capacity, 4_096);
+        assert_eq!(config.persist_workers, 4);
+        assert_eq!(config.stale_after_secs, 120);
     }
 
     #[test]

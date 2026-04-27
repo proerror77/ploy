@@ -1,16 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fs::{create_dir_all, File};
+use std::fs::{File, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeZone, Utc};
 use ploy_research::{
+    DatasetBuildManifest, DatasetBuildStats, DatasetSkipCounts, DatasetSourceWindow, DatasetSplit,
+    DatasetSplitAssignment, DatasetSplitCounts, DatasetSplitPolicy, EventIndexEntry,
     assign_chronological_event_splits, event_index_to_frame, split_assignments_to_frame,
-    standard_event_root_dataset_artifacts, DatasetBuildManifest, DatasetBuildStats,
-    DatasetSkipCounts, DatasetSourceWindow, DatasetSplit, DatasetSplitAssignment,
-    DatasetSplitCounts, DatasetSplitPolicy, EventIndexEntry,
+    standard_event_root_dataset_artifacts,
 };
 use polars::io::parquet::read::ParquetReader;
 use polars::io::parquet::write::ParquetWriter;
@@ -793,8 +793,8 @@ mod tests {
     use super::*;
     use chrono::Duration;
     use ploy_research::{
-        build_event_root_dataset, export_event_root_dataset_parquet, DatasetSourceWindow,
-        EventMetadataChronologyInput, EventRootDatasetBuildRequest, FactorObservation,
+        DatasetSourceWindow, EventMetadataChronologyInput, EventRootDatasetBuildRequest,
+        FactorObservation, build_event_root_dataset, export_event_root_dataset_parquet,
     };
     use std::fs;
 
@@ -1022,6 +1022,14 @@ mod tests {
             cum_depth_delta_5m: 0.0,
             cum_mprice_drift_5m: 0.0,
             cum_trade_imbalance_5m: 0.0,
+            cex_bar_return_30s: 0.0,
+            cex_bar_return_60s: 0.0,
+            cex_bar_volume_ratio_30s: 0.0,
+            cex_bar_volume_trend_3: 0.0,
+            cex_signed_volume_ratio_30s: 0.0,
+            cex_consecutive_up_bars: 0.0,
+            cex_consecutive_down_bars: 0.0,
+            cex_breakout_volume_score: 0.0,
         }
     }
 

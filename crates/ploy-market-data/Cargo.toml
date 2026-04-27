@@ -21,7 +21,7 @@ live = [
 chrono.workspace = true
 futures = { version = "0.3", optional = true }
 ploy-market-contracts.workspace = true
-polymarket-client-sdk = { path = "../../vendor/polymarket-client-sdk", features = ["clob", "gamma", "rtds", "tracing", "ws", "heartbeats"], optional = true }
+polymarket-client-sdk = { path = "../../vendor/polymarket-client-sdk", features = ["clob", "data", "gamma", "rtds", "tracing", "ws", "heartbeats"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true

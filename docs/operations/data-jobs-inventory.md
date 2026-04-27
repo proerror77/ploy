@@ -12,6 +12,7 @@ collection behavior.
 | --- | --- | --- | --- |
 | `crates/ploy-market-data` | canonical | Rust data plane | Owns live feed/scanner/discovery code used by runner/runtime surfaces. |
 | `new-ploy-runner collect-quotes` / `ploy-runner-host::ops` | canonical ops surface | runner ops | Full/ops build only; lean replay/backtest binaries intentionally do not expose it. |
+| `new-ploy-runner collect-pm-trades` / `ploy-runner-host::ops` | canonical ops surface | runner ops | Polls Polymarket Data API trade prints into `clob_trade_ticks`; full/ops build only. |
 | `ploy-feed-loaders` | canonical historical DB loader | research/backtest adapters | Owns SQLx historical `MarketUpdate` loading outside strategy-bundles. |
 | `scripts/export_parquet.sh` | canonical export helper | data/export host | Keep as the explicit Parquet export entrypoint until replaced by Rust datactl. |
 | `.github/workflows/backtest.yml` | canonical CI backtest lane | CI/backtest host | Should remain separated from trade-host deploy assumptions. |

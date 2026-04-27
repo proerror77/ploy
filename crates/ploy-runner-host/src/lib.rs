@@ -15,6 +15,8 @@ fn print_usage_for(program: &str) {
     eprintln!("  check-db          Check database data completeness");
     #[cfg(feature = "ops")]
     eprintln!("  collect-quotes    Collect orderbook quotes from Polymarket CLOB WebSocket");
+    #[cfg(feature = "ops")]
+    eprintln!("  collect-pm-trades Collect public Polymarket trade prints from Data API");
     eprintln!();
     eprintln!("Options for 'run':");
     eprintln!("  --config <path>   Unified TOML config file (required)");
@@ -51,6 +53,9 @@ pub async fn run_with_args(args: Vec<String>) {
         }
         Some("collect-quotes") => {
             run_collect_quotes(&args).await;
+        }
+        Some("collect-pm-trades") => {
+            run_collect_pm_trades(&args).await;
         }
         Some("run") | None => {
             run::run_command(&args, command).await;
@@ -125,5 +130,16 @@ async fn run_collect_quotes(args: &[String]) {
 #[cfg(not(feature = "ops"))]
 async fn run_collect_quotes(_args: &[String]) {
     eprintln!("The collect-quotes command requires the full/ops runner build");
+    std::process::exit(1);
+}
+
+#[cfg(feature = "ops")]
+async fn run_collect_pm_trades(args: &[String]) {
+    ops::run_collect_pm_trades(args).await;
+}
+
+#[cfg(not(feature = "ops"))]
+async fn run_collect_pm_trades(_args: &[String]) {
+    eprintln!("The collect-pm-trades command requires the full/ops runner build");
     std::process::exit(1);
 }

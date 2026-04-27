@@ -888,6 +888,179 @@ evidence.
   `future_exit_*` factor appeared in the walk-forward output. The ploy-ci runner was restored
   to active afterward.
 
+# PM5D Continuation Factor Gates (2026-04-26)
+
+## Files
+
+- `crates/ploy-research/src/factors.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: solo research lane
+- `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: solo research lane
+- `tasks/todo.md`
+  - Owner: solo research lane
+
+## Tasks
+
+- [x] Add point-in-time CEX candle/volume continuation factors from spot and aggTrade.
+- [x] Add side-aware V2 descriptors for continuation and continuation x executable-liquidity gates.
+- [x] Add factor-name filtering so continuation-only and continuation-gate reviews can run separately.
+- [x] Verify with local targeted tests and DB example checks.
+- [x] Run two ploy-ci/Tango walk-forward smokes:
+  - Direction A: continuation/candle-volume factor review.
+  - Direction B: continuation plus executable-liquidity/exit-feasibility gate review.
+
+## Review
+
+- 2026-04-26: Research rule for this lane: only use past CEX spot/aggTrade/LOB state at
+  decision time. Do not use `future_exit_*` labels for selection, and treat high rejection
+  rate as a first-class failure mode rather than a cosmetic metric.
+- 2026-04-26: Local verification passed for continuation factors: targeted point-in-time
+  continuation candle test, `factors_v2` tests, `cargo check -p ploy-research --no-default-features`,
+  DB-feature `factor_walk_forward_v2` example check, full `cargo test -p ploy-research --lib`,
+  `rustfmt --check`, and `git diff --check`.
+- 2026-04-26: Added `--factor-name-filter` to the walk-forward example/workflow so Direction A
+  can isolate continuation/candle-volume descriptors while Direction B isolates continuation
+  edge/liquidity gates on the same data range.
+- 2026-04-26: ploy-ci/Tango Direction A run `24944516097` completed green on branch
+  `research/continuation-factor-gates` with filter
+  `cex_bar,cex_signed,cex_consecutive,cex_breakout,cex_continuation_score`.
+  Health: `source_obs=105064`, `v2_rows=210128`, `executable_pnl_rows=12131`,
+  `deribit_rows=70614`, entry fill `5.77%`, rejection `94.23%`, exit fill `5.56%`.
+  Pure continuation factors were negative OOS: best aggregate
+  `cex_continuation_score_side` had total test PnL `-146.3491` over 3 windows.
+- 2026-04-26: ploy-ci/Tango Direction B run `24944549237` completed green with filter
+  `cex_continuation_edge_gate,cex_continuation_liquidity_gate`. Same health counts as A.
+  Gate composites were positive in aggregate but unstable: `cex_continuation_edge_gate`
+  total test PnL `254.6119`, positive-window ratio `0.3333`, average fill `15.21%`,
+  rejection `84.79%`; `cex_continuation_liquidity_gate` total test PnL `81.4682`,
+  positive-window ratio `0.3333`, average fill `8.04%`, rejection `91.96%`.
+  Do not promote either gate to live until more symbols/days and walk-forward stability improve.
+
+# PM5D Fillability-First Review And Liquidity Gate V1 (2026-04-26)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: solo research lane
+- `tasks/todo.md`
+  - Owner: solo research lane
+
+## Tasks
+
+- [x] Add a fillability review that bins PM/CEX/Deribit/execution context and ranks buckets by
+  entry fill, round-trip fill, rejection, coverage, slippage/cost, and executable PnL.
+- [x] Add a point-in-time `LiquidityGateV1` report that measures coverage and executable PnL after
+  applying conservative live-available liquidity constraints.
+- [x] Add a liquidity-gated alpha review that re-ranks factors only after the point-in-time
+  liquidity gate has selected tradeable rows.
+- [x] Print the fillability and liquidity-gate reports from the existing walk-forward example.
+- [x] Verify locally, then run a bounded ploy-ci smoke to prove the reports render from the remote
+  database path.
+
+## Review
+
+- 2026-04-26: Design rule: do fillability-first. Alpha factors are only useful inside a
+  live-executable region. The gate may use current PM quote, current PM depth/capacity, quote lag,
+  spread, time remaining, and current CEX/Deribit regime, but must not use settlement or future
+  exit labels to decide whether to trade.
+- 2026-04-26: Implemented `FillabilityReviewV1` and `LiquidityGateV1`. Fillability review bins
+  symbol/side/regime/time remaining, PM price/spread/lag/capacity/liquidity, CEX LOB/aggTrade
+  continuation and volume context, and Deribit IV context. LiquidityGateV1 uses only point-in-time
+  live-available fields: entry/exit capacity, PM lag, PM spread, time remaining, and entry ask band.
+- 2026-04-26: Local verification passed: targeted `rustfmt --check` for `factors_v2.rs` and
+  `factor_walk_forward_v2.rs`, `git diff --check`, `rtk cargo test -p ploy-research factors_v2 --lib`,
+  full `rtk cargo test -p ploy-research --lib`, `rtk cargo check -p ploy-research --no-default-features`,
+  and DB-feature `factor_walk_forward_v2` example check.
+- 2026-04-26: Bounded ploy-ci smoke succeeded: GitHub Actions run `24946137615` on
+  `research/continuation-factor-gates` completed successfully. Artifact `report.txt` contains the
+  new `Fillability Review V1` and `Liquidity Gate V1` sections for `BTCUSDT,ETHUSDT`,
+  `2026-04-22..2026-04-25`, `stake_usd=15`, `train=2d`, `test=1d`, `step=1d`.
+  Baseline data health: `source_obs=28262`, `v2_rows=56524`, entry fill `14.16%`, exit fill `13.43%`,
+  rejection `85.84%`. High-capacity buckets reached near-100% entry and round-trip fill, but most
+  were still negative executable PnL. Default LiquidityGateV1 selected `5024` rows, coverage `8.89%`,
+  entry/exit/round-trip fill `100%`, rejection `0%`, but total executable PnL `-1923.5867`. This
+  proves liquidity gating fixes execution feasibility but is not itself an alpha; alpha must be
+  re-ranked inside the gated region.
+- 2026-04-26: Implemented `LiquidityGatedAlphaV1`, which first applies `LiquidityGateV1`, then
+  re-runs single-factor review, walk-forward aggregates, and stability only on gated tradeable rows.
+  Local verification passed: targeted `rustfmt --check`, `git diff --check`,
+  `rtk cargo test -p ploy-research factors_v2 --lib`, full `rtk cargo test -p ploy-research --lib`,
+  `rtk cargo check -p ploy-research --no-default-features`, and DB-feature
+  `factor_walk_forward_v2` example check.
+- 2026-04-26: Gated-alpha smoke succeeded: GitHub Actions run `24946744696` on
+  `research/continuation-factor-gates` completed successfully. Artifact `report.txt` confirms no
+  `future_exit_*` labels appear in `Liquidity-Gated Single-Factor Reviews`. Gate health stayed
+  `5024` rows, coverage `8.89%`, entry/round-trip fill `100%`, rejection `0%`. Inside that
+  executable region, top walk-forward test PnL candidates were `side_model_prob` `1189.3706`,
+  `cex_continuation_edge_gate` `195.5518`, `cex_continuation_score_side` `165.0970`,
+  `cex_continuation_liquidity_gate` `160.1531`, `side_model_edge` `26.1325`, and
+  `entry_capacity_ratio` `20.1903`. All remain `watchlist` because this bounded smoke has only one
+  gated test window; require broader multi-symbol/multi-day runs before promotion.
+- 2026-04-26: Six-symbol ploy-ci run `24947015110` on `research/continuation-factor-gates`
+  completed successfully for `2026-04-21..2026-04-25`, `stake_usd=15`, `train=2d`, `test=1d`,
+  `step=1d`, and no factor-name filter. Baseline had `source_obs=105064`, `v2_rows=210128`,
+  `executable_pnl_rows=12131`, entry fill `5.77%`, exit fill `5.56%`, rejection `94.23%`.
+  `LiquidityGateV1` selected `6005` rows, coverage `2.86%`, entry/round-trip fill `100%`,
+  rejection `0%`, but raw gated-region PnL was `-2112.4030`, confirming the gate is execution
+  feasibility rather than alpha. Inside the gated region, single-factor review ranked
+  `side_distance_over_sigma` and `side_model_prob` first at `11864.7859` total PnL each, followed
+  by `abs_distance_to_beat` `1789.6649`, `entry_size_change_30s` `375.2320`,
+  `cex_signed_volume_ratio_30s_side`/`cex_breakout_volume_side` `326.9961`,
+  `side_model_edge` `239.6759`, `cex_bar_return_30s_side` `239.3301`,
+  `cum_trade_imbalance_5m_side` `239.2184`, `cex_continuation_edge_gate` `151.0650`,
+  `cex_continuation_liquidity_gate` `143.0696`, and `deribit_iv_change_60s` `139.1614`.
+  Liquidity-gated walk-forward still had only one OOS gated test window; top watchlist factors were
+  `side_distance_over_sigma`/`side_model_prob` `1341.2387`, `depth_imbalance_side` `620.3623`,
+  `obi_persistence_30s_side` `496.2592`, `obi_10_side` `366.1758`, and `drift_30s` `356.8128`,
+  all with fill `100%` and rejection `0%`. Do not promote to live until longer dated windows produce
+  multiple gated OOS windows and stability decisions can move beyond `too_few_windows_positive_pnl`.
+
+# PM5D Factor Stability And Combo V1 (2026-04-26)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: solo research lane
+- `tasks/todo.md`
+  - Owner: solo research lane
+
+## Tasks
+
+- [x] Add a stability report that turns ICIR, walk-forward PnL, fill/rejection, and symbol/regime
+  stability into `reject` / `watchlist` / `candidate` decisions.
+- [x] Add a conservative combo v1 that uses train-only normalization and family-balanced signed
+  factor scores instead of directly using ICIR as weights.
+- [x] Print the stability and combo reports from the existing walk-forward example.
+- [x] Verify locally, then run a bounded ploy-ci/Tango smoke before considering merge.
+
+## Review
+
+- 2026-04-26: Design rule: ICIR is a screening and stability metric, not a direct trading weight.
+  Combo selection must be trained only on each walk-forward training window and judged by executable
+  PnL in the following test window.
+- 2026-04-26: Implemented `FactorStabilityReport` and `FactorComboV1Report`. Stability decisions
+  combine window count, positive-window ratio, executable PnL, fill/rejection, symbol/regime
+  stability, and executable-PnL ICIR. Combo v1 selects factors per training window, balances by
+  family, uses train-only z-score normalization, and evaluates only on the next test window.
+- 2026-04-26: Local verification passed: targeted `rustfmt --check` for `factors_v2.rs` and
+  `factor_walk_forward_v2.rs`, `git diff --check`, `rtk cargo test -p ploy-research factors_v2 --lib`, full
+  `rtk cargo test -p ploy-research --lib`, `rtk cargo check -p ploy-research --no-default-features`,
+  and DB-feature `factor_walk_forward_v2` example check.
+- 2026-04-26: Bounded ploy-ci smoke succeeded: GitHub Actions run `24945674586` on
+  `research/continuation-factor-gates` completed successfully. Artifact `report.txt` contains the
+  new `Factor Stability Report` and `Factor Combo V1` sections for `BTCUSDT,ETHUSDT`,
+  `2026-04-22..2026-04-25`, `stake_usd=15`, `train=2d`, `test=1d`, `step=1d`,
+  `factor_name_filter=side_model,cex_continuation,entry_capacity,exit_capacity,pm_lag`. Data health:
+  `source_obs=28262`, `v2_rows=56524`, `executable_pnl_rows=8005`, entry fill rate `14.16%`, rejection
+  `85.84%`. Combo V1 smoke aggregate: `windows=1`, `total_test_pnl=201.8782`, fill rate `15.24%`,
+  rejection `84.76%`. Treat this as pipeline/format validation, not a final live parameter conclusion.
+
 # PM5D ThreeLayer Live Readiness (2026-04-24)
 
 ## Files
@@ -9438,3 +9611,150 @@ Checklist:
 
 Review:
 - 2026-04-25: Diagnostic optimize run `24925353379` showed hundreds to thousands of entry signals per trial, but every simulated order was rejected with `No executable ask liquidity`. The replay SQL was selecting the newest quote per token/second, which can choose later price-only `best_bid_ask`/`price_change` rows over book rows with size. The simulator also overwrote known sizes with `None` when it observed price-only quotes. Fixed both paths so LOB-aware replay can use executable liquidity when the historical data contains it, while still rejecting when size was never observed.
+
+## PM5D Trade Formation Review V1
+
+Goal: move past raw factor lists by explaining how profitable, losing, and missed executable PM5D trades form across direction, CEX microstructure, PM liquidity, Deribit volatility, and event-time context.
+
+File ownership:
+- `crates/ploy-research/src/factors_v2.rs`
+- `crates/ploy-research/src/lib.rs`
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Add event-level trade-formation review buckets for profitable gated trades, losing gated trades, and rejected missed winners.
+- [x] Add point-in-time meta-label rule candidates on top of the liquidity gate.
+- [x] Print the trade-formation report from `factor_walk_forward_v2`.
+- [x] Add focused regression coverage for profitable path and meta-label discovery.
+- [x] Verify locally and run the six-symbol ploy-ci smoke.
+
+Review:
+- Design rule: `label_future_exit_*` fields are explanation labels only. They can describe why winners formed or exits became available, but they must not be used inside live gates, train-time rule predicates, or point-in-time meta-label rules.
+- 2026-04-26: Six-symbol ploy-ci run `24947659098` succeeded on commit `42eeabfa` and confirmed the new report is emitted. The 2026-04-21..2026-04-25 sample had `source_obs=105064`, `v2_rows=210128`, `executable_pnl_rows=12131`, liquidity gate `selected=6005` with 100% entry/roundtrip fill, and trade-formation split `profitable_gated=3640`, `losing_gated=2365`, `missed_winners=3428`. The first meta-label candidate worth OOS review is `continuation_confirmation` (`n=1690`, win_rate `0.6864`, total_pnl `668.9946`), while `liquidity_gate_only` remained negative (`total_pnl=-2112.4030`).
+
+## PM5D Meta-Label Walk-Forward V1
+
+Goal: turn the trade-formation rule candidates into an out-of-sample test so descriptive profitable paths do not get promoted into strategy logic without train/test evidence.
+
+File ownership:
+- `crates/ploy-research/src/factors_v2.rs`
+- `crates/ploy-research/src/lib.rs`
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+- `tasks/todo.md`
+
+Checklist:
+- [x] Add pre-registered meta-label rule walk-forward on top of LiquidityGateV1.
+- [x] Report per-rule OOS aggregates and per-window test performance.
+- [x] Print the report from `factor_walk_forward_v2`.
+- [x] Add focused regression coverage for continuation-confirmation OOS selection.
+- [x] Verify locally and run the six-symbol ploy-ci smoke.
+
+Review:
+- Design rule: this lane tests fixed point-in-time rule predicates. It does not optimize thresholds from future labels and does not use `label_future_exit_*` as an input.
+- 2026-04-26: Six-symbol ploy-ci run `24948112641` succeeded on commit `f86f4f64` and emitted `Meta-Label Walk-Forward V1`. Only one OOS gated window met the liquidity/sample gates, so every positive result remains watchlist-level. In that OOS window `liquidity_gate_only` lost `-1209.7725`, while fixed point-in-time rules improved materially: `cex_obi_confirmation` `+478.0090`, `cex_obi_and_continuation` `+438.1082`, and `continuation_confirmation` `+297.8995`, all with 100% fill and 0% rejection inside the gate. This supports testing CEX microstructure/continuation meta-labels on longer windows before live promotion.
+
+# PM5D Meta-Label Readiness Gate (2026-04-26)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/src/lib.rs`
+  - Owner: solo research lane
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: solo research lane
+- `tasks/todo.md`
+  - Owner: solo research lane
+
+## Tasks
+
+- [x] Add explicit meta-label readiness thresholds for minimum OOS windows, positive-window ratio,
+  executable PnL, fill rate, rejection rate, worst window, and average OOS sample count.
+- [x] Emit `candidate` / `watchlist` / `reject` decisions plus machine-readable reasons in the
+  Meta-Label Walk-Forward V1 aggregate section.
+- [x] Add regression coverage proving one-window positive OOS rules stay `watchlist` while
+  multi-window stable executable rules can become `candidate`.
+- [x] Run targeted formatting, unit tests, cargo checks, and diff checks before pushing.
+
+## Review
+
+- 2026-04-26: Implemented `MetaLabelWalkForwardAggregate` readiness decisions. A rule is only
+  `candidate` after enough OOS windows, positive executable PnL, stable positive-window ratio,
+  sufficient OOS sample count, high fill rate, low rejection rate, and bounded worst-window loss.
+  Positive one-window results remain `watchlist` with `too_few_oos_windows_positive_pnl`.
+- 2026-04-26: Local verification passed: targeted `rustfmt --check` for `factors_v2.rs` and
+  `factor_walk_forward_v2.rs`, `rustfmt --config skip_children=true --check` for `lib.rs`,
+  `rtk git diff --check`, `rtk cargo test -p ploy-research factors_v2 --lib`, full
+  `rtk cargo test -p ploy-research --lib`, `rtk cargo check -p ploy-research --no-default-features`,
+  and DB-feature `factor_walk_forward_v2` example check.
+- 2026-04-26: Six-symbol ploy-ci run `24948546979` succeeded on commit `5aa67978`. Artifact
+  `report.txt` includes `rule,decision,reason,...` in `Meta-Label Walk-Forward Aggregates`.
+  Positive one-window rules are correctly gated as watchlist: `cex_obi_confirmation` `+478.0090`,
+  `cex_obi_and_continuation` `+438.1082`, and `continuation_confirmation` `+297.8995` all show
+  `too_few_oos_windows_positive_pnl`; nonpositive rules are rejected. This confirms the report no
+  longer lets a one-window profitable meta-label look deployable.
+- 2026-04-26: After recharging ploy-ci, restarted Aliyun instance
+  `i-6we7z44sfbfbnosbeymz`, restarted the GitHub runner service, and ran long-window ploy-ci
+  workflow `24950383475` on commit `4e987fc8` for `2026-04-15..2026-04-26` across
+  `BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,BNBUSDT,XRPUSDT`. The run succeeded in `18m43s` with
+  `source_obs=201251`, `v2_rows=402502`, `settlement_labels=402502`, `executable_pnl_rows=15960`,
+  `deribit_rows=110976`, baseline entry fill `3.97%`, baseline rejection `96.03%`, and liquidity
+  gate coverage `1.78%` with `100%` gated entry/roundtrip fill.
+- 2026-04-26: Long-window readiness result from run `24950383475`: no meta-label rule reached
+  `candidate`. `continuation_confirmation` remains the cleanest watchlist rule with `3/3` positive
+  OOS windows, `+212.0091` total OOS PnL, worst window `+22.4123`, `100%` fill, and `0%`
+  rejection, but it fails the eight-window readiness threshold. `cex_obi_confirmation` had larger
+  total OOS PnL (`+547.4000`) but failed stability with only `2/3` positive windows and worst
+  window `-45.4754`; `cex_obi_and_continuation` was nearly flat in its worst window (`-0.0630`).
+  `liquidity_gate_only` remains rejected (`-1442.4381`), confirming fillability alone is not an
+  edge.
+- 2026-04-26: The main remaining research bottleneck is qualifying OOS sample count, not runner
+  availability. The calendar span yields ten daily walk-forward windows, but only three meta-label
+  windows survive the strict liquidity/sample gates. Next research work should either add explicit
+  skipped-window diagnostics to the report or wait for more settled, fillable history before
+  relaxing readiness thresholds.
+
+# Collector Recovery And Data Utilization (2026-04-26)
+
+## Files
+
+- `crates/ploy-market-data/src/collector.rs`
+  - Owner: collector health/backpressure lane
+- `crates/ploy-market-data/src/pm_trades.rs`
+  - Owner: PM trade-print collection lane
+- `crates/ploy-runner-host/src/ops.rs`
+  - Owner: collector runtime defaults lane
+- `crates/ploy-research/src/factors.rs`
+  - Owner: side-aware observation/data utilization follow-up lane
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: factor utilization/reporting follow-up lane
+- `crates/ploy-research/examples/*`
+  - Owner: collector utilization report follow-up lane
+- `deployment/systemd/ploy-pm-trade-collector.service`
+  - Owner: PM trade collector deploy lane
+- `.github/workflows/deploy-tango-1-1.yml`
+  - Owner: Tango deploy lane
+- `tasks/todo.md`
+  - Owner: session tracker
+
+## Tasks
+
+- [x] Verify Tango `ploy-quote-collector` is currently writing fresh `clob_orderbook_snapshots`.
+- [x] Add bounded DB persistence/backpressure to `ploy-quote-collector`.
+- [x] Add collector self-health checks for stale book/snapshot writes so systemd can restart it.
+- [x] Add focused regression coverage for collector config/health behavior.
+- [x] Add collector data utilization report covering table freshness, source coverage, Factor V2 NaN rates, and skipped-row reasons.
+- [x] Add PM public trade-print collector entrypoint and deploy unit for `clob_trade_ticks`.
+- [ ] Add PM full-depth and PM trade-print factor inputs once collector freshness is verified.
+- [x] Mark stale Deribit Greeks unusable unless the Greeks collector/table becomes fresh.
+- [x] Fix side-aware observation generation so DOWN opportunities are not gated by UP ask freshness.
+- [x] Verify formatting, targeted tests, and current remote collector freshness pre-deploy.
+- [ ] Deploy CI-built artifact to Tango and verify `ploy-pm-trade-collector` writes fresh rows.
+
+## Review
+
+- 2026-04-27: Restored PM quote collector reliability in code with bounded persistence, stale self-health, and env-tunable worker/queue defaults. Tango's currently deployed collector was still writing fresh `clob_orderbook_snapshots` and `clob_quote_ticks` during the check, but the new code path still needs CI deploy before it is active on-host.
+- 2026-04-27: Added `collector_data_utilization`, a DB-backed research report that separates collector freshness from Factor V2 utilization. A small Tango read-only window (`2026-04-27T09:45:00Z..10:05:00Z`) reported fresh Binance spot/aggTrade/LOB, fresh PM quotes/snapshots, fresh Deribit IV, zero current `clob_trade_ticks`, and stale/unusable Deribit Greeks.
+- 2026-04-27: Fixed base factor observation generation so a fresh DOWN quote can produce an observation even when the UP ask is stale; stale side values are now represented as `NaN` instead of dropping the whole event.
+- 2026-04-27: Added `collect-pm-trades`, which reads active crypto market `conditionId` from `pm_market_catalog`, polls Polymarket Data API `/trades`, and persists de-duplicated prints to `clob_trade_ticks`. Added `ploy-pm-trade-collector.service` and deploy/healthcheck wiring so the service can start after the next main deploy.
