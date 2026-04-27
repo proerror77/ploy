@@ -9992,9 +9992,34 @@ Review:
 - [x] Identify the active Tango query and index coverage for Binance sampled data.
 - [x] Replace `sync_records`, `binance_price_ticks`, and `binance_agg_trade_ticks` sampled scans with bucketed index lookups.
 - [x] Verify focused tests/checks and Tango `EXPLAIN ANALYZE`.
-- [ ] Open/merge PR, then rerun Factor Walk-Forward V2 on `main`.
+- [x] Open/merge PR, then rerun Factor Walk-Forward V2 on `main`.
 
 ## Review
 
 - 2026-04-28: Replaced historical spot and aggTrade sampled queries that used `DISTINCT ON` plus computed bucket expressions over full time ranges. New queries generate bounded `symbols x bucket` windows and use lateral lookups against existing time/symbol indexes. AggTrade preserves the previous earliest-in-5s-bucket semantics with `ORDER BY trade_time ASC`.
 - 2026-04-28: Verification passed: `CARGO_TARGET_DIR=/tmp/ploy-binance-loader-indexed rtk cargo test -p ploy-feed-loaders binance_samplers_use_bucketed_index_lookups --lib`, `CARGO_TARGET_DIR=/tmp/ploy-binance-loader-indexed rtk cargo check -p ploy-feed-loaders --lib`, `CARGO_TARGET_DIR=/tmp/ploy-binance-loader-indexed rtk cargo check -p ploy-research --features db --example factor_walk_forward_v2`, and `rtk git diff --check`. Tango `EXPLAIN ANALYZE` on a 15-minute six-symbol window completed in about 42ms for `binance_price_ticks` and 259ms for `binance_agg_trade_ticks` without the previous `BufFileRead` full-range sort pattern.
+- 2026-04-28: PR #187 merged into `main` at `304983b`. The next Walk-Forward V2 run reached the Deribit IV/Greeks loader after passing the PM and Binance stages, then was cancelled after Deribit raw option-chain queries exceeded the expected runtime budget.
+
+# Research Backtest Rearchitecture Design (2026-04-28)
+
+## Files
+
+- `docs/architecture/research-backtest-rearchitecture.md`
+  - Owner: snapshot-backed research/backtest architecture design
+- `tasks/todo.md`
+  - Owner: session tracker
+
+## Tasks
+
+- [x] Record why direct raw-DB replay is the wrong canonical path for multi-day PM5D research.
+- [x] Define raw, sampled tape, observation tape, label tape, and report layers.
+- [x] Define snapshot compiler and snapshot-backed walk-forward runtime boundaries.
+- [x] Define Deribit ATM/cache-first redesign.
+- [x] Define workflow, performance budget, correctness gates, and migration phases.
+- [ ] Implement Phase 1: Deribit ATM/cache-first loader and phase timing output.
+- [ ] Implement Phase 2: `research_snapshot_compile` and snapshot artifact workflow.
+- [ ] Implement Phase 3: snapshot-backed Factor Review and Walk-Forward workflows.
+
+## Review
+
+- 2026-04-28: Added a full redesign proposal that moves canonical research from direct raw PostgreSQL replay to immutable snapshot-backed replay. Tango remains the raw collector source of truth; `ploy-ci-1` compiles reusable Parquet/Arrow tapes and runs factor review/walk-forward from those artifacts.
