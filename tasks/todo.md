@@ -9816,3 +9816,29 @@ Review:
 
 - 2026-04-27: Factor V2 now distinguishes live-parity top-of-book fillability from full-depth sweep fillability. Factor review and walk-forward use full-depth executable PnL when available, while still preserving the top-of-book labels for live-parity comparison.
 - 2026-04-27: Verification passed: `rtk cargo test -p ploy-research factors_v2 --lib`, `rtk cargo test -p ploy-research --lib`, `rtk cargo check -p ploy-research --features db --example factor_review_v2 --example factor_walk_forward_v2 --example collector_data_utilization`, and `rtk git diff --check`.
+
+# Factor Report Tradable Retry (2026-04-28)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: Factor V2 report surface and regression tests
+- `tasks/todo.md`
+  - Owner: session tracker
+
+## Tasks
+
+- [x] Keep future-looking exit diagnostics out of the primary single-factor tradable ranking.
+- [x] Add a separate diagnostic section for `future_exit_*` fields so they remain useful for exit-feasibility analysis.
+- [x] Print full-depth sweep health in walk-forward/combo/meta reports, not just single-window factor review.
+- [x] Verify focused tests/checks and diff hygiene.
+- [ ] Rerun Factor Review V2 and Walk-Forward V2 on main after merge, then read artifacts.
+
+## Review
+
+- 2026-04-28: The first retry artifacts were successful but exposed a report-surface issue:
+  single-window review ranked `future_exit_*` diagnostics above tradable factors. The report now
+  keeps the primary table to tradable factors, prints those future exit fields in a separate
+  diagnostic section, and includes full-depth sweep health across the walk-forward/combo/meta
+  report surfaces.
+- 2026-04-28: Verification passed: `CARGO_TARGET_DIR=/tmp/ploy-factor-report-retry rtk cargo test -p ploy-research factors_v2 --lib`, `CARGO_TARGET_DIR=/tmp/ploy-factor-report-retry rtk cargo check -p ploy-research --features db --example factor_review_v2 --example factor_walk_forward_v2`, and `rtk git diff --check`.
