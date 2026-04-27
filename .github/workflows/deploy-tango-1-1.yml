@@ -100,6 +100,7 @@ jobs:
           cp scripts/binance_lob_collector.py dist/scripts/binance_lob_collector.py
           cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
           cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
+          cp scripts/fix_clob_trade_partitions.sql dist/scripts/fix_clob_trade_partitions.sql
           cp scripts/repair_strategy_track_record_official_settlement.sql dist/scripts/repair_strategy_track_record_official_settlement.sql
           cp scripts/drills/*.sh dist/scripts/drills/
           for migration in ${DEPLOY_MIGRATIONS}; do
@@ -308,6 +309,7 @@ jobs:
             install -m 0755 ./scripts/binance_lob_collector.py ${DEPLOY_ROOT}/scripts/binance_lob_collector.py
             install -m 0644 ./scripts/fix_binance_lob_partitions.sql ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
             install -m 0644 ./scripts/fix_deribit_partitions.sql ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
+            install -m 0644 ./scripts/fix_clob_trade_partitions.sql ${DEPLOY_ROOT}/scripts/fix_clob_trade_partitions.sql
             install -m 0644 ./scripts/repair_strategy_track_record_official_settlement.sql ${DEPLOY_ROOT}/scripts/repair_strategy_track_record_official_settlement.sql
             install -m 0755 ./scripts/drills/*.sh ${DEPLOY_ROOT}/scripts/drills/
             for migration in ${DEPLOY_MIGRATIONS}; do
@@ -335,6 +337,7 @@ jobs:
             done
             PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
             PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
+            PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -f ${DEPLOY_ROOT}/scripts/fix_clob_trade_partitions.sql
 
             require_postgres
 
@@ -429,6 +432,10 @@ jobs:
                 "no partition of relation \"deribit_iv_ticks\"" \
                 "deribit iv collector still lacks active partitions"
             fi
+            assert_no_recent_logs \
+              "ploy-pm-trade-collector.service" \
+              "no partition of relation \"clob_trade_ticks\"" \
+              "pm trade collector still lacks active partitions"
 
             # Check service status
             systemctl status ploy-binance-aggtrade-collector.service --no-pager
