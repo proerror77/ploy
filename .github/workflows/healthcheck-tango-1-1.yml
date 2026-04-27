@@ -23,10 +23,24 @@ jobs:
     environment: tango-1-1
 
     steps:
-      - name: Install SSH client
+      - name: Ensure SSH client
         run: |
-          sudo apt-get update
-          sudo apt-get install -y openssh-client
+          set -euo pipefail
+          if command -v ssh >/dev/null 2>&1; then
+            ssh -V
+            exit 0
+          fi
+
+          if [ "$(id -u)" -eq 0 ]; then
+            apt-get update
+            apt-get install -y openssh-client
+          elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y openssh-client
+          else
+            echo "ssh client is missing and passwordless sudo is unavailable on this runner" >&2
+            exit 1
+          fi
 
       - name: Configure SSH
         run: |
