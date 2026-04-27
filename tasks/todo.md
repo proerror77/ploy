@@ -1,3 +1,41 @@
+# Rust Release Build Hygiene (2026-04-27)
+
+## Files
+
+- `Cargo.toml`
+- `rust-toolchain.toml`
+- `.github/actionlint.yaml`
+- `.github/workflows/auto-review.yml`
+- `.github/workflows/backtest.yml`
+- `.github/workflows/test.yml`
+- `.github/workflows/release-platform.yml`
+- `.github/workflows/deploy-tango-1-1.yml`
+- `.github/workflows/deploy-trade.yml`
+- `.github/workflows/build-push-acr.yml`
+- `.github/workflows/healthcheck-tango-1-1.yml`
+- `.github/workflows/optimize.yml`
+- `docs/CONTRIBUTING.md`
+- `docs/runbooks/platform-deploy.md`
+- `README.md`
+
+## Tasks
+
+- [x] Tighten the release profile for shipped binaries without changing dev/fast iteration profiles.
+- [x] Enable release/deploy CI lanes to use the repo's `sccache` wrapper and fast linker path.
+- [x] Add deterministic build environment and artifact checksum checks where bundles/binaries are deployed.
+- [x] Verify workflow syntax and diff hygiene without running heavy local Rust builds.
+
+## Review
+
+- 2026-04-27: Release profile now keeps `thin` LTO but uses one codegen unit, symbol stripping, and packed split debuginfo for shipped binaries; dev and fast profiles remain optimized for iteration.
+- 2026-04-27: `release-platform`, `deploy-tango-1-1`, `deploy-trade`, and `build-push-acr` now install/cache `sccache`, try `mold` before falling back through the repo fast-linker, and set `SOURCE_DATE_EPOCH` from the checked-out commit time with UTC/C locale settings.
+- 2026-04-27: Platform and Tango deploy bundles now use deterministic tar/gzip flags (`--sort=name`, fixed `--mtime`, numeric owner/group, `gzip -n`) before SHA256 generation; platform upload verifies the checksum before deploy upload and again on the remote host, while direct trade deploy verifies the remote runner binary checksum after copy.
+- 2026-04-27: Release/deploy cache keys now include target, `release` profile, `rustc` version, `sccache` version for sccache caches, and `Cargo.lock` hash. This closes the main cache-hygiene gap from the original build checklist.
+- 2026-04-27: Added `rust-toolchain.toml` pinned to Rust `1.91` (currently resolves to `1.91.1` with cargo/clippy/rustfmt) and switched active GitHub workflows from implicit `dtolnay/rust-toolchain@stable` to `@master`, so CI uses the repository toolchain file instead of floating latest stable.
+- 2026-04-27: Added `deploy` workflow_dispatch inputs to platform, Tango, and trade deploy workflows. Defaults remain `true`; setting `deploy=false` gives a build/package/checksum-only verification path without restarting remote services.
+- 2026-04-27: Added `.github/actionlint.yaml` for self-hosted labels (`ploy-ci-1`, `tango-1-1`) and cleaned existing shellcheck findings in `backtest.yml`, `optimize.yml`, and `healthcheck-tango-1-1.yml` so full active-workflow `actionlint` passes.
+- 2026-04-27: Verification used full active-workflow `actionlint`, YAML parsing, `rustup show active-toolchain`, `cargo metadata --no-deps --locked`, and `git diff --check`; no heavy local Rust build was run.
+
 # Ploy Frontend Operator Cockpit (2026-04-24)
 
 ## Files

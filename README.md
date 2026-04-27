@@ -162,6 +162,9 @@ Runbooks:
 Default release workflow:
 
 - `.github/workflows/release-platform.yml`
+- Build-only verification: dispatch `release-platform.yml` with `deploy=false`
+  to build, package, checksum, and upload the bundle artifact without restarting
+  the remote service.
 
 Remote live-host acceptance path:
 
