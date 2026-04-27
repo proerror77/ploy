@@ -13,6 +13,62 @@ use sqlx::PgPool;
 const EWMA_LAMBDA: f64 = 0.94;
 const RETURN_BUFFER_WINDOW_SECS: f64 = 300.0;
 
+#[cfg(any(feature = "db", test))]
+const PM_BOOK_SAMPLED_QUERY: &str = r#"
+        WITH token_map AS (
+            SELECT DISTINCT
+                m.market_slug,
+                trim(both '"' from token.value::text) AS token_id,
+                CASE token.ordinality WHEN 1 THEN 'UP' ELSE 'DOWN' END AS side,
+                GREATEST(
+                    $2::timestamptz,
+                    COALESCE(m.start_time, $2::timestamptz)
+                        - make_interval(secs => $4::int)
+                ) AS window_start,
+                LEAST(
+                    $3::timestamptz,
+                    COALESCE(m.end_time, $3::timestamptz)
+                        + make_interval(secs => $4::int)
+                ) AS window_end
+            FROM pm_market_metadata m
+            CROSS JOIN LATERAL jsonb_array_elements(
+                (m.raw_market->'markets'->0->>'clobTokenIds')::jsonb
+            ) WITH ORDINALITY AS token(value, ordinality)
+            WHERE m.symbol = ANY($1)
+              AND m.end_time >= $2
+              AND m.start_time <= $3
+              AND m.raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
+        ),
+        sampled AS (
+            SELECT
+                t.market_slug,
+                t.token_id,
+                t.side,
+                o.received_at,
+                o.bids,
+                o.asks
+            FROM token_map t
+            JOIN LATERAL generate_series(
+                t.window_start,
+                t.window_end,
+                make_interval(secs => $4::int)
+            ) AS bucket(bucket_start) ON true
+            JOIN LATERAL (
+                SELECT received_at, bids, asks
+                FROM clob_orderbook_snapshots o
+                WHERE o.token_id = t.token_id
+                  AND o.received_at >= bucket.bucket_start
+                  AND o.received_at < bucket.bucket_start + make_interval(secs => $4::int)
+                  AND o.received_at <= t.window_end
+                ORDER BY o.received_at DESC
+                LIMIT 1
+            ) AS o ON true
+        )
+        SELECT market_slug, token_id, side, received_at, bids, asks
+        FROM sampled
+        ORDER BY received_at
+        "#;
+
 #[derive(Debug, Clone)]
 pub struct FactorObservation {
     pub event_id: String,
@@ -793,58 +849,14 @@ pub async fn load_research_pm_book_snapshots_sampled(
     sample_every_secs: i32,
 ) -> Result<Vec<ResearchPmBookSnapshot>, sqlx::Error> {
     let sample_every_secs = sample_every_secs.max(1);
-    let rows: Vec<(String, String, String, DateTime<Utc>, Value, Value)> = sqlx::query_as(
-        r#"
-        WITH token_map AS (
-            SELECT DISTINCT
-                m.market_slug,
-                trim(both '"' from token.value::text) AS token_id,
-                CASE token.ordinality WHEN 1 THEN 'UP' ELSE 'DOWN' END AS side
-            FROM pm_market_metadata m
-            CROSS JOIN LATERAL jsonb_array_elements(
-                (m.raw_market->'markets'->0->>'clobTokenIds')::jsonb
-            ) WITH ORDINALITY AS token(value, ordinality)
-            WHERE m.symbol = ANY($1)
-              AND m.end_time >= $2
-              AND m.start_time <= $3
-              AND m.raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
-        ),
-        sampled AS (
-            SELECT DISTINCT ON (o.token_id, bucket)
-                t.market_slug,
-                t.token_id,
-                t.side,
-                o.received_at,
-                o.bids,
-                o.asks,
-                bucket
-            FROM (
-                SELECT
-                    token_id,
-                    received_at,
-                    bids,
-                    asks,
-                    to_timestamp(
-                        floor(EXTRACT(EPOCH FROM received_at) / $4::double precision) * $4
-                    ) AS bucket
-                FROM clob_orderbook_snapshots
-                WHERE received_at >= $2
-                  AND received_at <= $3
-            ) o
-            JOIN token_map t ON t.token_id = o.token_id
-            ORDER BY o.token_id, bucket, o.received_at DESC
-        )
-        SELECT market_slug, token_id, side, received_at, bids, asks
-        FROM sampled
-        ORDER BY received_at
-        "#,
-    )
-    .bind(symbols)
-    .bind(start)
-    .bind(end)
-    .bind(sample_every_secs)
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(String, String, String, DateTime<Utc>, Value, Value)> =
+        sqlx::query_as(PM_BOOK_SAMPLED_QUERY)
+            .bind(symbols)
+            .bind(start)
+            .bind(end)
+            .bind(sample_every_secs)
+            .fetch_all(pool)
+            .await?;
 
     eprintln!(
         "pm book snapshot rows: {} (sample_every_secs={})",
@@ -2302,8 +2314,9 @@ pub fn export_observations_parquet(
 #[cfg(test)]
 mod tests {
     use super::{
-        FactorObservation, LabelField, attach_future_pm_labels, build_factor_observations_with_lob,
+        attach_future_pm_labels, build_factor_observations_with_lob,
         build_task_grain_derived_artifacts_for_event_ids, pearson_ic, spearman_ic,
+        FactorObservation, LabelField, PM_BOOK_SAMPLED_QUERY,
     };
     use chrono::{TimeZone, Utc};
     use ploy_market_contracts::MarketUpdate;
@@ -2311,6 +2324,26 @@ mod tests {
     #[cfg(feature = "db")]
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn pm_book_sampler_uses_token_window_index_lookup() {
+        assert!(
+            PM_BOOK_SAMPLED_QUERY.contains("o.token_id = t.token_id"),
+            "PM book sampler must constrain clob_orderbook_snapshots by token_id"
+        );
+        assert!(
+            PM_BOOK_SAMPLED_QUERY.contains("generate_series"),
+            "PM book sampler must generate bounded event buckets"
+        );
+        assert!(
+            PM_BOOK_SAMPLED_QUERY.contains("ORDER BY o.received_at DESC"),
+            "PM book sampler should use the token_time index order for latest-in-bucket lookup"
+        );
+        assert!(
+            !PM_BOOK_SAMPLED_QUERY.contains("DISTINCT ON"),
+            "PM book sampler must not sort the full 41GB orderbook table by bucket"
+        );
+    }
 
     fn test_factor_observation(
         event_id: &str,
