@@ -171,12 +171,14 @@ jobs:
 
       - name: Healthcheck summary
         run: |
-          echo "## tango-1-1 healthcheck" >> "$GITHUB_STEP_SUMMARY"
-          echo "- PostgreSQL must be active and queryable" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ployd, ploy-binance-aggtrade-collector, ploy-binance-price-collector, ploy-binance-lob-collector, ploy-deribit-iv-collector, ploy-quote-collector, and installed pm trade collector services must be active" >> "$GITHUB_STEP_SUMMARY"
-          echo "- systemd guardrails must remain configured on all checked services" >> "$GITHUB_STEP_SUMMARY"
-          echo "- binance_agg_trade_ticks must advance within the last 10 minutes" >> "$GITHUB_STEP_SUMMARY"
-          echo "- binance_price_ticks must advance within the last 10 minutes" >> "$GITHUB_STEP_SUMMARY"
-          echo "- binance_lob_ticks must advance within the last 15 minutes" >> "$GITHUB_STEP_SUMMARY"
-          echo "- deribit_iv_ticks must advance within the last 15 minutes" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ployd must not log degraded persistence messages in the last 15 minutes" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## tango-1-1 healthcheck"
+            echo "- PostgreSQL must be active and queryable"
+            echo "- ployd, ploy-binance-aggtrade-collector, ploy-binance-price-collector, ploy-binance-lob-collector, ploy-deribit-iv-collector, ploy-quote-collector, and installed pm trade collector services must be active"
+            echo "- systemd guardrails must remain configured on all checked services"
+            echo "- binance_agg_trade_ticks must advance within the last 10 minutes"
+            echo "- binance_price_ticks must advance within the last 10 minutes"
+            echo "- binance_lob_ticks must advance within the last 15 minutes"
+            echo "- deribit_iv_ticks must advance within the last 15 minutes"
+            echo "- ployd must not log degraded persistence messages in the last 15 minutes"
+          } >> "$GITHUB_STEP_SUMMARY"

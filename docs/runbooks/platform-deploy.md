@@ -8,6 +8,10 @@ The workspace-default deploy path is:
 - Long-running systemd unit: `deployment/ployd.service`
 - Host install helper: `scripts/install-platform-service.sh`
 
+Use `deploy=false` when dispatching the workflow if you only want CI to build,
+package, checksum, and upload the platform bundle artifact without touching the
+remote host. The default `deploy=true` preserves the normal release path.
+
 This path deploys three binaries:
 
 - `/opt/ploy/bin/ployd`

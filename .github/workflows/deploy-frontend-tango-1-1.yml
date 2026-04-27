@@ -65,16 +65,18 @@ jobs:
 
       - name: Prepare remote directory
         run: |
+          # shellcheck disable=SC2029
           ssh tango-1-1 "mkdir -p ${DEPLOY_ROOT}/tmp"
 
       - name: Upload frontend bundle
         run: |
-          scp ploy-frontend-dist.tar.gz tango-1-1:${DEPLOY_ROOT}/tmp/ploy-frontend-dist.tar.gz
-          scp deployment/nginx/ploy-frontend.conf tango-1-1:${DEPLOY_ROOT}/tmp/ploy-frontend.nginx
+          scp ploy-frontend-dist.tar.gz "tango-1-1:${DEPLOY_ROOT}/tmp/ploy-frontend-dist.tar.gz"
+          scp deployment/nginx/ploy-frontend.conf "tango-1-1:${DEPLOY_ROOT}/tmp/ploy-frontend.nginx"
 
       - name: Install frontend and reload nginx
         run: |
-          ssh tango-1-1 /bin/bash <<EOF
+          # shellcheck disable=SC2029
+          ssh tango-1-1 DEPLOY_ROOT="${DEPLOY_ROOT}" /bin/bash <<'EOF'
             set -euo pipefail
 
             mkdir -p "${DEPLOY_ROOT}/tmp" "${DEPLOY_ROOT}/frontend.next"
@@ -101,9 +103,11 @@ jobs:
 
       - name: Deployment summary
         run: |
-          echo "## Frontend deployment to tango-1-1" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Root: \`${DEPLOY_ROOT}/frontend\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Nginx: \`/etc/nginx/sites-available/ploy-report\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Runtime impact: frontend static files only; no ployd restart" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Frontend deployment to tango-1-1"
+            echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`"
+            echo "- Root: \`${DEPLOY_ROOT}/frontend\`"
+            echo "- Nginx: \`/etc/nginx/sites-available/ploy-report\`"
+            echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`"
+            echo "- Runtime impact: frontend static files only; no ployd restart"
+          } >> "$GITHUB_STEP_SUMMARY"

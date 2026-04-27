@@ -6,6 +6,12 @@ This gate still controls Phase 9 SDK slimming. Phase 10 claimer retirement has
 been applied after the operator confirmed the account settlement flow has
 converted away from the self-claim path.
 
+Operational update on 2026-04-24: account-level Polymarket auto-claim is enabled
+outside Ploy. Runtime hosts should store only official relayer credentials
+(`RELAYER_API_KEY` and `RELAYER_API_KEY_ADDRESS`) for gasless account operations;
+do not restore `CLAIMER_*`, `POLY_BUILDER_*`, or the old in-process claimer
+daemon path.
+
 ## Current Dependency Evidence
 
 Read-only checks from the local workspace show why the gate matters:

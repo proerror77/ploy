@@ -15,6 +15,8 @@ import type {
   PlatformMetrics,
   ActiveAlert,
   TradingStateSnapshot,
+  MarketDataHealth,
+  DryRunPerformanceReport,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -215,6 +217,14 @@ class ApiService {
 
   async getTradingState(): Promise<TradingStateSnapshot[]> {
     return this.fetch<TradingStateSnapshot[]>('/trading/state');
+  }
+
+  async getMarketDataHealth(): Promise<MarketDataHealth> {
+    return this.fetch<MarketDataHealth>('/market-data/health');
+  }
+
+  async getDryRunPerformance(): Promise<DryRunPerformanceReport> {
+    return this.fetch<DryRunPerformanceReport>('/reports/dry-run');
   }
 
   async updateDeploymentState(
