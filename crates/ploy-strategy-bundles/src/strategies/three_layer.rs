@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -14,6 +14,7 @@ use super::common::event::EventWindow;
 use super::common::fees::crypto_fee_cost;
 use super::common::quote::QuoteState;
 use super::common::settlement;
+use super::three_layer_profile::ThreeLayerProfile;
 use crate::strategies::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 use ploy_operator_contracts::Regime;
@@ -22,6 +23,7 @@ use ploy_operator_contracts::Regime;
 #[derive(Debug, Clone)]
 pub struct ThreeLayerConfig {
     pub symbols: Vec<String>,
+    pub profile: ThreeLayerProfile,
     pub min_direction_prob: f64,
     pub min_distance_over_sigma: f64,
     pub min_confirmation_score: f64,
@@ -49,6 +51,7 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
     fn from(c: DirectionalConfig) -> Self {
         Self {
             symbols: c.symbols,
+            profile: c.three_layer_strategy_profile,
             min_direction_prob: c.three_layer_min_direction_prob,
             min_distance_over_sigma: c.three_layer_min_distance_over_sigma,
             min_confirmation_score: c.three_layer_min_confirmation_score,
@@ -182,6 +185,42 @@ struct QuoteDepth {
     ask_size: Option<Decimal>,
 }
 
+struct QuoteAskHistory {
+    entries: VecDeque<(DateTime<Utc>, f64)>,
+}
+
+impl QuoteAskHistory {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, ts: DateTime<Utc>, ask: f64) {
+        if !ask.is_finite() {
+            return;
+        }
+        self.entries.push_back((ts, ask));
+        while self.entries.len() > 1 {
+            let oldest = self.entries.front().unwrap().0;
+            if (ts - oldest).num_seconds() > 35 {
+                self.entries.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn change_since(&self, ts: DateTime<Utc>, now_ask: f64, secs: i64) -> Option<f64> {
+        let cutoff = ts - chrono::Duration::seconds(secs);
+        self.entries
+            .iter()
+            .rev()
+            .find(|(entry_ts, _)| *entry_ts <= cutoff)
+            .map(|(_, ask)| now_ask - *ask)
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct LobState {
     obi: f64,
@@ -270,11 +309,7 @@ fn norm_cdf(x: f64) -> f64 {
     let d = 0.3989422804014327 * (-x * x / 2.0).exp();
     let p =
         d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-    if x >= 0.0 {
-        1.0 - p
-    } else {
-        p
-    }
+    if x >= 0.0 { 1.0 - p } else { p }
 }
 
 fn threshold_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> f64 {
@@ -287,6 +322,107 @@ fn threshold_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> 
         value - threshold
     };
     (signed / scale).clamp(-0.50, 1.0)
+}
+
+fn profile_confirmation_score(
+    direction_sign: f64,
+    lob: &LobState,
+    cum_mprice_drift_5m: f64,
+    drift_30s: f64,
+    regime: Regime,
+    config: &ThreeLayerConfig,
+) -> f64 {
+    match config.profile {
+        ThreeLayerProfile::Mixed => evaluate_confirmation_bonus(
+            direction_sign,
+            lob,
+            cum_mprice_drift_5m,
+            drift_30s,
+            regime,
+            config,
+        ),
+        ThreeLayerProfile::Champion => 0.0,
+        ThreeLayerProfile::ObiSoft => {
+            let obi = (lob.obi * direction_sign).clamp(-1.0, 1.0);
+            let obi_delta = (lob.obi_delta() * direction_sign).clamp(-1.0, 1.0);
+            let depth = (lob.depth_imbalance() * direction_sign).clamp(-1.0, 1.0);
+            let microprice = (cum_mprice_drift_5m * direction_sign).clamp(-1.0, 1.0);
+            let trade_imbalance =
+                ((lob.signed_trade_imbalance / 50.0) * direction_sign).clamp(-1.0, 1.0);
+
+            0.30 * obi
+                + 0.20 * obi_delta
+                + 0.20 * obi
+                + 0.15 * depth
+                + 0.10 * microprice
+                + 0.05 * trade_imbalance
+        }
+        ThreeLayerProfile::ContinuationSoft => {
+            let drift_continuation = (drift_30s * direction_sign * 800.0).clamp(-1.0, 1.0);
+            let microprice = (cum_mprice_drift_5m * direction_sign).clamp(-1.0, 1.0);
+            let trade_imbalance =
+                ((lob.signed_trade_imbalance / 50.0) * direction_sign).clamp(-1.0, 1.0);
+            0.50 * drift_continuation + 0.30 * microprice + 0.20 * trade_imbalance
+        }
+    }
+}
+
+struct EntryScoreInputs {
+    direction_score: f64,
+    distance_over_sigma: f64,
+    direction_sign: f64,
+    edge: f64,
+    edge_score: f64,
+    confirmation: f64,
+    drift_30s: f64,
+    pm_momentum_score: f64,
+    liquidity_score: f64,
+}
+
+fn evaluate_entry_score(config: &ThreeLayerConfig, inputs: EntryScoreInputs) -> f64 {
+    if !config.profile.uses_snapshot_scoring() {
+        return inputs.direction_score * 0.50
+            + inputs.edge_score * 0.35
+            + inputs.confirmation * 0.15;
+    }
+
+    let side_distance = inputs.distance_over_sigma * inputs.direction_sign;
+    let distance_score = threshold_score(
+        side_distance,
+        config.min_distance_over_sigma,
+        0.60,
+        config.alpha_contrarian,
+    );
+    let edge_score = threshold_score(inputs.edge, config.min_edge, 0.08, config.alpha_contrarian);
+    let drift_side = inputs.drift_30s * inputs.direction_sign;
+    let drift_score = ((drift_side - config.min_drift_confirmation) * 800.0).clamp(-0.50, 1.0);
+    let confirmation_score = threshold_score(
+        inputs.confirmation,
+        config.min_confirmation_score,
+        0.50,
+        config.cex_contrarian,
+    );
+
+    match config.profile {
+        ThreeLayerProfile::Champion => {
+            0.33 * inputs.direction_score
+                + 0.17 * distance_score
+                + 0.25 * edge_score
+                + 0.10 * drift_score
+                + 0.10 * inputs.pm_momentum_score
+                + 0.05 * inputs.liquidity_score
+        }
+        ThreeLayerProfile::ObiSoft | ThreeLayerProfile::ContinuationSoft => {
+            0.25 * inputs.direction_score
+                + 0.12 * distance_score
+                + 0.18 * edge_score
+                + 0.15 * confirmation_score
+                + 0.10 * drift_score
+                + 0.12 * inputs.pm_momentum_score
+                + 0.08 * inputs.liquidity_score
+        }
+        ThreeLayerProfile::Mixed => unreachable!("mixed profile returned above"),
+    }
 }
 
 /// Layer 1: Direction score (0.0 – 1.0).
@@ -421,6 +557,7 @@ pub struct ThreeLayerStrategy {
     spot: HashMap<Arc<str>, Decimal>,
     quotes: HashMap<Arc<str>, QuoteState>,
     quote_depth: HashMap<Arc<str>, QuoteDepth>,
+    quote_ask_history: HashMap<Arc<str>, QuoteAskHistory>,
     token_symbol: HashMap<Arc<str>, Arc<str>>,
     token_event: HashMap<Arc<str>, Arc<str>>,
     events: HashMap<Arc<str>, Vec<EventWindow>>,
@@ -443,6 +580,7 @@ impl ThreeLayerStrategy {
             spot: HashMap::new(),
             quotes: HashMap::new(),
             quote_depth: HashMap::new(),
+            quote_ask_history: HashMap::new(),
             token_symbol: HashMap::new(),
             token_event: HashMap::new(),
             events: HashMap::new(),
@@ -537,6 +675,36 @@ impl ThreeLayerStrategy {
         match self.balance_exhausted_until {
             Some(existing) if existing >= until => {}
             _ => self.balance_exhausted_until = Some(until),
+        }
+    }
+
+    fn record_quote_ask(&mut self, token_id: Arc<str>, ask: Option<Decimal>, ts: DateTime<Utc>) {
+        let Some(ask) = ask.and_then(|price| price.to_f64()) else {
+            return;
+        };
+        self.quote_ask_history
+            .entry(token_id)
+            .or_insert_with(QuoteAskHistory::new)
+            .push(ts, ask);
+    }
+
+    fn pm_momentum_score(&self, token_id: &str, ask: f64, now: DateTime<Utc>) -> f64 {
+        let Some(history) = self.quote_ask_history.get(token_id) else {
+            return 0.0;
+        };
+        let pm_momentum = [
+            history.change_since(now, ask, 10),
+            history.change_since(now, ask, 30),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|value| value.is_finite())
+        .fold(f64::NEG_INFINITY, f64::max);
+
+        if pm_momentum.is_finite() {
+            (pm_momentum / 0.08).clamp(-0.50, 1.0)
+        } else {
+            0.0
         }
     }
 
@@ -676,9 +844,9 @@ impl ThreeLayerStrategy {
                 continue;
             }
 
-            // Layer 2: Confirmation bonus
+            // Layer 2: profile-specific confirmation component
             let lob = self.lob.get(symbol).copied().unwrap_or_default();
-            let confirmation_bonus = evaluate_confirmation_bonus(
+            let confirmation_score = profile_confirmation_score(
                 direction_sign,
                 &lob,
                 cum_mprice_drift_5m,
@@ -688,16 +856,32 @@ impl ThreeLayerStrategy {
             );
 
             // Layer 3: Edge score
-            let Some((entry_price_f, edge, _rr, edge_score)) =
+            let Some((entry_price_f, edge, rr, edge_score)) =
                 evaluate_edge_score(effective_p, ask, regime, &self.config)
             else {
                 self.bump("skip_edge_score");
                 continue;
             };
+            if self.config.profile.uses_snapshot_scoring() && rr < self.config.min_reward_risk {
+                self.bump("skip_reward_risk");
+                continue;
+            }
 
-            // Composite scoring model
-            let total_score =
-                direction_score * 0.50 + edge_score * 0.35 + confirmation_bonus * 0.15;
+            let pm_momentum_score = self.pm_momentum_score(token_id, ask, now);
+            let total_score = evaluate_entry_score(
+                &self.config,
+                EntryScoreInputs {
+                    direction_score,
+                    distance_over_sigma,
+                    direction_sign,
+                    edge,
+                    edge_score,
+                    confirmation: confirmation_score,
+                    drift_30s,
+                    pm_momentum_score,
+                    liquidity_score: 1.0,
+                },
+            );
 
             if total_score < self.config.min_entry_score {
                 self.bump("skip_entry_score");
@@ -708,8 +892,10 @@ impl ThreeLayerStrategy {
                     total_score = format!("{:.3}", total_score),
                     direction_score = format!("{:.3}", direction_score),
                     edge_score = format!("{:.3}", edge_score),
-                    confirmation_bonus = format!("{:.3}", confirmation_bonus),
+                    confirmation_score = format!("{:.3}", confirmation_score),
+                    pm_momentum_score = format!("{:.3}", pm_momentum_score),
                     min_entry_score = self.config.min_entry_score,
+                    profile = %self.config.profile,
                     regime = regime.as_str(),
                     "score below threshold"
                 );
@@ -796,10 +982,12 @@ impl ThreeLayerStrategy {
                 total_score = format!("{:.3}", total_score),
                 direction_score = format!("{:.3}", direction_score),
                 edge_score = format!("{:.3}", edge_score),
-                confirmation_bonus = format!("{:.3}", confirmation_bonus),
+                confirmation_score = format!("{:.3}", confirmation_score),
+                pm_momentum_score = format!("{:.3}", pm_momentum_score),
                 p_hat = effective_p,
                 edge,
                 entry_price = %entry_price,
+                profile = %self.config.profile,
                 regime = regime.as_str(),
                 "entry signal"
             );
@@ -1078,6 +1266,7 @@ impl StrategyLogic for ThreeLayerStrategy {
                         ask_size: *ask_size,
                     },
                 );
+                self.record_quote_ask(token_id.clone(), *ask, *ts);
 
                 let Some(symbol) = self.token_symbol.get(token_id).cloned() else {
                     return Vec::new();
@@ -1344,11 +1533,19 @@ mod tests {
     fn config_from_directional_preserves_fields() {
         let dc: DirectionalConfig = serde_json::from_str("{}").unwrap();
         let tlc: ThreeLayerConfig = dc.into();
+        assert_eq!(tlc.profile, ThreeLayerProfile::Mixed);
         assert_eq!(tlc.min_edge, 0.03);
         assert_eq!(tlc.min_reward_risk, 1.2);
         assert_eq!(tlc.take_profit_ask, 0.70);
         assert!((tlc.min_entry_score - 0.30).abs() < f64::EPSILON);
         assert!(!tlc.symbols.is_empty());
+    }
+
+    #[test]
+    fn config_from_directional_accepts_profile_aliases() {
+        let dc: DirectionalConfig = serde_json::from_str(r#"{"strategy_profile":"obi"}"#).unwrap();
+        let tlc: ThreeLayerConfig = dc.into();
+        assert_eq!(tlc.profile, ThreeLayerProfile::ObiSoft);
     }
 
     #[test]
@@ -1402,6 +1599,7 @@ mod tests {
     fn test_config() -> ThreeLayerConfig {
         ThreeLayerConfig {
             symbols: vec!["BTCUSDT".into()],
+            profile: ThreeLayerProfile::Mixed,
             min_direction_prob: 0.56,
             min_distance_over_sigma: 0.3,
             min_confirmation_score: 0.10,
@@ -1996,6 +2194,62 @@ mod tests {
             bonus > 0.0,
             "opposing LOB should be rewarded in contrarian confirmation mode, got {}",
             bonus
+        );
+    }
+
+    #[test]
+    fn champion_profile_ignores_confirmation_component() {
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::Champion;
+        let total = evaluate_entry_score(
+            &config,
+            EntryScoreInputs {
+                direction_score: 0.50,
+                distance_over_sigma: -0.20,
+                direction_sign: -1.0,
+                edge: 0.01,
+                edge_score: 0.20,
+                confirmation: -1.0,
+                drift_30s: 0.0,
+                pm_momentum_score: 0.0,
+                liquidity_score: 1.0,
+            },
+        );
+        let with_positive_confirmation = evaluate_entry_score(
+            &config,
+            EntryScoreInputs {
+                direction_score: 0.50,
+                distance_over_sigma: -0.20,
+                direction_sign: -1.0,
+                edge: 0.01,
+                edge_score: 0.20,
+                confirmation: 1.0,
+                drift_30s: 0.0,
+                pm_momentum_score: 0.0,
+                liquidity_score: 1.0,
+            },
+        );
+        assert!((total - with_positive_confirmation).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn obi_soft_profile_scores_side_aware_book_imbalance() {
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::ObiSoft;
+        let lob = LobState {
+            obi: -0.5,
+            obi_prev: -0.2,
+            spread_bps: 10,
+            bid_depth_near: 50.0,
+            ask_depth_near: 100.0,
+            signed_trade_imbalance: -20.0,
+            last_aggtrade_ts: None,
+            ts: None,
+        };
+        let score = profile_confirmation_score(-1.0, &lob, -0.5, 0.0, Regime::Middle, &config);
+        assert!(
+            score > 0.0,
+            "DOWN-side OBI profile should reward opposing raw UP pressure, got {score}"
         );
     }
 

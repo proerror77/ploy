@@ -1,5 +1,37 @@
 # PM5D Three-Arm Snapshot Optimization (2026-04-28)
 
+# PM5D Three-Layer Profile Dry-Run Deployment (2026-04-28)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer*.rs`
+  - Owner: runtime profile parity for optimized `champion` and `obi_soft` dry-run candidates.
+- `config/strategies/02-pm5d-threelayer.*.dryrun.toml`
+  - Owner: dry-run strategy configs generated from the validated snapshot optimizer parameters.
+- `config/deployments/pm5d.threelayer.*.dryrun.json`
+  - Owner: dry-run deployment manifests for Tango control-plane application.
+- `.github/workflows/deploy-tango-1-1.yml`
+  - Owner: CI artifact bundle coverage for the new strategy configs.
+- `tasks/todo.md`
+  - Owner: deploy plan, verification, and remote evidence.
+
+## Tasks
+
+- [x] Inspect the current runtime/config gap between snapshot profiles and deployed three-layer strategy behavior.
+- [x] Add runtime support for profile-specific three-layer scoring while preserving the legacy `mixed` default.
+- [x] Add `obi_soft` and `champion` dry-run configs/manifests using the 2026-04-28 200-trial snapshot optimizer parameters.
+- [x] Verify focused tests, config parsing, JSON/YAML validity, and diff hygiene.
+- [ ] Open/merge PR to `main`, then trigger CI-built `deploy-tango-1-1` dry-run deployment.
+- [ ] Apply/verify Tango dry-run deployments and confirm live remains paused.
+
+## Review
+
+- 2026-04-28: Added a three-layer runtime profile selector with legacy `mixed` as the default. `champion` uses the snapshot optimizer's contrarian-alpha weighted score without confirmation, while `obi_soft` adds side-aware OBI/depth/microprice/trade-imbalance soft confirmation. Runtime now honors the snapshot reward/risk gate for non-legacy profiles and keeps the previous `mixed` composite score unchanged.
+- 2026-04-28: Added dry-run configs/manifests for `pm5d.threelayer.obi-soft.dryrun` and `pm5d.threelayer.champion.dryrun`, both with fixed `stake_usd=15.0`, six symbols, dry-run mode, and optimizer params from runs `25046098899` and `25046098829`. The Tango deploy workflow now bundles and installs both strategy TOMLs.
+- 2026-04-28: Local focused verification passed: `rustfmt --edition 2024` on touched Rust files, JSON parsing for both manifests, Python `tomllib` parsing for both strategy configs with `stake_usd=15.0`, workflow YAML parse via Ruby, `CARGO_TARGET_DIR=/tmp/ploy-profile-dryrun-test rtk cargo test -p ploy-strategy-bundles three_layer --lib`, and `git diff --check`.
+- 2026-04-28: PR CI initially caught a missing `three_layer_strategy_profile` field in the built-in `run_backtest` example defaults. Added the field and root re-export, then verified `CARGO_TARGET_DIR=/tmp/ploy-profile-dryrun-test rtk cargo test --locked -p ploy-strategy-bundles --example run_backtest --no-run` plus the focused three-layer lib tests.
+- 2026-04-28: A second CI pass found the same missing default in integration-test and optimizer-example hand-written configs. Added `ThreeLayerProfile::Mixed` there and verified `CARGO_TARGET_DIR=/tmp/ploy-profile-dryrun-test rtk cargo test --locked -p ploy-strategy-bundles --tests --no-run`, `--example optimize_backtest --no-run`, `--example run_backtest --no-run`, and `git diff --check`.
+
 ## Files
 
 - `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`

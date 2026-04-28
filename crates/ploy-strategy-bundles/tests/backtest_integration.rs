@@ -11,6 +11,7 @@ use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
     DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, RecordedFeed, RecordingFeed,
     RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyRuntime,
+    ThreeLayerProfile,
 };
 use rust_decimal_macros::dec;
 use std::fs;
@@ -189,6 +190,7 @@ async fn backtest_full_loop_produces_entry() {
         reversal_max_pm_lag_secs: 30,
         reversal_take_profit_ask: 0.65,
         reversal_stop_distance_pct: 0.025,
+        three_layer_strategy_profile: ThreeLayerProfile::Mixed,
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
         cooldown_secs: 0,
@@ -324,6 +326,7 @@ async fn empty_feed_produces_zero_trades() {
         reversal_max_pm_lag_secs: 30,
         reversal_take_profit_ask: 0.65,
         reversal_stop_distance_pct: 0.025,
+        three_layer_strategy_profile: ThreeLayerProfile::Mixed,
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
         cooldown_secs: 0,
@@ -397,6 +400,7 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         reversal_max_pm_lag_secs: 30,
         reversal_take_profit_ask: 0.65,
         reversal_stop_distance_pct: 0.025,
+        three_layer_strategy_profile: ThreeLayerProfile::Mixed,
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
         cooldown_secs: 0,
@@ -519,6 +523,7 @@ async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
         reversal_max_pm_lag_secs: 30,
         reversal_take_profit_ask: 0.65,
         reversal_stop_distance_pct: 0.025,
+        three_layer_strategy_profile: ThreeLayerProfile::Mixed,
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
         cooldown_secs: 0,
@@ -634,6 +639,7 @@ async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior()
         reversal_max_pm_lag_secs: 30,
         reversal_take_profit_ask: 0.65,
         reversal_stop_distance_pct: 0.025,
+        three_layer_strategy_profile: ThreeLayerProfile::Mixed,
         min_time_remaining_secs: 60,
         max_time_remaining_secs: 300,
         cooldown_secs: 0,

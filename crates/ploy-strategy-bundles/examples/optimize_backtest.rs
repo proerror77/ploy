@@ -41,13 +41,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
 use ploy_feed_loaders::{
-    load_from_database_with_options, HistoricalLoadOptions as DbHistoricalLoadOptions,
+    HistoricalLoadOptions as DbHistoricalLoadOptions, load_from_database_with_options,
 };
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
     DirectionalStrategy, ExecutionReport, Feed, FullConfig, HistoricalFeed, MarketUpdate, Recorder,
     ReversalStrategy, RuntimeConfig, RuntimeMode, SignalRecord, SimulatedExecutor,
-    SimulatedExecutorConfig, StrategyLogic, StrategyRuntime, ThreeLayerStrategy,
+    SimulatedExecutorConfig, StrategyLogic, StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy,
 };
 use ploy_trading::{FillRecord, TradeSide, TradingIntent};
 use rust_decimal_macros::dec;
@@ -151,15 +151,8 @@ mod tests {
         };
         let symbols = vec!["BTCUSDT".to_string()];
 
-        let error = validate_preflight(
-            &manifest,
-            &symbols,
-            utc_ts(21),
-            utc_ts(27),
-            &limits,
-            true,
-        )
-        .expect_err("empty parquet manifest should be rejected");
+        let error = validate_preflight(&manifest, &symbols, utc_ts(21), utc_ts(27), &limits, true)
+            .expect_err("empty parquet manifest should be rejected");
 
         assert!(error.contains("zero rows"));
         assert!(error.contains("train split has zero rows"));
@@ -1126,6 +1119,7 @@ fn make_directional_config(
         reversal_max_pm_lag_secs: 30,
         reversal_take_profit_ask: 0.65,
         reversal_stop_distance_pct: 0.025,
+        three_layer_strategy_profile: ThreeLayerProfile::Mixed,
         min_time_remaining_secs: min_time as u64,
         max_time_remaining_secs: max_time as u64,
         cooldown_secs: cooldown_secs as u64,
@@ -1193,6 +1187,7 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
         reversal_max_pm_lag_secs: params.max_pm_lag_secs as u64,
         reversal_take_profit_ask: 0.65,
         reversal_stop_distance_pct: 0.025,
+        three_layer_strategy_profile: ThreeLayerProfile::Mixed,
         min_time_remaining_secs: params.min_time_remaining_secs as u64,
         max_time_remaining_secs: params.max_time_remaining_secs as u64,
         cooldown_secs: params.cooldown_secs as u64,
