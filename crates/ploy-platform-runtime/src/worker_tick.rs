@@ -194,6 +194,8 @@ mod tests {
     use rust_decimal_macros::dec;
     use std::fs;
     use std::path::PathBuf;
+    use std::thread;
+    use std::time::Duration as StdDuration;
 
     fn test_working_directory() -> PathBuf {
         let unique = std::time::SystemTime::now()
@@ -358,14 +360,29 @@ mod tests {
         });
 
         tick_workers(&mut control_plane, &mut supervisor, &config);
-        supervisor.pause("example.paper");
+        let paused = supervisor.pause("example.paper").expect("paused worker");
+        assert_eq!(paused.observed_state, ObservedState::Paused);
 
-        tick_workers(&mut control_plane, &mut supervisor, &config);
+        let restarted = (0..20).any(|_| {
+            tick_workers(&mut control_plane, &mut supervisor, &config);
+            let Some(status) = supervisor.status("example.paper") else {
+                return false;
+            };
+            if matches!(
+                status.observed_state,
+                ObservedState::Starting | ObservedState::Running
+            ) && status.pid.is_some()
+            {
+                return true;
+            }
+            thread::sleep(StdDuration::from_millis(10));
+            false
+        });
+
         let status = supervisor.status("example.paper").expect("status");
-        assert!(matches!(
-            status.observed_state,
-            ObservedState::Starting | ObservedState::Running
-        ));
-        assert!(status.pid.is_some());
+        assert!(
+            restarted,
+            "worker did not restart from paused state; final status={status:?}"
+        );
     }
 }
