@@ -292,9 +292,9 @@ def audit_research_windows(statement_timeout_seconds: int, psql_timeout_seconds:
         elif latest_lag > 12 * 3600:
             status = "critical"
             reasons.append(f"latest window lag {latest_lag}s > 12h")
-        elif latest_lag > 2 * 3600 and STATUS_ORDER[status] < STATUS_ORDER["warn"]:
+        elif latest_lag > 6 * 3600 and STATUS_ORDER[status] < STATUS_ORDER["warn"]:
             status = "warn"
-            reasons.append(f"latest window lag {latest_lag}s > 2h")
+            reasons.append(f"latest window lag {latest_lag}s > 6h")
         if not reasons:
             reasons.append("valid windows are populated and recent")
         row["status"] = status
