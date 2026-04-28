@@ -9,6 +9,7 @@ existing lightweight deployment bundle.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -28,6 +29,34 @@ DB_URL = (
 DEFAULT_SYMBOLS = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT"
 STATUS_ORDER = {"ok": 0, "warn": 1, "unknown": 2, "critical": 3}
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+SOURCE_PROFILES = {
+    "all": ["*"],
+    "pm5d-core": [
+        "polymarket_quotes",
+        "polymarket_orderbooks",
+        "binance_price",
+        "binance_agg_trades",
+        "binance_lob",
+    ],
+    "pm5d-execution": [
+        "polymarket_quotes",
+        "polymarket_orderbooks",
+        "binance_price",
+        "binance_agg_trades",
+        "binance_lob",
+    ],
+    "pm5d-vol": [
+        "polymarket_quotes",
+        "polymarket_orderbooks",
+        "deribit_iv",
+        "deribit_atm_greeks",
+        "binance_price",
+        "binance_agg_trades",
+        "binance_lob",
+    ],
+    "research-windows": ["research_valid_windows"],
+}
 
 
 @dataclass(frozen=True)
@@ -317,6 +346,7 @@ def parse_symbols(raw: str) -> list[str]:
 def gap_targets(symbols: Iterable[str]) -> list[GapTarget]:
     targets = [
         GapTarget("polymarket_quotes", "clob_quote_ticks", "received_at", 300),
+        GapTarget("polymarket_orderbooks", "clob_orderbook_snapshots", "received_at", 300),
         GapTarget("deribit_iv", "deribit_iv_ticks", "fetched_at", 900),
         GapTarget("deribit_atm_greeks", "deribit_atm_greeks_ticks", "fetched_at", 900),
     ]
@@ -352,6 +382,44 @@ def gap_targets(symbols: Iterable[str]) -> list[GapTarget]:
     return targets
 
 
+def parse_source_requirements(raw: str) -> list[str]:
+    tokens = [item.strip() for item in raw.split(",") if item.strip()]
+    if not tokens:
+        return ["all"]
+    out: list[str] = []
+    for token in tokens:
+        profile = SOURCE_PROFILES.get(token)
+        if profile is None:
+            out.append(token)
+        else:
+            out.extend(profile)
+    return out
+
+
+def source_aliases(target: GapTarget | dict[str, Any]) -> set[str]:
+    if isinstance(target, GapTarget):
+        source_id = target.source_id
+        table_name = target.table_name
+    else:
+        source_id = str(target.get("source_id") or "")
+        table_name = str(target.get("table_name") or "")
+    aliases = {source_id, table_name}
+    if "/" in source_id:
+        aliases.add(source_id.split("/", 1)[0])
+    return aliases
+
+
+def source_is_required(target: GapTarget | dict[str, Any], requirements: list[str]) -> bool:
+    aliases = source_aliases(target)
+    for requirement in requirements:
+        if requirement == "*":
+            return True
+        for alias in aliases:
+            if alias == requirement or fnmatch.fnmatch(alias, requirement):
+                return True
+    return False
+
+
 def overall_status(items: Iterable[dict[str, Any]]) -> str:
     status = "ok"
     for item in items:
@@ -369,6 +437,7 @@ def print_text(payload: dict[str, Any]) -> None:
         f"lookback_hours={payload['lookback_hours']} "
         f"bucket_minutes={payload['bucket_minutes']}"
     )
+    print(f"required_sources={','.join(payload.get('required_sources') or [])}")
     print()
     for item in payload["gap_audits"]:
         filter_value = item.get("filter_value")
@@ -412,12 +481,20 @@ def main() -> int:
         default=os.environ.get("PLOY_AUDIT_SYMBOLS", DEFAULT_SYMBOLS),
         help=f"comma-separated Binance symbols (default: {DEFAULT_SYMBOLS})",
     )
+    parser.add_argument(
+        "--required-sources",
+        default=os.environ.get("PLOY_AUDIT_REQUIRED_SOURCES", "all"),
+        help=(
+            "comma-separated source ids, table names, wildcard patterns, or profiles "
+            f"({', '.join(sorted(SOURCE_PROFILES))}); default: all"
+        ),
+    )
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument(
         "--fail-on",
-        choices=("critical", "unknown", "never"),
+        choices=("critical", "warn", "unknown", "never"),
         default="critical",
-        help="exit non-zero on critical, unknown-or-critical, or never",
+        help="exit non-zero on critical, warn-or-higher, unknown-or-critical, or never",
     )
     args = parser.parse_args()
 
@@ -429,6 +506,10 @@ def main() -> int:
         parser.error("--recent-minutes must be positive")
 
     symbols = parse_symbols(args.symbols)
+    source_requirements = parse_source_requirements(args.required_sources)
+    selected_gap_targets = [
+        target for target in gap_targets(symbols) if source_is_required(target, source_requirements)
+    ]
     gap_results = [
         audit_gap_target(
             target,
@@ -438,12 +519,20 @@ def main() -> int:
             statement_timeout_seconds=args.statement_timeout_seconds,
             psql_timeout_seconds=args.psql_timeout_seconds,
         )
-        for target in gap_targets(symbols)
+        for target in selected_gap_targets
     ]
-    window_results = [
-        audit_research_windows(args.statement_timeout_seconds, args.psql_timeout_seconds)
-    ]
+    window_results = []
+    research_window_target = {
+        "source_id": "research_valid_windows",
+        "table_name": "research_valid_windows",
+    }
+    if source_is_required(research_window_target, source_requirements):
+        window_results.append(
+            audit_research_windows(args.statement_timeout_seconds, args.psql_timeout_seconds)
+        )
     items = gap_results + window_results
+    if not items:
+        parser.error("--required-sources selected no audit targets")
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "database_url_source": "PLOY_DATABASE__URL"
@@ -453,6 +542,7 @@ def main() -> int:
         "bucket_minutes": args.bucket_minutes,
         "recent_minutes": args.recent_minutes,
         "symbols": symbols,
+        "required_sources": source_requirements,
         "overall_status": overall_status(items),
         "gap_audits": gap_results,
         "window_audits": window_results,
@@ -465,6 +555,8 @@ def main() -> int:
 
     if args.fail_on == "never":
         return 0
+    if args.fail_on == "warn" and payload["overall_status"] in {"warn", "unknown", "critical"}:
+        return 1
     if payload["overall_status"] == "critical":
         return 1
     if args.fail_on == "unknown" and payload["overall_status"] in {"critical", "unknown"}:

@@ -5,11 +5,14 @@
 //! scores executable PnL after PM CLOB fillability.
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
-    build_factor_observations_with_lob_sampled, build_factor_stability_report,
-    format_factor_combo_v1_report, format_factor_stability_report,
+    FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
+    FactorWalkForwardOptions, FillabilityReviewOptions, LiquidityGateV1Options,
+    LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions, ResearchSnapshotRequest,
+    TradeFormationReviewOptions, build_factor_observations_with_lob_sampled,
+    build_factor_stability_report, format_factor_combo_v1_report, format_factor_stability_report,
     format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
     format_liquidity_gate_v1_report, format_liquidity_gated_alpha_v1_report,
     format_meta_label_walk_forward_v1_report, format_trade_formation_v1_report,
@@ -19,10 +22,6 @@ use ploy_research::{
     review_fillability_v1_with_deribit, review_trade_formation_v1_with_deribit,
     validate_snapshot_request, walk_forward_factor_combo_v1_with_deribit,
     walk_forward_factors_v2_with_deribit_and_pm_books, walk_forward_meta_label_v1_with_deribit,
-    FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
-    FactorWalkForwardOptions, FillabilityReviewOptions, LiquidityGateV1Options,
-    LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions, ResearchSnapshotRequest,
-    TradeFormationReviewOptions,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -181,7 +180,7 @@ async fn main() {
             started.elapsed().as_millis()
         );
         snapshot_provenance = Some(format!(
-            "# Snapshot\nsnapshot_schema={}\nsnapshot_hash={}\nsnapshot_generated_at={}\nsnapshot_optimizer_data_dir={}\n",
+            "# Snapshot\nsnapshot_schema={}\nsnapshot_hash={}\nsnapshot_generated_at={}\nsnapshot_optimizer_data_dir={}\nsnapshot_data_requirements={}\nsnapshot_data_audit_status={}\nsnapshot_data_audit_report={}\nsnapshot_include_deribit={}\n",
             snapshot.manifest.schema_version,
             snapshot_hash,
             snapshot.manifest.generated_at,
@@ -189,7 +188,23 @@ async fn main() {
                 .manifest
                 .optimizer_data_dir
                 .as_deref()
-                .unwrap_or("<missing>")
+                .unwrap_or("<missing>"),
+            if snapshot.manifest.data_requirements.is_empty() {
+                "<unspecified>".to_string()
+            } else {
+                snapshot.manifest.data_requirements.join(",")
+            },
+            snapshot
+                .manifest
+                .data_audit_status
+                .as_deref()
+                .unwrap_or("<not-recorded>"),
+            snapshot
+                .manifest
+                .data_audit_report
+                .as_deref()
+                .unwrap_or("<not-recorded>"),
+            snapshot.manifest.include_deribit
         ));
         (
             snapshot.observations,

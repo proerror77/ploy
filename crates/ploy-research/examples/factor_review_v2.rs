@@ -17,14 +17,14 @@
 //!     [--top-n 20]
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
+    FactorObservation, FactorReviewOptions, ResearchSnapshotRequest,
     build_factor_observations_with_lob_sampled, format_factor_review_v2_report,
     load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
     load_research_pm_book_snapshots_sampled, load_research_snapshot,
-    review_factors_v2_with_deribit_and_pm_books, validate_snapshot_request, FactorObservation,
-    FactorReviewOptions, ResearchSnapshotRequest,
+    review_factors_v2_with_deribit_and_pm_books, validate_snapshot_request,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -163,7 +163,7 @@ async fn main() {
             started.elapsed().as_millis()
         );
         snapshot_provenance = Some(format!(
-            "# Snapshot\nsnapshot_schema={}\nsnapshot_hash={}\nsnapshot_generated_at={}\nsnapshot_optimizer_data_dir={}\n",
+            "# Snapshot\nsnapshot_schema={}\nsnapshot_hash={}\nsnapshot_generated_at={}\nsnapshot_optimizer_data_dir={}\nsnapshot_data_requirements={}\nsnapshot_data_audit_status={}\nsnapshot_data_audit_report={}\nsnapshot_include_deribit={}\n",
             snapshot.manifest.schema_version,
             snapshot_hash,
             snapshot.manifest.generated_at,
@@ -171,7 +171,23 @@ async fn main() {
                 .manifest
                 .optimizer_data_dir
                 .as_deref()
-                .unwrap_or("<missing>")
+                .unwrap_or("<missing>"),
+            if snapshot.manifest.data_requirements.is_empty() {
+                "<unspecified>".to_string()
+            } else {
+                snapshot.manifest.data_requirements.join(",")
+            },
+            snapshot
+                .manifest
+                .data_audit_status
+                .as_deref()
+                .unwrap_or("<not-recorded>"),
+            snapshot
+                .manifest
+                .data_audit_report
+                .as_deref()
+                .unwrap_or("<not-recorded>"),
+            snapshot.manifest.include_deribit
         ));
         (
             snapshot.observations,

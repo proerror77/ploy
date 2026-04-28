@@ -252,6 +252,10 @@ jobs:
               f"end={value('end')}",
               f"immutable_input={value('immutable_input')}",
               f"optimizer_data_dir={value('optimizer_data_dir')}",
+              f"data_requirements={value('data_requirements')}",
+              f"data_audit_status={value('data_audit_status')}",
+              f"data_audit_report={value('data_audit_report')}",
+              f"include_deribit={value('include_deribit')}",
           ]
           print("\n".join(str(line) for line in lines))
           PY

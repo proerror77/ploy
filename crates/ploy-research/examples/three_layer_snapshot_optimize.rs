@@ -15,8 +15,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
 use ploy_research::{
-    build_data_health_report, build_factor_observations_v2_with_deribit_and_pm_books,
-    load_research_snapshot, FactorObservationV2, FactorReviewOptions, ResearchSnapshotManifest,
+    FactorObservationV2, FactorReviewOptions, ResearchSnapshotManifest, build_data_health_report,
+    build_factor_observations_v2_with_deribit_and_pm_books, load_research_snapshot,
 };
 use serde::Serialize;
 
@@ -57,6 +57,10 @@ struct OptimizeSummary<'a> {
     snapshot_schema: &'a str,
     snapshot_hash: &'a str,
     snapshot_generated_at: DateTime<Utc>,
+    snapshot_data_requirements: &'a [String],
+    snapshot_data_audit_status: Option<&'a str>,
+    snapshot_data_audit_report: Option<&'a str>,
+    snapshot_include_deribit: bool,
     symbols: &'a [String],
     train_start: DateTime<Utc>,
     train_end: DateTime<Utc>,
@@ -185,11 +189,7 @@ fn validate_snapshot_scope(
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() {
-        value
-    } else {
-        0.0
-    }
+    if value.is_finite() { value } else { 0.0 }
 }
 
 fn crypto_fee_cost(entry_price: f64) -> f64 {
@@ -203,11 +203,7 @@ fn reward_risk_ratio(entry_price: f64) -> f64 {
     let fee = crypto_fee_cost(entry_price);
     let reward = 1.0 - entry_price - fee;
     let risk = entry_price + fee;
-    if risk <= 0.0 {
-        f64::NAN
-    } else {
-        reward / risk
-    }
+    if risk <= 0.0 { f64::NAN } else { reward / risk }
 }
 
 fn confirmation_score(row: &FactorObservationV2) -> f64 {
@@ -481,6 +477,10 @@ fn write_outputs(
          # validation_trades = {}\n\
          # min_trades = {}\n\
          # min_trades_source = {}\n\
+         # data_requirements = {}\n\
+         # data_audit_status = {}\n\
+         # data_audit_report = {}\n\
+         # include_deribit = {}\n\
          # train_underpowered = {}\n\
          # validation_underpowered = {}\n\
          three_layer_min_direction_prob = {:.6}\n\
@@ -502,6 +502,18 @@ fn write_outputs(
         summary.val_metrics.trades,
         summary.min_trades,
         summary.min_trades_source,
+        if summary.snapshot_data_requirements.is_empty() {
+            "<unspecified>".to_string()
+        } else {
+            summary.snapshot_data_requirements.join(",")
+        },
+        summary
+            .snapshot_data_audit_status
+            .unwrap_or("<not-recorded>"),
+        summary
+            .snapshot_data_audit_report
+            .unwrap_or("<not-recorded>"),
+        summary.snapshot_include_deribit,
         summary.train_underpowered,
         summary.validation_underpowered,
         params.min_direction_prob,
@@ -900,6 +912,10 @@ fn main() -> Result<()> {
         snapshot_schema: &snapshot.manifest.schema_version,
         snapshot_hash,
         snapshot_generated_at: snapshot.manifest.generated_at,
+        snapshot_data_requirements: &snapshot.manifest.data_requirements,
+        snapshot_data_audit_status: snapshot.manifest.data_audit_status.as_deref(),
+        snapshot_data_audit_report: snapshot.manifest.data_audit_report.as_deref(),
+        snapshot_include_deribit: snapshot.manifest.include_deribit,
         symbols: &symbols,
         train_start,
         train_end,

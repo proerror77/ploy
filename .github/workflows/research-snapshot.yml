@@ -39,6 +39,33 @@ on:
         description: "Immutable parquet-feed dir used by optimize_backtest"
         required: true
         default: "/tmp/ploy-parquet"
+      data_profile:
+        description: "Project data requirements profile"
+        type: choice
+        required: true
+        default: "pm5d-execution"
+        options:
+          - pm5d-execution
+          - pm5d-vol
+          - all
+          - custom
+      custom_required_sources:
+        description: "Comma-separated sources when data_profile=custom"
+        required: false
+        default: ""
+      audit_lookback_hours:
+        description: "Market-data audit lookback in hours"
+        required: false
+        default: "168"
+      data_gate:
+        description: "Fail threshold for required-source audit"
+        type: choice
+        required: true
+        default: "never"
+        options:
+          - critical
+          - warn
+          - never
 
 concurrency:
   group: research-snapshot-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}-${{ github.event.inputs.symbols }}
@@ -75,6 +102,119 @@ jobs:
       - name: Add cargo to PATH
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
+      - name: Ensure psql client
+        run: |
+          set -euo pipefail
+          if command -v psql >/dev/null 2>&1; then
+            psql --version
+            exit 0
+          fi
+          if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          else
+            echo "psql client is required for scoped data audits" >&2
+            exit 1
+          fi
+
+      - name: Resolve data requirements
+        id: data_scope
+        env:
+          DATA_PROFILE: ${{ github.event.inputs.data_profile }}
+          CUSTOM_REQUIRED_SOURCES: ${{ github.event.inputs.custom_required_sources }}
+        run: |
+          set -euo pipefail
+          case "${DATA_PROFILE}" in
+            pm5d-execution)
+              required_sources="polymarket_quotes,polymarket_orderbooks,binance_price,binance_agg_trades,binance_lob"
+              include_deribit="false"
+              ;;
+            pm5d-vol)
+              required_sources="polymarket_quotes,polymarket_orderbooks,deribit_iv,deribit_atm_greeks,binance_price,binance_agg_trades,binance_lob"
+              include_deribit="true"
+              ;;
+            all)
+              required_sources="all"
+              include_deribit="true"
+              ;;
+            custom)
+              required_sources="${CUSTOM_REQUIRED_SOURCES}"
+              if [ -z "${required_sources}" ]; then
+                echo "custom_required_sources is required when data_profile=custom" >&2
+                exit 2
+              fi
+              include_deribit="false"
+              case ",${required_sources}," in
+                *deribit*|*,all,*|*,pm5d-vol,*) include_deribit="true" ;;
+              esac
+              ;;
+            *)
+              echo "unsupported data_profile=${DATA_PROFILE}" >&2
+              exit 2
+              ;;
+          esac
+          echo "required_sources=${required_sources}" >> "${GITHUB_OUTPUT}"
+          echo "include_deribit=${include_deribit}" >> "${GITHUB_OUTPUT}"
+
+      - name: Audit required market data
+        id: data_audit
+        env:
+          REQUIRED_SOURCES: ${{ steps.data_scope.outputs.required_sources }}
+          AUDIT_LOOKBACK_HOURS: ${{ github.event.inputs.audit_lookback_hours }}
+          DATA_GATE: ${{ github.event.inputs.data_gate }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/research-snapshot
+          PLOY_DATABASE__URL="${PLOY_DB_URL:?PLOY_DB_URL secret is required}" \
+            scripts/audit_market_data_gaps.py \
+              --lookback-hours "${AUDIT_LOOKBACK_HOURS}" \
+              --bucket-minutes 5 \
+              --symbols "${{ github.event.inputs.symbols }}" \
+              --required-sources "${REQUIRED_SOURCES}" \
+              --statement-timeout-seconds 20 \
+              --psql-timeout-seconds 30 \
+              --format json \
+              --fail-on never > artifacts/research-snapshot/data-gap-audit.json
+          python3 <<'PY'
+          import json
+          import os
+
+          status_order = {"ok": 0, "warn": 1, "unknown": 2, "critical": 3}
+          gate = os.environ["DATA_GATE"]
+          with open("artifacts/research-snapshot/data-gap-audit.json", encoding="utf-8") as fh:
+              payload = json.load(fh)
+          status = payload.get("overall_status", "unknown")
+          lines = [
+              "# Scoped Data Audit",
+              "",
+              f"- Gate: `{gate}`",
+              f"- Overall: `{status}`",
+              f"- Required sources: `{','.join(payload.get('required_sources') or [])}`",
+              f"- Lookback: `{payload.get('lookback_hours')}h`",
+              "",
+              "| Source | Status | Reasons |",
+              "| --- | --- | --- |",
+          ]
+          for item in payload.get("gap_audits", []) + payload.get("window_audits", []):
+              lines.append(
+                  f"| `{item.get('source_id')}` | `{item.get('status', 'unknown')}` | "
+                  f"{'; '.join(item.get('reasons') or [])} |"
+              )
+          summary = "\n".join(lines) + "\n"
+          with open("artifacts/research-snapshot/data-gap-audit.md", "w", encoding="utf-8") as fh:
+              fh.write(summary)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+              fh.write(summary)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"overall_status={status}\n")
+          should_fail = (
+              (gate == "critical" and status in {"critical", "unknown"})
+              or (gate == "warn" and status_order.get(status, 2) >= status_order["warn"])
+          )
+          if should_fail:
+              raise SystemExit(f"scoped data audit gate failed: {status}")
+          PY
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -93,6 +233,10 @@ jobs:
       - name: Compile snapshot
         run: |
           set -euo pipefail
+          deribit_args=()
+          if [ "${{ steps.data_scope.outputs.include_deribit }}" != "true" ]; then
+            deribit_args+=(--skip-deribit)
+          fi
           mkdir -p artifacts/research-snapshot
           ./target/release/examples/research_snapshot_compile \
             --db-url "${PLOY_DB_URL:?PLOY_DB_URL secret is required}" \
@@ -105,6 +249,10 @@ jobs:
             --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
             --output-dir artifacts/research-snapshot \
             --optimizer-data-dir "${{ github.event.inputs.optimizer_data_dir }}" \
+            --data-requirements "${{ steps.data_scope.outputs.required_sources }}" \
+            --data-audit-status "${{ steps.data_audit.outputs.overall_status }}" \
+            --data-audit-report data-gap-audit.json \
+            "${deribit_args[@]}" \
             2>&1 | tee artifacts/research-snapshot/compile.log
 
       - name: Publish summary
@@ -116,7 +264,14 @@ jobs:
             echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
             echo "- Symbols: ${{ github.event.inputs.symbols }}"
             echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
+            echo "- Data profile: ${{ github.event.inputs.data_profile }}"
+            echo "- Data requirements: ${{ steps.data_scope.outputs.required_sources }}"
+            echo "- Include Deribit: ${{ steps.data_scope.outputs.include_deribit }}"
             echo ""
+            if [ -f artifacts/research-snapshot/data-gap-audit.md ]; then
+              cat artifacts/research-snapshot/data-gap-audit.md
+              echo ""
+            fi
             if [ -f artifacts/research-snapshot/quality.md ]; then
               cat artifacts/research-snapshot/quality.md
             fi
