@@ -660,7 +660,8 @@ pub struct BuilderTradeResponse {
     pub asset_id: U256,
     pub side: Side,
     pub size: Decimal,
-    pub size_usdc: Decimal,
+    #[serde(rename = "sizeUsdc")]
+    pub size_collateral: Decimal,
     pub price: Decimal,
     pub status: TradeStatusType,
     pub outcome: String,
@@ -674,7 +675,8 @@ pub struct BuilderTradeResponse {
     pub match_time: DateTime<Utc>,
     pub bucket_index: u32,
     pub fee: Decimal,
-    pub fee_usdc: Decimal,
+    #[serde(rename = "feeUsdc")]
+    pub fee_collateral: Decimal,
     #[serde(alias = "err_msg")]
     pub err_msg: Option<String>,
     pub created_at: Option<DateTime<Utc>>,

@@ -10,6 +10,8 @@
   - Owner: raw V2 order struct and POST `/order` serialization.
 - `vendor/polymarket-client-sdk/src/clob/order_builder.rs`
   - Owner: V2 order construction, timestamp, metadata, and builder field defaults.
+- `vendor/polymarket-client-sdk/README.md`
+  - Owner: V2 collateral wording and operator-facing allowance guidance.
 - `vendor/polymarket-client-sdk/tests/*`
   - Owner: SDK regression coverage for V2 signing/body compatibility.
 - `tasks/todo.md`
@@ -23,12 +25,15 @@
 - [x] Remove user-settable V1 order fields from V2 order construction and serialize V2 order bodies.
 - [x] Update focused SDK regression tests for V2 contract/order shape.
 - [x] Run focused verification and record remaining deploy checks.
+- [x] Remove old USDC naming from CLOB order amounts and V2 allowance guidance.
 
 ## Review
 
 - 2026-04-28: Polymarket V2 is now the target cutover path. The official migration guide requires CLOB domain version `"2"`, V2 exchange contracts, pUSD collateral, and raw order fields `timestamp`, `metadata`, and `builder` instead of V1 `taker`, `expiration`, `nonce`, and `feeRateBps`.
 - 2026-04-28: Switched the vendored CLOB SDK to Polygon V2 addresses, pUSD collateral, EIP-712 domain version `"2"`, and the V2 signed order shape. `timestamp` is signed/serialized as a uint256 millisecond string, while `metadata` and `builder` are bytes32 zero defaults unless a future builder-code integration fills them.
 - 2026-04-28: Updated approval/CTF examples to use the configured pUSD collateral instead of hardcoded USDC.e. Focused verification passed: `CARGO_TARGET_DIR=/tmp/ploy-v2-cutover-test rtk cargo test -p polymarket-client-sdk --features clob --lib --test order --test clob`, `CARGO_TARGET_DIR=/tmp/ploy-v2-cutover-test rtk cargo test -p polymarket-client-sdk --features ctf --test ctf`, `CARGO_TARGET_DIR=/tmp/ploy-v2-cutover-test rtk cargo test -p ploy-connectivity`, `CARGO_TARGET_DIR=/tmp/ploy-v2-cutover-test rtk cargo test -p polymarket-client-sdk --features clob,ctf,tracing --example approvals --example check_approvals --example ctf --no-run`, targeted `rustfmt`, and `git diff --check && git diff --cached --check`.
+- 2026-04-28: Follow-up CLOB naming cleanup switched public market-order amount helpers from `Amount::usdc`/`is_usdc` to `Amount::collateral`/`is_collateral`, renamed collateral precision constants, and updated V2 docs/comments so pUSD is the active collateral terminology. RFQ/builder Rust fields now use `collateral` names while preserving Polymarket's wire names such as `sizeUsdc` with explicit serde renames. Verification passed: `CARGO_TARGET_DIR=/tmp/ploy-v2-collateral-wording-test cargo test -p polymarket-client-sdk --features clob --lib --test order --test clob --color never`.
+- 2026-04-28: Tango post-deploy preflight found the configured funder `0xCbaAa60c5DEc85eaC2A2c424bdcD7258Ab67eEE2` and signer/relayer `0x9d699747148fd637a7d2514f9b3e3028bf59195c` both have `0` pUSD and `0` USDC.e on Polygon, with `0` pUSD allowance to the V2 normal and neg-risk exchanges. Live buy-side trading remains blocked until pUSD is present in the configured funder and V2 approvals are set or the configured funder is updated.
 
 # PM5D Three-Arm Snapshot Optimization (2026-04-28)
 

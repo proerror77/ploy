@@ -1694,9 +1694,9 @@ impl<K: Kind> Client<Authenticated<K>> {
         Ok(())
     }
 
-    /// Retrieves the user's USDC balance and token allowances.
+    /// Retrieves the user's collateral balance and token allowances.
     ///
-    /// Returns the current USDC balance in the user's wallet and the allowance
+    /// Returns the current collateral balance in the user's wallet and the allowance
     /// granted to the CLOB exchange contract. The allowance must be sufficient
     /// to place orders. This query updates internal cached balance state.
     ///
@@ -1728,7 +1728,7 @@ impl<K: Kind> Client<Authenticated<K>> {
     ///
     /// Triggers the CLOB backend to refresh its cached view of the user's
     /// on-chain balance and allowances. Use this after approving tokens or
-    /// depositing USDC to ensure the exchange recognizes the updated state.
+    /// depositing pUSD collateral to ensure the exchange recognizes the updated state.
     ///
     /// # Errors
     ///

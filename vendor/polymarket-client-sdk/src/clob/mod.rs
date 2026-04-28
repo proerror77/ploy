@@ -53,7 +53,7 @@
 //! | `/cancel-all` | Cancel all orders |
 //! | `/orders` | Get user's orders |
 //! | `/trades` | Get user's trade history |
-//! | `/balances` | Get USDC balances and allowances |
+//! | `/balances` | Get collateral balances and allowances |
 //! | `/api-keys` | List API keys |
 //! | `/create-api-key` | Create new API key |
 //! | `/delete-api-key` | Delete an API key |

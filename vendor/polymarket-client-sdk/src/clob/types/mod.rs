@@ -12,7 +12,7 @@ use strum_macros::Display;
 
 use crate::Result;
 use crate::auth::ApiKey;
-use crate::clob::order_builder::{MARKET_SHARE_DECIMALS, USDC_DECIMALS};
+use crate::clob::order_builder::{COLLATERAL_DECIMALS, MARKET_SHARE_DECIMALS};
 use crate::error::Error;
 use crate::types::Decimal;
 
@@ -162,14 +162,14 @@ impl From<Interval> for TimeRange {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum AmountInner {
-    Usdc(Decimal),
+    Collateral(Decimal),
     Shares(Decimal),
 }
 
 impl AmountInner {
     pub fn as_inner(&self) -> Decimal {
         match self {
-            AmountInner::Usdc(d) | AmountInner::Shares(d) => *d,
+            AmountInner::Collateral(d) | AmountInner::Shares(d) => *d,
         }
     }
 }
@@ -178,16 +178,16 @@ impl AmountInner {
 pub struct Amount(pub(crate) AmountInner);
 
 impl Amount {
-    pub fn usdc(value: Decimal) -> Result<Amount> {
+    pub fn collateral(value: Decimal) -> Result<Amount> {
         let normalized = value.normalize();
-        if normalized.scale() > USDC_DECIMALS {
+        if normalized.scale() > COLLATERAL_DECIMALS {
             return Err(Error::validation(format!(
-                "Unable to build Amount with {} decimal points, must be <= {USDC_DECIMALS}",
+                "Unable to build Amount with {} decimal points, must be <= {COLLATERAL_DECIMALS}",
                 normalized.scale()
             )));
         }
 
-        Ok(Amount(AmountInner::Usdc(normalized)))
+        Ok(Amount(AmountInner::Collateral(normalized)))
     }
 
     pub fn shares(value: Decimal) -> Result<Amount> {
@@ -208,8 +208,8 @@ impl Amount {
     }
 
     #[must_use]
-    pub fn is_usdc(&self) -> bool {
-        matches!(self.0, AmountInner::Usdc(_))
+    pub fn is_collateral(&self) -> bool {
+        matches!(self.0, AmountInner::Collateral(_))
     }
 
     #[must_use]
@@ -600,9 +600,9 @@ mod tests {
 
     #[test]
     fn amount_should_succeed() -> Result<()> {
-        let usdc = Amount::usdc(Decimal::ONE_HUNDRED)?;
-        assert!(usdc.is_usdc());
-        assert_eq!(usdc.as_inner(), Decimal::ONE_HUNDRED);
+        let collateral = Amount::collateral(Decimal::ONE_HUNDRED)?;
+        assert!(collateral.is_collateral());
+        assert_eq!(collateral.as_inner(), Decimal::ONE_HUNDRED);
 
         let shares = Amount::shares(Decimal::ONE_HUNDRED)?;
         assert!(shares.is_shares());
@@ -631,15 +631,17 @@ mod tests {
     }
 
     #[test]
-    fn improper_usdc_decimal_size_should_fail() {
-        let Err(err) = Amount::usdc(dec!(0.2340011)) else {
+    fn improper_collateral_decimal_size_should_fail() {
+        let Err(err) = Amount::collateral(dec!(0.2340011)) else {
             panic!()
         };
 
         let message = err.downcast_ref::<Validation>().unwrap();
         assert_eq!(
             message.reason,
-            format!("Unable to build Amount with 7 decimal points, must be <= {USDC_DECIMALS}")
+            format!(
+                "Unable to build Amount with 7 decimal points, must be <= {COLLATERAL_DECIMALS}"
+            )
         );
     }
 
