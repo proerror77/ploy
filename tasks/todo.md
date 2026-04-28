@@ -10285,7 +10285,7 @@ Review:
 - [x] Preserve scoped-data provenance in optimizer summaries.
 - [x] Verify syntax, focused tests, PR/CI, and run the scoped Research Snapshot workflow from `main`.
 - [x] Replace cancelled cross-run artifact downloads with a GitHub API helper.
-- [ ] Land the artifact download repair and rerun downstream Factor Review / Walk-Forward from `main`.
+- [x] Land the artifact download repair and rerun downstream Factor Review / Walk-Forward from `main`.
 
 ## Review
 
@@ -10330,3 +10330,10 @@ Review:
   Added `scripts/download_github_artifact.py` so Factor Review, Walk-Forward,
   and Optimize download artifacts through the GitHub REST API and verify
   required files before running.
+- 2026-04-28: PR #213 merged at `69bcfcd9`. CI passed on PR #213, and
+  post-merge main runs verified the downstream workflow: Optimize run
+  `25046098829` completed both `Download research snapshot` and `Run optimize`;
+  Factor Review V2 run `25046437970` completed `Download research snapshot`,
+  skipped fresh psql/audit/compile steps, and completed `Run factor review`;
+  Factor Walk-Forward V2 run `25047046921` completed the same snapshot reuse
+  path and completed `Run factor walk-forward`.
