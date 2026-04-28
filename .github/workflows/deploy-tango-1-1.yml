@@ -147,6 +147,7 @@ jobs:
           cp scripts/deribit_atm_greeks_collector.py dist/scripts/deribit_atm_greeks_collector.py
           cp scripts/report_strategy.py dist/scripts/report_strategy.py
           cp scripts/report_market_data_health.py dist/scripts/report_market_data_health.py
+          cp scripts/audit_market_data_gaps.py dist/scripts/audit_market_data_gaps.py
           cp scripts/report_dryrun_summary.py dist/scripts/report_dryrun_summary.py
           cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
           cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
@@ -371,6 +372,7 @@ jobs:
             install -m 0755 ./scripts/deribit_atm_greeks_collector.py ${DEPLOY_ROOT}/scripts/deribit_atm_greeks_collector.py
             install -m 0755 ./scripts/report_strategy.py ${DEPLOY_ROOT}/scripts/report_strategy.py
             install -m 0755 ./scripts/report_market_data_health.py ${DEPLOY_ROOT}/scripts/report_market_data_health.py
+            install -m 0755 ./scripts/audit_market_data_gaps.py ${DEPLOY_ROOT}/scripts/audit_market_data_gaps.py
             install -m 0755 ./scripts/report_dryrun_summary.py ${DEPLOY_ROOT}/scripts/report_dryrun_summary.py
             install -m 0644 ./scripts/fix_binance_lob_partitions.sql ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
             install -m 0644 ./scripts/fix_deribit_partitions.sql ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
