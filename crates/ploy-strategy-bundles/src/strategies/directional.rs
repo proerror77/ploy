@@ -13,8 +13,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -168,6 +168,14 @@ pub struct DirectionalConfig {
     /// Worth-it gate: minimum reward/risk ratio.
     #[serde(default = "default_tl_min_reward_risk")]
     pub three_layer_min_reward_risk: f64,
+
+    /// Research mode: fade the model-favored side instead of following it.
+    #[serde(default = "default_tl_alpha_contrarian")]
+    pub three_layer_alpha_contrarian: bool,
+
+    /// Research mode: reward CEX/LOB opposition instead of confirmation.
+    #[serde(default = "default_tl_cex_contrarian")]
+    pub three_layer_cex_contrarian: bool,
 
     /// Take-profit: exit when token ask reaches this level.
     #[serde(default = "default_tl_take_profit_ask")]
@@ -329,6 +337,12 @@ fn default_tl_min_edge() -> f64 {
 }
 fn default_tl_min_reward_risk() -> f64 {
     1.2
+}
+fn default_tl_alpha_contrarian() -> bool {
+    false
+}
+fn default_tl_cex_contrarian() -> bool {
+    false
 }
 fn default_tl_take_profit_ask() -> f64 {
     0.70
@@ -1782,6 +1796,8 @@ mod tests {
             three_layer_min_drift_confirmation: 0.0002,
             three_layer_min_edge: 0.03,
             three_layer_min_reward_risk: 1.2,
+            three_layer_alpha_contrarian: false,
+            three_layer_cex_contrarian: false,
             three_layer_take_profit_ask: 0.70,
             three_layer_stop_distance_pct: 0.020,
             three_layer_max_pm_lag_secs: 15,

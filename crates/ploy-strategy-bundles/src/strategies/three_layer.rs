@@ -28,6 +28,8 @@ pub struct ThreeLayerConfig {
     pub min_drift_confirmation: f64,
     pub min_edge: f64,
     pub min_reward_risk: f64,
+    pub alpha_contrarian: bool,
+    pub cex_contrarian: bool,
     pub take_profit_ask: f64,
     pub stop_distance_pct: f64,
     pub max_pm_lag_secs: u64,
@@ -53,6 +55,8 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             min_drift_confirmation: c.three_layer_min_drift_confirmation,
             min_edge: c.three_layer_min_edge,
             min_reward_risk: c.three_layer_min_reward_risk,
+            alpha_contrarian: c.three_layer_alpha_contrarian,
+            cex_contrarian: c.three_layer_cex_contrarian,
             take_profit_ask: c.three_layer_take_profit_ask,
             stop_distance_pct: c.three_layer_stop_distance_pct,
             max_pm_lag_secs: c.three_layer_max_pm_lag_secs,
@@ -273,6 +277,18 @@ fn norm_cdf(x: f64) -> f64 {
     }
 }
 
+fn threshold_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> f64 {
+    if !value.is_finite() || !threshold.is_finite() || !scale.is_finite() || scale <= 0.0 {
+        return -0.50;
+    }
+    let signed = if contrarian {
+        threshold - value
+    } else {
+        value - threshold
+    };
+    (signed / scale).clamp(-0.50, 1.0)
+}
+
 /// Layer 1: Direction score (0.0 – 1.0).
 /// Returns Some((direction_sign, effective_probability, direction_score)) or None
 /// only when the signal is too weak to even consider (below minimum distance in Early).
@@ -287,7 +303,10 @@ fn evaluate_direction_score(
     regime: Regime,
     config: &ThreeLayerConfig,
 ) -> Option<(f64, f64, f64)> {
-    if distance_over_sigma.abs() < config.min_distance_over_sigma && regime == Regime::Early {
+    if !config.alpha_contrarian
+        && distance_over_sigma.abs() < config.min_distance_over_sigma
+        && regime == Regime::Early
+    {
         return None;
     }
 
@@ -310,14 +329,24 @@ fn evaluate_direction_score(
         }
     };
 
-    let (direction_sign, effective_p) = if direction_prob >= 0.5 {
+    let (direction_sign, effective_p) = if config.alpha_contrarian {
+        if direction_prob >= 0.5 {
+            (-1.0_f64, 1.0 - direction_prob)
+        } else {
+            (1.0_f64, direction_prob)
+        }
+    } else if direction_prob >= 0.5 {
         (1.0_f64, direction_prob)
     } else {
         (-1.0_f64, 1.0 - direction_prob)
     };
 
     // Continuous score: how far effective_p is above 0.50, normalized to [0, 1].
-    let direction_score = ((effective_p - 0.50) / 0.50).clamp(0.0, 1.0);
+    let direction_score = if config.alpha_contrarian {
+        threshold_score(effective_p, config.min_direction_prob, 0.25, true)
+    } else {
+        ((effective_p - 0.50) / 0.50).clamp(0.0, 1.0)
+    };
 
     Some((direction_sign, effective_p, direction_score))
 }
@@ -330,7 +359,7 @@ fn evaluate_confirmation_bonus(
     cum_mprice_drift_5m: f64,
     drift_30s: f64,
     regime: Regime,
-    _config: &ThreeLayerConfig,
+    config: &ThreeLayerConfig,
 ) -> f64 {
     let raw_score = lob.confirmation_score() + (cum_mprice_drift_5m / 200.0).clamp(-0.15, 0.15);
     let aligned_score = direction_sign * raw_score;
@@ -344,7 +373,12 @@ fn evaluate_confirmation_bonus(
         _ => 0.0,
     };
 
-    (aligned_score + drift_factor).clamp(-0.20, 0.20)
+    let score = aligned_score + drift_factor;
+    if config.cex_contrarian {
+        (-score).clamp(-0.20, 0.20)
+    } else {
+        score.clamp(-0.20, 0.20)
+    }
 }
 
 /// Layer 3: Edge score (0.0 – 1.0).
@@ -368,7 +402,11 @@ fn evaluate_edge_score(
     let rr = if risk > 0.0 { reward / risk } else { 0.0 };
 
     // Continuous score: edge normalized by 0.10 (a 10% edge = perfect score).
-    let edge_score = (edge / 0.10).clamp(0.0, 1.0);
+    let edge_score = if config.alpha_contrarian {
+        threshold_score(edge, config.min_edge, 0.08, true)
+    } else {
+        (edge / 0.10).clamp(0.0, 1.0)
+    };
 
     Some((ask, edge, rr, edge_score))
 }
@@ -1370,6 +1408,8 @@ mod tests {
             min_drift_confirmation: 0.0002,
             min_edge: 0.03,
             min_reward_risk: 1.2,
+            alpha_contrarian: false,
+            cex_contrarian: false,
             take_profit_ask: 0.70,
             stop_distance_pct: 0.020,
             max_pm_lag_secs: 15,
@@ -1900,6 +1940,23 @@ mod tests {
     }
 
     #[test]
+    fn alpha_contrarian_direction_fades_model_favored_side() {
+        let mut config = test_config();
+        config.alpha_contrarian = true;
+        config.min_direction_prob = 0.56;
+
+        let result = evaluate_direction_score(1.5, 0.02, 0.0, 0.0, Regime::Early, &config)
+            .expect("contrarian mode should score instead of early-vetoing");
+        let (dir, prob, score) = result;
+        assert!(dir < 0.0, "positive distance should fade into DOWN");
+        assert!(
+            prob < 0.50,
+            "contrarian effective probability should be the faded side"
+        );
+        assert!(score > 0.0, "low model probability should be rewarded");
+    }
+
+    #[test]
     fn confirmation_returns_negative_for_opposing_lob() {
         let config = test_config();
         let lob = LobState {
@@ -1916,6 +1973,28 @@ mod tests {
         assert!(
             bonus < 0.0,
             "opposing LOB should produce negative bonus, got {}",
+            bonus
+        );
+    }
+
+    #[test]
+    fn cex_contrarian_inverts_confirmation_bonus() {
+        let mut config = test_config();
+        config.cex_contrarian = true;
+        let lob = LobState {
+            obi: -0.5,
+            obi_prev: -0.3,
+            spread_bps: 10,
+            bid_depth_near: 50.0,
+            ask_depth_near: 100.0,
+            signed_trade_imbalance: -20.0,
+            last_aggtrade_ts: None,
+            ts: None,
+        };
+        let bonus = evaluate_confirmation_bonus(1.0, &lob, -5.0, -0.001, Regime::Late, &config);
+        assert!(
+            bonus > 0.0,
+            "opposing LOB should be rewarded in contrarian confirmation mode, got {}",
             bonus
         );
     }
@@ -1939,6 +2018,22 @@ mod tests {
         assert!(
             edge_score < 0.3,
             "low edge should produce low score, got {}",
+            edge_score
+        );
+    }
+
+    #[test]
+    fn alpha_contrarian_edge_score_rewards_lower_edge() {
+        let mut config = test_config();
+        config.alpha_contrarian = true;
+        config.min_edge = -0.005;
+        let result = evaluate_edge_score(0.35, 0.50, Regime::Early, &config);
+        assert!(result.is_some());
+        let (_ask, edge, _rr, edge_score) = result.unwrap();
+        assert!(edge < 0.0);
+        assert!(
+            edge_score > 0.0,
+            "contrarian edge score should reward lower model edge, got {}",
             edge_score
         );
     }

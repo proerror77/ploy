@@ -469,8 +469,8 @@ fn write_outputs(
          three_layer_min_edge = {:.6}\n\
          three_layer_min_reward_risk = {:.6}\n\
          three_layer_min_entry_score = {:.6}\n\
-         # alpha_contrarian = {}\n\
-         # cex_contrarian = {}\n\
+         three_layer_alpha_contrarian = {}\n\
+         three_layer_cex_contrarian = {}\n\
          cooldown_secs = {}\n\
          min_time_remaining_secs = {}\n\
          max_time_remaining_secs = {}\n\
@@ -827,8 +827,14 @@ fn main() -> Result<()> {
         "three_layer_min_entry_score = {:.6}",
         best_params.min_entry_score
     );
-    eprintln!("# alpha_contrarian = {}", best_params.alpha_contrarian);
-    eprintln!("# cex_contrarian = {}", best_params.cex_contrarian);
+    eprintln!(
+        "three_layer_alpha_contrarian = {}",
+        best_params.alpha_contrarian
+    );
+    eprintln!(
+        "three_layer_cex_contrarian = {}",
+        best_params.cex_contrarian
+    );
     eprintln!("cooldown_secs = {}", best_params.cooldown_secs);
     eprintln!(
         "min_time_remaining_secs = {}",
