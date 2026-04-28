@@ -10222,6 +10222,8 @@ Review:
   - Owner: scheduled/manual Tango market-data gap gate.
 - `tasks/todo.md`
   - Owner: session tracker.
+- `scripts/download_github_artifact.py`
+  - Owner: GitHub artifact download fallback for downstream workflow reuse.
 
 ## Tasks
 
@@ -10275,7 +10277,9 @@ Review:
 - [x] Make research snapshot compilation carry explicit data requirements and avoid loading Deribit data when not requested.
 - [x] Wire Research Snapshot, Factor Review, and Walk-Forward workflows to run scoped data audits before fresh snapshot compilation.
 - [x] Preserve scoped-data provenance in optimizer summaries.
-- [ ] Verify syntax, focused tests, PR/CI, and run the scoped workflow from `main`.
+- [x] Verify syntax, focused tests, PR/CI, and run the scoped Research Snapshot workflow from `main`.
+- [x] Replace cancelled cross-run artifact downloads with a GitHub API helper.
+- [ ] Land the artifact download repair and rerun downstream Factor Review / Walk-Forward from `main`.
 
 ## Review
 
@@ -10307,3 +10311,16 @@ Review:
   ploy-research write_and_load_empty_snapshot_roundtrips_manifest --lib
   --no-default-features`. Full `cargo fmt --check` was not used as evidence
   because current repo/vendor files outside this slice already fail formatting.
+- 2026-04-28: PR #211 merged at `813291c9`. Post-merge Research Snapshot run
+  `25044276221` completed successfully from `main`; artifact
+  `research-snapshot-25044276221` records `pm5d-execution` requirements,
+  `include_deribit=false`, `deribit_snapshots=0`, `data_audit_status=critical`,
+  and the expected `polymarket_orderbooks` gap while continuing with
+  `data_gate=never`.
+- 2026-04-28: Downstream snapshot reuse exposed a workflow transport issue:
+  Factor Review V2 run `25045073793` built successfully and skipped fresh
+  psql/audit steps, then `actions/download-artifact@v8` cancelled while
+  downloading `research-snapshot-25044276221` after resolving the 21 MB artifact.
+  Added `scripts/download_github_artifact.py` so Factor Review, Walk-Forward,
+  and Optimize download artifacts through the GitHub REST API and verify
+  required files before running.
