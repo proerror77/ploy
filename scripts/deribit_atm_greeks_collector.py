@@ -38,6 +38,10 @@ PSQL_BIN = os.getenv("PSQL_BIN", "psql")
 RUNNING = True
 
 
+class GracefulShutdown(Exception):
+    """Raised when an in-flight subprocess is interrupted by service shutdown."""
+
+
 def _on_signal(signum: int, _frame: Any) -> None:
     global RUNNING
     RUNNING = False
@@ -58,7 +62,10 @@ def _run_psql(sql: str, at_mode: bool = False) -> str:
         check=False,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"psql failed: {proc.stderr.strip() or proc.stdout.strip()}")
+        output = proc.stderr.strip() or proc.stdout.strip()
+        if not RUNNING and not output:
+            raise GracefulShutdown("psql interrupted by service shutdown")
+        raise RuntimeError(f"psql failed: {output}")
     return proc.stdout
 
 
@@ -268,16 +275,24 @@ def upsert_greeks(currency: str, instrument_name: str, result: Dict[str, Any]) -
 
 
 def run_once() -> Tuple[int, int]:
+    if not RUNNING:
+        return 0, 0
+
     pairs = pick_atm_instruments()
     ok = 0
     total = 0
 
     for currency, instrument_name in pairs:
+        if not RUNNING:
+            break
+
         total += 1
         try:
             result = fetch_order_book(instrument_name)
             upsert_greeks(currency, instrument_name, result)
             ok += 1
+        except GracefulShutdown:
+            raise
         except Exception as exc:
             print(
                 f"[deribit-greeks] currency={currency} instrument={instrument_name} error={exc}",
@@ -288,7 +303,12 @@ def run_once() -> Tuple[int, int]:
 
 
 def main() -> int:
-    ensure_table()
+    try:
+        ensure_table()
+    except GracefulShutdown:
+        print("[deribit-greeks] stopped", flush=True)
+        return 0
+
     print(
         f"[deribit-greeks] started currencies={','.join(CURRENCIES)} poll_secs={POLL_SECS}",
         flush=True,
@@ -296,7 +316,11 @@ def main() -> int:
 
     while RUNNING:
         started = time.time()
-        ok, total = run_once()
+        try:
+            ok, total = run_once()
+        except GracefulShutdown:
+            break
+
         elapsed = time.time() - started
         print(
             f"[deribit-greeks] cycle ok={ok}/{total} elapsed_s={elapsed:.2f}",
@@ -304,8 +328,9 @@ def main() -> int:
         )
 
         sleep_left = POLL_SECS - elapsed
-        if sleep_left > 0:
-            time.sleep(sleep_left)
+        sleep_until = time.time() + max(0.0, sleep_left)
+        while RUNNING and time.time() < sleep_until:
+            time.sleep(min(1.0, sleep_until - time.time()))
 
     print("[deribit-greeks] stopped", flush=True)
     return 0
