@@ -36,6 +36,74 @@ struct SnapshotThreeLayerParams {
     max_time_remaining_secs: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StrategyProfile {
+    /// Historical behavior: blend continuation and CEX/PM book confirmation.
+    Mixed,
+    /// Strategy A: contrarian alpha inside executable liquidity/risk gates.
+    Champion,
+    /// Strategy B: Strategy A plus CEX/PM order-book imbalance soft score.
+    ObiSoft,
+    /// Strategy C: Strategy A plus CEX continuation soft score.
+    ContinuationSoft,
+}
+
+impl StrategyProfile {
+    fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "mixed" | "legacy" => Ok(Self::Mixed),
+            "champion" | "a" | "alpha" | "alpha_only" | "contrarian_alpha" => Ok(Self::Champion),
+            "obi" | "obi_soft" | "b" | "book_imbalance" | "orderbook" => Ok(Self::ObiSoft),
+            "continuation" | "continuation_soft" | "c" | "cex_continuation" => {
+                Ok(Self::ContinuationSoft)
+            }
+            other => anyhow::bail!(
+                "unknown --strategy-profile {other:?}; expected mixed, champion, obi_soft, or continuation_soft"
+            ),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mixed => "mixed",
+            Self::Champion => "champion",
+            Self::ObiSoft => "obi_soft",
+            Self::ContinuationSoft => "continuation_soft",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Mixed => "legacy mixed continuation + order-book confirmation",
+            Self::Champion => "contrarian alpha + executable liquidity/risk gates",
+            Self::ObiSoft => "champion + CEX/PM order-book imbalance soft score",
+            Self::ContinuationSoft => "champion + CEX continuation soft score",
+        }
+    }
+
+    fn fixes_alpha_contrarian(self) -> Option<bool> {
+        match self {
+            Self::Mixed => None,
+            Self::Champion | Self::ObiSoft | Self::ContinuationSoft => Some(true),
+        }
+    }
+
+    fn fixes_cex_contrarian(self) -> Option<bool> {
+        match self {
+            Self::Champion => Some(false),
+            Self::Mixed | Self::ObiSoft | Self::ContinuationSoft => None,
+        }
+    }
+
+    fn fixes_confirmation_threshold(self) -> Option<f64> {
+        match self {
+            Self::Champion => Some(0.0),
+            Self::Mixed | Self::ObiSoft | Self::ContinuationSoft => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct SnapshotObjectiveMetrics {
     candidates: usize,
@@ -66,6 +134,7 @@ struct OptimizeSummary<'a> {
     train_end: DateTime<Utc>,
     val_start: DateTime<Utc>,
     val_end: DateTime<Utc>,
+    strategy_profile: StrategyProfile,
     trials: usize,
     stake_usd: f64,
     min_trades: usize,
@@ -206,13 +275,31 @@ fn reward_risk_ratio(entry_price: f64) -> f64 {
     if risk <= 0.0 { f64::NAN } else { reward / risk }
 }
 
-fn confirmation_score(row: &FactorObservationV2) -> f64 {
+fn confirmation_score(row: &FactorObservationV2, profile: StrategyProfile) -> f64 {
     let side = row.side.multiplier();
     let continuation = finite_or_zero(row.cex_continuation_score_side).clamp(-1.0, 1.0);
     let obi = finite_or_zero(row.obi_10 * side).clamp(-1.0, 1.0);
+    let obi_delta_10s = finite_or_zero(row.obi_delta_10s_side).clamp(-1.0, 1.0);
+    let obi_persistence_30s = finite_or_zero(row.obi_persistence_30s_side).clamp(-1.0, 1.0);
     let depth = finite_or_zero(row.depth_imbalance * side).clamp(-1.0, 1.0);
     let microprice = finite_or_zero(row.microprice_offset_bps * side / 10.0).clamp(-1.0, 1.0);
-    0.45 * continuation + 0.25 * obi + 0.15 * depth + 0.15 * microprice
+    let trade_imbalance = finite_or_zero(row.trade_imbalance_delta_10s_side).clamp(-1.0, 1.0);
+
+    match profile {
+        StrategyProfile::Mixed => {
+            0.45 * continuation + 0.25 * obi + 0.15 * depth + 0.15 * microprice
+        }
+        StrategyProfile::Champion => 0.0,
+        StrategyProfile::ObiSoft => {
+            0.30 * obi
+                + 0.20 * obi_delta_10s
+                + 0.20 * obi_persistence_30s
+                + 0.15 * depth
+                + 0.10 * microprice
+                + 0.05 * trade_imbalance
+        }
+        StrategyProfile::ContinuationSoft => continuation,
+    }
 }
 
 fn three_layer_entry_score(
@@ -220,6 +307,7 @@ fn three_layer_entry_score(
     edge: f64,
     confirmation: f64,
     params: &SnapshotThreeLayerParams,
+    profile: StrategyProfile,
 ) -> f64 {
     let direction_score = directional_score(
         row.side_model_prob,
@@ -258,6 +346,14 @@ fn three_layer_entry_score(
         0.50,
         params.cex_contrarian,
     );
+    if profile == StrategyProfile::Champion {
+        return 0.33 * direction_score
+            + 0.17 * distance_score
+            + 0.25 * edge_score
+            + 0.10 * drift_score
+            + 0.10 * pm_momentum_score
+            + 0.05 * liquidity_score;
+    }
     0.25 * direction_score
         + 0.12 * distance_score
         + 0.18 * edge_score
@@ -289,7 +385,11 @@ fn entry_fillable(row: &FactorObservationV2) -> bool {
     row.label_full_depth_entry_fillable || row.label_executable_fillable
 }
 
-fn row_passes_gates(row: &FactorObservationV2, params: &SnapshotThreeLayerParams) -> bool {
+fn row_passes_gates(
+    row: &FactorObservationV2,
+    params: &SnapshotThreeLayerParams,
+    profile: StrategyProfile,
+) -> bool {
     if row.time_remaining_secs < params.min_time_remaining_secs
         || row.time_remaining_secs > params.max_time_remaining_secs
     {
@@ -325,17 +425,18 @@ fn row_passes_gates(row: &FactorObservationV2, params: &SnapshotThreeLayerParams
     if !reward_risk.is_finite() || reward_risk < params.min_reward_risk {
         return false;
     }
-    let confirmation = confirmation_score(row);
+    let confirmation = confirmation_score(row, profile);
     if !confirmation.is_finite() {
         return false;
     }
-    three_layer_entry_score(row, edge, confirmation, params) >= params.min_entry_score
+    three_layer_entry_score(row, edge, confirmation, params, profile) >= params.min_entry_score
 }
 
 fn evaluate_snapshot_objective(
     rows: &[FactorObservationV2],
     params: &SnapshotThreeLayerParams,
     min_trades: usize,
+    profile: StrategyProfile,
 ) -> SnapshotObjectiveMetrics {
     let mut last_trade_by_symbol: HashMap<String, DateTime<Utc>> = HashMap::new();
     let mut traded_event_sides: HashSet<String> = HashSet::new();
@@ -347,7 +448,7 @@ fn evaluate_snapshot_objective(
     let mut rejected_non_executable = 0usize;
 
     for row in rows {
-        if !row_passes_gates(row, params) {
+        if !row_passes_gates(row, params, profile) {
             continue;
         }
         candidates += 1;
@@ -472,6 +573,7 @@ fn write_outputs(
     let config = format!(
         "# PM5D three-layer snapshot optimizer output\n\
          # snapshot_hash = {}\n\
+         # strategy_profile = {}\n\
          # validation_sharpe = {:.6}\n\
          # validation_pnl = {:.6}\n\
          # validation_trades = {}\n\
@@ -497,6 +599,7 @@ fn write_outputs(
          max_time_remaining_secs = {}\n\
          # three_layer_take_profit_ask and three_layer_stop_distance_pct are not optimized here.\n",
         summary.snapshot_hash,
+        summary.strategy_profile.as_str(),
         summary.val_metrics.sharpe,
         summary.val_metrics.net_pnl,
         summary.val_metrics.trades,
@@ -592,6 +695,9 @@ fn main() -> Result<()> {
     let n_trials = flag_value(&args, "--trials")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(50usize);
+    let strategy_profile = StrategyProfile::parse(
+        &flag_value(&args, "--strategy-profile").unwrap_or_else(|| "mixed".to_string()),
+    )?;
     let stake_usd = flag_value(&args, "--stake-usd")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(15.0);
@@ -632,6 +738,11 @@ fn main() -> Result<()> {
     eprintln!(
         "Train: {} -> {}  Val: {} -> {}  Symbols: {:?}",
         train_start, train_end, val_start, val_end, symbols
+    );
+    eprintln!(
+        "Strategy profile: {} ({})",
+        strategy_profile.as_str(),
+        strategy_profile.description()
     );
     eprintln!(
         "Trials: {n_trials}  Algorithm: TPE  Stake: ${stake_usd:.2}  Min trades: {}",
@@ -738,26 +849,41 @@ fn main() -> Result<()> {
         study
             .optimize(n_trials, move |trial: &mut Trial| {
                 let min_time_remaining_secs = p_min_time_remaining_secs_c.suggest(trial)?;
+                let alpha_contrarian = match strategy_profile.fixes_alpha_contrarian() {
+                    Some(value) => value,
+                    None => p_alpha_contrarian_c.suggest(trial)?,
+                };
+                let cex_contrarian = match strategy_profile.fixes_cex_contrarian() {
+                    Some(value) => value,
+                    None => p_cex_contrarian_c.suggest(trial)?,
+                };
+                let min_confirmation_score =
+                    match strategy_profile.fixes_confirmation_threshold() {
+                        Some(value) => value,
+                        None => p_min_confirmation_score_c.suggest(trial)?,
+                    };
                 let params = SnapshotThreeLayerParams {
                     min_direction_prob: p_min_direction_prob_c.suggest(trial)?,
                     min_distance_over_sigma: p_min_distance_over_sigma_c.suggest(trial)?,
-                    min_confirmation_score: p_min_confirmation_score_c.suggest(trial)?,
+                    min_confirmation_score,
                     min_drift_confirmation: p_min_drift_confirmation_c.suggest(trial)?,
                     min_edge: p_min_edge_c.suggest(trial)?,
                     min_reward_risk: p_min_reward_risk_c.suggest(trial)?,
                     min_entry_score: p_min_entry_score_c.suggest(trial)?,
-                    alpha_contrarian: p_alpha_contrarian_c.suggest(trial)?,
-                    cex_contrarian: p_cex_contrarian_c.suggest(trial)?,
+                    alpha_contrarian,
+                    cex_contrarian,
                     cooldown_secs: p_cooldown_secs_c.suggest(trial)?,
                     min_time_remaining_secs,
                     max_time_remaining_secs: min_time_remaining_secs
                         + p_max_time_span_secs_c.suggest(trial)?,
                 };
 
-                let metrics = evaluate_snapshot_objective(&train_rows, &params, min_trades);
+                let metrics =
+                    evaluate_snapshot_objective(&train_rows, &params, min_trades, strategy_profile);
                 eprintln!(
-                    "  Trial {:>3}: source=snapshot-observation objective={:>9.3} sharpe={:>7.3} pnl=${:>8.2} trades={:>4} selected={:>5} fill={:>5.1}% | dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
+                    "  Trial {:>3}: profile={} source=snapshot-observation objective={:>9.3} sharpe={:>7.3} pnl=${:>8.2} trades={:>4} selected={:>5} fill={:>5.1}% | dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
                     trial.id(),
+                    strategy_profile.as_str(),
                     metrics.objective,
                     metrics.sharpe,
                     metrics.net_pnl,
@@ -789,25 +915,37 @@ fn main() -> Result<()> {
     let best_params = SnapshotThreeLayerParams {
         min_direction_prob: best.get(&p_min_direction_prob).unwrap_or(0.52),
         min_distance_over_sigma: best.get(&p_min_distance_over_sigma).unwrap_or(0.10),
-        min_confirmation_score: best.get(&p_min_confirmation_score).unwrap_or(0.05),
+        min_confirmation_score: strategy_profile
+            .fixes_confirmation_threshold()
+            .unwrap_or_else(|| best.get(&p_min_confirmation_score).unwrap_or(0.05)),
         min_drift_confirmation: best.get(&p_min_drift_confirmation).unwrap_or(0.0001),
         min_edge: best.get(&p_min_edge).unwrap_or(0.02),
         min_reward_risk: best.get(&p_min_reward_risk).unwrap_or(0.8),
         min_entry_score: best.get(&p_min_entry_score).unwrap_or(0.10),
-        alpha_contrarian: best.get(&p_alpha_contrarian).unwrap_or(false),
-        cex_contrarian: best.get(&p_cex_contrarian).unwrap_or(false),
+        alpha_contrarian: strategy_profile
+            .fixes_alpha_contrarian()
+            .unwrap_or_else(|| best.get(&p_alpha_contrarian).unwrap_or(false)),
+        cex_contrarian: strategy_profile
+            .fixes_cex_contrarian()
+            .unwrap_or_else(|| best.get(&p_cex_contrarian).unwrap_or(false)),
         cooldown_secs: best.get(&p_cooldown_secs).unwrap_or(15),
         min_time_remaining_secs: best_min_time_remaining_secs,
         max_time_remaining_secs: best_min_time_remaining_secs
             + best.get(&p_max_time_span_secs).unwrap_or(60),
     };
 
-    let train_metrics = evaluate_snapshot_objective(&train_rows, &best_params, min_trades);
-    let val_metrics = evaluate_snapshot_objective(&val_rows, &best_params, min_trades);
+    let train_metrics =
+        evaluate_snapshot_objective(&train_rows, &best_params, min_trades, strategy_profile);
+    let val_metrics =
+        evaluate_snapshot_objective(&val_rows, &best_params, min_trades, strategy_profile);
     let train_underpowered = train_metrics.trades < min_trades;
     let validation_underpowered = val_metrics.trades < min_trades;
 
     eprintln!("\n=== Best Parameters (Training) ===");
+    eprintln!(
+        "Strategy profile:                 {}",
+        strategy_profile.as_str()
+    );
     eprintln!("Objective:                       {:.3}", best.value);
     eprintln!(
         "three_layer_min_direction_prob = {:.6}",
@@ -863,6 +1001,7 @@ fn main() -> Result<()> {
 
     eprintln!("\n=== Config Snippet ===");
     eprintln!("# Paste into [strategy] only after walk-forward and dry-run/live parity review.");
+    eprintln!("# strategy_profile = {}", strategy_profile.as_str());
     eprintln!(
         "three_layer_min_direction_prob = {:.6}",
         best_params.min_direction_prob
@@ -921,6 +1060,7 @@ fn main() -> Result<()> {
         train_end,
         val_start,
         val_end,
+        strategy_profile,
         trials: n_trials,
         stake_usd,
         min_trades,
@@ -948,7 +1088,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_min_trades, directional_score, parse_date_end, reward_risk_ratio,
+        StrategyProfile, default_min_trades, directional_score, parse_date_end, reward_risk_ratio,
         sample_power_multiplier, trade_sharpe,
     };
 
@@ -994,5 +1134,51 @@ mod tests {
         assert!(sample_power_multiplier(500, 500) < 0.6);
         assert_eq!(sample_power_multiplier(2_000, 500), 1.0);
         assert_eq!(sample_power_multiplier(3_000, 500), 1.0);
+    }
+
+    #[test]
+    fn strategy_profile_parses_operator_aliases() {
+        assert_eq!(
+            StrategyProfile::parse("mixed").unwrap(),
+            StrategyProfile::Mixed
+        );
+        assert_eq!(
+            StrategyProfile::parse("A").unwrap(),
+            StrategyProfile::Champion
+        );
+        assert_eq!(
+            StrategyProfile::parse("obi").unwrap(),
+            StrategyProfile::ObiSoft
+        );
+        assert_eq!(
+            StrategyProfile::parse("cex_continuation").unwrap(),
+            StrategyProfile::ContinuationSoft
+        );
+        assert!(StrategyProfile::parse("unknown").is_err());
+    }
+
+    #[test]
+    fn three_arm_profiles_share_contrarian_alpha_base() {
+        assert_eq!(
+            StrategyProfile::Champion.fixes_alpha_contrarian(),
+            Some(true)
+        );
+        assert_eq!(
+            StrategyProfile::ObiSoft.fixes_alpha_contrarian(),
+            Some(true)
+        );
+        assert_eq!(
+            StrategyProfile::ContinuationSoft.fixes_alpha_contrarian(),
+            Some(true)
+        );
+        assert_eq!(StrategyProfile::Mixed.fixes_alpha_contrarian(), None);
+        assert_eq!(
+            StrategyProfile::Champion.fixes_cex_contrarian(),
+            Some(false)
+        );
+        assert_eq!(
+            StrategyProfile::Champion.fixes_confirmation_threshold(),
+            Some(0.0)
+        );
     }
 }

@@ -1,3 +1,29 @@
+# PM5D Three-Arm Snapshot Optimization (2026-04-28)
+
+## Files
+
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: profile-specific snapshot optimizer for Champion / OBI soft / Continuation soft.
+- `.github/workflows/optimize.yml`
+  - Owner: CI dispatch input for profile-specific snapshot optimization on `ploy-ci-1`.
+- `tasks/todo.md`
+  - Owner: implementation and run evidence.
+
+## Tasks
+
+- [x] Confirm the current optimizer only optimizes a mixed confirmation score and cannot isolate the three requested strategy arms.
+- [x] Add explicit optimizer profiles for `champion`, `obi_soft`, and `continuation_soft`, preserving the previous `mixed` default.
+- [x] Expose the profile through the Optimize workflow so ploy-ci can run the three arms from the same immutable snapshot.
+- [x] Verify the optimizer locally with focused tests/checks only.
+- [ ] Merge through PR, then run three `main` Optimize jobs against snapshot run `25029217647`.
+- [ ] Download artifacts and report best params plus train/validation metrics for each arm.
+
+## Review
+
+- 2026-04-28: Added explicit snapshot optimizer profiles. `mixed` preserves the old blended confirmation score. `champion` evaluates contrarian alpha plus executable liquidity/risk gates without CEX soft confirmation. `obi_soft` adds side-aware OBI, OBI delta/persistence, depth, microprice, and trade-imbalance soft confirmation. `continuation_soft` adds the existing CEX continuation score as the soft confirmation. The three requested profiles fix `alpha_contrarian=true` so they compare the same alpha base.
+- 2026-04-28: Updated Optimize workflow dispatch with `strategy_profile` and scoped concurrency by `git_ref + strategy_profile`, so the three profile runs can be queued without cancelling each other.
+- 2026-04-28: Local focused verification passed: `rustfmt --edition 2024 crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-three-arm-profile-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features`, and workflow YAML parse via Ruby. `actionlint` is not installed locally in this environment.
+
 # PM5D Snapshot Walk-Forward Completion (2026-04-28)
 
 ## Files

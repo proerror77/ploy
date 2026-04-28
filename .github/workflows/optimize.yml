@@ -43,6 +43,10 @@ on:
         description: "Number of optimization trials"
         required: true
         default: "5"
+      strategy_profile:
+        description: "Snapshot optimizer profile: mixed, champion, obi_soft, continuation_soft"
+        required: false
+        default: "mixed"
       symbols:
         description: "Comma-separated symbols to optimize"
         required: false
@@ -97,7 +101,7 @@ on:
         default: "false"
 
 concurrency:
-  group: optimize-${{ github.ref }}
+  group: optimize-${{ github.event.inputs.git_ref || github.ref }}-${{ github.event.inputs.strategy_profile || 'mixed' }}
   cancel-in-progress: true
 
 permissions:
@@ -396,6 +400,7 @@ jobs:
               --val-end "${{ github.event.inputs.val_end }}" \
               --symbols "${{ github.event.inputs.symbols }}" \
               --trials "${{ github.event.inputs.trials }}" \
+              --strategy-profile "${{ github.event.inputs.strategy_profile }}" \
               --stake-usd 15 \
               --output-dir artifacts/optimize \
               "${time_flags[@]}"
