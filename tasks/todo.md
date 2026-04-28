@@ -1,3 +1,25 @@
+# Snapshot Optimizer Sparse-Trade Guard (2026-04-28)
+
+## Files
+
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: canonical PM5D snapshot optimizer objective and result validity checks.
+- `tasks/todo.md`
+  - Owner: session tracker and post-run evidence.
+
+## Tasks
+
+- [x] Treat run `25035386833` as a guard failure, not a deployable strategy result, because validation had only 4 trades.
+- [x] Replace the hard-coded 20-trade optimizer floor with a snapshot-size dynamic default.
+- [x] Persist min-trade source and underpowered train/validation flags in optimizer artifacts.
+- [x] Verify focused local tests/checks.
+- [ ] Open/merge PR, then rerun Optimize on `main` using snapshot run `25029217647`.
+
+## Review
+
+- 2026-04-28: Runtime-compatible contrarian support made the optimizer output usable as config keys, but the first rerun exposed a separate research validity bug: a sparse training fit with 72 trades and only 4 validation trades could still look like a completed optimization when the default trade floor was 20. The optimizer now computes a dynamic default floor from the smaller train/validation slice, records underpowered flags, and fails the run after writing artifacts if the selected result is not sample-powered.
+- 2026-04-28: Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-snapshot-min-trades-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` and `git diff --check`.
+
 # Merge Remote Dry-Run Report To Main (2026-04-28)
 
 ## Files

@@ -64,8 +64,12 @@ struct OptimizeSummary<'a> {
     val_end: DateTime<Utc>,
     trials: usize,
     stake_usd: f64,
+    min_trades: usize,
+    min_trades_source: &'a str,
     train_rows: usize,
     val_rows: usize,
+    train_underpowered: bool,
+    validation_underpowered: bool,
     best_params: SnapshotThreeLayerParams,
     train_metrics: SnapshotObjectiveMetrics,
     val_metrics: SnapshotObjectiveMetrics,
@@ -436,6 +440,11 @@ fn ratio(num: usize, den: usize) -> f64 {
     }
 }
 
+fn default_min_trades(train_rows: usize, val_rows: usize) -> usize {
+    let base_rows = train_rows.min(val_rows);
+    (base_rows / 500).clamp(200, 2_000)
+}
+
 fn write_outputs(
     output_dir: Option<PathBuf>,
     summary: &OptimizeSummary<'_>,
@@ -462,6 +471,10 @@ fn write_outputs(
          # validation_sharpe = {:.6}\n\
          # validation_pnl = {:.6}\n\
          # validation_trades = {}\n\
+         # min_trades = {}\n\
+         # min_trades_source = {}\n\
+         # train_underpowered = {}\n\
+         # validation_underpowered = {}\n\
          three_layer_min_direction_prob = {:.6}\n\
          three_layer_min_distance_over_sigma = {:.6}\n\
          three_layer_min_confirmation_score = {:.6}\n\
@@ -479,6 +492,10 @@ fn write_outputs(
         summary.val_metrics.sharpe,
         summary.val_metrics.net_pnl,
         summary.val_metrics.trades,
+        summary.min_trades,
+        summary.min_trades_source,
+        summary.train_underpowered,
+        summary.validation_underpowered,
         params.min_direction_prob,
         params.min_distance_over_sigma,
         params.min_confirmation_score,
@@ -558,9 +575,8 @@ fn main() -> Result<()> {
     let stake_usd = flag_value(&args, "--stake-usd")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(15.0);
-    let min_trades = flag_value(&args, "--min-trades")
-        .and_then(|raw| raw.parse().ok())
-        .unwrap_or(20usize);
+    let min_trades_override =
+        flag_value(&args, "--min-trades").and_then(|raw| raw.parse::<usize>().ok());
     let output_dir = flag_value(&args, "--output-dir").map(PathBuf::from);
 
     let started = Instant::now();
@@ -598,7 +614,10 @@ fn main() -> Result<()> {
         train_start, train_end, val_start, val_end, symbols
     );
     eprintln!(
-        "Trials: {n_trials}  Algorithm: TPE  Stake: ${stake_usd:.2}  Min trades: {min_trades}"
+        "Trials: {n_trials}  Algorithm: TPE  Stake: ${stake_usd:.2}  Min trades: {}",
+        min_trades_override
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "dynamic".to_string())
     );
     eprintln!(
         "Objective labels: official settlement + executable PM CLOB full-depth/top-book fillability"
@@ -609,7 +628,7 @@ fn main() -> Result<()> {
 
     let review_options = FactorReviewOptions {
         stake_usd,
-        min_observations: min_trades,
+        min_observations: min_trades_override.unwrap_or(20),
         top_quantile: 0.2,
     };
     let mut v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
@@ -635,6 +654,13 @@ fn main() -> Result<()> {
 
     let train_rows = slice_by_time(&v2_rows, train_start, train_end).to_vec();
     let val_rows = slice_by_time(&v2_rows, val_start, val_end).to_vec();
+    let min_trades =
+        min_trades_override.unwrap_or_else(|| default_min_trades(train_rows.len(), val_rows.len()));
+    let min_trades_source = if min_trades_override.is_some() {
+        "cli"
+    } else {
+        "dynamic_default"
+    };
     if train_rows.len() < min_trades {
         anyhow::bail!(
             "training slice has only {} rows; need at least {}",
@@ -654,6 +680,7 @@ fn main() -> Result<()> {
         train_rows.len(),
         val_rows.len()
     );
+    eprintln!("Trade floor: min_trades={min_trades} source={min_trades_source}");
 
     let train_rows = Arc::new(train_rows);
     let study: Study<f64> = Study::maximize(TpeSampler::new());
@@ -757,6 +784,8 @@ fn main() -> Result<()> {
 
     let train_metrics = evaluate_snapshot_objective(&train_rows, &best_params, min_trades);
     let val_metrics = evaluate_snapshot_objective(&val_rows, &best_params, min_trades);
+    let train_underpowered = train_metrics.trades < min_trades;
+    let validation_underpowered = val_metrics.trades < min_trades;
 
     eprintln!("\n=== Best Parameters (Training) ===");
     eprintln!("Objective:                       {:.3}", best.value);
@@ -799,6 +828,18 @@ fn main() -> Result<()> {
     eprintln!("\n=== Snapshot Objective Metrics ===");
     print_metrics("Train", &train_metrics);
     print_metrics("Validation", &val_metrics);
+    if train_underpowered {
+        eprintln!(
+            "WARNING: best training result has {} trades below min_trades={}; do not use this parameter set.",
+            train_metrics.trades, min_trades
+        );
+    }
+    if validation_underpowered {
+        eprintln!(
+            "WARNING: validation result has {} trades below min_trades={}; do not use this parameter set.",
+            val_metrics.trades, min_trades
+        );
+    }
 
     eprintln!("\n=== Config Snippet ===");
     eprintln!("# Paste into [strategy] only after walk-forward and dry-run/live parity review.");
@@ -858,19 +899,33 @@ fn main() -> Result<()> {
         val_end,
         trials: n_trials,
         stake_usd,
+        min_trades,
+        min_trades_source,
         train_rows: train_rows.len(),
         val_rows: val_rows.len(),
+        train_underpowered,
+        validation_underpowered,
         best_params,
         train_metrics,
         val_metrics,
     };
     write_outputs(output_dir, &summary, &trials)?;
+    if train_underpowered || validation_underpowered {
+        anyhow::bail!(
+            "snapshot optimizer result is underpowered: train_trades={} validation_trades={} min_trades={}",
+            summary.train_metrics.trades,
+            summary.val_metrics.trades,
+            summary.min_trades
+        );
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{directional_score, parse_date_end, reward_risk_ratio, trade_sharpe};
+    use super::{
+        default_min_trades, directional_score, parse_date_end, reward_risk_ratio, trade_sharpe,
+    };
 
     #[test]
     fn date_end_is_exclusive_next_day() {
@@ -899,5 +954,12 @@ mod tests {
         assert!(directional_score(0.48, 0.55, 0.25, true) > 0.0);
         assert!(directional_score(0.48, 0.55, 0.25, false) < 0.0);
         assert_eq!(directional_score(f64::NAN, 0.55, 0.25, false), -0.50);
+    }
+
+    #[test]
+    fn default_min_trades_scales_with_snapshot_size() {
+        assert_eq!(default_min_trades(185_158, 107_774), 215);
+        assert_eq!(default_min_trades(1_000, 1_000), 200);
+        assert_eq!(default_min_trades(2_000_000, 2_000_000), 2_000);
     }
 }
