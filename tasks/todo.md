@@ -1,3 +1,28 @@
+# PM5D Snapshot Walk-Forward Completion (2026-04-28)
+
+## Files
+
+- `tasks/todo.md`
+  - Owner: snapshot-backed factor walk-forward result and runtime parity evidence.
+
+## Tasks
+
+- [x] Run Factor Walk-Forward V2 on `main` from immutable research snapshot run `25029217647`.
+- [x] Review liquidity-gated alpha, fillability, trade-formation, meta-label, stability, and combo outputs.
+- [x] Check current Tango dry-run/live trading snapshots before treating runtime parity as available evidence.
+- [x] Record what is usable for the next strategy iteration and what is not deployable yet.
+
+## Review
+
+- 2026-04-28: GitHub Actions run `25040833053` completed successfully on `ploy-ci-1` with `git_ref=main`, head `2ba9dbda`, snapshot hash `5bfb253100d3f573`, window `2026-04-21 -> 2026-04-27`, six symbols, `stake_usd=15`, train/test/step `3d/1d/1d`, and snapshot source `research_snapshot_v1`. The downloaded artifact includes the report plus snapshot manifest/quality evidence.
+- 2026-04-28: Snapshot quality confirmed immutable official-settlement research input: observations `146466`, PM full-depth book snapshots `197641`, Deribit snapshots `338`, optimizer data dir `/tmp/ploy-parquet`, official settlement required `true`. Phase timings were dominated by historical updates `409471 ms`, PM book snapshots `316825 ms`, and CEX LOB snapshots `141090 ms`, which is consistent with the new snapshot-compile architecture rather than per-trial raw DB replay.
+- 2026-04-28: Raw all-sample walk-forward again ranked the contrarian alpha factors first: `side_distance_over_sigma` total test PnL `50022.6257` and `side_model_prob` `49977.6742`, each `4/4` positive windows. This is directionally consistent with the optimizer's `three_layer_alpha_contrarian=true` / `three_layer_cex_contrarian=true` output, but raw all-sample factor PnL is not a live execution result.
+- 2026-04-28: The execution-aware result is narrower and more useful. `LiquidityGateV1` selected `10572` rows (`3.61%` coverage) with entry/exit/round-trip fill `100%`, but total PnL was `-3441.4434`; therefore liquidity alone is not an edge. Inside that executable region, `side_model_prob` and `side_distance_over_sigma` each produced liquidity-gated single-factor PnL `22806.5061`, Sharpe `21.5949`, symbol/time-bucket positive ratios `1.0/1.0`, and liquidity-gated walk-forward PnL `11715.8722` over `3/3` positive windows.
+- 2026-04-28: CEX OBI/continuation features are useful as watchlist diagnostics, not hard filters yet. Liquidity-gated walk-forward ranked `depth_imbalance_side` `682.2811`, `obi_10_side` `474.1853`, and `cex_continuation_edge_gate` `388.3395`, but most had only `2/3` positive windows. Meta-label rules were weak: `continuation_confirmation` had positive descriptive win rate but negative OOS PnL `-386.9135`; `cex_obi_confirmation` was only watchlist with total OOS PnL `85.2658`.
+- 2026-04-28: Stability gates correctly kept the leading factors at `watchlist`, not `candidate`, because the current seven-calendar-day snapshot yields only three to four OOS windows while the report requires eight windows for promotion. The factor combo model should not be used: Combo V1 had `3` windows, positive-window ratio `0.3333`, total test PnL `-243.7448`, and high reject rate `72.31%`.
+- 2026-04-28: Tango runtime parity was checked read-only at `2026-04-28T16:13+08:00`. `ployd` was running with no active alerts, `pm5d.threelayer.dryrun` was `Running`, `pm5d.threelayer.live` was `Paused`, and `trading status` showed `0` intents, `0` orders, `0` fills, `0` positions, and net PnL `0` for both deployments. That means current runtime state has no actual dry-run/live order sample to compare; the `research_snapshot_parity` path exists on `main`, but this check cannot validate live fill parity until a dry-run candidate is run and live is intentionally resumed.
+- 2026-04-28: Next strategy iteration should stay research/dry-run only: test a simple contrarian-alpha policy inside the executable liquidity gate, keep stake fixed at 15U, avoid deploying Combo V1 or meta-label hard filters, and require more days/windows before treating `side_model_prob` / `side_distance_over_sigma` as production-ready.
+
 # Snapshot Optimizer Sparse-Trade Guard (2026-04-28)
 
 ## Files
