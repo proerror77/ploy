@@ -10071,3 +10071,30 @@ Review:
 - 2026-04-28: Moved deploy log-failure checks to a post-restart verification
   baseline so controlled `systemctl restart` noise from old collector processes
   is not classified as a new deployment failure.
+
+# Snapshot Observation Optimizer Completion (2026-04-28)
+
+## Files
+
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: canonical PM5D three-layer optimizer over immutable research snapshot observations.
+- `crates/ploy-research/Cargo.toml`
+  - Owner: expose the snapshot optimizer example and optimizer crate dependency.
+- `.github/workflows/optimize.yml`
+  - Owner: choose snapshot-observation optimization for canonical runs and raw Parquet replay only for explicit debug.
+- `tasks/todo.md`
+  - Owner: session tracker and completion review.
+
+## Tasks
+
+- [x] Add a TPE/Bayesian three-layer optimizer that consumes `ResearchSnapshot` and `FactorObservationV2` rows.
+- [x] Enforce snapshot immutability, hash, symbol subset, official settlement, stake, and time-window coverage before optimization.
+- [x] Score only executable/fillable PM CLOB labels so non-fillable dry-run signals cannot dominate the objective.
+- [x] Keep raw tick-preserving Parquet optimizer replay as an explicit debug path, not the canonical snapshot path.
+- [x] Verify locally with targeted compile/tests and workflow YAML parsing.
+- [ ] Push PR, merge after CI, and rerun Optimize using snapshot run `25029217647`.
+
+## Review
+
+- 2026-04-28: Added `three_layer_snapshot_optimize`, a snapshot-observation TPE runner that validates immutable official-settlement snapshot scope, expands side-aware `FactorObservationV2`, dedupes one trade per event side, applies a per-symbol cooldown, and scores only executable full-depth/top-book PM CLOB labels.
+- 2026-04-28: Updated `optimize.yml` so canonical runs with `snapshot_run_id` build and run the snapshot optimizer, while raw Parquet sync/preflight/replay remains only for explicit non-snapshot debug mode.

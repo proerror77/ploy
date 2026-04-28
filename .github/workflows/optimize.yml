@@ -1,4 +1,4 @@
-name: Optimize three_layer params (tick-preserving)
+name: Optimize three_layer params (snapshot-backed)
 
 on:
   workflow_dispatch:
@@ -110,7 +110,7 @@ env:
 
 jobs:
   build:
-    name: Build optimize_backtest binary
+    name: Build optimize runner
     runs-on: [self-hosted, ploy-ci-1]
     timeout-minutes: 45
     environment: ploy-ci-1
@@ -136,21 +136,30 @@ jobs:
         with:
           cache-on-failure: true
           cache-targets: "true"
-          key: optimize-${{ hashFiles('crates/ploy-strategy-bundles/**', 'Cargo.lock') }}
+          key: optimize-${{ hashFiles('crates/ploy-strategy-bundles/**', 'crates/ploy-research/**', 'Cargo.lock') }}
 
-      - name: Build optimize_backtest
+      - name: Build optimize runner
         run: |
           . /home/runner/.cargo/env
-          cargo build --release --locked \
-            -p ploy-strategy-bundles \
-            --features ploy-strategy-bundles/parquet-feed \
-            --example optimize_backtest
+          mkdir -p artifacts/optimize-bin
+          if [ -n "${{ github.event.inputs.snapshot_run_id }}" ]; then
+            cargo build --release --locked \
+              -p ploy-research \
+              --example three_layer_snapshot_optimize
+            cp target/release/examples/three_layer_snapshot_optimize artifacts/optimize-bin/optimize-runner
+          else
+            cargo build --release --locked \
+              -p ploy-strategy-bundles \
+              --features ploy-strategy-bundles/parquet-feed \
+              --example optimize_backtest
+            cp target/release/examples/optimize_backtest artifacts/optimize-bin/optimize-runner
+          fi
 
-      - name: Upload optimize_backtest binary
+      - name: Upload optimize runner
         uses: actions/upload-artifact@v7
         with:
-          name: optimize_backtest-${{ github.sha }}
-          path: target/release/examples/optimize_backtest
+          name: optimize-runner-${{ github.sha }}
+          path: artifacts/optimize-bin/optimize-runner
           retention-days: 1
 
   optimize:
@@ -173,14 +182,14 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
-      - name: Download optimize_backtest binary
+      - name: Download optimize runner
         uses: actions/download-artifact@v8
         with:
-          name: optimize_backtest-${{ github.sha }}
+          name: optimize-runner-${{ github.sha }}
           path: target/release/examples
 
       - name: Make binary executable
-        run: chmod +x target/release/examples/optimize_backtest
+        run: chmod +x target/release/examples/optimize-runner
 
       - name: Download research snapshot
         if: ${{ github.event.inputs.snapshot_run_id != '' }}
@@ -192,7 +201,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Sync Parquet data from Tango-1-1
-        if: ${{ github.event.inputs.snapshot_run_id != '' || github.event.inputs.allow_live_parquet_debug == 'true' }}
+        if: ${{ github.event.inputs.snapshot_run_id == '' && github.event.inputs.allow_live_parquet_debug == 'true' }}
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.TANGO_SSH_KEY }}" > ~/.ssh/tango_key
@@ -256,6 +265,7 @@ jobs:
           cat artifacts/optimize/snapshot-provenance.txt >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Preflight Parquet manifest
+        if: ${{ github.event.inputs.snapshot_run_id == '' }}
         run: |
           set -euo pipefail
           . /home/runner/.cargo/env
@@ -294,13 +304,11 @@ jobs:
           if [ -n "${{ github.event.inputs.max_updates }}" ]; then
             extra_flags+=(--max-updates "${{ github.event.inputs.max_updates }}")
           fi
-          if [ -f artifacts/research-snapshot/manifest.json ]; then
-            extra_flags+=(--snapshot-dir artifacts/research-snapshot)
-          elif [ "${{ github.event.inputs.allow_live_parquet_debug }}" = "true" ]; then
+          if [ "${{ github.event.inputs.allow_live_parquet_debug }}" = "true" ]; then
             extra_flags+=(--allow-live-parquet-debug)
           fi
 
-          ./target/release/examples/optimize_backtest \
+          ./target/release/examples/optimize-runner \
             --preflight-only \
             --strategy-variant three_layer \
             --config config/strategies/02-pm5d-threelayer.unified.toml \
@@ -370,33 +378,46 @@ jobs:
           if [ -n "${{ github.event.inputs.max_updates }}" ]; then
             extra_flags+=(--max-updates "${{ github.event.inputs.max_updates }}")
           fi
-          if [ -f artifacts/research-snapshot/manifest.json ]; then
-            extra_flags+=(--snapshot-dir artifacts/research-snapshot)
-          elif [ "${{ github.event.inputs.allow_live_parquet_debug }}" = "true" ]; then
+          if [ "${{ github.event.inputs.allow_live_parquet_debug }}" = "true" ]; then
             extra_flags+=(--allow-live-parquet-debug)
           fi
 
-          timeout --preserve-status "${{ github.event.inputs.optimize_timeout_minutes }}m" \
-          ./target/release/examples/optimize_backtest \
-            --strategy-variant three_layer \
-            --config config/strategies/02-pm5d-threelayer.unified.toml \
-            --data-dir "${{ github.event.inputs.data_dir }}" \
-            --train-start "${{ github.event.inputs.train_start }}" \
-            --train-end "${{ github.event.inputs.train_end }}" \
-            --val-start "${{ github.event.inputs.val_start }}" \
-            --val-end "${{ github.event.inputs.val_end }}" \
-            --symbols "${{ github.event.inputs.symbols }}" \
-            --trials "${{ github.event.inputs.trials }}" \
-            --require-official-settlement \
-            --require-lob-liquidity \
-            --max-preflight-rows "${{ github.event.inputs.max_preflight_rows }}" \
-            --max-preflight-bytes "${{ github.event.inputs.max_preflight_bytes }}" \
-            --max-symbols "${{ github.event.inputs.max_symbols }}" \
-            --max-days "${{ github.event.inputs.max_days }}" \
-            --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
-            --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
-            "${time_flags[@]}" \
-            "${extra_flags[@]}"
+          if [ -f artifacts/research-snapshot/manifest.json ]; then
+            timeout --preserve-status "${{ github.event.inputs.optimize_timeout_minutes }}m" \
+            ./target/release/examples/optimize-runner \
+              --snapshot-dir artifacts/research-snapshot \
+              --train-start "${{ github.event.inputs.train_start }}" \
+              --train-end "${{ github.event.inputs.train_end }}" \
+              --val-start "${{ github.event.inputs.val_start }}" \
+              --val-end "${{ github.event.inputs.val_end }}" \
+              --symbols "${{ github.event.inputs.symbols }}" \
+              --trials "${{ github.event.inputs.trials }}" \
+              --stake-usd 15 \
+              --output-dir artifacts/optimize \
+              "${time_flags[@]}"
+          else
+            timeout --preserve-status "${{ github.event.inputs.optimize_timeout_minutes }}m" \
+            ./target/release/examples/optimize-runner \
+              --strategy-variant three_layer \
+              --config config/strategies/02-pm5d-threelayer.unified.toml \
+              --data-dir "${{ github.event.inputs.data_dir }}" \
+              --train-start "${{ github.event.inputs.train_start }}" \
+              --train-end "${{ github.event.inputs.train_end }}" \
+              --val-start "${{ github.event.inputs.val_start }}" \
+              --val-end "${{ github.event.inputs.val_end }}" \
+              --symbols "${{ github.event.inputs.symbols }}" \
+              --trials "${{ github.event.inputs.trials }}" \
+              --require-official-settlement \
+              --require-lob-liquidity \
+              --max-preflight-rows "${{ github.event.inputs.max_preflight_rows }}" \
+              --max-preflight-bytes "${{ github.event.inputs.max_preflight_bytes }}" \
+              --max-symbols "${{ github.event.inputs.max_symbols }}" \
+              --max-days "${{ github.event.inputs.max_days }}" \
+              --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
+              --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
+              "${time_flags[@]}" \
+              "${extra_flags[@]}"
+          fi
 
       - name: Upload optimize provenance
         if: ${{ always() }}
