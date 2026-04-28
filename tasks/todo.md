@@ -10092,9 +10092,13 @@ Review:
 - [x] Score only executable/fillable PM CLOB labels so non-fillable dry-run signals cannot dominate the objective.
 - [x] Keep raw tick-preserving Parquet optimizer replay as an explicit debug path, not the canonical snapshot path.
 - [x] Verify locally with targeted compile/tests and workflow YAML parsing.
-- [ ] Push PR, merge after CI, and rerun Optimize using snapshot run `25029217647`.
+- [x] Push PR, merge after CI, and rerun Optimize using snapshot run `25029217647`.
+- [ ] Add a score-gate follow-up so the snapshot optimizer can test contrarian alpha/confirmation and PM CLOB momentum instead of only the old high-alpha gate region.
+- [ ] Push and merge the score-gate follow-up, then rerun Optimize on `main`.
 
 ## Review
 
 - 2026-04-28: Added `three_layer_snapshot_optimize`, a snapshot-observation TPE runner that validates immutable official-settlement snapshot scope, expands side-aware `FactorObservationV2`, dedupes one trade per event side, applies a per-symbol cooldown, and scores only executable full-depth/top-book PM CLOB labels.
 - 2026-04-28: Updated `optimize.yml` so canonical runs with `snapshot_run_id` build and run the snapshot optimizer, while raw Parquet sync/preflight/replay remains only for explicit non-snapshot debug mode.
+- 2026-04-28: Merged PR #200 and reran Optimize on `main`; the snapshot path completed quickly but all 50 trials had zero trades because the old optimizer gates only searched the high-alpha/high-edge region.
+- 2026-04-28: Score-gate follow-up broadens the search to include contrarian alpha/confirmation options, PM ask momentum, and current executable-liquidity labels while keeping official settlement and executable PnL as the objective.

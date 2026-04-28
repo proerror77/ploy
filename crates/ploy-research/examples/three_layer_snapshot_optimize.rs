@@ -29,6 +29,8 @@ struct SnapshotThreeLayerParams {
     min_edge: f64,
     min_reward_risk: f64,
     min_entry_score: f64,
+    alpha_contrarian: bool,
+    cex_contrarian: bool,
     cooldown_secs: i64,
     min_time_remaining_secs: i64,
     max_time_remaining_secs: i64,
@@ -213,11 +215,68 @@ fn confirmation_score(row: &FactorObservationV2) -> f64 {
     0.45 * continuation + 0.25 * obi + 0.15 * depth + 0.15 * microprice
 }
 
-fn three_layer_entry_score(row: &FactorObservationV2, edge: f64, confirmation: f64) -> f64 {
-    let direction_score = ((row.side_model_prob - 0.5) / 0.5).clamp(0.0, 1.0);
-    let edge_score = (edge / 0.12).clamp(0.0, 1.0);
-    let confirmation_score = confirmation.clamp(-0.25, 0.35);
-    0.50 * direction_score + 0.35 * edge_score + 0.15 * confirmation_score
+fn three_layer_entry_score(
+    row: &FactorObservationV2,
+    edge: f64,
+    confirmation: f64,
+    params: &SnapshotThreeLayerParams,
+) -> f64 {
+    let direction_score = directional_score(
+        row.side_model_prob,
+        params.min_direction_prob,
+        0.25,
+        params.alpha_contrarian,
+    );
+    let distance_score = directional_score(
+        row.side_distance_over_sigma,
+        params.min_distance_over_sigma,
+        0.60,
+        params.alpha_contrarian,
+    );
+    let edge_score = directional_score(edge, params.min_edge, 0.08, params.alpha_contrarian);
+    let drift_side = row.drift_30s * row.side.multiplier();
+    let drift_score = ((drift_side - params.min_drift_confirmation) * 800.0).clamp(-0.50, 1.0);
+    let pm_momentum = row
+        .entry_ask_change_10s
+        .max(row.entry_ask_change_30s)
+        .max(row.pm_reprice_speed_30s * 30.0);
+    let pm_momentum_score = if pm_momentum.is_finite() {
+        (pm_momentum / 0.08).clamp(-0.50, 1.0)
+    } else {
+        0.0
+    };
+    let liquidity_score = if row.label_full_depth_entry_fillable {
+        1.0
+    } else if row.label_executable_fillable {
+        0.5
+    } else {
+        -0.5
+    };
+    let confirmation_score = directional_score(
+        confirmation,
+        params.min_confirmation_score,
+        0.50,
+        params.cex_contrarian,
+    );
+    0.25 * direction_score
+        + 0.12 * distance_score
+        + 0.18 * edge_score
+        + 0.15 * confirmation_score
+        + 0.10 * drift_score
+        + 0.12 * pm_momentum_score
+        + 0.08 * liquidity_score
+}
+
+fn directional_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> f64 {
+    if !value.is_finite() || !threshold.is_finite() || !scale.is_finite() || scale <= 0.0 {
+        return -0.50;
+    }
+    let signed = if contrarian {
+        threshold - value
+    } else {
+        value - threshold
+    };
+    (signed / scale).clamp(-0.50, 1.0)
 }
 
 fn executable_pnl(row: &FactorObservationV2) -> Option<f64> {
@@ -242,17 +301,15 @@ fn row_passes_gates(row: &FactorObservationV2, params: &SnapshotThreeLayerParams
     if !row.pm_lag_secs.is_finite() || row.pm_lag_secs < 0.0 || row.pm_lag_secs > 15.0 {
         return false;
     }
-    if !row.side_model_prob.is_finite() || row.side_model_prob < params.min_direction_prob {
+    if !row.side_model_prob.is_finite() {
         return false;
     }
-    if !row.side_distance_over_sigma.is_finite()
-        || row.side_distance_over_sigma < params.min_distance_over_sigma
-    {
+    if !row.side_distance_over_sigma.is_finite() {
         return false;
     }
 
     let drift_side = row.drift_30s * row.side.multiplier();
-    if !drift_side.is_finite() || drift_side < params.min_drift_confirmation {
+    if !drift_side.is_finite() {
         return false;
     }
 
@@ -261,7 +318,7 @@ fn row_passes_gates(row: &FactorObservationV2, params: &SnapshotThreeLayerParams
     } else {
         row.side_model_prob - row.entry_ask - crypto_fee_cost(row.entry_ask)
     };
-    if !edge.is_finite() || edge < params.min_edge {
+    if !edge.is_finite() {
         return false;
     }
     let reward_risk = reward_risk_ratio(row.entry_ask);
@@ -269,10 +326,10 @@ fn row_passes_gates(row: &FactorObservationV2, params: &SnapshotThreeLayerParams
         return false;
     }
     let confirmation = confirmation_score(row);
-    if confirmation < params.min_confirmation_score {
+    if !confirmation.is_finite() {
         return false;
     }
-    three_layer_entry_score(row, edge, confirmation) >= params.min_entry_score
+    three_layer_entry_score(row, edge, confirmation, params) >= params.min_entry_score
 }
 
 fn evaluate_snapshot_objective(
@@ -412,6 +469,8 @@ fn write_outputs(
          three_layer_min_edge = {:.6}\n\
          three_layer_min_reward_risk = {:.6}\n\
          three_layer_min_entry_score = {:.6}\n\
+         # alpha_contrarian = {}\n\
+         # cex_contrarian = {}\n\
          cooldown_secs = {}\n\
          min_time_remaining_secs = {}\n\
          max_time_remaining_secs = {}\n\
@@ -427,6 +486,8 @@ fn write_outputs(
         params.min_edge,
         params.min_reward_risk,
         params.min_entry_score,
+        params.alpha_contrarian,
+        params.cex_contrarian,
         params.cooldown_secs,
         params.min_time_remaining_secs,
         params.max_time_remaining_secs,
@@ -596,16 +657,18 @@ fn main() -> Result<()> {
 
     let train_rows = Arc::new(train_rows);
     let study: Study<f64> = Study::maximize(TpeSampler::new());
-    let p_min_direction_prob = FloatParam::new(0.52, 0.70).name("three_layer_min_direction_prob");
+    let p_min_direction_prob = FloatParam::new(0.50, 0.68).name("three_layer_min_direction_prob");
     let p_min_distance_over_sigma =
-        FloatParam::new(0.10, 0.60).name("three_layer_min_distance_over_sigma");
+        FloatParam::new(-0.20, 0.60).name("three_layer_min_distance_over_sigma");
     let p_min_confirmation_score =
-        FloatParam::new(0.05, 0.30).name("three_layer_min_confirmation_score");
+        FloatParam::new(-0.15, 0.25).name("three_layer_min_confirmation_score");
     let p_min_drift_confirmation =
-        FloatParam::new(0.0001, 0.001).name("three_layer_min_drift_confirmation");
-    let p_min_edge = FloatParam::new(0.02, 0.06).name("three_layer_min_edge");
-    let p_min_reward_risk = FloatParam::new(0.8, 2.0).name("three_layer_min_reward_risk");
-    let p_min_entry_score = FloatParam::new(0.10, 0.40).name("three_layer_min_entry_score");
+        FloatParam::new(-0.0005, 0.0008).name("three_layer_min_drift_confirmation");
+    let p_min_edge = FloatParam::new(-0.02, 0.05).name("three_layer_min_edge");
+    let p_min_reward_risk = FloatParam::new(0.20, 2.0).name("three_layer_min_reward_risk");
+    let p_min_entry_score = FloatParam::new(0.05, 0.55).name("three_layer_min_entry_score");
+    let p_alpha_contrarian = BoolParam::new().name("alpha_contrarian");
+    let p_cex_contrarian = BoolParam::new().name("cex_contrarian");
     let p_cooldown_secs = IntParam::new(15, 60).name("cooldown_secs");
     let p_min_time_remaining_secs = IntParam::new(30, 120).name("min_time_remaining_secs");
     let p_max_time_span_secs = IntParam::new(30, 120).name("three_layer_time_span_secs");
@@ -619,6 +682,8 @@ fn main() -> Result<()> {
         let p_min_edge_c = p_min_edge.clone();
         let p_min_reward_risk_c = p_min_reward_risk.clone();
         let p_min_entry_score_c = p_min_entry_score.clone();
+        let p_alpha_contrarian_c = p_alpha_contrarian.clone();
+        let p_cex_contrarian_c = p_cex_contrarian.clone();
         let p_cooldown_secs_c = p_cooldown_secs.clone();
         let p_min_time_remaining_secs_c = p_min_time_remaining_secs.clone();
         let p_max_time_span_secs_c = p_max_time_span_secs.clone();
@@ -634,6 +699,8 @@ fn main() -> Result<()> {
                     min_edge: p_min_edge_c.suggest(trial)?,
                     min_reward_risk: p_min_reward_risk_c.suggest(trial)?,
                     min_entry_score: p_min_entry_score_c.suggest(trial)?,
+                    alpha_contrarian: p_alpha_contrarian_c.suggest(trial)?,
+                    cex_contrarian: p_cex_contrarian_c.suggest(trial)?,
                     cooldown_secs: p_cooldown_secs_c.suggest(trial)?,
                     min_time_remaining_secs,
                     max_time_remaining_secs: min_time_remaining_secs
@@ -642,7 +709,7 @@ fn main() -> Result<()> {
 
                 let metrics = evaluate_snapshot_objective(&train_rows, &params, min_trades);
                 eprintln!(
-                    "  Trial {:>3}: source=snapshot-observation objective={:>9.3} sharpe={:>7.3} pnl=${:>8.2} trades={:>4} selected={:>5} fill={:>5.1}% | dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} score={:.3} cd={}s time={}..{}",
+                    "  Trial {:>3}: source=snapshot-observation objective={:>9.3} sharpe={:>7.3} pnl=${:>8.2} trades={:>4} selected={:>5} fill={:>5.1}% | dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
                     trial.id(),
                     metrics.objective,
                     metrics.sharpe,
@@ -657,6 +724,8 @@ fn main() -> Result<()> {
                     params.min_edge,
                     params.min_reward_risk,
                     params.min_entry_score,
+                    params.alpha_contrarian,
+                    params.cex_contrarian,
                     params.cooldown_secs,
                     params.min_time_remaining_secs,
                     params.max_time_remaining_secs,
@@ -678,6 +747,8 @@ fn main() -> Result<()> {
         min_edge: best.get(&p_min_edge).unwrap_or(0.02),
         min_reward_risk: best.get(&p_min_reward_risk).unwrap_or(0.8),
         min_entry_score: best.get(&p_min_entry_score).unwrap_or(0.10),
+        alpha_contrarian: best.get(&p_alpha_contrarian).unwrap_or(false),
+        cex_contrarian: best.get(&p_cex_contrarian).unwrap_or(false),
         cooldown_secs: best.get(&p_cooldown_secs).unwrap_or(15),
         min_time_remaining_secs: best_min_time_remaining_secs,
         max_time_remaining_secs: best_min_time_remaining_secs
@@ -714,6 +785,8 @@ fn main() -> Result<()> {
         "three_layer_min_entry_score = {:.6}",
         best_params.min_entry_score
     );
+    eprintln!("alpha_contrarian = {}", best_params.alpha_contrarian);
+    eprintln!("cex_contrarian = {}", best_params.cex_contrarian);
     eprintln!("cooldown_secs = {}", best_params.cooldown_secs);
     eprintln!(
         "min_time_remaining_secs = {}",
@@ -754,6 +827,8 @@ fn main() -> Result<()> {
         "three_layer_min_entry_score = {:.6}",
         best_params.min_entry_score
     );
+    eprintln!("# alpha_contrarian = {}", best_params.alpha_contrarian);
+    eprintln!("# cex_contrarian = {}", best_params.cex_contrarian);
     eprintln!("cooldown_secs = {}", best_params.cooldown_secs);
     eprintln!(
         "min_time_remaining_secs = {}",
@@ -789,7 +864,7 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_date_end, reward_risk_ratio, trade_sharpe};
+    use super::{directional_score, parse_date_end, reward_risk_ratio, trade_sharpe};
 
     #[test]
     fn date_end_is_exclusive_next_day() {
@@ -810,5 +885,13 @@ mod tests {
     fn trade_sharpe_penalizes_empty_trials() {
         assert_eq!(trade_sharpe(&[]), -100.0);
         assert!(trade_sharpe(&[1.0, 2.0, 3.0]).is_finite());
+    }
+
+    #[test]
+    fn directional_score_supports_normal_and_contrarian_search() {
+        assert!(directional_score(0.62, 0.55, 0.25, false) > 0.0);
+        assert!(directional_score(0.48, 0.55, 0.25, true) > 0.0);
+        assert!(directional_score(0.48, 0.55, 0.25, false) < 0.0);
+        assert_eq!(directional_score(f64::NAN, 0.55, 0.25, false), -0.50);
     }
 }
