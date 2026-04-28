@@ -10093,8 +10093,9 @@ Review:
 - [x] Keep raw tick-preserving Parquet optimizer replay as an explicit debug path, not the canonical snapshot path.
 - [x] Verify locally with targeted compile/tests and workflow YAML parsing.
 - [x] Push PR, merge after CI, and rerun Optimize using snapshot run `25029217647`.
-- [ ] Add a score-gate follow-up so the snapshot optimizer can test contrarian alpha/confirmation and PM CLOB momentum instead of only the old high-alpha gate region.
-- [ ] Push and merge the score-gate follow-up, then rerun Optimize on `main`.
+- [x] Add a score-gate follow-up so the snapshot optimizer can test contrarian alpha/confirmation and PM CLOB momentum instead of only the old high-alpha gate region.
+- [x] Push and merge the score-gate follow-up, then rerun Optimize on `main`.
+- [ ] Implement runtime support for any contrarian-mode parameter before applying optimized research output to dry-run/live configs.
 
 ## Review
 
@@ -10102,3 +10103,5 @@ Review:
 - 2026-04-28: Updated `optimize.yml` so canonical runs with `snapshot_run_id` build and run the snapshot optimizer, while raw Parquet sync/preflight/replay remains only for explicit non-snapshot debug mode.
 - 2026-04-28: Merged PR #200 and reran Optimize on `main`; the snapshot path completed quickly but all 50 trials had zero trades because the old optimizer gates only searched the high-alpha/high-edge region.
 - 2026-04-28: Score-gate follow-up broadens the search to include contrarian alpha/confirmation options, PM ask momentum, and current executable-liquidity labels while keeping official settlement and executable PnL as the objective.
+- 2026-04-28: Merged PR #201 and reran Optimize on `main` as run `25034557544`; build job finished in 3m27s, optimize job finished in 40s, and snapshot mode skipped raw Parquet sync/preflight. Best train metrics: objective `8.215`, Sharpe `8.132`, PnL `$8381.13`, trades `2574`, fill rate `51.52%`. Validation metrics: objective `2.223`, Sharpe `2.203`, PnL `$2077.31`, trades `2244`, fill rate `85.52%`, win rate `53.03%`.
+- 2026-04-28: The selected parameters require `alpha_contrarian=true` and `cex_contrarian=true`, which are optimizer research flags only today. Do not paste these params into live until the ThreeLayer runtime exposes and verifies equivalent behavior with walk-forward and dry-run/live parity.
