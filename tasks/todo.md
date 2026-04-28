@@ -10162,3 +10162,33 @@ Review:
 - 2026-04-28: Added `three_layer_alpha_contrarian` and `three_layer_cex_contrarian` as default-off config fields. Alpha contrarian mode fades the model-favored side and rewards lower model edge; CEX contrarian mode inverts the confirmation bonus. Existing live/dry-run behavior is unchanged unless these fields are explicitly enabled.
 - 2026-04-28: Local verification passed with `CARGO_TARGET_DIR=/tmp/ploy-three-layer-contrarian-test cargo check -p ploy-strategy-bundles --tests --examples`, `CARGO_TARGET_DIR=/tmp/ploy-three-layer-contrarian-test rtk cargo test -p ploy-strategy-bundles three_layer --lib`, `CARGO_TARGET_DIR=/tmp/ploy-three-layer-contrarian-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features`, and `git diff --check`.
 - 2026-04-28: PR #203 CI passed after adding the new fields to example and integration-test `DirectionalConfig` fixtures.
+
+# Market Data Gap Audit Automation (2026-04-28)
+
+## Files
+
+- `.github/workflows/market-data-gap-audit.yml`
+  - Owner: scheduled/manual Tango market-data gap gate.
+- `tasks/todo.md`
+  - Owner: session tracker.
+
+## Tasks
+
+- [x] Add a scheduled workflow that runs the deployed gap-audit script on Tango.
+- [x] Run quick 1-hour audits every 30 minutes and full retained-window audits every 6 hours.
+- [x] Save JSON reports as GitHub artifacts and stable Tango latest files.
+- [x] Fail the workflow on critical/unknown audit results by default.
+- [ ] Verify workflow YAML and run the workflow from `main`.
+
+## Review
+
+- 2026-04-28: Added `market-data-gap-audit.yml` with manual dispatch plus two
+  schedules: every 30 minutes for a 1-hour quick audit, and every 6 hours for
+  quick + retained-window audit. Reports are written under
+  `/opt/ploy/reports/market-data-gap-audit/` on Tango, copied back as GitHub
+  artifacts, and summarized in the workflow step summary.
+- 2026-04-28: Static verification passed with `git diff --check`, Ruby YAML
+  parse, and `bash -n` over every embedded workflow shell step. A direct Tango
+  quick-audit smoke produced JSON with 21 gap audits plus one window audit; it
+  returned `warn` because `research_valid_windows` has exceeded the 6-hour
+  warning threshold, not because live collectors stopped.
