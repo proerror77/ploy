@@ -67,10 +67,22 @@ pub struct ResearchSnapshotManifest {
     pub immutable_input: bool,
     pub source_kind: String,
     pub optimizer_data_dir: Option<String>,
+    #[serde(default)]
+    pub data_requirements: Vec<String>,
+    #[serde(default)]
+    pub data_audit_status: Option<String>,
+    #[serde(default)]
+    pub data_audit_report: Option<String>,
+    #[serde(default = "default_include_deribit")]
+    pub include_deribit: bool,
     pub artifacts: ResearchSnapshotArtifacts,
     pub row_counts: ResearchSnapshotRowCounts,
     pub phase_timings: Vec<ResearchSnapshotPhaseTiming>,
     pub quality_flags: Vec<String>,
+}
+
+fn default_include_deribit() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -266,6 +278,10 @@ pub struct ResearchSnapshotBuildOptions {
     pub require_official_settlement: bool,
     pub optimizer_data_dir: Option<String>,
     pub git_sha: Option<String>,
+    pub data_requirements: Vec<String>,
+    pub data_audit_status: Option<String>,
+    pub data_audit_report: Option<String>,
+    pub include_deribit: bool,
 }
 
 #[cfg(feature = "db")]
@@ -273,7 +289,7 @@ pub async fn build_research_snapshot_from_database(
     pool: &sqlx::PgPool,
     options: ResearchSnapshotBuildOptions,
 ) -> Result<ResearchSnapshot> {
-    use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+    use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
     use ploy_market_contracts::MarketUpdate;
 
     use crate::{
@@ -339,22 +355,32 @@ pub async fn build_research_snapshot_from_database(
         rows: Some(all_pm_book_snapshots.len()),
     });
 
-    let started = Instant::now();
-    let deribit_result = load_deribit_feature_snapshots_with_timings(
-        pool,
-        &options.symbols,
-        options.start,
-        options.end,
-        options.observation_sample_secs,
-    )
-    .await;
-    let deribit_snapshots = deribit_result.snapshots;
-    phase_timings.extend(deribit_result.phase_timings);
-    phase_timings.push(ResearchSnapshotPhaseTiming {
-        phase: "deribit_snapshots".to_string(),
-        elapsed_ms: started.elapsed().as_millis(),
-        rows: Some(deribit_snapshots.len()),
-    });
+    let deribit_snapshots = if options.include_deribit {
+        let started = Instant::now();
+        let deribit_result = load_deribit_feature_snapshots_with_timings(
+            pool,
+            &options.symbols,
+            options.start,
+            options.end,
+            options.observation_sample_secs,
+        )
+        .await;
+        let deribit_snapshots = deribit_result.snapshots;
+        phase_timings.extend(deribit_result.phase_timings);
+        phase_timings.push(ResearchSnapshotPhaseTiming {
+            phase: "deribit_snapshots".to_string(),
+            elapsed_ms: started.elapsed().as_millis(),
+            rows: Some(deribit_snapshots.len()),
+        });
+        deribit_snapshots
+    } else {
+        phase_timings.push(ResearchSnapshotPhaseTiming {
+            phase: "deribit_snapshots_skipped".to_string(),
+            elapsed_ms: 0,
+            rows: Some(0),
+        });
+        Vec::new()
+    };
 
     let started = Instant::now();
     let updates_slice = slice_by_time(
@@ -382,7 +408,7 @@ pub async fn build_research_snapshot_from_database(
     if observations.is_empty() {
         quality_flags.push("no_factor_observations".to_string());
     }
-    if deribit_snapshots.is_empty() {
+    if options.include_deribit && deribit_snapshots.is_empty() {
         quality_flags.push("no_deribit_snapshots".to_string());
     }
     if all_pm_book_snapshots.is_empty() {
@@ -407,6 +433,10 @@ pub async fn build_research_snapshot_from_database(
             immutable_input: true,
             source_kind: "tango_postgres_compiled_snapshot".to_string(),
             optimizer_data_dir: options.optimizer_data_dir,
+            data_requirements: options.data_requirements,
+            data_audit_status: options.data_audit_status,
+            data_audit_report: options.data_audit_report,
+            include_deribit: options.include_deribit,
             artifacts: ResearchSnapshotArtifacts::default(),
             row_counts: ResearchSnapshotRowCounts {
                 observations: observations.len(),
@@ -463,6 +493,24 @@ fn compute_snapshot_hash(
     update(&mut hash, manifest.end.to_rfc3339().as_bytes());
     update(&mut hash, manifest.symbols.join(",").as_bytes());
     update(&mut hash, manifest.stake_usd.to_string().as_bytes());
+    update(&mut hash, manifest.data_requirements.join(",").as_bytes());
+    update(&mut hash, manifest.include_deribit.to_string().as_bytes());
+    update(
+        &mut hash,
+        manifest
+            .data_audit_status
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
+    );
+    update(
+        &mut hash,
+        manifest
+            .data_audit_report
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
+    );
     for artifact in [
         &manifest.artifacts.observations_json,
         &manifest.artifacts.deribit_snapshots_json,
@@ -501,6 +549,32 @@ fn write_quality_markdown(path: &Path, manifest: &ResearchSnapshotManifest) -> R
             .optimizer_data_dir
             .as_deref()
             .unwrap_or("<missing>")
+    ));
+    body.push_str(&format!(
+        "- Data requirements: `{}`\n",
+        if manifest.data_requirements.is_empty() {
+            "<unspecified>".to_string()
+        } else {
+            manifest.data_requirements.join(",")
+        }
+    ));
+    body.push_str(&format!(
+        "- Data audit status: `{}`\n",
+        manifest
+            .data_audit_status
+            .as_deref()
+            .unwrap_or("<not-recorded>")
+    ));
+    body.push_str(&format!(
+        "- Data audit report: `{}`\n",
+        manifest
+            .data_audit_report
+            .as_deref()
+            .unwrap_or("<not-recorded>")
+    ));
+    body.push_str(&format!(
+        "- Deribit included: `{}`\n",
+        manifest.include_deribit
     ));
     body.push_str(&format!(
         "- Rows: observations={}, deribit={}, pm_books={}\n",
@@ -562,6 +636,10 @@ mod tests {
                 immutable_input: true,
                 source_kind: "unit_test".to_string(),
                 optimizer_data_dir: Some("/tmp/immutable-parquet".to_string()),
+                data_requirements: vec!["polymarket_quotes".to_string()],
+                data_audit_status: Some("ok".to_string()),
+                data_audit_report: Some("data-gap-audit.json".to_string()),
+                include_deribit: false,
                 artifacts: ResearchSnapshotArtifacts::default(),
                 row_counts: ResearchSnapshotRowCounts::default(),
                 phase_timings: vec![ResearchSnapshotPhaseTiming {

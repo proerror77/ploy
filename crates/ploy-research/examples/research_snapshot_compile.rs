@@ -23,6 +23,15 @@ fn flag_present(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
 }
 
+fn parse_csv(raw: Option<String>, default: &str) -> Vec<String> {
+    raw.unwrap_or_else(|| default.to_string())
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 fn parse_date_start(raw: &str) -> DateTime<Utc> {
     let date = NaiveDate::parse_from_str(raw, "%Y-%m-%d")
         .unwrap_or_else(|_| panic!("invalid date: {raw}"));
@@ -59,13 +68,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| {
             parse_date_end(&flag_value(&args, "--end-date").expect("--end-date required"))
         });
-    let symbols: Vec<String> = flag_value(&args, "--symbols")
-        .unwrap_or_else(|| "BTCUSDT".to_string())
-        .split(',')
-        .map(str::trim)
-        .filter(|symbol| !symbol.is_empty())
-        .map(ToOwned::to_owned)
-        .collect();
+    let symbols: Vec<String> = parse_csv(flag_value(&args, "--symbols"), "BTCUSDT");
     let lob_sample_secs: i32 = flag_value(&args, "--lob-sample-secs")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(30);
@@ -81,14 +84,20 @@ async fn main() -> anyhow::Result<()> {
     let require_official_settlement = !flag_present(&args, "--allow-missing-official-settlement");
     let optimizer_data_dir =
         flag_value(&args, "--optimizer-data-dir").expect("--optimizer-data-dir required");
+    let data_requirements = parse_csv(flag_value(&args, "--data-requirements"), "all");
+    let data_audit_status = flag_value(&args, "--data-audit-status");
+    let data_audit_report = flag_value(&args, "--data-audit-report");
+    let include_deribit = !flag_present(&args, "--skip-deribit");
 
     eprintln!(
-        "research_snapshot_compile: {} -> {} for {:?}, stake_usd={:.2}, output={}",
+        "research_snapshot_compile: {} -> {} for {:?}, stake_usd={:.2}, output={}, data_requirements={}, include_deribit={}",
         start,
         end,
         symbols,
         stake_usd,
-        output_dir.display()
+        output_dir.display(),
+        data_requirements.join(","),
+        include_deribit
     );
 
     let pool = PgPoolOptions::new()
@@ -110,6 +119,10 @@ async fn main() -> anyhow::Result<()> {
             require_official_settlement,
             optimizer_data_dir: Some(optimizer_data_dir),
             git_sha: std::env::var("GITHUB_SHA").ok(),
+            data_requirements,
+            data_audit_status,
+            data_audit_report,
+            include_deribit,
         },
     )
     .await?;

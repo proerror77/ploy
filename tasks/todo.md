@@ -10222,3 +10222,62 @@ Review:
   in 28s. Post-merge workflow run `25041205036` verified quick + full retained
   window reporting with `fail_on=never` and completed successfully in 1m49s;
   `summary.md`, `quick.json`, and `full.json` were uploaded as artifacts.
+# Data-Requirement Scoped Research Workflows (2026-04-28)
+
+## Files
+
+- `scripts/audit_market_data_gaps.py`
+  - Owner: source-scoped data freshness/coverage audit.
+- `.github/workflows/research-snapshot.yml`
+  - Owner: snapshot compile preflight and provenance.
+- `.github/workflows/factor-review-v2.yml`
+  - Owner: fresh-snapshot factor review path.
+- `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: fresh-snapshot walk-forward path.
+- `.github/workflows/optimize.yml`
+  - Owner: snapshot-backed optimizer provenance.
+- `crates/ploy-research/src/research_snapshot.rs`
+  - Owner: immutable snapshot manifest data-requirement metadata.
+- `crates/ploy-research/examples/research_snapshot_compile.rs`
+  - Owner: CLI boundary for compiling scoped snapshots.
+- `tasks/todo.md`
+  - Owner: session tracker.
+
+## Tasks
+
+- [x] Add source/profile filtering to the market-data gap audit so projects can require only the data they consume.
+- [x] Make research snapshot compilation carry explicit data requirements and avoid loading Deribit data when not requested.
+- [x] Wire Research Snapshot, Factor Review, and Walk-Forward workflows to run scoped data audits before fresh snapshot compilation.
+- [x] Preserve scoped-data provenance in optimizer summaries.
+- [ ] Verify syntax, focused tests, PR/CI, and run the scoped workflow from `main`.
+
+## Review
+
+- 2026-04-28: Added scoped data profiles to the gap audit script. `pm5d-execution`
+  requires PM quotes, PM orderbooks, Binance price ticks, Binance agg trades, and
+  Binance LOB; it intentionally excludes Deribit IV/Greeks. `pm5d-vol` and
+  `all` keep Deribit requirements available for strategies that actually consume
+  volatility features.
+- 2026-04-28: Research snapshots now record `data_requirements`,
+  `data_audit_status`, `data_audit_report`, and `include_deribit` in the
+  immutable manifest/quality output. Fresh snapshot compilation supports
+  `--skip-deribit`, so execution-only projects do not load Deribit rows into the
+  snapshot artifact.
+- 2026-04-28: Research Snapshot, Factor Review V2, and Factor Walk-Forward V2 now
+  run a scoped required-source audit before compiling a fresh snapshot. The
+  default `data_gate=never` keeps the downstream workflow moving while preserving
+  the exact audit status in artifacts; operators can choose `critical` or `warn`
+  when they want a blocking gate.
+- 2026-04-28: Read-only Tango smoke of the new `pm5d-execution` profile returned
+  `critical` because `polymarket_orderbooks` had a 185-minute max gap over the
+  168-hour window, while Deribit Greeks were not part of the profile. This
+  confirms the new workflow separates "not needed by this project" from
+  "needed but currently degraded."
+- 2026-04-28: Local verification passed with Python compile for
+  `scripts/audit_market_data_gaps.py`, `git diff --check`, targeted
+  `rustfmt --edition 2024 --check`, workflow YAML parsing, `bash -n` over
+  embedded workflow shell steps, and
+  `CARGO_TARGET_DIR=/tmp/ploy-data-requirements-target rtk cargo test -p
+  ploy-research write_and_load_empty_snapshot_roundtrips_manifest --lib
+  --no-default-features`. Full `cargo fmt --check` was not used as evidence
+  because current repo/vendor files outside this slice already fail formatting.
