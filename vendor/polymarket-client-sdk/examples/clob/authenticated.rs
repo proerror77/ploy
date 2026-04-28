@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let market_order = client
         .market_order()
         .token_id(token_id)
-        .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+        .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
         .side(Side::Buy)
         .build()
         .await?;

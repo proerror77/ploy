@@ -17,7 +17,7 @@ use reqwest::StatusCode;
 use rust_decimal_macros::dec;
 
 use crate::common::{
-    USDC_DECIMALS, create_authenticated, ensure_requirements, to_decimal, token_1, token_2,
+    COLLATERAL_DECIMALS, create_authenticated, ensure_requirements, to_decimal, token_1, token_2,
 };
 
 /// Tests for the lifecycle of a [`Client`] as it moves from [`Unauthenticated`] to [`Authenticated`]
@@ -1284,7 +1284,7 @@ mod market {
                 let err = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .order_type(OrderType::FOK)
                     .build()
@@ -1324,7 +1324,7 @@ mod market {
                 let err = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .order_type(OrderType::FOK)
                     .build()
@@ -1368,7 +1368,7 @@ mod market {
                 let signable_order = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .order_type(OrderType::FOK)
                     .build()
@@ -1388,7 +1388,7 @@ mod market {
                         "15871154585880608648532107628464183779895785213830018178010423617714102767076"
                     )?
                 );
-                assert_eq!(signable_order.order.makerAmount, U256::from(100_000_000)); // 100 USDC
+                assert_eq!(signable_order.order.makerAmount, U256::from(100_000_000)); // 100 collateral
                 assert_eq!(signable_order.order.side, Side::Buy as u8);
                 assert_eq!(signable_order.order.signatureType, SignatureType::Eoa as u8);
 
@@ -1423,7 +1423,7 @@ mod market {
                 let signable_order = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .order_type(OrderType::FOK)
                     .build()
@@ -1435,7 +1435,7 @@ mod market {
                 let price = to_decimal(maker_amount) / to_decimal(taker_amount);
                 assert_eq!(price, dec!(0.4));
 
-                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 USDC
+                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 collateral
                 assert_eq!(taker_amount, U256::from(250_000_000)); // 250 `token_1()` tokens
 
                 Ok(())
@@ -1469,7 +1469,7 @@ mod market {
                 let signable_order = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .order_type(OrderType::FOK)
                     .build()
@@ -1481,7 +1481,7 @@ mod market {
                 let price = to_decimal(maker_amount) / to_decimal(taker_amount);
                 assert_eq!(price, dec!(0.5));
 
-                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 USDC
+                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 collateral
                 assert_eq!(taker_amount, U256::from(200_000_000)); // 200 `token_1()` tokens
 
                 Ok(())
@@ -1515,7 +1515,7 @@ mod market {
                 let signable_order = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .order_type(OrderType::FOK)
                     .build()
@@ -1527,7 +1527,7 @@ mod market {
                 let price = to_decimal(maker_amount) / to_decimal(taker_amount);
                 assert_eq!(price, dec!(0.5));
 
-                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 USDC
+                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 collateral
                 assert_eq!(taker_amount, U256::from(200_000_000)); // 200 `token_1()` tokens
 
                 Ok(())
@@ -1547,7 +1547,7 @@ mod market {
                 let err = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .build()
                     .await
@@ -1586,7 +1586,7 @@ mod market {
                 let signable_order = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .build()
                     .await?;
@@ -1605,7 +1605,7 @@ mod market {
                         "15871154585880608648532107628464183779895785213830018178010423617714102767076"
                     )?
                 );
-                assert_eq!(signable_order.order.makerAmount, U256::from(100_000_000)); // 100 USDC
+                assert_eq!(signable_order.order.makerAmount, U256::from(100_000_000)); // 100 collateral
                 assert_eq!(signable_order.order.side, Side::Buy as u8);
                 assert_eq!(signable_order.order.signatureType, SignatureType::Eoa as u8);
 
@@ -1640,7 +1640,7 @@ mod market {
                 let signable_order = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .build()
                     .await?;
@@ -1651,7 +1651,7 @@ mod market {
                 let price = to_decimal(maker_amount) / to_decimal(taker_amount);
                 assert_eq!(price, dec!(0.5));
 
-                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 USDC
+                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 collateral
                 assert_eq!(taker_amount, U256::from(200_000_000)); // 200 `token_1()` tokens
 
                 Ok(())
@@ -1685,7 +1685,7 @@ mod market {
                 let signable_order = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .build()
                     .await?;
@@ -1696,7 +1696,7 @@ mod market {
                 let price = to_decimal(maker_amount) / to_decimal(taker_amount);
                 assert_eq!(price, dec!(0.4));
 
-                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 USDC
+                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 collateral
                 assert_eq!(taker_amount, U256::from(250_000_000)); // 250 `token_1()` tokens
 
                 Ok(())
@@ -1730,7 +1730,7 @@ mod market {
                 let signable_order = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .build()
                     .await?;
@@ -1741,7 +1741,7 @@ mod market {
                 let price = to_decimal(maker_amount) / to_decimal(taker_amount);
                 assert_eq!(price, dec!(0.5));
 
-                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 USDC
+                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 collateral
                 assert_eq!(taker_amount, U256::from(200_000_000)); // 200 `token_1()` tokens
 
                 Ok(())
@@ -1775,7 +1775,7 @@ mod market {
                 let signable_order = client
                     .market_order()
                     .token_id(token_1())
-                    .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                    .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                     .side(Side::Buy)
                     .build()
                     .await?;
@@ -1786,7 +1786,7 @@ mod market {
                 let price = to_decimal(maker_amount) / to_decimal(taker_amount);
                 assert_eq!(price, dec!(0.5));
 
-                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 USDC
+                assert_eq!(maker_amount, U256::from(100_000_000)); // 100 collateral
                 assert_eq!(taker_amount, U256::from(200_000_000)); // 200 `token_1()` tokens
 
                 Ok(())
@@ -1813,7 +1813,7 @@ mod market {
             let signable_order = client
                 .market_order()
                 .token_id(token_1())
-                .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                 .side(Side::Buy)
                 .build()
                 .await?;
@@ -1854,7 +1854,7 @@ mod market {
             let signable_order = client
                 .market_order()
                 .token_id(token_1())
-                .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                 .side(Side::Buy)
                 .build()
                 .await?;
@@ -1863,7 +1863,7 @@ mod market {
             let taker_amount = signable_order.order.takerAmount;
 
             let price = (to_decimal(maker_amount) / to_decimal(taker_amount))
-                .trunc_with_scale(USDC_DECIMALS);
+                .trunc_with_scale(COLLATERAL_DECIMALS);
             assert_eq!(price, dec!(0.56));
 
             assert_eq!(signable_order.order.maker, client.address());
@@ -1896,7 +1896,7 @@ mod market {
             let signable_order = client
                 .market_order()
                 .token_id(token_1())
-                .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                 .side(Side::Buy)
                 .build()
                 .await?;
@@ -1905,7 +1905,7 @@ mod market {
             let taker_amount = signable_order.order.takerAmount;
 
             let price = (to_decimal(maker_amount) / to_decimal(taker_amount))
-                .trunc_with_scale(USDC_DECIMALS);
+                .trunc_with_scale(COLLATERAL_DECIMALS);
             assert_eq!(price, dec!(0.056));
 
             assert_eq!(signable_order.order.maker, client.address());
@@ -1939,7 +1939,7 @@ mod market {
             let signable_order = client
                 .market_order()
                 .token_id(token_1())
-                .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+                .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
                 .side(Side::Buy)
                 .build()
                 .await?;
@@ -1948,7 +1948,7 @@ mod market {
             let taker_amount = signable_order.order.takerAmount;
 
             let price = (to_decimal(maker_amount) / to_decimal(taker_amount))
-                .trunc_with_scale(USDC_DECIMALS);
+                .trunc_with_scale(COLLATERAL_DECIMALS);
             assert_eq!(price, dec!(0.0056));
 
             assert_eq!(signable_order.order.maker, client.address());
@@ -2032,7 +2032,7 @@ mod market {
         }
 
         #[tokio::test]
-        async fn market_buy_with_shares_should_succeed_and_encode_maker_as_usdc()
+        async fn market_buy_with_shares_should_succeed_and_encode_maker_as_collateral()
         -> anyhow::Result<()> {
             let server = MockServer::start();
             let client = create_authenticated(&server).await?;
@@ -2063,7 +2063,7 @@ mod market {
                 .build()
                 .await?;
 
-            // maker = USDC, taker = shares
+            // maker = collateral, taker = shares
             assert_eq!(signable_order.order.makerAmount, U256::from(100_000_000)); // 250 * 0.4 = 100
             Ok(())
         }
@@ -2100,7 +2100,7 @@ mod market {
                 .build()
                 .await?;
 
-            // maker = USDC, taker = shares
+            // maker = collateral, taker = shares
             assert_eq!(signable_order.order.makerAmount, U256::from(125_000_000)); // 250 * 0.5 = 125
             Ok(())
         }
@@ -2257,7 +2257,7 @@ mod market {
                     )?
                 );
                 assert_eq!(maker_amount, U256::from(100_000_000)); // 100 `token_1()` tokens
-                assert_eq!(taker_amount, U256::from(50_000_000)); // 50 USDC
+                assert_eq!(taker_amount, U256::from(50_000_000)); // 50 collateral
                 assert_eq!(signable_order.order.side, Side::Sell as u8);
                 assert_eq!(signable_order.order.signatureType, SignatureType::Eoa as u8);
 
@@ -2305,7 +2305,7 @@ mod market {
                 assert_eq!(price, dec!(0.4));
 
                 assert_eq!(maker_amount, U256::from(100_000_000)); // 100 `token_1()` tokens
-                assert_eq!(taker_amount, U256::from(40_000_000)); // 40 USDC
+                assert_eq!(taker_amount, U256::from(40_000_000)); // 40 collateral
 
                 Ok(())
             }
@@ -2351,7 +2351,7 @@ mod market {
                 assert_eq!(price, dec!(0.4));
 
                 assert_eq!(maker_amount, U256::from(200_000_000)); // 200 `token_1()` tokens
-                assert_eq!(taker_amount, U256::from(80_000_000)); // 80 USDC
+                assert_eq!(taker_amount, U256::from(80_000_000)); // 80 collateral
 
                 Ok(())
             }
@@ -2397,7 +2397,7 @@ mod market {
                 assert_eq!(price, dec!(0.3));
 
                 assert_eq!(maker_amount, U256::from(300_000_000)); // 300 `token_1()` tokens
-                assert_eq!(taker_amount, U256::from(90_000_000)); // 90 USDC
+                assert_eq!(taker_amount, U256::from(90_000_000)); // 90 collateral
 
                 Ok(())
             }
@@ -2443,7 +2443,7 @@ mod market {
                 assert_eq!(price, dec!(0.3));
 
                 assert_eq!(maker_amount, U256::from(300_000_000)); // 300 `token_1()` tokens
-                assert_eq!(taker_amount, U256::from(90_000_000)); // 90 USDC
+                assert_eq!(taker_amount, U256::from(90_000_000)); // 90 collateral
 
                 Ok(())
             }
@@ -2520,7 +2520,7 @@ mod market {
                         "15871154585880608648532107628464183779895785213830018178010423617714102767076"
                     )?
                 );
-                assert_eq!(signable_order.order.makerAmount, U256::from(100_000_000)); // 100 USDC
+                assert_eq!(signable_order.order.makerAmount, U256::from(100_000_000)); // 100 collateral
                 assert_eq!(signable_order.order.side, Side::Sell as u8);
                 assert_eq!(signable_order.order.signatureType, SignatureType::Eoa as u8);
 
@@ -2567,7 +2567,7 @@ mod market {
                 assert_eq!(price, dec!(0.5));
 
                 assert_eq!(maker_amount, U256::from(100_000_000)); // 100 `token_1()` tokens
-                assert_eq!(taker_amount, U256::from(50_000_000)); // 50 USDC
+                assert_eq!(taker_amount, U256::from(50_000_000)); // 50 collateral
 
                 Ok(())
             }
@@ -2612,7 +2612,7 @@ mod market {
                 assert_eq!(price, dec!(0.4));
 
                 assert_eq!(maker_amount, U256::from(100_000_000)); // 100 `token_1()` tokens
-                assert_eq!(taker_amount, U256::from(40_000_000)); // 40 USDC
+                assert_eq!(taker_amount, U256::from(40_000_000)); // 40 collateral
 
                 Ok(())
             }
@@ -2657,7 +2657,7 @@ mod market {
                 assert_eq!(price, dec!(0.4));
 
                 assert_eq!(maker_amount, U256::from(200_000_000)); // 200 `token_1()` tokens
-                assert_eq!(taker_amount, U256::from(80_000_000)); // 80 USDC
+                assert_eq!(taker_amount, U256::from(80_000_000)); // 80 collateral
 
                 Ok(())
             }
@@ -2702,7 +2702,7 @@ mod market {
                 assert_eq!(price, dec!(0.5));
 
                 assert_eq!(maker_amount, U256::from(100_000_000)); // 100 `token_1()` tokens
-                assert_eq!(taker_amount, U256::from(50_000_000)); // 50 USDC
+                assert_eq!(taker_amount, U256::from(50_000_000)); // 50 collateral
 
                 Ok(())
             }
@@ -2747,7 +2747,7 @@ mod market {
                 assert_eq!(price, dec!(0.3));
 
                 assert_eq!(maker_amount, U256::from(300_000_000)); // 300 `token_1()` tokens
-                assert_eq!(taker_amount, U256::from(90_000_000)); // 90 USDC
+                assert_eq!(taker_amount, U256::from(90_000_000)); // 90 collateral
 
                 Ok(())
             }
@@ -2823,7 +2823,7 @@ mod market {
             let taker_amount = signable_order.order.takerAmount;
 
             let price = (to_decimal(taker_amount) / to_decimal(maker_amount))
-                .trunc_with_scale(USDC_DECIMALS);
+                .trunc_with_scale(COLLATERAL_DECIMALS);
             assert_eq!(price, dec!(0.56));
 
             assert_eq!(signable_order.order.maker, client.address());
@@ -2865,7 +2865,7 @@ mod market {
             let taker_amount = signable_order.order.takerAmount;
 
             let price = (to_decimal(taker_amount) / to_decimal(maker_amount))
-                .trunc_with_scale(USDC_DECIMALS);
+                .trunc_with_scale(COLLATERAL_DECIMALS);
             assert_eq!(price, dec!(0.056));
 
             assert_eq!(signable_order.order.maker, client.address());
@@ -2907,7 +2907,7 @@ mod market {
             let taker_amount = signable_order.order.takerAmount;
 
             let price = (to_decimal(taker_amount) / to_decimal(maker_amount))
-                .trunc_with_scale(USDC_DECIMALS);
+                .trunc_with_scale(COLLATERAL_DECIMALS);
             assert_eq!(price, dec!(0.0056));
 
             assert_eq!(signable_order.order.maker, client.address());
@@ -2928,7 +2928,7 @@ mod market {
 
         let err = client
             .market_order()
-            .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+            .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
             .side(Side::Buy)
             .build()
             .await
@@ -2940,7 +2940,7 @@ mod market {
         let err = client
             .market_order()
             .token_id(token_1())
-            .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+            .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
             .build()
             .await
             .unwrap_err();
@@ -2989,7 +2989,7 @@ mod market {
     }
 
     #[tokio::test]
-    async fn market_sell_with_usdc_should_fail() -> anyhow::Result<()> {
+    async fn market_sell_with_collateral_should_fail() -> anyhow::Result<()> {
         let server = MockServer::start();
         let client = create_authenticated(&server).await?;
 
@@ -2998,7 +2998,7 @@ mod market {
         let err = client
             .market_order()
             .token_id(token_1())
-            .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+            .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
             .side(Side::Sell)
             .build()
             .await

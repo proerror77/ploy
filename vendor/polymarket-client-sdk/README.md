@@ -252,7 +252,7 @@ async fn main() -> anyhow::Result<()> {
     let order = client
         .market_order()
         .token_id("<token-id>")
-        .amount(Amount::usdc(Decimal::ONE_HUNDRED)?)
+        .amount(Amount::collateral(Decimal::ONE_HUNDRED)?)
         .side(Side::Buy)
         .order_type(OrderType::FOK)
         .build()
@@ -482,17 +482,17 @@ If you are using a proxy or [Safe](https://help.safe.global/en/articles/40869-wh
 
 ### What are allowances?
 Think of allowances as permissions. Before Polymarket can move your funds to execute trades, you need to give the
-exchange contracts permission to access your USDC and conditional tokens.
+exchange contracts permission to access your pUSD collateral and conditional tokens.
 
 ### Quick Setup
 You need to approve two types of tokens:
-1. **USDC** (for deposits and trading)
+1. **pUSD collateral** (for deposits and trading)
 2. **Conditional Tokens** (the outcome tokens you trade)
 
 Each needs approval for the exchange contracts to work properly.
 
 ### Setting Allowances
-Use [examples/approvals.rs](examples/approvals.rs) to approve the right contracts. Run once to approve USDC. Then change
+Use [examples/approvals.rs](examples/approvals.rs) to approve the right contracts. Run once to approve pUSD collateral. Then change
 the `TOKEN_TO_APPROVE` and run for each conditional token.
 
 **Pro tip**: You only need to set these once per wallet. After that, you can trade freely.

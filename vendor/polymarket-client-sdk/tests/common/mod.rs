@@ -51,7 +51,7 @@ pub const POLY_BUILDER_TIMESTAMP: &str = "POLY_BUILDER_TIMESTAMP";
 pub const API_KEY: Uuid = Uuid::nil();
 pub const BUILDER_API_KEY: Uuid = Uuid::max();
 
-pub const USDC_DECIMALS: u32 = 6;
+pub const COLLATERAL_DECIMALS: u32 = 6;
 
 pub type TestClient = Client<Authenticated<Normal>>;
 

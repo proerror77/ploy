@@ -193,9 +193,9 @@ impl Serialize for Asset {
 #[derive(Debug, Clone, Serialize, Builder)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRfqRequestRequest {
-    /// Token ID the Requester wants to receive. "0" indicates USDC.
+    /// Token ID the Requester wants to receive. "0" indicates collateral.
     pub asset_in: Asset,
-    /// Token ID the Requester wants to give. "0" indicates USDC.
+    /// Token ID the Requester wants to give. "0" indicates collateral.
     pub asset_out: Asset,
     /// Amount of asset to receive (in base units).
     pub amount_in: Decimal,
@@ -244,10 +244,12 @@ pub struct RfqRequestsRequest {
     pub size_min: Option<Decimal>,
     /// Maximum size in tokens.
     pub size_max: Option<Decimal>,
-    /// Minimum size in USDC.
-    pub size_usdc_min: Option<Decimal>,
-    /// Maximum size in USDC.
-    pub size_usdc_max: Option<Decimal>,
+    /// Minimum size in collateral.
+    #[serde(rename = "sizeUsdcMin")]
+    pub size_collateral_min: Option<Decimal>,
+    /// Maximum size in collateral.
+    #[serde(rename = "sizeUsdcMax")]
+    pub size_collateral_max: Option<Decimal>,
     /// Minimum price.
     pub price_min: Option<Decimal>,
     /// Maximum price.
@@ -267,9 +269,9 @@ pub struct RfqRequestsRequest {
 pub struct CreateRfqQuoteRequest {
     /// ID of the Request to quote.
     pub request_id: String,
-    /// Token ID the Quoter wants to receive. "0" indicates USDC.
+    /// Token ID the Quoter wants to receive. "0" indicates collateral.
     pub asset_in: Asset,
-    /// Token ID the Quoter wants to give. "0" indicates USDC.
+    /// Token ID the Quoter wants to give. "0" indicates collateral.
     pub asset_out: Asset,
     /// Amount of asset to receive (in base units).
     pub amount_in: Decimal,
@@ -322,10 +324,12 @@ pub struct RfqQuotesRequest {
     pub size_min: Option<Decimal>,
     /// Maximum size in tokens.
     pub size_max: Option<Decimal>,
-    /// Minimum size in USDC.
-    pub size_usdc_min: Option<Decimal>,
-    /// Maximum size in USDC.
-    pub size_usdc_max: Option<Decimal>,
+    /// Minimum size in collateral.
+    #[serde(rename = "sizeUsdcMin")]
+    pub size_collateral_min: Option<Decimal>,
+    /// Maximum size in collateral.
+    #[serde(rename = "sizeUsdcMax")]
+    pub size_collateral_max: Option<Decimal>,
     /// Minimum price.
     pub price_min: Option<Decimal>,
     /// Maximum price.

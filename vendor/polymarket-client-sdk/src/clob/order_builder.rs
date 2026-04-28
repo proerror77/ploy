@@ -16,13 +16,13 @@ use crate::clob::types::{
 use crate::error::Error;
 use crate::types::{Address, Decimal};
 
-pub(crate) const USDC_DECIMALS: u32 = 6;
+pub(crate) const COLLATERAL_DECIMALS: u32 = 6;
 
 /// Maximum number of decimal places for `size`
 pub(crate) const LOT_SIZE_SCALE: u32 = 2;
 
-/// Polymarket market BUY orders reject maker USDC beyond cents.
-pub(crate) const MARKET_USDC_DECIMALS: u32 = 2;
+/// Polymarket market BUY orders reject maker collateral beyond cents.
+pub(crate) const MARKET_COLLATERAL_DECIMALS: u32 = 2;
 
 /// Polymarket market orders allow taker share precision up to four decimals.
 pub(crate) const MARKET_SHARE_DECIMALS: u32 = 4;
@@ -181,14 +181,14 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             ));
         }
 
-        // When buying `YES` tokens, the user will "make" `size` * `price` USDC and "take"
+        // When buying `YES` tokens, the user will "make" `size` * `price` collateral and "take"
         // `size` `YES` tokens, and vice versa for sells. We have to truncate the notional values
         // to the combined precision of the tick size _and_ the lot size. This is to ensure that
         // this order will "snap" to the precision of resting orders on the book. The returned
-        // values are quantized to `USDC_DECIMALS`.
+        // values are quantized to `COLLATERAL_DECIMALS`.
         //
         // e.g. User submits a limit order to buy 100 `YES` tokens at $0.34.
-        // This means they will take/receive 100 `YES` tokens, make/give up 34 USDC. This means that
+        // This means they will take/receive 100 `YES` tokens, make/give up 34 collateral. This means that
         // the `taker_amount` is `100000000` and the `maker_amount` of `34000000`.
         let (taker_amount, maker_amount) = match side {
             Side::Buy => (
@@ -251,7 +251,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 
     // Attempts to calculate the market price from the top of the book for the particular token.
     // - Uses an orderbook depth search to find the cutoff price:
-    //   - BUY + USDC: walk asks until notional >= USDC
+    //   - BUY + collateral: walk asks until notional >= collateral
     //   - BUY + Shares: walk asks until shares >= N
     //   - SELL + Shares: walk bids until shares >= N
     async fn calculate_price(&self, order_type: OrderType) -> Result<Decimal> {
@@ -282,7 +282,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
             Side::Buy => (book.asks, amount.0),
             Side::Sell => match amount.0 {
                 a @ AmountInner::Shares(_) => (book.bids, a),
-                AmountInner::Usdc(_) => {
+                AmountInner::Collateral(_) => {
                     return Err(Error::validation(
                         "Sell Orders must specify their `amount`s in shares",
                     ));
@@ -299,7 +299,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         let mut sum = Decimal::ZERO;
         let cutoff_price = levels.iter().rev().find_map(|level| {
             match amount {
-                AmountInner::Usdc(_) => sum += level.size * level.price,
+                AmountInner::Collateral(_) => sum += level.size * level.price,
                 AmountInner::Shares(_) => sum += level.size,
             }
             (sum >= amount.as_inner()).then_some(level.price)
@@ -366,12 +366,12 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
             )));
         }
 
-        // When buying `YES` tokens, the user will "make" `USDC` dollars and "take"
-        // `USDC` / `price` `YES` tokens. When selling `YES` tokens, the user will "make" `YES`
+        // When buying `YES` tokens, the user will "make" collateral dollars and "take"
+        // collateral / `price` `YES` tokens. When selling `YES` tokens, the user will "make" `YES`
         // token shares, and "take" `YES` shares * `price`. We have to truncate the notional values
         // to the combined precision of the tick size _and_ the lot size. This is to ensure that
         // this order will "snap" to the precision of resting orders on the book. The returned
-        // values are quantized to `USDC_DECIMALS`.
+        // values are quantized to `COLLATERAL_DECIMALS`.
         //
         // e.g. User submits a market order to buy $100 worth of `YES` tokens at
         // the current `market_price` of $0.34. This means they will take/receive (100/0.34)
@@ -385,28 +385,28 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         let raw_amount = amount.as_inner();
 
         let (taker_amount, maker_amount) = match (side, amount.0) {
-            // Spend USDC to buy shares
-            (Side::Buy, AmountInner::Usdc(_)) => {
-                let usdc = raw_amount.trunc_with_scale(MARKET_USDC_DECIMALS);
-                let shares = (usdc / price).trunc_with_scale(MARKET_SHARE_DECIMALS);
-                (shares, usdc)
+            // Spend collateral to buy shares
+            (Side::Buy, AmountInner::Collateral(_)) => {
+                let collateral = raw_amount.trunc_with_scale(MARKET_COLLATERAL_DECIMALS);
+                let shares = (collateral / price).trunc_with_scale(MARKET_SHARE_DECIMALS);
+                (shares, collateral)
             }
 
             // Buy N shares: use cutoff `price` derived from ask depth
             (Side::Buy, AmountInner::Shares(_)) => {
                 let shares = raw_amount.trunc_with_scale(MARKET_SHARE_DECIMALS);
-                let usdc = ceil_with_scale(shares * price, MARKET_USDC_DECIMALS);
-                (shares, usdc)
+                let collateral = ceil_with_scale(shares * price, MARKET_COLLATERAL_DECIMALS);
+                (shares, collateral)
             }
 
-            // Sell N shares for USDC
+            // Sell N shares for collateral
             (Side::Sell, AmountInner::Shares(_)) => {
                 let shares = raw_amount.trunc_with_scale(MARKET_SHARE_DECIMALS);
-                let usdc = (shares * price).trunc_with_scale(MARKET_USDC_DECIMALS);
-                (usdc, shares)
+                let collateral = (shares * price).trunc_with_scale(MARKET_COLLATERAL_DECIMALS);
+                (collateral, shares)
             }
 
-            (Side::Sell, AmountInner::Usdc(_)) => {
+            (Side::Sell, AmountInner::Collateral(_)) => {
                 return Err(Error::validation(
                     "Sell Orders must specify their `amount`s in shares",
                 ));
@@ -447,11 +447,11 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
     }
 }
 
-/// Removes trailing zeros, truncates to [`USDC_DECIMALS`] decimal places, and quanitizes as an
+/// Removes trailing zeros, truncates to [`COLLATERAL_DECIMALS`] decimal places, and quanitizes as an
 /// integer.
 fn to_fixed_u128(d: Decimal) -> u128 {
     d.normalize()
-        .trunc_with_scale(USDC_DECIMALS)
+        .trunc_with_scale(COLLATERAL_DECIMALS)
         .mantissa()
         .to_u128()
         .expect("The `build` call in `OrderBuilder<S, OrderKind, K>` ensures that only positive values are being multiplied/divided")
