@@ -118,6 +118,55 @@ fn display_bytes(bytes: u64) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utc_ts(day: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 4, day, 0, 0, 0)
+            .single()
+            .expect("valid test timestamp")
+    }
+
+    #[test]
+    fn validate_preflight_rejects_empty_parquet_manifest() {
+        let manifest = PreflightManifest {
+            splits: vec![
+                SplitPreflight {
+                    label: "train",
+                    ..SplitPreflight::default()
+                },
+                SplitPreflight {
+                    label: "val",
+                    ..SplitPreflight::default()
+                },
+            ],
+        };
+        let limits = PreflightLimits {
+            max_rows: 15_000_000,
+            max_bytes: 80 * 1024 * 1024 * 1024,
+            max_symbols: 6,
+            max_days: 8,
+            allow_large_window: false,
+        };
+        let symbols = vec!["BTCUSDT".to_string()];
+
+        let error = validate_preflight(
+            &manifest,
+            &symbols,
+            utc_ts(21),
+            utc_ts(27),
+            &limits,
+            true,
+        )
+        .expect_err("empty parquet manifest should be rejected");
+
+        assert!(error.contains("zero rows"));
+        assert!(error.contains("train split has zero rows"));
+        assert!(error.contains("val split has zero rows"));
+    }
+}
+
 fn load_research_snapshot_manifest(path: &str) -> ResearchSnapshotManifestProbe {
     let manifest_path = std::path::Path::new(path).join("manifest.json");
     let file = std::fs::File::open(&manifest_path).unwrap_or_else(|error| {
@@ -278,6 +327,20 @@ fn validate_preflight(
     let rows = manifest.total_rows();
     let bytes = manifest.max_split_bytes();
     let mut failures = Vec::new();
+    if rows == 0 {
+        failures.push(
+            "preflight found zero rows across train+validation; check parquet sync and date window"
+                .to_string(),
+        );
+    }
+    for split in &manifest.splits {
+        if split.total_rows() == 0 {
+            failures.push(format!(
+                "{} split has zero rows; check parquet sync and date window",
+                split.label
+            ));
+        }
+    }
     if !limits.allow_large_window {
         if rows > limits.max_rows {
             failures.push(format!(
@@ -373,6 +436,14 @@ fn parquet_preflight_manifest(
     val_from: chrono::DateTime<Utc>,
     val_to: chrono::DateTime<Utc>,
 ) -> std::result::Result<PreflightManifest, Box<dyn std::error::Error>> {
+    let data_path = std::path::Path::new(data_dir);
+    if !data_path.exists() {
+        return Err(format!("Parquet data directory does not exist: {data_dir}").into());
+    }
+    if !data_path.is_dir() {
+        return Err(format!("Parquet data path is not a directory: {data_dir}").into());
+    }
+
     let conn = open_duckdb_for_preflight()?;
     Ok(PreflightManifest {
         splits: vec![

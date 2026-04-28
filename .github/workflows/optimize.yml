@@ -192,7 +192,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Sync Parquet data from Tango-1-1
-        if: ${{ github.event.inputs.allow_live_parquet_debug == 'true' }}
+        if: ${{ github.event.inputs.snapshot_run_id != '' || github.event.inputs.allow_live_parquet_debug == 'true' }}
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.TANGO_SSH_KEY }}" > ~/.ssh/tango_key
