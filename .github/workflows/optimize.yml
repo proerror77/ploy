@@ -217,23 +217,42 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/optimize
-          node <<'NODE' > artifacts/optimize/snapshot-provenance.txt
-          const fs = require('fs');
-          const manifest = JSON.parse(fs.readFileSync('artifacts/research-snapshot/manifest.json', 'utf8'));
-          const lines = [
-            '# Research Snapshot Provenance',
-            `schema_version=${manifest.schema_version ?? ''}`,
-            `snapshot_hash=${manifest.snapshot_hash ?? ''}`,
-            `generated_at=${manifest.generated_at ?? ''}`,
-            `git_sha=${manifest.git_sha ?? ''}`,
-            `symbols=${(manifest.symbols ?? []).join(',')}`,
-            `start=${manifest.start ?? ''}`,
-            `end=${manifest.end ?? ''}`,
-            `immutable_input=${manifest.immutable_input ?? ''}`,
-            `optimizer_data_dir=${manifest.optimizer_data_dir ?? ''}`,
-          ];
-          console.log(lines.join('\n'));
-          NODE
+          if command -v python3 >/dev/null 2>&1; then
+            python3 <<'PY' > artifacts/optimize/snapshot-provenance.txt
+          import json
+
+          with open("artifacts/research-snapshot/manifest.json", encoding="utf-8") as fh:
+              manifest = json.load(fh)
+
+          def value(name):
+              raw = manifest.get(name, "")
+              if isinstance(raw, list):
+                  return ",".join(str(item) for item in raw)
+              if isinstance(raw, bool):
+                  return str(raw).lower()
+              return raw
+
+          lines = [
+              "# Research Snapshot Provenance",
+              f"schema_version={value('schema_version')}",
+              f"snapshot_hash={value('snapshot_hash')}",
+              f"generated_at={value('generated_at')}",
+              f"git_sha={value('git_sha')}",
+              f"symbols={value('symbols')}",
+              f"start={value('start')}",
+              f"end={value('end')}",
+              f"immutable_input={value('immutable_input')}",
+              f"optimizer_data_dir={value('optimizer_data_dir')}",
+          ]
+          print("\n".join(str(line) for line in lines))
+          PY
+          else
+            {
+              echo "# Research Snapshot Provenance"
+              echo "python3_missing=true"
+              sed -n '1,120p' artifacts/research-snapshot/manifest.json
+            } > artifacts/optimize/snapshot-provenance.txt
+          fi
           cat artifacts/optimize/snapshot-provenance.txt >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Preflight Parquet manifest
