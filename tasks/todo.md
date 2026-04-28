@@ -30,6 +30,7 @@
 - 2026-04-28: Added dry-run configs/manifests for `pm5d.threelayer.obi-soft.dryrun` and `pm5d.threelayer.champion.dryrun`, both with fixed `stake_usd=15.0`, six symbols, dry-run mode, and optimizer params from runs `25046098899` and `25046098829`. The Tango deploy workflow now bundles and installs both strategy TOMLs.
 - 2026-04-28: Local focused verification passed: `rustfmt --edition 2024` on touched Rust files, JSON parsing for both manifests, Python `tomllib` parsing for both strategy configs with `stake_usd=15.0`, workflow YAML parse via Ruby, `CARGO_TARGET_DIR=/tmp/ploy-profile-dryrun-test rtk cargo test -p ploy-strategy-bundles three_layer --lib`, and `git diff --check`.
 - 2026-04-28: PR CI initially caught a missing `three_layer_strategy_profile` field in the built-in `run_backtest` example defaults. Added the field and root re-export, then verified `CARGO_TARGET_DIR=/tmp/ploy-profile-dryrun-test rtk cargo test --locked -p ploy-strategy-bundles --example run_backtest --no-run` plus the focused three-layer lib tests.
+- 2026-04-28: A second CI pass found the same missing default in integration-test and optimizer-example hand-written configs. Added `ThreeLayerProfile::Mixed` there and verified `CARGO_TARGET_DIR=/tmp/ploy-profile-dryrun-test rtk cargo test --locked -p ploy-strategy-bundles --tests --no-run`, `--example optimize_backtest --no-run`, `--example run_backtest --no-run`, and `git diff --check`.
 
 ## Files
 
