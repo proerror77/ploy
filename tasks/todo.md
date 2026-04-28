@@ -10023,3 +10023,37 @@ Review:
 ## Review
 
 - 2026-04-28: Added a full redesign proposal that moves canonical research from direct raw PostgreSQL replay to immutable snapshot-backed replay. Tango remains the raw collector source of truth; `ploy-ci-1` compiles reusable Parquet/Arrow tapes and runs factor review/walk-forward from those artifacts.
+
+# Market Data Gap Audit (2026-04-28)
+
+## Files
+
+- `scripts/audit_market_data_gaps.py`
+  - Owner: lightweight PostgreSQL-backed market-data coverage audit
+- `.github/workflows/deploy-tango-1-1.yml`
+  - Owner: ship the audit script in the Tango deploy bundle
+- `tasks/todo.md`
+  - Owner: session tracker
+
+## Tasks
+
+- [x] Add a bounded index-probe audit for 7-day collector coverage.
+- [x] Include PM quotes, Binance price/aggTrade/LOB, Deribit IV/Greeks, and `research_valid_windows`.
+- [x] Verify locally with Python syntax/help checks.
+- [x] Run the audit on `tango-1-1` and capture the data-quality result.
+
+## Review
+
+- 2026-04-28: Added `scripts/audit_market_data_gaps.py`, a dependency-free psql
+  audit that checks 7-day coverage through closed time buckets and lateral index
+  probes rather than full-range `GROUP BY date_trunc(...)` scans. The script is
+  bundled into the Tango deploy artifact so operators can rerun it from
+  `/opt/ploy/scripts/audit_market_data_gaps.py` after deploy.
+- 2026-04-28: Verification passed: `python3 -m py_compile scripts/audit_market_data_gaps.py`,
+  `python3 scripts/audit_market_data_gaps.py --help`, `git diff --check`, a
+  1-hour Tango smoke audit, and a full 7-day Tango audit saved at
+  `/tmp/market_data_gap_audit_20260428T0018Z.json`.
+- 2026-04-28: The 7-day audit found current collection healthy for PM quotes,
+  Binance price/aggTrade/LOB across BTC/ETH/SOL/XRP/DOGE/BNB, Deribit IV, and
+  `research_valid_windows`, but marked `deribit_atm_greeks` critical because the
+  repo-backed collector only covers from about `2026-04-28 06:33 +08` onward.
