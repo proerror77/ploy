@@ -277,12 +277,18 @@ jobs:
 
       - name: Download research snapshot
         if: ${{ github.event.inputs.snapshot_run_id != '' }}
-        uses: actions/download-artifact@v8
-        with:
-          name: research-snapshot-${{ github.event.inputs.snapshot_run_id }}
-          path: artifacts/research-snapshot
-          run-id: ${{ github.event.inputs.snapshot_run_id }}
-          github-token: ${{ github.token }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/research-snapshot
+          python3 scripts/download_github_artifact.py \
+            --run-id "${SNAPSHOT_RUN_ID}" \
+            --name "research-snapshot-${SNAPSHOT_RUN_ID}" \
+            --output-dir artifacts/research-snapshot \
+            --require manifest.json \
+            --require quality.md
 
       - name: Compile research snapshot
         if: ${{ github.event.inputs.snapshot_run_id == '' && github.event.inputs.compile_snapshot == 'true' }}

@@ -187,22 +187,35 @@ jobs:
           ref: ${{ github.event.inputs.git_ref }}
 
       - name: Download optimize runner
-        uses: actions/download-artifact@v8
-        with:
-          name: optimize-runner-${{ github.sha }}
-          path: target/release/examples
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/release/examples
+          rm -f target/release/examples/optimize-runner
+          python3 scripts/download_github_artifact.py \
+            --run-id "${GITHUB_RUN_ID}" \
+            --name "optimize-runner-${GITHUB_SHA}" \
+            --output-dir target/release/examples \
+            --require optimize-runner
 
       - name: Make binary executable
         run: chmod +x target/release/examples/optimize-runner
 
       - name: Download research snapshot
         if: ${{ github.event.inputs.snapshot_run_id != '' }}
-        uses: actions/download-artifact@v8
-        with:
-          name: research-snapshot-${{ github.event.inputs.snapshot_run_id }}
-          path: artifacts/research-snapshot
-          run-id: ${{ github.event.inputs.snapshot_run_id }}
-          github-token: ${{ github.token }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/research-snapshot
+          python3 scripts/download_github_artifact.py \
+            --run-id "${SNAPSHOT_RUN_ID}" \
+            --name "research-snapshot-${SNAPSHOT_RUN_ID}" \
+            --output-dir artifacts/research-snapshot \
+            --require manifest.json \
+            --require quality.md
 
       - name: Sync Parquet data from Tango-1-1
         if: ${{ github.event.inputs.snapshot_run_id == '' && github.event.inputs.allow_live_parquet_debug == 'true' }}
