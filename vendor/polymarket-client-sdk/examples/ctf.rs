@@ -5,8 +5,8 @@
 //!
 //! This example demonstrates how to interact with the CTF contract to:
 //! - Calculate condition IDs, collection IDs, and position IDs
-//! - Split USDC collateral into outcome tokens (YES/NO)
-//! - Merge outcome tokens back into USDC
+//! - Split pUSD collateral into outcome tokens (YES/NO)
+//! - Merge outcome tokens back into pUSD
 //! - Redeem winning tokens after market resolution
 //!
 //! ## Usage
@@ -104,10 +104,10 @@ async fn main() -> Result<()> {
 
     // Example: Calculate position IDs (ERC1155 token IDs)
     info!("--- Calculating Position IDs ---");
-    let usdc = address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
+    let pusd = address!("0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB");
 
     let yes_position_req = PositionIdRequest::builder()
-        .collateral_token(usdc)
+        .collateral_token(pusd)
         .collection_id(yes_collection_resp.collection_id)
         .build();
 
@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
     );
 
     let no_position_req = PositionIdRequest::builder()
-        .collateral_token(usdc)
+        .collateral_token(pusd)
         .collection_id(no_collection_resp.collection_id)
         .build();
 
@@ -146,16 +146,16 @@ async fn main() -> Result<()> {
 
         info!("Using wallet: {wallet_address:?}");
 
-        // Example: Split 1 USDC into YES and NO tokens (using convenience method)
+        // Example: Split 1 pUSD into YES and NO tokens (using convenience method)
         info!("--- Splitting Position (Binary Market) ---");
-        info!("This will split 1 USDC into 1 YES and 1 NO token");
-        info!("Note: You must approve the CTF contract to spend your USDC first!");
+        info!("This will split 1 pUSD into 1 YES and 1 NO token");
+        info!("Note: You must approve the CTF contract to spend your pUSD first!");
 
         // Using the convenience method for binary markets
         let split_req = SplitPositionRequest::for_binary_market(
-            usdc,
+            pusd,
             condition_resp.condition_id,
-            U256::from(1_000_000), // 1 USDC (6 decimals)
+            U256::from(1_000_000), // 1 pUSD (6 decimals)
         );
 
         match client.split_position(&split_req).await {
@@ -166,17 +166,17 @@ async fn main() -> Result<()> {
             }
             Err(e) => {
                 error!("✗ Split failed: {e}");
-                error!("  Make sure you have approved the CTF contract and have sufficient USDC");
+                error!("  Make sure you have approved the CTF contract and have sufficient pUSD");
             }
         }
 
-        // Example: Merge YES and NO tokens back into USDC (using convenience method)
+        // Example: Merge YES and NO tokens back into pUSD (using convenience method)
         info!("--- Merging Positions (Binary Market) ---");
-        info!("This will merge 1 YES and 1 NO token back into 1 USDC");
+        info!("This will merge 1 YES and 1 NO token back into 1 pUSD");
 
         // Using the convenience method for binary markets
         let merge_req = MergePositionsRequest::for_binary_market(
-            usdc,
+            pusd,
             condition_resp.condition_id,
             U256::from(1_000_000), // 1 full set
         );
@@ -199,7 +199,7 @@ async fn main() -> Result<()> {
 
         // Using the convenience method for binary markets (redeems both YES and NO tokens)
         let redeem_req =
-            RedeemPositionsRequest::for_binary_market(usdc, condition_resp.condition_id);
+            RedeemPositionsRequest::for_binary_market(pusd, condition_resp.condition_id);
 
         match client.redeem_positions(&redeem_req).await {
             Ok(redeem_resp) => {

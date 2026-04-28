@@ -1,3 +1,35 @@
+# Polymarket CLOB V2 Cutover (2026-04-28)
+
+## Files
+
+- `vendor/polymarket-client-sdk/src/lib.rs`
+  - Owner: Polygon V2 exchange and pUSD collateral contract config.
+- `vendor/polymarket-client-sdk/src/clob/client.rs`
+  - Owner: EIP-712 exchange domain version.
+- `vendor/polymarket-client-sdk/src/clob/types/mod.rs`
+  - Owner: raw V2 order struct and POST `/order` serialization.
+- `vendor/polymarket-client-sdk/src/clob/order_builder.rs`
+  - Owner: V2 order construction, timestamp, metadata, and builder field defaults.
+- `vendor/polymarket-client-sdk/tests/*`
+  - Owner: SDK regression coverage for V2 signing/body compatibility.
+- `tasks/todo.md`
+  - Owner: cutover plan, verification, and deployment caveats.
+
+## Tasks
+
+- [x] Confirm `origin/main` is still on V1 signing/order fields after the pre-cutover compatibility rollback.
+- [x] Switch Polygon mainnet config to V2 exchange contracts and pUSD collateral.
+- [x] Switch EIP-712 order domain and raw order schema to V2.
+- [x] Remove user-settable V1 order fields from V2 order construction and serialize V2 order bodies.
+- [x] Update focused SDK regression tests for V2 contract/order shape.
+- [x] Run focused verification and record remaining deploy checks.
+
+## Review
+
+- 2026-04-28: Polymarket V2 is now the target cutover path. The official migration guide requires CLOB domain version `"2"`, V2 exchange contracts, pUSD collateral, and raw order fields `timestamp`, `metadata`, and `builder` instead of V1 `taker`, `expiration`, `nonce`, and `feeRateBps`.
+- 2026-04-28: Switched the vendored CLOB SDK to Polygon V2 addresses, pUSD collateral, EIP-712 domain version `"2"`, and the V2 signed order shape. `timestamp` is signed/serialized as a uint256 millisecond string, while `metadata` and `builder` are bytes32 zero defaults unless a future builder-code integration fills them.
+- 2026-04-28: Updated approval/CTF examples to use the configured pUSD collateral instead of hardcoded USDC.e. Focused verification passed: `CARGO_TARGET_DIR=/tmp/ploy-v2-cutover-test rtk cargo test -p polymarket-client-sdk --features clob --lib --test order --test clob`, `CARGO_TARGET_DIR=/tmp/ploy-v2-cutover-test rtk cargo test -p polymarket-client-sdk --features ctf --test ctf`, `CARGO_TARGET_DIR=/tmp/ploy-v2-cutover-test rtk cargo test -p ploy-connectivity`, `CARGO_TARGET_DIR=/tmp/ploy-v2-cutover-test rtk cargo test -p polymarket-client-sdk --features clob,ctf,tracing --example approvals --example check_approvals --example ctf --no-run`, targeted `rustfmt`, and `git diff --check && git diff --cached --check`.
+
 # PM5D Three-Arm Snapshot Optimization (2026-04-28)
 
 # PM5D Three-Layer Profile Dry-Run Deployment (2026-04-28)

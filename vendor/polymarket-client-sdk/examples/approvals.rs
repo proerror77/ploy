@@ -12,7 +12,7 @@
 //! 3. **Neg Risk Adapter** (`neg_risk_config.neg_risk_adapter`) - Token minting/splitting for neg-risk
 //!
 //! Each contract needs two approvals:
-//! - ERC-20 approval for USDC (collateral token)
+//! - ERC-20 approval for pUSD (collateral token)
 //! - ERC-1155 approval for Conditional Tokens (outcome tokens)
 //!
 //! You only need to run these approvals once per wallet.
@@ -41,7 +41,7 @@ use alloy::providers::ProviderBuilder;
 use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
 use alloy::sol;
-use polymarket_client_sdk::types::{Address, address};
+use polymarket_client_sdk::types::Address;
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR, contract_config};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -49,9 +49,6 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 const RPC_URL: &str = "https://polygon-rpc.com";
-
-const USDC_ADDRESS: Address = address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
-const TOKEN_TO_APPROVE: Address = USDC_ADDRESS;
 
 sol! {
     #[sol(rpc)]
@@ -121,15 +118,15 @@ async fn main() -> anyhow::Result<()> {
     let owner = signer.address();
     info!(address = %owner, "wallet loaded");
 
-    let token = IERC20::new(TOKEN_TO_APPROVE, provider.clone());
+    let token = IERC20::new(config.collateral, provider.clone());
     let ctf = IERC1155::new(config.conditional_tokens, provider.clone());
 
     info!(phase = "checking", "querying current allowances");
 
     for (name, target) in &targets {
         match check_allowance(&token, owner, *target).await {
-            Ok(allowance) => info!(contract = name, usdc_allowance = %allowance),
-            Err(e) => error!(contract = name, error = ?e, "failed to check USDC allowance"),
+            Ok(allowance) => info!(contract = name, pusd_allowance = %allowance),
+            Err(e) => error!(contract = name, error = ?e, "failed to check pUSD allowance"),
         }
 
         match check_approval_for_all(&ctf, owner, *target).await {
@@ -144,8 +141,8 @@ async fn main() -> anyhow::Result<()> {
         info!(contract = name, address = %target, "approving");
 
         match approve(&token, *target, U256::MAX).await {
-            Ok(tx_hash) => info!(contract = name, tx = %tx_hash, "USDC approved"),
-            Err(e) => error!(contract = name, error = ?e, "USDC approve failed"),
+            Ok(tx_hash) => info!(contract = name, tx = %tx_hash, "pUSD approved"),
+            Err(e) => error!(contract = name, error = ?e, "pUSD approve failed"),
         }
 
         match set_approval_for_all(&ctf, *target, true).await {
@@ -158,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
 
     for (name, target) in &targets {
         match check_allowance(&token, owner, *target).await {
-            Ok(allowance) => info!(contract = name, usdc_allowance = %allowance, "verified"),
+            Ok(allowance) => info!(contract = name, pusd_allowance = %allowance, "verified"),
             Err(e) => error!(contract = name, error = ?e, "verification failed"),
         }
 
@@ -192,11 +189,16 @@ async fn check_approval_for_all<P: alloy::providers::Provider>(
 }
 
 async fn approve<P: alloy::providers::Provider>(
-    usdc: &IERC20::IERC20Instance<P>,
+    collateral: &IERC20::IERC20Instance<P>,
     spender: Address,
     amount: U256,
 ) -> anyhow::Result<alloy::primitives::FixedBytes<32>> {
-    let tx_hash = usdc.approve(spender, amount).send().await?.watch().await?;
+    let tx_hash = collateral
+        .approve(spender, amount)
+        .send()
+        .await?
+        .watch()
+        .await?;
     Ok(tx_hash)
 }
 

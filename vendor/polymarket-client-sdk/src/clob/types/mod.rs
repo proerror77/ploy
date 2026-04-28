@@ -1,20 +1,20 @@
 use std::fmt;
 
 use alloy::core::sol;
-use alloy::primitives::{Signature, U256};
+use alloy::primitives::{B256, Signature, U256};
 use bon::Builder;
 use rust_decimal_macros::dec;
 use serde::ser::{Error as _, SerializeStruct as _};
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_repr::Serialize_repr;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use strum_macros::Display;
 
+use crate::Result;
 use crate::auth::ApiKey;
 use crate::clob::order_builder::{MARKET_SHARE_DECIMALS, USDC_DECIMALS};
 use crate::error::Error;
 use crate::types::Decimal;
-use crate::Result;
 
 pub mod request;
 pub mod response;
@@ -436,7 +436,6 @@ sol! {
         uint256 salt;
         address maker;
         address signer;
-        address taker;
         #[serde_as(as = "DisplayFromStr")]
         uint256 tokenId;
         #[serde_as(as = "DisplayFromStr")]
@@ -444,11 +443,9 @@ sol! {
         #[serde_as(as = "DisplayFromStr")]
         uint256 takerAmount;
         #[serde_as(as = "DisplayFromStr")]
-        uint256 expiration;
-        #[serde_as(as = "DisplayFromStr")]
-        uint256 nonce;
-        #[serde_as(as = "DisplayFromStr")]
-        uint256 feeRateBps;
+        uint256 timestamp;
+        bytes32 metadata;
+        bytes32 builder;
         uint8   side;
         uint8   signatureType;
     }
@@ -492,7 +489,6 @@ struct OrderWithSignature<'order> {
     salt: &'order U256,
     maker: &'order alloy::primitives::Address,
     signer: &'order alloy::primitives::Address,
-    taker: &'order alloy::primitives::Address,
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "tokenId")]
     token_id: &'order U256,
@@ -503,12 +499,9 @@ struct OrderWithSignature<'order> {
     #[serde(rename = "takerAmount")]
     taker_amount: &'order U256,
     #[serde_as(as = "DisplayFromStr")]
-    expiration: &'order U256,
-    #[serde_as(as = "DisplayFromStr")]
-    nonce: &'order U256,
-    #[serde_as(as = "DisplayFromStr")]
-    #[serde(rename = "feeRateBps")]
-    fee_rate_bps: &'order U256,
+    timestamp: &'order U256,
+    metadata: &'order B256,
+    builder: &'order B256,
     /// Side serialized as "BUY"/"SELL" string (CLOB API requirement)
     side: Side,
     #[serde(rename = "signatureType")]
@@ -531,13 +524,12 @@ impl Serialize for SignedOrder {
             salt: &self.order.salt,
             maker: &self.order.maker,
             signer: &self.order.signer,
-            taker: &self.order.taker,
             token_id: &self.order.tokenId,
             maker_amount: &self.order.makerAmount,
             taker_amount: &self.order.takerAmount,
-            expiration: &self.order.expiration,
-            nonce: &self.order.nonce,
-            fee_rate_bps: &self.order.feeRateBps,
+            timestamp: &self.order.timestamp,
+            metadata: &self.order.metadata,
+            builder: &self.order.builder,
             side,
             signature_type: self.order.signatureType,
             signature: self.signature.to_string(),
@@ -598,10 +590,12 @@ mod tests {
     fn non_standard_decimal_to_tick_size_should_fail() {
         let result = TickSize::try_from(Decimal::ONE);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Unknown tick size: 1"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unknown tick size: 1")
+        );
     }
 
     #[test]
@@ -728,5 +722,25 @@ mod tests {
             .expect("SignedOrder should serialize to an object");
 
         assert!(!object.contains_key("postOnly"));
+        let order = object
+            .get("order")
+            .and_then(serde_json::Value::as_object)
+            .expect("SignedOrder.order should serialize to an object");
+        assert!(!order.contains_key("nonce"));
+        assert!(!order.contains_key("feeRateBps"));
+        assert!(!order.contains_key("taker"));
+        assert!(!order.contains_key("expiration"));
+        assert_eq!(
+            order.get("timestamp").and_then(serde_json::Value::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            order.get("metadata").and_then(serde_json::Value::as_str),
+            Some("0x0000000000000000000000000000000000000000000000000000000000000000")
+        );
+        assert_eq!(
+            order.get("builder").and_then(serde_json::Value::as_str),
+            Some("0x0000000000000000000000000000000000000000000000000000000000000000")
+        );
     }
 }
