@@ -23,7 +23,10 @@ export function LiveParityBanner() {
         <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
           {report.alertPairs.slice(0, 3).map((pair) => (
             <Badge key={pair.key} variant="destructive">
-              {pair.key}: {pair.dryrunOnlyOrders.length + pair.executionMismatches.length}
+              {pair.key}:{' '}
+              {pair.dryrunOnlyOrders.length +
+                pair.liveOnlyOrders.length +
+                pair.executionMismatches.length}
             </Badge>
           ))}
           {report.alertPairs.length > 3 && (

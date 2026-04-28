@@ -5,12 +5,9 @@
 //! scores executable PnL after PM CLOB fillability.
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
-    FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
-    FactorWalkForwardOptions, FillabilityReviewOptions, LiquidityGateV1Options,
-    LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions, TradeFormationReviewOptions,
     build_factor_observations_with_lob_sampled, build_factor_stability_report,
     format_factor_combo_v1_report, format_factor_stability_report,
     format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
@@ -18,9 +15,14 @@ use ploy_research::{
     format_meta_label_walk_forward_v1_report, format_trade_formation_v1_report,
     liquidity_gate_v1_with_deribit, liquidity_gated_alpha_v1_with_deribit,
     load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
-    load_research_pm_book_snapshots_sampled, review_fillability_v1_with_deribit,
-    review_trade_formation_v1_with_deribit, walk_forward_factor_combo_v1_with_deribit,
+    load_research_pm_book_snapshots_sampled, load_research_snapshot,
+    review_fillability_v1_with_deribit, review_trade_formation_v1_with_deribit,
+    validate_snapshot_request, walk_forward_factor_combo_v1_with_deribit,
     walk_forward_factors_v2_with_deribit_and_pm_books, walk_forward_meta_label_v1_with_deribit,
+    FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
+    FactorWalkForwardOptions, FillabilityReviewOptions, LiquidityGateV1Options,
+    LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions, ResearchSnapshotRequest,
+    TradeFormationReviewOptions,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -29,6 +31,10 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2)
         .find(|window| window[0] == flag)
         .map(|window| window[1].clone())
+}
+
+fn flag_present(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
 }
 
 fn parse_date_start(raw: &str) -> DateTime<Utc> {
@@ -63,7 +69,7 @@ where
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let db_url = flag_value(&args, "--db-url").expect("--db-url required");
+    let db_url = flag_value(&args, "--db-url");
     let start = flag_value(&args, "--start-ts")
         .map(|raw| parse_timestamp(&raw))
         .unwrap_or_else(|| {
@@ -130,65 +136,178 @@ async fn main() {
         options.factor_name_filter.as_deref().unwrap_or("<none>")
     );
 
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_secs(120))
-        .connect(&db_url)
-        .await
-        .expect("database connection failed");
-
-    let history_start = start - chrono::Duration::hours(1) - chrono::Duration::seconds(300);
-    let historical_sample_secs = u32::try_from(lob_sample_secs.max(1)).unwrap_or(1);
-    let all_updates = load_from_database_with_options(
-        &pool,
-        &symbols,
-        history_start,
-        end,
-        &HistoricalLoadOptions {
-            require_official_settlement: true,
-            include_l2: false,
-            spot_sample_secs: historical_sample_secs,
-            lob_sample_secs: historical_sample_secs,
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("bulk historical load failed");
-    eprintln!("updates: {}", all_updates.len());
-
-    let all_lob_snapshots =
-        load_research_lob_snapshots_sampled(&pool, &symbols, history_start, end, lob_sample_secs)
+    let snapshot_dir = flag_value(&args, "--snapshot-dir");
+    let allow_direct_db_debug = flag_present(&args, "--allow-direct-db-debug");
+    if snapshot_dir.is_some() && db_url.is_some() {
+        eprintln!("ERROR: --snapshot-dir cannot be combined with --db-url");
+        std::process::exit(2);
+    }
+    let mut snapshot_provenance: Option<String> = None;
+    let (observations, deribit_snapshots, all_pm_book_snapshots): (
+        Vec<FactorObservation>,
+        Vec<_>,
+        Vec<_>,
+    ) = if let Some(snapshot_dir) = snapshot_dir {
+        let started = std::time::Instant::now();
+        let snapshot =
+            load_research_snapshot(&snapshot_dir).expect("load research snapshot failed");
+        validate_snapshot_request(
+            &snapshot.manifest,
+            ResearchSnapshotRequest {
+                symbols: &symbols,
+                start,
+                end,
+                lob_sample_secs,
+                observation_sample_secs,
+                max_quote_age_secs,
+                stake_usd: options.review.stake_usd,
+                require_official_settlement: true,
+            },
+        )
+        .expect("snapshot does not match requested walk-forward inputs");
+        let snapshot_hash = snapshot
+            .manifest
+            .snapshot_hash
+            .as_deref()
+            .unwrap_or("<missing>");
+        eprintln!(
+            "snapshot: schema={} hash={} generated_at={} observations={} deribit={} pm_books={} load_ms={}",
+            snapshot.manifest.schema_version,
+            snapshot_hash,
+            snapshot.manifest.generated_at,
+            snapshot.observations.len(),
+            snapshot.deribit_snapshots.len(),
+            snapshot.pm_book_snapshots.len(),
+            started.elapsed().as_millis()
+        );
+        snapshot_provenance = Some(format!(
+            "# Snapshot\nsnapshot_schema={}\nsnapshot_hash={}\nsnapshot_generated_at={}\nsnapshot_optimizer_data_dir={}\n",
+            snapshot.manifest.schema_version,
+            snapshot_hash,
+            snapshot.manifest.generated_at,
+            snapshot
+                .manifest
+                .optimizer_data_dir
+                .as_deref()
+                .unwrap_or("<missing>")
+        ));
+        (
+            snapshot.observations,
+            snapshot.deribit_snapshots,
+            snapshot.pm_book_snapshots,
+        )
+    } else {
+        if !allow_direct_db_debug {
+            eprintln!(
+                "ERROR: direct DB factor walk-forward is non-canonical; pass --snapshot-dir or explicit --allow-direct-db-debug"
+            );
+            std::process::exit(2);
+        }
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(120))
+            .connect(
+                db_url
+                    .as_deref()
+                    .expect("--db-url required without --snapshot-dir"),
+            )
             .await
-            .expect("bulk lob snapshot load failed");
-    eprintln!("lob_snapshots: {}", all_lob_snapshots.len());
+            .expect("database connection failed");
 
-    let all_pm_book_snapshots = load_research_pm_book_snapshots_sampled(
-        &pool,
-        &symbols,
-        history_start,
-        end,
-        lob_sample_secs,
-    )
-    .await
-    .expect("bulk PM book snapshot load failed");
-    eprintln!("pm_book_snapshots: {}", all_pm_book_snapshots.len());
+        let mut phase_timings = Vec::new();
+        let history_start = start - chrono::Duration::hours(1) - chrono::Duration::seconds(300);
+        let historical_sample_secs = u32::try_from(lob_sample_secs.max(1)).unwrap_or(1);
+        let started = std::time::Instant::now();
+        let all_updates = load_from_database_with_options(
+            &pool,
+            &symbols,
+            history_start,
+            end,
+            &HistoricalLoadOptions {
+                require_official_settlement: true,
+                include_l2: false,
+                spot_sample_secs: historical_sample_secs,
+                lob_sample_secs: historical_sample_secs,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bulk historical load failed");
+        phase_timings.push((
+            "historical_updates",
+            started.elapsed().as_millis(),
+            all_updates.len(),
+        ));
+        eprintln!("updates: {}", all_updates.len());
 
-    let deribit_snapshots =
-        load_deribit_feature_snapshots(&pool, &symbols, start, end, observation_sample_secs).await;
-    eprintln!("deribit_snapshots: {}", deribit_snapshots.len());
+        let started = std::time::Instant::now();
+        let all_lob_snapshots = load_research_lob_snapshots_sampled(
+            &pool,
+            &symbols,
+            history_start,
+            end,
+            lob_sample_secs,
+        )
+        .await
+        .expect("bulk lob snapshot load failed");
+        phase_timings.push((
+            "cex_lob_snapshots",
+            started.elapsed().as_millis(),
+            all_lob_snapshots.len(),
+        ));
+        eprintln!("lob_snapshots: {}", all_lob_snapshots.len());
 
-    let updates_slice = slice_by_time(&all_updates, history_start, end, MarketUpdate::sort_ts);
-    let lob_slice = slice_by_time(&all_lob_snapshots, history_start, end, |snapshot| {
-        snapshot.ts
-    });
+        let started = std::time::Instant::now();
+        let all_pm_book_snapshots = load_research_pm_book_snapshots_sampled(
+            &pool,
+            &symbols,
+            history_start,
+            end,
+            lob_sample_secs,
+        )
+        .await
+        .expect("bulk PM book snapshot load failed");
+        phase_timings.push((
+            "pm_book_snapshots",
+            started.elapsed().as_millis(),
+            all_pm_book_snapshots.len(),
+        ));
+        eprintln!("pm_book_snapshots: {}", all_pm_book_snapshots.len());
 
-    let observations: Vec<FactorObservation> = build_factor_observations_with_lob_sampled(
-        updates_slice,
-        lob_slice,
-        max_quote_age_secs,
-        observation_sample_secs,
-    );
-    eprintln!("factor_observations: {}", observations.len());
+        let started = std::time::Instant::now();
+        let deribit_snapshots =
+            load_deribit_feature_snapshots(&pool, &symbols, start, end, observation_sample_secs)
+                .await;
+        phase_timings.push((
+            "deribit_snapshots",
+            started.elapsed().as_millis(),
+            deribit_snapshots.len(),
+        ));
+        eprintln!("deribit_snapshots: {}", deribit_snapshots.len());
+
+        let updates_slice = slice_by_time(&all_updates, history_start, end, MarketUpdate::sort_ts);
+        let lob_slice = slice_by_time(&all_lob_snapshots, history_start, end, |snapshot| {
+            snapshot.ts
+        });
+
+        let started = std::time::Instant::now();
+        let observations: Vec<FactorObservation> = build_factor_observations_with_lob_sampled(
+            updates_slice,
+            lob_slice,
+            max_quote_age_secs,
+            observation_sample_secs,
+        );
+        phase_timings.push((
+            "factor_observations",
+            started.elapsed().as_millis(),
+            observations.len(),
+        ));
+        for (phase, elapsed_ms, rows) in phase_timings {
+            eprintln!("phase {phase:<24} {elapsed_ms:>8} ms rows={rows}");
+        }
+        eprintln!("factor_observations: {}", observations.len());
+        (observations, deribit_snapshots, all_pm_book_snapshots)
+    };
 
     if observations.is_empty() {
         eprintln!("no observations — check date range, symbols, quote coverage, and settlements");
@@ -203,6 +322,9 @@ async fn main() {
         end,
         options.clone(),
     );
+    if let Some(snapshot_provenance) = snapshot_provenance {
+        println!("{snapshot_provenance}");
+    }
     println!("{}", format_factor_walk_forward_v2_report(&report));
     let fillability_report = review_fillability_v1_with_deribit(
         &observations,

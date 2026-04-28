@@ -63,6 +63,22 @@ on:
         description: "Optional comma-separated factor-name substrings"
         required: false
         default: ""
+      snapshot_run_id:
+        description: "Optional Research Snapshot workflow run id to consume"
+        required: false
+        default: ""
+      compile_snapshot:
+        description: "Compile a fresh snapshot before walk-forward when snapshot_run_id is empty"
+        required: false
+        default: "true"
+      allow_direct_db_debug:
+        description: "Allow non-canonical direct DB walk-forward when no snapshot is present"
+        required: false
+        default: "false"
+      optimizer_data_dir:
+        description: "Immutable parquet-feed dir recorded in compiled snapshot manifests"
+        required: false
+        default: "/tmp/ploy-parquet"
 
 concurrency:
   group: factor-walk-forward-v2-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.factor_name_filter || 'all' }}
@@ -70,6 +86,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -106,20 +123,59 @@ jobs:
           cache-targets: "true"
           key: factor-walk-forward-v2-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
 
-      - name: Build factor_walk_forward_v2
+      - name: Build factor walk-forward and snapshot compiler
         run: |
           . /home/runner/.cargo/env
           cargo build --release --locked \
             -p ploy-research \
-            --features db \
-            --example factor_walk_forward_v2
+            --features db,polars-export \
+            --example factor_walk_forward_v2 \
+            --example research_snapshot_compile
+
+      - name: Download research snapshot
+        if: ${{ github.event.inputs.snapshot_run_id != '' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: research-snapshot-${{ github.event.inputs.snapshot_run_id }}
+          path: artifacts/research-snapshot
+          run-id: ${{ github.event.inputs.snapshot_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Compile research snapshot
+        if: ${{ github.event.inputs.snapshot_run_id == '' && github.event.inputs.compile_snapshot == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/research-snapshot
+          ./target/release/examples/research_snapshot_compile \
+            --db-url "${PLOY_DB_URL:?PLOY_DB_URL secret is required}" \
+            --symbols "${{ github.event.inputs.symbols }}" \
+            --start-date "${{ github.event.inputs.start_date }}" \
+            --end-date "${{ github.event.inputs.end_date }}" \
+            --stake-usd "${{ github.event.inputs.stake_usd }}" \
+            --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
+            --observation-sample-secs "${{ github.event.inputs.observation_sample_secs }}" \
+            --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
+            --output-dir artifacts/research-snapshot \
+            --optimizer-data-dir "${{ github.event.inputs.optimizer_data_dir }}" \
+            2>&1 | tee artifacts/research-snapshot/compile.log
 
       - name: Run factor walk-forward
         run: |
           set -euo pipefail
           mkdir -p artifacts/factor-walk-forward-v2
+          source_args=()
+          if [ -f artifacts/research-snapshot/manifest.json ]; then
+            source_args=(--snapshot-dir artifacts/research-snapshot)
+            echo "canonical_result=snapshot" | tee artifacts/factor-walk-forward-v2/source.txt
+          elif [ "${{ github.event.inputs.allow_direct_db_debug }}" = "true" ]; then
+            source_args=(--db-url "${PLOY_DB_URL:?PLOY_DB_URL secret is required}" --allow-direct-db-debug)
+            echo "canonical_result=no direct_db_debug=true" | tee artifacts/factor-walk-forward-v2/source.txt
+          else
+            echo "ERROR: no research snapshot is present; set compile_snapshot=true, pass snapshot_run_id, or explicitly set allow_direct_db_debug=true" >&2
+            exit 2
+          fi
           args=(
-            --db-url "${PLOY_DB_URL:?PLOY_DB_URL secret is required}"
+            "${source_args[@]}"
             --symbols "${{ github.event.inputs.symbols }}"
             --start-date "${{ github.event.inputs.start_date }}"
             --end-date "${{ github.event.inputs.end_date }}"
@@ -151,7 +207,15 @@ jobs:
             echo "- Symbols: ${{ github.event.inputs.symbols }}"
             echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
             echo "- Factor filter: ${{ github.event.inputs.factor_name_filter || '<none>' }}"
+            if [ -f artifacts/factor-walk-forward-v2/source.txt ]; then
+              echo "- Source: $(cat artifacts/factor-walk-forward-v2/source.txt)"
+            fi
             echo ""
+            if [ -f artifacts/research-snapshot/quality.md ]; then
+              echo "### Snapshot Quality"
+              cat artifacts/research-snapshot/quality.md
+              echo ""
+            fi
             if [ -f artifacts/factor-walk-forward-v2/report.txt ]; then
               echo '```'
               sed -n '1,160p' artifacts/factor-walk-forward-v2/report.txt
@@ -164,5 +228,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: factor-walk-forward-v2-${{ github.run_id }}
-          path: artifacts/factor-walk-forward-v2/
+          path: |
+            artifacts/factor-walk-forward-v2/
+            artifacts/research-snapshot/
           retention-days: 14

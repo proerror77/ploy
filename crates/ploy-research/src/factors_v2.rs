@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Duration, Utc};
 use ploy_operator_contracts::Regime;
+use serde::{Deserialize, Serialize};
 
 use crate::factors::{pearson_ic, spearman_ic, FactorObservation, ResearchPmBookSnapshot};
 
@@ -10,7 +11,7 @@ const DEFAULT_TOP_QUANTILE: f64 = 0.2;
 const PM_BOOK_MAX_AGE_SECS: i64 = 30;
 const EPS: f64 = 1e-9;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FactorFamily {
     Alpha,
     CexLob,
@@ -41,7 +42,7 @@ impl FactorFamily {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThreeLayerArchive {
     DirectionProbabilityEdge,
     CexMicrostructureConfirmation,
@@ -62,7 +63,7 @@ impl ThreeLayerArchive {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReviewSide {
     Up,
     Down,
@@ -101,7 +102,7 @@ impl Default for FactorReviewOptions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeribitFeatureSnapshot {
     pub symbol: String,
     pub ts: DateTime<Utc>,
@@ -115,7 +116,7 @@ pub struct DeribitFeatureSnapshot {
     pub theta: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactorObservationV2 {
     pub event_id: String,
     pub symbol: String,

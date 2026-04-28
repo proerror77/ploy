@@ -5,6 +5,7 @@ use ploy_market_contracts::MarketUpdate;
 #[cfg(feature = "polars-export")]
 use polars::prelude::*;
 use rust_decimal::prelude::ToPrimitive;
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "db")]
 use serde_json::Value;
 #[cfg(feature = "db")]
@@ -69,7 +70,7 @@ const PM_BOOK_SAMPLED_QUERY: &str = r#"
         ORDER BY received_at
         "#;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactorObservation {
     pub event_id: String,
     pub symbol: String,
@@ -236,7 +237,7 @@ pub struct AggregatedFactorMetric {
     pub icir: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResearchLobSnapshot {
     pub symbol: String,
     pub ts: DateTime<Utc>,
@@ -254,13 +255,13 @@ pub struct ResearchLobSnapshot {
     pub ask_depth_inner: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ResearchPmBookLevel {
     pub price: f64,
     pub size: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResearchPmBookSnapshot {
     pub event_id: String,
     pub token_id: String,

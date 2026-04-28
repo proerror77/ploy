@@ -10016,13 +10016,22 @@ Review:
 - [x] Define snapshot compiler and snapshot-backed walk-forward runtime boundaries.
 - [x] Define Deribit ATM/cache-first redesign.
 - [x] Define workflow, performance budget, correctness gates, and migration phases.
-- [ ] Implement Phase 1: Deribit ATM/cache-first loader and phase timing output.
-- [ ] Implement Phase 2: `research_snapshot_compile` and snapshot artifact workflow.
-- [ ] Implement Phase 3: snapshot-backed Factor Review and Walk-Forward workflows.
+- [x] Implement Phase 1: Deribit ATM/cache-first loader and phase timing output.
+- [x] Implement Phase 2: `research_snapshot_compile` and snapshot artifact workflow.
+- [x] Implement Phase 3: snapshot-backed Factor Review and Walk-Forward workflows.
+- [x] Implement Phase 4: optimizer immutable snapshot gate.
+- [x] Implement Phase 5: snapshot/dry-run/live parity hook.
 
 ## Review
 
 - 2026-04-28: Added a full redesign proposal that moves canonical research from direct raw PostgreSQL replay to immutable snapshot-backed replay. Tango remains the raw collector source of truth; `ploy-ci-1` compiles reusable Parquet/Arrow tapes and runs factor review/walk-forward from those artifacts.
+- 2026-04-28: Implemented the first snapshot-backed research path. Deribit now uses `strategy_data.deribit_atm_greeks_snapshots_cache` then `deribit_atm_greeks_ticks`; raw `deribit_iv_ticks` bucket fallback is disabled unless `PLOY_RESEARCH_DERIBIT_RAW_IV_FALLBACK=1`. Added `research_snapshot_compile`, snapshot manifest/quality/timing artifacts, snapshot loading for Factor Review V2 and Walk-Forward V2, a `research-snapshot.yml` workflow, snapshot-first review/walk-forward workflows, an optimizer `--snapshot-dir` gate, and a `research_snapshot_parity` CLI for snapshot/dry-run/live trading-state comparison.
+- 2026-04-28: Verification passed locally with targeted checks: `CARGO_TARGET_DIR=/tmp/ploy-research-snapshot-check rtk cargo check -p ploy-research --features db --example factor_review_v2 --example factor_walk_forward_v2 --example research_snapshot_compile`; `CARGO_TARGET_DIR=/tmp/ploy-research-snapshot-parity-check rtk cargo check -p ploy-research --example research_snapshot_parity`; `CARGO_TARGET_DIR=/tmp/ploy-optimize-snapshot-check rtk cargo check -p ploy-strategy-bundles --features parquet-feed --example optimize_backtest`; `CARGO_TARGET_DIR=/tmp/ploy-research-snapshot-test rtk cargo test -p ploy-research write_and_load_empty_snapshot_roundtrips_manifest --lib`; `npm ci && npm run build` in `ploy-frontend`; Ruby YAML parse for touched workflows; and `rtk git diff --check`.
+- 2026-04-28: Architect review rejected the first implementation because snapshot provenance and workflow gates were too soft. Fixed by requiring `optimizer_data_dir` in the snapshot workflow, preventing review/walk-forward workflows from silently falling back to DB unless `allow_direct_db_debug=true`, adding snapshot input validation and `snapshot_hash`, requiring that hash in optimizer canonical mode, and adding parity `--fail-on-mismatch` plus example tests for fill shortfall and out-of-snapshot event detection.
+- 2026-04-28: Second architect review found two remaining contract holes. Fixed by making `research_snapshot_compile` require `--optimizer-data-dir`, making `write_research_snapshot` reject manifests without that pin, passing it from all built-in snapshot-producing workflows, and making `optimize_backtest` reject `--snapshot-dir` combined with `--db-url` so canonical optimization cannot fall back to DB replay.
+- 2026-04-28: Third architect review found hidden non-canonical paths and weak runtime parity. Fixed by making Factor Review and Walk-Forward binaries reject direct DB unless `--allow-direct-db-debug` is explicit, validating snapshot stake/sample/quote/settlement/immutability parameters, splitting optimizer live-Parquet and direct-DB debug gates, treating live-only frontend orders as alerts, and comparing same-key dry-run/live order state, requested quantity, filled quantity, and rejection reasons in `research_snapshot_parity`.
+- 2026-04-28: Fourth architect review found two remaining evidence gaps. Fixed by rendering live-only orders in the frontend parity page and banner counts, and by persisting Deribit cache/ATM/raw-fallback phase timings into the research snapshot manifest/quality artifacts instead of relying only on tracing logs.
+- 2026-04-28: Ralph deslop pass stayed bounded to changed files. It removed duplicated frontend parity order-table markup, restored noisy `lib.rs` export reordering to the existing style, and kept the snapshot diff focused on required serialization/manifest changes.
 
 # Market Data Gap Audit (2026-04-28)
 

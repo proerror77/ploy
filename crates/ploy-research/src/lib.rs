@@ -11,6 +11,7 @@ pub mod factors_v2;
 #[cfg(any(feature = "ml", feature = "rl"))]
 pub mod model;
 pub mod replay;
+pub mod research_snapshot;
 pub mod signal;
 
 pub use backtesting::{BacktestReport, run_backtest};
@@ -31,7 +32,10 @@ pub use dataset::{
     export_event_root_dataset_parquet, split_assignments_to_frame,
 };
 #[cfg(feature = "db")]
-pub use deribit::load_deribit_feature_snapshots;
+pub use deribit::{
+    load_deribit_feature_snapshots, load_deribit_feature_snapshots_with_timings,
+    DeribitFeatureLoadResult,
+};
 pub use event_ml::{
     ArchitectureArtifact, EVENT_ML_ARCHITECTURE_VERSION, EventMlArchitecture, LaneReadiness,
     LaneStatus, LearningLane, LearningLaneId, PhaseId, ReadinessGate, WALK_FORWARD_REPORT_VERSION,
@@ -54,6 +58,13 @@ pub use factors::{
     load_research_pm_book_snapshots_sampled,
 };
 pub use replay::replay_fills;
+#[cfg(feature = "db")]
+pub use research_snapshot::{build_research_snapshot_from_database, ResearchSnapshotBuildOptions};
+pub use research_snapshot::{
+    load_research_snapshot, validate_snapshot_request, write_research_snapshot, ResearchSnapshot,
+    ResearchSnapshotArtifacts, ResearchSnapshotManifest, ResearchSnapshotPhaseTiming,
+    ResearchSnapshotRequest, ResearchSnapshotRowCounts, RESEARCH_SNAPSHOT_SCHEMA_VERSION,
+};
 
 pub const CRATE_MARKER: &str = "ploy-research";
 

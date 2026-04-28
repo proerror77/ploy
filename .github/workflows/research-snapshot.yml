@@ -1,0 +1,138 @@
+name: Research Snapshot
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref"
+        required: true
+        default: "main"
+      start_date:
+        description: "Snapshot start date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-21"
+      end_date:
+        description: "Snapshot end date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-25"
+      symbols:
+        description: "Comma-separated Binance symbols"
+        required: true
+        default: "BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,BNBUSDT,XRPUSDT"
+      stake_usd:
+        description: "Fixed notional used by executable labels"
+        required: true
+        default: "15"
+      lob_sample_secs:
+        description: "Binance and PM LOB sample interval"
+        required: false
+        default: "30"
+      observation_sample_secs:
+        description: "Factor observation output interval"
+        required: false
+        default: "30"
+      max_quote_age_secs:
+        description: "Maximum PM quote age"
+        required: false
+        default: "30"
+      optimizer_data_dir:
+        description: "Immutable parquet-feed dir used by optimize_backtest"
+        required: true
+        default: "/tmp/ploy-parquet"
+
+concurrency:
+  group: research-snapshot-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}-${{ github.event.inputs.symbols }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  PLOY_DB_URL: ${{ secrets.PLOY_DB_URL }}
+
+jobs:
+  compile:
+    name: Compile research snapshot on ploy-ci-1
+    runs-on: [self-hosted, ploy-ci-1]
+    timeout-minutes: 45
+    environment: ploy-ci-1
+
+    steps:
+      - name: Repair runner workspace permissions
+        run: |
+          if [ -d "${GITHUB_WORKSPACE}" ]; then
+            sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
+            sudo rm -f "${GITHUB_WORKSPACE}/.cargo-lock" || true
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Add cargo to PATH
+        run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-targets: "true"
+          key: research-snapshot-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
+
+      - name: Build research_snapshot_compile
+        run: |
+          . /home/runner/.cargo/env
+          cargo build --release --locked \
+            -p ploy-research \
+            --features db,polars-export \
+            --example research_snapshot_compile
+
+      - name: Compile snapshot
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/research-snapshot
+          ./target/release/examples/research_snapshot_compile \
+            --db-url "${PLOY_DB_URL:?PLOY_DB_URL secret is required}" \
+            --symbols "${{ github.event.inputs.symbols }}" \
+            --start-date "${{ github.event.inputs.start_date }}" \
+            --end-date "${{ github.event.inputs.end_date }}" \
+            --stake-usd "${{ github.event.inputs.stake_usd }}" \
+            --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
+            --observation-sample-secs "${{ github.event.inputs.observation_sample_secs }}" \
+            --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
+            --output-dir artifacts/research-snapshot \
+            --optimizer-data-dir "${{ github.event.inputs.optimizer_data_dir }}" \
+            2>&1 | tee artifacts/research-snapshot/compile.log
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## Research Snapshot"
+            echo ""
+            echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
+            echo "- Symbols: ${{ github.event.inputs.symbols }}"
+            echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
+            echo ""
+            if [ -f artifacts/research-snapshot/quality.md ]; then
+              cat artifacts/research-snapshot/quality.md
+            fi
+            if [ -f artifacts/research-snapshot/compile.log ]; then
+              echo ""
+              echo "## Compile Log"
+              echo '```'
+              tail -120 artifacts/research-snapshot/compile.log
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload research snapshot artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: research-snapshot-${{ github.run_id }}
+          path: artifacts/research-snapshot/
+          retention-days: 14
