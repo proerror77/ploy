@@ -10068,3 +10068,6 @@ Review:
   repo-backed collector only covers from about `2026-04-28 06:33 +08` onward.
 - 2026-04-28: Adjusted `research_valid_windows` freshness warning to 6 hours,
   matching the documented 6-hour materialized-view refresh cadence.
+- 2026-04-28: Moved deploy log-failure checks to a post-restart verification
+  baseline so controlled `systemctl restart` noise from old collector processes
+  is not classified as a new deployment failure.

@@ -312,7 +312,8 @@ jobs:
               local unit="\$1"
               local pattern="\$2"
               local message="\$3"
-              if journalctl -u "\${unit}" --since "\${DEPLOY_STARTED_AT}" --no-pager | grep -E "\${pattern}"; then
+              local since="\${DEPLOY_VERIFY_SINCE:-\${DEPLOY_STARTED_AT}}"
+              if journalctl -u "\${unit}" --since "\${since}" --no-pager | grep -E "\${pattern}"; then
                 echo "\${message}" >&2
                 exit 1
               fi
@@ -431,6 +432,7 @@ jobs:
               systemctl restart ployd.service
             fi
 
+            DEPLOY_VERIFY_SINCE=\$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             sleep 5
             require_postgres
             systemctl is-active --quiet ploy-binance-aggtrade-collector.service
