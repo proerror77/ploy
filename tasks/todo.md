@@ -13,12 +13,17 @@
 - [x] Replace the hard-coded 20-trade optimizer floor with a snapshot-size dynamic default.
 - [x] Persist min-trade source and underpowered train/validation flags in optimizer artifacts.
 - [x] Verify focused local tests/checks.
-- [ ] Open/merge PR, then rerun Optimize on `main` using snapshot run `25029217647`.
+- [x] Open/merge PR, then rerun Optimize on `main` using snapshot run `25029217647`.
+- [x] Use the 200-trial rerun to confirm sparse-threshold hugging is still rejected instead of treated as deployable.
+- [x] Strengthen the objective against threshold-hugging by raising the dynamic floor and shrinking near-floor Sharpe.
+- [ ] Verify, merge, and rerun Optimize on `main`.
 
 ## Review
 
 - 2026-04-28: Runtime-compatible contrarian support made the optimizer output usable as config keys, but the first rerun exposed a separate research validity bug: a sparse training fit with 72 trades and only 4 validation trades could still look like a completed optimization when the default trade floor was 20. The optimizer now computes a dynamic default floor from the smaller train/validation slice, records underpowered flags, and fails the run after writing artifacts if the selected result is not sample-powered.
 - 2026-04-28: Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-snapshot-min-trades-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` and `git diff --check`.
+- 2026-04-28: PR #204 merged at `285e94f9`. A corrected 50-trial optimize run `25036006982` completed with `min_trades=215`, train trades `1841`, validation trades `1814`, validation PnL `$337.53`, and validation Sharpe `0.399`. A 200-trial run `25036115888` correctly failed after artifact upload because it selected a threshold-hugging fit with train trades `222` and validation trades `103`, below the validation floor. That means the guard works, but the objective still needs a stronger sample-power penalty.
+- 2026-04-28: Raised the default dynamic trade floor to `clamp(min(train_rows, val_rows) / 200, 500, 5000)` and shrunk objective Sharpe until a trial reaches 4x the floor. Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-snapshot-sample-power-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` and `git diff --check`.
 
 # Merge Remote Dry-Run Report To Main (2026-04-28)
 

@@ -400,7 +400,7 @@ fn evaluate_snapshot_objective(
     let objective = if trades < min_trades {
         -1_000_000.0 + trades as f64
     } else {
-        sharpe + (net_pnl / 100_000.0)
+        (sharpe * sample_power_multiplier(trades, min_trades)) + (net_pnl / 100_000.0)
     };
 
     SnapshotObjectiveMetrics {
@@ -442,7 +442,15 @@ fn ratio(num: usize, den: usize) -> f64 {
 
 fn default_min_trades(train_rows: usize, val_rows: usize) -> usize {
     let base_rows = train_rows.min(val_rows);
-    (base_rows / 500).clamp(200, 2_000)
+    (base_rows / 200).clamp(500, 5_000)
+}
+
+fn sample_power_multiplier(trades: usize, min_trades: usize) -> f64 {
+    if trades < min_trades || min_trades == 0 {
+        return 0.0;
+    }
+    let full_power_trades = min_trades.saturating_mul(4).max(min_trades + 1);
+    (trades as f64 / full_power_trades as f64).min(1.0).sqrt()
 }
 
 fn write_outputs(
@@ -924,7 +932,8 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_min_trades, directional_score, parse_date_end, reward_risk_ratio, trade_sharpe,
+        default_min_trades, directional_score, parse_date_end, reward_risk_ratio,
+        sample_power_multiplier, trade_sharpe,
     };
 
     #[test]
@@ -958,8 +967,16 @@ mod tests {
 
     #[test]
     fn default_min_trades_scales_with_snapshot_size() {
-        assert_eq!(default_min_trades(185_158, 107_774), 215);
-        assert_eq!(default_min_trades(1_000, 1_000), 200);
-        assert_eq!(default_min_trades(2_000_000, 2_000_000), 2_000);
+        assert_eq!(default_min_trades(185_158, 107_774), 538);
+        assert_eq!(default_min_trades(1_000, 1_000), 500);
+        assert_eq!(default_min_trades(2_000_000, 2_000_000), 5_000);
+    }
+
+    #[test]
+    fn sample_power_multiplier_penalizes_threshold_hugging() {
+        assert_eq!(sample_power_multiplier(499, 500), 0.0);
+        assert!(sample_power_multiplier(500, 500) < 0.6);
+        assert_eq!(sample_power_multiplier(2_000, 500), 1.0);
+        assert_eq!(sample_power_multiplier(3_000, 500), 1.0);
     }
 }
