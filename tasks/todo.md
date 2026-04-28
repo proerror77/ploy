@@ -10057,3 +10057,5 @@ Review:
   Binance price/aggTrade/LOB across BTC/ETH/SOL/XRP/DOGE/BNB, Deribit IV, and
   `research_valid_windows`, but marked `deribit_atm_greeks` critical because the
   repo-backed collector only covers from about `2026-04-28 06:33 +08` onward.
+- 2026-04-28: Adjusted `research_valid_windows` freshness warning to 6 hours,
+  matching the documented 6-hour materialized-view refresh cadence.
