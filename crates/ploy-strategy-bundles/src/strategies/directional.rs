@@ -13,8 +13,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 use super::common::event::EventWindow;
 use super::common::fees::crypto_fee_cost;
 use super::common::quote::QuoteState;
+use super::three_layer_profile::ThreeLayerProfile;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
 
 // ── Probability Model ────────────────────────────────────
@@ -145,6 +146,10 @@ pub struct DirectionalConfig {
     pub reversal_stop_distance_pct: f64,
 
     // ── Three-Layer strategy parameters ──────────────────────────────
+    /// Runtime profile for profile-specific snapshot optimizer parity.
+    #[serde(default, alias = "strategy_profile")]
+    pub three_layer_strategy_profile: ThreeLayerProfile,
+
     /// Direction gate: minimum effective probability to consider a trade.
     #[serde(default = "default_tl_min_direction_prob")]
     pub three_layer_min_direction_prob: f64,
@@ -1790,6 +1795,7 @@ mod tests {
             reversal_max_pm_lag_secs: 30,
             reversal_take_profit_ask: 0.65,
             reversal_stop_distance_pct: 0.025,
+            three_layer_strategy_profile: ThreeLayerProfile::Mixed,
             three_layer_min_direction_prob: 0.56,
             three_layer_min_distance_over_sigma: 0.3,
             three_layer_min_confirmation_score: 0.10,
