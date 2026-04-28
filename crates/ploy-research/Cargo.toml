@@ -35,6 +35,7 @@ uuid.workspace = true
 anyhow = "1"
 burn = { version = "0.17", default-features = false, features = ["ndarray", "autodiff", "std"], optional = true }
 burn-ndarray = { version = "0.17", optional = true }
+optimizer.workspace = true
 
 [dev-dependencies]
 rust_decimal_macros.workspace = true
@@ -104,6 +105,10 @@ required-features = ["db"]
 [[example]]
 name = "research_snapshot_parity"
 path = "examples/research_snapshot_parity.rs"
+
+[[example]]
+name = "three_layer_snapshot_optimize"
+path = "examples/three_layer_snapshot_optimize.rs"
 
 [[example]]
 name = "collector_data_utilization"

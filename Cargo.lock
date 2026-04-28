@@ -5377,6 +5377,7 @@ dependencies = [
  "burn",
  "burn-ndarray",
  "chrono",
+ "optimizer",
  "ploy-feed-loaders",
  "ploy-market-contracts",
  "ploy-operator-contracts",
