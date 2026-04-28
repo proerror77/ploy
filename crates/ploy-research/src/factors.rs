@@ -14,6 +14,17 @@ use sqlx::PgPool;
 const EWMA_LAMBDA: f64 = 0.94;
 const RETURN_BUFFER_WINDOW_SECS: f64 = 300.0;
 
+fn nan_f64() -> f64 {
+    f64::NAN
+}
+
+fn deserialize_nullable_f64_as_nan<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<f64>::deserialize(deserializer)?.unwrap_or(f64::NAN))
+}
+
 #[cfg(any(feature = "db", test))]
 const PM_BOOK_SAMPLED_QUERY: &str = r#"
         WITH token_map AS (
@@ -83,15 +94,47 @@ pub struct FactorObservation {
     pub flip_age_secs: f64,
     pub post_flip_drift: f64,
     pub sigma_horizon: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub fair_prob_up: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub fair_prob_up_clean: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub prob_disagreement: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub implied_sigma_horizon: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub vol_gap: f64,
     pub distance_over_sigma: f64,
     pub model_prob_up: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub model_edge_up: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub reward_risk_up: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub reward_risk_down: f64,
     pub obi: f64,
     pub spread_bps: f64,
@@ -101,15 +144,51 @@ pub struct FactorObservation {
     pub depth_ratio: f64,
     pub depth_imbalance: f64,
     pub depth_far_ratio: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub depth_acceleration: f64,
     pub obi_10: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub pm_up_bid: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub pm_up_ask: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub pm_up_bid_size: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub pm_up_ask_size: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub pm_down_bid: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub pm_down_ask: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub pm_down_bid_size: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub pm_down_ask_size: f64,
     pub pm_lag_secs: f64,
     pub settlement_up: f64,
@@ -123,9 +202,17 @@ pub struct FactorObservation {
     pub cex_bar_return_60s: f64,
     pub cex_bar_volume_ratio_30s: f64,
     pub cex_bar_volume_trend_3: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub cex_signed_volume_ratio_30s: f64,
     pub cex_consecutive_up_bars: f64,
     pub cex_consecutive_down_bars: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub cex_breakout_volume_score: f64,
 }
 
@@ -2412,6 +2499,58 @@ mod tests {
             cex_consecutive_down_bars: 0.0,
             cex_breakout_volume_score: 0.0,
         }
+    }
+
+    #[test]
+    fn factor_observation_deserializes_snapshot_nulls_as_nan() {
+        let mut observation = test_factor_observation("evt", "BTCUSDT", 100, 1.0, None);
+        observation.fair_prob_up = f64::NAN;
+        observation.fair_prob_up_clean = f64::NAN;
+        observation.prob_disagreement = f64::NAN;
+        observation.implied_sigma_horizon = f64::NAN;
+        observation.vol_gap = f64::NAN;
+        observation.model_edge_up = f64::NAN;
+        observation.reward_risk_up = f64::NAN;
+        observation.reward_risk_down = f64::NAN;
+        observation.depth_acceleration = f64::NAN;
+        observation.pm_up_bid = f64::NAN;
+        observation.pm_up_ask = f64::NAN;
+        observation.pm_up_bid_size = f64::NAN;
+        observation.pm_up_ask_size = f64::NAN;
+        observation.pm_down_bid = f64::NAN;
+        observation.pm_down_ask = f64::NAN;
+        observation.pm_down_bid_size = f64::NAN;
+        observation.pm_down_ask_size = f64::NAN;
+        observation.cex_signed_volume_ratio_30s = f64::NAN;
+        observation.cex_breakout_volume_score = f64::NAN;
+        observation.future_up_ask_change_60s = None;
+
+        let json = serde_json::to_string(&observation).expect("serialize observation");
+        assert!(json.contains("\"depth_acceleration\":null"));
+        assert!(json.contains("\"pm_up_bid_size\":null"));
+
+        let decoded: FactorObservation =
+            serde_json::from_str(&json).expect("deserialize snapshot observation");
+        assert!(decoded.fair_prob_up.is_nan());
+        assert!(decoded.fair_prob_up_clean.is_nan());
+        assert!(decoded.prob_disagreement.is_nan());
+        assert!(decoded.implied_sigma_horizon.is_nan());
+        assert!(decoded.vol_gap.is_nan());
+        assert!(decoded.model_edge_up.is_nan());
+        assert!(decoded.reward_risk_up.is_nan());
+        assert!(decoded.reward_risk_down.is_nan());
+        assert!(decoded.depth_acceleration.is_nan());
+        assert!(decoded.pm_up_bid.is_nan());
+        assert!(decoded.pm_up_ask.is_nan());
+        assert!(decoded.pm_up_bid_size.is_nan());
+        assert!(decoded.pm_up_ask_size.is_nan());
+        assert!(decoded.pm_down_bid.is_nan());
+        assert!(decoded.pm_down_ask.is_nan());
+        assert!(decoded.pm_down_bid_size.is_nan());
+        assert!(decoded.pm_down_ask_size.is_nan());
+        assert!(decoded.cex_signed_volume_ratio_30s.is_nan());
+        assert!(decoded.cex_breakout_volume_score.is_nan());
+        assert_eq!(decoded.future_up_ask_change_60s, None);
     }
 
     #[test]
