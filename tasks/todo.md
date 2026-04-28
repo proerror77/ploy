@@ -10178,7 +10178,7 @@ Review:
 - [x] Run quick 1-hour audits every 30 minutes and full retained-window audits every 6 hours.
 - [x] Save JSON reports as GitHub artifacts and stable Tango latest files.
 - [x] Fail the workflow on critical/unknown audit results by default.
-- [ ] Verify workflow YAML and run the workflow from `main`.
+- [x] Verify workflow YAML and run the workflow from `main`.
 
 ## Review
 
@@ -10192,3 +10192,8 @@ Review:
   quick-audit smoke produced JSON with 21 gap audits plus one window audit; it
   returned `warn` because `research_valid_windows` has exceeded the 6-hour
   warning threshold, not because live collectors stopped.
+- 2026-04-28: PR #208 merged at `f15720be`. Post-merge workflow run
+  `25041125499` verified the quick path from `main` and completed successfully
+  in 28s. Post-merge workflow run `25041205036` verified quick + full retained
+  window reporting with `fail_on=never` and completed successfully in 1m49s;
+  `summary.md`, `quick.json`, and `full.json` were uploaded as artifacts.
