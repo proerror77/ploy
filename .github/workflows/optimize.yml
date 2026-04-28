@@ -87,6 +87,14 @@ on:
         description: "Process timeout for optimize_backtest"
         required: false
         default: "90"
+      snapshot_run_id:
+        description: "Research Snapshot workflow run id; required for canonical optimizer runs"
+        required: false
+        default: ""
+      allow_live_parquet_debug:
+        description: "Allow non-canonical direct live parquet optimization without snapshot manifest"
+        required: false
+        default: "false"
 
 concurrency:
   group: optimize-${{ github.ref }}
@@ -94,6 +102,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -173,7 +182,17 @@ jobs:
       - name: Make binary executable
         run: chmod +x target/release/examples/optimize_backtest
 
+      - name: Download research snapshot
+        if: ${{ github.event.inputs.snapshot_run_id != '' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: research-snapshot-${{ github.event.inputs.snapshot_run_id }}
+          path: artifacts/research-snapshot
+          run-id: ${{ github.event.inputs.snapshot_run_id }}
+          github-token: ${{ github.token }}
+
       - name: Sync Parquet data from Tango-1-1
+        if: ${{ github.event.inputs.allow_live_parquet_debug == 'true' }}
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.TANGO_SSH_KEY }}" > ~/.ssh/tango_key
@@ -192,6 +211,30 @@ jobs:
           echo "PLOY_DUCKDB_TEMP_DIR=${DUCKDB_TEMP_DIR}" >> "${GITHUB_ENV}"
           echo "PLOY_DUCKDB_MEMORY_LIMIT=${{ github.event.inputs.duckdb_memory_limit }}" >> "${GITHUB_ENV}"
           echo "DuckDB spill directory: ${DUCKDB_TEMP_DIR}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Publish snapshot provenance
+        if: ${{ hashFiles('artifacts/research-snapshot/manifest.json') != '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/optimize
+          node <<'NODE' > artifacts/optimize/snapshot-provenance.txt
+          const fs = require('fs');
+          const manifest = JSON.parse(fs.readFileSync('artifacts/research-snapshot/manifest.json', 'utf8'));
+          const lines = [
+            '# Research Snapshot Provenance',
+            `schema_version=${manifest.schema_version ?? ''}`,
+            `snapshot_hash=${manifest.snapshot_hash ?? ''}`,
+            `generated_at=${manifest.generated_at ?? ''}`,
+            `git_sha=${manifest.git_sha ?? ''}`,
+            `symbols=${(manifest.symbols ?? []).join(',')}`,
+            `start=${manifest.start ?? ''}`,
+            `end=${manifest.end ?? ''}`,
+            `immutable_input=${manifest.immutable_input ?? ''}`,
+            `optimizer_data_dir=${manifest.optimizer_data_dir ?? ''}`,
+          ];
+          console.log(lines.join('\n'));
+          NODE
+          cat artifacts/optimize/snapshot-provenance.txt >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Preflight Parquet manifest
         run: |
@@ -231,6 +274,11 @@ jobs:
           fi
           if [ -n "${{ github.event.inputs.max_updates }}" ]; then
             extra_flags+=(--max-updates "${{ github.event.inputs.max_updates }}")
+          fi
+          if [ -f artifacts/research-snapshot/manifest.json ]; then
+            extra_flags+=(--snapshot-dir artifacts/research-snapshot)
+          elif [ "${{ github.event.inputs.allow_live_parquet_debug }}" = "true" ]; then
+            extra_flags+=(--allow-live-parquet-debug)
           fi
 
           ./target/release/examples/optimize_backtest \
@@ -303,6 +351,11 @@ jobs:
           if [ -n "${{ github.event.inputs.max_updates }}" ]; then
             extra_flags+=(--max-updates "${{ github.event.inputs.max_updates }}")
           fi
+          if [ -f artifacts/research-snapshot/manifest.json ]; then
+            extra_flags+=(--snapshot-dir artifacts/research-snapshot)
+          elif [ "${{ github.event.inputs.allow_live_parquet_debug }}" = "true" ]; then
+            extra_flags+=(--allow-live-parquet-debug)
+          fi
 
           timeout --preserve-status "${{ github.event.inputs.optimize_timeout_minutes }}m" \
           ./target/release/examples/optimize_backtest \
@@ -325,3 +378,12 @@ jobs:
             --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
             "${time_flags[@]}" \
             "${extra_flags[@]}"
+
+      - name: Upload optimize provenance
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: optimize-provenance-${{ github.run_id }}
+          path: artifacts/optimize
+          if-no-files-found: ignore
+          retention-days: 14

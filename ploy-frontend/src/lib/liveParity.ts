@@ -56,6 +56,7 @@ export interface LiveParityReport {
   alertPairs: LiveParityPair[];
   dryrunOrders: number;
   executionMismatches: number;
+  liveOnlyOrders: number;
   liveOrders: number;
   pairs: LiveParityPair[];
   unmatchedDryrunOrders: number;
@@ -76,7 +77,12 @@ function runtimeBucket(snapshot: TradingStateSnapshot): RuntimeBucket | null {
   const mode = snapshot.runtime_mode.toLowerCase();
   const id = snapshot.deployment_id.toLowerCase();
 
-  if (mode.includes('dry')) {
+  if (
+    mode.includes('dry') ||
+    mode === 'paper' ||
+    mode.includes('paper') ||
+    mode.includes('sim')
+  ) {
     return 'dryrun';
   }
 
@@ -227,7 +233,7 @@ function executionMismatches(dryrun?: TradingStateSnapshot, live?: TradingStateS
 function pairMessage(
   pair: Pick<
     LiveParityPair,
-    'dryrun' | 'dryrunOnlyOrders' | 'executionMismatches' | 'live'
+    'dryrun' | 'dryrunOnlyOrders' | 'executionMismatches' | 'live' | 'liveOnlyOrders'
   >
 ) {
   if (!pair.dryrun) {
@@ -240,6 +246,10 @@ function pairMessage(
 
   if (pair.dryrunOnlyOrders.length > 0) {
     return 'Dry-run order is missing from live';
+  }
+
+  if (pair.liveOnlyOrders.length > 0) {
+    return 'Live has order not seen in dry-run';
   }
 
   if (pair.executionMismatches.length > 0) {
@@ -256,7 +266,7 @@ function pairMessage(
 function pairStatus(
   pair: Pick<
     LiveParityPair,
-    'dryrun' | 'dryrunOnlyOrders' | 'executionMismatches' | 'live'
+    'dryrun' | 'dryrunOnlyOrders' | 'executionMismatches' | 'live' | 'liveOnlyOrders'
   >
 ) {
   if (!pair.dryrun) {
@@ -268,6 +278,10 @@ function pairStatus(
   }
 
   if (pair.dryrunOnlyOrders.length > 0) {
+    return 'alert' as const;
+  }
+
+  if (pair.liveOnlyOrders.length > 0) {
     return 'alert' as const;
   }
 
@@ -332,6 +346,7 @@ export function buildLiveParityReport(
       (sum, pair) => sum + pair.executionMismatches.length,
       0
     ),
+    liveOnlyOrders: pairs.reduce((sum, pair) => sum + pair.liveOnlyOrders.length, 0),
     liveOrders: pairs.reduce((sum, pair) => sum + pair.liveSummary.orders, 0),
     pairs,
     unmatchedDryrunOrders: pairs.reduce(

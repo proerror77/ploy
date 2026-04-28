@@ -17,7 +17,7 @@ import { api } from '@/services/api';
 import { ws } from '@/services/websocket';
 import { useStore } from '@/store';
 
-import type { LiveParityPair, SnapshotSummary } from '@/lib/liveParity';
+import type { LiveParityPair, ParityOrderRow, SnapshotSummary } from '@/lib/liveParity';
 
 function integer(value: number) {
   return new Intl.NumberFormat('zh-CN').format(value);
@@ -96,7 +96,64 @@ function Metric({ label, value }: { label: string; value: string }) {
 function EmptyOrders() {
   return (
     <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">
-      No unmatched dry-run orders
+      No unmatched orders
+    </div>
+  );
+}
+
+function OrderGapTable({
+  accent = 'neutral',
+  orders,
+}: {
+  accent?: 'destructive' | 'neutral';
+  orders: ParityOrderRow[];
+}) {
+  if (orders.length === 0) {
+    return <EmptyOrders />;
+  }
+
+  const headerClass =
+    accent === 'destructive'
+      ? 'bg-destructive/10 text-destructive'
+      : 'bg-muted text-muted-foreground';
+  const borderClass = accent === 'destructive' ? 'border border-destructive/30' : 'border';
+
+  return (
+    <div className={`overflow-hidden rounded-lg ${borderClass}`}>
+      <div
+        className={`grid grid-cols-[minmax(180px,1fr)_100px_100px_120px_minmax(120px,1fr)] px-4 py-2 text-xs font-semibold uppercase tracking-wide ${headerClass}`}
+      >
+        <div>Created</div>
+        <div>Side</div>
+        <div>State</div>
+        <div>Qty / Price</div>
+        <div>Event / Token</div>
+      </div>
+      {orders.map((order) => (
+        <div
+          key={order.orderId}
+          className="grid grid-cols-[minmax(180px,1fr)_100px_100px_120px_minmax(120px,1fr)] gap-0 border-t px-4 py-3 text-sm"
+        >
+          <div className="min-w-0">
+            <div className="truncate font-medium">{order.orderId}</div>
+            <div className="mt-1 truncate text-xs text-muted-foreground">
+              {order.createdAt ? formatTimestamp(order.createdAt) : 'unknown time'}
+            </div>
+          </div>
+          <div className="font-semibold">{order.side}</div>
+          <div>{order.state}</div>
+          <div className="font-mono text-xs">
+            {order.quantity}
+            <br />
+            {order.limitPrice ?? 'market'}
+          </div>
+          <div className="truncate font-mono text-xs text-muted-foreground">
+            {order.eventId}
+            <br />
+            {order.tokenId}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -110,7 +167,10 @@ function EmptyMismatches() {
 }
 
 function PairCard({ pair }: { pair: LiveParityPair }) {
-  const alertCount = pair.dryrunOnlyOrders.length + pair.executionMismatches.length;
+  const alertCount =
+    pair.dryrunOnlyOrders.length +
+    pair.liveOnlyOrders.length +
+    pair.executionMismatches.length;
 
   return (
     <Card className={pair.status === 'alert' ? 'border-destructive/45' : undefined}>
@@ -157,44 +217,12 @@ function PairCard({ pair }: { pair: LiveParityPair }) {
 
         <div className="mt-5">
           <div className="mb-3 text-sm font-semibold">Dry-run orders without live match</div>
-          {pair.dryrunOnlyOrders.length === 0 ? (
-            <EmptyOrders />
-          ) : (
-            <div className="overflow-hidden rounded-lg border">
-              <div className="grid grid-cols-[minmax(180px,1fr)_100px_100px_120px_minmax(120px,1fr)] bg-muted px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                <div>Created</div>
-                <div>Side</div>
-                <div>State</div>
-                <div>Qty / Price</div>
-                <div>Event / Token</div>
-              </div>
-              {pair.dryrunOnlyOrders.map((order) => (
-                <div
-                  key={order.orderId}
-                  className="grid grid-cols-[minmax(180px,1fr)_100px_100px_120px_minmax(120px,1fr)] gap-0 border-t px-4 py-3 text-sm"
-                >
-                  <div className="min-w-0">
-                    <div className="truncate font-medium">{order.orderId}</div>
-                    <div className="mt-1 truncate text-xs text-muted-foreground">
-                      {order.createdAt ? formatTimestamp(order.createdAt) : 'unknown time'}
-                    </div>
-                  </div>
-                  <div className="font-semibold">{order.side}</div>
-                  <div>{order.state}</div>
-                  <div className="font-mono text-xs">
-                    {order.quantity}
-                    <br />
-                    {order.limitPrice ?? 'market'}
-                  </div>
-                  <div className="truncate font-mono text-xs text-muted-foreground">
-                    {order.eventId}
-                    <br />
-                    {order.tokenId}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+          <OrderGapTable orders={pair.dryrunOnlyOrders} />
+        </div>
+
+        <div className="mt-5">
+          <div className="mb-3 text-sm font-semibold">Live orders without dry-run match</div>
+          <OrderGapTable accent="destructive" orders={pair.liveOnlyOrders} />
         </div>
 
         <div className="mt-5">
@@ -324,14 +352,15 @@ export function LiveParity() {
               <CheckCircle2 className="h-5 w-5 text-success" />
             )}
             {hasAlert
-              ? 'Dry-run has orders that live has not placed'
-              : 'No dry-run-only live order gaps detected'}
+              ? 'Dry-run and live order paths are not aligned'
+              : 'No dry-run/live order or fill gaps detected'}
           </div>
           <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
             <span>{integer(report.pairs.length)} pairs</span>
             <span>{integer(report.dryrunOrders)} dry-run orders</span>
             <span>{integer(report.liveOrders)} live orders</span>
             <span>{integer(report.unmatchedDryrunOrders)} missing live orders</span>
+            <span>{integer(report.liveOnlyOrders)} live-only orders</span>
             <span>{integer(report.executionMismatches)} fill mismatches</span>
           </div>
         </div>

@@ -51,11 +51,19 @@ use ploy_strategy_bundles::{
 };
 use ploy_trading::{FillRecord, TradeSide, TradingIntent};
 use rust_decimal_macros::dec;
+use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 const DEFAULT_THREE_LAYER_CONFIG: &str = "config/strategies/02-pm5d-threelayer.unified.toml";
+
+#[derive(Debug, Clone)]
+struct SnapshotProvenance {
+    hash: String,
+    generated_at: DateTime<Utc>,
+    optimizer_data_dir: String,
+}
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
@@ -108,6 +116,24 @@ fn display_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+fn load_research_snapshot_manifest(path: &str) -> ResearchSnapshotManifestProbe {
+    let manifest_path = std::path::Path::new(path).join("manifest.json");
+    let file = std::fs::File::open(&manifest_path).unwrap_or_else(|error| {
+        eprintln!(
+            "ERROR: failed to open research snapshot manifest {}: {error}",
+            manifest_path.display()
+        );
+        std::process::exit(2);
+    });
+    serde_json::from_reader(file).unwrap_or_else(|error| {
+        eprintln!(
+            "ERROR: failed to parse research snapshot manifest {}: {error}",
+            manifest_path.display()
+        );
+        std::process::exit(2);
+    })
 }
 
 fn algorithm_label(_strategy_variant: &str) -> &'static str {
@@ -178,6 +204,18 @@ impl SplitPreflight {
 #[derive(Debug, Default)]
 struct PreflightManifest {
     splits: Vec<SplitPreflight>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResearchSnapshotManifestProbe {
+    schema_version: String,
+    snapshot_hash: Option<String>,
+    generated_at: DateTime<Utc>,
+    symbols: Vec<String>,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    immutable_input: bool,
+    optimizer_data_dir: Option<String>,
 }
 
 impl PreflightManifest {
@@ -601,6 +639,35 @@ fn canonical_strategy_variant(raw: &str) -> String {
         }
         other => other.to_string(),
     }
+}
+
+fn validate_snapshot_optimizer_scope(
+    manifest: &ResearchSnapshotManifestProbe,
+    symbols: &[String],
+    train_from: DateTime<Utc>,
+    train_to: DateTime<Utc>,
+    val_from: DateTime<Utc>,
+    val_to: DateTime<Utc>,
+) -> std::result::Result<(), String> {
+    let mut requested_symbols = symbols.to_vec();
+    requested_symbols.sort();
+    let mut snapshot_symbols = manifest.symbols.clone();
+    snapshot_symbols.sort();
+    if snapshot_symbols != requested_symbols {
+        return Err(format!(
+            "snapshot symbols {:?} do not match requested symbols {:?}",
+            snapshot_symbols, requested_symbols
+        ));
+    }
+    let requested_start = train_from.min(val_from);
+    let requested_end = train_to.max(val_to);
+    if manifest.start > requested_start || manifest.end < requested_end {
+        return Err(format!(
+            "snapshot window {} -> {} does not cover optimizer window {} -> {}",
+            manifest.start, manifest.end, requested_start, requested_end
+        ));
+    }
+    Ok(())
 }
 
 fn build_strategy(strategy_variant: &str, config: DirectionalConfig) -> Box<dyn StrategyLogic> {
@@ -1114,7 +1181,85 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let db_url = flag_value(&args, "--db-url");
-    let data_dir = flag_value(&args, "--data-dir");
+    let mut data_dir = flag_value(&args, "--data-dir");
+    let snapshot_dir = flag_value(&args, "--snapshot-dir");
+    let allow_live_parquet_debug = flag_present(&args, "--allow-live-parquet-debug");
+    let allow_direct_db_debug = flag_present(&args, "--allow-direct-db-debug");
+    let mut snapshot_manifest = None;
+
+    if let Some(ref snapshot_dir) = snapshot_dir {
+        if db_url.is_some() {
+            eprintln!("ERROR: --snapshot-dir cannot be combined with --db-url");
+            std::process::exit(2);
+        }
+        let manifest = load_research_snapshot_manifest(snapshot_dir);
+        if !manifest.immutable_input {
+            eprintln!("ERROR: research snapshot manifest is not marked immutable_input=true");
+            std::process::exit(2);
+        }
+        if manifest.schema_version != "research_snapshot_v1" {
+            eprintln!(
+                "ERROR: unsupported research snapshot schema {}; expected research_snapshot_v1",
+                manifest.schema_version
+            );
+            std::process::exit(2);
+        }
+        if manifest
+            .snapshot_hash
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty()
+        {
+            eprintln!("ERROR: research snapshot manifest is missing snapshot_hash");
+            std::process::exit(2);
+        }
+        match (&data_dir, &manifest.optimizer_data_dir) {
+            (None, Some(snapshot_data_dir)) => {
+                data_dir = Some(snapshot_data_dir.clone());
+            }
+            (Some(actual), Some(expected)) if actual != expected => {
+                eprintln!(
+                    "ERROR: --data-dir {actual} does not match snapshot optimizer_data_dir {expected}"
+                );
+                std::process::exit(2);
+            }
+            (Some(_), None) => {
+                eprintln!(
+                    "ERROR: research snapshot manifest does not declare optimizer_data_dir; \
+                     refusing to optimize against an unpinned parquet source"
+                );
+                std::process::exit(2);
+            }
+            (None, None) => {}
+            _ => {}
+        }
+        if data_dir.is_none() {
+            eprintln!(
+                "ERROR: research snapshot manifest must declare optimizer_data_dir for canonical optimization"
+            );
+            std::process::exit(2);
+        }
+        snapshot_manifest = Some(manifest);
+    } else {
+        if db_url.is_some() && !allow_direct_db_debug {
+            eprintln!(
+                "ERROR: direct DB optimizer replay is non-canonical; pass --snapshot-dir or explicit --allow-direct-db-debug"
+            );
+            std::process::exit(2);
+        }
+        if data_dir.is_some() && !allow_live_parquet_debug {
+            eprintln!(
+                "ERROR: live Parquet optimizer replay is non-canonical; pass --snapshot-dir or explicit --allow-live-parquet-debug"
+            );
+            std::process::exit(2);
+        }
+        if data_dir.is_none() && db_url.is_none() {
+            eprintln!(
+                "ERROR: optimizer canonical mode requires --snapshot-dir; debug modes require --data-dir/--allow-live-parquet-debug or --db-url/--allow-direct-db-debug"
+            );
+            std::process::exit(2);
+        }
+    }
 
     if db_url.is_none() && data_dir.is_none() {
         eprintln!("ERROR: either --db-url or --data-dir is required");
@@ -1257,6 +1402,30 @@ fn main() {
         .as_deref()
         .map(parse_timestamp)
         .unwrap_or_else(|| parse_date_end(&val_end));
+
+    let _snapshot_provenance = snapshot_manifest.as_ref().map(|manifest| {
+        if let Err(error) = validate_snapshot_optimizer_scope(
+            manifest, &symbols, train_from, train_to, val_from, val_to,
+        ) {
+            eprintln!("ERROR: research snapshot does not match optimizer request: {error}");
+            std::process::exit(2);
+        }
+        let provenance = SnapshotProvenance {
+            hash: manifest.snapshot_hash.clone().unwrap_or_default(),
+            generated_at: manifest.generated_at,
+            optimizer_data_dir: manifest.optimizer_data_dir.clone().unwrap_or_default(),
+        };
+        let line = format!(
+            "Research snapshot: schema={} hash={} generated_at={} optimizer_data_dir={}",
+            manifest.schema_version,
+            provenance.hash,
+            provenance.generated_at,
+            provenance.optimizer_data_dir
+        );
+        eprintln!("{line}");
+        println!("{line}");
+        provenance
+    });
 
     let (train_source, val_source) = if let Some(ref dir) = data_dir {
         let manifest =

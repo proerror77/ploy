@@ -1,0 +1,137 @@
+//! Compile a point-in-time research snapshot from Tango PostgreSQL raw tables.
+//!
+//! This binary is the boundary between collector storage and repeated research
+//! scoring. Factor review, walk-forward, and optimizer jobs should consume the
+//! resulting immutable snapshot artifacts instead of rebuilding raw joins.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use ploy_research::{
+    ResearchSnapshotBuildOptions, build_research_snapshot_from_database, write_research_snapshot,
+};
+use sqlx::postgres::PgPoolOptions;
+
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2)
+        .find(|window| window[0] == flag)
+        .map(|window| window[1].clone())
+}
+
+fn flag_present(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+}
+
+fn parse_date_start(raw: &str) -> DateTime<Utc> {
+    let date = NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .unwrap_or_else(|_| panic!("invalid date: {raw}"));
+    Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+}
+
+fn parse_date_end(raw: &str) -> DateTime<Utc> {
+    let date = NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .unwrap_or_else(|_| panic!("invalid date: {raw}"));
+    let next_day = date
+        .succ_opt()
+        .unwrap_or_else(|| panic!("invalid end date: {raw}"));
+    Utc.from_utc_datetime(&next_day.and_hms_opt(0, 0, 0).unwrap())
+}
+
+fn parse_timestamp(raw: &str) -> DateTime<Utc> {
+    raw.parse::<DateTime<Utc>>()
+        .unwrap_or_else(|_| panic!("invalid timestamp: {raw}"))
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let db_url = flag_value(&args, "--db-url").expect("--db-url required");
+    let output_dir =
+        PathBuf::from(flag_value(&args, "--output-dir").expect("--output-dir required"));
+    let start = flag_value(&args, "--start-ts")
+        .map(|raw| parse_timestamp(&raw))
+        .unwrap_or_else(|| {
+            parse_date_start(&flag_value(&args, "--start-date").expect("--start-date required"))
+        });
+    let end = flag_value(&args, "--end-ts")
+        .map(|raw| parse_timestamp(&raw))
+        .unwrap_or_else(|| {
+            parse_date_end(&flag_value(&args, "--end-date").expect("--end-date required"))
+        });
+    let symbols: Vec<String> = flag_value(&args, "--symbols")
+        .unwrap_or_else(|| "BTCUSDT".to_string())
+        .split(',')
+        .map(str::trim)
+        .filter(|symbol| !symbol.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    let lob_sample_secs: i32 = flag_value(&args, "--lob-sample-secs")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(30);
+    let max_quote_age_secs: i64 = flag_value(&args, "--max-quote-age-secs")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(30);
+    let observation_sample_secs: i64 = flag_value(&args, "--observation-sample-secs")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(30);
+    let stake_usd = flag_value(&args, "--stake-usd")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(15.0);
+    let require_official_settlement = !flag_present(&args, "--allow-missing-official-settlement");
+    let optimizer_data_dir =
+        flag_value(&args, "--optimizer-data-dir").expect("--optimizer-data-dir required");
+
+    eprintln!(
+        "research_snapshot_compile: {} -> {} for {:?}, stake_usd={:.2}, output={}",
+        start,
+        end,
+        symbols,
+        stake_usd,
+        output_dir.display()
+    );
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(120))
+        .connect(&db_url)
+        .await?;
+
+    let snapshot = build_research_snapshot_from_database(
+        &pool,
+        ResearchSnapshotBuildOptions {
+            symbols,
+            start,
+            end,
+            lob_sample_secs,
+            observation_sample_secs,
+            max_quote_age_secs,
+            stake_usd,
+            require_official_settlement,
+            optimizer_data_dir: Some(optimizer_data_dir),
+            git_sha: std::env::var("GITHUB_SHA").ok(),
+        },
+    )
+    .await?;
+    let manifest = write_research_snapshot(&output_dir, snapshot)?;
+
+    eprintln!("research snapshot written: {}", output_dir.display());
+    eprintln!(
+        "rows: observations={} deribit={} pm_books={}",
+        manifest.row_counts.observations,
+        manifest.row_counts.deribit_snapshots,
+        manifest.row_counts.pm_book_snapshots
+    );
+    for timing in &manifest.phase_timings {
+        eprintln!(
+            "phase {:<24} {:>8} ms rows={}",
+            timing.phase,
+            timing.elapsed_ms,
+            timing
+                .rows
+                .map(|rows| rows.to_string())
+                .unwrap_or_else(|| "n/a".to_string())
+        );
+    }
+    Ok(())
+}

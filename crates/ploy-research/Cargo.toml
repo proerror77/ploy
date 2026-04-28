@@ -97,6 +97,15 @@ path = "examples/factor_walk_forward_v2.rs"
 required-features = ["db"]
 
 [[example]]
+name = "research_snapshot_compile"
+path = "examples/research_snapshot_compile.rs"
+required-features = ["db"]
+
+[[example]]
+name = "research_snapshot_parity"
+path = "examples/research_snapshot_parity.rs"
+
+[[example]]
 name = "collector_data_utilization"
 path = "examples/collector_data_utilization.rs"
 required-features = ["db"]
