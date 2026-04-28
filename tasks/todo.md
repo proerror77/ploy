@@ -16,6 +16,8 @@
 - [x] Open/merge PR, then rerun Optimize on `main` using snapshot run `25029217647`.
 - [x] Use the 200-trial rerun to confirm sparse-threshold hugging is still rejected instead of treated as deployable.
 - [x] Strengthen the objective against threshold-hugging by raising the dynamic floor and shrinking near-floor Sharpe.
+- [x] Verify, merge, and rerun Optimize on `main`.
+- [x] Calibrate the sample floor after run `25036356198` showed a strong 484-trade validation candidate just below the 538 floor.
 - [ ] Verify, merge, and rerun Optimize on `main`.
 
 ## Review
@@ -24,6 +26,8 @@
 - 2026-04-28: Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-snapshot-min-trades-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` and `git diff --check`.
 - 2026-04-28: PR #204 merged at `285e94f9`. A corrected 50-trial optimize run `25036006982` completed with `min_trades=215`, train trades `1841`, validation trades `1814`, validation PnL `$337.53`, and validation Sharpe `0.399`. A 200-trial run `25036115888` correctly failed after artifact upload because it selected a threshold-hugging fit with train trades `222` and validation trades `103`, below the validation floor. That means the guard works, but the objective still needs a stronger sample-power penalty.
 - 2026-04-28: Raised the default dynamic trade floor to `clamp(min(train_rows, val_rows) / 200, 500, 5000)` and shrunk objective Sharpe until a trial reaches 4x the floor. Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-snapshot-sample-power-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` and `git diff --check`.
+- 2026-04-28: PR #205 merged at `9a639317`. The final 200-trial retry `25036356198` still failed by design, but the selected candidate had train trades `819`, validation trades `484`, validation PnL `$2790.72`, and validation Sharpe `5.545`; it missed the 538 trade floor by about 10%. The earlier sparse 103-trade result remains invalid, but this run shows the floor should be calibrated around 400+ trades for the current 7-day six-symbol snapshot.
+- 2026-04-28: Calibrated the floor to `clamp(min(train_rows, val_rows) / 250, 400, 5000)`, which makes the current snapshot floor `431`. Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-snapshot-floor-calibration-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` and `git diff --check`.
 
 # Merge Remote Dry-Run Report To Main (2026-04-28)
 

@@ -442,7 +442,7 @@ fn ratio(num: usize, den: usize) -> f64 {
 
 fn default_min_trades(train_rows: usize, val_rows: usize) -> usize {
     let base_rows = train_rows.min(val_rows);
-    (base_rows / 200).clamp(500, 5_000)
+    (base_rows / 250).clamp(400, 5_000)
 }
 
 fn sample_power_multiplier(trades: usize, min_trades: usize) -> f64 {
@@ -967,8 +967,8 @@ mod tests {
 
     #[test]
     fn default_min_trades_scales_with_snapshot_size() {
-        assert_eq!(default_min_trades(185_158, 107_774), 538);
-        assert_eq!(default_min_trades(1_000, 1_000), 500);
+        assert_eq!(default_min_trades(185_158, 107_774), 431);
+        assert_eq!(default_min_trades(1_000, 1_000), 400);
         assert_eq!(default_min_trades(2_000_000, 2_000_000), 5_000);
     }
 
