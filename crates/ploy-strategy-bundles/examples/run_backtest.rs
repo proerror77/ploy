@@ -13,12 +13,12 @@
 //! If no --db-url is given, uses synthetic market data.
 
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
-    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
-    StrategyRuntime, ThreeLayerStrategy, config::FullConfig,
+    config::FullConfig, DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder,
+    ReversalStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
+    StrategyLogic, StrategyRuntime, ThreeLayerStrategy,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -255,6 +255,8 @@ fn main() {
                     three_layer_min_drift_confirmation: 0.0002,
                     three_layer_min_edge: 0.03,
                     three_layer_min_reward_risk: 1.2,
+                    three_layer_alpha_contrarian: false,
+                    three_layer_cex_contrarian: false,
                     three_layer_take_profit_ask: 0.70,
                     three_layer_stop_distance_pct: 0.020,
                     three_layer_max_pm_lag_secs: 15,

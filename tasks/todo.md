@@ -10095,7 +10095,7 @@ Review:
 - [x] Push PR, merge after CI, and rerun Optimize using snapshot run `25029217647`.
 - [x] Add a score-gate follow-up so the snapshot optimizer can test contrarian alpha/confirmation and PM CLOB momentum instead of only the old high-alpha gate region.
 - [x] Push and merge the score-gate follow-up, then rerun Optimize on `main`.
-- [ ] Implement runtime support for any contrarian-mode parameter before applying optimized research output to dry-run/live configs.
+- [x] Implement runtime support for any contrarian-mode parameter before applying optimized research output to dry-run/live configs.
 
 ## Review
 
@@ -10105,3 +10105,28 @@ Review:
 - 2026-04-28: Score-gate follow-up broadens the search to include contrarian alpha/confirmation options, PM ask momentum, and current executable-liquidity labels while keeping official settlement and executable PnL as the objective.
 - 2026-04-28: Merged PR #201 and reran Optimize on `main` as run `25034557544`; build job finished in 3m27s, optimize job finished in 40s, and snapshot mode skipped raw Parquet sync/preflight. Best train metrics: objective `8.215`, Sharpe `8.132`, PnL `$8381.13`, trades `2574`, fill rate `51.52%`. Validation metrics: objective `2.223`, Sharpe `2.203`, PnL `$2077.31`, trades `2244`, fill rate `85.52%`, win rate `53.03%`.
 - 2026-04-28: The selected parameters require `alpha_contrarian=true` and `cex_contrarian=true`, which are optimizer research flags only today. Do not paste these params into live until the ThreeLayer runtime exposes and verifies equivalent behavior with walk-forward and dry-run/live parity.
+
+# ThreeLayer Contrarian Runtime Support (2026-04-28)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+  - Owner: TOML-facing strategy config and default values.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: ThreeLayer runtime scoring and entry side selection.
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: optimizer output format for runtime-compatible params.
+
+## Tasks
+
+- [x] Add default-off ThreeLayer runtime flags for alpha and CEX/LOB contrarian modes.
+- [x] Keep default behavior unchanged when both flags are false.
+- [x] Emit runtime-compatible optimizer keys instead of comment-only contrarian output.
+- [x] Verify with focused local Rust tests.
+- [x] Push PR, pass CI, and merge.
+
+## Review
+
+- 2026-04-28: Added `three_layer_alpha_contrarian` and `three_layer_cex_contrarian` as default-off config fields. Alpha contrarian mode fades the model-favored side and rewards lower model edge; CEX contrarian mode inverts the confirmation bonus. Existing live/dry-run behavior is unchanged unless these fields are explicitly enabled.
+- 2026-04-28: Local verification passed with `CARGO_TARGET_DIR=/tmp/ploy-three-layer-contrarian-test cargo check -p ploy-strategy-bundles --tests --examples`, `CARGO_TARGET_DIR=/tmp/ploy-three-layer-contrarian-test rtk cargo test -p ploy-strategy-bundles three_layer --lib`, `CARGO_TARGET_DIR=/tmp/ploy-three-layer-contrarian-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features`, and `git diff --check`.
+- 2026-04-28: PR #203 CI passed after adding the new fields to example and integration-test `DirectionalConfig` fixtures.

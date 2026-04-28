@@ -11,8 +11,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tracing::{debug, info, warn};
 
@@ -1058,6 +1058,8 @@ mod tests {
             three_layer_min_drift_confirmation: 0.0002,
             three_layer_min_edge: 0.03,
             three_layer_min_reward_risk: 1.2,
+            three_layer_alpha_contrarian: false,
+            three_layer_cex_contrarian: false,
             three_layer_take_profit_ask: 0.70,
             three_layer_stop_distance_pct: 0.020,
             three_layer_max_pm_lag_secs: 15,
