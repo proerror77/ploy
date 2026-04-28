@@ -29,7 +29,7 @@ use std::fs::File;
 use alloy::primitives::U256;
 use alloy::providers::ProviderBuilder;
 use alloy::sol;
-use polymarket_client_sdk::types::{Address, address};
+use polymarket_client_sdk::types::Address;
 use polymarket_client_sdk::{POLYGON, contract_config};
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
@@ -37,8 +37,6 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 const RPC_URL: &str = "https://polygon-rpc.com";
-
-const USDC_ADDRESS: Address = address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
 
 sol! {
     #[sol(rpc)]
@@ -91,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
     let config = contract_config(POLYGON, false).unwrap();
     let neg_risk_config = contract_config(POLYGON, true).unwrap();
 
-    let usdc = IERC20::new(USDC_ADDRESS, provider.clone());
+    let pusd = IERC20::new(config.collateral, provider.clone());
     let ctf = IERC1155::new(config.conditional_tokens, provider.clone());
 
     // All contracts that need approval for full CLOB trading
@@ -107,28 +105,28 @@ async fn main() -> anyhow::Result<()> {
     let mut all_approved = true;
 
     for (name, target) in &targets {
-        let usdc_result = usdc.allowance(wallet_address, *target).call().await;
+        let pusd_result = pusd.allowance(wallet_address, *target).call().await;
         let ctf_result = ctf.isApprovedForAll(wallet_address, *target).call().await;
 
-        match (&usdc_result, &ctf_result) {
-            (Ok(usdc_allowance), Ok(ctf_approved)) => {
-                let usdc_ok = *usdc_allowance > U256::ZERO;
+        match (&pusd_result, &ctf_result) {
+            (Ok(pusd_allowance), Ok(ctf_approved)) => {
+                let pusd_ok = *pusd_allowance > U256::ZERO;
                 let ctf_ok = *ctf_approved;
 
-                if !usdc_ok || !ctf_ok {
+                if !pusd_ok || !ctf_ok {
                     all_approved = false;
                 }
 
                 info!(
                     contract = name,
                     address = %target,
-                    usdc_allowance = %format_allowance(*usdc_allowance),
-                    usdc_approved = usdc_ok,
+                    pusd_allowance = %format_allowance(*pusd_allowance),
+                    pusd_approved = pusd_ok,
                     ctf_approved = ctf_ok,
                 );
             }
             (Err(e), _) => {
-                debug!(contract = name, error = %e, "failed to check USDC allowance");
+                debug!(contract = name, error = %e, "failed to check pUSD allowance");
                 all_approved = false;
             }
             (_, Err(e)) => {
@@ -156,9 +154,9 @@ fn format_allowance(allowance: U256) -> String {
     } else if allowance == U256::ZERO {
         "0".to_owned()
     } else {
-        // USDC has 6 decimals
-        let usdc_decimals = U256::from(1_000_000);
-        let whole = allowance / usdc_decimals;
-        format!("{whole} USDC")
+        // pUSD has 6 decimals
+        let pusd_decimals = U256::from(1_000_000);
+        let whole = allowance / pusd_decimals;
+        format!("{whole} pUSD")
     }
 }

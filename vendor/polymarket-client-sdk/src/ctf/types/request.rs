@@ -44,7 +44,7 @@ pub struct CollectionIdRequest {
 #[non_exhaustive]
 #[derive(Debug, Clone, Builder)]
 pub struct PositionIdRequest {
-    /// The collateral token address (e.g., USDC)
+    /// The collateral token address (e.g., pUSD)
     pub collateral_token: Address,
     /// The collection ID
     pub collection_id: B256,
@@ -52,11 +52,11 @@ pub struct PositionIdRequest {
 
 /// Request to split collateral into outcome tokens.
 ///
-/// Converts USDC collateral into matched outcome token pairs (YES/NO).
+/// Converts pUSD collateral into matched outcome token pairs (YES/NO).
 #[non_exhaustive]
 #[derive(Debug, Clone, Builder)]
 pub struct SplitPositionRequest {
-    /// The collateral token address (e.g., USDC)
+    /// The collateral token address (e.g., pUSD)
     pub collateral_token: Address,
     /// Parent collection ID (typically zero for Polymarket)
     #[builder(default)]
@@ -72,11 +72,11 @@ pub struct SplitPositionRequest {
 
 /// Request to merge outcome tokens back into collateral.
 ///
-/// Combines matched outcome token pairs back into USDC.
+/// Combines matched outcome token pairs back into pUSD.
 #[non_exhaustive]
 #[derive(Debug, Clone, Builder)]
 pub struct MergePositionsRequest {
-    /// The collateral token address (e.g., USDC)
+    /// The collateral token address (e.g., pUSD)
     pub collateral_token: Address,
     /// Parent collection ID (typically zero for Polymarket)
     #[builder(default)]
@@ -92,11 +92,11 @@ pub struct MergePositionsRequest {
 
 /// Request to redeem winning outcome tokens for collateral.
 ///
-/// After a condition is resolved, burns winning tokens to recover USDC.
+/// After a condition is resolved, burns winning tokens to recover pUSD.
 #[non_exhaustive]
 #[derive(Debug, Clone, Builder)]
 pub struct RedeemPositionsRequest {
-    /// The collateral token address (e.g., USDC)
+    /// The collateral token address (e.g., pUSD)
     pub collateral_token: Address,
     /// Parent collection ID (typically zero for Polymarket)
     #[builder(default)]
@@ -134,9 +134,9 @@ impl SplitPositionRequest {
     /// # use polymarket_client_sdk::types::address;
     /// # use alloy::primitives::{B256, U256};
     /// let request = SplitPositionRequest::for_binary_market(
-    ///     address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"), // USDC
+    ///     address!("0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"), // pUSD
     ///     B256::default(),
-    ///     U256::from(1_000_000), // 1 USDC (6 decimals)
+    ///     U256::from(1_000_000), // 1 pUSD (6 decimals)
     /// );
     /// ```
     #[must_use]
@@ -163,7 +163,7 @@ impl MergePositionsRequest {
     /// # use polymarket_client_sdk::types::address;
     /// # use alloy::primitives::{B256, U256};
     /// let request = MergePositionsRequest::for_binary_market(
-    ///     address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"), // USDC
+    ///     address!("0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"), // pUSD
     ///     B256::default(),
     ///     U256::from(1_000_000), // 1 full set
     /// );
@@ -192,7 +192,7 @@ impl RedeemPositionsRequest {
     /// # use polymarket_client_sdk::types::address;
     /// # use alloy::primitives::{B256, U256};
     /// let request = RedeemPositionsRequest::for_binary_market(
-    ///     address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"), // USDC
+    ///     address!("0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"), // pUSD
     ///     B256::default(),
     /// );
     /// ```
