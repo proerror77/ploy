@@ -6,6 +6,12 @@ Issue: https://github.com/proerror77/ploy/issues/224
 
 - `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
   - Owner: snapshot optimizer selection objective, trade floor, and output diagnostics.
+- `config/strategies/02-pm5d-threelayer.continuation-soft-dryrun.toml`
+  - Owner: dry-run candidate config generated from the best holistic optimizer rerun.
+- `config/deployments/pm5d.threelayer.continuation-soft.dryrun.json`
+  - Owner: Tango dry-run deployment ID for the new continuation-soft candidate.
+- `.github/workflows/deploy-tango-1-1.yml`
+  - Owner: CI deploy bundle coverage for the continuation-soft dry-run config.
 - `tasks/todo.md`
   - Owner: correction plan, verification evidence, and candidate-selection caveats.
 
@@ -16,7 +22,8 @@ Issue: https://github.com/proerror77/ploy/issues/224
 - [x] Base the default trade floor on event-side / day / symbol coverage instead of raw observation row count.
 - [x] Add avg entry price and reward/risk diagnostics to optimizer metrics and artifacts.
 - [x] Run focused formatter/tests and diff checks.
-- [ ] Rerun snapshot optimizations on current `main` via CI and compare candidates by full profitability metrics.
+- [x] Rerun snapshot optimizations on current `main` via CI and compare candidates by full profitability metrics.
+- [x] Add a dry-run deployment/config for the best holistic candidate, without changing live.
 
 ## Review
 
@@ -25,6 +32,10 @@ Issue: https://github.com/proerror77/ploy/issues/224
 - 2026-04-29: The revised objective evaluates train and validation every trial, rejects unpowered or non-profitable validation windows, and ranks by a holistic score including log growth, net PnL, max drawdown, fill/reject quality, positive day/symbol rates, concentration, avg entry, and reward/risk. Win rate stays in the artifact for visibility but is not a promotion criterion.
 - 2026-04-29: The default trade floor now uses event-side opportunity coverage plus day/symbol coverage instead of raw observation rows, so a selective profitable strategy is not discarded solely because the snapshot has many rows per event.
 - 2026-04-29: Focused verification passed: `rustfmt --edition 2024 crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `git diff --check`, and `CARGO_TARGET_DIR=/tmp/ploy-holistic-opt-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`14 passed`).
+- 2026-04-29: Dispatched corrected CI optimizer reruns from branch `fix/pm5d-holistic-snapshot-optimizer` with snapshot run `25029217647`, snapshot hash `5bfb253100d3f573`, train `2026-04-21..2026-04-25`, validation `2026-04-25..2026-04-28`, six symbols, `trials=200`: `champion=25089051307`, `obi_soft=25089051290`, `continuation_soft=25089051296`.
+- 2026-04-29: All corrected CI optimizer reruns completed successfully. By whole profitability quality, `continuation_soft` run `25089051296` is the current best candidate: validation PnL `$1,027.25`, Sharpe `2.587`, trades `216`, max drawdown `$182.59`, avg entry `0.3152`, avg reward/risk `2.405`, positive day rate `100%`, positive symbol rate `100%`, fill rate `100%`, and min-trades floor `187`. `champion` run `25089051307` had higher validation PnL `$1,882.11` but much worse drawdown `$989.20` and weaker validation stability. `obi_soft` run `25089051290` was profitable but weaker: validation PnL `$232.07`, Sharpe `0.473`, max drawdown `$574.25`.
+- 2026-04-29: Tango live dry-run snapshot at `2026-04-29T03:23Z` confirmed existing deployment IDs `pm5d.threelayer.champion.dryrun`, `pm5d.threelayer.dryrun`, and `pm5d.threelayer.obi-soft.dryrun`; current public dry-run results were early and not promotion-grade overall (`21` closed trades, realized PnL `-$49.99`, max drawdown `-$117.11`). Added missing dry-run candidate deployment ID `pm5d.threelayer.continuation-soft.dryrun` and strategy config from run `25089051296`; live config remains untouched.
+- 2026-04-29: Continuation-soft dry-run config verification passed: JSON manifest `jq`, TOML parse via `tomllib`, workflow YAML parse via Ruby, `git diff --check`, and `CARGO_TARGET_DIR=/tmp/ploy-continuation-dryrun-test rtk cargo test -p ploy-strategy-bundles three_layer --lib` (`28 passed`).
 
 # PM5D Stable Scoring Objective (2026-04-29)
 
