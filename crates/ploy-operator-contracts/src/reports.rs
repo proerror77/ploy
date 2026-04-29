@@ -1,5 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DryRunSummary {
@@ -26,6 +27,16 @@ pub enum NumberOrText {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DryRunMetrics {
     pub sharpe: Option<f64>,
+    #[serde(default)]
+    pub sharpe_per_trade: Option<f64>,
+    #[serde(default)]
+    pub sharpe_basis: Option<String>,
+    #[serde(default)]
+    pub closed_trade_count_for_sharpe: Option<usize>,
+    #[serde(default)]
+    pub sharpe_daily_ann: Option<f64>,
+    #[serde(default)]
+    pub daily_sharpe_basis: Option<String>,
     pub profit_factor: Option<NumberOrText>,
     pub max_drawdown: f64,
     pub avg_trade: Option<f64>,
@@ -149,6 +160,14 @@ pub struct DryRunPairingReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DryRunExecutionDiagnostics {
+    pub basis: String,
+    pub partial_buy_threshold_pct: usize,
+    pub summary: BTreeMap<String, serde_json::Value>,
+    pub strategies: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DryRunStrategyReport {
     pub runtime_mode: String,
     pub strategy_id: String,
@@ -165,6 +184,8 @@ pub struct DryRunStrategyReport {
     pub closed_trades: Vec<DryRunClosedTradeRow>,
     pub recent_closed: Vec<DryRunClosedTradeRow>,
     pub open_positions: Vec<DryRunOpenPositionRow>,
+    #[serde(default)]
+    pub execution_diagnostics: Option<DryRunExecutionDiagnostics>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -183,4 +204,133 @@ pub struct DryRunPerformanceReport {
     pub open_positions: Vec<DryRunOpenPositionRow>,
     pub strategies: Vec<DryRunStrategyReport>,
     pub pairing: DryRunPairingReport,
+    #[serde(default)]
+    pub execution_diagnostics: Option<DryRunExecutionDiagnostics>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DryRunPerformanceReport;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn dry_run_report_roundtrip_preserves_diagnostics_fields() {
+        let raw = json!({
+            "generated_at": "2026-04-29T00:00:00Z",
+            "summary": summary(),
+            "metrics": metrics(),
+            "equity_curve": [],
+            "by_window": [],
+            "daily": [],
+            "daily_by_window": [],
+            "symbols": [],
+            "symbols_by_window": [],
+            "closed_trades": [],
+            "recent_closed": [],
+            "open_positions": [],
+            "strategies": [{
+                "runtime_mode": "dryrun",
+                "strategy_id": "pm5d",
+                "deployment_id": "pm5d-dryrun",
+                "label": "dryrun/pm5d/pm5d-dryrun",
+                "summary": summary(),
+                "metrics": metrics(),
+                "equity_curve": [],
+                "by_window": [],
+                "daily": [],
+                "daily_by_window": [],
+                "symbols": [],
+                "symbols_by_window": [],
+                "closed_trades": [],
+                "recent_closed": [],
+                "open_positions": [],
+                "execution_diagnostics": diagnostics()
+            }],
+            "pairing": {
+                "pair_key": "runtime_mode,strategy_id,deployment_id,event_id",
+                "mixed_event_groups": 0,
+                "fills_in_mixed_event_groups": 0,
+                "current_view_rows": 0,
+                "side_aware_rows": 0
+            },
+            "execution_diagnostics": diagnostics()
+        });
+
+        let report: DryRunPerformanceReport = serde_json::from_value(raw).unwrap();
+        let roundtripped = serde_json::to_value(report).unwrap();
+
+        assert_eq!(
+            roundtripped["metrics"]["sharpe_basis"],
+            "closed_trade_pnl_sqrt_n"
+        );
+        assert_eq!(
+            roundtripped["metrics"]["daily_sharpe_basis"],
+            "daily_net_pnl_sqrt_365"
+        );
+        assert_eq!(
+            roundtripped["execution_diagnostics"]["basis"],
+            "strategy_runtime_orders"
+        );
+        assert_eq!(
+            roundtripped["strategies"][0]["execution_diagnostics"]["basis"],
+            "strategy_runtime_orders"
+        );
+        assert_eq!(
+            roundtripped["execution_diagnostics"]["summary"]["rejected_buy_orders"],
+            2
+        );
+    }
+
+    fn summary() -> Value {
+        json!({
+            "total_trades": 1,
+            "closed_trades": 1,
+            "wins": 1,
+            "losses": 0,
+            "win_rate_pct": 100.0,
+            "realized_pnl": 1.25,
+            "total_fees": 0.01,
+            "open_positions": 0,
+            "open_exposure": 0.0,
+            "latest_opened_at": null,
+            "latest_closed_at": null
+        })
+    }
+
+    fn metrics() -> Value {
+        json!({
+            "sharpe": 1.5,
+            "sharpe_per_trade": 1.5,
+            "sharpe_basis": "closed_trade_pnl_sqrt_n",
+            "closed_trade_count_for_sharpe": 3,
+            "sharpe_daily_ann": 2.5,
+            "daily_sharpe_basis": "daily_net_pnl_sqrt_365",
+            "profit_factor": "Infinity",
+            "max_drawdown": -0.25,
+            "avg_trade": 0.42,
+            "gross_profit": 1.25,
+            "gross_loss": 0.0,
+            "equity_points": 1
+        })
+    }
+
+    fn diagnostics() -> Value {
+        json!({
+            "basis": "strategy_runtime_orders",
+            "partial_buy_threshold_pct": 98,
+            "summary": {
+                "total_orders": 7,
+                "buy_orders": 5,
+                "rejected_buy_orders": 2,
+                "buy_fill_rate_pct": 61.5
+            },
+            "strategies": [{
+                "runtime_mode": "dryrun",
+                "strategy_id": "pm5d",
+                "deployment_id": "pm5d-dryrun",
+                "buy_orders": 5,
+                "rejected_buy_orders": 2
+            }]
+        })
+    }
 }

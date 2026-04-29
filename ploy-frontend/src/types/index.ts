@@ -24,6 +24,7 @@ export type {
   DryRunDailyRow,
   DryRunDailyWindowRow,
   DryRunEquityPoint,
+  DryRunExecutionDiagnostics,
   DryRunMetrics,
   DryRunOpenPositionRow,
   DryRunPairingReport,

@@ -196,6 +196,34 @@ Issue: https://github.com/proerror77/ploy/issues/227
 - 2026-04-29: Review correction: runtime deployment rows now join to matching report strategy by `deployment_id`, while the strategy table also lists dry-run deployments that have no report rows yet. Cross-strategy equity uses close-time on the x-axis and does not bridge missing strategy points.
 - 2026-04-29: Verification passed: `node scripts/export_operator_contract_types.mjs --check`, `env CARGO_TARGET_DIR=/tmp/ploy-dryrun-contracts /opt/homebrew/bin/timeout 180 cargo run -p ploy-operator-contracts --example export_schemas -- --check`, `python3 -m py_compile scripts/report_dryrun_summary.py`, `cd ploy-frontend && npm run lint`, `cd ploy-frontend && npm run build`, `env CARGO_TARGET_DIR=/tmp/ploy-dryrun-daemon-check /opt/homebrew/bin/timeout 180 cargo check -p ploy-daemon-host`, and `git diff --check`.
 
+# Dry-run Report Diagnostics Contract Preservation (2026-04-29)
+
+## Files
+
+- `crates/ploy-operator-contracts/src/reports.rs`
+  - Owner: preserve dry-run Sharpe basis fields and execution diagnostics through the daemon contract roundtrip.
+- `contracts/schemas/dry-run-performance-report.schema.json`
+  - Owner: generated schema snapshot for the expanded dry-run report payload.
+- `ploy-frontend/src/types/operator-contracts.ts`
+- `ploy-sidecar/src/contracts/operator-contracts.ts`
+- `ploy-frontend/src/types/index.ts`
+  - Owner: generated and public TypeScript type coverage for the expanded payload.
+
+## Tasks
+
+- [x] Add contract fields for trade/daily Sharpe basis metrics.
+- [x] Add top-level and per-strategy `execution_diagnostics` contract coverage.
+- [x] Add a Rust roundtrip regression test for the daemon parse/reserialize path.
+- [x] Regenerate schema and TypeScript contract snapshots.
+- [x] Run local contract/report verification.
+- [ ] Land via PR, deploy `main` to `tango-1-1` through CI, and verify `/api/reports/dry-run` payload fields on local and public endpoints.
+
+## Review
+
+- 2026-04-29: Root cause after the report-accounting deploy was not the Python report script; `ployd` parses script stdout into `DryRunPerformanceReport` and serializes that typed value back to clients, so undeclared fields were dropped at the operator-contract boundary.
+- 2026-04-29: Added explicit contract coverage for `metrics.sharpe_per_trade`, `metrics.sharpe_basis`, `metrics.closed_trade_count_for_sharpe`, `metrics.sharpe_daily_ann`, `metrics.daily_sharpe_basis`, and `execution_diagnostics` at both report and strategy scope.
+- 2026-04-29: Local verification passed: `cargo fmt -p ploy-operator-contracts -- --check`, `rtk cargo test -p ploy-operator-contracts dry_run_report_roundtrip_preserves_diagnostics_fields`, `rtk cargo check -p ploy-operator-contracts`, `rtk cargo run --locked -p ploy-operator-contracts --example export_schemas -- --check`, `node scripts/export_operator_contract_types.mjs --check`, Python report py-compile, `python3 -m unittest tests.test_dryrun_report_contracts`, and `git diff --check`.
+
 # PM5D Expectancy And Fillable-Order Gate (2026-04-29)
 
 ## Files
