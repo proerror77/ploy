@@ -453,10 +453,6 @@ fn executable_edge_score(edge: f64, params: &SnapshotThreeLayerParams) -> f64 {
     directional_score(edge, executable_edge_threshold(params), 0.08, false)
 }
 
-fn executable_model_edge(row: &FactorObservationV2, params: &SnapshotThreeLayerParams) -> f64 {
-    expected_value_per_share(calibrated_model_probability(row, params), row.entry_ask)
-}
-
 fn directional_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> f64 {
     if !value.is_finite() || !threshold.is_finite() || !scale.is_finite() || scale <= 0.0 {
         return -0.50;
@@ -507,7 +503,12 @@ fn row_passes_gates(
         return false;
     }
 
-    let edge = executable_model_edge(row, params);
+    let direction_probability = calibrated_model_probability(row, params);
+    if !direction_probability.is_finite() || direction_probability < params.min_direction_prob {
+        return false;
+    }
+
+    let edge = expected_value_per_share(direction_probability, row.entry_ask);
     if !edge.is_finite() || edge < executable_edge_threshold(params) {
         return false;
     }
@@ -1611,7 +1612,7 @@ mod tests {
         default_min_trades_from_coverage, directional_score, evaluate_snapshot_objective,
         executable_edge_score, expected_value_per_share, expected_value_per_staked_dollar,
         holistic_selection_objective, max_drawdown, parse_date_end, reward_risk_ratio,
-        sample_power_multiplier, stable_compounding_objective, trade_sharpe,
+        row_passes_gates, sample_power_multiplier, stable_compounding_objective, trade_sharpe,
         transformed_model_probability,
     };
     use chrono::{TimeZone, Utc};
@@ -1916,6 +1917,19 @@ mod tests {
             expected_value_per_staked_dollar(0.57, 0.28)
                 > expected_value_per_staked_dollar(0.72, 0.70),
             "lower probability can still be better when payoff per staked dollar is higher"
+        );
+    }
+
+    #[test]
+    fn snapshot_gate_rejects_cheap_neutral_direction_probability() {
+        let mut params = test_params();
+        params.min_direction_prob = 0.56;
+        params.min_entry_score = 0.0;
+        let row = test_row("event-cheap-neutral", 0.51, 0.12, Some(12.0), true, 0);
+
+        assert!(
+            !row_passes_gates(&row, &params, StrategyProfile::Champion),
+            "cheap executable odds must not pass when calibrated direction probability is below the configured gate"
         );
     }
 

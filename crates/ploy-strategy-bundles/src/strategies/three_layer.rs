@@ -511,6 +511,9 @@ fn evaluate_direction_score(
         config.probability_shrink,
         config.probability_haircut,
     );
+    if !effective_p.is_finite() || effective_p < config.min_direction_prob {
+        return None;
+    }
 
     // In contrarian mode the direction is inverted, but the alpha strength is
     // still the distance from 50/50. Do not treat the faded side's raw model
@@ -2023,6 +2026,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
         let mut config = test_config();
         config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
         let mut strategy = ThreeLayerStrategy::new(config);
         discover_test_event(&mut strategy, now);
         let positions = PositionLedger::default();
@@ -2061,6 +2065,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
         let mut config = test_config();
         config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
         let mut strategy = ThreeLayerStrategy::new(config);
         discover_test_event(&mut strategy, now);
         let positions = PositionLedger::default();
@@ -2095,6 +2100,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
         let mut config = test_config();
         config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
         let mut strategy = ThreeLayerStrategy::new(config);
         discover_test_event(&mut strategy, now);
         let positions = PositionLedger::default();
@@ -2207,6 +2213,20 @@ mod tests {
         assert!(
             score > 0.0,
             "direction score should be positive for strong signal"
+        );
+    }
+
+    #[test]
+    fn direction_rejects_when_calibrated_probability_is_neutral() {
+        let mut config = test_config();
+        config.probability_shrink = 0.0;
+        config.probability_haircut = 0.0;
+
+        let result = evaluate_direction_score(2.0, 0.02, 0.0, 0.0, Regime::Early, &config);
+
+        assert!(
+            result.is_none(),
+            "cheap executable odds must not override neutral calibrated direction probability"
         );
     }
 
