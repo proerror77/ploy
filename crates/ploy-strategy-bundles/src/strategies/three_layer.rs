@@ -27,6 +27,7 @@ pub struct ThreeLayerConfig {
     pub min_direction_prob: f64,
     pub min_distance_over_sigma: f64,
     pub min_confirmation_score: f64,
+    pub require_confirmation: bool,
     pub min_drift_confirmation: f64,
     pub min_edge: f64,
     pub min_reward_risk: f64,
@@ -57,6 +58,7 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             min_direction_prob: c.three_layer_min_direction_prob,
             min_distance_over_sigma: c.three_layer_min_distance_over_sigma,
             min_confirmation_score: c.three_layer_min_confirmation_score,
+            require_confirmation: c.three_layer_require_confirmation,
             min_drift_confirmation: c.three_layer_min_drift_confirmation,
             min_edge: c.three_layer_min_edge,
             min_reward_risk: c.three_layer_min_reward_risk,
@@ -370,7 +372,7 @@ fn profile_confirmation_score(
             config,
         ),
         ThreeLayerProfile::Champion => 0.0,
-        ThreeLayerProfile::ObiSoft => {
+        ThreeLayerProfile::ObiSoft | ThreeLayerProfile::ObiHard => {
             let obi = (lob.obi * direction_sign).clamp(-1.0, 1.0);
             let obi_delta = (lob.obi_delta() * direction_sign).clamp(-1.0, 1.0);
             let depth = (lob.depth_imbalance() * direction_sign).clamp(-1.0, 1.0);
@@ -440,7 +442,9 @@ fn evaluate_entry_score(config: &ThreeLayerConfig, inputs: EntryScoreInputs) -> 
                 + 0.10 * inputs.pm_momentum_score
                 + 0.05 * inputs.liquidity_score
         }
-        ThreeLayerProfile::ObiSoft | ThreeLayerProfile::ContinuationSoft => {
+        ThreeLayerProfile::ObiSoft
+        | ThreeLayerProfile::ObiHard
+        | ThreeLayerProfile::ContinuationSoft => {
             0.25 * inputs.direction_score
                 + 0.12 * distance_score
                 + 0.18 * edge_score
@@ -450,6 +454,17 @@ fn evaluate_entry_score(config: &ThreeLayerConfig, inputs: EntryScoreInputs) -> 
                 + 0.08 * inputs.liquidity_score
         }
         ThreeLayerProfile::Mixed => unreachable!("mixed profile returned above"),
+    }
+}
+
+fn confirmation_gate_passes(value: f64, threshold: f64, contrarian: bool) -> bool {
+    if !value.is_finite() || !threshold.is_finite() {
+        return false;
+    }
+    if contrarian {
+        value <= threshold
+    } else {
+        value >= threshold
     }
 }
 
@@ -933,6 +948,16 @@ impl ThreeLayerStrategy {
                 regime,
                 &self.config,
             );
+            if self.config.require_confirmation
+                && !confirmation_gate_passes(
+                    confirmation_score,
+                    self.config.min_confirmation_score,
+                    self.config.cex_contrarian,
+                )
+            {
+                self.bump("skip_confirmation_gate");
+                continue;
+            }
 
             // Layer 3: Edge score
             let Some((entry_price_f, edge, rr, edge_score)) =
@@ -1625,6 +1650,11 @@ mod tests {
         let dc: DirectionalConfig = serde_json::from_str(r#"{"strategy_profile":"obi"}"#).unwrap();
         let tlc: ThreeLayerConfig = dc.into();
         assert_eq!(tlc.profile, ThreeLayerProfile::ObiSoft);
+
+        let dc: DirectionalConfig =
+            serde_json::from_str(r#"{"strategy_profile":"obi_hard"}"#).unwrap();
+        let tlc: ThreeLayerConfig = dc.into();
+        assert_eq!(tlc.profile, ThreeLayerProfile::ObiHard);
     }
 
     #[test]
@@ -1682,6 +1712,7 @@ mod tests {
             min_direction_prob: 0.56,
             min_distance_over_sigma: 0.3,
             min_confirmation_score: 0.10,
+            require_confirmation: false,
             min_drift_confirmation: 0.0002,
             min_edge: 0.03,
             min_reward_risk: 1.2,
@@ -2364,6 +2395,43 @@ mod tests {
         assert!(
             score > 0.0,
             "DOWN-side OBI profile should reward opposing raw UP pressure, got {score}"
+        );
+    }
+
+    #[test]
+    fn hard_confirmation_gate_rejects_weak_obi_when_required() {
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::ObiHard;
+        config.require_confirmation = true;
+        config.min_confirmation_score = 0.10;
+
+        assert!(!confirmation_gate_passes(
+            0.0,
+            config.min_confirmation_score,
+            config.cex_contrarian
+        ));
+
+        let mut soft_config = config.clone();
+        soft_config.profile = ThreeLayerProfile::ObiSoft;
+        soft_config.require_confirmation = false;
+        let soft_score = evaluate_entry_score(
+            &soft_config,
+            EntryScoreInputs {
+                direction_score: 0.80,
+                distance_over_sigma: 0.40,
+                direction_sign: 1.0,
+                edge: 0.06,
+                edge_score: 0.70,
+                confirmation: 0.0,
+                drift_30s: 0.0,
+                pm_momentum_score: 0.0,
+                liquidity_score: 1.0,
+            },
+        );
+
+        assert!(
+            soft_score > soft_config.min_entry_score,
+            "OBI-soft should still be able to score weak confirmation instead of hard rejecting"
         );
     }
 

@@ -13,6 +13,8 @@ pub enum ThreeLayerProfile {
     Champion,
     /// Snapshot Strategy B: Champion plus CEX/PM order-book imbalance soft score.
     ObiSoft,
+    /// Snapshot Strategy B-hard: OBI confirmation must pass before scoring.
+    ObiHard,
     /// Snapshot Strategy C: Champion plus CEX continuation soft score.
     ContinuationSoft,
 }
@@ -29,6 +31,7 @@ impl ThreeLayerProfile {
             Self::Mixed => "mixed",
             Self::Champion => "champion",
             Self::ObiSoft => "obi_soft",
+            Self::ObiHard => "obi_hard",
             Self::ContinuationSoft => "continuation_soft",
         }
     }
@@ -46,11 +49,14 @@ impl FromStr for ThreeLayerProfile {
             "" | "mixed" | "legacy" => Ok(Self::Mixed),
             "champion" | "a" | "alpha" | "alpha_only" | "contrarian_alpha" => Ok(Self::Champion),
             "obi" | "obi_soft" | "b" | "book_imbalance" | "orderbook" => Ok(Self::ObiSoft),
+            "obi_hard" | "obi_confirmed" | "book_imbalance_hard" | "orderbook_hard" => {
+                Ok(Self::ObiHard)
+            }
             "continuation" | "continuation_soft" | "c" | "cex_continuation" => {
                 Ok(Self::ContinuationSoft)
             }
             other => Err(format!(
-                "unknown three_layer_strategy_profile {other:?}; expected mixed, champion, obi_soft, or continuation_soft"
+                "unknown three_layer_strategy_profile {other:?}; expected mixed, champion, obi_soft, obi_hard, or continuation_soft"
             )),
         }
     }
@@ -69,5 +75,24 @@ impl<'de> Deserialize<'de> for ThreeLayerProfile {
     {
         let raw = String::deserialize(deserializer)?;
         Self::from_str(&raw).map_err(de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ThreeLayerProfile;
+    use std::str::FromStr;
+
+    #[test]
+    fn parses_obi_hard_operator_aliases() {
+        assert_eq!(
+            ThreeLayerProfile::from_str("obi_hard").unwrap(),
+            ThreeLayerProfile::ObiHard
+        );
+        assert_eq!(
+            ThreeLayerProfile::from_str("book_imbalance_hard").unwrap(),
+            ThreeLayerProfile::ObiHard
+        );
+        assert_eq!(ThreeLayerProfile::ObiHard.as_str(), "obi_hard");
     }
 }

@@ -162,6 +162,10 @@ pub struct DirectionalConfig {
     #[serde(default = "default_tl_min_confirmation_score")]
     pub three_layer_min_confirmation_score: f64,
 
+    /// Confirmation gate: require the profile-specific CEX/PM confirmation score to pass.
+    #[serde(default = "default_tl_require_confirmation")]
+    pub three_layer_require_confirmation: bool,
+
     /// Confirmation gate: in late/expiry regimes, require drift_30s to agree with direction.
     #[serde(default = "default_tl_min_drift_confirmation")]
     pub three_layer_min_drift_confirmation: f64,
@@ -341,6 +345,9 @@ fn default_tl_min_distance_over_sigma() -> f64 {
 }
 fn default_tl_min_confirmation_score() -> f64 {
     0.10
+}
+fn default_tl_require_confirmation() -> bool {
+    false
 }
 fn default_tl_min_drift_confirmation() -> f64 {
     0.0002
@@ -1813,6 +1820,7 @@ mod tests {
             three_layer_min_direction_prob: 0.56,
             three_layer_min_distance_over_sigma: 0.3,
             three_layer_min_confirmation_score: 0.10,
+            three_layer_require_confirmation: false,
             three_layer_min_drift_confirmation: 0.0002,
             three_layer_min_edge: 0.03,
             three_layer_min_reward_risk: 1.2,
