@@ -1,3 +1,30 @@
+# PM5D Stable Scoring Objective (2026-04-29)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: live/dry-run three-layer scoring semantics.
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: snapshot optimizer scoring parity and objective function.
+- `tasks/todo.md`
+  - Owner: implementation plan, verification evidence, and research caveats.
+
+## Tasks
+
+- [x] Mark prior DR/optimizer results as stale until scoring is rerun.
+- [x] Split contrarian alpha scoring from execution edge scoring.
+- [x] Keep executable edge monotonic: higher cost-adjusted edge scores better, negative edge cannot be rewarded by contrarian mode.
+- [x] Replace Sharpe-dominated optimizer objective with a stability/compounding-aware utility.
+- [x] Emit drawdown, smoothness, stability, fill/reject, and risk-adjusted metrics in optimizer output.
+- [x] Update focused tests so they protect the corrected semantics.
+
+## Review
+
+- 2026-04-29: Current DR candidates from the previous snapshot optimizer should be treated as stale research candidates. The old objective selected by trade-level Sharpe plus a tiny PnL term and the old contrarian scoring could reward lower or negative edge, so the three strategy arms must be rerun before any production/live sizing decision.
+- 2026-04-29: Runtime scoring now treats contrarian as an alpha-direction transform only. Snapshot profiles transform the model probability before direction/edge scoring, enforce non-negative cost-adjusted edge, and never use contrarian mode to reward lower executable edge.
+- 2026-04-29: Snapshot optimization now uses a stability/compounding objective built from log growth, net PnL, maximum drawdown, fill/reject quality, positive day/symbol rates, concentration, and a small capped Sharpe bonus. Optimizer artifacts now print the stability diagnostics alongside Sharpe/PnL.
+- 2026-04-29: Focused verification passed: `rustfmt --edition 2024` on touched Rust files, `git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-stable-scoring-test rtk cargo test -p ploy-strategy-bundles three_layer --lib`, and `CARGO_TARGET_DIR=/tmp/ploy-stable-scoring-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features`.
+
 # Polymarket CLOB V2 Cutover (2026-04-28)
 
 ## Files

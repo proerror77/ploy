@@ -324,6 +324,14 @@ fn threshold_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> 
     (signed / scale).clamp(-0.50, 1.0)
 }
 
+fn executable_edge_threshold(config: &ThreeLayerConfig) -> f64 {
+    if config.profile.uses_snapshot_scoring() {
+        config.min_edge.max(0.0)
+    } else {
+        config.min_edge
+    }
+}
+
 fn profile_confirmation_score(
     direction_sign: f64,
     lob: &LobState,
@@ -393,7 +401,7 @@ fn evaluate_entry_score(config: &ThreeLayerConfig, inputs: EntryScoreInputs) -> 
         0.60,
         config.alpha_contrarian,
     );
-    let edge_score = threshold_score(inputs.edge, config.min_edge, 0.08, config.alpha_contrarian);
+    let edge_score = threshold_score(inputs.edge, executable_edge_threshold(config), 0.08, false);
     let drift_side = inputs.drift_30s * inputs.direction_sign;
     let drift_score = ((drift_side - config.min_drift_confirmation) * 800.0).clamp(-0.50, 1.0);
     let confirmation_score = threshold_score(
@@ -429,8 +437,9 @@ fn evaluate_entry_score(config: &ThreeLayerConfig, inputs: EntryScoreInputs) -> 
 /// Returns Some((direction_sign, effective_probability, direction_score)) or None
 /// only when the signal is too weak to even consider (below minimum distance in Early).
 ///
-/// The score is a continuous measure of directional conviction:
-///   score = (effective_p - 0.50) / 0.50, clamped to [0, 1].
+/// In snapshot-scored profiles, contrarian mode inverts the direction but keeps
+/// the transformed alpha probability monotonic: stronger inverse alpha scores
+/// higher, and execution edge is evaluated separately.
 fn evaluate_direction_score(
     distance_over_sigma: f64,
     _sigma_horizon: f64,
@@ -466,10 +475,11 @@ fn evaluate_direction_score(
     };
 
     let (direction_sign, effective_p) = if config.alpha_contrarian {
+        let inverse_alpha_p = direction_prob.max(1.0 - direction_prob);
         if direction_prob >= 0.5 {
-            (-1.0_f64, 1.0 - direction_prob)
+            (-1.0_f64, inverse_alpha_p)
         } else {
-            (1.0_f64, direction_prob)
+            (1.0_f64, inverse_alpha_p)
         }
     } else if direction_prob >= 0.5 {
         (1.0_f64, direction_prob)
@@ -477,9 +487,11 @@ fn evaluate_direction_score(
         (-1.0_f64, 1.0 - direction_prob)
     };
 
-    // Continuous score: how far effective_p is above 0.50, normalized to [0, 1].
-    let direction_score = if config.alpha_contrarian {
-        threshold_score(effective_p, config.min_direction_prob, 0.25, true)
+    // In contrarian mode the direction is inverted, but the alpha strength is
+    // still the distance from 50/50. Do not treat the faded side's raw model
+    // probability as the executable probability.
+    let direction_score = if config.profile.uses_snapshot_scoring() {
+        threshold_score(effective_p, config.min_direction_prob, 0.25, false)
     } else {
         ((effective_p - 0.50) / 0.50).clamp(0.0, 1.0)
     };
@@ -537,9 +549,15 @@ fn evaluate_edge_score(
     let risk = ask + fee;
     let rr = if risk > 0.0 { reward / risk } else { 0.0 };
 
-    // Continuous score: edge normalized by 0.10 (a 10% edge = perfect score).
-    let edge_score = if config.alpha_contrarian {
-        threshold_score(edge, config.min_edge, 0.08, true)
+    // Execution edge is always monotonic: higher cost-adjusted edge scores
+    // better. Contrarian mode can invert alpha, but not executable edge.
+    let required_edge = executable_edge_threshold(config);
+    if config.profile.uses_snapshot_scoring() && edge < required_edge {
+        return None;
+    }
+
+    let edge_score = if config.profile.uses_snapshot_scoring() {
+        threshold_score(edge, required_edge, 0.08, false)
     } else {
         (edge / 0.10).clamp(0.0, 1.0)
     };
@@ -2148,10 +2166,10 @@ mod tests {
         let (dir, prob, score) = result;
         assert!(dir < 0.0, "positive distance should fade into DOWN");
         assert!(
-            prob < 0.50,
-            "contrarian effective probability should be the faded side"
+            prob > 0.50,
+            "contrarian effective probability should be transformed alpha confidence"
         );
-        assert!(score > 0.0, "low model probability should be rewarded");
+        assert!(score > 0.0, "strong inverse alpha should be rewarded");
     }
 
     #[test]
@@ -2277,18 +2295,15 @@ mod tests {
     }
 
     #[test]
-    fn alpha_contrarian_edge_score_rewards_lower_edge() {
+    fn alpha_contrarian_edge_score_does_not_reward_negative_edge() {
         let mut config = test_config();
+        config.profile = ThreeLayerProfile::Champion;
         config.alpha_contrarian = true;
         config.min_edge = -0.005;
         let result = evaluate_edge_score(0.35, 0.50, Regime::Early, &config);
-        assert!(result.is_some());
-        let (_ask, edge, _rr, edge_score) = result.unwrap();
-        assert!(edge < 0.0);
         assert!(
-            edge_score > 0.0,
-            "contrarian edge score should reward lower model edge, got {}",
-            edge_score
+            result.is_none(),
+            "negative edge should be rejected for snapshot profiles even in contrarian mode"
         );
     }
 
