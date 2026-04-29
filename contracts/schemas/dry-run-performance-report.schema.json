@@ -49,6 +49,17 @@
         "$ref": "#/definitions/DryRunEquityPoint"
       }
     },
+    "execution_diagnostics": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DryRunExecutionDiagnostics"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "generated_at": {
       "type": "string"
     },
@@ -363,6 +374,33 @@
         }
       }
     },
+    "DryRunExecutionDiagnostics": {
+      "type": "object",
+      "required": [
+        "basis",
+        "partial_buy_threshold_pct",
+        "strategies",
+        "summary"
+      ],
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "partial_buy_threshold_pct": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "strategies": {
+          "type": "array",
+          "items": true
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
     "DryRunMetrics": {
       "type": "object",
       "required": [
@@ -378,6 +416,22 @@
             "null"
           ],
           "format": "double"
+        },
+        "closed_trade_count_for_sharpe": {
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "daily_sharpe_basis": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "equity_points": {
           "type": "integer",
@@ -407,6 +461,29 @@
           ]
         },
         "sharpe": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "sharpe_basis": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sharpe_daily_ann": {
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "sharpe_per_trade": {
+          "default": null,
           "type": [
             "number",
             "null"
@@ -592,6 +669,17 @@
           "items": {
             "$ref": "#/definitions/DryRunEquityPoint"
           }
+        },
+        "execution_diagnostics": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DryRunExecutionDiagnostics"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "label": {
           "type": "string"
