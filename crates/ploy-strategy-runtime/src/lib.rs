@@ -26,13 +26,32 @@ use tracing::info;
 pub use ploy_strategy_bundles::RuntimeMode as StrategyRuntimeMode;
 
 pub async fn run_strategy(config: FullConfig, config_path: &str, force_dry_run: bool) {
+    run_strategy_with_deployment_id(config, config_path, force_dry_run, None).await;
+}
+
+pub async fn run_strategy_with_deployment_id(
+    config: FullConfig,
+    config_path: &str,
+    force_dry_run: bool,
+    deployment_id: Option<String>,
+) {
     let mut runtime_config = config.runtime_config();
     if force_dry_run {
         runtime_config.mode = RuntimeMode::DryRun;
     }
+    let deployment_id = resolve_deployment_id(deployment_id);
+    if matches!(runtime_config.mode, RuntimeMode::Live | RuntimeMode::DryRun)
+        && deployment_id.is_none()
+    {
+        eprintln!(
+            "Live and dry-run strategy runtime requires --deployment-id or PLOY_DEPLOYMENT_ID"
+        );
+        std::process::exit(1);
+    }
 
     info!(
         mode = ?runtime_config.mode,
+        deployment_id = deployment_id.as_deref().unwrap_or(""),
         config = %config_path,
         symbols = ?config.strategy.symbols,
         "ploy-runner starting",
@@ -47,7 +66,14 @@ pub async fn run_strategy(config: FullConfig, config_path: &str, force_dry_run: 
         }
         RuntimeMode::Replay => run_replay_entry(&config, strategy, runtime_config.clone()).await,
         RuntimeMode::Live | RuntimeMode::DryRun => {
-            run_live_or_dry_run_entry(&config, &symbols, strategy, runtime_config.clone()).await
+            run_live_or_dry_run_entry(
+                &config,
+                &symbols,
+                strategy,
+                runtime_config.clone(),
+                deployment_id.expect("deployment_id checked for live/dry-run"),
+            )
+            .await
         }
     };
 
@@ -115,6 +141,7 @@ async fn run_live_or_dry_run_entry(
     _symbols: &[String],
     _strategy: Box<dyn StrategyLogic>,
     _runtime_config: RuntimeModeConfig,
+    _deployment_id: String,
 ) -> (
     ploy_strategy_bundles::RuntimeResult,
     ploy_trading::TradingRuntimeSnapshot,
@@ -124,6 +151,13 @@ async fn run_live_or_dry_run_entry(
 }
 
 type RuntimeModeConfig = ploy_strategy_bundles::RuntimeConfig;
+
+fn resolve_deployment_id(cli_value: Option<String>) -> Option<String> {
+    cli_value
+        .or_else(|| std::env::var("PLOY_DEPLOYMENT_ID").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
 
 fn prepare_feed_symbols(mode: RuntimeMode, strategy_symbols: &[String]) -> Vec<String> {
     match mode {
@@ -139,7 +173,7 @@ fn database_unavailable_is_fatal(mode: RuntimeMode, database_url_present: bool) 
 
 #[cfg(test)]
 mod tests {
-    use super::{database_unavailable_is_fatal, prepare_feed_symbols};
+    use super::{database_unavailable_is_fatal, prepare_feed_symbols, resolve_deployment_id};
     use ploy_strategy_bundles::RuntimeMode;
 
     #[test]
@@ -156,5 +190,14 @@ mod tests {
         assert!(!database_unavailable_is_fatal(RuntimeMode::Backtest, true));
         assert!(!database_unavailable_is_fatal(RuntimeMode::Replay, true));
         assert!(!database_unavailable_is_fatal(RuntimeMode::DryRun, false));
+    }
+
+    #[test]
+    fn trims_empty_deployment_ids() {
+        assert_eq!(
+            resolve_deployment_id(Some(" dep-1 ".to_string())).as_deref(),
+            Some("dep-1")
+        );
+        assert!(resolve_deployment_id(Some(" ".to_string())).is_none());
     }
 }
