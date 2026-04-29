@@ -45,6 +45,7 @@ env:
     035_binance_agg_trade_ticks.sql
     036_research_valid_windows_matview.sql
     037_research_time_conditioned_factor_metrics.sql
+    039_fix_strategy_track_record_side_key.sql
     038_track_record_official_residual_settlement.sql
 
 jobs:
