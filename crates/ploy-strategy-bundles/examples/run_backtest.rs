@@ -22,9 +22,12 @@ use ploy_strategy_bundles::{
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeMap;
+use std::fs;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Generate synthetic market data: 1 hour of 5-min windows for 3 symbols.
 ///
@@ -182,12 +185,14 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 fn main() {
     // Parse CLI flags
     let args: Vec<String> = std::env::args().collect();
+    let total_started = Instant::now();
     let config_path = flag_value(&args, "--config")
         .or_else(|| args.get(1).filter(|a| !a.starts_with('-')).cloned());
     let db_url = flag_value(&args, "--db-url");
     let data_dir = flag_value(&args, "--data-dir");
     let start_date = flag_value(&args, "--start-date");
     let end_date = flag_value(&args, "--end-date");
+    let timing_json = flag_value(&args, "--timing-json");
 
     let (strategy_variant, strategy_config, sim_config, runtime_config, backtest_options) =
         if let Some(ref path) = config_path {
@@ -338,6 +343,7 @@ fn main() {
                     .unwrap(),
             );
             eprintln!("Streaming Parquet data from: {dir} ({from} → {to})");
+            let source_started = Instant::now();
             let feed = StreamingParquetFeed::new(
                 dir,
                 &strategy_config.symbols,
@@ -345,14 +351,42 @@ fn main() {
                 to_dt,
                 &backtest_options,
             );
+            let source_open_secs = source_started.elapsed().as_secs_f64();
             let mut runtime =
                 StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
+            let run_started = Instant::now();
             let result = rt.block_on(runtime.run());
+            let runtime_wall_secs = run_started.elapsed().as_secs_f64();
             let mark_prices = BTreeMap::new();
             let snapshot = runtime.trading().snapshot(&mark_prices);
-            print_results(result, snapshot, stake_usd);
+            write_timing_json(
+                timing_json.as_deref(),
+                json!({
+                    "command": "run_backtest",
+                    "source": "parquet-stream",
+                    "config": config_path.as_deref(),
+                    "strategy_variant": &strategy_variant,
+                    "symbols": &strategy_config.symbols,
+                    "start_date": from,
+                    "end_date": to,
+                    "data_dir": dir,
+                    "source_open_secs": round_secs(source_open_secs),
+                    "runtime_wall_secs": round_secs(runtime_wall_secs),
+                    "runtime_elapsed_secs": round_secs(result.elapsed_secs),
+                    "total_wall_secs": round_secs(total_started.elapsed().as_secs_f64()),
+                    "updates_processed": result.updates_processed,
+                    "updates_per_sec": round_secs(throughput(result.updates_processed, runtime_wall_secs)),
+                    "fills_recorded": result.fills_recorded,
+                    "intents_submitted": result.intents_submitted,
+                    "net_pnl": result.pnl.net_pnl().to_string(),
+                    "open_positions": result.risk.open_positions,
+                    "gross_exposure": result.risk.gross_exposure.to_string(),
+                }),
+            );
+            print_results(&result, &snapshot, stake_usd);
         }
     } else {
+        let eager_source_load_secs;
         let data: Vec<MarketUpdate> = if let Some(ref url) = db_url {
             let from = start_date.as_deref().unwrap_or("2026-03-28");
             let to = end_date.as_deref().unwrap_or("2026-04-03");
@@ -369,6 +403,7 @@ fn main() {
                     .unwrap(),
             );
             eprintln!("Loading DB data: {} → {}", from, to);
+            let source_started = Instant::now();
             let pool = rt
                 .block_on(PgPoolOptions::new().max_connections(5).connect(url))
                 .expect("DB connection failed");
@@ -382,24 +417,56 @@ fn main() {
                     &backtest_options,
                 ))
                 .expect("Failed to load from database");
+            let source_load_secs = source_started.elapsed().as_secs_f64();
+            eager_source_load_secs = Some(source_load_secs);
             eprintln!("Loaded {} market updates from DB\n", updates.len());
             print_data_breakdown(&updates);
             updates
         } else {
+            let source_started = Instant::now();
             let updates = generate_synthetic_data(&["BTCUSDT", "ETHUSDT", "SOLUSDT"], 60);
+            let source_load_secs = source_started.elapsed().as_secs_f64();
+            eager_source_load_secs = Some(source_load_secs);
             eprintln!(
                 "Generated {} market updates (1 hour synthetic)\n",
                 updates.len()
             );
+            eprintln!("Synthetic generation elapsed: {:.3}s", source_load_secs);
             updates
         };
 
         let feed = HistoricalFeed::new(data);
         let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
+        let run_started = Instant::now();
         let result = rt.block_on(runtime.run());
+        let runtime_wall_secs = run_started.elapsed().as_secs_f64();
         let mark_prices = BTreeMap::new();
         let snapshot = runtime.trading().snapshot(&mark_prices);
-        print_results(result, snapshot, stake_usd);
+        write_timing_json(
+            timing_json.as_deref(),
+            json!({
+                "command": "run_backtest",
+                "source": if db_url.is_some() { "db-eager" } else { "synthetic" },
+                "config": config_path.as_deref(),
+                "strategy_variant": &strategy_variant,
+                "symbols": &strategy_config.symbols,
+                "start_date": start_date.as_deref(),
+                "end_date": end_date.as_deref(),
+                "source_load_secs": eager_source_load_secs.map(round_secs),
+                "updates_loaded": result.updates_processed,
+                "runtime_wall_secs": round_secs(runtime_wall_secs),
+                "runtime_elapsed_secs": round_secs(result.elapsed_secs),
+                "total_wall_secs": round_secs(total_started.elapsed().as_secs_f64()),
+                "updates_processed": result.updates_processed,
+                "updates_per_sec": round_secs(throughput(result.updates_processed, runtime_wall_secs)),
+                "fills_recorded": result.fills_recorded,
+                "intents_submitted": result.intents_submitted,
+                "net_pnl": result.pnl.net_pnl().to_string(),
+                "open_positions": result.risk.open_positions,
+                "gross_exposure": result.risk.gross_exposure.to_string(),
+            }),
+        );
+        print_results(&result, &snapshot, stake_usd);
     }
 }
 
@@ -432,9 +499,44 @@ fn print_data_breakdown(updates: &[MarketUpdate]) {
     );
 }
 
+fn round_secs(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
+fn throughput(updates: u64, seconds: f64) -> f64 {
+    if seconds <= 0.0 {
+        0.0
+    } else {
+        updates as f64 / seconds
+    }
+}
+
+fn write_timing_json(path: Option<&str>, payload: serde_json::Value) {
+    let Some(path) = path else {
+        return;
+    };
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!(
+                "warning: failed to create timing dir {}: {error}",
+                parent.display()
+            );
+            return;
+        }
+    }
+    match serde_json::to_string_pretty(&payload) {
+        Ok(body) => {
+            if let Err(error) = fs::write(path, format!("{body}\n")) {
+                eprintln!("warning: failed to write timing json {path}: {error}");
+            }
+        }
+        Err(error) => eprintln!("warning: failed to encode timing json {path}: {error}"),
+    }
+}
+
 fn print_results(
-    result: ploy_strategy_bundles::RuntimeResult,
-    snapshot: ploy_trading::TradingRuntimeSnapshot,
+    result: &ploy_strategy_bundles::RuntimeResult,
+    snapshot: &ploy_trading::TradingRuntimeSnapshot,
     stake_usd: Decimal,
 ) {
     let cashflow = snapshot.fill_cashflow_summary();
