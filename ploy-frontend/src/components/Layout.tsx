@@ -122,7 +122,12 @@ export function Layout() {
         <nav className="space-y-1 p-4">
           {navigation.map((item) => {
             const Icon = item.icon;
-            const isActive = location.pathname === item.href;
+            const isActive =
+              item.href === '/'
+                ? location.pathname === item.href
+                : location.pathname === item.href ||
+                  location.pathname.startsWith(`${item.href}/`) ||
+                  (item.href === '/dry-run' && location.pathname.startsWith('/reports/'));
             return (
               <Link
                 key={item.name}

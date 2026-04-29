@@ -7,6 +7,7 @@ import { TradeHistory } from '@/pages/TradeHistory';
 import { LiveMonitor } from '@/pages/LiveMonitor';
 import { LiveParity } from '@/pages/LiveParity';
 import { OperatorCockpit } from '@/pages/OperatorCockpit';
+import { DryRunReport } from '@/pages/DryRunReport';
 import { StrategyMonitor } from '@/pages/StrategyMonitor';
 import { SystemControl } from '@/pages/SystemControl';
 import { SecurityAudit } from '@/pages/SecurityAudit';
@@ -101,7 +102,10 @@ function App() {
             <Route path="trades" element={<TradeHistory />} />
             <Route path="monitor" element={<LiveMonitor />} />
             <Route path="parity" element={<LiveParity />} />
-            <Route path="dry-run" element={<OperatorCockpit />} />
+            <Route path="dry-run" element={<DryRunReport />} />
+            <Route path="dry-run/:deploymentId" element={<DryRunReport />} />
+            <Route path="reports/strategies" element={<DryRunReport />} />
+            <Route path="reports/strategy" element={<DryRunReport />} />
             <Route path="deployments" element={<StrategyMonitor />} />
             <Route path="monitor-strategy" element={<StrategyMonitor />} />
             <Route path="nba-swing" element={<NBASwingMonitor />} />
