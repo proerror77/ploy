@@ -529,11 +529,33 @@ fn evaluate_confirmation_bonus(
     }
 }
 
-/// Layer 3: Edge score (0.0 – 1.0).
-/// Returns Some((entry_price, edge, reward_risk, edge_score)) or None
+fn expected_value_per_share(direction_probability: f64, entry_price: f64) -> f64 {
+    if !direction_probability.is_finite()
+        || !entry_price.is_finite()
+        || !(0.0..=1.0).contains(&direction_probability)
+        || !(0.0..1.0).contains(&entry_price)
+    {
+        return f64::NAN;
+    }
+    let fee = crypto_fee_cost(entry_price);
+    let win_payoff = 1.0 - entry_price - fee;
+    let loss_cost = entry_price + fee;
+    direction_probability * win_payoff - (1.0 - direction_probability) * loss_cost
+}
+
+fn expected_value_per_staked_dollar(direction_probability: f64, entry_price: f64) -> f64 {
+    let expected_value = expected_value_per_share(direction_probability, entry_price);
+    if !expected_value.is_finite() || !entry_price.is_finite() || entry_price <= 0.0 {
+        return f64::NAN;
+    }
+    expected_value / entry_price
+}
+
+/// Layer 3: Expected-value score (0.0 – 1.0).
+/// Returns Some((entry_price, expected_value_per_share, reward_risk, expectancy_score)) or None
 /// only when the price is outside tradeable bounds.
 fn evaluate_edge_score(
-    effective_p: f64,
+    direction_probability: f64,
     ask: f64,
     _regime: Regime,
     config: &ThreeLayerConfig,
@@ -543,7 +565,10 @@ fn evaluate_edge_score(
     }
 
     let fee = crypto_fee_cost(ask);
-    let edge = effective_p - ask - fee;
+    let edge = expected_value_per_share(direction_probability, ask);
+    if !edge.is_finite() {
+        return None;
+    }
 
     let reward = 1.0 - ask - fee;
     let risk = ask + fee;
@@ -556,10 +581,13 @@ fn evaluate_edge_score(
         return None;
     }
 
+    let stake_expectancy = expected_value_per_staked_dollar(direction_probability, ask);
     let edge_score = if config.profile.uses_snapshot_scoring() {
-        threshold_score(edge, required_edge, 0.08, false)
+        let per_share_score = threshold_score(edge, required_edge, 0.08, false);
+        let per_stake_score = threshold_score(stake_expectancy, 0.0, 0.25, false);
+        (0.70 * per_share_score + 0.30 * per_stake_score).clamp(-0.50, 1.0)
     } else {
-        (edge / 0.10).clamp(0.0, 1.0)
+        (stake_expectancy / 0.40).clamp(0.0, 1.0)
     };
 
     Some((ask, edge, rr, edge_score))
@@ -2291,6 +2319,34 @@ mod tests {
             edge_score < 0.3,
             "low edge should produce low score, got {}",
             edge_score
+        );
+    }
+
+    #[test]
+    fn expectancy_rejects_high_probability_when_entry_is_too_rich() {
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::Champion;
+        config.min_edge = 0.01;
+        config.max_entry_price = 0.95;
+
+        assert!(
+            evaluate_edge_score(0.70, 0.75, Regime::Early, &config).is_none(),
+            "direction probability alone is insufficient when executable entry price makes EV negative"
+        );
+        assert!(
+            evaluate_edge_score(0.58, 0.35, Regime::Early, &config).is_some(),
+            "lower direction probability can pass when executable price/payoff create positive EV"
+        );
+    }
+
+    #[test]
+    fn expectancy_prefers_better_price_even_with_lower_probability() {
+        let high_probability_rich_entry = expected_value_per_staked_dollar(0.72, 0.70);
+        let lower_probability_cheap_entry = expected_value_per_staked_dollar(0.57, 0.28);
+
+        assert!(
+            lower_probability_cheap_entry > high_probability_rich_entry,
+            "EV should compare probability together with executable price, not probability alone"
         );
     }
 
