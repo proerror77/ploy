@@ -115,6 +115,13 @@ struct SnapshotObjectiveMetrics {
     net_pnl: f64,
     avg_pnl: f64,
     sharpe: f64,
+    max_drawdown: f64,
+    log_growth: f64,
+    avg_log_return: f64,
+    positive_day_rate: f64,
+    positive_symbol_rate: f64,
+    concentration: f64,
+    reject_rate: f64,
     objective: f64,
     fill_rate: f64,
     win_rate: f64,
@@ -309,19 +316,15 @@ fn three_layer_entry_score(
     params: &SnapshotThreeLayerParams,
     profile: StrategyProfile,
 ) -> f64 {
-    let direction_score = directional_score(
-        row.side_model_prob,
-        params.min_direction_prob,
-        0.25,
-        params.alpha_contrarian,
-    );
+    let alpha_prob = transformed_model_probability(row.side_model_prob, params.alpha_contrarian);
+    let direction_score = directional_score(alpha_prob, params.min_direction_prob, 0.25, false);
     let distance_score = directional_score(
         row.side_distance_over_sigma,
         params.min_distance_over_sigma,
         0.60,
         params.alpha_contrarian,
     );
-    let edge_score = directional_score(edge, params.min_edge, 0.08, params.alpha_contrarian);
+    let edge_score = executable_edge_score(edge, params);
     let drift_side = row.drift_30s * row.side.multiplier();
     let drift_score = ((drift_side - params.min_drift_confirmation) * 800.0).clamp(-0.50, 1.0);
     let pm_momentum = row
@@ -361,6 +364,31 @@ fn three_layer_entry_score(
         + 0.10 * drift_score
         + 0.12 * pm_momentum_score
         + 0.08 * liquidity_score
+}
+
+fn transformed_model_probability(side_model_prob: f64, alpha_contrarian: bool) -> f64 {
+    if !side_model_prob.is_finite() {
+        return f64::NAN;
+    }
+    if alpha_contrarian {
+        1.0 - side_model_prob
+    } else {
+        side_model_prob
+    }
+}
+
+fn executable_edge_threshold(params: &SnapshotThreeLayerParams) -> f64 {
+    params.min_edge.max(0.0)
+}
+
+fn executable_edge_score(edge: f64, params: &SnapshotThreeLayerParams) -> f64 {
+    directional_score(edge, executable_edge_threshold(params), 0.08, false)
+}
+
+fn executable_model_edge(row: &FactorObservationV2, params: &SnapshotThreeLayerParams) -> f64 {
+    transformed_model_probability(row.side_model_prob, params.alpha_contrarian)
+        - row.entry_ask
+        - crypto_fee_cost(row.entry_ask)
 }
 
 fn directional_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> f64 {
@@ -413,12 +441,8 @@ fn row_passes_gates(
         return false;
     }
 
-    let edge = if row.side_model_edge.is_finite() {
-        row.side_model_edge
-    } else {
-        row.side_model_prob - row.entry_ask - crypto_fee_cost(row.entry_ask)
-    };
-    if !edge.is_finite() {
+    let edge = executable_model_edge(row, params);
+    if !edge.is_finite() || edge < executable_edge_threshold(params) {
         return false;
     }
     let reward_risk = reward_risk_ratio(row.entry_ask);
@@ -436,11 +460,14 @@ fn evaluate_snapshot_objective(
     rows: &[FactorObservationV2],
     params: &SnapshotThreeLayerParams,
     min_trades: usize,
+    stake_usd: f64,
     profile: StrategyProfile,
 ) -> SnapshotObjectiveMetrics {
     let mut last_trade_by_symbol: HashMap<String, DateTime<Utc>> = HashMap::new();
     let mut traded_event_sides: HashSet<String> = HashSet::new();
     let mut pnls = Vec::new();
+    let mut pnl_by_day: HashMap<String, f64> = HashMap::new();
+    let mut pnl_by_symbol: HashMap<String, f64> = HashMap::new();
     let mut candidates = 0usize;
     let mut selected = 0usize;
     let mut rejected_duplicate = 0usize;
@@ -476,6 +503,10 @@ fn evaluate_snapshot_objective(
         };
 
         pnls.push(pnl);
+        *pnl_by_day
+            .entry(row.tick_ts.date_naive().to_string())
+            .or_default() += pnl;
+        *pnl_by_symbol.entry(row.symbol.clone()).or_default() += pnl;
         traded_event_sides.insert(event_side_key);
         last_trade_by_symbol.insert(row.symbol.clone(), row.tick_ts);
     }
@@ -489,6 +520,17 @@ fn evaluate_snapshot_objective(
     };
     let sharpe = trade_sharpe(&pnls);
     let fill_rate = ratio(trades, selected);
+    let reject_rate = ratio(rejected_non_executable, selected);
+    let max_drawdown = max_drawdown(&pnls);
+    let log_growth = compounded_log_growth(&pnls, stake_usd);
+    let avg_log_return = if trades == 0 {
+        f64::NAN
+    } else {
+        log_growth / trades as f64
+    };
+    let positive_day_rate = positive_bucket_rate(&pnl_by_day);
+    let positive_symbol_rate = positive_bucket_rate(&pnl_by_symbol);
+    let concentration = concentration_ratio(&pnl_by_day).max(concentration_ratio(&pnl_by_symbol));
     let win_rate = if trades == 0 {
         f64::NAN
     } else {
@@ -497,7 +539,20 @@ fn evaluate_snapshot_objective(
     let objective = if trades < min_trades {
         -1_000_000.0 + trades as f64
     } else {
-        (sharpe * sample_power_multiplier(trades, min_trades)) + (net_pnl / 100_000.0)
+        stable_compounding_objective(StableObjectiveInputs {
+            trades,
+            min_trades,
+            stake_usd,
+            net_pnl,
+            sharpe,
+            max_drawdown,
+            log_growth,
+            fill_rate,
+            reject_rate,
+            positive_day_rate,
+            positive_symbol_rate,
+            concentration,
+        })
     };
 
     SnapshotObjectiveMetrics {
@@ -510,10 +565,98 @@ fn evaluate_snapshot_objective(
         net_pnl,
         avg_pnl,
         sharpe,
+        max_drawdown,
+        log_growth,
+        avg_log_return,
+        positive_day_rate,
+        positive_symbol_rate,
+        concentration,
+        reject_rate,
         objective,
         fill_rate,
         win_rate,
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StableObjectiveInputs {
+    trades: usize,
+    min_trades: usize,
+    stake_usd: f64,
+    net_pnl: f64,
+    sharpe: f64,
+    max_drawdown: f64,
+    log_growth: f64,
+    fill_rate: f64,
+    reject_rate: f64,
+    positive_day_rate: f64,
+    positive_symbol_rate: f64,
+    concentration: f64,
+}
+
+fn stable_compounding_objective(inputs: StableObjectiveInputs) -> f64 {
+    if inputs.trades < inputs.min_trades {
+        return -1_000_000.0 + inputs.trades as f64;
+    }
+    let stake = inputs.stake_usd.max(1.0);
+    let sample_power = sample_power_multiplier(inputs.trades, inputs.min_trades);
+    let pnl_stakes = inputs.net_pnl / stake;
+    let pnl_term = pnl_stakes.signum() * pnl_stakes.abs().ln_1p();
+    let drawdown_stakes = inputs.max_drawdown / stake;
+    let stability_bonus = 2.0 * inputs.positive_day_rate
+        + 1.5 * inputs.positive_symbol_rate
+        + inputs.fill_rate.clamp(0.0, 1.0);
+    let risk_penalty = 0.45 * drawdown_stakes
+        + 2.0 * inputs.reject_rate.clamp(0.0, 1.0)
+        + 2.0 * inputs.concentration.clamp(0.0, 1.0);
+    let sharpe_bonus = 0.25 * inputs.sharpe.clamp(-5.0, 5.0);
+
+    sample_power * (inputs.log_growth + pnl_term + stability_bonus + sharpe_bonus - risk_penalty)
+}
+
+fn max_drawdown(pnls: &[f64]) -> f64 {
+    let mut equity = 0.0;
+    let mut peak = 0.0;
+    let mut max_drawdown = 0.0;
+    for pnl in pnls {
+        equity += pnl;
+        if equity > peak {
+            peak = equity;
+        }
+        let drawdown = peak - equity;
+        if drawdown > max_drawdown {
+            max_drawdown = drawdown;
+        }
+    }
+    max_drawdown
+}
+
+fn compounded_log_growth(pnls: &[f64], stake_usd: f64) -> f64 {
+    let stake = stake_usd.max(1.0);
+    pnls.iter()
+        .map(|pnl| (1.0 + (pnl / stake).clamp(-0.99, 10.0)).ln())
+        .sum()
+}
+
+fn positive_bucket_rate(buckets: &HashMap<String, f64>) -> f64 {
+    if buckets.is_empty() {
+        return 0.0;
+    }
+    ratio(
+        buckets.values().filter(|pnl| **pnl > 0.0).count(),
+        buckets.len(),
+    )
+}
+
+fn concentration_ratio(buckets: &HashMap<String, f64>) -> f64 {
+    let total_abs = buckets.values().map(|pnl| pnl.abs()).sum::<f64>();
+    if total_abs <= 1e-9 {
+        return 0.0;
+    }
+    buckets
+        .values()
+        .map(|pnl| pnl.abs() / total_abs)
+        .fold(0.0, f64::max)
 }
 
 fn trade_sharpe(pnls: &[f64]) -> f64 {
@@ -574,9 +717,14 @@ fn write_outputs(
         "# PM5D three-layer snapshot optimizer output\n\
          # snapshot_hash = {}\n\
          # strategy_profile = {}\n\
+         # objective = {:.6}\n\
          # validation_sharpe = {:.6}\n\
          # validation_pnl = {:.6}\n\
          # validation_trades = {}\n\
+         # validation_max_drawdown = {:.6}\n\
+         # validation_log_growth = {:.6}\n\
+         # validation_positive_day_rate = {:.6}\n\
+         # validation_positive_symbol_rate = {:.6}\n\
          # min_trades = {}\n\
          # min_trades_source = {}\n\
          # data_requirements = {}\n\
@@ -600,9 +748,14 @@ fn write_outputs(
          # three_layer_take_profit_ask and three_layer_stop_distance_pct are not optimized here.\n",
         summary.snapshot_hash,
         summary.strategy_profile.as_str(),
+        summary.val_metrics.objective,
         summary.val_metrics.sharpe,
         summary.val_metrics.net_pnl,
         summary.val_metrics.trades,
+        summary.val_metrics.max_drawdown,
+        summary.val_metrics.log_growth,
+        summary.val_metrics.positive_day_rate,
+        summary.val_metrics.positive_symbol_rate,
         summary.min_trades,
         summary.min_trades_source,
         if summary.snapshot_data_requirements.is_empty() {
@@ -660,15 +813,21 @@ fn write_outputs(
 
 fn print_metrics(label: &str, metrics: &SnapshotObjectiveMetrics) {
     eprintln!(
-        "{label}: objective={:.3} sharpe={:.3} pnl=${:.2} trades={} candidates={} selected={} fill_rate={:.2}% win_rate={:.2}% non_exec={} dup={} cooldown={}",
+        "{label}: objective={:.3} sharpe={:.3} pnl=${:.2} max_dd=${:.2} log_growth={:.3} pos_day={:.2}% pos_symbol={:.2}% concentration={:.2}% trades={} candidates={} selected={} fill_rate={:.2}% win_rate={:.2}% reject={:.2}% non_exec={} dup={} cooldown={}",
         metrics.objective,
         metrics.sharpe,
         metrics.net_pnl,
+        metrics.max_drawdown,
+        metrics.log_growth,
+        metrics.positive_day_rate * 100.0,
+        metrics.positive_symbol_rate * 100.0,
+        metrics.concentration * 100.0,
         metrics.trades,
         metrics.candidates,
         metrics.selected,
         metrics.fill_rate * 100.0,
         metrics.win_rate * 100.0,
+        metrics.reject_rate * 100.0,
         metrics.rejected_non_executable,
         metrics.rejected_duplicate,
         metrics.rejected_cooldown,
@@ -822,7 +981,7 @@ fn main() -> Result<()> {
         FloatParam::new(-0.15, 0.25).name("three_layer_min_confirmation_score");
     let p_min_drift_confirmation =
         FloatParam::new(-0.0005, 0.0008).name("three_layer_min_drift_confirmation");
-    let p_min_edge = FloatParam::new(-0.02, 0.05).name("three_layer_min_edge");
+    let p_min_edge = FloatParam::new(0.0, 0.08).name("three_layer_min_edge");
     let p_min_reward_risk = FloatParam::new(0.20, 2.0).name("three_layer_min_reward_risk");
     let p_min_entry_score = FloatParam::new(0.05, 0.55).name("three_layer_min_entry_score");
     let p_alpha_contrarian = BoolParam::new().name("alpha_contrarian");
@@ -878,15 +1037,23 @@ fn main() -> Result<()> {
                         + p_max_time_span_secs_c.suggest(trial)?,
                 };
 
-                let metrics =
-                    evaluate_snapshot_objective(&train_rows, &params, min_trades, strategy_profile);
+                let metrics = evaluate_snapshot_objective(
+                    &train_rows,
+                    &params,
+                    min_trades,
+                    stake_usd,
+                    strategy_profile,
+                );
                 eprintln!(
-                    "  Trial {:>3}: profile={} source=snapshot-observation objective={:>9.3} sharpe={:>7.3} pnl=${:>8.2} trades={:>4} selected={:>5} fill={:>5.1}% | dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
+                    "  Trial {:>3}: profile={} source=snapshot-observation objective={:>9.3} sharpe={:>7.3} pnl=${:>8.2} dd=${:>7.2} log={:>6.2} pos_day={:>5.1}% trades={:>4} selected={:>5} fill={:>5.1}% | dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
                     trial.id(),
                     strategy_profile.as_str(),
                     metrics.objective,
                     metrics.sharpe,
                     metrics.net_pnl,
+                    metrics.max_drawdown,
+                    metrics.log_growth,
+                    metrics.positive_day_rate * 100.0,
                     metrics.trades,
                     metrics.selected,
                     metrics.fill_rate * 100.0,
@@ -934,10 +1101,20 @@ fn main() -> Result<()> {
             + best.get(&p_max_time_span_secs).unwrap_or(60),
     };
 
-    let train_metrics =
-        evaluate_snapshot_objective(&train_rows, &best_params, min_trades, strategy_profile);
-    let val_metrics =
-        evaluate_snapshot_objective(&val_rows, &best_params, min_trades, strategy_profile);
+    let train_metrics = evaluate_snapshot_objective(
+        &train_rows,
+        &best_params,
+        min_trades,
+        stake_usd,
+        strategy_profile,
+    );
+    let val_metrics = evaluate_snapshot_objective(
+        &val_rows,
+        &best_params,
+        min_trades,
+        stake_usd,
+        strategy_profile,
+    );
     let train_underpowered = train_metrics.trades < min_trades;
     let validation_underpowered = val_metrics.trades < min_trades;
 
@@ -1088,9 +1265,28 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        StrategyProfile, default_min_trades, directional_score, parse_date_end, reward_risk_ratio,
-        sample_power_multiplier, trade_sharpe,
+        SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile, compounded_log_growth,
+        default_min_trades, directional_score, executable_edge_score, max_drawdown, parse_date_end,
+        reward_risk_ratio, sample_power_multiplier, stable_compounding_objective, trade_sharpe,
+        transformed_model_probability,
     };
+
+    fn test_params() -> SnapshotThreeLayerParams {
+        SnapshotThreeLayerParams {
+            min_direction_prob: 0.55,
+            min_distance_over_sigma: 0.0,
+            min_confirmation_score: 0.0,
+            min_drift_confirmation: 0.0,
+            min_edge: 0.0,
+            min_reward_risk: 0.5,
+            min_entry_score: 0.1,
+            alpha_contrarian: false,
+            cex_contrarian: false,
+            cooldown_secs: 30,
+            min_time_remaining_secs: 60,
+            max_time_remaining_secs: 180,
+        }
+    }
 
     #[test]
     fn date_end_is_exclusive_next_day() {
@@ -1119,6 +1315,66 @@ mod tests {
         assert!(directional_score(0.48, 0.55, 0.25, true) > 0.0);
         assert!(directional_score(0.48, 0.55, 0.25, false) < 0.0);
         assert_eq!(directional_score(f64::NAN, 0.55, 0.25, false), -0.50);
+    }
+
+    #[test]
+    fn contrarian_probability_transforms_before_edge_scoring() {
+        assert!((transformed_model_probability(0.22, true) - 0.78).abs() < 1e-9);
+        assert!((transformed_model_probability(0.78, false) - 0.78).abs() < 1e-9);
+    }
+
+    #[test]
+    fn executable_edge_score_never_rewards_negative_edge() {
+        let mut params = test_params();
+        params.alpha_contrarian = true;
+        params.min_edge = -0.02;
+
+        assert!(
+            executable_edge_score(-0.001, &params) < 0.0,
+            "negative edge should remain a penalty even in contrarian mode"
+        );
+        assert!(executable_edge_score(0.04, &params) > 0.0);
+    }
+
+    #[test]
+    fn stable_objective_prefers_smooth_compounding_over_choppy_sharpe() {
+        let smooth = stable_compounding_objective(StableObjectiveInputs {
+            trades: 800,
+            min_trades: 400,
+            stake_usd: 15.0,
+            net_pnl: 900.0,
+            sharpe: 2.0,
+            max_drawdown: 60.0,
+            log_growth: 12.0,
+            fill_rate: 0.95,
+            reject_rate: 0.02,
+            positive_day_rate: 1.0,
+            positive_symbol_rate: 1.0,
+            concentration: 0.25,
+        });
+        let choppy = stable_compounding_objective(StableObjectiveInputs {
+            trades: 800,
+            min_trades: 400,
+            stake_usd: 15.0,
+            net_pnl: 900.0,
+            sharpe: 4.5,
+            max_drawdown: 450.0,
+            log_growth: 2.0,
+            fill_rate: 0.70,
+            reject_rate: 0.25,
+            positive_day_rate: 0.50,
+            positive_symbol_rate: 0.50,
+            concentration: 0.80,
+        });
+
+        assert!(smooth > choppy);
+    }
+
+    #[test]
+    fn drawdown_and_log_growth_capture_compounding_risk() {
+        assert_eq!(max_drawdown(&[10.0, -5.0, -20.0, 15.0]), 25.0);
+        assert!(compounded_log_growth(&[1.0, 1.0, 1.0], 15.0) > 0.0);
+        assert!(compounded_log_growth(&[-15.0], 15.0) < -4.0);
     }
 
     #[test]
