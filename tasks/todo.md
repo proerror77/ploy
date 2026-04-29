@@ -20,7 +20,7 @@ Issue: https://github.com/proerror77/ploy/issues/227
 - [x] Route `/dry-run` away from `OperatorCockpit` and keep nested dry-run routes highlighted in navigation.
 - [x] Add compatibility routes for `/reports/strategies` and `/reports/strategy?strategy_id=<id>`.
 - [x] Run frontend lint/build and diff checks.
-- [ ] Open PR and verify CI.
+- [x] Open PR and verify CI.
 
 ## Review
 
@@ -30,6 +30,7 @@ Issue: https://github.com/proerror77/ploy/issues/227
 - 2026-04-29: Review correction: dry-run deployment/trading state now prefers fresh polling rows and only uses WebSocket store snapshots as an initial fallback, avoiding stale store rows when the stream reconnects or stalls.
 - 2026-04-29: Local verification passed: `cd ploy-frontend && npm run lint`, `cd ploy-frontend && npm run build`, `git diff --check`, and Playwright route smoke for `/dry-run` plus `/dry-run/test-deployment` with the backend absent. The browser showed the intentional unavailable-report fallback; console noise was the expected failed API fetches because no local `ployd` API was running.
 - 2026-04-29: Mock-data Playwright verification passed for `/dry-run` and `/dry-run/:deploymentId` at `1600x1000`: aggregate/per-strategy equity rendered, strategy ranking showed today PnL plus all-time PnL, strategy trade provenance was visible, detail pages showed strategy equity/window/symbol/open-position sections, and no horizontal overflow was detected. A stale-day payload with only `2026-04-28` daily rows kept `today pnl`, `green today`, and `red today` at zero while still showing cumulative loss.
+- 2026-04-29: PR #234 merged to `main@33833627`; PR CI and the post-merge main `Test` workflow both passed. Issue #227 was closed and updated with the completion summary.
 
 # PM5D Calibrated Expectancy Objective (2026-04-29)
 
