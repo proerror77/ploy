@@ -14,7 +14,7 @@ use ploy_trading::{
     TradingRuntime, TradingRuntimeSnapshot,
 };
 use rust_decimal::Decimal;
-use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
+use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
 use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -318,7 +318,7 @@ mod execution {
 }
 
 use crate::recording::build_signal_recorder;
-use crate::{database_unavailable_is_fatal, RuntimeModeConfig};
+use crate::{RuntimeModeConfig, database_unavailable_is_fatal};
 
 #[derive(Debug, FromRow)]
 struct LiveOrderRestoreRow {
@@ -353,11 +353,12 @@ pub(crate) async fn run_live_or_dry_run_entry(
     symbols: &[String],
     strategy: Box<dyn StrategyLogic>,
     runtime_config: RuntimeModeConfig,
+    deployment_id: String,
 ) -> (
     ploy_strategy_bundles::RuntimeResult,
     ploy_trading::TradingRuntimeSnapshot,
 ) {
-    run_live_or_dry_run(config, symbols, strategy, runtime_config).await
+    run_live_or_dry_run(config, symbols, strategy, runtime_config, deployment_id).await
 }
 
 async fn restore_active_live_trading_runtime(pool: &PgPool) -> Option<TradingRuntime> {
@@ -515,6 +516,7 @@ async fn run_live_or_dry_run(
     symbols: &[String],
     strategy: Box<dyn StrategyLogic>,
     runtime_config: RuntimeModeConfig,
+    deployment_id: String,
 ) -> (
     ploy_strategy_bundles::RuntimeResult,
     ploy_trading::TradingRuntimeSnapshot,
@@ -628,7 +630,8 @@ async fn run_live_or_dry_run(
                 recorder,
                 runtime_config,
                 trading,
-            );
+            )
+            .with_deployment_id(deployment_id.clone());
             let result = runtime.run().await;
             let snapshot = runtime
                 .trading()
@@ -643,7 +646,8 @@ async fn run_live_or_dry_run(
             executor,
             recorder,
             runtime_config,
-        );
+        )
+        .with_deployment_id(deployment_id);
         let result = runtime.run().await;
         let snapshot = runtime
             .trading()
