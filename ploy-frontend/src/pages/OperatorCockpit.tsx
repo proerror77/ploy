@@ -91,6 +91,16 @@ function isDryRunDeployment(deployment: DeploymentSummary) {
   return isDryRunId(deployment.deployment_id);
 }
 
+function shouldShowUnreportedDryRunDeployment(deployment: DeploymentSummary, snapshot?: TradingStateSnapshot) {
+  if (snapshot) return true;
+  return (
+    deployment.desired_state === 'running' ||
+    deployment.observed_state === 'running' ||
+    deployment.observed_state === 'starting' ||
+    deployment.observed_state === 'degraded'
+  );
+}
+
 function compactTime(timestamp?: string | null) {
   if (!timestamp) return '-';
   return new Date(timestamp).toLocaleTimeString('zh-CN', {
@@ -442,8 +452,14 @@ export function OperatorCockpit() {
     }
     return byDeployment;
   }, [dryRunStrategies]);
+  const tradingByDeployment = useMemo(
+    () => new Map(dryRunTrading.map((snapshot) => [snapshot.deployment_id, snapshot])),
+    [dryRunTrading]
+  );
   const unreportedDryRunDeployments = dryRunDeployments.filter(
-    (deployment) => !dryRunStrategyByDeployment.has(deployment.deployment_id)
+    (deployment) =>
+      !dryRunStrategyByDeployment.has(deployment.deployment_id) &&
+      shouldShowUnreportedDryRunDeployment(deployment, tradingByDeployment.get(deployment.deployment_id))
   );
 
   const eventAge = lastEventAt == null ? null : Math.max(0, Math.round((Date.now() - lastEventAt) / 1000));
