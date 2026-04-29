@@ -156,6 +156,12 @@
         "exit_type": {
           "type": "string"
         },
+        "experiment_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "market_side": {
           "type": [
             "string",
@@ -526,6 +532,12 @@
             "null"
           ]
         },
+        "experiment_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "market_side": {
           "type": [
             "string",
@@ -679,6 +691,12 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "experiment_label": {
+          "type": [
+            "string",
+            "null"
           ]
         },
         "label": {
