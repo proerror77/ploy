@@ -8,6 +8,8 @@
   - Owner: runtime probability calibration before executable EV scoring.
 - `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
   - Owner: optimizer probability calibration search, realized expectancy diagnostics, and calibration penalties.
+- `config/strategies/02-pm5d-threelayer.champion-dryrun.toml`
+  - Owner: calibrated champion dry-run candidate generated from the profitable calibrated optimizer rerun.
 - `tasks/todo.md`
   - Owner: plan, verification evidence, and optimizer rerun notes.
 
@@ -17,13 +19,16 @@
 - [x] Apply calibrated direction probability before runtime EV gates and snapshot EV scoring.
 - [x] Penalize predicted-EV vs realized-fillable-return mismatch in the optimizer objective.
 - [x] Add focused tests for probability calibration and realized expectancy mismatch.
-- [ ] Run formatter/diff checks, CI tests, rerun optimizer, and compare candidates.
+- [x] Run formatter/diff checks, CI tests, rerun optimizer, and compare candidates.
+- [ ] Promote the calibrated champion dry-run config and redeploy dry-run only.
 
 ## Review
 
 - 2026-04-29: Follow-up correction: EV is now explicit, but optimizer results still show predicted EV per stake far above realized fillable PnL per stake. That means raw/transformed direction probability is overconfident for execution; the next fix should calibrate probability and penalize EV overstatement, not discard probability.
 - 2026-04-29: Runtime and snapshot optimizer now calibrate the transformed direction probability with `three_layer_probability_shrink` and `three_layer_probability_haircut` before EV scoring. The optimizer now records realized return per stake, predicted-vs-realized EV gap, and penalizes calibration overstatement in both stable and train/validation selection objectives.
 - 2026-04-29: Local verification passed: `rustfmt --edition 2024` on touched Rust files, `git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-calibrated-expectancy-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`20 passed`), `CARGO_TARGET_DIR=/tmp/ploy-calibrated-expectancy-test rtk cargo test -p ploy-strategy-bundles three_layer --lib` (`31 passed, 103 filtered out`), and `ploy-strategy-bundles` test/example no-run compilation. CI and optimizer reruns remain pending.
+- 2026-04-29: PR #229 merged to `main@9c7d7fbc`; GitHub Test run `25096237797` passed all required jobs, and deploy run `25096440320` succeeded. Tango verification showed `ployd` active/running with `NRestarts=0`, no alerts, no remote cargo/rustc build process, dry-run deployments running, and `pm5d.threelayer.live` still Paused.
+- 2026-04-29: Calibrated optimizer reruns on `main@9c7d7fbc` and snapshot `25029217647`: champion `25096720302` validation PnL `$3,640.74`, DD `$224.74`, trades `341`, fill `100%`, win `44.28%`, realized return/stake `0.7118`, EV gap `0.1085`, positive day/symbol `100%/100%`; obi_soft `25096721695` validation PnL `-$127.99`, DD `$590.04`; continuation_soft `25096723178` validation PnL `-$290.10`, DD `$1,564.88`. Champion is the only calibrated candidate worth promoting to dry-run config; live remains untouched.
 
 # PM5D Expectancy And Fillable-Order Gate (2026-04-29)
 
