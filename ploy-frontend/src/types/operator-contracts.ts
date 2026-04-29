@@ -41,6 +41,32 @@ export interface TradingIntentSnapshot { created_at: string; intent_id: string; 
 
 export interface TradingStateSnapshot { deployment_id: string; fills: FillSnapshot[]; intents: TradingIntentSnapshot[]; orders: OrderSnapshot[]; pnl: PnlSnapshotResponse; positions: PositionSnapshotResponse[]; risk: RiskSnapshotResponse; runtime_mode: string; }
 
+export interface DryRunClosedTradeRow { closed_at?: string | null; deployment_id?: string | null; entry_price?: number | null; entry_time_remaining_secs?: number | null; event_id?: string | null; exit_price?: number | null; exit_type: string; market_side?: string | null; net_pnl: number; notional: number; opened_at?: string | null; quantity: number; runtime_mode?: string | null; strategy_id?: string | null; symbol?: string | null; trade_key?: string | null; window_label: string; window_secs?: number | null; }
+
+export interface DryRunDailyRow { closed_trade_count: number; confirmed_pnl: number; confirmed_trade_count: number; fees: number; losses: number; net_pnl: number; open_quantity: number; trade_count: number; trading_day_cst?: string | null; wins: number; }
+
+export interface DryRunDailyWindowRow { closed_trade_count: number; losses: number; net_pnl: number; trade_count: number; trading_day_cst: string; window_label: string; window_secs?: number | null; wins: number; }
+
+export interface DryRunEquityPoint { cumulative: number; drawdown: number; index: number; label: string; pnl: number; symbol?: string | null; timestamp?: string | null; }
+
+export interface DryRunMetrics { avg_trade?: number | null; equity_points: number; gross_loss: number; gross_profit: number; max_drawdown: number; profit_factor?: NumberOrText | null; sharpe?: number | null; }
+
+export interface DryRunOpenPositionRow { deployment_id?: string | null; entry_price?: number | null; entry_time_remaining_secs?: number | null; event_id?: string | null; market_side?: string | null; notional: number; opened_at?: string | null; quantity: number; runtime_mode?: string | null; strategy_id?: string | null; symbol?: string | null; trade_key?: string | null; window_label: string; window_secs?: number | null; }
+
+export interface DryRunPairingReport { current_view_rows: number; fills_in_mixed_event_groups: number; mixed_event_groups: number; pair_key: string; side_aware_rows: number; }
+
+export interface DryRunStrategyReport { by_window: DryRunWindowRow[]; closed_trades: DryRunClosedTradeRow[]; daily: DryRunDailyRow[]; daily_by_window: DryRunDailyWindowRow[]; deployment_id: string; equity_curve: DryRunEquityPoint[]; label: string; metrics: DryRunMetrics; open_positions: DryRunOpenPositionRow[]; recent_closed: DryRunClosedTradeRow[]; runtime_mode: string; strategy_id: string; summary: DryRunSummary; symbols: DryRunSymbolRow[]; symbols_by_window: DryRunSymbolRow[]; }
+
+export interface DryRunSummary { closed_trades: number; latest_closed_at?: string | null; latest_opened_at?: string | null; losses: number; open_exposure: number; open_positions: number; realized_pnl: number; total_fees: number; total_trades: number; win_rate_pct: number; wins: number; }
+
+export interface DryRunSymbolRow { avg_entry?: number | null; losses: number; net_pnl: number; symbol: string; trades: number; window_label?: string | null; window_secs?: number | null; wins: number; }
+
+export interface DryRunWindowRow { avg_entry?: number | null; avg_pnl?: number | null; closed_trades: number; losses: number; max_entry_ttr_secs?: number | null; min_entry_ttr_secs?: number | null; realized_pnl: number; total_trades: number; win_rate_pct: number; window_label: string; window_secs?: number | null; wins: number; }
+
+export type NumberOrText = number | string;
+
+export interface DryRunPerformanceReport { by_window: DryRunWindowRow[]; closed_trades: DryRunClosedTradeRow[]; daily: DryRunDailyRow[]; daily_by_window: DryRunDailyWindowRow[]; equity_curve: DryRunEquityPoint[]; generated_at: string; metrics: DryRunMetrics; open_positions: DryRunOpenPositionRow[]; pairing: DryRunPairingReport; recent_closed: DryRunClosedTradeRow[]; strategies: DryRunStrategyReport[]; summary: DryRunSummary; symbols: DryRunSymbolRow[]; symbols_by_window: DryRunSymbolRow[]; }
+
 export interface SystemStatus { active_alert_count?: number; database_connected: boolean; error_count_1h: number; last_live_reconcile_error?: string | null; last_live_reconcile_success_at?: string | null; last_trade_time?: string | null; live_reconcile_failures?: number; next_live_reconcile_at?: string | null; stale_source_count?: number; status: string; strategy: string; uptime_seconds: number; version: string; websocket_connected: boolean; }
 
 export interface SystemControlResponse { message: string; success: boolean; }

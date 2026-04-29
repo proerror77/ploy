@@ -6,10 +6,10 @@ use ploy_operator_contracts::{
     compute_oversight_report, AgentRunRecord, AlertSnapshotEvent, AuditLogEntry,
     ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
     DeploymentDiagnosticsReport, DeploymentSnapshotEvent, DiagnosticsEvidence, DiagnosticsFinding,
-    IntentPurpose, MetricsSnapshotEvent, OperatorEvent, OrderReplaceRequest,
-    OversightSnapshotEvent, PaperIntentRequest, PlatformDiagnosticsReport, ProposalCreateRequest,
-    ProposalDecisionRequest, ProposalSnapshotEvent, StatusUpdate, SystemSnapshotEvent,
-    SystemStatus, TradingSnapshotEvent,
+    DryRunPerformanceReport, IntentPurpose, MetricsSnapshotEvent, OperatorEvent,
+    OrderReplaceRequest, OversightSnapshotEvent, PaperIntentRequest, PlatformDiagnosticsReport,
+    ProposalCreateRequest, ProposalDecisionRequest, ProposalSnapshotEvent, StatusUpdate,
+    SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
 };
 use ploy_trading::{TradeSide, TradingIntent};
 use secrecy::{ExposeSecret, SecretString};
@@ -362,7 +362,23 @@ fn build_dry_run_summary_json(state: &Arc<AppState>) -> (u16, String) {
         );
     }
 
-    (200, body)
+    let report: DryRunPerformanceReport = match serde_json::from_str(&body) {
+        Ok(report) => report,
+        Err(err) => {
+            return json_error(
+                500,
+                "dry_run_summary_invalid",
+                Some(format!(
+                    "dry-run summary script returned payload outside the operator contract: {err}"
+                )),
+            );
+        }
+    };
+
+    (
+        200,
+        serde_json::to_string(&report).unwrap_or_else(|_| body.to_string()),
+    )
 }
 
 fn html_error(status_code: u16, message: &str) -> (u16, String) {

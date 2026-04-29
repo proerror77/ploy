@@ -29,6 +29,7 @@ function getErrorMessage(error: unknown, fallback: string) {
 const navigation = [
   { name: '仪表盘', href: '/', icon: LayoutDashboard },
   { name: '运营驾驶舱', href: '/cockpit', icon: Gauge },
+  { name: 'Dry-run 报表', href: '/dry-run', icon: TrendingUp },
   { name: '交易历史', href: '/trades', icon: History },
   { name: '实时日志', href: '/monitor', icon: Activity },
   { name: 'Dry/Live 对比', href: '/parity', icon: GitCompare },

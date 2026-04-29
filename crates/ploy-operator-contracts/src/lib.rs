@@ -3,6 +3,7 @@ pub mod deployments;
 pub mod diagnostics;
 pub mod errors;
 pub mod events;
+pub mod reports;
 pub mod schemas;
 pub mod system;
 pub mod trading;
@@ -13,16 +14,21 @@ pub use deployments::{
     DeploymentSummary, DesiredState, ObservedState,
 };
 pub use diagnostics::{
-    compute_oversight_report, AgentRunRecord, DeploymentDiagnosticsMetrics,
-    DeploymentDiagnosticsReport, DiagnosticsEvidence, DiagnosticsFinding,
-    OversightRecommendedAction, OversightReport, OversightSignal, OversightSnapshotEvent,
-    PlatformDiagnosticsReport, ProposalActionKind, ProposalCreateRequest, ProposalDecisionRequest,
-    ProposalSnapshotEvent, ProposalStatus, SafetyProposal,
+    AgentRunRecord, DeploymentDiagnosticsMetrics, DeploymentDiagnosticsReport, DiagnosticsEvidence,
+    DiagnosticsFinding, OversightRecommendedAction, OversightReport, OversightSignal,
+    OversightSnapshotEvent, PlatformDiagnosticsReport, ProposalActionKind, ProposalCreateRequest,
+    ProposalDecisionRequest, ProposalSnapshotEvent, ProposalStatus, SafetyProposal,
+    compute_oversight_report,
 };
 pub use errors::ControlPlaneErrorResponse;
 pub use events::{
     AlertSnapshotEvent, DeploymentSnapshotEvent, LogEntry, MetricsSnapshotEvent, OperatorEvent,
     StatusUpdate, SystemSnapshotEvent, TradingSnapshotEvent, WsMessage,
+};
+pub use reports::{
+    DryRunClosedTradeRow, DryRunDailyRow, DryRunDailyWindowRow, DryRunEquityPoint, DryRunMetrics,
+    DryRunOpenPositionRow, DryRunPairingReport, DryRunPerformanceReport, DryRunStrategyReport,
+    DryRunSummary, DryRunSymbolRow, DryRunWindowRow, NumberOrText,
 };
 pub use system::{
     ActiveAlert, AlertKind, AlertSeverity, HeartbeatState, HeartbeatStatus, PlatformMetrics,
