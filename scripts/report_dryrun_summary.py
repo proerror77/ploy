@@ -534,7 +534,8 @@ def main() -> int:
         daily_by_strategy[strategy_key(row)].append(row)
 
     strategies = []
-    for runtime_mode, strategy_id, deployment_id in sorted(events_by_strategy.keys()):
+    strategy_keys = set(events_by_strategy.keys()) | set(daily_by_strategy.keys())
+    for runtime_mode, strategy_id, deployment_id in sorted(strategy_keys):
         strategy_events = events_by_strategy[(runtime_mode, strategy_id, deployment_id)]
         strategy_daily_rows = daily_by_strategy.get((runtime_mode, strategy_id, deployment_id), [])
         strategy_payload = build_report_slice(strategy_events, strategy_daily_rows)

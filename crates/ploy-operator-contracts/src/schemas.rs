@@ -1,9 +1,9 @@
 use crate::{
     AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
-    DeploymentSummary, OperatorEvent, PaperIntentRequest, PaperIntentResponse,
-    SystemControlResponse, SystemStatus, TradingStateSnapshot,
+    DeploymentSummary, DryRunPerformanceReport, OperatorEvent, PaperIntentRequest,
+    PaperIntentResponse, SystemControlResponse, SystemStatus, TradingStateSnapshot,
 };
-use schemars::{schema::RootSchema, JsonSchema};
+use schemars::{JsonSchema, schema::RootSchema};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy)]
@@ -58,6 +58,10 @@ pub fn contract_schemas() -> Vec<ContractSchema> {
         ContractSchema::new::<TradingStateSnapshot>(
             "trading-state-snapshot.schema.json",
             "TradingStateSnapshot",
+        ),
+        ContractSchema::new::<DryRunPerformanceReport>(
+            "dry-run-performance-report.schema.json",
+            "DryRunPerformanceReport",
         ),
         ContractSchema::new::<SystemStatus>("system-status.schema.json", "SystemStatus"),
         ContractSchema::new::<SystemControlResponse>(

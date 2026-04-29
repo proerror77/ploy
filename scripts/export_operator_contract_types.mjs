@@ -16,6 +16,7 @@ const schemaFiles = [
   "paper-intent-request.schema.json",
   "paper-intent-response.schema.json",
   "trading-state-snapshot.schema.json",
+  "dry-run-performance-report.schema.json",
   "system-status.schema.json",
   "system-control-response.schema.json",
   "audit-log-entry.schema.json",

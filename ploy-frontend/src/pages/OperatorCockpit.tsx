@@ -2,6 +2,16 @@ import type { ReactNode } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import {
   Activity,
   AlertTriangle,
   ArrowUpRight,
@@ -26,7 +36,11 @@ import { ws } from '@/services/websocket';
 import { useStore } from '@/store';
 import type {
   ActiveAlert,
+  DryRunClosedTradeRow,
+  DryRunEquityPoint,
+  DryRunOpenPositionRow,
   DryRunPerformanceReport,
+  DryRunStrategyReport,
   DeploymentSummary,
   LogEntry,
   PlatformMetrics,
@@ -36,6 +50,12 @@ import type {
 import { cn, formatCurrency, formatDuration, formatNumber, formatTimestamp } from '@/lib/utils';
 
 type Health = 'good' | 'watch' | 'bad' | 'neutral';
+
+type EquityChartRow = {
+  timestamp: number;
+  label: string | null;
+  [seriesKey: string]: number | string | null;
+};
 
 interface HealthCardProps {
   title: string;
@@ -86,6 +106,50 @@ function formatSecondsBrief(value?: number | null) {
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   return minutes > 0 ? `${minutes}m${rest.toString().padStart(2, '0')}s` : `${rest}s`;
+}
+
+const aggregateSeriesKey = 'all_dry_run';
+const strategyPalette = ['#0f172a', '#0f766e', '#2563eb', '#b45309', '#7c3aed', '#be123c', '#15803d'];
+const emptyDryRunStrategies: DryRunStrategyReport[] = [];
+const emptyDryRunEquityCurve: DryRunEquityPoint[] = [];
+const emptyDryRunClosedTrades: DryRunClosedTradeRow[] = [];
+const emptyDryRunOpenPositions: DryRunOpenPositionRow[] = [];
+
+function strategySeriesKey(index: number) {
+  return `strategy_${index}`;
+}
+
+function compactStrategyLabel(strategy: DryRunStrategyReport) {
+  return strategy.label || strategy.deployment_id || strategy.strategy_id || strategy.runtime_mode;
+}
+
+function closedTradeStrategyLabel(row: DryRunClosedTradeRow) {
+  return row.deployment_id || row.strategy_id || row.runtime_mode || 'unknown';
+}
+
+function equityPointTime(point: DryRunEquityPoint) {
+  const timestamp = Date.parse(point.timestamp ?? '');
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function formatChartTimestamp(value: unknown) {
+  const timestamp = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(timestamp)) return '-';
+  return new Date(timestamp).toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function formatOptionalMetric(value?: number | null, digits = 2) {
+  return value == null || !Number.isFinite(value) ? '-' : value.toFixed(digits);
+}
+
+function formatProfitFactor(value: DryRunStrategyReport['metrics']['profit_factor']) {
+  if (value == null) return '-';
+  return typeof value === 'number' ? value.toFixed(2) : value;
 }
 
 function ageSeconds(timestamp?: string | null) {
@@ -310,10 +374,77 @@ export function OperatorCockpit() {
   const reportedWinRate = reportedSummary == null ? null : toNumber(reportedSummary.win_rate_pct);
   const dryRunWindows = dryRunPerformance?.by_window ?? [];
   const dryRunPairing = dryRunPerformance?.pairing;
+  const dryRunStrategies = dryRunPerformance?.strategies ?? emptyDryRunStrategies;
+  const dryRunEquityCurve = dryRunPerformance?.equity_curve ?? emptyDryRunEquityCurve;
+  const dryRunRecentClosed = dryRunPerformance?.recent_closed ?? emptyDryRunClosedTrades;
+  const dryRunOpenPositions = dryRunPerformance?.open_positions ?? emptyDryRunOpenPositions;
   const pairingHasMismatch =
     dryRunPairing != null &&
     (dryRunPairing.mixed_event_groups > 0 ||
       dryRunPairing.current_view_rows !== dryRunPairing.side_aware_rows);
+  const strategyEquity = useMemo(() => {
+    const series = [
+      ...(dryRunEquityCurve.length > 0
+        ? [
+            {
+              key: aggregateSeriesKey,
+              label: 'All dry-run',
+              color: strategyPalette[0],
+            },
+          ]
+        : []),
+      ...dryRunStrategies
+        .filter((strategy) => strategy.equity_curve.length > 0)
+        .map((strategy, index) => ({
+          key: strategySeriesKey(index),
+          label: compactStrategyLabel(strategy),
+          color: strategyPalette[(index + 1) % strategyPalette.length],
+        })),
+    ];
+
+    const rows = new Map<number, EquityChartRow>();
+    for (const point of dryRunEquityCurve) {
+      const timestamp = equityPointTime(point);
+      if (timestamp == null) continue;
+      const row = rows.get(timestamp) ?? { timestamp, label: point.timestamp ?? null };
+      row[aggregateSeriesKey] = point.cumulative;
+      rows.set(timestamp, row);
+    }
+    dryRunStrategies.forEach((strategy, index) => {
+      const key = strategySeriesKey(index);
+      for (const point of strategy.equity_curve) {
+        const timestamp = equityPointTime(point);
+        if (timestamp == null) continue;
+        const row = rows.get(timestamp) ?? { timestamp, label: point.timestamp ?? null };
+        row[key] = point.cumulative;
+        rows.set(timestamp, row);
+      }
+    });
+
+    return {
+      series,
+      data: Array.from(rows.values()).sort((a, b) => toNumber(a.timestamp) - toNumber(b.timestamp)),
+    };
+  }, [dryRunEquityCurve, dryRunStrategies]);
+  const rankedStrategies = useMemo(() => {
+    return [...dryRunStrategies].sort(
+      (a, b) =>
+        toNumber(b.summary.realized_pnl) - toNumber(a.summary.realized_pnl) ||
+        b.summary.closed_trades - a.summary.closed_trades
+    );
+  }, [dryRunStrategies]);
+  const dryRunStrategyByDeployment = useMemo(() => {
+    const byDeployment = new Map<string, DryRunStrategyReport>();
+    for (const strategy of dryRunStrategies) {
+      if (strategy.deployment_id) {
+        byDeployment.set(strategy.deployment_id, strategy);
+      }
+    }
+    return byDeployment;
+  }, [dryRunStrategies]);
+  const unreportedDryRunDeployments = dryRunDeployments.filter(
+    (deployment) => !dryRunStrategyByDeployment.has(deployment.deployment_id)
+  );
 
   const eventAge = lastEventAt == null ? null : Math.max(0, Math.round((Date.now() - lastEventAt) / 1000));
   const cpuPressure =
@@ -433,6 +564,278 @@ export function OperatorCockpit() {
         />
       </div>
 
+      {dryRunPerformance ? (
+        <Card className="mb-5">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between gap-3">
+              <CardTitle className="flex items-center gap-2 text-lg">
+                <FileText className="h-5 w-5" />
+                Dry-run Strategy Report
+              </CardTitle>
+              <Badge variant={dryRunStrategies.length > 1 ? 'success' : 'secondary'}>
+                {dryRunStrategies.length} strategies
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 gap-5 2xl:grid-cols-[1.2fr_0.8fr]">
+              <div className="rounded-md border bg-white p-4">
+                <div className="mb-3 flex items-start justify-between gap-3">
+                  <div>
+                    <div className="font-medium">Cumulative equity curve</div>
+                    <div className="text-xs text-muted-foreground">
+                      {dryRunPerformance.metrics.equity_points} closed trades · x-axis is close time · max drawdown{' '}
+                      {formatCurrency(dryRunPerformance.metrics.max_drawdown)}
+                    </div>
+                  </div>
+                  <Badge variant={reportedNetPnl >= 0 ? 'success' : 'destructive'}>
+                    {formatCurrency(reportedNetPnl)}
+                  </Badge>
+                </div>
+                {strategyEquity.series.length > 0 && strategyEquity.data.length > 0 ? (
+                  <div className="h-[320px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={strategyEquity.data}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                        <XAxis
+                          dataKey="timestamp"
+                          type="number"
+                          domain={['dataMin', 'dataMax']}
+                          tick={{ fontSize: 12 }}
+                          tickFormatter={formatChartTimestamp}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 12 }}
+                          tickFormatter={(value) => `$${Number(value).toFixed(0)}`}
+                          width={64}
+                        />
+                        <Tooltip
+                          formatter={(value, name) => {
+                            const seriesName = String(name);
+                            return [
+                              formatCurrency(toNumber(value)),
+                              strategyEquity.series.find((entry) => entry.key === seriesName)?.label ?? seriesName,
+                            ];
+                          }}
+                          labelFormatter={formatChartTimestamp}
+                        />
+                        <Legend
+                          formatter={(value) => (
+                            <span className="text-xs text-muted-foreground">{value}</span>
+                          )}
+                        />
+                        {strategyEquity.series.map((series) => (
+                          <Line
+                            key={series.key}
+                            type="monotone"
+                            dataKey={series.key}
+                            name={series.label}
+                            stroke={series.color}
+                            strokeWidth={series.key === aggregateSeriesKey ? 3 : 2}
+                            dot={false}
+                          />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : (
+                  <div className="flex h-[320px] items-center justify-center rounded-md bg-muted text-sm text-muted-foreground">
+                    No closed-trade equity points yet.
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-md border bg-white p-4">
+                <div className="mb-3 flex items-start justify-between gap-3">
+                  <div>
+                    <div className="font-medium">Strategy attribution</div>
+                    <div className="text-xs text-muted-foreground">
+                      grouped by strategy_id and deployment_id
+                    </div>
+                  </div>
+                  <Badge variant={pairingHasMismatch ? 'warning' : 'success'}>
+                    {dryRunPairing?.mixed_event_groups ?? 0} mixed events
+                  </Badge>
+                </div>
+                <div className="overflow-hidden rounded-md border">
+                  <div className="grid grid-cols-[1.5fr_0.8fr_0.8fr_0.8fr_0.8fr] bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground">
+                    <span>strategy</span>
+                    <span>closed</span>
+                    <span>win</span>
+                    <span>sharpe</span>
+                    <span className="text-right">pnl</span>
+                  </div>
+                  {rankedStrategies.length === 0 && unreportedDryRunDeployments.length === 0 ? (
+                    <div className="px-3 py-8 text-center text-sm text-muted-foreground">
+                      No strategy-level dry-run rows yet.
+                    </div>
+                  ) : (
+                    <>
+                      {rankedStrategies.map((strategy) => {
+                        const pnl = toNumber(strategy.summary.realized_pnl);
+                        return (
+                          <div
+                            key={`${strategy.runtime_mode}:${strategy.strategy_id}:${strategy.deployment_id}`}
+                            className="grid grid-cols-[1.5fr_0.8fr_0.8fr_0.8fr_0.8fr] items-center border-t px-3 py-2 text-sm"
+                          >
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">{compactStrategyLabel(strategy)}</div>
+                              <div className="truncate text-xs text-muted-foreground">
+                                {strategy.strategy_id || 'unknown'} · {strategy.runtime_mode || 'unknown'}
+                              </div>
+                            </div>
+                            <div>{strategy.summary.closed_trades}</div>
+                            <div>{formatOptionalMetric(strategy.summary.win_rate_pct, 1)}%</div>
+                            <div>{formatOptionalMetric(strategy.metrics.sharpe, 2)}</div>
+                            <div className={cn('text-right font-medium', pnl < 0 ? 'text-destructive' : 'text-success')}>
+                              {formatCurrency(pnl)}
+                              <div className="text-xs font-normal text-muted-foreground">
+                                PF {formatProfitFactor(strategy.metrics.profit_factor)}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {unreportedDryRunDeployments.map((deployment) => (
+                        <div
+                          key={`unreported:${deployment.deployment_id}`}
+                          className="grid grid-cols-[1.5fr_0.8fr_0.8fr_0.8fr_0.8fr] items-center border-t px-3 py-2 text-sm"
+                        >
+                          <div className="min-w-0">
+                            <div className="truncate font-medium">{deployment.deployment_id}</div>
+                            <div className="truncate text-xs text-muted-foreground">
+                              running deployment · no dry-run report rows
+                            </div>
+                          </div>
+                          <div>0</div>
+                          <div>-</div>
+                          <div>-</div>
+                          <div className="text-right text-muted-foreground">
+                            no data
+                          </div>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-5 rounded-md border bg-white">
+              <div className="flex items-start justify-between gap-3 border-b px-4 py-3">
+                <div>
+                  <div className="font-medium">Closed trade ledger</div>
+                  <div className="text-xs text-muted-foreground">
+                    strategy/deployment attribution from dry-run track records
+                  </div>
+                </div>
+                <Badge variant="secondary">{dryRunRecentClosed.length} recent</Badge>
+              </div>
+              {dryRunRecentClosed.length === 0 ? (
+                <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+                  No closed dry-run trades yet.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <div className="min-w-[1040px]">
+                    <div className="grid grid-cols-[1.4fr_1.1fr_0.75fr_0.75fr_0.75fr_0.75fr_1fr_1fr] bg-muted px-4 py-2 text-xs font-medium uppercase text-muted-foreground">
+                      <span>strategy</span>
+                      <span>symbol</span>
+                      <span>side</span>
+                      <span>exit</span>
+                      <span>qty</span>
+                      <span>notional</span>
+                      <span className="text-right">pnl</span>
+                      <span className="text-right">closed</span>
+                    </div>
+                    {dryRunRecentClosed.map((trade) => {
+                      const pnl = toNumber(trade.net_pnl);
+                      return (
+                        <div
+                          key={trade.trade_key ?? `${trade.strategy_id}:${trade.symbol}:${trade.closed_at}`}
+                          className="grid grid-cols-[1.4fr_1.1fr_0.75fr_0.75fr_0.75fr_0.75fr_1fr_1fr] items-center border-t px-4 py-2 text-sm"
+                        >
+                          <div className="min-w-0">
+                            <div className="truncate font-medium">{closedTradeStrategyLabel(trade)}</div>
+                            <div className="truncate text-xs text-muted-foreground">
+                              {trade.strategy_id || 'unknown'} · {trade.runtime_mode || 'unknown'}
+                            </div>
+                          </div>
+                          <div className="min-w-0">
+                            <div className="truncate">{trade.symbol || 'unknown'}</div>
+                            <div className="truncate text-xs text-muted-foreground">
+                              {trade.event_id || trade.trade_key || '-'}
+                            </div>
+                          </div>
+                          <div>{trade.market_side || '-'}</div>
+                          <div>{trade.exit_type}</div>
+                          <div>{formatNumber(toNumber(trade.quantity))}</div>
+                          <div>{formatCurrency(toNumber(trade.notional))}</div>
+                          <div className={cn('text-right font-medium', pnl < 0 ? 'text-destructive' : 'text-success')}>
+                            {formatCurrency(pnl)}
+                          </div>
+                          <div className="text-right text-xs text-muted-foreground">
+                            {trade.closed_at ? formatTimestamp(trade.closed_at) : '-'}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {dryRunOpenPositions.length > 0 ? (
+              <div className="mt-5 rounded-md border bg-white">
+                <div className="flex items-start justify-between gap-3 border-b px-4 py-3">
+                  <div>
+                    <div className="font-medium">Open dry-run positions</div>
+                    <div className="text-xs text-muted-foreground">
+                      current exposure grouped by original strategy/deployment
+                    </div>
+                  </div>
+                  <Badge variant="warning">{dryRunOpenPositions.length} open</Badge>
+                </div>
+                <div className="overflow-x-auto">
+                  <div className="min-w-[900px]">
+                    <div className="grid grid-cols-[1.4fr_1.2fr_0.8fr_0.8fr_0.8fr_1fr] bg-muted px-4 py-2 text-xs font-medium uppercase text-muted-foreground">
+                      <span>strategy</span>
+                      <span>symbol</span>
+                      <span>side</span>
+                      <span>qty</span>
+                      <span>notional</span>
+                      <span className="text-right">opened</span>
+                    </div>
+                    {dryRunOpenPositions.map((position) => (
+                      <div
+                        key={position.trade_key ?? `${position.strategy_id}:${position.symbol}:${position.opened_at}`}
+                        className="grid grid-cols-[1.4fr_1.2fr_0.8fr_0.8fr_0.8fr_1fr] items-center border-t px-4 py-2 text-sm"
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate font-medium">
+                            {position.deployment_id || position.strategy_id || position.runtime_mode || 'unknown'}
+                          </div>
+                          <div className="truncate text-xs text-muted-foreground">
+                            {position.strategy_id || 'unknown'} · {position.runtime_mode || 'unknown'}
+                          </div>
+                        </div>
+                        <div className="truncate">{position.symbol || 'unknown'}</div>
+                        <div>{position.market_side || '-'}</div>
+                        <div>{formatNumber(toNumber(position.quantity))}</div>
+                        <div>{formatCurrency(toNumber(position.notional))}</div>
+                        <div className="text-right text-xs text-muted-foreground">
+                          {position.opened_at ? formatTimestamp(position.opened_at) : '-'}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-12">
         <div className="space-y-5 xl:col-span-8">
           <Card>
@@ -467,7 +870,19 @@ export function OperatorCockpit() {
                     );
                     const risk = snapshot?.risk;
                     const isDryRun = isDryRunDeployment(deployment);
-                    const pnl = isDryRun ? reportedNetPnl : toNumber(snapshot?.pnl.net_pnl);
+                    const reportStrategy = isDryRun
+                      ? dryRunStrategyByDeployment.get(deployment.deployment_id)
+                      : undefined;
+                    const hasPnl = reportStrategy != null || snapshot != null;
+                    const pnl = reportStrategy
+                      ? toNumber(reportStrategy.summary.realized_pnl)
+                      : toNumber(snapshot?.pnl.net_pnl);
+                    const fees = reportStrategy
+                      ? toNumber(reportStrategy.summary.total_fees)
+                      : toNumber(snapshot?.pnl.total_fees);
+                    const exposure = reportStrategy
+                      ? toNumber(reportStrategy.summary.open_exposure)
+                      : toNumber(risk?.total_gross_exposure);
                     return (
                       <div
                         key={deployment.deployment_id}
@@ -488,9 +903,9 @@ export function OperatorCockpit() {
                           </div>
                         </div>
                         <div className={cn('font-medium', pnl < 0 ? 'text-destructive' : 'text-success')}>
-                          {snapshot || isDryRun ? formatCurrency(pnl) : '-'}
+                          {hasPnl ? formatCurrency(pnl) : '-'}
                           <div className="text-xs font-normal text-muted-foreground">
-                            fees {formatCurrency(isDryRun ? reportedFees : toNumber(snapshot?.pnl.total_fees))}
+                            {hasPnl ? `fees ${formatCurrency(fees)}` : 'no report rows'}
                           </div>
                         </div>
                         <div>
@@ -502,7 +917,7 @@ export function OperatorCockpit() {
                         <div>
                           <div>{deployment.account_id ?? 'default'}</div>
                           <div className="text-xs text-muted-foreground">
-                            {formatCurrency(isDryRun ? reportedOpenExposure : toNumber(risk?.total_gross_exposure))}
+                            {hasPnl ? formatCurrency(exposure) : '-'}
                           </div>
                         </div>
                       </div>

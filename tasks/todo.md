@@ -25,6 +25,61 @@
 - 2026-04-29: Runtime and snapshot optimizer now calibrate the transformed direction probability with `three_layer_probability_shrink` and `three_layer_probability_haircut` before EV scoring. The optimizer now records realized return per stake, predicted-vs-realized EV gap, and penalizes calibration overstatement in both stable and train/validation selection objectives.
 - 2026-04-29: Local verification passed: `rustfmt --edition 2024` on touched Rust files, `git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-calibrated-expectancy-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`20 passed`), `CARGO_TARGET_DIR=/tmp/ploy-calibrated-expectancy-test rtk cargo test -p ploy-strategy-bundles three_layer --lib` (`31 passed, 103 filtered out`), and `ploy-strategy-bundles` test/example no-run compilation. CI and optimizer reruns remain pending.
 
+# Dry-run Report Contracts And Multi-strategy UI (2026-04-29)
+
+Issue: https://github.com/proerror77/ploy/issues/227
+
+## Files
+
+- `crates/ploy-operator-contracts/src/reports.rs`
+  - Owner: typed dry-run performance report payload matching `scripts/report_dryrun_summary.py`.
+- `crates/ploy-daemon-host/src/http.rs`
+  - Owner: server-side enforcement of the dry-run performance report contract before API responses.
+- `crates/ploy-operator-contracts/src/lib.rs`
+  - Owner: public operator-contract exports for dry-run report types.
+- `crates/ploy-operator-contracts/src/schemas.rs`
+  - Owner: JSON schema registration for dry-run report payloads.
+- `contracts/schemas/dry-run-performance-report.schema.json`
+  - Owner: generated schema snapshot consumed by TypeScript contract generation.
+- `scripts/export_operator_contract_types.mjs`
+  - Owner: generated TypeScript contract type coverage.
+- `scripts/report_dryrun_summary.py`
+  - Owner: dry-run report payload generation and per-strategy grouping.
+- `ploy-frontend/src/types/index.ts`
+  - Owner: frontend type exports for dry-run report data.
+- `ploy-frontend/src/types/operator-contracts.ts`
+  - Owner: generated frontend operator contract types.
+- `ploy-sidecar/src/contracts/operator-contracts.ts`
+  - Owner: generated sidecar operator contract types.
+- `ploy-frontend/src/pages/OperatorCockpit.tsx`
+  - Owner: multi-strategy dry-run equity, attribution, and trade ledger UI.
+- `ploy-frontend/src/components/Layout.tsx`
+  - Owner: explicit dry-run report navigation entry.
+- `tasks/todo.md`
+  - Owner: implementation plan and verification evidence.
+
+## Tasks
+
+- [x] Add first-class operator contract/schema types for the dry-run performance report.
+- [x] Generate frontend and sidecar TypeScript contract types from the schema snapshot.
+- [x] Replace local handwritten dry-run frontend interfaces with generated contract exports.
+- [x] Surface full dry-run equity plus per-strategy equity lines and strategy attribution metrics.
+- [x] Add closed-trade/open-position attribution tables showing strategy, deployment, side, size, and PnL.
+- [x] Enforce the dry-run report contract in the daemon route before returning script output.
+- [x] Keep dry-run deployment runtime rows deployment-specific instead of repeating portfolio totals.
+- [x] Include daily-only strategy rows so stale/no-current-event strategies can still appear.
+- [x] Add direct cockpit navigation for the dry-run report surface.
+- [x] Run focused contract, frontend, and diff verification.
+
+## Review
+
+- 2026-04-29: `report_dryrun_summary.py` already emits root-level full dry-run data plus per-strategy slices grouped by `runtime_mode`, `strategy_id`, and `deployment_id`; the missing boundary was a typed operator contract and a UI that made those distinctions visible.
+- 2026-04-29: Added `DryRunPerformanceReport` and nested row/report types to `ploy-operator-contracts`, preserving nullable timestamps/IDs and `profit_factor` as `number|string` because the report can emit `"Infinity"`.
+- 2026-04-29: OperatorCockpit now shows an aggregate `All dry-run` equity line alongside each strategy line, ranks strategies by realized PnL/closed trades, and includes closed-trade/open-position ledgers with strategy/deployment attribution so losing strategies and order provenance are visible in the history view.
+- 2026-04-29: Review correction: `/api/reports/dry-run` now parses script stdout into `DryRunPerformanceReport` before returning JSON, so script/schema drift fails loudly instead of silently passing through to the frontend.
+- 2026-04-29: Review correction: runtime deployment rows now join to matching report strategy by `deployment_id`, while the strategy table also lists dry-run deployments that have no report rows yet. Cross-strategy equity uses close-time on the x-axis and does not bridge missing strategy points.
+- 2026-04-29: Verification passed: `node scripts/export_operator_contract_types.mjs --check`, `env CARGO_TARGET_DIR=/tmp/ploy-dryrun-contracts /opt/homebrew/bin/timeout 180 cargo run -p ploy-operator-contracts --example export_schemas -- --check`, `python3 -m py_compile scripts/report_dryrun_summary.py`, `cd ploy-frontend && npm run lint`, `cd ploy-frontend && npm run build`, `env CARGO_TARGET_DIR=/tmp/ploy-dryrun-daemon-check /opt/homebrew/bin/timeout 180 cargo check -p ploy-daemon-host`, and `git diff --check`.
+
 # PM5D Expectancy And Fillable-Order Gate (2026-04-29)
 
 ## Files
