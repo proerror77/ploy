@@ -368,7 +368,8 @@ fn three_layer_entry_score(
     params: &SnapshotThreeLayerParams,
     profile: StrategyProfile,
 ) -> f64 {
-    let alpha_prob = calibrated_model_probability(row, params);
+    let alpha_prob = direction_alpha_probability(row, params);
+    let calibrated_prob = calibrated_model_probability(row, params);
     let direction_score = directional_score(alpha_prob, params.min_direction_prob, 0.25, false);
     let distance_score = directional_score(
         row.side_distance_over_sigma,
@@ -378,7 +379,7 @@ fn three_layer_entry_score(
     );
     let per_share_edge_score = executable_edge_score(edge, params);
     let per_stake_expectancy_score = directional_score(
-        expected_value_per_staked_dollar(alpha_prob, row.entry_ask),
+        expected_value_per_staked_dollar(calibrated_prob, row.entry_ask),
         0.0,
         0.25,
         false,
@@ -437,12 +438,19 @@ fn transformed_model_probability(side_model_prob: f64, alpha_contrarian: bool) -
     }
 }
 
+fn direction_alpha_probability(
+    row: &FactorObservationV2,
+    params: &SnapshotThreeLayerParams,
+) -> f64 {
+    transformed_model_probability(row.side_model_prob, params.alpha_contrarian)
+}
+
 fn calibrated_model_probability(
     row: &FactorObservationV2,
     params: &SnapshotThreeLayerParams,
 ) -> f64 {
     calibrate_direction_probability(
-        transformed_model_probability(row.side_model_prob, params.alpha_contrarian),
+        direction_alpha_probability(row, params),
         params.probability_shrink,
         params.probability_haircut,
     )
@@ -506,11 +514,12 @@ fn row_passes_gates(
         return false;
     }
 
-    let direction_probability = calibrated_model_probability(row, params);
-    if !direction_probability.is_finite() || direction_probability < params.min_direction_prob {
+    let direction_alpha = direction_alpha_probability(row, params);
+    if !direction_alpha.is_finite() || direction_alpha < params.min_direction_prob {
         return false;
     }
 
+    let direction_probability = calibrated_model_probability(row, params);
     let edge = expected_value_per_share(direction_probability, row.entry_ask);
     if !edge.is_finite() || edge < executable_edge_threshold(params) {
         return false;
@@ -1617,11 +1626,11 @@ mod tests {
         OPTIMIZER_MAX_DIRECTION_PROB, OPTIMIZER_MIN_DIRECTION_PROB, SnapshotObjectiveMetrics,
         SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
         calibrate_direction_probability, calibrated_model_probability, compounded_log_growth,
-        default_min_trades_from_coverage, directional_score, evaluate_snapshot_objective,
-        executable_edge_score, expected_value_per_share, expected_value_per_staked_dollar,
-        holistic_selection_objective, max_drawdown, parse_date_end, reward_risk_ratio,
-        row_passes_gates, sample_power_multiplier, stable_compounding_objective, trade_sharpe,
-        transformed_model_probability,
+        default_min_trades_from_coverage, direction_alpha_probability, directional_score,
+        evaluate_snapshot_objective, executable_edge_score, expected_value_per_share,
+        expected_value_per_staked_dollar, holistic_selection_objective, max_drawdown,
+        parse_date_end, reward_risk_ratio, row_passes_gates, sample_power_multiplier,
+        stable_compounding_objective, trade_sharpe, transformed_model_probability,
     };
     use chrono::{TimeZone, Utc};
     use ploy_research::{FactorObservationV2, Regime, ReviewSide};
@@ -1946,7 +1955,24 @@ mod tests {
 
         assert!(
             !row_passes_gates(&row, &params, StrategyProfile::Champion),
-            "cheap executable odds must not pass when calibrated direction probability is below the configured gate"
+            "cheap executable odds must not pass when directional alpha is below the configured gate"
+        );
+    }
+
+    #[test]
+    fn snapshot_gate_uses_alpha_probability_before_calibrated_ev() {
+        let mut params = test_params();
+        params.min_direction_prob = 0.56;
+        params.probability_shrink = 0.0;
+        params.probability_haircut = 0.0;
+        params.min_entry_score = 0.0;
+        let row = test_row("event-strong-alpha-cheap", 0.70, 0.12, Some(12.0), true, 0);
+
+        assert!(direction_alpha_probability(&row, &params) >= params.min_direction_prob);
+        assert!((calibrated_model_probability(&row, &params) - 0.50).abs() < 1e-9);
+        assert!(
+            row_passes_gates(&row, &params, StrategyProfile::Champion),
+            "strong directional alpha should reach calibrated EV scoring instead of being double-gated by probability shrink"
         );
     }
 

@@ -454,12 +454,13 @@ fn evaluate_entry_score(config: &ThreeLayerConfig, inputs: EntryScoreInputs) -> 
 }
 
 /// Layer 1: Direction score (0.0 – 1.0).
-/// Returns Some((direction_sign, effective_probability, direction_score)) or None
+/// Returns Some((direction_sign, calibrated_probability, direction_score)) or None
 /// only when the signal is too weak to even consider (below minimum distance in Early).
 ///
 /// In snapshot-scored profiles, contrarian mode inverts the direction but keeps
 /// the transformed alpha probability monotonic: stronger inverse alpha scores
-/// higher, and execution edge is evaluated separately.
+/// higher. The hard direction gate uses raw alpha strength, while execution EV
+/// is evaluated with the calibrated probability.
 fn evaluate_direction_score(
     distance_over_sigma: f64,
     _sigma_horizon: f64,
@@ -506,12 +507,16 @@ fn evaluate_direction_score(
     } else {
         (-1.0_f64, 1.0 - direction_prob)
     };
+    if !raw_effective_p.is_finite() || raw_effective_p < config.min_direction_prob {
+        return None;
+    }
+
     let effective_p = calibrate_direction_probability(
         raw_effective_p,
         config.probability_shrink,
         config.probability_haircut,
     );
-    if !effective_p.is_finite() || effective_p < config.min_direction_prob {
+    if !effective_p.is_finite() {
         return None;
     }
 
@@ -519,7 +524,7 @@ fn evaluate_direction_score(
     // still the distance from 50/50. Do not treat the faded side's raw model
     // probability as the executable probability.
     let direction_score = if config.profile.uses_snapshot_scoring() {
-        threshold_score(effective_p, config.min_direction_prob, 0.25, false)
+        threshold_score(raw_effective_p, config.min_direction_prob, 0.25, false)
     } else {
         ((effective_p - 0.50) / 0.50).clamp(0.0, 1.0)
     };
@@ -2217,16 +2222,32 @@ mod tests {
     }
 
     #[test]
-    fn direction_rejects_when_calibrated_probability_is_neutral() {
+    fn direction_rejects_when_raw_alpha_probability_is_neutral() {
+        let config = test_config();
+
+        let result = evaluate_direction_score(0.05, 0.02, 0.0, 0.0, Regime::Middle, &config);
+
+        assert!(
+            result.is_none(),
+            "cheap executable odds must not override neutral directional alpha"
+        );
+    }
+
+    #[test]
+    fn direction_gate_allows_strong_alpha_to_reach_calibrated_ev() {
         let mut config = test_config();
+        config.profile = ThreeLayerProfile::Champion;
         config.probability_shrink = 0.0;
         config.probability_haircut = 0.0;
 
         let result = evaluate_direction_score(2.0, 0.02, 0.0, 0.0, Regime::Early, &config);
 
+        let (_dir, prob, score) =
+            result.expect("strong raw directional alpha should pass the direction gate");
+        assert!((prob - 0.50).abs() < 1e-9);
         assert!(
-            result.is_none(),
-            "cheap executable odds must not override neutral calibrated direction probability"
+            score > 0.0,
+            "direction score should remain based on alpha strength before EV calibration"
         );
     }
 
