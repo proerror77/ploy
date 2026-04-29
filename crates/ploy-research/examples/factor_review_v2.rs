@@ -19,11 +19,13 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
-    DeribitFeatureSnapshot, FactorObservation, FactorReviewOptions,
+    DeribitFeatureSnapshot, FactorObservation, FactorReviewOptions, FactorReviewV2Report,
     build_factor_observations_with_lob, format_factor_review_v2_report,
     load_research_lob_snapshots_sampled, review_factors_v2_with_deribit,
 };
+use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
+use std::fs::File;
 use std::time::Duration;
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
@@ -47,6 +49,101 @@ fn parse_date_end(raw: &str) -> DateTime<Utc> {
 fn parse_timestamp(raw: &str) -> DateTime<Utc> {
     raw.parse::<DateTime<Utc>>()
         .unwrap_or_else(|_| panic!("invalid timestamp: {raw}"))
+}
+
+#[derive(Debug, Serialize)]
+struct FactorReviewEvaluationArtifact<'a> {
+    schema_version: u32,
+    artifact_type: &'static str,
+    producer: &'static str,
+    generated_at: DateTime<Utc>,
+    git_ref: String,
+    window: EvaluationWindow,
+    symbols: Vec<String>,
+    accounting_contract: AccountingContract,
+    canonical_result: bool,
+    risk_flags: Vec<String>,
+    report: &'a FactorReviewV2Report,
+}
+
+#[derive(Debug, Serialize)]
+struct EvaluationWindow {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct AccountingContract {
+    name: &'static str,
+    stake_usd: f64,
+    entry_model: &'static str,
+    exit_model: &'static str,
+    fee_model: &'static str,
+    grouping: &'static str,
+}
+
+fn git_ref_from_args(args: &[String]) -> String {
+    flag_value(args, "--git-ref")
+        .or_else(|| std::env::var("GITHUB_SHA").ok())
+        .or_else(|| std::env::var("GITHUB_REF_NAME").ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn factor_review_risk_flags(report: &FactorReviewV2Report) -> Vec<String> {
+    let mut flags = Vec::new();
+    if report.health.source_observations == 0 {
+        flags.push("no_source_observations".to_string());
+    }
+    if report.health.entry_fill_rate().is_finite() && report.health.entry_fill_rate() < 0.10 {
+        flags.push("low_entry_fill_rate".to_string());
+    }
+    if report.health.rejection_rate().is_finite() && report.health.rejection_rate() > 0.90 {
+        flags.push("high_candidate_rejection_rate".to_string());
+    }
+    if report.health.deribit_rows == 0 {
+        flags.push("missing_deribit_features".to_string());
+    }
+    if report.reviews.is_empty() {
+        flags.push("no_factor_reviews_passed_min_observations".to_string());
+    }
+    flags
+}
+
+fn write_factor_review_json(
+    path: &str,
+    args: &[String],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    symbols: &[String],
+    options: &FactorReviewOptions,
+    report: &FactorReviewV2Report,
+) {
+    let artifact = FactorReviewEvaluationArtifact {
+        schema_version: 1,
+        artifact_type: "strategy_evaluation",
+        producer: "factor_review_v2",
+        generated_at: Utc::now(),
+        git_ref: git_ref_from_args(args),
+        window: EvaluationWindow { start, end },
+        symbols: symbols.to_vec(),
+        accounting_contract: AccountingContract {
+            name: "pm5d_top_of_book_side_aware_15u",
+            stake_usd: options.stake_usd,
+            entry_model: "entry side ask must have enough top-of-book size for fixed stake",
+            exit_model: "opposite side bid marks immediate executable exit value",
+            fee_model: "Polymarket crypto fee 2pct * p * (1-p) per share",
+            grouping: "side-aware observation rows; not a promoted multi-factor strategy",
+        },
+        canonical_result: true,
+        risk_flags: factor_review_risk_flags(report),
+        report,
+    };
+    let file = File::create(path).unwrap_or_else(|error| {
+        panic!("failed to create factor review evaluation artifact {path}: {error}")
+    });
+    serde_json::to_writer_pretty(file, &artifact).unwrap_or_else(|error| {
+        panic!("failed to write factor review evaluation artifact {path}: {error}")
+    });
 }
 
 fn slice_by_time<T, F>(items: &[T], start: DateTime<Utc>, end: DateTime<Utc>, ts_fn: F) -> &[T]
@@ -153,8 +250,12 @@ async fn main() {
         return;
     }
 
-    let report = review_factors_v2_with_deribit(&observations, &deribit_snapshots, options);
+    let report = review_factors_v2_with_deribit(&observations, &deribit_snapshots, options.clone());
     println!("{}", format_factor_review_v2_report(&report, top_n));
+    if let Some(path) = flag_value(&args, "--output-json") {
+        write_factor_review_json(&path, &args, start, end, &symbols, &options, &report);
+        eprintln!("wrote factor review evaluation artifact: {path}");
+    }
 }
 
 async fn load_deribit_feature_snapshots(

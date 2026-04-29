@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use ploy_operator_contracts::Regime;
+use serde::Serialize;
 
 use crate::factors::{FactorObservation, pearson_ic, spearman_ic};
 
@@ -9,7 +10,7 @@ const DEFAULT_STAKE_USD: f64 = 15.0;
 const DEFAULT_TOP_QUANTILE: f64 = 0.2;
 const EPS: f64 = 1e-9;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum FactorFamily {
     Alpha,
     CexLob,
@@ -40,7 +41,7 @@ impl FactorFamily {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ThreeLayerArchive {
     DirectionProbabilityEdge,
     CexMicrostructureConfirmation,
@@ -61,7 +62,7 @@ impl ThreeLayerArchive {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ReviewSide {
     Up,
     Down,
@@ -83,7 +84,7 @@ impl ReviewSide {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FactorReviewOptions {
     pub stake_usd: f64,
     pub min_observations: usize,
@@ -100,7 +101,7 @@ impl Default for FactorReviewOptions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DeribitFeatureSnapshot {
     pub symbol: String,
     pub ts: DateTime<Utc>,
@@ -218,7 +219,7 @@ pub struct FactorV2Descriptor {
     pub accessor: fn(&FactorObservationV2) -> f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DataHealthReport {
     pub source_observations: usize,
     pub v2_rows: usize,
@@ -250,7 +251,7 @@ impl DataHealthReport {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SingleFactorReview {
     pub factor: String,
     pub family: FactorFamily,
@@ -273,7 +274,7 @@ pub struct SingleFactorReview {
     pub by_time_bucket_positive_ratio: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FactorReviewV2Report {
     pub options: FactorReviewOptions,
     pub health: DataHealthReport,
@@ -1768,5 +1769,16 @@ mod tests {
                 .iter()
                 .any(|review| review.factor == "side_model_edge")
         );
+    }
+
+    #[test]
+    fn factor_review_report_serializes_accounting_contract_fields() {
+        let report = review_factors_v2(&[base_obs()], FactorReviewOptions::default());
+        let value = serde_json::to_value(&report).expect("report should serialize");
+
+        assert_eq!(value["options"]["stake_usd"], DEFAULT_STAKE_USD);
+        assert_eq!(value["health"]["source_observations"], 1);
+        assert!(value["health"]["executable_pnl_rows"].as_u64().unwrap() > 0);
+        assert!(value["reviews"].is_array());
     }
 }

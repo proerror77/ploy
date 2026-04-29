@@ -41,7 +41,7 @@
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
 use ploy_feed_loaders::{
-    load_from_database_with_options, HistoricalLoadOptions as DbHistoricalLoadOptions,
+    HistoricalLoadOptions as DbHistoricalLoadOptions, load_from_database_with_options,
 };
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
@@ -51,8 +51,10 @@ use ploy_strategy_bundles::{
 };
 use ploy_trading::TradeSide;
 use rust_decimal_macros::dec;
+use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::{BTreeMap, HashMap};
+use std::fs::File;
 use std::sync::Arc;
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
@@ -124,14 +126,14 @@ struct PreflightLimits {
     allow_large_window: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 struct SourcePreflight {
     source: &'static str,
     rows: usize,
     bytes: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 struct SplitPreflight {
     label: &'static str,
     sources: Vec<SourcePreflight>,
@@ -147,7 +149,7 @@ impl SplitPreflight {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 struct PreflightManifest {
     splits: Vec<SplitPreflight>,
 }
@@ -636,12 +638,162 @@ impl ReplaySource {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
 struct BacktestOutcome {
     net_pnl: f64,
     trade_count: usize,
     sharpe: f64,
     updates_processed: u64,
     elapsed_secs: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct OptimizeEvaluationArtifact {
+    schema_version: u32,
+    artifact_type: &'static str,
+    producer: &'static str,
+    generated_at: DateTime<Utc>,
+    git_ref: String,
+    strategy_variant: String,
+    algorithm: &'static str,
+    replay_mode: String,
+    canonical_result: bool,
+    symbols: Vec<String>,
+    train_window: EvaluationWindow,
+    validation_window: EvaluationWindow,
+    trials: TrialSummary,
+    accounting_contract: OptimizeAccountingContract,
+    preflight: Option<PreflightManifest>,
+    train: Option<BacktestOutcome>,
+    validation: Option<BacktestOutcome>,
+    best_config: Option<DirectionalConfig>,
+    risk_flags: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct EvaluationWindow {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct TrialSummary {
+    requested: usize,
+    completed: usize,
+    best_train_score: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct OptimizeAccountingContract {
+    name: &'static str,
+    executor: &'static str,
+    spread_pct: f64,
+    market_impact_enabled: bool,
+    partial_fills_enabled: bool,
+    fee_model: &'static str,
+    grouping: &'static str,
+}
+
+fn git_ref_from_args(args: &[String]) -> String {
+    flag_value(args, "--git-ref")
+        .or_else(|| std::env::var("GITHUB_SHA").ok())
+        .or_else(|| std::env::var("GITHUB_REF_NAME").ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn optimize_risk_flags(
+    canonical_result: bool,
+    requested_trials: usize,
+    completed_trials: usize,
+    train: &BacktestOutcome,
+    validation: &BacktestOutcome,
+) -> Vec<String> {
+    let mut flags = Vec::new();
+    if !canonical_result {
+        flags.push("non_canonical_smoke_limited_result".to_string());
+    }
+    if completed_trials < requested_trials {
+        flags.push("incomplete_trial_count".to_string());
+    }
+    if train.trade_count < 5 {
+        flags.push("low_train_trade_count".to_string());
+    }
+    if validation.trade_count < 5 {
+        flags.push("low_validation_trade_count".to_string());
+    }
+    if validation.net_pnl < 0.0 {
+        flags.push("negative_validation_pnl".to_string());
+    }
+    if validation.sharpe < 0.0 {
+        flags.push("negative_validation_sharpe".to_string());
+    }
+    flags
+}
+
+fn write_optimize_json(path: &str, artifact: &OptimizeEvaluationArtifact) {
+    let file = File::create(path).unwrap_or_else(|error| {
+        panic!("failed to create optimize evaluation artifact {path}: {error}")
+    });
+    serde_json::to_writer_pretty(file, artifact).unwrap_or_else(|error| {
+        panic!("failed to write optimize evaluation artifact {path}: {error}")
+    });
+}
+
+fn write_preflight_only_json(
+    path: &str,
+    args: &[String],
+    strategy_variant: &str,
+    symbols: &[String],
+    train_from: DateTime<Utc>,
+    train_to: DateTime<Utc>,
+    val_from: DateTime<Utc>,
+    val_to: DateTime<Utc>,
+    n_trials: usize,
+    manifest: PreflightManifest,
+) {
+    let artifact = OptimizeEvaluationArtifact {
+        schema_version: 1,
+        artifact_type: "strategy_evaluation",
+        producer: "optimize_backtest",
+        generated_at: Utc::now(),
+        git_ref: git_ref_from_args(args),
+        strategy_variant: strategy_variant.to_string(),
+        algorithm: algorithm_label(strategy_variant),
+        replay_mode: "parquet-stream-preflight".to_string(),
+        canonical_result: false,
+        symbols: symbols.to_vec(),
+        train_window: EvaluationWindow {
+            start: train_from,
+            end: train_to,
+        },
+        validation_window: EvaluationWindow {
+            start: val_from,
+            end: val_to,
+        },
+        trials: TrialSummary {
+            requested: n_trials,
+            completed: 0,
+            best_train_score: f64::NAN,
+        },
+        accounting_contract: OptimizeAccountingContract {
+            name: "preflight_only_no_trade_accounting",
+            executor: "none",
+            spread_pct: 0.0,
+            market_impact_enabled: false,
+            partial_fills_enabled: false,
+            fee_model: "none",
+            grouping: "preflight manifest only; no strategy replay or PnL",
+        },
+        preflight: Some(manifest),
+        train: None,
+        validation: None,
+        best_config: None,
+        risk_flags: vec![
+            "preflight_only".to_string(),
+            "non_canonical_no_replay".to_string(),
+        ],
+    };
+    write_optimize_json(path, &artifact);
 }
 
 fn source_hint(source: &ReplaySource) -> String {
@@ -694,7 +846,10 @@ fn run_backtest(
     let fills = &snapshot.fills;
     let mut by_token: HashMap<&str, Vec<&ploy_trading::FillRecord>> = HashMap::new();
     for fill in fills {
-        by_token.entry(fill.token_id.as_str()).or_default().push(fill);
+        by_token
+            .entry(fill.token_id.as_str())
+            .or_default()
+            .push(fill);
     }
     let mut per_trade_pnl = Vec::new();
     for token_fills in by_token.values() {
@@ -864,6 +1019,7 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
 struct ThreeLayerSearchParams {
     min_direction_prob: f64,
     min_distance_over_sigma: f64,
@@ -930,11 +1086,58 @@ fn make_three_layer_config(symbols: &[String], p: &ThreeLayerSearchParams) -> Di
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outcome(trades: usize, pnl: f64, sharpe: f64) -> BacktestOutcome {
+        BacktestOutcome {
+            net_pnl: pnl,
+            trade_count: trades,
+            sharpe,
+            updates_processed: 100,
+            elapsed_secs: 1.0,
+        }
+    }
+
+    #[test]
+    fn three_layer_is_labeled_random_sampling() {
+        assert_eq!(algorithm_label("three_layer"), "random_sampling");
+        assert_eq!(algorithm_label("directional"), "TPE");
+    }
+
+    #[test]
+    fn optimize_risk_flags_mark_smoke_and_weak_validation() {
+        let flags =
+            optimize_risk_flags(false, 10, 8, &outcome(4, 1.0, 1.0), &outcome(3, -1.0, -0.5));
+
+        assert!(
+            flags
+                .iter()
+                .any(|flag| flag == "non_canonical_smoke_limited_result")
+        );
+        assert!(flags.iter().any(|flag| flag == "incomplete_trial_count"));
+        assert!(flags.iter().any(|flag| flag == "low_train_trade_count"));
+        assert!(
+            flags
+                .iter()
+                .any(|flag| flag == "low_validation_trade_count")
+        );
+        assert!(flags.iter().any(|flag| flag == "negative_validation_pnl"));
+        assert!(
+            flags
+                .iter()
+                .any(|flag| flag == "negative_validation_sharpe")
+        );
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let db_url = flag_value(&args, "--db-url");
     let data_dir = flag_value(&args, "--data-dir");
+    let output_json = flag_value(&args, "--output-json");
 
     if db_url.is_none() && data_dir.is_none() {
         eprintln!("ERROR: either --db-url or --data-dir is required");
@@ -1033,6 +1236,7 @@ fn main() {
         .map(parse_timestamp)
         .unwrap_or_else(|| parse_date_end(&val_end));
 
+    let mut preflight_artifact = None;
     let (train_source, val_source) = if let Some(ref dir) = data_dir {
         let manifest =
             parquet_preflight_manifest(dir, &symbols, train_from, train_to, val_from, val_to)
@@ -1045,9 +1249,25 @@ fn main() {
             std::process::exit(2);
         }
         if preflight_only {
+            if let Some(path) = output_json.as_deref() {
+                write_preflight_only_json(
+                    path,
+                    &args,
+                    &strategy_variant,
+                    &symbols,
+                    train_from,
+                    train_to,
+                    val_from,
+                    val_to,
+                    n_trials,
+                    manifest,
+                );
+                eprintln!("wrote optimize preflight evaluation artifact: {path}");
+            }
             eprintln!("Preflight-only mode complete; exiting before replay/optimization.");
             return;
         }
+        preflight_artifact = Some(manifest.clone());
 
         (
             ReplaySource::parquet_stream("train", dir, &symbols, train_from, train_to),
@@ -1332,8 +1552,10 @@ fn main() {
         let symbols_ref_c = Arc::clone(&symbols_ref);
         let mut best_score = f64::NEG_INFINITY;
         let mut best_params_opt: Option<ThreeLayerSearchParams> = None;
+        let mut best_train_outcome: Option<BacktestOutcome> = None;
         let mut best_pnl = 0.0f64;
         let mut best_trades = 0usize;
+        let mut completed_trials = 0usize;
 
         for iter in 0..n_trials {
             let min_direction_prob = sample(&mut lcg_next, 0.52, 0.70);
@@ -1376,6 +1598,7 @@ fn main() {
                     continue;
                 }
             };
+            completed_trials += 1;
 
             // Sharpe = mean(pnl_per_trade) / std(pnl_per_trade) * sqrt(trades_per_year)
             // Penalty for < 5 trades already applied inside run_backtest (-999.0)
@@ -1406,6 +1629,7 @@ fn main() {
                 best_score = score;
                 best_pnl = outcome.net_pnl;
                 best_trades = outcome.trade_count;
+                best_train_outcome = Some(outcome.clone());
                 best_params_opt = Some(ThreeLayerSearchParams {
                     min_direction_prob,
                     min_distance_over_sigma,
@@ -1423,6 +1647,7 @@ fn main() {
         }
 
         let best_params = best_params_opt.expect("No completed trials");
+        let best_train_outcome = best_train_outcome.expect("No completed trials");
 
         eprintln!("\n=== Best Parameters (Training) ===");
         eprintln!("Sharpe:                      {best_score:.3}");
@@ -1431,7 +1656,7 @@ fn main() {
 
         eprintln!("\n=== Validation (held-out, out-of-sample) ===");
         let val_config = make_three_layer_config(symbols_ref.as_slice(), &best_params);
-        let val_outcome = run_backtest("three_layer", val_config, &val_source, max_updates)
+        let val_outcome = run_backtest("three_layer", val_config.clone(), &val_source, max_updates)
             .expect("Validation backtest failed");
         eprintln!("Val Source:  {}", val_source.kind());
         eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
@@ -1439,6 +1664,58 @@ fn main() {
         eprintln!("Val Trades:  {}", val_outcome.trade_count);
         eprintln!("Val Updates: {}", val_outcome.updates_processed);
         eprintln!("Val Elapsed: {:.1}s", val_outcome.elapsed_secs);
+
+        if let Some(path) = output_json.as_deref() {
+            let canonical_result = max_updates.is_none();
+            let risk_flags = optimize_risk_flags(
+                canonical_result,
+                n_trials,
+                completed_trials,
+                &best_train_outcome,
+                &val_outcome,
+            );
+            let artifact = OptimizeEvaluationArtifact {
+                schema_version: 1,
+                artifact_type: "strategy_evaluation",
+                producer: "optimize_backtest",
+                generated_at: Utc::now(),
+                git_ref: git_ref_from_args(&args),
+                strategy_variant: strategy_variant.clone(),
+                algorithm: algorithm_label(&strategy_variant),
+                replay_mode: train_source.kind().to_string(),
+                canonical_result,
+                symbols: symbols_ref.as_ref().clone(),
+                train_window: EvaluationWindow {
+                    start: train_from,
+                    end: train_to,
+                },
+                validation_window: EvaluationWindow {
+                    start: val_from,
+                    end: val_to,
+                },
+                trials: TrialSummary {
+                    requested: n_trials,
+                    completed: completed_trials,
+                    best_train_score: best_score,
+                },
+                accounting_contract: OptimizeAccountingContract {
+                    name: "pm5d_simulated_executor_pairwise_fill_pnl",
+                    executor: "SimulatedExecutor",
+                    spread_pct: 0.08,
+                    market_impact_enabled: true,
+                    partial_fills_enabled: false,
+                    fee_model: "Polymarket crypto fee 2pct * p * (1-p) per share",
+                    grouping: "token fill pairs; optimizer objective, not dry-run/live realized accounting",
+                },
+                preflight: preflight_artifact.clone(),
+                train: Some(best_train_outcome.clone()),
+                validation: Some(val_outcome.clone()),
+                best_config: Some(val_config.clone()),
+                risk_flags,
+            };
+            write_optimize_json(path, &artifact);
+            eprintln!("wrote optimize evaluation artifact: {path}");
+        }
 
         eprintln!("\n=== Best Config (TOML) ===");
         eprintln!("# Paste into [strategy] section of your config file");

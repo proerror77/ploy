@@ -1,3 +1,102 @@
+# Polymarket V2 Indexer Sidecar Integration (2026-04-29)
+
+## Files
+
+- `migrations/039_polymarket_v2_indexer_events.sql`
+- `scripts/import_polymarket_v2_indexer.py`
+- `docs/runbooks/polymarket-v2-indexer.md`
+- `tests/test_polymarket_v2_indexer_contracts.py`
+
+## Tasks
+
+- [ ] Add database tables for V2 on-chain order fills, matches, fees, pUSD flows, and sync cursor state.
+- [ ] Add a lightweight importer that can ingest Envio GraphQL output or JSON/JSONL exports without adding a runtime dependency.
+- [ ] Document the deployment boundary: sidecar indexer for reconciliation/research, not realtime PM5D signal input.
+- [ ] Run static/unit verification without requiring a local PostgreSQL instance or live Envio endpoint.
+
+## Review
+
+- Pending.
+
+# Tango Dry-Run Report DB Recovery (2026-04-29)
+
+## Files
+
+- `.github/workflows/deploy-tango-1-1.yml`
+- `deployment/ploy-maintenance.timer`
+- `scripts/ploy_maintenance.sh`
+
+## Tasks
+
+- [x] Diagnose the public `/dry-run` 500 from the live API response.
+- [x] Free safe remote disk space and restart PostgreSQL on `tango-1-1`.
+- [x] Make the Tango deploy workflow keep the dry-run report script and maintenance timer installed.
+- [x] Verify the public dry-run API and maintenance timer after the fix.
+
+## Review
+
+- 2026-04-29: Public `/api/reports/dry-run` failed because PostgreSQL was not listening on `localhost:5432`; `postgresql@16-main.service` had failed while `/` was 100% full.
+- 2026-04-29: Freed disk by deleting only old oversized `/opt/ploy/logs/ploy.log.2026-03-*` files. Root free space recovered from `0` to about `129G`, PostgreSQL restarted, and `/api/system/status` returned `database_connected=true`.
+- 2026-04-29: The stale remote maintenance unit pointed at `/var/log/ploy`, while the disk-filling logs lived under `/opt/ploy/logs`.
+- 2026-04-29: Deployed the corrected maintenance unit/timer/script and dry-run summary script to `tango-1-1`; timer is active with next run at `2026-04-30 00:00:00 CST`. `PLOY_REFRESH_RESEARCH_WINDOWS` now gates the expensive `research_valid_windows` refresh so normal maintenance does not hang on that materialized view.
+- 2026-04-29: Verification passed: remote PostgreSQL active/listening on `5432`, `ployd.service` active, root disk at about `129G` free / `73%` used, public `/api/system/status` reports `database_connected=true`, public `/api/reports/dry-run` returns summary JSON, `/dry-run` returns HTTP 200 HTML, `bash -n scripts/ploy_maintenance.sh`, YAML parse for `.github/workflows/deploy-tango-1-1.yml`, and `git diff --check` on touched files. `actionlint` was not available locally.
+- 2026-04-29: Tightened historical log management after finding `/var/log/ploy` still held 1.6G of pathological repeated-rotation files. `scripts/ploy_maintenance.sh` now supports `PLOY_MAINTENANCE_LOGS_ONLY=true`, manages both `/opt/ploy/logs` and `/var/log/ploy`, deletes stale logs before compression, caps old single rotated logs, and prunes largest files when a log directory exceeds `PLOY_RETENTION_LOG_MAX_DIR_MB` (default 1024M).
+- 2026-04-29: Ran remote log-only maintenance on `tango-1-1`: `/opt/ploy/logs` reduced from `80M` before the first pass to `24K`; `/var/log/ploy` reduced from `1.6G` to `810M`; root disk stayed healthy at about `126G` free / `74%` used.
+
+# Strategy Research Workflow Evaluation Artifacts (2026-04-29)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+- `crates/ploy-research/examples/factor_review_v2.rs`
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+- `.github/workflows/factor-review-v2.yml`
+- `.github/workflows/optimize.yml`
+
+## Tasks
+
+- [x] Use Agent Team review lanes to confirm the smallest correction surface.
+- [x] Add structured JSON evaluation output for `factor_review_v2`.
+- [x] Add structured JSON evaluation output for `three_layer` optimize runs.
+- [x] Upload the JSON artifacts from the relevant GitHub workflows.
+- [x] Run targeted formatting/checks and record remaining workflow risks.
+
+## Review
+
+- 2026-04-29: Agent Team review converged on a narrow correction: do not create a new shared crate yet; emit structured `strategy_evaluation` JSON from the existing research/optimize entrypoints and upload it from CI.
+- 2026-04-29: `factor_review_v2` now supports `--git-ref` and `--output-json`, writes an artifact with data-health, risk flags, accounting-contract text, symbols/window, and the full `FactorReviewV2Report`.
+- 2026-04-29: `optimize_backtest` now supports `--git-ref` and `--output-json` for `three_layer` optimize and preflight-only modes. The optimize artifact records canonical vs smoke/preflight status, preflight manifest, train/validation outcomes, trial counts, risk flags, and the final `DirectionalConfig`.
+- 2026-04-29: Workflows now pass `--output-json` and upload the JSON artifacts. `scripts/check_optimize_verification_gates.sh` now also enforces structured artifact wiring for `factor-review-v2.yml` and `optimize.yml`.
+- 2026-04-29: Verification passed: `rustfmt --edition 2024` on touched Rust files, `bash -n scripts/check_optimize_verification_gates.sh`, `./scripts/check_optimize_verification_gates.sh`, `actionlint .github/workflows/factor-review-v2.yml .github/workflows/optimize.yml`, `git diff --check`, `rtk cargo test -p ploy-research factors_v2 --lib`, `rtk cargo check -p ploy-research --features db --example factor_review_v2`, `rtk cargo check -p ploy-strategy-bundles --features ploy-strategy-bundles/parquet-feed --example optimize_backtest`, and `rtk cargo test -p ploy-strategy-bundles --example optimize_backtest`.
+- 2026-04-29: Local `rtk cargo test -p ploy-strategy-bundles --features ploy-strategy-bundles/parquet-feed --example optimize_backtest` failed at link time with `ld64.lld: error: library not found for -lduckdb`; the same target passed `cargo check` with `parquet-feed`, and the example's pure Rust tests passed without `parquet-feed`.
+- 2026-04-29: Remaining workflow risks from Agent Team analysis: dry-run report accounting still has a separate Sharpe definition, reject-rate is not yet surfaced in the main report path, and event/market metadata joins should be fixed in a follow-up migration/report slice rather than hidden inside this artifact change.
+
+# Dry-Run Report Accounting Diagnostics (2026-04-29)
+
+## Files
+
+- `migrations/038_fix_strategy_track_record_side_key.sql`
+- `scripts/report_dryrun_summary.py`
+- `scripts/report_strategy.py`
+- `tests/test_dryrun_report_contracts.py`
+
+## Tasks
+
+- [x] Keep event track-record rows side-aware by grouping on token/market side.
+- [x] Remove unsafe `event_id = market_slug` metadata joins from the dry-run JSON report.
+- [x] Make Sharpe/PnL basis explicit across JSON and HTML report paths.
+- [x] Surface buy-order reject and partial-fill diagnostics in the report payloads.
+- [x] Run lightweight Python/static verification without local DB or heavy Rust work.
+
+## Review
+
+- 2026-04-29: Added migration `038_fix_strategy_track_record_side_key.sql` to rebuild the dry-run track-record views with `trade_key`, `token_id`, and `market_side` in the event aggregation key, preventing UP/DOWN token rows from being merged before reports consume them.
+- 2026-04-29: `report_dryrun_summary.py` no longer joins market metadata through `event_id = market_slug`; it bridges through `pm_token_settlements.token_id -> market_slug`, exposes `metadata_join_status`, adds explicit `sharpe_per_trade`/`sharpe_daily_ann` basis fields, uses CST day bucketing for event-derived daily windows, and includes `execution_diagnostics` from `strategy_runtime_orders`.
+- 2026-04-29: `report_strategy.py` now aggregates all linked BUY orders for requested/filled notional instead of taking the first order, surfaces rejected BUY count/rate, and displays both trade-level and daily-annualized Sharpe.
+- 2026-04-29: Verification passed: `python3 -m py_compile scripts/report_dryrun_summary.py scripts/report_strategy.py tests/test_dryrun_report_contracts.py`, `python3 -m unittest tests.test_dryrun_report_contracts`, `git diff --check`, and static grep for removed unsafe join / first-order LIMIT / zero-variance Sharpe fallback.
+- 2026-04-29: Synchronized the migration and report scripts to `tango-1-1`, backed up current view definitions under `/opt/ploy/backups/dryrun-report-fix/`, and applied the view migration successfully. Direct remote script output now includes `sharpe_basis=closed_trade_pnl_sqrt_n` and `execution_diagnostics`.
+- 2026-04-29: Public `/api/reports/dry-run` is still served through the currently deployed `ployd` binary, which strips the payload to the old operator contract. The deploy workflow now includes migration `038`; exposing the new API fields requires CI-built `ployd` deployment rather than local Rust builds on Tango.
+
 # Dry-Run Deployment Attribution Fix (2026-04-29)
 
 Issue: https://github.com/proerror77/ploy/issues/220

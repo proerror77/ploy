@@ -108,6 +108,8 @@ jobs:
             --min-observations "${{ github.event.inputs.min_observations }}" \
             --top-quantile "${{ github.event.inputs.top_quantile }}" \
             --top-n "${{ github.event.inputs.top_n }}" \
+            --git-ref "${{ github.event.inputs.git_ref }}" \
+            --output-json artifacts/factor-review-v2/evaluation.json \
             | tee artifacts/factor-review-v2/report.txt
 
       - name: Publish summary

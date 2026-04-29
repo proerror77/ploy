@@ -181,6 +181,7 @@ jobs:
         run: |
           set -euo pipefail
           . /home/runner/.cargo/env
+          mkdir -p artifacts/optimize
 
           health_summary() {
             echo "## Optimize preflight host health" >> "${GITHUB_STEP_SUMMARY}"
@@ -219,6 +220,8 @@ jobs:
             --max-days "${{ github.event.inputs.max_days }}" \
             --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
             --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
+            --git-ref "${{ github.event.inputs.git_ref }}" \
+            --output-json artifacts/optimize/preflight-evaluation.json \
             "${extra_flags[@]}"
 
       - name: Run optimize
@@ -226,6 +229,7 @@ jobs:
         run: |
           set -euo pipefail
           . /home/runner/.cargo/env
+          mkdir -p artifacts/optimize
           rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
           mkdir -p "${PLOY_DUCKDB_TEMP_DIR}"
 
@@ -272,4 +276,15 @@ jobs:
             --max-days "${{ github.event.inputs.max_days }}" \
             --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
             --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
+            --git-ref "${{ github.event.inputs.git_ref }}" \
+            --output-json artifacts/optimize/evaluation.json \
             "${extra_flags[@]}"
+
+      - name: Upload optimize evaluation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimize-evaluation-${{ github.run_id }}
+          path: artifacts/optimize/
+          if-no-files-found: ignore
+          retention-days: 14

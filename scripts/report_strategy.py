@@ -31,6 +31,7 @@ for i, arg in enumerate(sys.argv[1:], 1):
 
 SINCE_FILTER = f"AND COALESCE(closed_at, opened_at) >= '{SINCE}T00:00:00+08'" if SINCE else ""
 DAILY_FILTER = f"AND trading_day_cst >= '{SINCE}'" if SINCE else ""
+ORDERS_FILTER = f"AND created_at >= '{SINCE}T00:00:00+08'" if SINCE else ""
 
 
 def run_sql(query: str) -> str:
@@ -79,27 +80,35 @@ SELECT t.symbol, t.market_side,
        ROUND(t.avg_entry_price::numeric, 4),
        ROUND(t.avg_exit_price::numeric, 4),
        ROUND(t.buy_quantity::numeric, 2),
-       ROUND(t.buy_notional::numeric, 2),
-       ROUND(COALESCE(o.quantity * o.limit_price, t.buy_notional)::numeric, 2),
-       ROUND(COALESCE(o.filled_quantity, t.buy_quantity)::numeric, 2),
-       COALESCE(o.status, ''),
+       ROUND(COALESCE(NULLIF(o.buy_filled_notional, 0), t.buy_notional)::numeric, 2),
+       ROUND(COALESCE(NULLIF(o.buy_requested_notional, 0), t.buy_notional)::numeric, 2),
+       ROUND(COALESCE(NULLIF(o.buy_filled_quantity, 0), t.buy_quantity)::numeric, 2),
+       COALESCE(o.latest_buy_status, ''),
+       COALESCE(o.buy_orders, 0),
+       COALESCE(o.rejected_buy_orders, 0),
        ROUND(t.net_pnl::numeric, 2),
        ROUND(t.total_fee::numeric, 4),
        to_char(t.opened_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI'),
        to_char(t.closed_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI')
 FROM closed t
 LEFT JOIN LATERAL (
-  SELECT quantity, limit_price, filled_quantity, status
+  SELECT
+    COALESCE(SUM(quantity * COALESCE(limit_price, avg_fill_price, 0)) FILTER (WHERE order_side = 'BUY'), 0) AS buy_requested_notional,
+    COALESCE(SUM(filled_quantity * COALESCE(avg_fill_price, limit_price, 0)) FILTER (WHERE order_side = 'BUY'), 0) AS buy_filled_notional,
+    COALESCE(SUM(filled_quantity) FILTER (WHERE order_side = 'BUY'), 0) AS buy_filled_quantity,
+    COUNT(*) FILTER (WHERE order_side = 'BUY') AS buy_orders,
+    COUNT(*) FILTER (
+      WHERE order_side = 'BUY'
+        AND (LOWER(status) = 'rejected' OR rejection_reason IS NOT NULL)
+    ) AS rejected_buy_orders,
+    MAX(status) FILTER (WHERE order_side = 'BUY') AS latest_buy_status
   FROM strategy_runtime_orders o
   WHERE o.runtime_mode = t.runtime_mode
     AND o.strategy_id = t.strategy_id
-    AND o.order_side = 'BUY'
     AND (
       o.intent_id = t.intent_id
       OR (o.event_id = t.event_id AND o.token_id = t.token_id)
     )
-  ORDER BY o.created_at ASC
-  LIMIT 1
 ) o ON true
 ORDER BY t.closed_at
 """)
@@ -110,9 +119,9 @@ for line in trades_raw.split("\n"):
     if not line.strip():
         continue
     parts = line.split("|")
-    if len(parts) < 13:
+    if len(parts) < 15:
         continue
-    pnl = float(parts[9])
+    pnl = float(parts[11])
     cum_pnl += pnl
     exit_px = float(parts[3]) if parts[3] else 0
     if exit_px >= 0.99:
@@ -129,9 +138,11 @@ for line in trades_raw.split("\n"):
         "requested_notional": float(parts[6]),
         "filled_qty": float(parts[7]),
         "order_status": parts[8],
-        "pnl": pnl, "fee": float(parts[10]),
+        "buy_orders": int(parts[9] or 0),
+        "rejected_buy_orders": int(parts[10] or 0),
+        "pnl": pnl, "fee": float(parts[12]),
         "exit_type": exit_type,
-        "opened": parts[11], "closed": parts[12],
+        "opened": parts[13], "closed": parts[14],
         "cum_pnl": round(cum_pnl, 2),
     })
 
@@ -165,24 +176,32 @@ open_raw = run_sql(f"""
 SELECT symbol, market_side,
        ROUND(avg_entry_price::numeric, 4),
        ROUND(buy_quantity::numeric, 2),
-       ROUND(buy_notional::numeric, 2),
-       ROUND(COALESCE(o.quantity * o.limit_price, buy_notional)::numeric, 2),
-       ROUND(COALESCE(o.filled_quantity, buy_quantity)::numeric, 2),
-       COALESCE(o.status, ''),
+       ROUND(COALESCE(NULLIF(o.buy_filled_notional, 0), buy_notional)::numeric, 2),
+       ROUND(COALESCE(NULLIF(o.buy_requested_notional, 0), buy_notional)::numeric, 2),
+       ROUND(COALESCE(NULLIF(o.buy_filled_quantity, 0), buy_quantity)::numeric, 2),
+       COALESCE(o.latest_buy_status, ''),
+       COALESCE(o.buy_orders, 0),
+       COALESCE(o.rejected_buy_orders, 0),
        to_char(opened_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI')
 FROM strategy_runtime_event_track_record t
 LEFT JOIN LATERAL (
-  SELECT quantity, limit_price, filled_quantity, status
+  SELECT
+    COALESCE(SUM(quantity * COALESCE(limit_price, avg_fill_price, 0)) FILTER (WHERE order_side = 'BUY'), 0) AS buy_requested_notional,
+    COALESCE(SUM(filled_quantity * COALESCE(avg_fill_price, limit_price, 0)) FILTER (WHERE order_side = 'BUY'), 0) AS buy_filled_notional,
+    COALESCE(SUM(filled_quantity) FILTER (WHERE order_side = 'BUY'), 0) AS buy_filled_quantity,
+    COUNT(*) FILTER (WHERE order_side = 'BUY') AS buy_orders,
+    COUNT(*) FILTER (
+      WHERE order_side = 'BUY'
+        AND (LOWER(status) = 'rejected' OR rejection_reason IS NOT NULL)
+    ) AS rejected_buy_orders,
+    MAX(status) FILTER (WHERE order_side = 'BUY') AS latest_buy_status
   FROM strategy_runtime_orders o
   WHERE o.runtime_mode = t.runtime_mode
     AND o.strategy_id = t.strategy_id
-    AND o.order_side = 'BUY'
     AND (
       o.intent_id = t.intent_id
       OR (o.event_id = t.event_id AND o.token_id = t.token_id)
     )
-  ORDER BY o.created_at ASC
-  LIMIT 1
 ) o ON true
 WHERE t.runtime_mode = 'dry_run' AND NOT t.is_closed {SINCE_FILTER}
 ORDER BY t.opened_at DESC
@@ -193,7 +212,7 @@ for line in open_raw.split("\n"):
     if not line.strip():
         continue
     parts = line.split("|")
-    if len(parts) < 9:
+    if len(parts) < 11:
         continue
     open_positions.append({
         "symbol": parts[0], "side": parts[1], "entry": float(parts[2]),
@@ -202,8 +221,63 @@ for line in open_raw.split("\n"):
         "requested_notional": float(parts[5]),
         "filled_qty": float(parts[6]),
         "order_status": parts[7],
-        "opened": parts[8],
+        "buy_orders": int(parts[8] or 0),
+        "rejected_buy_orders": int(parts[9] or 0),
+        "opened": parts[10],
     })
+
+# Q4: Order diagnostics independent of the trade view, so rejected orders with
+# no fill still show up in the report.
+orders_raw = run_sql(f"""
+SELECT
+  COUNT(*) AS total_orders,
+  COUNT(*) FILTER (WHERE order_side = 'BUY') AS buy_orders,
+  COUNT(*) FILTER (WHERE order_side = 'SELL') AS sell_orders,
+  COUNT(*) FILTER (
+    WHERE LOWER(status) = 'rejected' OR rejection_reason IS NOT NULL
+  ) AS rejected_orders,
+  COUNT(*) FILTER (
+    WHERE order_side = 'BUY'
+      AND (LOWER(status) = 'rejected' OR rejection_reason IS NOT NULL)
+  ) AS rejected_buy_orders,
+  COUNT(*) FILTER (
+    WHERE order_side = 'BUY'
+      AND filled_quantity > 0
+      AND quantity > 0
+      AND filled_quantity < quantity * 0.98
+  ) AS partial_buy_orders,
+  ROUND(COALESCE(SUM(quantity * COALESCE(limit_price, avg_fill_price, 0)) FILTER (WHERE order_side = 'BUY'), 0), 2) AS buy_requested_notional,
+  ROUND(COALESCE(SUM(filled_quantity * COALESCE(avg_fill_price, limit_price, 0)) FILTER (WHERE order_side = 'BUY'), 0), 2) AS buy_filled_notional
+FROM strategy_runtime_orders
+WHERE runtime_mode = 'dry_run' {ORDERS_FILTER}
+""")
+
+order_diagnostics = {
+    "total_orders": 0,
+    "buy_orders": 0,
+    "sell_orders": 0,
+    "rejected_orders": 0,
+    "rejected_buy_orders": 0,
+    "partial_buy_orders": 0,
+    "buy_requested_notional": 0.0,
+    "buy_filled_notional": 0.0,
+}
+for line in orders_raw.split("\n"):
+    if not line.strip():
+        continue
+    parts = line.split("|")
+    if len(parts) < 8:
+        continue
+    order_diagnostics = {
+        "total_orders": int(parts[0] or 0),
+        "buy_orders": int(parts[1] or 0),
+        "sell_orders": int(parts[2] or 0),
+        "rejected_orders": int(parts[3] or 0),
+        "rejected_buy_orders": int(parts[4] or 0),
+        "partial_buy_orders": int(parts[5] or 0),
+        "buy_requested_notional": float(parts[6] or 0),
+        "buy_filled_notional": float(parts[7] or 0),
+    }
 
 # --- Compute summary stats ---
 import math
@@ -224,16 +298,29 @@ partial_fills = sum(
     1 for t in closed_trades
     if t["requested_notional"] > 0 and t["filled_notional"] < t["requested_notional"] * 0.98
 )
+rejected_buy_orders = order_diagnostics["rejected_buy_orders"]
+buy_orders = order_diagnostics["buy_orders"]
+rejected_buy_rate = rejected_buy_orders / buy_orders * 100 if buy_orders > 0 else 0
 
-# Sharpe ratio (annualized from daily)
+# Sharpe ratios use explicit bases. Per-trade matches the JSON dry-run report;
+# daily annualized is kept as a secondary diagnostic.
+trade_pnls = [t["pnl"] for t in closed_trades]
+if len(trade_pnls) > 1:
+    mean_t = sum(trade_pnls) / len(trade_pnls)
+    var_t = sum((x - mean_t) ** 2 for x in trade_pnls) / (len(trade_pnls) - 1)
+    std_t = math.sqrt(var_t)
+    trade_sharpe = (mean_t / std_t) * math.sqrt(len(trade_pnls)) if std_t > 0 else 0
+else:
+    trade_sharpe = 0
+
 daily_pnls = [d["pnl"] for d in daily]
 if len(daily_pnls) > 1:
     mean_d = sum(daily_pnls) / len(daily_pnls)
     var_d = sum((x - mean_d) ** 2 for x in daily_pnls) / (len(daily_pnls) - 1)
-    std_d = math.sqrt(var_d) if var_d > 0 else 0.001
-    sharpe = (mean_d / std_d) * math.sqrt(365)
+    std_d = math.sqrt(var_d)
+    daily_sharpe_ann = (mean_d / std_d) * math.sqrt(365) if std_d > 0 else 0
 else:
-    sharpe = 0
+    daily_sharpe_ann = 0
 
 # Max drawdown
 peak = 0
@@ -329,6 +416,8 @@ for t in recent:
       <td>${t['requested_notional']:.2f}</td>
       <td style="color:{fill_color};font-weight:600">${t['filled_notional']:.2f}</td>
       <td style="color:{fill_color}">{fill_ratio:.0f}%</td>
+      <td>{t['buy_orders']}</td>
+      <td>{t['rejected_buy_orders']}</td>
       <td>{t['qty']:.1f}</td>
       <td style="color:{color};font-weight:600">${t['pnl']:,.2f}</td>
       <td>{t['opened']}</td><td>{t['closed']}</td>
@@ -348,6 +437,7 @@ for p in open_positions:
       <td>${p['requested_notional']:.2f}</td>
       <td style="color:{fill_color};font-weight:600">${p['notional']:.2f}</td>
       <td style="color:{fill_color}">{fill_ratio:.0f}%</td>
+      <td>{p['buy_orders']}</td><td>{p['rejected_buy_orders']}</td>
       <td>{p['qty']:.1f}</td><td>{p['opened']}</td>
     </tr>"""
 
@@ -406,8 +496,10 @@ html = f"""<!DOCTYPE html>
     <div class="value">{total}</div></div>
   <div class="card"><div class="label">Win Rate</div>
     <div class="value">{win_rate:.1f}%</div></div>
-  <div class="card"><div class="label">Sharpe (ann.)</div>
-    <div class="value">{sharpe:.1f}</div></div>
+  <div class="card"><div class="label">Sharpe / Trade</div>
+    <div class="value">{trade_sharpe:.1f}</div></div>
+  <div class="card"><div class="label">Sharpe Daily Ann</div>
+    <div class="value">{daily_sharpe_ann:.1f}</div></div>
   <div class="card"><div class="label">Max Drawdown</div>
     <div class="value" style="color:#ef4444">${max_dd:,.2f}</div></div>
   <div class="card"><div class="label">Avg PnL/Trade</div>
@@ -418,6 +510,10 @@ html = f"""<!DOCTYPE html>
     <div class="value">${avg_filled_notional:,.2f}</div></div>
   <div class="card"><div class="label">Partial Fills</div>
     <div class="value">{partial_fills}</div></div>
+  <div class="card"><div class="label">Rejected BUY</div>
+    <div class="value">{rejected_buy_orders}</div></div>
+  <div class="card"><div class="label">BUY Reject Rate</div>
+    <div class="value">{rejected_buy_rate:.1f}%</div></div>
   <div class="card"><div class="label">Total Fees</div>
     <div class="value">${total_fees:,.2f}</div></div>
   <div class="card"><div class="label">Open Positions</div>
@@ -454,12 +550,12 @@ html = f"""<!DOCTYPE html>
   <table>
     <tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th>
         <th>Type</th><th>Req Stake</th><th>Filled</th><th>Fill %</th>
-        <th>Shares</th><th>Net PnL</th><th>Opened</th><th>Closed</th></tr>
+        <th>Orders</th><th>Rejected</th><th>Shares</th><th>Net PnL</th><th>Opened</th><th>Closed</th></tr>
     {trade_rows}
   </table>
 </div>
 
-{"<div class='section chart-box'><h2>Open Positions</h2><table><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Req Stake</th><th>Filled</th><th>Fill %</th><th>Shares</th><th>Opened</th></tr>" + open_rows + "</table></div>" if open_positions else ""}
+{"<div class='section chart-box'><h2>Open Positions</h2><table><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Req Stake</th><th>Filled</th><th>Fill %</th><th>Orders</th><th>Rejected</th><th>Shares</th><th>Opened</th></tr>" + open_rows + "</table></div>" if open_positions else ""}
 
 <div class="section chart-box">
   <h2>Strategy Parameters</h2>
@@ -546,4 +642,8 @@ out_path.parent.mkdir(parents=True, exist_ok=True)
 out_path.write_text(html)
 
 print(f"Report saved to {out_path}")
-print(f"  Trades: {total} | Win rate: {win_rate:.1f}% | PnL: ${total_pnl:,.2f} | Sharpe: {sharpe:.1f}")
+print(
+    f"  Trades: {total} | Win rate: {win_rate:.1f}% | PnL: ${total_pnl:,.2f} "
+    f"| Sharpe/trade: {trade_sharpe:.1f} | Sharpe daily ann: {daily_sharpe_ann:.1f} "
+    f"| Rejected BUY: {rejected_buy_orders}"
+)

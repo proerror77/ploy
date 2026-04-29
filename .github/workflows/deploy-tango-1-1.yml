@@ -45,6 +45,7 @@ env:
     035_binance_agg_trade_ticks.sql
     036_research_valid_windows_matview.sql
     037_research_time_conditioned_factor_metrics.sql
+    038_fix_strategy_track_record_side_key.sql
 
 jobs:
   build-and-deploy:
@@ -145,6 +146,7 @@ jobs:
           cp scripts/report_strategy.py dist/scripts/report_strategy.py
           cp scripts/report_market_data_health.py dist/scripts/report_market_data_health.py
           cp scripts/report_dryrun_summary.py dist/scripts/report_dryrun_summary.py
+          cp scripts/ploy_maintenance.sh dist/scripts/ploy_maintenance.sh
           cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
           cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
           cp scripts/drills/*.sh dist/scripts/drills/
@@ -157,6 +159,8 @@ jobs:
           cp deployment/systemd/ploy-binance-lob-collector.service dist/deployment/systemd/ploy-binance-lob-collector.service
           cp deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf dist/deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf
           cp deployment/systemd/ploy-quote-collector.hardening.conf dist/deployment/systemd/ploy-quote-collector.hardening.conf
+          cp deployment/ploy-maintenance.service dist/deployment/ploy-maintenance.service
+          cp deployment/ploy-maintenance.timer dist/deployment/ploy-maintenance.timer
           tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
             -C dist -cf - . | gzip -n > "${DEPLOY_BUNDLE_NAME}"
           sha256sum "${DEPLOY_BUNDLE_NAME}" > "${DEPLOY_BUNDLE_NAME}.sha256"
@@ -363,6 +367,8 @@ jobs:
             install -m 0755 ./scripts/binance_lob_collector.py ${DEPLOY_ROOT}/scripts/binance_lob_collector.py
             install -m 0755 ./scripts/report_strategy.py ${DEPLOY_ROOT}/scripts/report_strategy.py
             install -m 0755 ./scripts/report_market_data_health.py ${DEPLOY_ROOT}/scripts/report_market_data_health.py
+            install -m 0755 ./scripts/report_dryrun_summary.py ${DEPLOY_ROOT}/scripts/report_dryrun_summary.py
+            install -m 0755 ./scripts/ploy_maintenance.sh ${DEPLOY_ROOT}/scripts/ploy_maintenance.sh
             install -m 0644 ./scripts/fix_binance_lob_partitions.sql ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
             install -m 0644 ./scripts/fix_deribit_partitions.sql ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
             install -m 0755 ./scripts/drills/*.sh ${DEPLOY_ROOT}/scripts/drills/
@@ -376,7 +382,10 @@ jobs:
             install -m 0644 ./deployment/systemd/ploy-binance-aggtrade-collector.service /etc/systemd/system/ploy-binance-aggtrade-collector.service
             install -m 0644 ./deployment/systemd/ploy-binance-lob-collector.service /etc/systemd/system/ploy-binance-lob-collector.service
             install -m 0644 ./deployment/systemd/ploy-quote-collector.hardening.conf /etc/systemd/system/ploy-quote-collector.service.d/hardening.conf
+            install -m 0644 ./deployment/ploy-maintenance.service /etc/systemd/system/ploy-maintenance.service
+            install -m 0644 ./deployment/ploy-maintenance.timer /etc/systemd/system/ploy-maintenance.timer
             systemctl daemon-reload
+            systemctl enable --now ploy-maintenance.timer
 
             # Apply additive runner migrations before restarting services.
             mkdir -p ${DEPLOY_ROOT}/migrations

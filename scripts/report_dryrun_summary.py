@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from statistics import mean, stdev
 
 
@@ -47,6 +47,11 @@ WITH events AS (
     t.is_closed,
     t.open_quantity,
     CASE
+      WHEN m.market_slug IS NOT NULL THEN 'token_settlement_market_metadata'
+      WHEN s.market_slug IS NOT NULL THEN 'token_settlement_without_metadata'
+      ELSE 'missing_token_settlement'
+    END AS metadata_join_status,
+    CASE
       WHEN m.end_time IS NOT NULL AND m.start_time IS NOT NULL
         THEN ROUND(EXTRACT(EPOCH FROM (m.end_time - m.start_time)))::int
       WHEN m.market_slug ILIKE '%15m%' OR m.market_slug ILIKE '%15-minute%' THEN 900
@@ -59,7 +64,8 @@ WITH events AS (
       ELSE NULL
     END AS entry_time_remaining_secs
   FROM strategy_runtime_event_track_record t
-  LEFT JOIN pm_market_metadata m ON m.market_slug = t.event_id
+  LEFT JOIN pm_token_settlements s ON s.token_id = t.token_id
+  LEFT JOIN pm_market_metadata m ON m.market_slug = s.market_slug
   WHERE t.runtime_mode IN ({MODE_FILTER})
 )
 SELECT COALESCE(json_agg(row_to_json(e) ORDER BY e.opened_at, e.trade_key), '[]'::json)::text
@@ -128,6 +134,46 @@ FROM (
   GROUP BY runtime_mode, strategy_id, deployment_id, event_id
   HAVING COUNT(DISTINCT token_id) > 1 OR COUNT(DISTINCT market_side) > 1
 ) mixed;
+"""
+
+ORDER_DIAGNOSTICS_QUERY = f"""
+SELECT COALESCE(json_agg(row_to_json(d) ORDER BY d.runtime_mode, d.strategy_id, d.deployment_id), '[]'::json)::text
+FROM (
+  SELECT
+    runtime_mode,
+    strategy_id,
+    deployment_id,
+    COUNT(*) AS total_orders,
+    COUNT(*) FILTER (WHERE order_side = 'BUY') AS buy_orders,
+    COUNT(*) FILTER (WHERE order_side = 'SELL') AS sell_orders,
+    COUNT(*) FILTER (
+      WHERE LOWER(status) = 'rejected' OR rejection_reason IS NOT NULL
+    ) AS rejected_orders,
+    COUNT(*) FILTER (
+      WHERE order_side = 'BUY'
+        AND (LOWER(status) = 'rejected' OR rejection_reason IS NOT NULL)
+    ) AS rejected_buy_orders,
+    COUNT(*) FILTER (
+      WHERE order_side = 'BUY'
+        AND filled_quantity > 0
+        AND quantity > 0
+        AND filled_quantity < quantity * 0.98
+    ) AS partial_buy_orders,
+    ROUND(COALESCE(SUM(quantity * COALESCE(limit_price, avg_fill_price, 0)) FILTER (WHERE order_side = 'BUY'), 0), 4) AS buy_requested_notional,
+    ROUND(COALESCE(SUM(filled_quantity * COALESCE(avg_fill_price, limit_price, 0)) FILTER (WHERE order_side = 'BUY'), 0), 4) AS buy_filled_notional,
+    ROUND(
+      CASE
+        WHEN COALESCE(SUM(quantity) FILTER (WHERE order_side = 'BUY'), 0) > 0
+          THEN COALESCE(SUM(filled_quantity) FILTER (WHERE order_side = 'BUY'), 0)
+               / SUM(quantity) FILTER (WHERE order_side = 'BUY') * 100
+        ELSE 0
+      END,
+      2
+    ) AS buy_fill_rate_pct
+  FROM strategy_runtime_orders
+  WHERE runtime_mode IN ({MODE_FILTER})
+  GROUP BY runtime_mode, strategy_id, deployment_id
+) d;
 """
 
 
@@ -206,7 +252,21 @@ def day_from_event(row) -> str | None:
     timestamp = row.get("closed_at") or row.get("last_fill_at") or row.get("opened_at")
     if not timestamp:
         return None
-    return timestamp[:10]
+    parsed = parse_timestamp(timestamp)
+    if parsed is None:
+        return timestamp[:10]
+    if parsed.tzinfo is None:
+        return parsed.date().isoformat()
+    return parsed.astimezone(timezone(timedelta(hours=8))).date().isoformat()
+
+
+def parse_timestamp(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def win_rate(wins: int, closed_count: int) -> float:
@@ -273,16 +333,19 @@ def build_metrics(events, equity_curve):
     elif gross_profit > 0:
         profit_factor = "Infinity"
 
-    sharpe = None
+    sharpe_per_trade = None
     if len(closed_pnls) >= 2:
         sigma = stdev(closed_pnls)
         if sigma > 0:
-            sharpe = round((mean(closed_pnls) / sigma) * math.sqrt(len(closed_pnls)), 4)
+            sharpe_per_trade = round((mean(closed_pnls) / sigma) * math.sqrt(len(closed_pnls)), 4)
 
     max_drawdown = min((point["drawdown"] for point in equity_curve), default=0.0)
     avg_trade = mean(closed_pnls) if closed_pnls else None
     return {
-        "sharpe": sharpe,
+        "sharpe": sharpe_per_trade,
+        "sharpe_per_trade": sharpe_per_trade,
+        "sharpe_basis": "closed_trade_pnl_sqrt_n",
+        "closed_trade_count_for_sharpe": len(closed_pnls),
         "profit_factor": profit_factor,
         "max_drawdown": round(max_drawdown, 4),
         "avg_trade": None if avg_trade is None else round(avg_trade, 4),
@@ -290,6 +353,16 @@ def build_metrics(events, equity_curve):
         "gross_loss": round(gross_loss, 4),
         "equity_points": len(equity_curve),
     }
+
+
+def build_daily_sharpe(daily_rows):
+    daily_pnls = [number(row.get("net_pnl")) for row in daily_rows]
+    if len(daily_pnls) < 2:
+        return None
+    sigma = stdev(daily_pnls)
+    if sigma <= 0:
+        return None
+    return round((mean(daily_pnls) / sigma) * math.sqrt(365), 4)
 
 
 def build_window_rows(events):
@@ -474,9 +547,12 @@ def build_open_positions(events):
 def build_report_slice(events, daily_rows):
     equity_curve = build_equity_curve(events)
     closed_trades = build_closed_trades(events)
+    metrics = build_metrics(events, equity_curve)
+    metrics["sharpe_daily_ann"] = build_daily_sharpe(daily_rows)
+    metrics["daily_sharpe_basis"] = "daily_net_pnl_sqrt_365"
     return {
         "summary": build_summary(events),
-        "metrics": build_metrics(events, equity_curve),
+        "metrics": metrics,
         "equity_curve": equity_curve,
         "by_window": build_window_rows(events),
         "daily": build_daily_rows(daily_rows),
@@ -486,6 +562,41 @@ def build_report_slice(events, daily_rows):
         "closed_trades": closed_trades[:250],
         "recent_closed": closed_trades[:50],
         "open_positions": build_open_positions(events),
+    }
+
+
+def build_execution_diagnostics(rows):
+    totals = defaultdict(float)
+    for row in rows:
+        for key in (
+            "total_orders",
+            "buy_orders",
+            "sell_orders",
+            "rejected_orders",
+            "rejected_buy_orders",
+            "partial_buy_orders",
+            "buy_requested_notional",
+            "buy_filled_notional",
+        ):
+            totals[key] += number(row.get(key))
+
+    buy_orders = totals["buy_orders"]
+    rejected_buy_orders = totals["rejected_buy_orders"]
+    totals["buy_fill_rate_pct"] = (
+        round(totals["buy_filled_notional"] / totals["buy_requested_notional"] * 100, 2)
+        if totals["buy_requested_notional"] > 0
+        else 0
+    )
+    totals["rejected_buy_rate_pct"] = round(rejected_buy_orders / buy_orders * 100, 2) if buy_orders > 0 else 0
+
+    return {
+        "basis": "strategy_runtime_orders",
+        "partial_buy_threshold_pct": 98,
+        "summary": {
+            key: (round(value, 4) if key.endswith("_notional") else int(value) if key.endswith("_orders") else value)
+            for key, value in totals.items()
+        },
+        "strategies": rows,
     }
 
 
@@ -512,6 +623,7 @@ def empty_payload():
             "current_view_rows": 0,
             "side_aware_rows": 0,
         },
+        "execution_diagnostics": build_execution_diagnostics([]),
     }
 
 
@@ -519,11 +631,13 @@ def main() -> int:
     events = run_json_query(EVENTS_QUERY) or []
     daily_rows = run_json_query(DAILY_QUERY) or []
     pairing = run_json_query(PAIRING_QUERY) or empty_payload()["pairing"]
+    order_diagnostics = run_json_query(ORDER_DIAGNOSTICS_QUERY) or []
 
     payload = empty_payload()
     payload["generated_at"] = datetime.now(timezone.utc).isoformat()
     payload.update(build_report_slice(events, daily_rows))
     payload["pairing"] = pairing
+    payload["execution_diagnostics"] = build_execution_diagnostics(order_diagnostics)
 
     events_by_strategy = defaultdict(list)
     for event in events:
@@ -533,10 +647,13 @@ def main() -> int:
     for row in daily_rows:
         daily_by_strategy[strategy_key(row)].append(row)
 
+    diagnostics_by_strategy = {strategy_key(row): row for row in order_diagnostics}
+
     strategies = []
     for runtime_mode, strategy_id, deployment_id in sorted(events_by_strategy.keys()):
         strategy_events = events_by_strategy[(runtime_mode, strategy_id, deployment_id)]
         strategy_daily_rows = daily_by_strategy.get((runtime_mode, strategy_id, deployment_id), [])
+        strategy_diagnostics = diagnostics_by_strategy.get((runtime_mode, strategy_id, deployment_id))
         strategy_payload = build_report_slice(strategy_events, strategy_daily_rows)
         strategy_payload.update(
             {
@@ -544,6 +661,9 @@ def main() -> int:
                 "strategy_id": strategy_id,
                 "deployment_id": deployment_id,
                 "label": strategy_label(runtime_mode, strategy_id, deployment_id),
+                "execution_diagnostics": build_execution_diagnostics(
+                    [strategy_diagnostics] if strategy_diagnostics else []
+                ),
             }
         )
         strategies.append(strategy_payload)

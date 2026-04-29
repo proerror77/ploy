@@ -11,6 +11,7 @@ set -euo pipefail
 
 DB_NAME="${PLOY_DB_NAME:-ploy}"
 LOG_DIR="${LOG_DIR:-/opt/ploy/logs}"
+EXTRA_LOG_DIRS="${PLOY_EXTRA_LOG_DIRS:-/var/log/ploy}"
 
 RETENTION_CLOB_TICKS_DAYS="${PLOY_RETENTION_CLOB_TICKS_DAYS:-7}"
 RETENTION_CLOB_BOOK_DAYS="${PLOY_RETENTION_CLOB_BOOK_DAYS:-7}"
@@ -23,9 +24,13 @@ RETENTION_BINANCE_LOB_DAYS="${PLOY_RETENTION_BINANCE_LOB_DAYS:-7}"
 RETENTION_NBA_OBS_DAYS="${PLOY_RETENTION_NBA_OBS_DAYS:-7}"
 RETENTION_ORDER_EXEC_DAYS="${PLOY_RETENTION_ORDER_EXEC_DAYS:-7}"
 RETENTION_LOG_DAYS="${PLOY_RETENTION_LOG_DAYS:-14}"
+RETENTION_LOG_MAX_FILE_MB="${PLOY_RETENTION_LOG_MAX_FILE_MB:-512}"
+RETENTION_LOG_MAX_DIR_MB="${PLOY_RETENTION_LOG_MAX_DIR_MB:-1024}"
 JOURNAL_VACUUM_SIZE="${PLOY_JOURNAL_VACUUM_SIZE:-200M}"
 DERIBIT_PARTITION_LOOKBACK_DAYS="${PLOY_DERIBIT_PARTITION_LOOKBACK_DAYS:-7}"
 DERIBIT_PARTITION_LOOKAHEAD_DAYS="${PLOY_DERIBIT_PARTITION_LOOKAHEAD_DAYS:-14}"
+REFRESH_RESEARCH_WINDOWS="${PLOY_REFRESH_RESEARCH_WINDOWS:-false}"
+LOGS_ONLY="${PLOY_MAINTENANCE_LOGS_ONLY:-false}"
 
 is_uint() {
   [[ "${1:-}" =~ ^[0-9]+$ ]]
@@ -75,6 +80,14 @@ if ! is_uint "$RETENTION_LOG_DAYS"; then
   echo "invalid PLOY_RETENTION_LOG_DAYS: $RETENTION_LOG_DAYS" >&2
   exit 2
 fi
+if ! is_uint "$RETENTION_LOG_MAX_FILE_MB"; then
+  echo "invalid PLOY_RETENTION_LOG_MAX_FILE_MB: $RETENTION_LOG_MAX_FILE_MB" >&2
+  exit 2
+fi
+if ! is_uint "$RETENTION_LOG_MAX_DIR_MB"; then
+  echo "invalid PLOY_RETENTION_LOG_MAX_DIR_MB: $RETENTION_LOG_MAX_DIR_MB" >&2
+  exit 2
+fi
 if ! is_uint "$DERIBIT_PARTITION_LOOKBACK_DAYS"; then
   echo "invalid PLOY_DERIBIT_PARTITION_LOOKBACK_DAYS: $DERIBIT_PARTITION_LOOKBACK_DAYS" >&2
   exit 2
@@ -84,23 +97,82 @@ if ! is_uint "$DERIBIT_PARTITION_LOOKAHEAD_DAYS"; then
   exit 2
 fi
 
-echo "ploy_maintenance: db=${DB_NAME} log_dir=${LOG_DIR} clob_ticks_days=${RETENTION_CLOB_TICKS_DAYS} clob_book_days=${RETENTION_CLOB_BOOK_DAYS} clob_obh_days=${RETENTION_CLOB_ORDERBOOK_HISTORY_DAYS} clob_trades_days=${RETENTION_CLOB_TRADES_DAYS} clob_alerts_days=${RETENTION_CLOB_ALERTS_DAYS} binance_ticks_days=${RETENTION_BINANCE_TICKS_DAYS} binance_aggtrade_days=${RETENTION_BINANCE_AGGTRADE_DAYS} binance_lob_days=${RETENTION_BINANCE_LOB_DAYS} nba_obs_days=${RETENTION_NBA_OBS_DAYS} order_exec_days=${RETENTION_ORDER_EXEC_DAYS} log_days=${RETENTION_LOG_DAYS} deribit_partition_lookback_days=${DERIBIT_PARTITION_LOOKBACK_DAYS} deribit_partition_lookahead_days=${DERIBIT_PARTITION_LOOKAHEAD_DAYS}"
+echo "ploy_maintenance: db=${DB_NAME} log_dir=${LOG_DIR} extra_log_dirs=${EXTRA_LOG_DIRS} clob_ticks_days=${RETENTION_CLOB_TICKS_DAYS} clob_book_days=${RETENTION_CLOB_BOOK_DAYS} clob_obh_days=${RETENTION_CLOB_ORDERBOOK_HISTORY_DAYS} clob_trades_days=${RETENTION_CLOB_TRADES_DAYS} clob_alerts_days=${RETENTION_CLOB_ALERTS_DAYS} binance_ticks_days=${RETENTION_BINANCE_TICKS_DAYS} binance_aggtrade_days=${RETENTION_BINANCE_AGGTRADE_DAYS} binance_lob_days=${RETENTION_BINANCE_LOB_DAYS} nba_obs_days=${RETENTION_NBA_OBS_DAYS} order_exec_days=${RETENTION_ORDER_EXEC_DAYS} log_days=${RETENTION_LOG_DAYS} log_max_file_mb=${RETENTION_LOG_MAX_FILE_MB} log_max_dir_mb=${RETENTION_LOG_MAX_DIR_MB} deribit_partition_lookback_days=${DERIBIT_PARTITION_LOOKBACK_DAYS} deribit_partition_lookahead_days=${DERIBIT_PARTITION_LOOKAHEAD_DAYS} refresh_research_windows=${REFRESH_RESEARCH_WINDOWS} logs_only=${LOGS_ONLY}"
 
-if [[ -n "${DATABASE_URL:-}" ]]; then
-  PSQL=(psql "$DATABASE_URL" -v ON_ERROR_STOP=1)
-elif command -v runuser >/dev/null 2>&1; then
-  PSQL=(runuser -u postgres -- psql -d "$DB_NAME" -v ON_ERROR_STOP=1)
-else
-  # Fallback for minimal distros.
-  PSQL=(su -s /bin/bash postgres -c "psql -d \"$DB_NAME\" -v ON_ERROR_STOP=1")
-fi
+prune_log_dir() {
+  local dir="$1"
+  local current_mb oldest
+  local timestamp size path
 
-echo "==> DB retention"
-"${PSQL[@]}" <<SQL
+  [[ -d "$dir" ]] || return 0
+
+  echo "Pruning logs in ${dir}"
+
+  # Delete old log files before compression so stale giant files disappear in one run.
+  find "$dir" -maxdepth 1 -type f -mtime +"$RETENTION_LOG_DAYS" \
+    \( -name '*.log' -o -name '*.log.*' -o -name '*.log.*.gz' -o -name 'ploy.log*' -o -name 'platform.log*' \) \
+    -delete
+
+  # Delete old rotated files that are too large even if logrotate touched mtime recently.
+  find "$dir" -maxdepth 1 -type f -mtime +1 -size +"${RETENTION_LOG_MAX_FILE_MB}"M \
+    \( -name '*.log.*' -o -name '*.log.*.gz' -o -name 'ploy.log.*' -o -name 'platform.log.*' \) \
+    -delete
+
+  # Compress older uncompressed logs that survived deletion.
+  find "$dir" -maxdepth 1 -type f -mtime +1 ! -name '*.gz' \
+    \( -name '*.log' -o -name '*.log.*' -o -name 'ploy.log*' -o -name 'platform.log*' \) \
+    -print0 | xargs -0 -r gzip -9
+
+  # Delete old compressed logs.
+  find "$dir" -maxdepth 1 -type f -name '*.gz' -mtime +"$RETENTION_LOG_DAYS" -delete
+
+  current_mb=$(du -sm "$dir" | awk '{print $1}')
+  if (( current_mb <= RETENTION_LOG_MAX_DIR_MB )); then
+    echo "Log dir ${dir} is ${current_mb}M, under ${RETENTION_LOG_MAX_DIR_MB}M cap"
+    return 0
+  fi
+
+  echo "Log dir ${dir} is ${current_mb}M, pruning largest files to ${RETENTION_LOG_MAX_DIR_MB}M cap"
+  while IFS= read -r -d '' oldest; do
+    size="${oldest%% *}"
+    oldest="${oldest#* }"
+    timestamp="${oldest%% *}"
+    path="${oldest#* }"
+    echo "Deleting ${path} (${size} bytes, ts=${timestamp})"
+    rm -f -- "$path"
+    current_mb=$(du -sm "$dir" | awk '{print $1}')
+    (( current_mb <= RETENTION_LOG_MAX_DIR_MB )) && break
+  done < <(
+    find "$dir" -maxdepth 1 -type f \
+      \( -name '*.log' -o -name '*.log.*' -o -name '*.log.*.gz' -o -name 'ploy.log*' -o -name 'platform.log*' \) \
+      -printf '%s %T@ %p\0' | sort -z -nr
+  )
+  echo "Log dir ${dir} is now $(du -sm "$dir" | awk '{print $1}')M"
+}
+
+if [[ "$LOGS_ONLY" != "true" ]]; then
+  if [[ -n "${DATABASE_URL:-}" ]]; then
+    PSQL=(psql "$DATABASE_URL" -v ON_ERROR_STOP=1)
+  elif command -v runuser >/dev/null 2>&1; then
+    PSQL=(runuser -u postgres -- psql -d "$DB_NAME" -v ON_ERROR_STOP=1)
+  else
+    # Fallback for minimal distros.
+    PSQL=(su -s /bin/bash postgres -c "psql -d \"$DB_NAME\" -v ON_ERROR_STOP=1")
+  fi
+
+  echo "==> DB retention"
+  if [[ "$REFRESH_RESEARCH_WINDOWS" == "true" ]]; then
+    "${PSQL[@]}" <<SQL
 -- Refresh research valid windows materialized view (if it exists).
 -- CONCURRENTLY avoids locking reads during refresh; requires the UNIQUE index.
 SELECT 'REFRESH MATERIALIZED VIEW CONCURRENTLY research_valid_windows;'
 WHERE to_regclass('public.research_valid_windows') IS NOT NULL \\gexec
+SQL
+  else
+    echo "Skipping research_valid_windows refresh; set PLOY_REFRESH_RESEARCH_WINDOWS=true to enable."
+  fi
+
+  "${PSQL[@]}" <<SQL
 
 DO \$\$
 DECLARE
@@ -233,16 +305,20 @@ SELECT 'VACUUM (ANALYZE) binance_lob_ticks;' WHERE to_regclass('public.binance_l
 VACUUM (ANALYZE) nba_live_observations;
 SELECT 'VACUUM (ANALYZE) agent_order_executions;' WHERE to_regclass('public.agent_order_executions') IS NOT NULL \\gexec
 SQL
+else
+  echo "Skipping DB retention because PLOY_MAINTENANCE_LOGS_ONLY=true"
+fi
 
 echo "==> Log retention"
-if [[ -d "$LOG_DIR" ]]; then
-  # Compress older uncompressed logs.
-  find "$LOG_DIR" -maxdepth 1 -type f -name 'ploy.log.*' -mtime +1 ! -name '*.gz' -print0 \
-    | xargs -0 -r gzip -9
-
-  # Delete old compressed logs.
-  find "$LOG_DIR" -maxdepth 1 -type f -name 'ploy.log.*.gz' -mtime +"$RETENTION_LOG_DAYS" -delete
-fi
+seen_log_dirs=" "
+for dir in "$LOG_DIR" $EXTRA_LOG_DIRS; do
+  [[ -n "${dir:-}" ]] || continue
+  case "$seen_log_dirs" in
+    *" $dir "*) continue ;;
+  esac
+  seen_log_dirs="${seen_log_dirs}${dir} "
+  prune_log_dir "$dir"
+done
 
 echo "==> Journald vacuum"
 if command -v journalctl >/dev/null 2>&1; then

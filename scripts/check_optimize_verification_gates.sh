@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workflow="${repo_root}/.github/workflows/optimize.yml"
+factor_workflow="${repo_root}/.github/workflows/factor-review-v2.yml"
 optimizer="${repo_root}/crates/ploy-strategy-bundles/examples/optimize_backtest.rs"
 
 failures=()
@@ -41,6 +42,7 @@ require_any_text() {
 }
 
 require_file "${workflow}"
+require_file "${factor_workflow}"
 require_file "${optimizer}"
 
 if [[ -f "${workflow}" ]]; then
@@ -51,6 +53,8 @@ if [[ -f "${workflow}" ]]; then
   require_any_text "${workflow}" "smoke max-updates control" "max_updates" "max-updates"
   require_any_text "${workflow}" "DuckDB memory guard" "duckdb_memory_limit" "duckdb-memory-limit"
   require_any_text "${workflow}" "DuckDB temp-dir isolation" "duckdb_temp_dir" "duckdb-temp-dir"
+  require_text "${workflow}" "--output-json" "optimize structured evaluation artifact"
+  require_text "${workflow}" "upload-artifact" "optimize evaluation artifact upload"
   require_text "${workflow}" "timeout" "optimize process timeout wrapper"
 
   if ! python3 - "${workflow}" <<'PY'
@@ -105,6 +109,12 @@ PY
   then
     failures+=("workflow defaults must not dispatch full Apr 15-22 six-symbol optimize before gates")
   fi
+fi
+
+if [[ -f "${factor_workflow}" ]]; then
+  require_text "${factor_workflow}" "--output-json" "factor review structured evaluation artifact"
+  require_text "${factor_workflow}" "evaluation.json" "factor review evaluation artifact path"
+  require_text "${factor_workflow}" "upload-artifact" "factor review artifact upload"
 fi
 
 if [[ -f "${optimizer}" ]]; then

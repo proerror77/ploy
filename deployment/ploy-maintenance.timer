@@ -3,10 +3,10 @@ Description=Run Ploy maintenance periodically
 
 [Timer]
 OnBootSec=10m
+OnCalendar=*-*-* 00/6:00:00
 OnUnitActiveSec=6h
 Persistent=true
 Unit=ploy-maintenance.service
 
 [Install]
 WantedBy=timers.target
-
