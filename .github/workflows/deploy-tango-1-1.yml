@@ -154,6 +154,7 @@ jobs:
           cp scripts/report_market_data_health.py dist/scripts/report_market_data_health.py
           cp scripts/audit_market_data_gaps.py dist/scripts/audit_market_data_gaps.py
           cp scripts/report_dryrun_summary.py dist/scripts/report_dryrun_summary.py
+          cp scripts/check_dryrun_report_contract.py dist/scripts/check_dryrun_report_contract.py
           cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
           cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
           cp scripts/fix_clob_trade_partitions.sql dist/scripts/fix_clob_trade_partitions.sql
@@ -384,6 +385,7 @@ jobs:
             install -m 0755 ./scripts/report_market_data_health.py ${DEPLOY_ROOT}/scripts/report_market_data_health.py
             install -m 0755 ./scripts/audit_market_data_gaps.py ${DEPLOY_ROOT}/scripts/audit_market_data_gaps.py
             install -m 0755 ./scripts/report_dryrun_summary.py ${DEPLOY_ROOT}/scripts/report_dryrun_summary.py
+            install -m 0755 ./scripts/check_dryrun_report_contract.py ${DEPLOY_ROOT}/scripts/check_dryrun_report_contract.py
             install -m 0644 ./scripts/fix_binance_lob_partitions.sql ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
             install -m 0644 ./scripts/fix_deribit_partitions.sql ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
             install -m 0644 ./scripts/fix_clob_trade_partitions.sql ${DEPLOY_ROOT}/scripts/fix_clob_trade_partitions.sql
@@ -464,6 +466,7 @@ jobs:
             if service_exists ployd.service; then
               systemctl is-active --quiet ployd.service
               curl -fsS http://127.0.0.1:8081/health
+              curl -fsS http://127.0.0.1:8081/api/reports/dry-run | ${DEPLOY_ROOT}/scripts/check_dryrun_report_contract.py
               ${DEPLOY_ROOT}/bin/ployctl deployments list
             fi
 
