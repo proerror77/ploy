@@ -85,6 +85,15 @@
   - Update progress.
   - Continue automatically until completion or a real stop condition appears.
 
+- Pattern: `ploy-ci-1` is an on-demand Aliyun ECS host and may be stopped even when GitHub optimize/backtest workflows are dispatched.
+- Rule: Before triggering `optimize.yml`, `backtest.yml`, or other `ploy-ci-1` workflows, verify Aliyun ECS is `Running` and the GitHub self-hosted runner is `online`. If not, start ECS first, then enable/start `actions.runner.proerror77-ploy.ploy-ci-1.service`, and only then dispatch or monitor jobs.
+- Preflight checklist:
+  - `aliyun ecs DescribeInstances --RegionId ap-northeast-1 --InstanceName ploy-ci-1 --PageSize 10`
+  - `gh api repos/proerror77/ploy/actions/runners --jq '.runners[] | select(.name == "ploy-ci-1")'`
+  - If ECS is stopped: `aliyun ecs StartInstance --RegionId ap-northeast-1 --InstanceId i-6we7z44sfbfbnosbeymz`
+  - After boot, use Cloud Assistant if needed to run `systemctl enable --now actions.runner.proerror77-ploy.ploy-ci-1.service`.
+  - Confirm queued workflow runs move to `in_progress` before assuming ploy-ci work has actually started.
+
 ## 2026-03-06
 
 - Pattern: Managed strategy bootstrap can silently drift from the checked-in live strategy template and override production sizing without touching host config files.
