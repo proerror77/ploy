@@ -161,6 +161,29 @@ mod tests {
         assert!(error.contains("train split has zero rows"));
         assert!(error.contains("val split has zero rows"));
     }
+
+    #[test]
+    fn cheap_preflight_rejects_oversized_request_before_manifest_scan() {
+        let limits = PreflightLimits {
+            max_rows: 15_000_000,
+            max_bytes: 80 * 1024 * 1024 * 1024,
+            max_symbols: 2,
+            max_days: 3,
+            allow_large_window: false,
+        };
+        let symbols = vec![
+            "BTCUSDT".to_string(),
+            "ETHUSDT".to_string(),
+            "SOLUSDT".to_string(),
+        ];
+
+        let error = validate_preflight_request(&symbols, utc_ts(21), utc_ts(27), &limits)
+            .expect_err("oversized request should be rejected before parquet scan");
+
+        assert!(error.contains("symbol count 3 exceeds --max-symbols 2"));
+        assert!(error.contains("date span 7 days exceeds --max-days 3"));
+        assert!(error.contains("before parquet preflight scan"));
+    }
 }
 
 fn load_research_snapshot_manifest(path: &str) -> ResearchSnapshotManifestProbe {
@@ -394,6 +417,41 @@ fn validate_preflight(
     } else {
         Err(format!(
             "{}; rerun with --allow-large-window only after bounded smoke/host-health checks",
+            failures.join("; ")
+        ))
+    }
+}
+
+fn validate_preflight_request(
+    symbols: &[String],
+    from: chrono::DateTime<Utc>,
+    to: chrono::DateTime<Utc>,
+    limits: &PreflightLimits,
+) -> std::result::Result<(), String> {
+    if limits.allow_large_window {
+        return Ok(());
+    }
+
+    let days = (to.date_naive() - from.date_naive()).num_days().abs() + 1;
+    let mut failures = Vec::new();
+    if symbols.len() > limits.max_symbols {
+        failures.push(format!(
+            "symbol count {} exceeds --max-symbols {}",
+            symbols.len(),
+            limits.max_symbols
+        ));
+    }
+    if days > limits.max_days {
+        failures.push(format!(
+            "date span {days} days exceeds --max-days {}",
+            limits.max_days
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}; rejected before parquet preflight scan; rerun with --allow-large-window only after bounded smoke/host-health checks",
             failures.join("; ")
         ))
     }
@@ -1564,6 +1622,44 @@ fn main() {
     });
 
     let (train_source, val_source) = if let Some(ref dir) = data_dir {
+        let request_guardrail_started = Instant::now();
+        if let Err(error) =
+            validate_preflight_request(&symbols, train_from, val_to, &preflight_limits)
+        {
+            eprintln!("ERROR: optimize request rejected: {error}");
+            phase_timings.push(json!({
+                "phase": "request_guardrail",
+                "source": "parquet-stream",
+                "wall_secs": round_secs(request_guardrail_started.elapsed().as_secs_f64()),
+                "result": "rejected",
+                "error": &error,
+            }));
+            write_timing_json(
+                timing_json.as_deref(),
+                json!({
+                    "command": "optimize_backtest",
+                    "mode": if preflight_only { "preflight-only" } else { "optimize" },
+                    "strategy_variant": &strategy_variant,
+                    "symbols": &symbols,
+                    "train_start": train_start_ts.as_deref().unwrap_or(&train_start),
+                    "train_end": train_end_ts.as_deref().unwrap_or(&train_end),
+                    "val_start": val_start_ts.as_deref().unwrap_or(&val_start),
+                    "val_end": val_end_ts.as_deref().unwrap_or(&val_end),
+                    "trials_requested": n_trials,
+                    "source": "parquet-stream",
+                    "phase_timings": phase_timings,
+                    "error": error,
+                    "total_wall_secs": round_secs(total_started.elapsed().as_secs_f64()),
+                }),
+            );
+            std::process::exit(2);
+        }
+        phase_timings.push(json!({
+            "phase": "request_guardrail",
+            "source": "parquet-stream",
+            "wall_secs": round_secs(request_guardrail_started.elapsed().as_secs_f64()),
+            "result": "passed",
+        }));
         let preflight_started = Instant::now();
         let manifest =
             parquet_preflight_manifest(dir, &symbols, train_from, train_to, val_from, val_to)
