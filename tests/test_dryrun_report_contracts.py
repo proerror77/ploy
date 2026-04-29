@@ -1,12 +1,16 @@
 import importlib.util
+import json
 import math
 from pathlib import Path
+import subprocess
+import sys
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SUMMARY_SCRIPT = ROOT / "scripts" / "report_dryrun_summary.py"
 HTML_SCRIPT = ROOT / "scripts" / "report_strategy.py"
+CHECK_SCRIPT = ROOT / "scripts" / "check_dryrun_report_contract.py"
 SIDE_KEY_MIGRATION = ROOT / "migrations" / "039_fix_strategy_track_record_side_key.sql"
 
 
@@ -71,6 +75,49 @@ class DryRunReportContractTests(unittest.TestCase):
         self.assertEqual(diagnostics["partial_buy_threshold_pct"], 98)
         self.assertEqual(diagnostics["summary"]["rejected_buy_orders"], 1)
         self.assertEqual(diagnostics["summary"]["buy_fill_rate_pct"], 50)
+
+    def test_report_contract_checker_accepts_clean_empty_dryrun(self) -> None:
+        payload = {
+            "summary": {"total_trades": 0},
+            "metrics": {
+                "sharpe_basis": "closed_trade_pnl_sqrt_n",
+                "daily_sharpe_basis": "daily_net_pnl_sqrt_365",
+            },
+            "execution_diagnostics": {"basis": "strategy_runtime_orders"},
+            "strategies": [],
+        }
+
+        result = subprocess.run(
+            [sys.executable, str(CHECK_SCRIPT)],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_report_contract_checker_validates_strategy_rows_when_present(self) -> None:
+        payload = {
+            "summary": {"total_trades": 1},
+            "metrics": {
+                "sharpe_basis": "closed_trade_pnl_sqrt_n",
+                "daily_sharpe_basis": "daily_net_pnl_sqrt_365",
+            },
+            "execution_diagnostics": {"basis": "strategy_runtime_orders"},
+            "strategies": [{"execution_diagnostics": {}}],
+        }
+
+        result = subprocess.run(
+            [sys.executable, str(CHECK_SCRIPT)],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("strategies[0].execution_diagnostics.basis", result.stderr)
 
     def test_strategy_label_prefers_versioned_experiment_label(self) -> None:
         summary = load_summary_module()
