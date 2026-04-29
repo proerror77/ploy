@@ -83,7 +83,8 @@ Issue: https://github.com/proerror77/ploy/issues/227
 - [x] Verify the direction-probability gate correction with focused checks.
 - [x] Prevent optimizer reruns from rediscovering a neutral `0.50` direction-probability gate.
 - [ ] Land via PR and deploy dry-run-only from `main`; keep live untouched.
-- [ ] Rerun optimizer after the direction-probability lower-bound fix and compare by full executable-EV metrics.
+- [x] Rerun optimizer after the direction-probability lower-bound fix and compare by full executable-EV metrics.
+- [x] Decouple raw directional-alpha gating from calibrated EV probability, then rerun optimizer.
 
 ## Review
 
@@ -94,6 +95,10 @@ Issue: https://github.com/proerror77/ploy/issues/227
 - 2026-04-29: Focused verification passed after the hard direction-probability gate: `rustfmt --edition 2024 crates/ploy-strategy-bundles/src/strategies/three_layer.rs crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-direction-prob-gate-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-strategy-bundles three_layer --lib` (`32 passed, 103 filtered out`), and `CARGO_TARGET_DIR=/tmp/ploy-direction-prob-gate-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`21 passed`).
 - 2026-04-29: Post-deploy optimizer rerun exposed a second issue: the optimizer search space could still choose `three_layer_min_direction_prob=0.500000`, turning the hard gate into a neutral gate. Raised the optimizer search lower bound to `0.525` so subsequent candidates must retain directional alpha before EV/fillable-price scoring.
 - 2026-04-29: Focused verification for the optimizer lower-bound fix passed: `rustfmt --edition 2024 crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `git diff --check`, and `CARGO_TARGET_DIR=/tmp/ploy-direction-prob-bound-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`22 passed`).
+- 2026-04-29: PR #236 merged to `main@3fdeb48e`; deploy run `25103076272` succeeded. Tango verification showed `ployd` active/running with `NRestarts=0`, `active_alert_count=0`, no cargo/rustc process, PM5D dry-run deployments running, and `pm5d.threelayer.live` still Paused.
+- 2026-04-29: Post-bound optimizer reruns (`25103416008` champion, `25103417798` obi_soft, `25103419812` continuation_soft, `25103421469` mixed) all failed promotion criteria. Champion/obi/continuation were validation-underpowered with only `1`/`1`/`2` validation trades; mixed had `7` validation trades and negative validation PnL. No candidate should be promoted from this batch.
+- 2026-04-29: The underpowered reruns show the calibrated-probability hard gate is too restrictive when paired with probability shrink/haircut. Next correction decouples the hard direction gate from calibration: raw transformed alpha probability must clear `three_layer_min_direction_prob`, while calibrated probability remains the EV/executable-price input.
+- 2026-04-29: Runtime and snapshot optimizer now gate on raw transformed directional alpha, while calibrated probability remains the executable-EV input. Focused verification passed: `rustfmt --edition 2024 crates/ploy-strategy-bundles/src/strategies/three_layer.rs crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-alpha-ev-decouple-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-strategy-bundles three_layer --lib` (`33 passed, 103 filtered out`), and `CARGO_TARGET_DIR=/tmp/ploy-alpha-ev-decouple-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`23 passed`).
 
 # Dry-run Report Contracts And Multi-strategy UI (2026-04-29)
 
