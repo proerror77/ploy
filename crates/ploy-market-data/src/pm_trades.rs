@@ -224,23 +224,7 @@ impl TradeCollector {
         let lookback_idx = self.config.symbols.len() + 1;
         let lookahead_idx = self.config.symbols.len() + 2;
 
-        let query = format!(
-            r#"
-            SELECT
-                market_id,
-                COALESCE(market_slug, market_id) AS market_slug,
-                strategy_symbol AS symbol,
-                raw_market->>'conditionId' AS condition_id
-            FROM pm_market_catalog
-            WHERE LOWER(market_family) = 'crypto'
-              AND strategy_symbol IN ({})
-              AND raw_market->>'conditionId' IS NOT NULL
-              AND COALESCE(end_time, NOW()) >= NOW() - (${}::bigint * INTERVAL '1 second')
-              AND COALESCE(start_time, NOW()) <= NOW() + (${}::bigint * INTERVAL '1 second')
-            ORDER BY start_time NULLS LAST, end_time NULLS LAST, market_id
-            "#,
-            placeholders, lookback_idx, lookahead_idx
-        );
+        let query = active_markets_query(&placeholders, lookback_idx, lookahead_idx);
 
         let mut q = sqlx::query_as::<_, ActiveTradeMarketRow>(&query);
         for symbol in &self.config.symbols {
@@ -297,6 +281,26 @@ impl TradeCollector {
 
         Ok((fetched, inserted, skipped))
     }
+}
+
+fn active_markets_query(placeholders: &str, lookback_idx: usize, lookahead_idx: usize) -> String {
+    format!(
+        r#"
+        SELECT
+            market_id,
+            COALESCE(market_slug, market_id) AS market_slug,
+            strategy_symbol AS symbol,
+            raw_market->>'conditionId' AS condition_id
+        FROM pm_market_catalog
+        WHERE market_family = 'crypto'
+          AND strategy_symbol IN ({})
+          AND raw_market->>'conditionId' IS NOT NULL
+          AND (end_time IS NULL OR end_time >= NOW() - (${}::bigint * INTERVAL '1 second'))
+          AND (start_time IS NULL OR start_time <= NOW() + (${}::bigint * INTERVAL '1 second'))
+        ORDER BY start_time NULLS LAST, end_time NULLS LAST, market_id
+        "#,
+        placeholders, lookback_idx, lookahead_idx
+    )
 }
 
 async fn persist_trades(
@@ -409,7 +413,7 @@ fn stale_for_too_long(last_success_at: Option<DateTime<Utc>>, stale_after_secs: 
 #[cfg(test)]
 mod tests {
     use super::{
-        trade_side, trade_timestamp, TradeCollectorConfig, DEFAULT_API_LIMIT,
+        active_markets_query, trade_side, trade_timestamp, TradeCollectorConfig, DEFAULT_API_LIMIT,
         DEFAULT_MARKET_LOOKAHEAD_SECS, DEFAULT_MARKET_LOOKBACK_SECS, DEFAULT_REFRESH_INTERVAL_SECS,
         DEFAULT_STALE_AFTER_SECS, DEFAULT_TRADE_LOOKBACK_SECS,
     };
@@ -457,5 +461,17 @@ mod tests {
     fn trade_timestamp_accepts_unix_seconds() {
         let ts = trade_timestamp(1_712_205_600).expect("valid timestamp");
         assert_eq!(ts.to_rfc3339(), "2024-04-04T04:40:00+00:00");
+    }
+
+    #[test]
+    fn active_markets_query_keeps_catalog_filters_indexable() {
+        let query = active_markets_query("$1, $2", 3, 4);
+
+        assert!(query.contains("WHERE market_family = 'crypto'"));
+        assert!(query.contains("AND (end_time IS NULL OR end_time >="));
+        assert!(query.contains("AND (start_time IS NULL OR start_time <="));
+        assert!(!query.contains("LOWER(market_family)"));
+        assert!(!query.contains("COALESCE(end_time"));
+        assert!(!query.contains("COALESCE(start_time"));
     }
 }

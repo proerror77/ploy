@@ -10785,3 +10785,24 @@ Review:
 ## Review
 
 - 2026-04-30: Dry-run report rows now expose `experiment_label` such as `TL v4 OBI-hard EVCal`; the cockpit uses that label first and shows deployment ID as the stable identity instead of collapsing visible names to `three_layer`.
+
+# PM Trade Collector Active-Market Query Optimization (2026-04-30)
+
+## Files
+
+- `crates/ploy-market-data/src/pm_trades.rs`
+  - Owner: active Polymarket trade market lookup used by `ploy-pm-trade-collector.service`.
+
+## Tasks
+
+- [x] Confirm the slow query on `tango-1-1` with live logs and read-only `EXPLAIN`.
+- [x] Rewrite active-market predicates to use existing `pm_market_catalog` indexes.
+- [x] Add a unit test preventing `LOWER(market_family)` / `COALESCE(end_time/start_time)` regressions in this query.
+- [x] Run focused local verification.
+- [ ] Land via PR, deploy `main` to `tango-1-1`, and verify recent collector logs no longer show the active-market query slow path.
+
+## Review
+
+- 2026-04-30: Live `EXPLAIN (ANALYZE, BUFFERS)` on `tango-1-1` showed the current query doing a `Seq Scan` over `49,794` `pm_market_catalog` rows with `228k` shared-buffer hits and `~1.1-2.5s` execution time even when returning zero rows.
+- 2026-04-30: The root cause is predicate shape, not a missing index. `LOWER(market_family)` and `COALESCE(end_time/start_time, NOW())` prevent the planner from using existing btree indexes. Rewriting to `market_family = 'crypto'` plus explicit null-aware time predicates produced a `Bitmap Heap Scan` using `idx_pm_market_catalog_family_end_time` and executed in `~0.08-0.18ms` on the live DB.
+- 2026-04-30: Local verification passed: `rtk cargo test -p ploy-market-data active_markets_query_keeps_catalog_filters_indexable --lib`, `rtk cargo test -p ploy-market-data trade_collector_config_fills_safe_defaults --lib`, `rtk cargo check -p ploy-market-data`, and `git diff --check`. Full rustfmt check was not used because current crate import ordering outside this slice would create unrelated formatting churn.
