@@ -1,3 +1,31 @@
+# PM5D Holistic Snapshot Optimizer Fix (2026-04-29)
+
+Issue: https://github.com/proerror77/ploy/issues/224
+
+## Files
+
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: snapshot optimizer selection objective, trade floor, and output diagnostics.
+- `tasks/todo.md`
+  - Owner: correction plan, verification evidence, and candidate-selection caveats.
+
+## Tasks
+
+- [x] Diagnose the 2026-04-29 failed profile optimize runs from GitHub artifacts.
+- [x] Replace train-only TPE scoring with a train + validation holistic selection objective.
+- [x] Base the default trade floor on event-side / day / symbol coverage instead of raw observation row count.
+- [x] Add avg entry price and reward/risk diagnostics to optimizer metrics and artifacts.
+- [x] Run focused formatter/tests and diff checks.
+- [ ] Rerun snapshot optimizations on current `main` via CI and compare candidates by full profitability metrics.
+
+## Review
+
+- 2026-04-29: Runs `25085610598` (`champion`), `25085610603` (`continuation_soft`), and `25085610610` (`obi_soft`) all built successfully and wrote optimizer artifacts, then failed because the selected validation trade count was below the dynamic `min_trades=431` floor. They were not clean deployable candidates.
+- 2026-04-29: The previous optimizer still selected parameters using train-only objective values, with validation checked only after optimization. That is not enough for the user's requested whole-picture profitability review.
+- 2026-04-29: The revised objective evaluates train and validation every trial, rejects unpowered or non-profitable validation windows, and ranks by a holistic score including log growth, net PnL, max drawdown, fill/reject quality, positive day/symbol rates, concentration, avg entry, and reward/risk. Win rate stays in the artifact for visibility but is not a promotion criterion.
+- 2026-04-29: The default trade floor now uses event-side opportunity coverage plus day/symbol coverage instead of raw observation rows, so a selective profitable strategy is not discarded solely because the snapshot has many rows per event.
+- 2026-04-29: Focused verification passed: `rustfmt --edition 2024 crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `git diff --check`, and `CARGO_TARGET_DIR=/tmp/ploy-holistic-opt-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`14 passed`).
+
 # PM5D Stable Scoring Objective (2026-04-29)
 
 ## Files
