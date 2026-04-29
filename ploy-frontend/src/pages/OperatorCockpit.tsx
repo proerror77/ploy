@@ -91,8 +91,28 @@ function isDryRunDeployment(deployment: DeploymentSummary) {
   return isDryRunId(deployment.deployment_id);
 }
 
+function isDrillDeployment(deployment: DeploymentSummary) {
+  const deploymentId = deployment.deployment_id.toLowerCase();
+  const accountId = deployment.account_id?.toLowerCase() ?? '';
+  return deploymentId.startsWith('example.') || deploymentId.includes('.drill') || accountId.includes('drill');
+}
+
+function snapshotHasActivity(snapshot: TradingStateSnapshot) {
+  return (
+    snapshot.orders.length > 0 ||
+    snapshot.fills.length > 0 ||
+    snapshot.positions.length > 0 ||
+    snapshot.risk.active_orders > 0 ||
+    snapshot.risk.open_positions > 0 ||
+    snapshot.risk.pending_intents > 0 ||
+    toNumber(snapshot.pnl.net_pnl) !== 0 ||
+    toNumber(snapshot.risk.total_gross_exposure) !== 0
+  );
+}
+
 function shouldShowUnreportedDryRunDeployment(deployment: DeploymentSummary, snapshot?: TradingStateSnapshot) {
-  if (snapshot) return true;
+  if (isDrillDeployment(deployment)) return false;
+  if (snapshot && snapshotHasActivity(snapshot)) return true;
   return (
     deployment.desired_state === 'running' ||
     deployment.observed_state === 'running' ||
