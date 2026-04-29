@@ -25,13 +25,14 @@
 - [x] Keep raw direction probability as a hard alpha gate and use confirmation as an additional filter, not a replacement.
 - [x] Add a Tango deployable dry-run-only config/manifest for real filled-order sampling.
 - [x] Run focused tests, config parses, and diff checks.
-- [ ] Deploy dry-run only from `main`; keep live paused.
+- [x] Deploy dry-run only from `main`; keep live paused.
 
 ## Review
 
 - 2026-04-29: Added `three_layer_require_confirmation` as a backward-compatible default-false field. `obi_hard` keeps the raw direction-probability gate and executable EV/risk gates, then adds a profile-specific CEX/PM order-book confirmation veto. Existing `obi_soft` remains a score-only profile.
 - 2026-04-29: Added dry-run-only strategy/deployment files for `pm5d.threelayer.obi-hard.dryrun`; live config and manifest were not changed.
 - 2026-04-29: Verification passed: `rustfmt --edition 2024` on touched Rust files, JSON/TOML parse for new manifest/config, `rtk git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-obi-hard-test rtk cargo test -p ploy-strategy-bundles three_layer --lib`, `CARGO_TARGET_DIR=/tmp/ploy-obi-hard-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features`, `CARGO_TARGET_DIR=/tmp/ploy-obi-hard-test rtk cargo test -p ploy-strategy-bundles config --lib`, and `CARGO_TARGET_DIR=/tmp/ploy-obi-hard-test rtk cargo test -p ploy-strategy-bundles --tests --no-run`.
+- 2026-04-29: PR #242 merged to `main@6fb5399f`; deploy workflow run `25119095391` succeeded on attempt 2. Tango verification showed `pm5d.threelayer.obi-hard.dryrun` desired/observed `Running`, `pm5d.threelayer.live` desired/observed `Paused`, `ployd` active with `NRestarts=0`, alerts empty, and no `cargo`/`rustc` process on-host.
 
 # Dedicated Dry-run Report Page (2026-04-29)
 
