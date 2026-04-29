@@ -182,6 +182,14 @@ pub struct DirectionalConfig {
     #[serde(default = "default_tl_cex_contrarian")]
     pub three_layer_cex_contrarian: bool,
 
+    /// Probability calibration: shrink effective direction probability toward 50/50 before EV.
+    #[serde(default = "default_tl_probability_shrink")]
+    pub three_layer_probability_shrink: f64,
+
+    /// Probability calibration: subtract a conservative haircut after shrink before EV.
+    #[serde(default = "default_tl_probability_haircut")]
+    pub three_layer_probability_haircut: f64,
+
     /// Take-profit: exit when token ask reaches this level.
     #[serde(default = "default_tl_take_profit_ask")]
     pub three_layer_take_profit_ask: f64,
@@ -348,6 +356,12 @@ fn default_tl_alpha_contrarian() -> bool {
 }
 fn default_tl_cex_contrarian() -> bool {
     false
+}
+fn default_tl_probability_shrink() -> f64 {
+    1.0
+}
+fn default_tl_probability_haircut() -> f64 {
+    0.0
 }
 fn default_tl_take_profit_ask() -> f64 {
     0.70
@@ -1804,6 +1818,8 @@ mod tests {
             three_layer_min_reward_risk: 1.2,
             three_layer_alpha_contrarian: false,
             three_layer_cex_contrarian: false,
+            three_layer_probability_shrink: 1.0,
+            three_layer_probability_haircut: 0.0,
             three_layer_take_profit_ask: 0.70,
             three_layer_stop_distance_pct: 0.020,
             three_layer_max_pm_lag_secs: 15,

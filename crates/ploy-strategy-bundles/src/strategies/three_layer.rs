@@ -32,6 +32,8 @@ pub struct ThreeLayerConfig {
     pub min_reward_risk: f64,
     pub alpha_contrarian: bool,
     pub cex_contrarian: bool,
+    pub probability_shrink: f64,
+    pub probability_haircut: f64,
     pub take_profit_ask: f64,
     pub stop_distance_pct: f64,
     pub max_pm_lag_secs: u64,
@@ -60,6 +62,8 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             min_reward_risk: c.three_layer_min_reward_risk,
             alpha_contrarian: c.three_layer_alpha_contrarian,
             cex_contrarian: c.three_layer_cex_contrarian,
+            probability_shrink: c.three_layer_probability_shrink,
+            probability_haircut: c.three_layer_probability_haircut,
             take_profit_ask: c.three_layer_take_profit_ask,
             stop_distance_pct: c.three_layer_stop_distance_pct,
             max_pm_lag_secs: c.three_layer_max_pm_lag_secs,
@@ -324,6 +328,22 @@ fn threshold_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> 
     (signed / scale).clamp(-0.50, 1.0)
 }
 
+fn calibrate_direction_probability(
+    direction_probability: f64,
+    probability_shrink: f64,
+    probability_haircut: f64,
+) -> f64 {
+    if !direction_probability.is_finite()
+        || !probability_shrink.is_finite()
+        || !probability_haircut.is_finite()
+    {
+        return f64::NAN;
+    }
+    let shrink = probability_shrink.clamp(0.0, 1.0);
+    let haircut = probability_haircut.clamp(0.0, 0.49);
+    (0.5 + (direction_probability - 0.5) * shrink - haircut).clamp(0.01, 0.99)
+}
+
 fn executable_edge_threshold(config: &ThreeLayerConfig) -> f64 {
     if config.profile.uses_snapshot_scoring() {
         config.min_edge.max(0.0)
@@ -474,7 +494,7 @@ fn evaluate_direction_score(
         }
     };
 
-    let (direction_sign, effective_p) = if config.alpha_contrarian {
+    let (direction_sign, raw_effective_p) = if config.alpha_contrarian {
         let inverse_alpha_p = direction_prob.max(1.0 - direction_prob);
         if direction_prob >= 0.5 {
             (-1.0_f64, inverse_alpha_p)
@@ -486,6 +506,11 @@ fn evaluate_direction_score(
     } else {
         (-1.0_f64, 1.0 - direction_prob)
     };
+    let effective_p = calibrate_direction_probability(
+        raw_effective_p,
+        config.probability_shrink,
+        config.probability_haircut,
+    );
 
     // In contrarian mode the direction is inverted, but the alpha strength is
     // still the distance from 50/50. Do not treat the faded side's raw model
@@ -1654,6 +1679,8 @@ mod tests {
             min_reward_risk: 1.2,
             alpha_contrarian: false,
             cex_contrarian: false,
+            probability_shrink: 1.0,
+            probability_haircut: 0.0,
             take_profit_ask: 0.70,
             stop_distance_pct: 0.020,
             max_pm_lag_secs: 15,
@@ -2347,6 +2374,16 @@ mod tests {
         assert!(
             lower_probability_cheap_entry > high_probability_rich_entry,
             "EV should compare probability together with executable price, not probability alone"
+        );
+    }
+
+    #[test]
+    fn probability_calibration_shrinks_and_haircuts_overconfident_alpha() {
+        let calibrated = calibrate_direction_probability(0.70, 0.50, 0.03);
+        assert!((calibrated - 0.57).abs() < 1e-9);
+        assert!(
+            expected_value_per_share(calibrated, 0.60) < 0.0,
+            "calibrated probability should prevent rich-entry EV overstatement"
         );
     }
 
