@@ -1,3 +1,38 @@
+# PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+  - Owner: additive three-layer confirmation hard-gate config.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: runtime confirmation hard gate and OBI-hard profile parity.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer_profile.rs`
+  - Owner: runtime profile aliases.
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: snapshot optimizer parity for OBI-hard scoring.
+- `config/strategies/02-pm5d-threelayer.obi-hard-dryrun.toml`
+  - Owner: dry-run-only candidate for real filled-order sampling.
+- `config/deployments/pm5d.threelayer.obi-hard.dryrun.json`
+  - Owner: dry-run deployment manifest, no live changes.
+- `.github/workflows/optimize.yml`
+- `.github/workflows/deploy-tango-1-1.yml`
+- `tasks/todo.md`
+
+## Tasks
+
+- [x] Add a backward-compatible `three_layer_require_confirmation` gate.
+- [x] Add `obi_hard` as a dry-run candidate profile while preserving existing `obi_soft`.
+- [x] Keep raw direction probability as a hard alpha gate and use confirmation as an additional filter, not a replacement.
+- [x] Add a Tango deployable dry-run-only config/manifest for real filled-order sampling.
+- [x] Run focused tests, config parses, and diff checks.
+- [ ] Deploy dry-run only from `main`; keep live paused.
+
+## Review
+
+- 2026-04-29: Added `three_layer_require_confirmation` as a backward-compatible default-false field. `obi_hard` keeps the raw direction-probability gate and executable EV/risk gates, then adds a profile-specific CEX/PM order-book confirmation veto. Existing `obi_soft` remains a score-only profile.
+- 2026-04-29: Added dry-run-only strategy/deployment files for `pm5d.threelayer.obi-hard.dryrun`; live config and manifest were not changed.
+- 2026-04-29: Verification passed: `rustfmt --edition 2024` on touched Rust files, JSON/TOML parse for new manifest/config, `rtk git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-obi-hard-test rtk cargo test -p ploy-strategy-bundles three_layer --lib`, `CARGO_TARGET_DIR=/tmp/ploy-obi-hard-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features`, `CARGO_TARGET_DIR=/tmp/ploy-obi-hard-test rtk cargo test -p ploy-strategy-bundles config --lib`, and `CARGO_TARGET_DIR=/tmp/ploy-obi-hard-test rtk cargo test -p ploy-strategy-bundles --tests --no-run`.
+
 # Dedicated Dry-run Report Page (2026-04-29)
 
 Issue: https://github.com/proerror77/ploy/issues/227

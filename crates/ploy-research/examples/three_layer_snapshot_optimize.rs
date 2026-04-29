@@ -28,6 +28,7 @@ struct SnapshotThreeLayerParams {
     min_direction_prob: f64,
     min_distance_over_sigma: f64,
     min_confirmation_score: f64,
+    require_confirmation: bool,
     min_drift_confirmation: f64,
     min_edge: f64,
     min_reward_risk: f64,
@@ -50,6 +51,8 @@ enum StrategyProfile {
     Champion,
     /// Strategy B: Strategy A plus CEX/PM order-book imbalance soft score.
     ObiSoft,
+    /// Strategy B-hard: Strategy A plus a hard CEX/PM order-book confirmation gate.
+    ObiHard,
     /// Strategy C: Strategy A plus CEX continuation soft score.
     ContinuationSoft,
 }
@@ -60,11 +63,14 @@ impl StrategyProfile {
             "" | "mixed" | "legacy" => Ok(Self::Mixed),
             "champion" | "a" | "alpha" | "alpha_only" | "contrarian_alpha" => Ok(Self::Champion),
             "obi" | "obi_soft" | "b" | "book_imbalance" | "orderbook" => Ok(Self::ObiSoft),
+            "obi_hard" | "obi_confirmed" | "book_imbalance_hard" | "orderbook_hard" => {
+                Ok(Self::ObiHard)
+            }
             "continuation" | "continuation_soft" | "c" | "cex_continuation" => {
                 Ok(Self::ContinuationSoft)
             }
             other => anyhow::bail!(
-                "unknown --strategy-profile {other:?}; expected mixed, champion, obi_soft, or continuation_soft"
+                "unknown --strategy-profile {other:?}; expected mixed, champion, obi_soft, obi_hard, or continuation_soft"
             ),
         }
     }
@@ -74,6 +80,7 @@ impl StrategyProfile {
             Self::Mixed => "mixed",
             Self::Champion => "champion",
             Self::ObiSoft => "obi_soft",
+            Self::ObiHard => "obi_hard",
             Self::ContinuationSoft => "continuation_soft",
         }
     }
@@ -83,6 +90,7 @@ impl StrategyProfile {
             Self::Mixed => "legacy mixed continuation + order-book confirmation",
             Self::Champion => "contrarian alpha + executable liquidity/risk gates",
             Self::ObiSoft => "champion + CEX/PM order-book imbalance soft score",
+            Self::ObiHard => "champion + hard CEX/PM order-book confirmation gate",
             Self::ContinuationSoft => "champion + CEX continuation soft score",
         }
     }
@@ -90,13 +98,13 @@ impl StrategyProfile {
     fn fixes_alpha_contrarian(self) -> Option<bool> {
         match self {
             Self::Mixed => None,
-            Self::Champion | Self::ObiSoft | Self::ContinuationSoft => Some(true),
+            Self::Champion | Self::ObiSoft | Self::ObiHard | Self::ContinuationSoft => Some(true),
         }
     }
 
     fn fixes_cex_contrarian(self) -> Option<bool> {
         match self {
-            Self::Champion => Some(false),
+            Self::Champion | Self::ObiHard => Some(false),
             Self::Mixed | Self::ObiSoft | Self::ContinuationSoft => None,
         }
     }
@@ -104,7 +112,14 @@ impl StrategyProfile {
     fn fixes_confirmation_threshold(self) -> Option<f64> {
         match self {
             Self::Champion => Some(0.0),
-            Self::Mixed | Self::ObiSoft | Self::ContinuationSoft => None,
+            Self::Mixed | Self::ObiSoft | Self::ObiHard | Self::ContinuationSoft => None,
+        }
+    }
+
+    fn fixes_require_confirmation(self) -> Option<bool> {
+        match self {
+            Self::ObiHard => Some(true),
+            Self::Mixed | Self::Champion | Self::ObiSoft | Self::ContinuationSoft => None,
         }
     }
 }
@@ -349,7 +364,7 @@ fn confirmation_score(row: &FactorObservationV2, profile: StrategyProfile) -> f6
             0.45 * continuation + 0.25 * obi + 0.15 * depth + 0.15 * microprice
         }
         StrategyProfile::Champion => 0.0,
-        StrategyProfile::ObiSoft => {
+        StrategyProfile::ObiSoft | StrategyProfile::ObiHard => {
             0.30 * obi
                 + 0.20 * obi_delta_10s
                 + 0.20 * obi_persistence_30s
@@ -425,6 +440,17 @@ fn three_layer_entry_score(
         + 0.10 * drift_score
         + 0.12 * pm_momentum_score
         + 0.08 * liquidity_score
+}
+
+fn confirmation_gate_passes(value: f64, threshold: f64, contrarian: bool) -> bool {
+    if !value.is_finite() || !threshold.is_finite() {
+        return false;
+    }
+    if contrarian {
+        value <= threshold
+    } else {
+        value >= threshold
+    }
 }
 
 fn transformed_model_probability(side_model_prob: f64, alpha_contrarian: bool) -> f64 {
@@ -530,6 +556,15 @@ fn row_passes_gates(
     }
     let confirmation = confirmation_score(row, profile);
     if !confirmation.is_finite() {
+        return false;
+    }
+    if params.require_confirmation
+        && !confirmation_gate_passes(
+            confirmation,
+            params.min_confirmation_score,
+            params.cex_contrarian,
+        )
+    {
         return false;
     }
     three_layer_entry_score(row, edge, confirmation, params, profile) >= params.min_entry_score
@@ -1018,6 +1053,7 @@ fn write_outputs(
          three_layer_min_direction_prob = {:.6}\n\
          three_layer_min_distance_over_sigma = {:.6}\n\
          three_layer_min_confirmation_score = {:.6}\n\
+         three_layer_require_confirmation = {}\n\
          three_layer_min_drift_confirmation = {:.8}\n\
          three_layer_min_edge = {:.6}\n\
          three_layer_min_reward_risk = {:.6}\n\
@@ -1067,6 +1103,7 @@ fn write_outputs(
         params.min_direction_prob,
         params.min_distance_over_sigma,
         params.min_confirmation_score,
+        params.require_confirmation,
         params.min_drift_confirmation,
         params.min_edge,
         params.min_reward_risk,
@@ -1293,6 +1330,7 @@ fn main() -> Result<()> {
     let p_min_edge = FloatParam::new(0.0, 0.08).name("three_layer_min_edge");
     let p_min_reward_risk = FloatParam::new(0.20, 2.0).name("three_layer_min_reward_risk");
     let p_min_entry_score = FloatParam::new(0.05, 0.55).name("three_layer_min_entry_score");
+    let p_require_confirmation = BoolParam::new().name("three_layer_require_confirmation");
     let p_probability_shrink = FloatParam::new(0.35, 1.0).name("three_layer_probability_shrink");
     let p_probability_haircut = FloatParam::new(0.0, 0.08).name("three_layer_probability_haircut");
     let p_alpha_contrarian = BoolParam::new().name("alpha_contrarian");
@@ -1310,6 +1348,7 @@ fn main() -> Result<()> {
         let p_min_edge_c = p_min_edge.clone();
         let p_min_reward_risk_c = p_min_reward_risk.clone();
         let p_min_entry_score_c = p_min_entry_score.clone();
+        let p_require_confirmation_c = p_require_confirmation.clone();
         let p_probability_shrink_c = p_probability_shrink.clone();
         let p_probability_haircut_c = p_probability_haircut.clone();
         let p_alpha_contrarian_c = p_alpha_contrarian.clone();
@@ -1335,10 +1374,15 @@ fn main() -> Result<()> {
                         Some(value) => value,
                         None => p_min_confirmation_score_c.suggest(trial)?,
                     };
+                let require_confirmation = match strategy_profile.fixes_require_confirmation() {
+                    Some(value) => value,
+                    None => p_require_confirmation_c.suggest(trial)?,
+                };
                 let params = SnapshotThreeLayerParams {
                     min_direction_prob: p_min_direction_prob_c.suggest(trial)?,
                     min_distance_over_sigma: p_min_distance_over_sigma_c.suggest(trial)?,
                     min_confirmation_score,
+                    require_confirmation,
                     min_drift_confirmation: p_min_drift_confirmation_c.suggest(trial)?,
                     min_edge: p_min_edge_c.suggest(trial)?,
                     min_reward_risk: p_min_reward_risk_c.suggest(trial)?,
@@ -1370,7 +1414,7 @@ fn main() -> Result<()> {
                 let objective =
                     holistic_selection_objective(&train_metrics, &val_metrics, min_trades);
                 eprintln!(
-                    "  Trial {:>3}: profile={} source=snapshot-observation objective={:>9.3} train_obj={:>8.3} val_obj={:>8.3} train_pnl=${:>8.2}/{} val_pnl=${:>8.2}/{} val_dd=${:>7.2} val_entry={:.3} val_rr={:.2} val_ev_stake={:.3} val_real_stake={:.3} val_ev_gap={:.3} val_pos_sym={:>5.1}% | dir_prob={:.3} shrink={:.3} haircut={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} min_ev={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
+                    "  Trial {:>3}: profile={} source=snapshot-observation objective={:>9.3} train_obj={:>8.3} val_obj={:>8.3} train_pnl=${:>8.2}/{} val_pnl=${:>8.2}/{} val_dd=${:>7.2} val_entry={:.3} val_rr={:.2} val_ev_stake={:.3} val_real_stake={:.3} val_ev_gap={:.3} val_pos_sym={:>5.1}% | dir_prob={:.3} shrink={:.3} haircut={:.3} dist_sigma={:.3} conf={:.3} require_conf={} drift={:.5} min_ev={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
                     trial.id(),
                     strategy_profile.as_str(),
                     objective,
@@ -1392,6 +1436,7 @@ fn main() -> Result<()> {
                     params.probability_haircut,
                     params.min_distance_over_sigma,
                     params.min_confirmation_score,
+                    params.require_confirmation,
                     params.min_drift_confirmation,
                     params.min_edge,
                     params.min_reward_risk,
@@ -1419,6 +1464,9 @@ fn main() -> Result<()> {
         min_confirmation_score: strategy_profile
             .fixes_confirmation_threshold()
             .unwrap_or_else(|| best.get(&p_min_confirmation_score).unwrap_or(0.05)),
+        require_confirmation: strategy_profile
+            .fixes_require_confirmation()
+            .unwrap_or_else(|| best.get(&p_require_confirmation).unwrap_or(false)),
         min_drift_confirmation: best.get(&p_min_drift_confirmation).unwrap_or(0.0001),
         min_edge: best.get(&p_min_edge).unwrap_or(0.02),
         min_reward_risk: best.get(&p_min_reward_risk).unwrap_or(0.8),
@@ -1473,6 +1521,10 @@ fn main() -> Result<()> {
     eprintln!(
         "three_layer_min_confirmation_score = {:.6}",
         best_params.min_confirmation_score
+    );
+    eprintln!(
+        "three_layer_require_confirmation = {}",
+        best_params.require_confirmation
     );
     eprintln!(
         "three_layer_min_drift_confirmation = {:.8}",
@@ -1537,6 +1589,10 @@ fn main() -> Result<()> {
     eprintln!(
         "three_layer_min_confirmation_score = {:.6}",
         best_params.min_confirmation_score
+    );
+    eprintln!(
+        "three_layer_require_confirmation = {}",
+        best_params.require_confirmation
     );
     eprintln!(
         "three_layer_min_drift_confirmation = {:.8}",
@@ -1640,6 +1696,7 @@ mod tests {
             min_direction_prob: 0.55,
             min_distance_over_sigma: 0.0,
             min_confirmation_score: 0.0,
+            require_confirmation: false,
             min_drift_confirmation: 0.0,
             min_edge: 0.0,
             min_reward_risk: 0.5,
@@ -1977,6 +2034,26 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_hard_confirmation_gate_rejects_weak_obi() {
+        let mut params = test_params();
+        params.min_direction_prob = 0.56;
+        params.min_confirmation_score = 0.05;
+        params.min_entry_score = 0.0;
+        let row = test_row("event-weak-obi", 0.62, 0.30, Some(2.0), true, 0);
+
+        assert!(
+            row_passes_gates(&row, &params, StrategyProfile::ObiSoft),
+            "OBI-soft should treat weak confirmation as a score component, not a hard veto"
+        );
+
+        params.require_confirmation = true;
+        assert!(
+            !row_passes_gates(&row, &params, StrategyProfile::ObiHard),
+            "OBI-hard must keep direction/EV gates but add a fillable confirmation veto"
+        );
+    }
+
+    #[test]
     fn snapshot_objective_counts_only_fillable_executable_orders() {
         let mut params = test_params();
         params.cooldown_secs = 0;
@@ -2152,6 +2229,10 @@ mod tests {
             StrategyProfile::ObiSoft
         );
         assert_eq!(
+            StrategyProfile::parse("obi_hard").unwrap(),
+            StrategyProfile::ObiHard
+        );
+        assert_eq!(
             StrategyProfile::parse("cex_continuation").unwrap(),
             StrategyProfile::ContinuationSoft
         );
@@ -2169,6 +2250,10 @@ mod tests {
             Some(true)
         );
         assert_eq!(
+            StrategyProfile::ObiHard.fixes_alpha_contrarian(),
+            Some(true)
+        );
+        assert_eq!(
             StrategyProfile::ContinuationSoft.fixes_alpha_contrarian(),
             Some(true)
         );
@@ -2180,6 +2265,11 @@ mod tests {
         assert_eq!(
             StrategyProfile::Champion.fixes_confirmation_threshold(),
             Some(0.0)
+        );
+        assert_eq!(StrategyProfile::ObiHard.fixes_cex_contrarian(), Some(false));
+        assert_eq!(
+            StrategyProfile::ObiHard.fixes_require_confirmation(),
+            Some(true)
         );
     }
 }

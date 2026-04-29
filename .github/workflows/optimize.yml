@@ -44,7 +44,7 @@ on:
         required: true
         default: "5"
       strategy_profile:
-        description: "Snapshot optimizer profile: mixed, champion, obi_soft, continuation_soft"
+        description: "Snapshot optimizer profile: mixed, champion, obi_soft, obi_hard, continuation_soft"
         required: false
         default: "mixed"
       symbols:

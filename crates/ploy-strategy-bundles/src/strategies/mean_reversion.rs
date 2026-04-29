@@ -1056,6 +1056,7 @@ mod tests {
             three_layer_min_direction_prob: 0.56,
             three_layer_min_distance_over_sigma: 0.3,
             three_layer_min_confirmation_score: 0.10,
+            three_layer_require_confirmation: false,
             three_layer_min_drift_confirmation: 0.0002,
             three_layer_min_edge: 0.03,
             three_layer_min_reward_risk: 1.2,

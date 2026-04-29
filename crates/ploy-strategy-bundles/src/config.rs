@@ -5,8 +5,8 @@
 
 use chrono::{DateTime, Utc};
 use ploy_market_contracts::{InstrumentKind, PredictionFamily, VenueKind};
-use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use serde::Deserialize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -601,6 +601,10 @@ venue = "sportsbook"
         for file in [
             "02-pm5d-threelayer.unified.toml",
             "02-pm5d-threelayer.live.toml",
+            "02-pm5d-threelayer.champion-dryrun.toml",
+            "02-pm5d-threelayer.obi-soft-dryrun.toml",
+            "02-pm5d-threelayer.obi-hard-dryrun.toml",
+            "02-pm5d-threelayer.continuation-soft-dryrun.toml",
             "02-pm5d.v1-dryrun.toml",
             "02-pm5d.v1-live.toml",
             "02-pm5d.v2-dryrun.toml",
