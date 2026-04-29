@@ -20,7 +20,7 @@ use ploy_research::{
 };
 use serde::Serialize;
 
-const OPTIMIZER_MIN_DIRECTION_PROB: f64 = 0.525;
+const OPTIMIZER_MIN_DIRECTION_PROB: f64 = 0.515;
 const OPTIMIZER_MAX_DIRECTION_PROB: f64 = 0.68;
 
 #[derive(Debug, Clone, Copy, Serialize)]
