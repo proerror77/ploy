@@ -109,22 +109,24 @@ export function Layout() {
   };
 
   return (
-    <div className="flex h-screen bg-background">
+    <div className="flex min-h-screen flex-col bg-background lg:h-screen lg:flex-row lg:overflow-hidden">
       {/* Sidebar */}
-      <div className="w-64 border-r bg-card">
+      <div className="relative shrink-0 border-b bg-card lg:h-screen lg:w-64 lg:border-b-0 lg:border-r">
         <div className="flex h-16 items-center border-b px-6">
           <h1 className="text-xl font-bold">Ploy Trading</h1>
         </div>
-        <nav className="space-y-1 p-4">
+        <nav className="flex gap-1 overflow-x-auto p-3 lg:block lg:space-y-1 lg:p-4">
           {navigation.map((item) => {
             const Icon = item.icon;
-            const isActive = location.pathname === item.href;
+            const isActive =
+              location.pathname === item.href ||
+              (item.href === '/cockpit' && location.pathname === '/dry-run');
             return (
               <Link
                 key={item.name}
                 to={item.href}
                 className={cn(
-                  'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                  'flex shrink-0 items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors lg:w-full',
                   isActive
                     ? 'bg-primary text-primary-foreground'
                     : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
@@ -138,7 +140,7 @@ export function Layout() {
         </nav>
 
         {/* Auth + Status indicators */}
-        <div className="absolute bottom-0 w-64 border-t bg-card p-4">
+        <div className="border-t bg-card p-4 lg:absolute lg:bottom-0 lg:w-64">
           <div className="mb-3 border-b pb-3">
             <div className="mb-2 flex items-center justify-between text-xs">
               <span className="text-muted-foreground">控制面认证</span>
@@ -213,7 +215,7 @@ export function Layout() {
       </div>
 
       {/* Main content */}
-      <div className="flex-1 overflow-auto">
+      <div className="min-w-0 flex-1 overflow-auto">
         <Outlet />
       </div>
     </div>

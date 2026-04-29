@@ -73,7 +73,11 @@ class ApiService {
     this.setStoredToken(this.SIDECAR_TOKEN_KEY, null);
   }
 
-  private async fetch<T>(endpoint: string, options?: RequestInit): Promise<T> {
+  private async fetch<T>(
+    endpoint: string,
+    options?: RequestInit,
+    basePath: string = API_BASE
+  ): Promise<T> {
     const headers = new Headers(options?.headers ? options.headers : {});
     headers.set('Content-Type', 'application/json');
 
@@ -89,7 +93,7 @@ class ApiService {
       headers.set('x-ploy-sidecar-token', sidecarToken);
     }
 
-    const response = await fetch(`${API_BASE}${endpoint}`, {
+    const response = await fetch(`${basePath}${endpoint}`, {
       credentials: 'same-origin',
       headers,
       ...options,
@@ -104,7 +108,11 @@ class ApiService {
   }
 
   async getAuthSession(): Promise<{ authenticated: boolean; auth_required: boolean }> {
-    return this.fetch<{ authenticated: boolean; auth_required: boolean }>('/auth/session');
+    return this.fetch<{ authenticated: boolean; auth_required: boolean }>(
+      '/auth/session',
+      undefined,
+      ''
+    );
   }
 
   async login(adminToken: string): Promise<{ success: boolean }> {
@@ -113,7 +121,7 @@ class ApiService {
       body: JSON.stringify({
         admin_token: adminToken,
       }),
-    });
+    }, '');
   }
 
   async logout(): Promise<{ success: boolean }> {
@@ -121,7 +129,7 @@ class ApiService {
     this.clearSidecarToken();
     return this.fetch<{ success: boolean }>('/auth/logout', {
       method: 'POST',
-    });
+    }, '');
   }
 
   // Stats endpoints

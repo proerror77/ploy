@@ -163,6 +163,26 @@ export interface DryRunSummary {
   latest_closed_at: string | null;
 }
 
+export interface DryRunMetrics {
+  sharpe: number | null;
+  profit_factor: number | 'Infinity' | null;
+  max_drawdown: number;
+  avg_trade: number | null;
+  gross_profit: number;
+  gross_loss: number;
+  equity_points: number;
+}
+
+export interface DryRunEquityPoint {
+  index: number;
+  label: string;
+  timestamp: string | null;
+  symbol?: string | null;
+  pnl: number;
+  cumulative: number;
+  drawdown: number;
+}
+
 export interface DryRunDailyRow {
   trading_day_cst: string;
   trade_count: number;
@@ -214,6 +234,11 @@ export interface DryRunSymbolRow {
 }
 
 export interface DryRunClosedTradeRow {
+  runtime_mode?: string | null;
+  strategy_id?: string | null;
+  deployment_id?: string | null;
+  trade_key?: string | null;
+  event_id?: string | null;
   symbol: string;
   window_secs?: number | null;
   window_label?: string;
@@ -222,6 +247,7 @@ export interface DryRunClosedTradeRow {
   exit_price: string | number | null;
   exit_type: string;
   quantity: string | number;
+  notional?: string | number;
   net_pnl: string | number;
   entry_time_remaining_secs?: number | null;
   opened_at: string;
@@ -229,6 +255,11 @@ export interface DryRunClosedTradeRow {
 }
 
 export interface DryRunOpenPositionRow {
+  runtime_mode?: string | null;
+  strategy_id?: string | null;
+  deployment_id?: string | null;
+  trade_key?: string | null;
+  event_id?: string | null;
   symbol: string;
   window_secs?: number | null;
   window_label?: string;
@@ -248,15 +279,26 @@ export interface DryRunPairingReport {
   side_aware_rows: number;
 }
 
-export interface DryRunPerformanceReport {
-  generated_at: string;
+export interface DryRunStrategyReport {
+  runtime_mode?: string;
+  strategy_id?: string;
+  deployment_id?: string;
+  label?: string;
   summary: DryRunSummary;
+  metrics?: DryRunMetrics;
+  equity_curve?: DryRunEquityPoint[];
   by_window: DryRunWindowRow[];
   daily: DryRunDailyRow[];
   daily_by_window: DryRunDailyWindowRow[];
   symbols: DryRunSymbolRow[];
   symbols_by_window: DryRunSymbolRow[];
+  closed_trades?: DryRunClosedTradeRow[];
   recent_closed: DryRunClosedTradeRow[];
   open_positions: DryRunOpenPositionRow[];
+}
+
+export interface DryRunPerformanceReport extends DryRunStrategyReport {
+  generated_at: string;
+  strategies?: DryRunStrategyReport[];
   pairing?: DryRunPairingReport;
 }

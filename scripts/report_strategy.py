@@ -65,19 +65,43 @@ def run_sql(query: str) -> str:
 
 print(f"Fetching data from {HOST}...")
 
-# Q1: All closed trades for cumulative PnL + detail table
+# Q1: All closed trades for cumulative PnL + detail table.
+# Strategy sizing is requested in USD stake, while fills are recorded as shares.
+# Show both requested stake and actual filled notional so liquidity partial fills
+# are visible instead of being mistaken for a smaller configured stake.
 trades_raw = run_sql(f"""
-SELECT symbol, market_side,
-       ROUND(avg_entry_price::numeric, 4),
-       ROUND(avg_exit_price::numeric, 4),
-       ROUND(buy_quantity::numeric, 2),
-       ROUND(net_pnl::numeric, 2),
-       ROUND(total_fee::numeric, 4),
-       to_char(opened_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI'),
-       to_char(closed_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI')
-FROM strategy_runtime_event_track_record
-WHERE runtime_mode = 'dry_run' AND is_closed {SINCE_FILTER}
-ORDER BY closed_at
+WITH closed AS (
+  SELECT *
+  FROM strategy_runtime_event_track_record
+  WHERE runtime_mode = 'dry_run' AND is_closed {SINCE_FILTER}
+)
+SELECT t.symbol, t.market_side,
+       ROUND(t.avg_entry_price::numeric, 4),
+       ROUND(t.avg_exit_price::numeric, 4),
+       ROUND(t.buy_quantity::numeric, 2),
+       ROUND(t.buy_notional::numeric, 2),
+       ROUND(COALESCE(o.quantity * o.limit_price, t.buy_notional)::numeric, 2),
+       ROUND(COALESCE(o.filled_quantity, t.buy_quantity)::numeric, 2),
+       COALESCE(o.status, ''),
+       ROUND(t.net_pnl::numeric, 2),
+       ROUND(t.total_fee::numeric, 4),
+       to_char(t.opened_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI'),
+       to_char(t.closed_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI')
+FROM closed t
+LEFT JOIN LATERAL (
+  SELECT quantity, limit_price, filled_quantity, status
+  FROM strategy_runtime_orders o
+  WHERE o.runtime_mode = t.runtime_mode
+    AND o.strategy_id = t.strategy_id
+    AND o.order_side = 'BUY'
+    AND (
+      o.intent_id = t.intent_id
+      OR (o.event_id = t.event_id AND o.token_id = t.token_id)
+    )
+  ORDER BY o.created_at ASC
+  LIMIT 1
+) o ON true
+ORDER BY t.closed_at
 """)
 
 trades = []
@@ -86,9 +110,9 @@ for line in trades_raw.split("\n"):
     if not line.strip():
         continue
     parts = line.split("|")
-    if len(parts) < 9:
+    if len(parts) < 13:
         continue
-    pnl = float(parts[5])
+    pnl = float(parts[9])
     cum_pnl += pnl
     exit_px = float(parts[3]) if parts[3] else 0
     if exit_px >= 0.99:
@@ -100,9 +124,14 @@ for line in trades_raw.split("\n"):
     trades.append({
         "symbol": parts[0], "side": parts[1],
         "entry": float(parts[2]), "exit": exit_px,
-        "qty": float(parts[4]), "pnl": pnl, "fee": float(parts[6]),
+        "qty": float(parts[4]),
+        "filled_notional": float(parts[5]),
+        "requested_notional": float(parts[6]),
+        "filled_qty": float(parts[7]),
+        "order_status": parts[8],
+        "pnl": pnl, "fee": float(parts[10]),
         "exit_type": exit_type,
-        "opened": parts[7], "closed": parts[8],
+        "opened": parts[11], "closed": parts[12],
         "cum_pnl": round(cum_pnl, 2),
     })
 
@@ -137,10 +166,26 @@ SELECT symbol, market_side,
        ROUND(avg_entry_price::numeric, 4),
        ROUND(buy_quantity::numeric, 2),
        ROUND(buy_notional::numeric, 2),
+       ROUND(COALESCE(o.quantity * o.limit_price, buy_notional)::numeric, 2),
+       ROUND(COALESCE(o.filled_quantity, buy_quantity)::numeric, 2),
+       COALESCE(o.status, ''),
        to_char(opened_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI')
-FROM strategy_runtime_event_track_record
-WHERE runtime_mode = 'dry_run' AND NOT is_closed {SINCE_FILTER}
-ORDER BY opened_at DESC
+FROM strategy_runtime_event_track_record t
+LEFT JOIN LATERAL (
+  SELECT quantity, limit_price, filled_quantity, status
+  FROM strategy_runtime_orders o
+  WHERE o.runtime_mode = t.runtime_mode
+    AND o.strategy_id = t.strategy_id
+    AND o.order_side = 'BUY'
+    AND (
+      o.intent_id = t.intent_id
+      OR (o.event_id = t.event_id AND o.token_id = t.token_id)
+    )
+  ORDER BY o.created_at ASC
+  LIMIT 1
+) o ON true
+WHERE t.runtime_mode = 'dry_run' AND NOT t.is_closed {SINCE_FILTER}
+ORDER BY t.opened_at DESC
 """)
 
 open_positions = []
@@ -148,11 +193,16 @@ for line in open_raw.split("\n"):
     if not line.strip():
         continue
     parts = line.split("|")
-    if len(parts) < 6:
+    if len(parts) < 9:
         continue
     open_positions.append({
         "symbol": parts[0], "side": parts[1], "entry": float(parts[2]),
-        "qty": float(parts[3]), "notional": float(parts[4]), "opened": parts[5],
+        "qty": float(parts[3]),
+        "notional": float(parts[4]),
+        "requested_notional": float(parts[5]),
+        "filled_qty": float(parts[6]),
+        "order_status": parts[7],
+        "opened": parts[8],
     })
 
 # --- Compute summary stats ---
@@ -166,6 +216,14 @@ win_rate = (wins / total * 100) if total > 0 else 0
 total_pnl = sum(t["pnl"] for t in closed_trades)
 total_fees = sum(t["fee"] for t in closed_trades)
 avg_pnl = total_pnl / total if total > 0 else 0
+total_requested_notional = sum(t["requested_notional"] for t in closed_trades)
+total_filled_notional = sum(t["filled_notional"] for t in closed_trades)
+avg_requested_notional = total_requested_notional / total if total > 0 else 0
+avg_filled_notional = total_filled_notional / total if total > 0 else 0
+partial_fills = sum(
+    1 for t in closed_trades
+    if t["requested_notional"] > 0 and t["filled_notional"] < t["requested_notional"] * 0.98
+)
 
 # Sharpe ratio (annualized from daily)
 daily_pnls = [d["pnl"] for d in daily]
@@ -259,10 +317,18 @@ trade_rows = ""
 for t in recent:
     color = "#22c55e" if t["pnl"] >= 0 else "#ef4444"
     et_color = {"WIN": "#22c55e", "LOSS": "#ef4444", "TP/SL": "#f59e0b"}.get(t["exit_type"], "#888")
+    fill_ratio = (
+        t["filled_notional"] / t["requested_notional"] * 100
+        if t["requested_notional"] > 0 else 0
+    )
+    fill_color = "#f59e0b" if fill_ratio < 98 else "#cbd5e1"
     trade_rows += f"""<tr>
       <td>{t['symbol']}</td><td>{t['side']}</td>
       <td>{t['entry']:.4f}</td><td>{t['exit']:.4f}</td>
       <td style="color:{et_color};font-weight:600">{t['exit_type']}</td>
+      <td>${t['requested_notional']:.2f}</td>
+      <td style="color:{fill_color};font-weight:600">${t['filled_notional']:.2f}</td>
+      <td style="color:{fill_color}">{fill_ratio:.0f}%</td>
       <td>{t['qty']:.1f}</td>
       <td style="color:{color};font-weight:600">${t['pnl']:,.2f}</td>
       <td>{t['opened']}</td><td>{t['closed']}</td>
@@ -271,10 +337,18 @@ for t in recent:
 # Build open positions rows
 open_rows = ""
 for p in open_positions:
+    fill_ratio = (
+        p["notional"] / p["requested_notional"] * 100
+        if p["requested_notional"] > 0 else 0
+    )
+    fill_color = "#f59e0b" if fill_ratio < 98 else "#cbd5e1"
     open_rows += f"""<tr>
       <td>{p['symbol']}</td><td>{p['side']}</td>
-      <td>{p['entry']:.4f}</td><td>{p['qty']:.1f}</td>
-      <td>${p['notional']:.2f}</td><td>{p['opened']}</td>
+      <td>{p['entry']:.4f}</td>
+      <td>${p['requested_notional']:.2f}</td>
+      <td style="color:{fill_color};font-weight:600">${p['notional']:.2f}</td>
+      <td style="color:{fill_color}">{fill_ratio:.0f}%</td>
+      <td>{p['qty']:.1f}</td><td>{p['opened']}</td>
     </tr>"""
 
 # Config rows
@@ -338,6 +412,12 @@ html = f"""<!DOCTYPE html>
     <div class="value" style="color:#ef4444">${max_dd:,.2f}</div></div>
   <div class="card"><div class="label">Avg PnL/Trade</div>
     <div class="value">${avg_pnl:,.2f}</div></div>
+  <div class="card"><div class="label">Avg Req Stake</div>
+    <div class="value">${avg_requested_notional:,.2f}</div></div>
+  <div class="card"><div class="label">Avg Filled Stake</div>
+    <div class="value">${avg_filled_notional:,.2f}</div></div>
+  <div class="card"><div class="label">Partial Fills</div>
+    <div class="value">{partial_fills}</div></div>
   <div class="card"><div class="label">Total Fees</div>
     <div class="value">${total_fees:,.2f}</div></div>
   <div class="card"><div class="label">Open Positions</div>
@@ -373,12 +453,13 @@ html = f"""<!DOCTYPE html>
   <h2>Recent Trades (last 30)</h2>
   <table>
     <tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th>
-        <th>Type</th><th>Qty</th><th>Net PnL</th><th>Opened</th><th>Closed</th></tr>
+        <th>Type</th><th>Req Stake</th><th>Filled</th><th>Fill %</th>
+        <th>Shares</th><th>Net PnL</th><th>Opened</th><th>Closed</th></tr>
     {trade_rows}
   </table>
 </div>
 
-{"<div class='section chart-box'><h2>Open Positions</h2><table><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Qty</th><th>Notional</th><th>Opened</th></tr>" + open_rows + "</table></div>" if open_positions else ""}
+{"<div class='section chart-box'><h2>Open Positions</h2><table><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Req Stake</th><th>Filled</th><th>Fill %</th><th>Shares</th><th>Opened</th></tr>" + open_rows + "</table></div>" if open_positions else ""}
 
 <div class="section chart-box">
   <h2>Strategy Parameters</h2>
