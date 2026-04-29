@@ -1,5 +1,6 @@
 # Three-layer champion dry-run config
-# Snapshot optimizer run 25096720302, snapshot 5bfb253100d3f573
+# Snapshot optimizer run 25105940653, snapshot 5bfb253100d3f573
+# Dry-run-only candidate: validation was 199/200 trades, so this is for real filled-order sampling, not live promotion.
 
 [runtime]
 strategy_variant = "three_layer"
@@ -20,9 +21,9 @@ no_trade_zone_max = 0.55
 
 min_edge = 0.0
 
-min_time_remaining_secs = 86
-max_time_remaining_secs = 173
-cooldown_secs = 19
+min_time_remaining_secs = 99
+max_time_remaining_secs = 190
+cooldown_secs = 44
 
 stake_usd = 15.0
 max_positions = 1000
@@ -30,17 +31,17 @@ max_daily_trades = 1000
 allowed_window_secs = [300, 900]
 
 three_layer_strategy_profile = "champion"
-three_layer_min_entry_score = 0.355216
-three_layer_min_direction_prob = 0.528079
-three_layer_min_distance_over_sigma = 0.085629
+three_layer_min_entry_score = 0.436535
+three_layer_min_direction_prob = 0.518337
+three_layer_min_distance_over_sigma = 0.555811
 three_layer_min_confirmation_score = 0.0
-three_layer_min_drift_confirmation = 0.00036282
-three_layer_min_edge = 0.0
-three_layer_min_reward_risk = 1.306785
+three_layer_min_drift_confirmation = -0.00019681
+three_layer_min_edge = 0.012595
+three_layer_min_reward_risk = 1.886977
 three_layer_alpha_contrarian = true
 three_layer_cex_contrarian = false
-three_layer_probability_shrink = 0.462909
-three_layer_probability_haircut = 0.0
+three_layer_probability_shrink = 0.751883
+three_layer_probability_haircut = 0.062327
 three_layer_take_profit_ask = 0.8437
 three_layer_stop_distance_pct = 0.0152
 three_layer_max_pm_lag_secs = 15
