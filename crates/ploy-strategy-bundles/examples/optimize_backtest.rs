@@ -52,9 +52,12 @@ use ploy_strategy_bundles::{
 use ploy_trading::{FillRecord, TradeSide, TradingIntent};
 use rust_decimal_macros::dec;
 use serde::Deserialize;
+use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 const DEFAULT_THREE_LAYER_CONFIG: &str = "config/strategies/02-pm5d-threelayer.unified.toml";
 
@@ -157,6 +160,29 @@ mod tests {
         assert!(error.contains("zero rows"));
         assert!(error.contains("train split has zero rows"));
         assert!(error.contains("val split has zero rows"));
+    }
+
+    #[test]
+    fn cheap_preflight_rejects_oversized_request_before_manifest_scan() {
+        let limits = PreflightLimits {
+            max_rows: 15_000_000,
+            max_bytes: 80 * 1024 * 1024 * 1024,
+            max_symbols: 2,
+            max_days: 3,
+            allow_large_window: false,
+        };
+        let symbols = vec![
+            "BTCUSDT".to_string(),
+            "ETHUSDT".to_string(),
+            "SOLUSDT".to_string(),
+        ];
+
+        let error = validate_preflight_request(&symbols, utc_ts(21), utc_ts(27), &limits)
+            .expect_err("oversized request should be rejected before parquet scan");
+
+        assert!(error.contains("symbol count 3 exceeds --max-symbols 2"));
+        assert!(error.contains("date span 7 days exceeds --max-days 3"));
+        assert!(error.contains("before parquet preflight scan"));
     }
 }
 
@@ -391,6 +417,41 @@ fn validate_preflight(
     } else {
         Err(format!(
             "{}; rerun with --allow-large-window only after bounded smoke/host-health checks",
+            failures.join("; ")
+        ))
+    }
+}
+
+fn validate_preflight_request(
+    symbols: &[String],
+    from: chrono::DateTime<Utc>,
+    to: chrono::DateTime<Utc>,
+    limits: &PreflightLimits,
+) -> std::result::Result<(), String> {
+    if limits.allow_large_window {
+        return Ok(());
+    }
+
+    let days = (to.date_naive() - from.date_naive()).num_days().abs() + 1;
+    let mut failures = Vec::new();
+    if symbols.len() > limits.max_symbols {
+        failures.push(format!(
+            "symbol count {} exceeds --max-symbols {}",
+            symbols.len(),
+            limits.max_symbols
+        ));
+    }
+    if days > limits.max_days {
+        failures.push(format!(
+            "date span {days} days exceeds --max-days {}",
+            limits.max_days
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}; rejected before parquet preflight scan; rerun with --allow-large-window only after bounded smoke/host-health checks",
             failures.join("; ")
         ))
     }
@@ -989,6 +1050,66 @@ fn source_hint(source: &ReplaySource) -> String {
         .unwrap_or_else(|| "streaming".to_string())
 }
 
+fn round_secs(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
+fn throughput(updates: u64, seconds: f64) -> f64 {
+    if seconds <= 0.0 {
+        0.0
+    } else {
+        updates as f64 / seconds
+    }
+}
+
+fn outcome_timing_json(
+    split: &str,
+    source: &ReplaySource,
+    outcome: &BacktestOutcome,
+    wall_secs: f64,
+    score: Option<f64>,
+) -> serde_json::Value {
+    json!({
+        "split": split,
+        "source_label": source.label(),
+        "source_kind": source.kind(),
+        "score": score,
+        "sharpe": outcome.sharpe,
+        "net_pnl": round_secs(outcome.net_pnl),
+        "trade_count": outcome.trade_count,
+        "updates_processed": outcome.updates_processed,
+        "runtime_elapsed_secs": round_secs(outcome.elapsed_secs),
+        "wall_secs": round_secs(wall_secs),
+        "updates_per_sec": round_secs(throughput(outcome.updates_processed, wall_secs)),
+        "intents_submitted": outcome.intents_submitted,
+        "fills_recorded": outcome.fills_recorded,
+        "orders_rejected": outcome.diagnostics.orders_rejected,
+    })
+}
+
+fn write_timing_json(path: Option<&str>, payload: serde_json::Value) {
+    let Some(path) = path else {
+        return;
+    };
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!(
+                "warning: failed to create timing dir {}: {error}",
+                parent.display()
+            );
+            return;
+        }
+    }
+    match serde_json::to_string_pretty(&payload) {
+        Ok(body) => {
+            if let Err(error) = fs::write(path, format!("{body}\n")) {
+                eprintln!("warning: failed to write timing json {path}: {error}");
+            }
+        }
+        Err(error) => eprintln!("warning: failed to encode timing json {path}: {error}"),
+    }
+}
+
 /// Run a single backtest and return compact analyzer-style metrics.
 fn run_backtest(
     strategy_variant: &str,
@@ -1249,10 +1370,13 @@ fn make_three_layer_config(
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let total_started = Instant::now();
 
     let db_url = flag_value(&args, "--db-url");
     let mut data_dir = flag_value(&args, "--data-dir");
     let snapshot_dir = flag_value(&args, "--snapshot-dir");
+    let timing_json = flag_value(&args, "--timing-json");
+    let mut phase_timings = Vec::new();
     let allow_live_parquet_debug = flag_present(&args, "--allow-live-parquet-debug");
     let allow_direct_db_debug = flag_present(&args, "--allow-direct-db-debug");
     let mut snapshot_manifest = None;
@@ -1498,9 +1622,54 @@ fn main() {
     });
 
     let (train_source, val_source) = if let Some(ref dir) = data_dir {
+        let request_guardrail_started = Instant::now();
+        if let Err(error) =
+            validate_preflight_request(&symbols, train_from, val_to, &preflight_limits)
+        {
+            eprintln!("ERROR: optimize request rejected: {error}");
+            phase_timings.push(json!({
+                "phase": "request_guardrail",
+                "source": "parquet-stream",
+                "wall_secs": round_secs(request_guardrail_started.elapsed().as_secs_f64()),
+                "result": "rejected",
+                "error": &error,
+            }));
+            write_timing_json(
+                timing_json.as_deref(),
+                json!({
+                    "command": "optimize_backtest",
+                    "mode": if preflight_only { "preflight-only" } else { "optimize" },
+                    "strategy_variant": &strategy_variant,
+                    "symbols": &symbols,
+                    "train_start": train_start_ts.as_deref().unwrap_or(&train_start),
+                    "train_end": train_end_ts.as_deref().unwrap_or(&train_end),
+                    "val_start": val_start_ts.as_deref().unwrap_or(&val_start),
+                    "val_end": val_end_ts.as_deref().unwrap_or(&val_end),
+                    "trials_requested": n_trials,
+                    "source": "parquet-stream",
+                    "phase_timings": phase_timings,
+                    "error": error,
+                    "total_wall_secs": round_secs(total_started.elapsed().as_secs_f64()),
+                }),
+            );
+            std::process::exit(2);
+        }
+        phase_timings.push(json!({
+            "phase": "request_guardrail",
+            "source": "parquet-stream",
+            "wall_secs": round_secs(request_guardrail_started.elapsed().as_secs_f64()),
+            "result": "passed",
+        }));
+        let preflight_started = Instant::now();
         let manifest =
             parquet_preflight_manifest(dir, &symbols, train_from, train_to, val_from, val_to)
                 .expect("Failed to build Parquet preflight manifest");
+        phase_timings.push(json!({
+            "phase": "parquet_preflight",
+            "source": "parquet-stream",
+            "wall_secs": round_secs(preflight_started.elapsed().as_secs_f64()),
+            "data_dir": dir,
+        }));
         manifest.print();
         if let Err(error) = validate_preflight(
             &manifest,
@@ -1515,6 +1684,23 @@ fn main() {
         }
         if preflight_only {
             eprintln!("Preflight-only mode complete; exiting before replay/optimization.");
+            write_timing_json(
+                timing_json.as_deref(),
+                json!({
+                    "command": "optimize_backtest",
+                    "mode": "preflight-only",
+                    "strategy_variant": &strategy_variant,
+                    "symbols": &symbols,
+                    "train_start": train_start_ts.as_deref().unwrap_or(&train_start),
+                    "train_end": train_end_ts.as_deref().unwrap_or(&train_end),
+                    "val_start": val_start_ts.as_deref().unwrap_or(&val_start),
+                    "val_end": val_end_ts.as_deref().unwrap_or(&val_end),
+                    "trials_requested": n_trials,
+                    "source": "parquet-stream",
+                    "phase_timings": phase_timings,
+                    "total_wall_secs": round_secs(total_started.elapsed().as_secs_f64()),
+                }),
+            );
             return;
         }
 
@@ -1524,14 +1710,21 @@ fn main() {
         )
     } else {
         let db_url = db_url.as_deref().unwrap();
+        let db_connect_started = Instant::now();
         let pool = rt
             .block_on(PgPoolOptions::new().max_connections(3).connect(db_url))
             .expect("DB connection failed");
+        phase_timings.push(json!({
+            "phase": "db_connect",
+            "source": "db-eager",
+            "wall_secs": round_secs(db_connect_started.elapsed().as_secs_f64()),
+        }));
 
         eprintln!(
             "Loading training data into db-eager replay ({} → {})...",
             train_start, train_end
         );
+        let train_load_started = Instant::now();
         let train = rt
             .block_on(load_from_database_with_options(
                 &pool,
@@ -1545,11 +1738,18 @@ fn main() {
             ))
             .expect("Failed to load training data");
         eprintln!("  {} updates loaded", train.len());
+        phase_timings.push(json!({
+            "phase": "db_load_train",
+            "source": "db-eager",
+            "wall_secs": round_secs(train_load_started.elapsed().as_secs_f64()),
+            "updates_loaded": train.len(),
+        }));
 
         eprintln!(
             "Loading validation data into db-eager replay ({} → {})...",
             val_start, val_end
         );
+        let val_load_started = Instant::now();
         let val = rt
             .block_on(load_from_database_with_options(
                 &pool,
@@ -1563,6 +1763,12 @@ fn main() {
             ))
             .expect("Failed to load validation data");
         eprintln!("  {} updates loaded\n", val.len());
+        phase_timings.push(json!({
+            "phase": "db_load_validation",
+            "source": "db-eager",
+            "wall_secs": round_secs(val_load_started.elapsed().as_secs_f64()),
+            "updates_loaded": val.len(),
+        }));
         (
             ReplaySource::db_eager("train", train),
             ReplaySource::db_eager("validation", val),
@@ -1582,6 +1788,8 @@ fn main() {
         source_hint(&val_source)
     );
 
+    let trial_timings: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut validation_timings = Vec::new();
     let symbols_ref = Arc::new(symbols.clone());
     let executor_config = Arc::new(executor_config);
     let three_layer_base_config = three_layer_base_config.map(Arc::new);
@@ -1601,9 +1809,11 @@ fn main() {
         let p_pm_lag_c = p_pm_lag.clone();
         let p_min_edge_c = p_min_edge.clone();
         let executor_config_c = Arc::clone(&executor_config);
+        let trial_timings_c = Arc::clone(&trial_timings);
 
         study
             .optimize(n_trials, move |trial: &mut Trial| {
+                let trial_id = trial.id();
                 let params = ReversalSearchParams {
                     max_distance_pct: p_max_distance_c.suggest(trial)?,
                     max_drift_flip_age_secs: 60,
@@ -1618,6 +1828,7 @@ fn main() {
                 };
 
                 let config = make_reversal_config(symbols_ref_c.as_slice(), &params);
+                let trial_started = Instant::now();
                 let outcome = match run_backtest(
                     "reversal",
                     config,
@@ -1627,9 +1838,18 @@ fn main() {
                 ) {
                     Ok(outcome) => outcome,
                     Err(error) => {
+                        trial_timings_c.lock().unwrap().push(json!({
+                            "trial_id": trial_id,
+                            "strategy_variant": "reversal",
+                            "split": "train",
+                            "source_label": train_ref.label(),
+                            "source_kind": train_ref.kind(),
+                            "wall_secs": round_secs(trial_started.elapsed().as_secs_f64()),
+                            "error": &error,
+                        }));
                         eprintln!(
                             "  Trial {:>3}: source={} error={error}",
-                            trial.id(),
+                            trial_id,
                             train_ref.kind()
                         );
                         return Ok::<f64, Error>(-1_000_000.0);
@@ -1642,10 +1862,16 @@ fn main() {
                 } else {
                     outcome.sharpe
                 };
+                let trial_wall_secs = trial_started.elapsed().as_secs_f64();
+                let mut record =
+                    outcome_timing_json("train", &train_ref, &outcome, trial_wall_secs, Some(score));
+                record["trial_id"] = json!(trial_id);
+                record["strategy_variant"] = json!("reversal");
+                trial_timings_c.lock().unwrap().push(record);
 
                 eprintln!(
                     "  Trial {:>3}: source={} score={:>7.3} sharpe={:>7.3} pnl=${:>8.2} trades={:>4} updates={} elapsed={:.1}s dist={:.4} flip={} drift={:.5} lob={:.2} ask={:.3} lag={}",
-                    trial.id(),
+                    trial_id,
                     train_ref.kind(),
                     score,
                     outcome.sharpe,
@@ -1660,7 +1886,7 @@ fn main() {
                     params.max_ask_for_reversal,
                     params.max_pm_lag_secs,
                 );
-                print_backtest_diagnostics(&format!("trial {}", trial.id()), &outcome);
+                print_backtest_diagnostics(&format!("trial {trial_id}"), &outcome);
 
                 Ok::<f64, Error>(score)
             })
@@ -1722,6 +1948,7 @@ fn main() {
 
         eprintln!("\n=== Validation (held-out) ===");
         let val_config = make_reversal_config(symbols_ref.as_slice(), &best_params);
+        let validation_started = Instant::now();
         let val_outcome = run_backtest(
             "reversal",
             val_config,
@@ -1730,6 +1957,13 @@ fn main() {
             max_updates,
         )
         .expect("Validation backtest failed");
+        validation_timings.push(outcome_timing_json(
+            "validation",
+            &val_source,
+            &val_outcome,
+            validation_started.elapsed().as_secs_f64(),
+            Some(val_outcome.sharpe),
+        ));
         eprintln!("Val Source:  {}", val_source.kind());
         eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
         eprintln!("Val PnL:     ${:.2}", val_outcome.net_pnl);
@@ -1794,6 +2028,28 @@ fn main() {
                 trial.get(&p_min_edge).unwrap_or(0.0),
             );
         }
+        let trial_timing_snapshot = trial_timings.lock().unwrap().clone();
+        write_timing_json(
+            timing_json.as_deref(),
+            json!({
+                "command": "optimize_backtest",
+                "strategy_variant": "reversal",
+                "algorithm": algorithm_label("reversal"),
+                "trials_requested": n_trials,
+                "trials_recorded": trial_timing_snapshot.len(),
+                "train_source": {"label": train_source.label(), "kind": train_source.kind(), "updates": source_hint(&train_source)},
+                "validation_source": {"label": val_source.label(), "kind": val_source.kind(), "updates": source_hint(&val_source)},
+                "symbols": &symbols,
+                "phase_timings": phase_timings,
+                "trial_timings": trial_timing_snapshot,
+                "validation_timings": validation_timings,
+                "best_training_score": best.value,
+                "validation_sharpe": val_outcome.sharpe,
+                "validation_net_pnl": round_secs(val_outcome.net_pnl),
+                "validation_trades": val_outcome.trade_count,
+                "total_wall_secs": round_secs(total_started.elapsed().as_secs_f64()),
+            }),
+        );
     } else if strategy_variant == "three_layer" {
         let base_config = three_layer_base_config
             .as_ref()
@@ -1803,6 +2059,7 @@ fn main() {
         let symbols_ref_c = Arc::clone(&symbols_ref);
         let executor_config_c = Arc::clone(&executor_config);
         let base_config_c = Arc::clone(base_config);
+        let trial_timings_c = Arc::clone(&trial_timings);
 
         let p_min_direction_prob =
             FloatParam::new(0.52, 0.70).name("three_layer_min_direction_prob");
@@ -1835,6 +2092,7 @@ fn main() {
 
         study
             .optimize(n_trials, move |trial: &mut Trial| {
+                let trial_id = trial.id();
                 let min_time_remaining_secs = p_min_time_remaining_secs_c.suggest(trial)?;
                 let params = ThreeLayerSearchParams {
                     min_direction_prob: p_min_direction_prob_c.suggest(trial)?,
@@ -1856,6 +2114,7 @@ fn main() {
                     &params,
                     base_config_c.as_ref(),
                 );
+                let trial_started = Instant::now();
                 let outcome = match run_backtest(
                     "three_layer",
                     config,
@@ -1865,9 +2124,18 @@ fn main() {
                 ) {
                     Ok(outcome) => outcome,
                     Err(error) => {
+                        trial_timings_c.lock().unwrap().push(json!({
+                            "trial_id": trial_id,
+                            "strategy_variant": "three_layer",
+                            "split": "train",
+                            "source_label": train_ref.label(),
+                            "source_kind": train_ref.kind(),
+                            "wall_secs": round_secs(trial_started.elapsed().as_secs_f64()),
+                            "error": &error,
+                        }));
                         eprintln!(
                             "  Trial {:>3}: source={} error={error}",
-                            trial.id(),
+                            trial_id,
                             train_ref.kind()
                         );
                         return Ok::<f64, Error>(-1_000_000.0);
@@ -1877,10 +2145,16 @@ fn main() {
                 // Sharpe = mean(pnl_per_trade) / std(pnl_per_trade) * sqrt(trades_per_year).
                 // Penalty for sparse trials is already applied inside run_backtest.
                 let score = outcome.sharpe;
+                let trial_wall_secs = trial_started.elapsed().as_secs_f64();
+                let mut record =
+                    outcome_timing_json("train", &train_ref, &outcome, trial_wall_secs, Some(score));
+                record["trial_id"] = json!(trial_id);
+                record["strategy_variant"] = json!("three_layer");
+                trial_timings_c.lock().unwrap().push(record);
 
                 eprintln!(
                     "  Trial {:>3}: source={} sharpe={:>7.3} trades={:>4} pnl=${:>8.2} updates={} elapsed={:.1}s | params: dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} tp={:.3} stop={:.4} cd={}s",
-                    trial.id(),
+                    trial_id,
                     train_ref.kind(),
                     outcome.sharpe,
                     outcome.trade_count,
@@ -1897,7 +2171,7 @@ fn main() {
                     params.stop_distance_pct,
                     params.cooldown_secs,
                 );
-                print_backtest_diagnostics(&format!("trial {}", trial.id()), &outcome);
+                print_backtest_diagnostics(&format!("trial {trial_id}"), &outcome);
 
                 Ok::<f64, Error>(score)
             })
@@ -1926,6 +2200,7 @@ fn main() {
         eprintln!("\n=== Validation (held-out, out-of-sample) ===");
         let val_config =
             make_three_layer_config(symbols_ref.as_slice(), &best_params, base_config.as_ref());
+        let validation_started = Instant::now();
         let val_outcome = run_backtest(
             "three_layer",
             val_config,
@@ -1934,6 +2209,13 @@ fn main() {
             max_updates,
         )
         .expect("Validation backtest failed");
+        validation_timings.push(outcome_timing_json(
+            "validation",
+            &val_source,
+            &val_outcome,
+            validation_started.elapsed().as_secs_f64(),
+            Some(val_outcome.sharpe),
+        ));
         eprintln!("Val Source:  {}", val_source.kind());
         eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
         eprintln!("Val PnL:     ${:.2}", val_outcome.net_pnl);
@@ -1982,6 +2264,28 @@ fn main() {
             "max_time_remaining_secs = {}",
             best_params.max_time_remaining_secs
         );
+        let trial_timing_snapshot = trial_timings.lock().unwrap().clone();
+        write_timing_json(
+            timing_json.as_deref(),
+            json!({
+                "command": "optimize_backtest",
+                "strategy_variant": "three_layer",
+                "algorithm": algorithm_label("three_layer"),
+                "trials_requested": n_trials,
+                "trials_recorded": trial_timing_snapshot.len(),
+                "train_source": {"label": train_source.label(), "kind": train_source.kind(), "updates": source_hint(&train_source)},
+                "validation_source": {"label": val_source.label(), "kind": val_source.kind(), "updates": source_hint(&val_source)},
+                "symbols": &symbols,
+                "phase_timings": phase_timings,
+                "trial_timings": trial_timing_snapshot,
+                "validation_timings": validation_timings,
+                "best_training_score": best.value,
+                "validation_sharpe": val_outcome.sharpe,
+                "validation_net_pnl": round_secs(val_outcome.net_pnl),
+                "validation_trades": val_outcome.trade_count,
+                "total_wall_secs": round_secs(total_started.elapsed().as_secs_f64()),
+            }),
+        );
     } else {
         let p_min_prob = FloatParam::new(0.50, 0.72).name("min_probability");
         let p_min_edge = FloatParam::new(0.005, 0.06).name("min_edge");
@@ -1999,9 +2303,11 @@ fn main() {
         let p_min_time_c = p_min_time.clone();
         let p_max_time_c = p_max_time.clone();
         let executor_config_c = Arc::clone(&executor_config);
+        let trial_timings_c = Arc::clone(&trial_timings);
 
         study
             .optimize(n_trials, move |trial: &mut Trial| {
+                let trial_id = trial.id();
                 let min_prob = p_min_prob_c.suggest(trial)?;
                 let min_edge = p_min_edge_c.suggest(trial)?;
                 let max_entry = p_max_entry_c.suggest(trial)?;
@@ -2010,6 +2316,15 @@ fn main() {
                 let max_time = p_max_time_c.suggest(trial)?;
 
                 if max_time <= min_time || max_entry <= 0.45 {
+                    trial_timings_c.lock().unwrap().push(json!({
+                        "trial_id": trial_id,
+                        "strategy_variant": "directional",
+                        "split": "train",
+                        "source_label": train_ref.label(),
+                        "source_kind": train_ref.kind(),
+                        "score": -10.0,
+                        "skipped": "invalid_parameter_combo",
+                    }));
                     return Ok::<f64, Error>(-10.0);
                 }
 
@@ -2022,6 +2337,7 @@ fn main() {
                     min_time,
                     max_time,
                 );
+                let trial_started = Instant::now();
                 let outcome = match run_backtest(
                     "directional",
                     config,
@@ -2031,18 +2347,34 @@ fn main() {
                 ) {
                     Ok(outcome) => outcome,
                     Err(error) => {
+                        trial_timings_c.lock().unwrap().push(json!({
+                            "trial_id": trial_id,
+                            "strategy_variant": "directional",
+                            "split": "train",
+                            "source_label": train_ref.label(),
+                            "source_kind": train_ref.kind(),
+                            "wall_secs": round_secs(trial_started.elapsed().as_secs_f64()),
+                            "error": &error,
+                        }));
                         eprintln!(
                             "  Trial {:>3}: source={} error={error}",
-                            trial.id(),
+                            trial_id,
                             train_ref.kind()
                         );
                         return Ok::<f64, Error>(-1_000_000.0);
                     }
                 };
+                let score = outcome.sharpe;
+                let trial_wall_secs = trial_started.elapsed().as_secs_f64();
+                let mut record =
+                    outcome_timing_json("train", &train_ref, &outcome, trial_wall_secs, Some(score));
+                record["trial_id"] = json!(trial_id);
+                record["strategy_variant"] = json!("directional");
+                trial_timings_c.lock().unwrap().push(record);
 
                 eprintln!(
                     "  Trial {:>3}: source={} sharpe={:>7.3}  pnl=${:>8.2}  trades={:>4}  updates={} elapsed={:.1}s  p={:.3}  edge={:.4}  max={:.2}  cd={}s",
-                    trial.id(),
+                    trial_id,
                     train_ref.kind(),
                     outcome.sharpe,
                     outcome.net_pnl,
@@ -2054,9 +2386,9 @@ fn main() {
                     max_entry,
                     cooldown
                 );
-                print_backtest_diagnostics(&format!("trial {}", trial.id()), &outcome);
+                print_backtest_diagnostics(&format!("trial {trial_id}"), &outcome);
 
-                Ok(outcome.sharpe)
+                Ok(score)
             })
             .expect("Optimization failed");
 
@@ -2087,6 +2419,7 @@ fn main() {
             best_min_time,
             best_max_time,
         );
+        let validation_started = Instant::now();
         let val_outcome = run_backtest(
             "directional",
             val_config,
@@ -2095,6 +2428,13 @@ fn main() {
             max_updates,
         )
         .expect("Validation backtest failed");
+        validation_timings.push(outcome_timing_json(
+            "validation",
+            &val_source,
+            &val_outcome,
+            validation_started.elapsed().as_secs_f64(),
+            Some(val_outcome.sharpe),
+        ));
         eprintln!("Val Source:  {}", val_source.kind());
         eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
         eprintln!("Val PnL:     ${:.2}", val_outcome.net_pnl);
@@ -2134,5 +2474,27 @@ fn main() {
                 trial.get(&p_min_time).unwrap_or(0),
             );
         }
+        let trial_timing_snapshot = trial_timings.lock().unwrap().clone();
+        write_timing_json(
+            timing_json.as_deref(),
+            json!({
+                "command": "optimize_backtest",
+                "strategy_variant": "directional",
+                "algorithm": algorithm_label("directional"),
+                "trials_requested": n_trials,
+                "trials_recorded": trial_timing_snapshot.len(),
+                "train_source": {"label": train_source.label(), "kind": train_source.kind(), "updates": source_hint(&train_source)},
+                "validation_source": {"label": val_source.label(), "kind": val_source.kind(), "updates": source_hint(&val_source)},
+                "symbols": &symbols,
+                "phase_timings": phase_timings,
+                "trial_timings": trial_timing_snapshot,
+                "validation_timings": validation_timings,
+                "best_training_score": best.value,
+                "validation_sharpe": val_outcome.sharpe,
+                "validation_net_pnl": round_secs(val_outcome.net_pnl),
+                "validation_trades": val_outcome.trade_count,
+                "total_wall_secs": round_secs(total_started.elapsed().as_secs_f64()),
+            }),
+        );
     }
 }

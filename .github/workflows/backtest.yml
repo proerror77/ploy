@@ -22,7 +22,11 @@ on:
       data_dir:
         description: "Local Parquet data dir (leave empty to use DB)"
         required: false
-        default: "/tmp/ploy-parquet"
+        default: ""
+      sync_parquet_data:
+        description: "Sync the full Parquet tree from Tango before running"
+        required: false
+        default: "false"
 
 concurrency:
   group: backtest-${{ github.ref }}
@@ -103,10 +107,13 @@ jobs:
         run: chmod +x target/release/examples/run_backtest
 
       - name: Sync Parquet data from Tango-1-1
-        if: ${{ github.event.inputs.data_dir != '' }}
+        if: ${{ github.event.inputs.data_dir != '' && github.event.inputs.sync_parquet_data == 'true' }}
         env:
           DATA_DIR: ${{ github.event.inputs.data_dir }}
         run: |
+          set -euo pipefail
+          mkdir -p artifacts/backtest
+          started=$(date +%s)
           mkdir -p ~/.ssh
           echo "${{ secrets.TANGO_SSH_KEY }}" > ~/.ssh/tango_key
           chmod 600 ~/.ssh/tango_key
@@ -115,6 +122,9 @@ jobs:
             -e "ssh -i ~/.ssh/tango_key -o StrictHostKeyChecking=no" \
             root@172.16.0.204:/opt/ploy/data/parquet/ \
             "${DATA_DIR}/"
+          elapsed=$(( $(date +%s) - started ))
+          printf '{"phase":"rsync_parquet","wall_secs":%s,"data_dir":"%s"}\n' "${elapsed}" "${DATA_DIR}" \
+            > artifacts/backtest/rsync-timing.json
 
       - name: Run backtest
         env:
@@ -122,14 +132,50 @@ jobs:
           START_DATE: ${{ github.event.inputs.start_date }}
           END_DATE: ${{ github.event.inputs.end_date }}
           DATA_DIR: ${{ github.event.inputs.data_dir }}
+          SYNC_PARQUET_DATA: ${{ github.event.inputs.sync_parquet_data }}
         run: |
+          set -uo pipefail
+          mkdir -p artifacts/backtest
+          started=$(date +%s)
           extra_args=()
           if [ -n "$DATA_DIR" ]; then
+            if [ ! -d "$DATA_DIR" ]; then
+              echo "ERROR: DATA_DIR '$DATA_DIR' does not exist; set sync_parquet_data=true or leave data_dir empty to use DB" \
+                | tee artifacts/backtest/report.txt
+              printf '{"phase":"backtest_workflow_step","wall_secs":0,"status":2,"missing_data_dir":"%s","sync_parquet_data":"%s"}\n' \
+                "$DATA_DIR" "$SYNC_PARQUET_DATA" > artifacts/backtest/workflow-timing.json
+              exit 2
+            fi
             extra_args=(--data-dir "$DATA_DIR")
           fi
+          set +e
           ./target/release/examples/run_backtest \
             --config "${CONFIG}" \
             --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
             --start-date "${START_DATE}" \
             --end-date "${END_DATE}" \
-            "${extra_args[@]}"
+            --timing-json artifacts/backtest/timing.json \
+            "${extra_args[@]}" \
+            2>&1 | tee artifacts/backtest/report.txt
+          status=${PIPESTATUS[0]}
+          elapsed=$(( $(date +%s) - started ))
+          printf '{"phase":"backtest_workflow_step","wall_secs":%s,"status":%s}\n' "${elapsed}" "${status}" \
+            > artifacts/backtest/workflow-timing.json
+          if [ -f artifacts/backtest/timing.json ]; then
+            {
+              echo "## Backtest timing"
+              echo '```json'
+              cat artifacts/backtest/timing.json
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          exit "${status}"
+
+      - name: Upload backtest report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: backtest-report-${{ github.run_id }}
+          path: artifacts/backtest
+          if-no-files-found: ignore
+          retention-days: 14

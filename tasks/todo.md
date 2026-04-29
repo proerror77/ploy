@@ -22,6 +22,46 @@
 - 2026-04-29: Runtime entry scoring now computes expected value explicitly from direction probability, executable ask, payout/loss, and crypto fee. Snapshot profiles still require non-negative configured EV (`three_layer_min_edge`), and score also includes expected value per staked dollar so lower-probability but better-priced orders can outrank high-probability rich entries.
 - 2026-04-29: Snapshot optimizer now emits average expected value per share and per staked dollar, includes per-stake EV in the stability objective/generalization penalty, and has focused tests proving non-fillable rows are selected/rejected as non-executable rather than counted as executable PnL.
 
+# Research Loop Observability And Speedup (2026-04-29)
+
+Issue: https://github.com/proerror77/ploy/issues/227
+
+## Files
+
+- `.github/workflows/backtest.yml`
+  - Owner: backtest artifact capture and timing report upload.
+- `.github/workflows/optimize.yml`
+  - Owner: optimizer preflight/replay timing artifacts and workflow summaries.
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+  - Owner: per-run backtest timing/throughput JSON.
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+  - Owner: optimizer phase timing and per-trial replay throughput observability.
+- `tasks/todo.md`
+  - Owner: implementation plan and verification evidence.
+
+## Tasks
+
+- [x] Add low-overhead timing records to `run_backtest`.
+- [x] Add optimizer phase timing plus per-trial replay throughput records.
+- [x] Upload timing/report artifacts from `backtest.yml` and `optimize.yml`.
+- [x] Stop `backtest.yml` from syncing the full Parquet tree by default.
+- [x] Reject oversized optimizer symbol/date requests before scanning Parquet.
+- [x] Run focused formatting and no-run checks without heavy local replay.
+
+## Review
+
+- 2026-04-29: Multi-agent review found the slow loop is not one isolated bottleneck. The highest-impact issues are repeated Parquet preflight scans, per-trial replay/runtime/feed setup in `optimize_backtest`, default full-tree Parquet rsync in `backtest.yml`, and a broader lack of one canonical snapshot/tape boundary across research, backtest, replay, dry-run, and reporting.
+- 2026-04-29: Added `--timing-json` to `run_backtest` for source open/load time, runtime wall time, runtime elapsed time, total wall time, updates processed, updates/sec, intents/fills, PnL, exposure, source, strategy variant, symbols, dates, and config.
+- 2026-04-29: Added `--timing-json` to non-snapshot `optimize_backtest` for Parquet preflight / DB connect / DB load phase timings, per-trial replay wall time, runtime elapsed time, updates/sec, score, Sharpe, PnL, trades, fills, intents, rejected orders, errors, and held-out validation timing.
+- 2026-04-29: Updated `backtest.yml` to save `artifacts/backtest/report.txt`, `timing.json`, `rsync-timing.json`, `workflow-timing.json`, upload them as `backtest-report-${{ github.run_id }}`, and print timing JSON into the step summary when present.
+- 2026-04-29: Updated `optimize.yml` to save preflight/report/workflow timing under `artifacts/optimize`, pass `--timing-json` for non-snapshot optimizer paths, keep snapshot-backed optimizer report capture, and upload the optimize artifact directory.
+- 2026-04-29: After rebasing onto current `main`, changed `backtest.yml` so `data_dir` defaults to empty DB mode and full Parquet rsync only runs when `sync_parquet_data=true`. If an operator supplies `data_dir` without a local directory or sync, the workflow now fails fast with a clear report and timing JSON instead of silently doing expensive setup.
+- 2026-04-29: Added an optimizer request guardrail before `parquet_preflight_manifest`. Oversized symbol/date requests are rejected before DuckDB scans Parquet; row/byte/liquidity checks still run after manifest generation for requests that pass the cheap guardrail.
+- 2026-04-29: UI/reporting review found `report_dryrun_summary.py` already has multi-strategy and equity-curve data, but `ploy-frontend` and `ploy-operator-contracts` still lack a first-class dry-run report contract and routes. Follow-up should make `strategy_id` the primary grouping key and `deployment_id` the secondary key, with side-aware orders/fills/PnL attribution.
+- 2026-04-29: Verification passed: `rustfmt --edition 2024 crates/ploy-strategy-bundles/examples/run_backtest.rs crates/ploy-strategy-bundles/examples/optimize_backtest.rs`, `git diff --check`, and workflow YAML parsing via Ruby for `.github/workflows/backtest.yml` and `.github/workflows/optimize.yml`.
+- 2026-04-29: Follow-up verification passed: `rustfmt --edition 2024 crates/ploy-strategy-bundles/examples/run_backtest.rs crates/ploy-strategy-bundles/examples/optimize_backtest.rs`, `git diff --check`, and workflow YAML parsing via Ruby for `.github/workflows/backtest.yml` and `.github/workflows/optimize.yml`.
+- 2026-04-29: Full local Rust compile was intentionally stopped after repeated long dependency rebuilds on the Mac. `cargo test --no-run` for `run_backtest` was terminated after several minutes of dependency compilation; a bounded 180s `cargo check` for `optimize_backtest` and a bounded 240s targeted test for the cheap guardrail also timed out while rebuilding dependencies. No real backtest/replay was executed locally.
+
 # PM5D Holistic Snapshot Optimizer Fix (2026-04-29)
 
 Issue: https://github.com/proerror77/ploy/issues/224

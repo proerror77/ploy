@@ -290,6 +290,8 @@ jobs:
         run: |
           set -euo pipefail
           . /home/runner/.cargo/env
+          mkdir -p artifacts/optimize
+          started=$(date +%s)
 
           health_summary() {
             echo "## Optimize preflight host health" >> "${GITHUB_STEP_SUMMARY}"
@@ -329,6 +331,7 @@ jobs:
             extra_flags+=(--allow-live-parquet-debug)
           fi
 
+          set +e
           ./target/release/examples/optimize-runner \
             --preflight-only \
             --strategy-variant three_layer \
@@ -348,14 +351,23 @@ jobs:
             --max-days "${{ github.event.inputs.max_days }}" \
             --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
             --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
+            --timing-json artifacts/optimize/preflight-timing.json \
             "${time_flags[@]}" \
-            "${extra_flags[@]}"
+            "${extra_flags[@]}" \
+            2>&1 | tee artifacts/optimize/preflight-report.txt
+          status=${PIPESTATUS[0]}
+          elapsed=$(( $(date +%s) - started ))
+          printf '{"phase":"optimize_preflight_workflow_step","wall_secs":%s,"status":%s}\n' "${elapsed}" "${status}" \
+            > artifacts/optimize/preflight-workflow-timing.json
+          exit "${status}"
 
       - name: Run optimize
         if: ${{ github.event.inputs.preflight_only != 'true' }}
         run: |
           set -euo pipefail
           . /home/runner/.cargo/env
+          mkdir -p artifacts/optimize
+          started=$(date +%s)
           rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
           mkdir -p "${PLOY_DUCKDB_TEMP_DIR}"
 
@@ -403,6 +415,7 @@ jobs:
             extra_flags+=(--allow-live-parquet-debug)
           fi
 
+          set +e
           if [ -f artifacts/research-snapshot/manifest.json ]; then
             timeout --preserve-status "${{ github.event.inputs.optimize_timeout_minutes }}m" \
             ./target/release/examples/optimize-runner \
@@ -416,7 +429,9 @@ jobs:
               --strategy-profile "${{ github.event.inputs.strategy_profile }}" \
               --stake-usd 15 \
               --output-dir artifacts/optimize \
-              "${time_flags[@]}"
+              "${time_flags[@]}" \
+              2>&1 | tee artifacts/optimize/report.txt
+            status=${PIPESTATUS[0]}
           else
             timeout --preserve-status "${{ github.event.inputs.optimize_timeout_minutes }}m" \
             ./target/release/examples/optimize-runner \
@@ -437,9 +452,24 @@ jobs:
               --max-days "${{ github.event.inputs.max_days }}" \
               --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
               --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
+              --timing-json artifacts/optimize/timing.json \
               "${time_flags[@]}" \
-              "${extra_flags[@]}"
+              "${extra_flags[@]}" \
+              2>&1 | tee artifacts/optimize/report.txt
+            status=${PIPESTATUS[0]}
           fi
+          elapsed=$(( $(date +%s) - started ))
+          printf '{"phase":"optimize_workflow_step","wall_secs":%s,"status":%s,"snapshot_backed":%s}\n' \
+            "${elapsed}" "${status}" \
+            "$([ -f artifacts/research-snapshot/manifest.json ] && echo true || echo false)" \
+            > artifacts/optimize/workflow-timing.json
+          {
+            echo "## Optimize timing"
+            echo '```json'
+            [ -f artifacts/optimize/timing.json ] && cat artifacts/optimize/timing.json || cat artifacts/optimize/workflow-timing.json
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit "${status}"
 
       - name: Upload optimize provenance
         if: ${{ always() }}
