@@ -81,7 +81,9 @@ Issue: https://github.com/proerror77/ploy/issues/227
 - [x] Recompute current dry-run metrics from real orders/fills by `deployment_id`, including PnL, drawdown, fill coverage, return per stake, side/symbol concentration, and sample size.
 - [x] Decide whether the next action is report repair, more dry-run monitoring, or a dry-run-only strategy/config correction.
 - [x] Verify the direction-probability gate correction with focused checks.
+- [x] Prevent optimizer reruns from rediscovering a neutral `0.50` direction-probability gate.
 - [ ] Land via PR and deploy dry-run-only from `main`; keep live untouched.
+- [ ] Rerun optimizer after the direction-probability lower-bound fix and compare by full executable-EV metrics.
 
 ## Review
 
@@ -90,6 +92,8 @@ Issue: https://github.com/proerror77/ploy/issues/227
 - 2026-04-29: Raw order/fill validation used `strategy_runtime_orders`, `strategy_runtime_fills`, and `strategy_runtime_event_track_record`. Post-deploy orders were all `FILLED` with `quantity_fill_ratio=1.0`; this is a real filled-order sample, not a signal-only sample. Current post-deploy closed sample is still small and negative across all four deployments, so it is not enough to promote a different candidate by PnL alone.
 - 2026-04-29: Found a strategy semantics bug from runtime logs: entries could pass with calibrated `p_hat` near `0.50` when cheap executable price and PM momentum lifted total score above threshold. Fixed runtime and snapshot optimizer so `three_layer_min_direction_prob` is a hard gate on calibrated direction probability before EV/entry scoring. Direction probability stays as alpha input; EV remains the execution-scale gate after probability passes.
 - 2026-04-29: Focused verification passed after the hard direction-probability gate: `rustfmt --edition 2024 crates/ploy-strategy-bundles/src/strategies/three_layer.rs crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-direction-prob-gate-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-strategy-bundles three_layer --lib` (`32 passed, 103 filtered out`), and `CARGO_TARGET_DIR=/tmp/ploy-direction-prob-gate-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`21 passed`).
+- 2026-04-29: Post-deploy optimizer rerun exposed a second issue: the optimizer search space could still choose `three_layer_min_direction_prob=0.500000`, turning the hard gate into a neutral gate. Raised the optimizer search lower bound to `0.525` so subsequent candidates must retain directional alpha before EV/fillable-price scoring.
+- 2026-04-29: Focused verification for the optimizer lower-bound fix passed: `rustfmt --edition 2024 crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `git diff --check`, and `CARGO_TARGET_DIR=/tmp/ploy-direction-prob-bound-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`22 passed`).
 
 # Dry-run Report Contracts And Multi-strategy UI (2026-04-29)
 

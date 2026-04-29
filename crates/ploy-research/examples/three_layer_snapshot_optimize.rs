@@ -20,6 +20,9 @@ use ploy_research::{
 };
 use serde::Serialize;
 
+const OPTIMIZER_MIN_DIRECTION_PROB: f64 = 0.525;
+const OPTIMIZER_MAX_DIRECTION_PROB: f64 = 0.68;
+
 #[derive(Debug, Clone, Copy, Serialize)]
 struct SnapshotThreeLayerParams {
     min_direction_prob: f64,
@@ -1269,7 +1272,9 @@ fn main() -> Result<()> {
     let train_rows = Arc::new(train_rows);
     let val_rows = Arc::new(val_rows);
     let study: Study<f64> = Study::maximize(TpeSampler::new());
-    let p_min_direction_prob = FloatParam::new(0.50, 0.68).name("three_layer_min_direction_prob");
+    let p_min_direction_prob =
+        FloatParam::new(OPTIMIZER_MIN_DIRECTION_PROB, OPTIMIZER_MAX_DIRECTION_PROB)
+            .name("three_layer_min_direction_prob");
     let p_min_distance_over_sigma =
         FloatParam::new(-0.20, 0.60).name("three_layer_min_distance_over_sigma");
     let p_min_confirmation_score =
@@ -1398,7 +1403,9 @@ fn main() -> Result<()> {
         .context("no completed optimizer trials")?;
     let best_min_time_remaining_secs = best.get(&p_min_time_remaining_secs).unwrap_or(30);
     let best_params = SnapshotThreeLayerParams {
-        min_direction_prob: best.get(&p_min_direction_prob).unwrap_or(0.52),
+        min_direction_prob: best
+            .get(&p_min_direction_prob)
+            .unwrap_or(OPTIMIZER_MIN_DIRECTION_PROB),
         min_distance_over_sigma: best.get(&p_min_distance_over_sigma).unwrap_or(0.10),
         min_confirmation_score: strategy_profile
             .fixes_confirmation_threshold()
@@ -1607,7 +1614,8 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SnapshotObjectiveMetrics, SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
+        OPTIMIZER_MAX_DIRECTION_PROB, OPTIMIZER_MIN_DIRECTION_PROB, SnapshotObjectiveMetrics,
+        SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
         calibrate_direction_probability, calibrated_model_probability, compounded_log_growth,
         default_min_trades_from_coverage, directional_score, evaluate_snapshot_objective,
         executable_edge_score, expected_value_per_share, expected_value_per_staked_dollar,
@@ -1918,6 +1926,15 @@ mod tests {
                 > expected_value_per_staked_dollar(0.72, 0.70),
             "lower probability can still be better when payoff per staked dollar is higher"
         );
+    }
+
+    #[test]
+    fn optimizer_search_keeps_direction_probability_meaningful() {
+        assert!(
+            OPTIMIZER_MIN_DIRECTION_PROB > 0.50,
+            "optimizer must not search neutral direction-probability gates"
+        );
+        assert!(OPTIMIZER_MIN_DIRECTION_PROB < OPTIMIZER_MAX_DIRECTION_PROB);
     }
 
     #[test]
