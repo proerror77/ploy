@@ -20,7 +20,7 @@
 - [x] Penalize predicted-EV vs realized-fillable-return mismatch in the optimizer objective.
 - [x] Add focused tests for probability calibration and realized expectancy mismatch.
 - [x] Run formatter/diff checks, CI tests, rerun optimizer, and compare candidates.
-- [ ] Promote the calibrated champion dry-run config and redeploy dry-run only.
+- [x] Promote the calibrated champion dry-run config and redeploy dry-run only.
 
 ## Review
 
@@ -29,6 +29,7 @@
 - 2026-04-29: Local verification passed: `rustfmt --edition 2024` on touched Rust files, `git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-calibrated-expectancy-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`20 passed`), `CARGO_TARGET_DIR=/tmp/ploy-calibrated-expectancy-test rtk cargo test -p ploy-strategy-bundles three_layer --lib` (`31 passed, 103 filtered out`), and `ploy-strategy-bundles` test/example no-run compilation. CI and optimizer reruns remain pending.
 - 2026-04-29: PR #229 merged to `main@9c7d7fbc`; GitHub Test run `25096237797` passed all required jobs, and deploy run `25096440320` succeeded. Tango verification showed `ployd` active/running with `NRestarts=0`, no alerts, no remote cargo/rustc build process, dry-run deployments running, and `pm5d.threelayer.live` still Paused.
 - 2026-04-29: Calibrated optimizer reruns on `main@9c7d7fbc` and snapshot `25029217647`: champion `25096720302` validation PnL `$3,640.74`, DD `$224.74`, trades `341`, fill `100%`, win `44.28%`, realized return/stake `0.7118`, EV gap `0.1085`, positive day/symbol `100%/100%`; obi_soft `25096721695` validation PnL `-$127.99`, DD `$590.04`; continuation_soft `25096723178` validation PnL `-$290.10`, DD `$1,564.88`. Champion is the only calibrated candidate worth promoting to dry-run config; live remains untouched.
+- 2026-04-29: PR #231 merged to `main@f5e2f787`; GitHub Test run `25097131517` passed, and deploy run `25097228117` succeeded. Tango verification after redeploy: `ployd` active/running, `NRestarts=0`, `active_alerts=0`, no cargo/rustc build processes, `pm5d.threelayer.champion.dryrun` desired/observed `Running`, and `pm5d.threelayer.live` desired/observed `Paused`. Remote champion TOML now has `three_layer_probability_shrink=0.462909`, `three_layer_probability_haircut=0.0`, `three_layer_min_entry_score=0.355216`, and dry-run mode with `stake_usd=15.0`.
 
 # Dry-run Report Contracts And Multi-strategy UI (2026-04-29)
 
