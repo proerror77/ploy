@@ -1,3 +1,30 @@
+# PM5D Calibrated Expectancy Objective (2026-04-29)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+  - Owner: config surface/defaults for PM5D three-layer probability calibration.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: runtime probability calibration before executable EV scoring.
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: optimizer probability calibration search, realized expectancy diagnostics, and calibration penalties.
+- `tasks/todo.md`
+  - Owner: plan, verification evidence, and optimizer rerun notes.
+
+## Tasks
+
+- [x] Add conservative probability shrink/haircut fields with backward-compatible defaults.
+- [x] Apply calibrated direction probability before runtime EV gates and snapshot EV scoring.
+- [x] Penalize predicted-EV vs realized-fillable-return mismatch in the optimizer objective.
+- [x] Add focused tests for probability calibration and realized expectancy mismatch.
+- [ ] Run formatter/diff checks, CI tests, rerun optimizer, and compare candidates.
+
+## Review
+
+- 2026-04-29: Follow-up correction: EV is now explicit, but optimizer results still show predicted EV per stake far above realized fillable PnL per stake. That means raw/transformed direction probability is overconfident for execution; the next fix should calibrate probability and penalize EV overstatement, not discard probability.
+- 2026-04-29: Runtime and snapshot optimizer now calibrate the transformed direction probability with `three_layer_probability_shrink` and `three_layer_probability_haircut` before EV scoring. The optimizer now records realized return per stake, predicted-vs-realized EV gap, and penalizes calibration overstatement in both stable and train/validation selection objectives.
+- 2026-04-29: Local verification passed: `rustfmt --edition 2024` on touched Rust files, `git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-calibrated-expectancy-test rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`20 passed`), `CARGO_TARGET_DIR=/tmp/ploy-calibrated-expectancy-test rtk cargo test -p ploy-strategy-bundles three_layer --lib` (`31 passed, 103 filtered out`), and `ploy-strategy-bundles` test/example no-run compilation. CI and optimizer reruns remain pending.
+
 # PM5D Expectancy And Fillable-Order Gate (2026-04-29)
 
 ## Files

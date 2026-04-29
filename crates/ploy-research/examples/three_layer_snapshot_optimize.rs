@@ -31,6 +31,8 @@ struct SnapshotThreeLayerParams {
     min_entry_score: f64,
     alpha_contrarian: bool,
     cex_contrarian: bool,
+    probability_shrink: f64,
+    probability_haircut: f64,
     cooldown_secs: i64,
     min_time_remaining_secs: i64,
     max_time_remaining_secs: i64,
@@ -118,6 +120,8 @@ struct SnapshotObjectiveMetrics {
     avg_reward_risk: f64,
     avg_expected_value_per_share: f64,
     avg_expected_value_per_stake: f64,
+    avg_realized_return_per_stake: f64,
+    expectancy_calibration_gap: f64,
     sharpe: f64,
     max_drawdown: f64,
     log_growth: f64,
@@ -311,6 +315,22 @@ fn expected_value_per_staked_dollar(direction_probability: f64, entry_price: f64
     expected_value / entry_price
 }
 
+fn calibrate_direction_probability(
+    direction_probability: f64,
+    probability_shrink: f64,
+    probability_haircut: f64,
+) -> f64 {
+    if !direction_probability.is_finite()
+        || !probability_shrink.is_finite()
+        || !probability_haircut.is_finite()
+    {
+        return f64::NAN;
+    }
+    let shrink = probability_shrink.clamp(0.0, 1.0);
+    let haircut = probability_haircut.clamp(0.0, 0.49);
+    (0.5 + (direction_probability - 0.5) * shrink - haircut).clamp(0.01, 0.99)
+}
+
 fn confirmation_score(row: &FactorObservationV2, profile: StrategyProfile) -> f64 {
     let side = row.side.multiplier();
     let continuation = finite_or_zero(row.cex_continuation_score_side).clamp(-1.0, 1.0);
@@ -345,7 +365,7 @@ fn three_layer_entry_score(
     params: &SnapshotThreeLayerParams,
     profile: StrategyProfile,
 ) -> f64 {
-    let alpha_prob = transformed_model_probability(row.side_model_prob, params.alpha_contrarian);
+    let alpha_prob = calibrated_model_probability(row, params);
     let direction_score = directional_score(alpha_prob, params.min_direction_prob, 0.25, false);
     let distance_score = directional_score(
         row.side_distance_over_sigma,
@@ -414,6 +434,17 @@ fn transformed_model_probability(side_model_prob: f64, alpha_contrarian: bool) -
     }
 }
 
+fn calibrated_model_probability(
+    row: &FactorObservationV2,
+    params: &SnapshotThreeLayerParams,
+) -> f64 {
+    calibrate_direction_probability(
+        transformed_model_probability(row.side_model_prob, params.alpha_contrarian),
+        params.probability_shrink,
+        params.probability_haircut,
+    )
+}
+
 fn executable_edge_threshold(params: &SnapshotThreeLayerParams) -> f64 {
     params.min_edge.max(0.0)
 }
@@ -423,10 +454,7 @@ fn executable_edge_score(edge: f64, params: &SnapshotThreeLayerParams) -> f64 {
 }
 
 fn executable_model_edge(row: &FactorObservationV2, params: &SnapshotThreeLayerParams) -> f64 {
-    expected_value_per_share(
-        transformed_model_probability(row.side_model_prob, params.alpha_contrarian),
-        row.entry_ask,
-    )
+    expected_value_per_share(calibrated_model_probability(row, params), row.entry_ask)
 }
 
 fn directional_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> f64 {
@@ -515,6 +543,8 @@ fn evaluate_snapshot_objective(
     let mut reward_risk_sum = 0.0;
     let mut expected_value_per_share_sum = 0.0;
     let mut expected_value_per_stake_sum = 0.0;
+    let mut realized_return_per_stake_sum = 0.0;
+    let stake = stake_usd.max(1.0);
 
     for row in rows {
         if !row_passes_gates(row, params, profile) {
@@ -548,8 +578,7 @@ fn evaluate_snapshot_objective(
             rejected_non_executable += 1;
             continue;
         }
-        let direction_probability =
-            transformed_model_probability(row.side_model_prob, params.alpha_contrarian);
+        let direction_probability = calibrated_model_probability(row, params);
         let ev_per_share = expected_value_per_share(direction_probability, row.entry_ask);
         let ev_per_stake = expected_value_per_staked_dollar(direction_probability, row.entry_ask);
         if !ev_per_share.is_finite() || !ev_per_stake.is_finite() {
@@ -562,6 +591,7 @@ fn evaluate_snapshot_objective(
         reward_risk_sum += reward_risk;
         expected_value_per_share_sum += ev_per_share;
         expected_value_per_stake_sum += ev_per_stake;
+        realized_return_per_stake_sum += pnl / stake;
         *pnl_by_day
             .entry(row.tick_ts.date_naive().to_string())
             .or_default() += pnl;
@@ -597,6 +627,17 @@ fn evaluate_snapshot_objective(
     } else {
         expected_value_per_stake_sum / trades as f64
     };
+    let avg_realized_return_per_stake = if trades == 0 {
+        f64::NAN
+    } else {
+        realized_return_per_stake_sum / trades as f64
+    };
+    let expectancy_calibration_gap =
+        if avg_expected_value_per_stake.is_finite() && avg_realized_return_per_stake.is_finite() {
+            (avg_expected_value_per_stake - avg_realized_return_per_stake).max(0.0)
+        } else {
+            f64::NAN
+        };
     let sharpe = trade_sharpe(&pnls);
     let fill_rate = ratio(trades, selected);
     let reject_rate = ratio(rejected_non_executable, selected);
@@ -629,6 +670,8 @@ fn evaluate_snapshot_objective(
             avg_entry_price,
             avg_reward_risk,
             avg_expected_value_per_stake,
+            avg_realized_return_per_stake,
+            expectancy_calibration_gap,
             fill_rate,
             reject_rate,
             positive_day_rate,
@@ -650,6 +693,8 @@ fn evaluate_snapshot_objective(
         avg_reward_risk,
         avg_expected_value_per_share,
         avg_expected_value_per_stake,
+        avg_realized_return_per_stake,
+        expectancy_calibration_gap,
         sharpe,
         max_drawdown,
         log_growth,
@@ -676,6 +721,8 @@ struct StableObjectiveInputs {
     avg_entry_price: f64,
     avg_reward_risk: f64,
     avg_expected_value_per_stake: f64,
+    avg_realized_return_per_stake: f64,
+    expectancy_calibration_gap: f64,
     fill_rate: f64,
     reject_rate: f64,
     positive_day_rate: f64,
@@ -702,6 +749,16 @@ fn stable_compounding_objective(inputs: StableObjectiveInputs) -> f64 {
     } else {
         -0.5
     };
+    let realized_expectancy_quality = if inputs.avg_realized_return_per_stake.is_finite() {
+        inputs.avg_realized_return_per_stake.clamp(-0.5, 1.5)
+    } else {
+        -0.5
+    };
+    let calibration_penalty = if inputs.expectancy_calibration_gap.is_finite() {
+        2.5 * inputs.expectancy_calibration_gap.clamp(0.0, 2.0)
+    } else {
+        2.0
+    };
     let rich_entry_penalty = if inputs.avg_entry_price.is_finite() {
         ((inputs.avg_entry_price - 0.55).max(0.0) * 4.0).clamp(0.0, 2.0)
     } else {
@@ -711,11 +768,13 @@ fn stable_compounding_objective(inputs: StableObjectiveInputs) -> f64 {
         + 1.5 * inputs.positive_symbol_rate
         + inputs.fill_rate.clamp(0.0, 1.0)
         + 0.5 * reward_risk_quality
-        + 0.75 * expectancy_quality;
+        + 0.50 * expectancy_quality
+        + 1.25 * realized_expectancy_quality;
     let risk_penalty = 0.45 * drawdown_stakes
         + 2.0 * inputs.reject_rate.clamp(0.0, 1.0)
         + 2.0 * inputs.concentration.clamp(0.0, 1.0)
-        + rich_entry_penalty;
+        + rich_entry_penalty
+        + calibration_penalty;
     let sharpe_bonus = 0.25 * inputs.sharpe.clamp(-5.0, 5.0);
 
     sample_power * (inputs.log_growth + pnl_term + stability_bonus + sharpe_bonus - risk_penalty)
@@ -745,8 +804,25 @@ fn holistic_selection_objective(
         validation.avg_expected_value_per_stake,
     )
     .clamp(0.0, 2.0);
-    let generalization_penalty =
-        3.0 * stability_gap + 0.75 * reward_risk_gap + 2.0 * entry_gap + expectancy_gap;
+    let realized_expectancy_gap = finite_gap(
+        train.avg_realized_return_per_stake,
+        validation.avg_realized_return_per_stake,
+    )
+    .clamp(0.0, 2.0);
+    let calibration_gap = finite_gap(
+        train.expectancy_calibration_gap,
+        validation.expectancy_calibration_gap,
+    )
+    .clamp(0.0, 2.0);
+    let overstatement_penalty = train.expectancy_calibration_gap.clamp(0.0, 2.0)
+        + 1.5 * validation.expectancy_calibration_gap.clamp(0.0, 2.0);
+    let generalization_penalty = 3.0 * stability_gap
+        + 0.75 * reward_risk_gap
+        + 2.0 * entry_gap
+        + expectancy_gap
+        + realized_expectancy_gap
+        + calibration_gap
+        + overstatement_penalty;
 
     0.40 * train.objective + 0.60 * validation.objective - generalization_penalty
 }
@@ -912,6 +988,8 @@ fn write_outputs(
          # validation_avg_reward_risk = {:.6}\n\
          # validation_avg_expected_value_per_share = {:.6}\n\
          # validation_avg_expected_value_per_stake = {:.6}\n\
+         # validation_avg_realized_return_per_stake = {:.6}\n\
+         # validation_expectancy_calibration_gap = {:.6}\n\
          # validation_max_drawdown = {:.6}\n\
          # validation_log_growth = {:.6}\n\
          # validation_positive_day_rate = {:.6}\n\
@@ -931,6 +1009,8 @@ fn write_outputs(
          three_layer_min_edge = {:.6}\n\
          three_layer_min_reward_risk = {:.6}\n\
          three_layer_min_entry_score = {:.6}\n\
+         three_layer_probability_shrink = {:.6}\n\
+         three_layer_probability_haircut = {:.6}\n\
          three_layer_alpha_contrarian = {}\n\
          three_layer_cex_contrarian = {}\n\
          cooldown_secs = {}\n\
@@ -949,6 +1029,8 @@ fn write_outputs(
         summary.val_metrics.avg_reward_risk,
         summary.val_metrics.avg_expected_value_per_share,
         summary.val_metrics.avg_expected_value_per_stake,
+        summary.val_metrics.avg_realized_return_per_stake,
+        summary.val_metrics.expectancy_calibration_gap,
         summary.val_metrics.max_drawdown,
         summary.val_metrics.log_growth,
         summary.val_metrics.positive_day_rate,
@@ -976,6 +1058,8 @@ fn write_outputs(
         params.min_edge,
         params.min_reward_risk,
         params.min_entry_score,
+        params.probability_shrink,
+        params.probability_haircut,
         params.alpha_contrarian,
         params.cex_contrarian,
         params.cooldown_secs,
@@ -1010,7 +1094,7 @@ fn write_outputs(
 
 fn print_metrics(label: &str, metrics: &SnapshotObjectiveMetrics) {
     eprintln!(
-        "{label}: objective={:.3} sharpe={:.3} pnl=${:.2} avg_entry={:.3} avg_rr={:.3} avg_ev_share={:.4} avg_ev_stake={:.3} max_dd=${:.2} log_growth={:.3} pos_day={:.2}% pos_symbol={:.2}% concentration={:.2}% trades={} candidates={} selected={} fill_rate={:.2}% win_rate={:.2}% reject={:.2}% non_exec={} dup={} cooldown={}",
+        "{label}: objective={:.3} sharpe={:.3} pnl=${:.2} avg_entry={:.3} avg_rr={:.3} avg_ev_share={:.4} avg_ev_stake={:.3} avg_real_stake={:.3} ev_gap={:.3} max_dd=${:.2} log_growth={:.3} pos_day={:.2}% pos_symbol={:.2}% concentration={:.2}% trades={} candidates={} selected={} fill_rate={:.2}% win_rate={:.2}% reject={:.2}% non_exec={} dup={} cooldown={}",
         metrics.objective,
         metrics.sharpe,
         metrics.net_pnl,
@@ -1018,6 +1102,8 @@ fn print_metrics(label: &str, metrics: &SnapshotObjectiveMetrics) {
         metrics.avg_reward_risk,
         metrics.avg_expected_value_per_share,
         metrics.avg_expected_value_per_stake,
+        metrics.avg_realized_return_per_stake,
+        metrics.expectancy_calibration_gap,
         metrics.max_drawdown,
         metrics.log_growth,
         metrics.positive_day_rate * 100.0,
@@ -1192,6 +1278,8 @@ fn main() -> Result<()> {
     let p_min_edge = FloatParam::new(0.0, 0.08).name("three_layer_min_edge");
     let p_min_reward_risk = FloatParam::new(0.20, 2.0).name("three_layer_min_reward_risk");
     let p_min_entry_score = FloatParam::new(0.05, 0.55).name("three_layer_min_entry_score");
+    let p_probability_shrink = FloatParam::new(0.35, 1.0).name("three_layer_probability_shrink");
+    let p_probability_haircut = FloatParam::new(0.0, 0.08).name("three_layer_probability_haircut");
     let p_alpha_contrarian = BoolParam::new().name("alpha_contrarian");
     let p_cex_contrarian = BoolParam::new().name("cex_contrarian");
     let p_cooldown_secs = IntParam::new(15, 60).name("cooldown_secs");
@@ -1207,6 +1295,8 @@ fn main() -> Result<()> {
         let p_min_edge_c = p_min_edge.clone();
         let p_min_reward_risk_c = p_min_reward_risk.clone();
         let p_min_entry_score_c = p_min_entry_score.clone();
+        let p_probability_shrink_c = p_probability_shrink.clone();
+        let p_probability_haircut_c = p_probability_haircut.clone();
         let p_alpha_contrarian_c = p_alpha_contrarian.clone();
         let p_cex_contrarian_c = p_cex_contrarian.clone();
         let p_cooldown_secs_c = p_cooldown_secs.clone();
@@ -1240,6 +1330,8 @@ fn main() -> Result<()> {
                     min_entry_score: p_min_entry_score_c.suggest(trial)?,
                     alpha_contrarian,
                     cex_contrarian,
+                    probability_shrink: p_probability_shrink_c.suggest(trial)?,
+                    probability_haircut: p_probability_haircut_c.suggest(trial)?,
                     cooldown_secs: p_cooldown_secs_c.suggest(trial)?,
                     min_time_remaining_secs,
                     max_time_remaining_secs: min_time_remaining_secs
@@ -1263,7 +1355,7 @@ fn main() -> Result<()> {
                 let objective =
                     holistic_selection_objective(&train_metrics, &val_metrics, min_trades);
                 eprintln!(
-                    "  Trial {:>3}: profile={} source=snapshot-observation objective={:>9.3} train_obj={:>8.3} val_obj={:>8.3} train_pnl=${:>8.2}/{} val_pnl=${:>8.2}/{} val_dd=${:>7.2} val_entry={:.3} val_rr={:.2} val_ev_stake={:.3} val_pos_sym={:>5.1}% | dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} min_ev={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
+                    "  Trial {:>3}: profile={} source=snapshot-observation objective={:>9.3} train_obj={:>8.3} val_obj={:>8.3} train_pnl=${:>8.2}/{} val_pnl=${:>8.2}/{} val_dd=${:>7.2} val_entry={:.3} val_rr={:.2} val_ev_stake={:.3} val_real_stake={:.3} val_ev_gap={:.3} val_pos_sym={:>5.1}% | dir_prob={:.3} shrink={:.3} haircut={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} min_ev={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
                     trial.id(),
                     strategy_profile.as_str(),
                     objective,
@@ -1277,8 +1369,12 @@ fn main() -> Result<()> {
                     val_metrics.avg_entry_price,
                     val_metrics.avg_reward_risk,
                     val_metrics.avg_expected_value_per_stake,
+                    val_metrics.avg_realized_return_per_stake,
+                    val_metrics.expectancy_calibration_gap,
                     val_metrics.positive_symbol_rate * 100.0,
                     params.min_direction_prob,
+                    params.probability_shrink,
+                    params.probability_haircut,
                     params.min_distance_over_sigma,
                     params.min_confirmation_score,
                     params.min_drift_confirmation,
@@ -1316,6 +1412,8 @@ fn main() -> Result<()> {
         cex_contrarian: strategy_profile
             .fixes_cex_contrarian()
             .unwrap_or_else(|| best.get(&p_cex_contrarian).unwrap_or(false)),
+        probability_shrink: best.get(&p_probability_shrink).unwrap_or(1.0),
+        probability_haircut: best.get(&p_probability_haircut).unwrap_or(0.0),
         cooldown_secs: best.get(&p_cooldown_secs).unwrap_or(15),
         min_time_remaining_secs: best_min_time_remaining_secs,
         max_time_remaining_secs: best_min_time_remaining_secs
@@ -1372,6 +1470,14 @@ fn main() -> Result<()> {
         "three_layer_min_entry_score = {:.6}",
         best_params.min_entry_score
     );
+    eprintln!(
+        "three_layer_probability_shrink = {:.6}",
+        best_params.probability_shrink
+    );
+    eprintln!(
+        "three_layer_probability_haircut = {:.6}",
+        best_params.probability_haircut
+    );
     eprintln!("alpha_contrarian = {}", best_params.alpha_contrarian);
     eprintln!("cex_contrarian = {}", best_params.cex_contrarian);
     eprintln!("cooldown_secs = {}", best_params.cooldown_secs);
@@ -1427,6 +1533,14 @@ fn main() -> Result<()> {
     eprintln!(
         "three_layer_min_entry_score = {:.6}",
         best_params.min_entry_score
+    );
+    eprintln!(
+        "three_layer_probability_shrink = {:.6}",
+        best_params.probability_shrink
+    );
+    eprintln!(
+        "three_layer_probability_haircut = {:.6}",
+        best_params.probability_haircut
     );
     eprintln!(
         "three_layer_alpha_contrarian = {}",
@@ -1493,11 +1607,12 @@ fn main() -> Result<()> {
 mod tests {
     use super::{
         SnapshotObjectiveMetrics, SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
-        compounded_log_growth, default_min_trades_from_coverage, directional_score,
-        evaluate_snapshot_objective, executable_edge_score, expected_value_per_share,
-        expected_value_per_staked_dollar, holistic_selection_objective, max_drawdown,
-        parse_date_end, reward_risk_ratio, sample_power_multiplier, stable_compounding_objective,
-        trade_sharpe, transformed_model_probability,
+        calibrate_direction_probability, calibrated_model_probability, compounded_log_growth,
+        default_min_trades_from_coverage, directional_score, evaluate_snapshot_objective,
+        executable_edge_score, expected_value_per_share, expected_value_per_staked_dollar,
+        holistic_selection_objective, max_drawdown, parse_date_end, reward_risk_ratio,
+        sample_power_multiplier, stable_compounding_objective, trade_sharpe,
+        transformed_model_probability,
     };
     use chrono::{TimeZone, Utc};
     use ploy_research::{FactorObservationV2, Regime, ReviewSide};
@@ -1513,6 +1628,8 @@ mod tests {
             min_entry_score: 0.1,
             alpha_contrarian: false,
             cex_contrarian: false,
+            probability_shrink: 1.0,
+            probability_haircut: 0.0,
             cooldown_secs: 30,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 180,
@@ -1524,6 +1641,16 @@ mod tests {
         net_pnl: f64,
         objective: f64,
     ) -> SnapshotObjectiveMetrics {
+        let avg_realized_return_per_stake = if trades == 0 {
+            f64::NAN
+        } else {
+            net_pnl / 15.0 / trades as f64
+        };
+        let expectancy_calibration_gap = if avg_realized_return_per_stake.is_finite() {
+            (0.19 - avg_realized_return_per_stake).max(0.0)
+        } else {
+            f64::NAN
+        };
         SnapshotObjectiveMetrics {
             candidates: trades,
             selected: trades,
@@ -1541,6 +1668,8 @@ mod tests {
             avg_reward_risk: 1.35,
             avg_expected_value_per_share: 0.08,
             avg_expected_value_per_stake: 0.19,
+            avg_realized_return_per_stake,
+            expectancy_calibration_gap,
             sharpe: 2.0,
             max_drawdown: 60.0,
             log_growth: 8.0,
@@ -1728,6 +1857,36 @@ mod tests {
     }
 
     #[test]
+    fn probability_calibration_lowers_rich_entry_ev() {
+        let mut params = test_params();
+        params.probability_shrink = 0.50;
+        params.probability_haircut = 0.03;
+        let row = test_row("event-calibrated", 0.70, 0.60, Some(-1.0), true, 0);
+
+        let raw_probability =
+            transformed_model_probability(row.side_model_prob, params.alpha_contrarian);
+        let calibrated_probability = calibrated_model_probability(&row, &params);
+
+        assert!((calibrated_probability - 0.57).abs() < 1e-9);
+        assert!(calibrated_probability < raw_probability);
+        assert!(
+            expected_value_per_share(calibrated_probability, row.entry_ask)
+                < expected_value_per_share(raw_probability, row.entry_ask),
+            "calibration should lower overconfident EV on rich executable entries"
+        );
+        assert!(
+            expected_value_per_share(calibrated_probability, row.entry_ask) < 0.0,
+            "rich entry should fail EV after shrink and haircut"
+        );
+    }
+
+    #[test]
+    fn calibrate_direction_probability_handles_invalid_inputs() {
+        assert!(calibrate_direction_probability(f64::NAN, 0.5, 0.0).is_nan());
+        assert_eq!(calibrate_direction_probability(0.70, 2.0, -1.0), 0.70);
+    }
+
+    #[test]
     fn executable_edge_score_never_rewards_negative_edge() {
         let mut params = test_params();
         params.alpha_contrarian = true;
@@ -1793,6 +1952,8 @@ mod tests {
             avg_entry_price: 0.42,
             avg_reward_risk: 1.35,
             avg_expected_value_per_stake: 0.19,
+            avg_realized_return_per_stake: 0.15,
+            expectancy_calibration_gap: 0.04,
             fill_rate: 0.95,
             reject_rate: 0.02,
             positive_day_rate: 1.0,
@@ -1810,6 +1971,8 @@ mod tests {
             avg_entry_price: 0.72,
             avg_reward_risk: 0.35,
             avg_expected_value_per_stake: -0.05,
+            avg_realized_return_per_stake: -0.02,
+            expectancy_calibration_gap: 0.03,
             fill_rate: 0.70,
             reject_rate: 0.25,
             positive_day_rate: 0.50,
@@ -1818,6 +1981,41 @@ mod tests {
         });
 
         assert!(smooth > choppy);
+    }
+
+    #[test]
+    fn stable_objective_penalizes_predicted_ev_overstatement() {
+        let base = StableObjectiveInputs {
+            trades: 800,
+            min_trades: 400,
+            stake_usd: 15.0,
+            net_pnl: 900.0,
+            sharpe: 2.0,
+            max_drawdown: 80.0,
+            log_growth: 10.0,
+            avg_entry_price: 0.42,
+            avg_reward_risk: 1.35,
+            avg_expected_value_per_stake: 0.12,
+            avg_realized_return_per_stake: 0.10,
+            expectancy_calibration_gap: 0.02,
+            fill_rate: 0.95,
+            reject_rate: 0.02,
+            positive_day_rate: 1.0,
+            positive_symbol_rate: 1.0,
+            concentration: 0.25,
+        };
+        let honest = stable_compounding_objective(base);
+        let overstated = stable_compounding_objective(StableObjectiveInputs {
+            avg_expected_value_per_stake: 1.30,
+            avg_realized_return_per_stake: 0.02,
+            expectancy_calibration_gap: 1.28,
+            ..base
+        });
+
+        assert!(
+            honest > overstated,
+            "same realized PnL should score worse when predicted EV greatly exceeds realized return"
+        );
     }
 
     #[test]
@@ -1853,6 +2051,25 @@ mod tests {
         let validation_loss = metrics_for_selection(160, -50.0, 8.0);
 
         assert!(holistic_selection_objective(&train, &validation_loss, 40) < -9_000.0);
+    }
+
+    #[test]
+    fn holistic_selection_penalizes_validation_calibration_gap() {
+        let train = metrics_for_selection(300, 900.0, 10.0);
+        let mut calibrated_validation = metrics_for_selection(160, 300.0, 8.0);
+        calibrated_validation.avg_expected_value_per_stake = 0.12;
+        calibrated_validation.avg_realized_return_per_stake = 0.11;
+        calibrated_validation.expectancy_calibration_gap = 0.01;
+
+        let mut overstated_validation = calibrated_validation.clone();
+        overstated_validation.avg_expected_value_per_stake = 1.20;
+        overstated_validation.avg_realized_return_per_stake = 0.05;
+        overstated_validation.expectancy_calibration_gap = 1.15;
+
+        assert!(
+            holistic_selection_objective(&train, &calibrated_validation, 40)
+                > holistic_selection_objective(&train, &overstated_validation, 40)
+        );
     }
 
     #[test]

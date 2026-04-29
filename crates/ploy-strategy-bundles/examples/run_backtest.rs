@@ -263,6 +263,8 @@ fn main() {
                     three_layer_min_reward_risk: 1.2,
                     three_layer_alpha_contrarian: false,
                     three_layer_cex_contrarian: false,
+                    three_layer_probability_shrink: 1.0,
+                    three_layer_probability_haircut: 0.0,
                     three_layer_take_profit_ask: 0.70,
                     three_layer_stop_distance_pct: 0.020,
                     three_layer_max_pm_lag_secs: 15,
