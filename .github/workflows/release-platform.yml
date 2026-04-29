@@ -7,6 +7,11 @@ on:
         description: "Git ref to release (branch, tag, or SHA)"
         required: true
         default: "main"
+      deploy:
+        description: "Deploy the built bundle after build verification"
+        type: boolean
+        required: true
+        default: true
 
 concurrency:
   group: release-platform-${{ github.ref }}
@@ -18,6 +23,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  SCCACHE_CACHE_SIZE: 10G
+  TZ: UTC
+  LC_ALL: C
+  LANG: C
   PLATFORM_TARGET: x86_64-unknown-linux-gnu
   DEPLOY_ROOT: ${{ vars.PLOY_DEPLOY_ROOT || '/opt/ploy' }}
 
@@ -33,8 +42,11 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
+      - name: Set reproducible build environment
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           targets: ${{ env.PLATFORM_TARGET }}
 
@@ -42,6 +54,31 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev libpq-dev clang lld
+          sudo apt-get install -y sccache || cargo install sccache --locked
+          sudo apt-get install -y mold || true
+
+      - name: Capture cache metadata
+        id: cache_meta
+        run: |
+          echo "rustc_version=$(rustc -Vv | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
+          echo "sccache_version=$(sccache --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-platform-${{ env.PLATFORM_TARGET }}-release-rust-${{ steps.cache_meta.outputs.rustc_version }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache sccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: ${{ runner.os }}-sccache-release-platform-${{ env.PLATFORM_TARGET }}-release-rust-${{ steps.cache_meta.outputs.rustc_version }}-sccache-${{ steps.cache_meta.outputs.sccache_version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sccache-release-platform-${{ env.PLATFORM_TARGET }}-release-rust-${{ steps.cache_meta.outputs.rustc_version }}-sccache-${{ steps.cache_meta.outputs.sccache_version }}-
+            ${{ runner.os }}-sccache-release-platform-${{ env.PLATFORM_TARGET }}-release-rust-${{ steps.cache_meta.outputs.rustc_version }}-
+            ${{ runner.os }}-sccache-release-platform-${{ env.PLATFORM_TARGET }}-release-
+            ${{ runner.os }}-sccache-release-platform-
+            ${{ runner.os }}-sccache-
 
       - name: Build platform binaries
         run: |
@@ -60,6 +97,7 @@ jobs:
 
       - name: Create platform bundle
         run: |
+          set -euo pipefail
           bundle_root="dist/platform-bundle"
           mkdir -p \
             "${bundle_root}/bin" \
@@ -77,18 +115,27 @@ jobs:
           install -m 755 scripts/drills/live_dry_run.sh "${bundle_root}/scripts/drills/live_dry_run.sh"
           install -m 644 config/deployments/example.live.dry-run.json "${bundle_root}/config/deployments/example.live.dry-run.json.sample"
           install -m 644 data/state/deployments.json.sample "${bundle_root}/data/state/deployments.json.sample"
-          tar czf dist/ploy-platform.tar.gz -C "${bundle_root}" .
+          tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+            -C "${bundle_root}" -cf - . | gzip -n > dist/ploy-platform.tar.gz
+          (cd dist && sha256sum ploy-platform.tar.gz > ploy-platform.tar.gz.sha256)
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
       - name: Upload platform bundle
         uses: actions/upload-artifact@v4
         with:
           name: ploy-platform-bundle
-          path: dist/ploy-platform.tar.gz
+          path: |
+            dist/ploy-platform.tar.gz
+            dist/ploy-platform.tar.gz.sha256
           retention-days: 14
 
   deploy:
     name: Deploy platform bundle
     needs: build
+    if: ${{ inputs.deploy }}
     runs-on: ubuntu-latest
     environment: production
 
@@ -99,6 +146,9 @@ jobs:
           name: ploy-platform-bundle
           path: dist
 
+      - name: Verify platform bundle checksum
+        run: (cd dist && sha256sum -c ploy-platform.tar.gz.sha256)
+
       - name: Upload platform bundle to host
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -106,7 +156,7 @@ jobs:
           username: ${{ vars.EC2_USER || 'ec2-user' }}
           key: ${{ secrets.EC2_SSH_KEY }}
           fingerprint: ${{ secrets.EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT }}
-          source: dist/ploy-platform.tar.gz
+          source: dist/ploy-platform.tar.gz,dist/ploy-platform.tar.gz.sha256
           target: /tmp/
           strip_components: 1
 
@@ -125,6 +175,7 @@ jobs:
             WORKDIR="/tmp/ploy-platform"
             rm -rf "${WORKDIR}"
             mkdir -p "${WORKDIR}"
+            (cd /tmp && sha256sum -c ploy-platform.tar.gz.sha256)
             tar xzf /tmp/ploy-platform.tar.gz -C "${WORKDIR}"
 
             SUDO=""
@@ -163,7 +214,9 @@ jobs:
 
       - name: Deployment summary
         run: |
-          echo "## Platform Release" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Bundle: \`ployd + ployctl + ploytui\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Service: \`ployd.service\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Drill: \`/opt/ploy/scripts/drills/live_dry_run.sh\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Platform Release"
+            echo "- Bundle: \`ployd + ployctl + ploytui\`"
+            echo "- Service: \`ployd.service\`"
+            echo "- Drill: \`/opt/ploy/scripts/drills/live_dry_run.sh\`"
+          } >> "$GITHUB_STEP_SUMMARY"

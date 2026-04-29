@@ -147,6 +147,8 @@ ci/<short-description>        — CI/workflow changes
 ### Deployment
 - **Backtest**: trigger `backtest.yml` (workflow_dispatch) with `git_ref=main`
 - **Deploy dryrun/live**: trigger `deploy-tango-1-1.yml` (workflow_dispatch) with `git_ref=main`
+- **Deploy trade**: trigger `deploy-trade.yml` (workflow_dispatch) with `git_ref=main`
+- **Release platform**: trigger `release-platform.yml` (workflow_dispatch) with `git_ref=main`
 - Never deploy from a feature branch directly
 - Never build Rust on tango-1-1 — CI builds and ships artifacts only
 
@@ -257,7 +259,7 @@ Available gstack skills: /office-hours, /plan-ceo-review, /plan-eng-review, /pla
 
 - For trading hosts (for example `tango-1-1`), do not build Rust source on-host.
 - Build in CI/GitHub Actions and deploy release artifacts only.
-- Preferred production path: `.github/workflows/release-aliyun.yml`.
+- Preferred production path: `.github/workflows/release-platform.yml`.
 - Keep host Rust on latest stable via rustup, and ensure default `rustc`/`cargo` resolve to rustup-managed binaries.
 - Enforce systemd guardrails on live ploy services:
   - `Restart=always`

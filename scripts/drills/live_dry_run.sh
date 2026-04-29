@@ -62,6 +62,17 @@ env_has_any_key() {
   return 1
 }
 
+first_env_value() {
+  local key
+  for key in "$@"; do
+    if env_has_key "$key"; then
+      grep -E "^[[:space:]]*${key}=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- | tr -d '[:space:]'
+      return 0
+    fi
+  done
+  return 1
+}
+
 require_env_key() {
   local key="$1"
   env_has_key "$key" || fail "required env key missing from ${ENV_FILE}: ${key}"
@@ -189,12 +200,20 @@ require_any_env_key "operator credential" \
 if ! env_has_key "PLOY_OPERATOR_TOKEN" && ! env_has_key "PLOY_API_OPERATOR_TOKEN"; then
   warn "operator token not configured; dry-run will rely on admin credentials"
 fi
-require_env_key "POLYMARKET_PRIVATE_KEY"
-if env_has_key "POLY_SIGNATURE_TYPE"; then
-  SIGNATURE_TYPE="$(grep -E '^[[:space:]]*POLY_SIGNATURE_TYPE=' "${ENV_FILE}" | tail -n 1 | cut -d= -f2- | tr -d '[:space:]')"
+require_any_env_key "Polymarket private key" "POLYMARKET_PRIVATE_KEY" "PRIVATE_KEY"
+SIGNATURE_TYPE="$(first_env_value "POLY_SIGNATURE_TYPE" "POLYMARKET_SIGNATURE_TYPE" || true)"
+FUNDER_PRESENT=0
+if env_has_any_key "POLY_FUNDER" "POLYMARKET_FUNDER" "POLYMARKET_FUNDER_ADDRESS"; then
+  FUNDER_PRESENT=1
+fi
+if [[ -n "${SIGNATURE_TYPE}" ]]; then
   if [[ "${SIGNATURE_TYPE}" == "proxy" || "${SIGNATURE_TYPE}" == "gnosis_safe" ]]; then
-    require_env_key "POLY_FUNDER"
+    require_any_env_key "proxy funder" "POLY_FUNDER" "POLYMARKET_FUNDER" "POLYMARKET_FUNDER_ADDRESS"
+  elif [[ "${SIGNATURE_TYPE}" != "eoa" ]]; then
+    fail "unsupported POLY_SIGNATURE_TYPE: ${SIGNATURE_TYPE}"
   fi
+elif [[ "${FUNDER_PRESENT}" -eq 1 ]]; then
+  warn "POLY_SIGNATURE_TYPE is not explicit; current SDK defaults to proxy when a funder is present"
 fi
 [[ -f "${STATE_ROOT}/deployments.json" ]] || fail "missing deployments state file: ${STATE_ROOT}/deployments.json"
 [[ -f "${RUNTIME_ROOT}/system-status.json" ]] || fail "missing system status snapshot: ${RUNTIME_ROOT}/system-status.json"
