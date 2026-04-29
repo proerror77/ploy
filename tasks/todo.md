@@ -1,3 +1,96 @@
+# Dry-Run Deployment Attribution Fix (2026-04-29)
+
+Issue: https://github.com/proerror77/ploy/issues/220
+
+## Files
+
+- `crates/ploy-platform-runtime/src/worker_tick.rs`
+- `crates/ploy-runner-host/src/lib.rs`
+- `crates/ploy-runner-host/src/run.rs`
+- `crates/ploy-strategy-runtime/src/lib.rs`
+- `crates/ploy-strategy-runtime/src/live.rs`
+- `crates/ploy-strategy-bundles/src/engine.rs`
+
+## Tasks
+
+- [x] File a GitHub issue for the dry-run deployment attribution gap.
+- [x] Pass deployment identity from platform worker launch into `new-ploy-runner`.
+- [x] Fill empty strategy-emitted intent `deployment_id` values inside the runtime before submit/record.
+- [x] Add regression tests for worker launch args and runtime attribution.
+- [x] Run targeted formatting/tests and record any remaining deployment/history risks.
+
+## Review
+
+- 2026-04-29: Filed issue #220 for dry-run multi-strategy attribution collapse. The raw-data issue is not the UI alone: historical rows can only split by deployment after new orders/fills carry non-empty `deployment_id`.
+- 2026-04-29: Platform worker launch now passes `--deployment-id <record.deployment_id>` into `new-ploy-runner`; runner CLI also accepts `--deployment-id` and keeps `PLOY_DEPLOYMENT_ID` as an env fallback.
+- 2026-04-29: Strategy runtime now attaches the runtime deployment identity to empty strategy-emitted intents before executor submit, order recording, trading runtime submit, and fill recording. Live/dry-run without deployment identity now fails loudly instead of silently writing un-attributed rows.
+- 2026-04-29: Verification passed: targeted `rustfmt --edition 2024` on touched Rust files, `rtk cargo test -p ploy-platform-runtime build_launch_spec_resolves_strategy_config_path_and_dry_run_flag`, `rtk cargo test -p ploy-strategy-bundles fills_empty_intent_deployment_id_before_submit_and_record`, `rtk cargo test -p ploy-strategy-runtime trims_empty_deployment_ids`, `rtk cargo check -p ploy-runner-host`, `rtk cargo test -p ploy-strategy-bundles recorded_updates_replay_to_the_same_runtime_result`, and scoped `git diff --check`.
+- 2026-04-29: Remaining risk: existing historical dry-run rows with empty `deployment_id` cannot be reliably backfilled without another source of truth. After CI artifact deploy and dry-run worker restart, verify new rows on `tango-1-1` with `GROUP BY runtime_mode, strategy_id, deployment_id`.
+- 2026-04-29: Cleared old dry-run execution audit rows on `tango-1-1` after backup. DB backup tables: `strategy_runtime_orders_dryrun_backup_20260429_092917` and `strategy_runtime_fills_dryrun_backup_20260429_092917`. CSV backups: `/opt/ploy/backups/dryrun-cleanup/strategy_runtime_orders_dryrun_20260429_092917.csv` and `/opt/ploy/backups/dryrun-cleanup/strategy_runtime_fills_dryrun_20260429_092917.csv`. Deleted 2736 order rows; cascade cleared 2724 fill rows; `/api/reports/dry-run` now reports `total_trades=0`.
+
+# Rust Release Build Hygiene (2026-04-27)
+
+## Files
+
+- `Cargo.toml`
+- `rust-toolchain.toml`
+- `.github/actionlint.yaml`
+- `.github/workflows/auto-review.yml`
+- `.github/workflows/backtest.yml`
+- `.github/workflows/test.yml`
+- `.github/workflows/release-platform.yml`
+- `.github/workflows/deploy-tango-1-1.yml`
+- `.github/workflows/deploy-trade.yml`
+- `.github/workflows/build-push-acr.yml`
+- `.github/workflows/healthcheck-tango-1-1.yml`
+- `.github/workflows/optimize.yml`
+- `docs/CONTRIBUTING.md`
+- `docs/runbooks/platform-deploy.md`
+- `README.md`
+
+## Tasks
+
+- [x] Tighten the release profile for shipped binaries without changing dev/fast iteration profiles.
+- [x] Enable release/deploy CI lanes to use the repo's `sccache` wrapper and fast linker path.
+- [x] Add deterministic build environment and artifact checksum checks where bundles/binaries are deployed.
+- [x] Verify workflow syntax and diff hygiene without running heavy local Rust builds.
+
+## Review
+
+- 2026-04-27: Release profile now keeps `thin` LTO but uses one codegen unit, symbol stripping, and packed split debuginfo for shipped binaries; dev and fast profiles remain optimized for iteration.
+- 2026-04-27: `release-platform`, `deploy-tango-1-1`, `deploy-trade`, and `build-push-acr` now install/cache `sccache`, try `mold` before falling back through the repo fast-linker, and set `SOURCE_DATE_EPOCH` from the checked-out commit time with UTC/C locale settings.
+- 2026-04-27: Platform and Tango deploy bundles now use deterministic tar/gzip flags (`--sort=name`, fixed `--mtime`, numeric owner/group, `gzip -n`) before SHA256 generation; platform upload verifies the checksum before deploy upload and again on the remote host, while direct trade deploy verifies the remote runner binary checksum after copy.
+- 2026-04-27: Release/deploy cache keys now include target, `release` profile, `rustc` version, `sccache` version for sccache caches, and `Cargo.lock` hash. This closes the main cache-hygiene gap from the original build checklist.
+- 2026-04-27: Added `rust-toolchain.toml` pinned to Rust `1.91` (currently resolves to `1.91.1` with cargo/clippy/rustfmt) and switched active GitHub workflows from implicit `dtolnay/rust-toolchain@stable` to `@master`, so CI uses the repository toolchain file instead of floating latest stable.
+- 2026-04-27: Added `deploy` workflow_dispatch inputs to platform, Tango, and trade deploy workflows. Defaults remain `true`; setting `deploy=false` gives a build/package/checksum-only verification path without restarting remote services.
+- 2026-04-27: Added `.github/actionlint.yaml` for self-hosted labels (`ploy-ci-1`, `tango-1-1`) and cleaned existing shellcheck findings in `backtest.yml`, `optimize.yml`, and `healthcheck-tango-1-1.yml` so full active-workflow `actionlint` passes.
+- 2026-04-27: Verification used full active-workflow `actionlint`, YAML parsing, `rustup show active-toolchain`, `cargo metadata --no-deps --locked`, and `git diff --check`; no heavy local Rust build was run.
+
+# PM5D ThreeLayer Live Readiness (2026-04-24)
+
+## Files
+
+- `config/strategies/02-pm5d-threelayer.live.toml`
+- `config/deployments/pm5d.threelayer.live.json`
+- `scripts/drills/live_dry_run.sh`
+- `scripts/drills/pm5d_threelayer_live_gate.sh`
+- `.github/workflows/deploy-tango-1-1.yml`
+- `crates/ploy-strategy-bundles/src/config.rs`
+
+## Tasks
+
+- [x] Mirror the current `pm5d.threelayer.dryrun` strategy settings into a live-only config with only `[runtime].mode` changed.
+- [x] Add a paused live deployment manifest so applying it cannot start real orders until an explicit resume.
+- [x] Add a Tango-side live gate script that runs readiness checks and requires an explicit `--go-live` before resume.
+- [x] Ensure the Tango deploy workflow ships the live config, manifests, and drill scripts.
+- [x] Verify config parity and manifest parsing with targeted tests/checks.
+
+## Review
+
+- 2026-04-24: Remote registry read on `tango-1-1` showed current `pm5d.threelayer.dryrun` as `bundle_id=02-pm5d-threelayer.unified`, `account_id=acct-pm5d-dryrun`, `max_gross_exposure=5.00`, `runtime_mode=dryrun`, `desired_state=running`; live manifest mirrors those non-live fields and stays paused.
+- 2026-04-24: Local verification passed: `bash -n scripts/drills/live_dry_run.sh`, `bash -n scripts/drills/pm5d_threelayer_live_gate.sh`, JSON manifest parse, live/dry-run config parity check, workflow YAML parse, `git diff --check` for touched files, `rtk cargo test -p ploy-strategy-bundles threelayer_live_config_matches_dryrun_except_runtime_mode --lib`, and `rtk cargo test -p ploy-strategy-bundles roadmap_config_family_parses --lib`.
+- 2026-04-24: `cargo fmt --check --package ploy-strategy-bundles` still reports unrelated existing formatting drift in strategy/feed/test files outside this live-readiness slice.
+
 # Ploy Frontend Operator Cockpit (2026-04-24)
 
 ## Files
@@ -37,6 +130,50 @@
 - [ ] Let the report generator run directly on `tango-1-1` against its local PostgreSQL instead of SSHing back into the host.
 - [ ] Ship the report script in the tango deploy bundle so `ployd` can regenerate and serve the page on demand.
 - [ ] Deploy the change to `tango-1-1` and verify the report is reachable over the existing control-plane surface.
+
+## Sizing Visualization Correction (2026-04-25)
+
+- [x] Verify raw dry-run orders request roughly 15u per entry via `quantity * limit_price`.
+- [x] Verify smaller visible positions come from partial fills in `strategy_runtime_fills`, often matching recent CLOB `ask_size`.
+- [x] Update `scripts/report_strategy.py` so recent trades and open positions show requested stake, filled notional, fill percentage, and shares separately.
+- [x] Deploy the corrected report script to `tango-1-1` and verify the public page renders the new fields.
+
+# Dry-Run Cockpit UI Review + Multi-Strategy Readiness (2026-04-28)
+
+## Files
+
+- `ploy-frontend/src/pages/OperatorCockpit.tsx`
+- `ploy-frontend/src/components/Layout.tsx`
+- `ploy-frontend/src/services/api.ts`
+- `ploy-frontend/vite.config.ts`
+- `ploy-frontend/.env.development`
+
+## Tasks
+
+- [x] Review the current dry-run cockpit information hierarchy against operator needs.
+- [x] Rework the cockpit so the first viewport separates portfolio totals from per-strategy health.
+- [x] Add a clear three-strategy capacity model so two future strategies can be added without redesigning the page.
+- [x] Verify the frontend build and document remaining UI/data risks.
+
+## Review
+
+- 2026-04-28: Current cockpit data wiring is useful, but the old first viewport mixed aggregate PnL, deployment rows, and single-strategy status, which would become harder to scan after adding two more dry-run strategies.
+- 2026-04-28: First pass added a three-slot strategy board above the existing detail panels. The user found it hard to understand and visually weak, so the cockpit was redesigned again around a plainer operator reading flow.
+- 2026-04-28: Replaced the slot-board design with a Chinese read-first monitor: current conclusion, four high-level operating cards, strategy runtime table, trading performance, system integration status, runtime health, attention queue, and market-data health. Future strategies now extend the strategy table instead of occupying fake empty cards.
+- 2026-04-28: Added explicit system-integration rows for `/api/system/status`, `/api/system/metrics`, `/api/system/alerts`, `/api/deployments`, `/api/trading/state`, `/api/reports/dry-run`, and `/api/market-data/health`, so missing backend support is visible as a system gap rather than a confusing UI blank.
+- 2026-04-28: After the user clarified the target is only dry-run strategy performance, redesigned `/dry-run` again as a black trading-terminal page focused on dry-run report data only: cumulative PnL curve, strategy metrics, win rate, Sharpe, profit factor, drawdown, average trade, closed-trade detail table, symbol performance, open positions, and data derivation notes.
+- 2026-04-28: Sharpe, profit factor, drawdown, and average trade are currently derived in the frontend from `recent_closed` or `daily` report rows. This is a UI-level approximation until the backend report exposes official metrics with a stable accounting window.
+- 2026-04-28: The dry-run strategy page is desktop-only now: it uses a minimum 1280px canvas and does not optimize the trading terminal layout for mobile viewing.
+- 2026-04-28: Connected local development to the real Tango `ployd` by adding `ploy-frontend/.env.development` with `VITE_API_URL=http://8.221.143.151`; verified the local Vite proxy returns live report data (`total_trades=1284`, `closed_trades=1281`, `realized_pnl=-121.42`, `open_exposure=24.24`).
+- 2026-04-28: Fixed frontend auth path coordination by making auth calls hit `/auth/*` rather than `/api/auth/*`, adding a Vite `/auth` proxy, and updating Tango nginx to proxy `/auth/` to `127.0.0.1:8081/auth/`. Verified both `http://8.221.143.151/auth/session` and local `http://127.0.0.1:5173/auth/session` return JSON.
+- 2026-04-28: Extended the real dry-run report contract behind `/api/reports/dry-run` to include `strategies[]`, full historical `equity_curve`, backend-derived Sharpe/profit-factor/max-drawdown/average-trade metrics, and bounded recent closed-trade rows for fast UI rendering. Synchronized the read-only report script to `tango-1-1:/opt/ploy/scripts/report_dryrun_summary.py` and verified the public endpoint returns strategy split data plus 1310 full equity points.
+- 2026-04-28: Updated the `/dry-run` frontend to show ALL dry-run plus per-strategy rows, a long-term cumulative equity curve, backend report metrics, symbol performance, open positions, and a bounded recent trade table (`250 / total`) so the browser no longer stalls on the full historical report payload.
+- 2026-04-28: Visual verification passed on `http://127.0.0.1:5173/dry-run` with the real Tango `ployd` proxy: the page shows `DRY-RUN STRATEGY PERFORMANCE`, strategy split rows, 1310 equity points, and the long-term red equity curve. Screenshot saved as `dry-run-full-strategy-ui.png`.
+- 2026-04-28: Fixed trade-list strategy attribution after the user saw `unknown`: remote DB rows already carried `strategy_id=three_layer`, but Tango had fallen back to the old summary script shape. Reinstalled the updated script on `tango-1-1`, verified public/local API rows now include `runtime_mode=dry_run` and `strategy_id=three_layer`, and updated the trade table with strategy-color labels plus tabs for all/loss/win trades.
+- 2026-04-29: Clarified the three-strategy dry-run gap in the UI: `/api/trading/state` shows three running dry-run/paper deployments (`pm5d.threelayer.champion.dryrun`, `pm5d.threelayer.dryrun`, `pm5d.threelayer.obi-soft.dryrun`), while `strategy_runtime_event_track_record` currently writes all closed-trade attribution into one DB bucket (`runtime_mode=dry_run`, `strategy_id=three_layer`, empty `deployment_id`). Updated the strategy split table to show both the report bucket and the three running deployments, with deployment rows marked `未归因` until recorder data includes `deployment_id`.
+- 2026-04-28: Kept the page read-only and reused existing `system/status`, `system/metrics`, `system/alerts`, `deployments`, `trading/state`, and dry-run report data. No new backend endpoint or dependency was added.
+- 2026-04-28: Fixed the global layout at mobile width by switching from a forced 256px sidebar to a top horizontal nav on small screens, so `/dry-run` no longer collapses into a narrow content strip.
+- 2026-04-28: Verification passed after the redesign: `npm run build`, `npm run lint`, `git diff --check`, and Playwright screenshots on `http://127.0.0.1:5173/dry-run` at desktop and 390px mobile widths. Local Playwright showed expected API console errors because no local `ployd` backend was attached.
 
 # PM5D Settlement + Strategy Audit (2026-04-12)
 
@@ -8268,3 +8405,20 @@ Build a Rust-native factor research workflow for binary-options trading that sep
 - [ ] Run `cargo build --timings` and record baseline HTML report for top-10 slowest crates.
 - [ ] Add `[profile.ci]` (inherits dev, debug=false, incremental=false) and update CI workflows to use it.
 - [ ] Audit `workspace.dependencies` feature sets — verify sqlx/tokio/polars features are minimal common set.
+
+## PM5D Factor Review V2
+
+- [x] Add a V2 factor observation layer with alpha, PM liquidity, execution, regime, exit, and portfolio/risk families.
+- [x] Add dual labels for official settlement direction and executable 15U PnL under current top-of-book liquidity.
+- [x] Add single-factor review metrics: coverage, rejection rate, fill rate, slippage proxy, round-trip-cost PnL, Sharpe/drawdown, by-symbol stability, and by-time-bucket stability.
+- [x] Add a DB-backed `factor_review_v2` research entrypoint that loads official-settlement data and prints data health plus top factor reviews.
+- [x] Verify the new module with targeted unit tests and a no-default research crate check.
+- [x] Expand V2 factors to use CEX LOB dynamics, Binance aggTrade flow, PM CLOB dynamics, Deribit IV/Greeks, future exit labels, and same-event observation state.
+- [x] Add `factor-review-v2.yml` so factor review runs on `ploy-ci-1` against Tango DB and uploads the report artifact.
+
+### Review
+
+- Implemented as an additive research-only path in `crates/ploy-research`, leaving live/dry-run strategy behavior unchanged.
+- Verified `rtk cargo test -p ploy-research factors_v2 --lib`, `rtk cargo check -p ploy-research --no-default-features`, and `rtk cargo check -p ploy-research --features db --example factor_review_v2`.
+- Full workspace `cargo fmt --all --check` still reports pre-existing formatting diffs across unrelated files; only the files touched for this slice were formatted with `rustfmt --edition 2024`.
+- Review expansion includes all currently collected PM5D research sources: Binance spot/LOB/aggTrade via existing DB loader, PM CLOB quote/orderbook fallback, official PM settlement, and optional Deribit IV/Greeks joins when Tango has rows for the reviewed symbols/window.
