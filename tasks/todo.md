@@ -31,6 +31,32 @@
 - 2026-04-29: Calibrated optimizer reruns on `main@9c7d7fbc` and snapshot `25029217647`: champion `25096720302` validation PnL `$3,640.74`, DD `$224.74`, trades `341`, fill `100%`, win `44.28%`, realized return/stake `0.7118`, EV gap `0.1085`, positive day/symbol `100%/100%`; obi_soft `25096721695` validation PnL `-$127.99`, DD `$590.04`; continuation_soft `25096723178` validation PnL `-$290.10`, DD `$1,564.88`. Champion is the only calibrated candidate worth promoting to dry-run config; live remains untouched.
 - 2026-04-29: PR #231 merged to `main@f5e2f787`; GitHub Test run `25097131517` passed, and deploy run `25097228117` succeeded. Tango verification after redeploy: `ployd` active/running, `NRestarts=0`, `active_alerts=0`, no cargo/rustc build processes, `pm5d.threelayer.champion.dryrun` desired/observed `Running`, and `pm5d.threelayer.live` desired/observed `Paused`. Remote champion TOML now has `three_layer_probability_shrink=0.462909`, `three_layer_probability_haircut=0.0`, `three_layer_min_entry_score=0.355216`, and dry-run mode with `stake_usd=15.0`.
 
+# PM5D Tango Dry-run Expectancy Monitoring (2026-04-29)
+
+## Files
+
+- `scripts/report_dryrun_summary.py`
+  - Owner: side-aware dry-run reporting and raw-fill reconciliation checks.
+- `tasks/todo.md`
+  - Owner: current monitoring plan, evidence, and decision notes.
+
+## Tasks
+
+- [x] Verify Tango deployment state, no active alerts, no on-host Rust build, and live still paused.
+- [x] Inspect raw `strategy_runtime_*` schema and confirm report aggregation uses a side-aware/fillable execution view.
+- [x] Recompute current dry-run metrics from real orders/fills by `deployment_id`, including PnL, drawdown, fill coverage, return per stake, side/symbol concentration, and sample size.
+- [x] Decide whether the next action is report repair, more dry-run monitoring, or a dry-run-only strategy/config correction.
+- [x] Verify the direction-probability gate correction with focused checks.
+- [ ] Land via PR and deploy dry-run-only from `main`; keep live untouched.
+
+## Review
+
+- 2026-04-29: User correction for continuation: do not optimize by win rate alone. Direction probability remains important, but entry/promotion must be judged by executable expected value and realized fillable order performance: PnL, drawdown, fill rate, return per stake, EV gap, symbol/day coverage, and concentration.
+- 2026-04-29: Tango source-of-truth check showed `ployd` active/running, `NRestarts=0`, `active_alerts=0`, no cargo/rustc on host, dry-run deployments running, and `pm5d.threelayer.live` desired/observed `Paused`. Deployment IDs currently monitored: `pm5d.threelayer.champion.dryrun`, `pm5d.threelayer.continuation-soft.dryrun`, `pm5d.threelayer.dryrun`, and `pm5d.threelayer.obi-soft.dryrun`.
+- 2026-04-29: Raw order/fill validation used `strategy_runtime_orders`, `strategy_runtime_fills`, and `strategy_runtime_event_track_record`. Post-deploy orders were all `FILLED` with `quantity_fill_ratio=1.0`; this is a real filled-order sample, not a signal-only sample. Current post-deploy closed sample is still small and negative across all four deployments, so it is not enough to promote a different candidate by PnL alone.
+- 2026-04-29: Found a strategy semantics bug from runtime logs: entries could pass with calibrated `p_hat` near `0.50` when cheap executable price and PM momentum lifted total score above threshold. Fixed runtime and snapshot optimizer so `three_layer_min_direction_prob` is a hard gate on calibrated direction probability before EV/entry scoring. Direction probability stays as alpha input; EV remains the execution-scale gate after probability passes.
+- 2026-04-29: Focused verification passed after the hard direction-probability gate: `rustfmt --edition 2024 crates/ploy-strategy-bundles/src/strategies/three_layer.rs crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-direction-prob-gate-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-strategy-bundles three_layer --lib` (`32 passed, 103 filtered out`), and `CARGO_TARGET_DIR=/tmp/ploy-direction-prob-gate-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`21 passed`).
+
 # Dry-run Report Contracts And Multi-strategy UI (2026-04-29)
 
 Issue: https://github.com/proerror77/ploy/issues/227
