@@ -114,6 +114,8 @@ struct SnapshotObjectiveMetrics {
     rejected_non_executable: usize,
     net_pnl: f64,
     avg_pnl: f64,
+    avg_entry_price: f64,
+    avg_reward_risk: f64,
     sharpe: f64,
     max_drawdown: f64,
     log_growth: f64,
@@ -144,8 +146,11 @@ struct OptimizeSummary<'a> {
     strategy_profile: StrategyProfile,
     trials: usize,
     stake_usd: f64,
+    selection_objective: f64,
     min_trades: usize,
     min_trades_source: &'a str,
+    train_opportunities: usize,
+    val_opportunities: usize,
     train_rows: usize,
     val_rows: usize,
     train_underpowered: bool,
@@ -473,6 +478,8 @@ fn evaluate_snapshot_objective(
     let mut rejected_duplicate = 0usize;
     let mut rejected_cooldown = 0usize;
     let mut rejected_non_executable = 0usize;
+    let mut entry_price_sum = 0.0;
+    let mut reward_risk_sum = 0.0;
 
     for row in rows {
         if !row_passes_gates(row, params, profile) {
@@ -501,8 +508,15 @@ fn evaluate_snapshot_objective(
             rejected_non_executable += 1;
             continue;
         };
+        let reward_risk = reward_risk_ratio(row.entry_ask);
+        if !reward_risk.is_finite() {
+            rejected_non_executable += 1;
+            continue;
+        }
 
         pnls.push(pnl);
+        entry_price_sum += row.entry_ask;
+        reward_risk_sum += reward_risk;
         *pnl_by_day
             .entry(row.tick_ts.date_naive().to_string())
             .or_default() += pnl;
@@ -517,6 +531,16 @@ fn evaluate_snapshot_objective(
         f64::NAN
     } else {
         net_pnl / trades as f64
+    };
+    let avg_entry_price = if trades == 0 {
+        f64::NAN
+    } else {
+        entry_price_sum / trades as f64
+    };
+    let avg_reward_risk = if trades == 0 {
+        f64::NAN
+    } else {
+        reward_risk_sum / trades as f64
     };
     let sharpe = trade_sharpe(&pnls);
     let fill_rate = ratio(trades, selected);
@@ -547,6 +571,8 @@ fn evaluate_snapshot_objective(
             sharpe,
             max_drawdown,
             log_growth,
+            avg_entry_price,
+            avg_reward_risk,
             fill_rate,
             reject_rate,
             positive_day_rate,
@@ -564,6 +590,8 @@ fn evaluate_snapshot_objective(
         rejected_non_executable,
         net_pnl,
         avg_pnl,
+        avg_entry_price,
+        avg_reward_risk,
         sharpe,
         max_drawdown,
         log_growth,
@@ -587,6 +615,8 @@ struct StableObjectiveInputs {
     sharpe: f64,
     max_drawdown: f64,
     log_growth: f64,
+    avg_entry_price: f64,
+    avg_reward_risk: f64,
     fill_rate: f64,
     reject_rate: f64,
     positive_day_rate: f64,
@@ -603,15 +633,59 @@ fn stable_compounding_objective(inputs: StableObjectiveInputs) -> f64 {
     let pnl_stakes = inputs.net_pnl / stake;
     let pnl_term = pnl_stakes.signum() * pnl_stakes.abs().ln_1p();
     let drawdown_stakes = inputs.max_drawdown / stake;
+    let reward_risk_quality = if inputs.avg_reward_risk.is_finite() {
+        (inputs.avg_reward_risk - 1.0).clamp(-1.0, 2.0)
+    } else {
+        -1.0
+    };
+    let rich_entry_penalty = if inputs.avg_entry_price.is_finite() {
+        ((inputs.avg_entry_price - 0.55).max(0.0) * 4.0).clamp(0.0, 2.0)
+    } else {
+        2.0
+    };
     let stability_bonus = 2.0 * inputs.positive_day_rate
         + 1.5 * inputs.positive_symbol_rate
-        + inputs.fill_rate.clamp(0.0, 1.0);
+        + inputs.fill_rate.clamp(0.0, 1.0)
+        + 0.5 * reward_risk_quality;
     let risk_penalty = 0.45 * drawdown_stakes
         + 2.0 * inputs.reject_rate.clamp(0.0, 1.0)
-        + 2.0 * inputs.concentration.clamp(0.0, 1.0);
+        + 2.0 * inputs.concentration.clamp(0.0, 1.0)
+        + rich_entry_penalty;
     let sharpe_bonus = 0.25 * inputs.sharpe.clamp(-5.0, 5.0);
 
     sample_power * (inputs.log_growth + pnl_term + stability_bonus + sharpe_bonus - risk_penalty)
+}
+
+fn holistic_selection_objective(
+    train: &SnapshotObjectiveMetrics,
+    validation: &SnapshotObjectiveMetrics,
+    min_trades: usize,
+) -> f64 {
+    if train.trades < min_trades || validation.trades < min_trades {
+        return -1_000_000.0 + train.trades.min(validation.trades) as f64;
+    }
+    if train.net_pnl <= 0.0 || validation.net_pnl <= 0.0 {
+        return train.objective.min(validation.objective) - 10_000.0;
+    }
+
+    let stability_gap = (train.positive_day_rate - validation.positive_day_rate).abs()
+        + (train.positive_symbol_rate - validation.positive_symbol_rate).abs()
+        + (train.fill_rate - validation.fill_rate).abs()
+        + (train.concentration - validation.concentration).abs();
+    let reward_risk_gap =
+        finite_gap(train.avg_reward_risk, validation.avg_reward_risk).clamp(0.0, 3.0);
+    let entry_gap = finite_gap(train.avg_entry_price, validation.avg_entry_price).clamp(0.0, 1.0);
+    let generalization_penalty = 3.0 * stability_gap + 0.75 * reward_risk_gap + 2.0 * entry_gap;
+
+    0.40 * train.objective + 0.60 * validation.objective - generalization_penalty
+}
+
+fn finite_gap(left: f64, right: f64) -> f64 {
+    if left.is_finite() && right.is_finite() {
+        (left - right).abs()
+    } else {
+        1.0
+    }
 }
 
 fn max_drawdown(pnls: &[f64]) -> f64 {
@@ -680,9 +754,49 @@ fn ratio(num: usize, den: usize) -> f64 {
     }
 }
 
-fn default_min_trades(train_rows: usize, val_rows: usize) -> usize {
-    let base_rows = train_rows.min(val_rows);
-    (base_rows / 250).clamp(400, 5_000)
+fn event_side_opportunities(rows: &[FactorObservationV2]) -> usize {
+    rows.iter()
+        .map(|row| format!("{}:{}", row.event_id, row.side.as_str()))
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn slice_coverage(rows: &[FactorObservationV2]) -> (usize, usize, usize) {
+    let event_sides = event_side_opportunities(rows);
+    let days = rows
+        .iter()
+        .map(|row| row.tick_ts.date_naive())
+        .collect::<HashSet<_>>()
+        .len();
+    let symbols = rows
+        .iter()
+        .map(|row| row.symbol.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    (event_sides, days, symbols)
+}
+
+fn default_min_trades(
+    train_rows: &[FactorObservationV2],
+    val_rows: &[FactorObservationV2],
+) -> usize {
+    let (train_events, train_days, train_symbols) = slice_coverage(train_rows);
+    let (val_events, val_days, val_symbols) = slice_coverage(val_rows);
+    default_min_trades_from_coverage(
+        train_events.min(val_events),
+        train_days.min(val_days),
+        train_symbols.min(val_symbols),
+    )
+}
+
+fn default_min_trades_from_coverage(
+    event_side_opportunities: usize,
+    days: usize,
+    symbols: usize,
+) -> usize {
+    let opportunity_floor = ((event_side_opportunities as f64) * 0.015).ceil() as usize;
+    let bucket_floor = days.saturating_mul(symbols).saturating_mul(8);
+    opportunity_floor.max(bucket_floor).clamp(40, 1_500)
 }
 
 fn sample_power_multiplier(trades: usize, min_trades: usize) -> f64 {
@@ -717,10 +831,14 @@ fn write_outputs(
         "# PM5D three-layer snapshot optimizer output\n\
          # snapshot_hash = {}\n\
          # strategy_profile = {}\n\
-         # objective = {:.6}\n\
+         # selection_objective = {:.6}\n\
+         # train_objective = {:.6}\n\
+         # validation_objective = {:.6}\n\
          # validation_sharpe = {:.6}\n\
          # validation_pnl = {:.6}\n\
          # validation_trades = {}\n\
+         # validation_avg_entry = {:.6}\n\
+         # validation_avg_reward_risk = {:.6}\n\
          # validation_max_drawdown = {:.6}\n\
          # validation_log_growth = {:.6}\n\
          # validation_positive_day_rate = {:.6}\n\
@@ -748,10 +866,14 @@ fn write_outputs(
          # three_layer_take_profit_ask and three_layer_stop_distance_pct are not optimized here.\n",
         summary.snapshot_hash,
         summary.strategy_profile.as_str(),
+        summary.selection_objective,
+        summary.train_metrics.objective,
         summary.val_metrics.objective,
         summary.val_metrics.sharpe,
         summary.val_metrics.net_pnl,
         summary.val_metrics.trades,
+        summary.val_metrics.avg_entry_price,
+        summary.val_metrics.avg_reward_risk,
         summary.val_metrics.max_drawdown,
         summary.val_metrics.log_growth,
         summary.val_metrics.positive_day_rate,
@@ -813,10 +935,12 @@ fn write_outputs(
 
 fn print_metrics(label: &str, metrics: &SnapshotObjectiveMetrics) {
     eprintln!(
-        "{label}: objective={:.3} sharpe={:.3} pnl=${:.2} max_dd=${:.2} log_growth={:.3} pos_day={:.2}% pos_symbol={:.2}% concentration={:.2}% trades={} candidates={} selected={} fill_rate={:.2}% win_rate={:.2}% reject={:.2}% non_exec={} dup={} cooldown={}",
+        "{label}: objective={:.3} sharpe={:.3} pnl=${:.2} avg_entry={:.3} avg_rr={:.3} max_dd=${:.2} log_growth={:.3} pos_day={:.2}% pos_symbol={:.2}% concentration={:.2}% trades={} candidates={} selected={} fill_rate={:.2}% win_rate={:.2}% reject={:.2}% non_exec={} dup={} cooldown={}",
         metrics.objective,
         metrics.sharpe,
         metrics.net_pnl,
+        metrics.avg_entry_price,
+        metrics.avg_reward_risk,
         metrics.max_drawdown,
         metrics.log_growth,
         metrics.positive_day_rate * 100.0,
@@ -944,8 +1068,10 @@ fn main() -> Result<()> {
 
     let train_rows = slice_by_time(&v2_rows, train_start, train_end).to_vec();
     let val_rows = slice_by_time(&v2_rows, val_start, val_end).to_vec();
+    let train_opportunities = event_side_opportunities(&train_rows);
+    let val_opportunities = event_side_opportunities(&val_rows);
     let min_trades =
-        min_trades_override.unwrap_or_else(|| default_min_trades(train_rows.len(), val_rows.len()));
+        min_trades_override.unwrap_or_else(|| default_min_trades(&train_rows, &val_rows));
     let min_trades_source = if min_trades_override.is_some() {
         "cli"
     } else {
@@ -970,9 +1096,14 @@ fn main() -> Result<()> {
         train_rows.len(),
         val_rows.len()
     );
+    eprintln!(
+        "Event-side opportunities: train={} validation={}",
+        train_opportunities, val_opportunities
+    );
     eprintln!("Trade floor: min_trades={min_trades} source={min_trades_source}");
 
     let train_rows = Arc::new(train_rows);
+    let val_rows = Arc::new(val_rows);
     let study: Study<f64> = Study::maximize(TpeSampler::new());
     let p_min_direction_prob = FloatParam::new(0.50, 0.68).name("three_layer_min_direction_prob");
     let p_min_distance_over_sigma =
@@ -1004,6 +1135,7 @@ fn main() -> Result<()> {
         let p_cooldown_secs_c = p_cooldown_secs.clone();
         let p_min_time_remaining_secs_c = p_min_time_remaining_secs.clone();
         let p_max_time_span_secs_c = p_max_time_span_secs.clone();
+        let val_rows = Arc::clone(&val_rows);
 
         study
             .optimize(n_trials, move |trial: &mut Trial| {
@@ -1037,26 +1169,37 @@ fn main() -> Result<()> {
                         + p_max_time_span_secs_c.suggest(trial)?,
                 };
 
-                let metrics = evaluate_snapshot_objective(
+                let train_metrics = evaluate_snapshot_objective(
                     &train_rows,
                     &params,
                     min_trades,
                     stake_usd,
                     strategy_profile,
                 );
+                let val_metrics = evaluate_snapshot_objective(
+                    &val_rows,
+                    &params,
+                    min_trades,
+                    stake_usd,
+                    strategy_profile,
+                );
+                let objective =
+                    holistic_selection_objective(&train_metrics, &val_metrics, min_trades);
                 eprintln!(
-                    "  Trial {:>3}: profile={} source=snapshot-observation objective={:>9.3} sharpe={:>7.3} pnl=${:>8.2} dd=${:>7.2} log={:>6.2} pos_day={:>5.1}% trades={:>4} selected={:>5} fill={:>5.1}% | dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
+                    "  Trial {:>3}: profile={} source=snapshot-observation objective={:>9.3} train_obj={:>8.3} val_obj={:>8.3} train_pnl=${:>8.2}/{} val_pnl=${:>8.2}/{} val_dd=${:>7.2} val_entry={:.3} val_rr={:.2} val_pos_sym={:>5.1}% | dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
                     trial.id(),
                     strategy_profile.as_str(),
-                    metrics.objective,
-                    metrics.sharpe,
-                    metrics.net_pnl,
-                    metrics.max_drawdown,
-                    metrics.log_growth,
-                    metrics.positive_day_rate * 100.0,
-                    metrics.trades,
-                    metrics.selected,
-                    metrics.fill_rate * 100.0,
+                    objective,
+                    train_metrics.objective,
+                    val_metrics.objective,
+                    train_metrics.net_pnl,
+                    train_metrics.trades,
+                    val_metrics.net_pnl,
+                    val_metrics.trades,
+                    val_metrics.max_drawdown,
+                    val_metrics.avg_entry_price,
+                    val_metrics.avg_reward_risk,
+                    val_metrics.positive_symbol_rate * 100.0,
                     params.min_direction_prob,
                     params.min_distance_over_sigma,
                     params.min_confirmation_score,
@@ -1070,7 +1213,7 @@ fn main() -> Result<()> {
                     params.min_time_remaining_secs,
                     params.max_time_remaining_secs,
                 );
-                Ok::<f64, Error>(metrics.objective)
+                Ok::<f64, Error>(objective)
             })
             .context("snapshot TPE optimization failed")?;
     }
@@ -1115,6 +1258,8 @@ fn main() -> Result<()> {
         stake_usd,
         strategy_profile,
     );
+    let selection_objective =
+        holistic_selection_objective(&train_metrics, &val_metrics, min_trades);
     let train_underpowered = train_metrics.trades < min_trades;
     let validation_underpowered = val_metrics.trades < min_trades;
 
@@ -1161,6 +1306,7 @@ fn main() -> Result<()> {
         best_params.max_time_remaining_secs
     );
     eprintln!("\n=== Snapshot Objective Metrics ===");
+    eprintln!("Selection objective: {:.3}", selection_objective);
     print_metrics("Train", &train_metrics);
     print_metrics("Validation", &val_metrics);
     if train_underpowered {
@@ -1240,8 +1386,11 @@ fn main() -> Result<()> {
         strategy_profile,
         trials: n_trials,
         stake_usd,
+        selection_objective,
         min_trades,
         min_trades_source,
+        train_opportunities,
+        val_opportunities,
         train_rows: train_rows.len(),
         val_rows: val_rows.len(),
         train_underpowered,
@@ -1265,8 +1414,9 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile, compounded_log_growth,
-        default_min_trades, directional_score, executable_edge_score, max_drawdown, parse_date_end,
+        SnapshotObjectiveMetrics, SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
+        compounded_log_growth, default_min_trades_from_coverage, directional_score,
+        executable_edge_score, holistic_selection_objective, max_drawdown, parse_date_end,
         reward_risk_ratio, sample_power_multiplier, stable_compounding_objective, trade_sharpe,
         transformed_model_probability,
     };
@@ -1285,6 +1435,44 @@ mod tests {
             cooldown_secs: 30,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 180,
+        }
+    }
+
+    fn metrics_for_selection(
+        trades: usize,
+        net_pnl: f64,
+        objective: f64,
+    ) -> SnapshotObjectiveMetrics {
+        SnapshotObjectiveMetrics {
+            candidates: trades,
+            selected: trades,
+            trades,
+            rejected_duplicate: 0,
+            rejected_cooldown: 0,
+            rejected_non_executable: 0,
+            net_pnl,
+            avg_pnl: if trades == 0 {
+                f64::NAN
+            } else {
+                net_pnl / trades as f64
+            },
+            avg_entry_price: 0.42,
+            avg_reward_risk: 1.35,
+            sharpe: 2.0,
+            max_drawdown: 60.0,
+            log_growth: 8.0,
+            avg_log_return: if trades == 0 {
+                f64::NAN
+            } else {
+                8.0 / trades as f64
+            },
+            positive_day_rate: 1.0,
+            positive_symbol_rate: 0.8,
+            concentration: 0.35,
+            reject_rate: 0.0,
+            objective,
+            fill_rate: 1.0,
+            win_rate: 0.45,
         }
     }
 
@@ -1346,6 +1534,8 @@ mod tests {
             sharpe: 2.0,
             max_drawdown: 60.0,
             log_growth: 12.0,
+            avg_entry_price: 0.42,
+            avg_reward_risk: 1.35,
             fill_rate: 0.95,
             reject_rate: 0.02,
             positive_day_rate: 1.0,
@@ -1360,6 +1550,8 @@ mod tests {
             sharpe: 4.5,
             max_drawdown: 450.0,
             log_growth: 2.0,
+            avg_entry_price: 0.72,
+            avg_reward_risk: 0.35,
             fill_rate: 0.70,
             reject_rate: 0.25,
             positive_day_rate: 0.50,
@@ -1378,10 +1570,31 @@ mod tests {
     }
 
     #[test]
-    fn default_min_trades_scales_with_snapshot_size() {
-        assert_eq!(default_min_trades(185_158, 107_774), 431);
-        assert_eq!(default_min_trades(1_000, 1_000), 400);
-        assert_eq!(default_min_trades(2_000_000, 2_000_000), 5_000);
+    fn default_min_trades_scales_with_event_coverage_not_rows() {
+        assert_eq!(default_min_trades_from_coverage(10_368, 3, 6), 156);
+        assert_eq!(default_min_trades_from_coverage(1_000, 1, 2), 40);
+        assert_eq!(default_min_trades_from_coverage(200_000, 7, 6), 1_500);
+    }
+
+    #[test]
+    fn holistic_selection_requires_powered_train_and_validation_windows() {
+        let train = metrics_for_selection(300, 900.0, 10.0);
+        let sparse_validation = metrics_for_selection(39, 300.0, 8.0);
+        let powered_validation = metrics_for_selection(160, 300.0, 8.0);
+
+        assert!(
+            holistic_selection_objective(&train, &sparse_validation, 40) < -999_000.0,
+            "sparse validation should remain rejected even when profitable"
+        );
+        assert!(holistic_selection_objective(&train, &powered_validation, 40) > 0.0);
+    }
+
+    #[test]
+    fn holistic_selection_rejects_non_profitable_validation() {
+        let train = metrics_for_selection(300, 900.0, 10.0);
+        let validation_loss = metrics_for_selection(160, -50.0, 8.0);
+
+        assert!(holistic_selection_objective(&train, &validation_loss, 40) < -9_000.0);
     }
 
     #[test]
