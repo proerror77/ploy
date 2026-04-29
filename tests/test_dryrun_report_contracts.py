@@ -72,6 +72,26 @@ class DryRunReportContractTests(unittest.TestCase):
         self.assertEqual(diagnostics["summary"]["rejected_buy_orders"], 1)
         self.assertEqual(diagnostics["summary"]["buy_fill_rate_pct"], 50)
 
+    def test_strategy_label_prefers_versioned_experiment_label(self) -> None:
+        summary = load_summary_module()
+
+        self.assertEqual(
+            summary.strategy_label(
+                "dry_run",
+                "three_layer",
+                "pm5d.threelayer.obi-hard.dryrun",
+            ),
+            "TL v4 OBI-hard EVCal",
+        )
+        self.assertEqual(
+            summary.strategy_label(
+                "dry_run",
+                "three_layer",
+                "pm5d.threelayer.some-new-gate.dryrun",
+            ),
+            "TL Some New Gate",
+        )
+
     def test_html_report_aggregates_orders_and_names_sharpe_bases(self) -> None:
         script = HTML_SCRIPT.read_text()
 

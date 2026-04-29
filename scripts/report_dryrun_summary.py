@@ -20,6 +20,14 @@ DB_URL = (
 SIMULATED_RUNTIME_MODES = ("dry_run", "dryrun", "paper")
 MODE_FILTER = ",".join(f"'{mode}'" for mode in SIMULATED_RUNTIME_MODES)
 
+EXPERIMENT_LABELS = {
+    "pm5d.threelayer.dryrun": "TL v1 Base EVCal",
+    "pm5d.threelayer.champion.dryrun": "TL v2 Champion EVCal",
+    "pm5d.threelayer.obi-soft.dryrun": "TL v3 OBI-soft EVCal",
+    "pm5d.threelayer.obi-hard.dryrun": "TL v4 OBI-hard EVCal",
+    "pm5d.threelayer.continuation-soft.dryrun": "TL v5 Continuation-soft EVCal",
+}
+
 
 EVENTS_QUERY = f"""
 WITH events AS (
@@ -226,12 +234,30 @@ def strategy_key(row) -> tuple[str, str, str]:
     )
 
 
-def strategy_label(runtime_mode: str, strategy_id: str, deployment_id: str) -> str:
+def humanize_deployment_id(deployment_id: str) -> str:
+    if not deployment_id:
+        return ""
+    if deployment_id.startswith("pm5d.threelayer.") and deployment_id.endswith(".dryrun"):
+        variant = deployment_id.removeprefix("pm5d.threelayer.").removesuffix(".dryrun")
+        if variant == "":
+            variant = "base"
+        return f"TL {variant.replace('-', ' ').title()}"
+    if deployment_id.startswith("pm5d.") and deployment_id.endswith(".dryrun"):
+        variant = deployment_id.removeprefix("pm5d.").removesuffix(".dryrun")
+        return f"PM5D {variant.replace('-', ' ').replace('.', ' ').title()}"
+    return deployment_id
+
+
+def experiment_label(runtime_mode: str, strategy_id: str, deployment_id: str) -> str:
     if deployment_id:
-        return deployment_id
+        return EXPERIMENT_LABELS.get(deployment_id, humanize_deployment_id(deployment_id))
     if strategy_id:
         return strategy_id
     return runtime_mode or "unknown"
+
+
+def strategy_label(runtime_mode: str, strategy_id: str, deployment_id: str) -> str:
+    return experiment_label(runtime_mode, strategy_id, deployment_id)
 
 
 def window_label(window_secs) -> str:
@@ -486,6 +512,11 @@ def closed_trade_row(event):
         "runtime_mode": event.get("runtime_mode"),
         "strategy_id": event.get("strategy_id"),
         "deployment_id": event.get("deployment_id"),
+        "experiment_label": experiment_label(
+            event.get("runtime_mode") or "",
+            event.get("strategy_id") or "",
+            event.get("deployment_id") or "",
+        ),
         "trade_key": event.get("trade_key"),
         "event_id": event.get("event_id"),
         "symbol": event.get("symbol"),
@@ -528,6 +559,11 @@ def build_open_positions(events):
                 "runtime_mode": event.get("runtime_mode"),
                 "strategy_id": event.get("strategy_id"),
                 "deployment_id": event.get("deployment_id"),
+                "experiment_label": experiment_label(
+                    event.get("runtime_mode") or "",
+                    event.get("strategy_id") or "",
+                    event.get("deployment_id") or "",
+                ),
                 "trade_key": event.get("trade_key"),
                 "event_id": event.get("event_id"),
                 "symbol": event.get("symbol"),
@@ -661,6 +697,7 @@ def main() -> int:
                 "strategy_id": strategy_id,
                 "deployment_id": deployment_id,
                 "label": strategy_label(runtime_mode, strategy_id, deployment_id),
+                "experiment_label": experiment_label(runtime_mode, strategy_id, deployment_id),
                 "execution_diagnostics": build_execution_diagnostics(
                     [strategy_diagnostics] if strategy_diagnostics else []
                 ),

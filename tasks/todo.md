@@ -10762,3 +10762,26 @@ Review:
   skipped fresh psql/audit/compile steps, and completed `Run factor review`;
   Factor Walk-Forward V2 run `25047046921` completed the same snapshot reuse
   path and completed `Run factor walk-forward`.
+
+# PM5D Dry-Run Experiment Labels (2026-04-30)
+
+## Files
+
+- `scripts/report_dryrun_summary.py`
+- `crates/ploy-operator-contracts/src/reports.rs`
+- `contracts/schemas/dry-run-performance-report.schema.json`
+- `ploy-frontend/src/pages/OperatorCockpit.tsx`
+- `ploy-frontend/src/types/operator-contracts.ts`
+- `ploy-sidecar/src/contracts/operator-contracts.ts`
+- `tests/test_dryrun_report_contracts.py`
+
+## Tasks
+
+- [x] Add stable version/feature experiment labels for PM5D three-layer dry-run deployments.
+- [x] Preserve deployment IDs as exact attribution keys while using experiment labels for display.
+- [x] Keep labels available through the operator contract so `ployd` does not strip them.
+- [x] Verify Python report contracts, generated schemas/types, and frontend build.
+
+## Review
+
+- 2026-04-30: Dry-run report rows now expose `experiment_label` such as `TL v4 OBI-hard EVCal`; the cockpit uses that label first and shows deployment ID as the stable identity instead of collapsing visible names to `three_layer`.

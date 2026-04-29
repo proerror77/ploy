@@ -150,11 +150,11 @@ function strategySeriesKey(index: number) {
 }
 
 function compactStrategyLabel(strategy: DryRunStrategyReport) {
-  return strategy.label || strategy.deployment_id || strategy.strategy_id || strategy.runtime_mode;
+  return strategy.experiment_label || strategy.label || strategy.deployment_id || strategy.strategy_id || strategy.runtime_mode;
 }
 
 function closedTradeStrategyLabel(row: DryRunClosedTradeRow) {
-  return row.deployment_id || row.strategy_id || row.runtime_mode || 'unknown';
+  return row.experiment_label || row.deployment_id || row.strategy_id || row.runtime_mode || 'unknown';
 }
 
 function equityPointTime(point: DryRunEquityPoint) {
@@ -686,7 +686,7 @@ export function OperatorCockpit() {
                   <div>
                     <div className="font-medium">Strategy attribution</div>
                     <div className="text-xs text-muted-foreground">
-                      grouped by strategy_id and deployment_id
+                      grouped by deployment/version/feature label
                     </div>
                   </div>
                   <Badge variant={pairingHasMismatch ? 'warning' : 'success'}>
@@ -717,7 +717,7 @@ export function OperatorCockpit() {
                             <div className="min-w-0">
                               <div className="truncate font-medium">{compactStrategyLabel(strategy)}</div>
                               <div className="truncate text-xs text-muted-foreground">
-                                {strategy.strategy_id || 'unknown'} · {strategy.runtime_mode || 'unknown'}
+                                {strategy.deployment_id || strategy.strategy_id || 'unknown'} · {strategy.runtime_mode || 'unknown'}
                               </div>
                             </div>
                             <div>{strategy.summary.closed_trades}</div>
@@ -849,7 +849,7 @@ export function OperatorCockpit() {
                       >
                         <div className="min-w-0">
                           <div className="truncate font-medium">
-                            {position.deployment_id || position.strategy_id || position.runtime_mode || 'unknown'}
+                            {position.experiment_label || position.deployment_id || position.strategy_id || position.runtime_mode || 'unknown'}
                           </div>
                           <div className="truncate text-xs text-muted-foreground">
                             {position.strategy_id || 'unknown'} · {position.runtime_mode || 'unknown'}
