@@ -120,6 +120,16 @@ function isDryRunDeployment(deployment: DeploymentSummary) {
   return isDryRunId(deployment.deployment_id);
 }
 
+function shouldShowUnreportedDryRunDeployment(deployment: DeploymentSummary, snapshot?: TradingStateSnapshot) {
+  if (snapshot) return true;
+  return (
+    deployment.desired_state === 'running' ||
+    deployment.observed_state === 'running' ||
+    deployment.observed_state === 'starting' ||
+    deployment.observed_state === 'degraded'
+  );
+}
+
 function isDryRunSnapshot(snapshot: TradingStateSnapshot) {
   return isDryRunId(snapshot.deployment_id) || isDryRunId(snapshot.runtime_mode);
 }
@@ -545,7 +555,10 @@ export function DryRunReport() {
 
     const reportedDeploymentIds = new Set(reported.map((row) => row.deploymentId));
     const missing = dryRunDeployments
-      .filter((deployment) => !reportedDeploymentIds.has(deployment.deployment_id))
+      .filter((deployment) => {
+        if (reportedDeploymentIds.has(deployment.deployment_id)) return false;
+        return shouldShowUnreportedDryRunDeployment(deployment, snapshotByDeployment.get(deployment.deployment_id));
+      })
       .map((deployment): StrategySurfaceRow => {
         const snapshot = snapshotByDeployment.get(deployment.deployment_id);
         const pnl = toNumber(snapshot?.pnl.net_pnl);
