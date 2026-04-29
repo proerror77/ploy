@@ -7,14 +7,10 @@ import json
 import sys
 
 
-EXPECTED = {
+REQUIRED = {
     "metrics.sharpe_basis": "closed_trade_pnl_sqrt_n",
     "metrics.daily_sharpe_basis": "daily_net_pnl_sqrt_365",
     "execution_diagnostics.basis": "strategy_runtime_orders",
-}
-
-EXPECTED_WHEN_STRATEGIES_EXIST = {
-    "strategies[0].execution_diagnostics.basis": "strategy_runtime_orders",
 }
 
 
@@ -33,15 +29,27 @@ def nested_value(payload: dict, path: str):
 
 def main() -> int:
     payload = json.load(sys.stdin)
-    expected = dict(EXPECTED)
-    if payload.get("strategies"):
-        expected.update(EXPECTED_WHEN_STRATEGIES_EXIST)
-
     failures = {
-        path: {"expected": expected_value, "actual": nested_value(payload, path)}
-        for path, expected_value in expected.items()
-        if nested_value(payload, path) != expected_value
+        path: {"expected": expected, "actual": nested_value(payload, path)}
+        for path, expected in REQUIRED.items()
+        if nested_value(payload, path) != expected
     }
+
+    strategy_diagnostics = [
+        (strategy.get("deployment_id"), nested_value(strategy, "execution_diagnostics.basis"))
+        for strategy in payload.get("strategies") or []
+        if strategy.get("execution_diagnostics") is not None
+    ]
+    failures.update(
+        {
+            f"strategies[{deployment_id}].execution_diagnostics.basis": {
+                "expected": "strategy_runtime_orders",
+                "actual": basis,
+            }
+            for deployment_id, basis in strategy_diagnostics
+            if basis != "strategy_runtime_orders"
+        }
+    )
     if failures:
         print(json.dumps({"dry_run_report_contract_failures": failures}, sort_keys=True), file=sys.stderr)
         return 1
