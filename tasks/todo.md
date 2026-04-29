@@ -1,3 +1,36 @@
+# Dedicated Dry-run Report Page (2026-04-29)
+
+Issue: https://github.com/proerror77/ploy/issues/227
+
+## Files
+
+- `ploy-frontend/src/pages/DryRunReport.tsx`
+  - Owner: dedicated dry-run overview/detail report UI.
+- `ploy-frontend/src/App.tsx`
+  - Owner: route `/dry-run`, `/dry-run/:deploymentId`, and report aliases to the dedicated page.
+- `ploy-frontend/src/components/Layout.tsx`
+  - Owner: dry-run navigation active state for nested report routes.
+- `tasks/todo.md`
+  - Owner: implementation plan and verification evidence.
+
+## Tasks
+
+- [x] Add desktop-first dry-run overview with portfolio KPIs, multi-strategy equity, strategy comparison, and recent trade ledger.
+- [x] Add per-strategy detail route focused on one deployment/strategy, with its own curve, metrics, symbol contribution, recent trades, and open positions.
+- [x] Route `/dry-run` away from `OperatorCockpit` and keep nested dry-run routes highlighted in navigation.
+- [x] Add compatibility routes for `/reports/strategies` and `/reports/strategy?strategy_id=<id>`.
+- [x] Run frontend lint/build and diff checks.
+- [ ] Open PR and verify CI.
+
+## Review
+
+- 2026-04-29: Added a dedicated dry-run report page instead of mounting `OperatorCockpit` at `/dry-run`. The overview is structured around portfolio KPIs, aggregate/per-strategy equity, a compact strategy ranking, recent closed trades, open positions, and an attention queue.
+- 2026-04-29: Added a strategy detail state reachable from `/dry-run/:deploymentId` and compatible with `/reports/strategy?strategy_id=<id>`, focused on one strategy's equity, PnL, win rate, Sharpe, drawdown, symbol/window contribution, recent trades, and open positions.
+- 2026-04-29: Review correction: today's strategy metrics now match `trading_day_cst` with an Asia/Shanghai trading day and do not fall back to an older day when the current CST day is missing. Health is separated from PnL performance, and the strategy ranking shows both today PnL and cumulative PnL so losing strategies are visible from the overview.
+- 2026-04-29: Review correction: dry-run deployment/trading state now prefers fresh polling rows and only uses WebSocket store snapshots as an initial fallback, avoiding stale store rows when the stream reconnects or stalls.
+- 2026-04-29: Local verification passed: `cd ploy-frontend && npm run lint`, `cd ploy-frontend && npm run build`, `git diff --check`, and Playwright route smoke for `/dry-run` plus `/dry-run/test-deployment` with the backend absent. The browser showed the intentional unavailable-report fallback; console noise was the expected failed API fetches because no local `ployd` API was running.
+- 2026-04-29: Mock-data Playwright verification passed for `/dry-run` and `/dry-run/:deploymentId` at `1600x1000`: aggregate/per-strategy equity rendered, strategy ranking showed today PnL plus all-time PnL, strategy trade provenance was visible, detail pages showed strategy equity/window/symbol/open-position sections, and no horizontal overflow was detected. A stale-day payload with only `2026-04-28` daily rows kept `today pnl`, `green today`, and `red today` at zero while still showing cumulative loss.
+
 # PM5D Calibrated Expectancy Objective (2026-04-29)
 
 ## Files
