@@ -116,6 +116,8 @@ struct SnapshotObjectiveMetrics {
     avg_pnl: f64,
     avg_entry_price: f64,
     avg_reward_risk: f64,
+    avg_expected_value_per_share: f64,
+    avg_expected_value_per_stake: f64,
     sharpe: f64,
     max_drawdown: f64,
     log_growth: f64,
@@ -287,6 +289,28 @@ fn reward_risk_ratio(entry_price: f64) -> f64 {
     if risk <= 0.0 { f64::NAN } else { reward / risk }
 }
 
+fn expected_value_per_share(direction_probability: f64, entry_price: f64) -> f64 {
+    if !direction_probability.is_finite()
+        || !entry_price.is_finite()
+        || !(0.0..=1.0).contains(&direction_probability)
+        || !(0.0..1.0).contains(&entry_price)
+    {
+        return f64::NAN;
+    }
+    let fee = crypto_fee_cost(entry_price);
+    let win_payoff = 1.0 - entry_price - fee;
+    let loss_cost = entry_price + fee;
+    direction_probability * win_payoff - (1.0 - direction_probability) * loss_cost
+}
+
+fn expected_value_per_staked_dollar(direction_probability: f64, entry_price: f64) -> f64 {
+    let expected_value = expected_value_per_share(direction_probability, entry_price);
+    if !expected_value.is_finite() || !entry_price.is_finite() || entry_price <= 0.0 {
+        return f64::NAN;
+    }
+    expected_value / entry_price
+}
+
 fn confirmation_score(row: &FactorObservationV2, profile: StrategyProfile) -> f64 {
     let side = row.side.multiplier();
     let continuation = finite_or_zero(row.cex_continuation_score_side).clamp(-1.0, 1.0);
@@ -329,7 +353,15 @@ fn three_layer_entry_score(
         0.60,
         params.alpha_contrarian,
     );
-    let edge_score = executable_edge_score(edge, params);
+    let per_share_edge_score = executable_edge_score(edge, params);
+    let per_stake_expectancy_score = directional_score(
+        expected_value_per_staked_dollar(alpha_prob, row.entry_ask),
+        0.0,
+        0.25,
+        false,
+    );
+    let expectancy_score =
+        (0.70 * per_share_edge_score + 0.30 * per_stake_expectancy_score).clamp(-0.50, 1.0);
     let drift_side = row.drift_30s * row.side.multiplier();
     let drift_score = ((drift_side - params.min_drift_confirmation) * 800.0).clamp(-0.50, 1.0);
     let pm_momentum = row
@@ -357,14 +389,14 @@ fn three_layer_entry_score(
     if profile == StrategyProfile::Champion {
         return 0.33 * direction_score
             + 0.17 * distance_score
-            + 0.25 * edge_score
+            + 0.25 * expectancy_score
             + 0.10 * drift_score
             + 0.10 * pm_momentum_score
             + 0.05 * liquidity_score;
     }
     0.25 * direction_score
         + 0.12 * distance_score
-        + 0.18 * edge_score
+        + 0.18 * expectancy_score
         + 0.15 * confirmation_score
         + 0.10 * drift_score
         + 0.12 * pm_momentum_score
@@ -391,9 +423,10 @@ fn executable_edge_score(edge: f64, params: &SnapshotThreeLayerParams) -> f64 {
 }
 
 fn executable_model_edge(row: &FactorObservationV2, params: &SnapshotThreeLayerParams) -> f64 {
-    transformed_model_probability(row.side_model_prob, params.alpha_contrarian)
-        - row.entry_ask
-        - crypto_fee_cost(row.entry_ask)
+    expected_value_per_share(
+        transformed_model_probability(row.side_model_prob, params.alpha_contrarian),
+        row.entry_ask,
+    )
 }
 
 fn directional_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> f64 {
@@ -480,6 +513,8 @@ fn evaluate_snapshot_objective(
     let mut rejected_non_executable = 0usize;
     let mut entry_price_sum = 0.0;
     let mut reward_risk_sum = 0.0;
+    let mut expected_value_per_share_sum = 0.0;
+    let mut expected_value_per_stake_sum = 0.0;
 
     for row in rows {
         if !row_passes_gates(row, params, profile) {
@@ -513,10 +548,20 @@ fn evaluate_snapshot_objective(
             rejected_non_executable += 1;
             continue;
         }
+        let direction_probability =
+            transformed_model_probability(row.side_model_prob, params.alpha_contrarian);
+        let ev_per_share = expected_value_per_share(direction_probability, row.entry_ask);
+        let ev_per_stake = expected_value_per_staked_dollar(direction_probability, row.entry_ask);
+        if !ev_per_share.is_finite() || !ev_per_stake.is_finite() {
+            rejected_non_executable += 1;
+            continue;
+        }
 
         pnls.push(pnl);
         entry_price_sum += row.entry_ask;
         reward_risk_sum += reward_risk;
+        expected_value_per_share_sum += ev_per_share;
+        expected_value_per_stake_sum += ev_per_stake;
         *pnl_by_day
             .entry(row.tick_ts.date_naive().to_string())
             .or_default() += pnl;
@@ -541,6 +586,16 @@ fn evaluate_snapshot_objective(
         f64::NAN
     } else {
         reward_risk_sum / trades as f64
+    };
+    let avg_expected_value_per_share = if trades == 0 {
+        f64::NAN
+    } else {
+        expected_value_per_share_sum / trades as f64
+    };
+    let avg_expected_value_per_stake = if trades == 0 {
+        f64::NAN
+    } else {
+        expected_value_per_stake_sum / trades as f64
     };
     let sharpe = trade_sharpe(&pnls);
     let fill_rate = ratio(trades, selected);
@@ -573,6 +628,7 @@ fn evaluate_snapshot_objective(
             log_growth,
             avg_entry_price,
             avg_reward_risk,
+            avg_expected_value_per_stake,
             fill_rate,
             reject_rate,
             positive_day_rate,
@@ -592,6 +648,8 @@ fn evaluate_snapshot_objective(
         avg_pnl,
         avg_entry_price,
         avg_reward_risk,
+        avg_expected_value_per_share,
+        avg_expected_value_per_stake,
         sharpe,
         max_drawdown,
         log_growth,
@@ -617,6 +675,7 @@ struct StableObjectiveInputs {
     log_growth: f64,
     avg_entry_price: f64,
     avg_reward_risk: f64,
+    avg_expected_value_per_stake: f64,
     fill_rate: f64,
     reject_rate: f64,
     positive_day_rate: f64,
@@ -638,6 +697,11 @@ fn stable_compounding_objective(inputs: StableObjectiveInputs) -> f64 {
     } else {
         -1.0
     };
+    let expectancy_quality = if inputs.avg_expected_value_per_stake.is_finite() {
+        inputs.avg_expected_value_per_stake.clamp(-0.5, 1.5)
+    } else {
+        -0.5
+    };
     let rich_entry_penalty = if inputs.avg_entry_price.is_finite() {
         ((inputs.avg_entry_price - 0.55).max(0.0) * 4.0).clamp(0.0, 2.0)
     } else {
@@ -646,7 +710,8 @@ fn stable_compounding_objective(inputs: StableObjectiveInputs) -> f64 {
     let stability_bonus = 2.0 * inputs.positive_day_rate
         + 1.5 * inputs.positive_symbol_rate
         + inputs.fill_rate.clamp(0.0, 1.0)
-        + 0.5 * reward_risk_quality;
+        + 0.5 * reward_risk_quality
+        + 0.75 * expectancy_quality;
     let risk_penalty = 0.45 * drawdown_stakes
         + 2.0 * inputs.reject_rate.clamp(0.0, 1.0)
         + 2.0 * inputs.concentration.clamp(0.0, 1.0)
@@ -675,7 +740,13 @@ fn holistic_selection_objective(
     let reward_risk_gap =
         finite_gap(train.avg_reward_risk, validation.avg_reward_risk).clamp(0.0, 3.0);
     let entry_gap = finite_gap(train.avg_entry_price, validation.avg_entry_price).clamp(0.0, 1.0);
-    let generalization_penalty = 3.0 * stability_gap + 0.75 * reward_risk_gap + 2.0 * entry_gap;
+    let expectancy_gap = finite_gap(
+        train.avg_expected_value_per_stake,
+        validation.avg_expected_value_per_stake,
+    )
+    .clamp(0.0, 2.0);
+    let generalization_penalty =
+        3.0 * stability_gap + 0.75 * reward_risk_gap + 2.0 * entry_gap + expectancy_gap;
 
     0.40 * train.objective + 0.60 * validation.objective - generalization_penalty
 }
@@ -839,6 +910,8 @@ fn write_outputs(
          # validation_trades = {}\n\
          # validation_avg_entry = {:.6}\n\
          # validation_avg_reward_risk = {:.6}\n\
+         # validation_avg_expected_value_per_share = {:.6}\n\
+         # validation_avg_expected_value_per_stake = {:.6}\n\
          # validation_max_drawdown = {:.6}\n\
          # validation_log_growth = {:.6}\n\
          # validation_positive_day_rate = {:.6}\n\
@@ -874,6 +947,8 @@ fn write_outputs(
         summary.val_metrics.trades,
         summary.val_metrics.avg_entry_price,
         summary.val_metrics.avg_reward_risk,
+        summary.val_metrics.avg_expected_value_per_share,
+        summary.val_metrics.avg_expected_value_per_stake,
         summary.val_metrics.max_drawdown,
         summary.val_metrics.log_growth,
         summary.val_metrics.positive_day_rate,
@@ -935,12 +1010,14 @@ fn write_outputs(
 
 fn print_metrics(label: &str, metrics: &SnapshotObjectiveMetrics) {
     eprintln!(
-        "{label}: objective={:.3} sharpe={:.3} pnl=${:.2} avg_entry={:.3} avg_rr={:.3} max_dd=${:.2} log_growth={:.3} pos_day={:.2}% pos_symbol={:.2}% concentration={:.2}% trades={} candidates={} selected={} fill_rate={:.2}% win_rate={:.2}% reject={:.2}% non_exec={} dup={} cooldown={}",
+        "{label}: objective={:.3} sharpe={:.3} pnl=${:.2} avg_entry={:.3} avg_rr={:.3} avg_ev_share={:.4} avg_ev_stake={:.3} max_dd=${:.2} log_growth={:.3} pos_day={:.2}% pos_symbol={:.2}% concentration={:.2}% trades={} candidates={} selected={} fill_rate={:.2}% win_rate={:.2}% reject={:.2}% non_exec={} dup={} cooldown={}",
         metrics.objective,
         metrics.sharpe,
         metrics.net_pnl,
         metrics.avg_entry_price,
         metrics.avg_reward_risk,
+        metrics.avg_expected_value_per_share,
+        metrics.avg_expected_value_per_stake,
         metrics.max_drawdown,
         metrics.log_growth,
         metrics.positive_day_rate * 100.0,
@@ -1186,7 +1263,7 @@ fn main() -> Result<()> {
                 let objective =
                     holistic_selection_objective(&train_metrics, &val_metrics, min_trades);
                 eprintln!(
-                    "  Trial {:>3}: profile={} source=snapshot-observation objective={:>9.3} train_obj={:>8.3} val_obj={:>8.3} train_pnl=${:>8.2}/{} val_pnl=${:>8.2}/{} val_dd=${:>7.2} val_entry={:.3} val_rr={:.2} val_pos_sym={:>5.1}% | dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
+                    "  Trial {:>3}: profile={} source=snapshot-observation objective={:>9.3} train_obj={:>8.3} val_obj={:>8.3} train_pnl=${:>8.2}/{} val_pnl=${:>8.2}/{} val_dd=${:>7.2} val_entry={:.3} val_rr={:.2} val_ev_stake={:.3} val_pos_sym={:>5.1}% | dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} min_ev={:.3} rr={:.2} score={:.3} alpha_contra={} cex_contra={} cd={}s time={}..{}",
                     trial.id(),
                     strategy_profile.as_str(),
                     objective,
@@ -1199,6 +1276,7 @@ fn main() -> Result<()> {
                     val_metrics.max_drawdown,
                     val_metrics.avg_entry_price,
                     val_metrics.avg_reward_risk,
+                    val_metrics.avg_expected_value_per_stake,
                     val_metrics.positive_symbol_rate * 100.0,
                     params.min_direction_prob,
                     params.min_distance_over_sigma,
@@ -1416,10 +1494,13 @@ mod tests {
     use super::{
         SnapshotObjectiveMetrics, SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
         compounded_log_growth, default_min_trades_from_coverage, directional_score,
-        executable_edge_score, holistic_selection_objective, max_drawdown, parse_date_end,
-        reward_risk_ratio, sample_power_multiplier, stable_compounding_objective, trade_sharpe,
-        transformed_model_probability,
+        evaluate_snapshot_objective, executable_edge_score, expected_value_per_share,
+        expected_value_per_staked_dollar, holistic_selection_objective, max_drawdown,
+        parse_date_end, reward_risk_ratio, sample_power_multiplier, stable_compounding_objective,
+        trade_sharpe, transformed_model_probability,
     };
+    use chrono::{TimeZone, Utc};
+    use ploy_research::{FactorObservationV2, Regime, ReviewSide};
 
     fn test_params() -> SnapshotThreeLayerParams {
         SnapshotThreeLayerParams {
@@ -1458,6 +1539,8 @@ mod tests {
             },
             avg_entry_price: 0.42,
             avg_reward_risk: 1.35,
+            avg_expected_value_per_share: 0.08,
+            avg_expected_value_per_stake: 0.19,
             sharpe: 2.0,
             max_drawdown: 60.0,
             log_growth: 8.0,
@@ -1473,6 +1556,139 @@ mod tests {
             objective,
             fill_rate: 1.0,
             win_rate: 0.45,
+        }
+    }
+
+    fn test_row(
+        event_id: &str,
+        side_model_prob: f64,
+        entry_ask: f64,
+        executable_pnl: Option<f64>,
+        fillable: bool,
+        ts_offset_secs: i64,
+    ) -> FactorObservationV2 {
+        FactorObservationV2 {
+            event_id: event_id.to_string(),
+            symbol: "BTCUSDT".to_string(),
+            tick_ts: Utc.with_ymd_and_hms(2026, 4, 25, 0, 0, 0).unwrap()
+                + chrono::Duration::seconds(ts_offset_secs),
+            time_remaining_secs: 120,
+            regime: Regime::Middle,
+            side: ReviewSide::Up,
+            side_model_prob,
+            side_fair_prob: side_model_prob,
+            side_model_edge: side_model_prob - entry_ask,
+            side_distance_over_sigma: 0.25,
+            abs_distance_to_beat: 10.0,
+            drift_10s: 0.0,
+            drift_30s: 0.0,
+            post_flip_drift: 0.0,
+            sigma_horizon: 1.0,
+            vol_gap: 0.0,
+            obi_10: 0.0,
+            depth_imbalance: 0.0,
+            depth_acceleration: 0.0,
+            microprice_offset_bps: 0.0,
+            cex_spread_bps: 1.0,
+            cum_mprice_drift_5m: 0.0,
+            cum_trade_imbalance_5m: 0.0,
+            obi_delta_10s_side: 0.0,
+            obi_delta_30s_side: 0.0,
+            obi_persistence_30s_side: 0.0,
+            obi_flip_count_60s: 0.0,
+            depth_imbalance_delta_30s_side: 0.0,
+            microprice_momentum_30s_side: 0.0,
+            trade_imbalance_delta_10s_side: 0.0,
+            trade_imbalance_delta_30s_side: 0.0,
+            cex_bar_return_30s: 0.0,
+            cex_bar_return_60s: 0.0,
+            cex_bar_volume_ratio_30s: 1.0,
+            cex_bar_volume_trend_3: 0.0,
+            cex_signed_volume_ratio_30s: 0.0,
+            cex_consecutive_bar_side: 0.0,
+            cex_breakout_volume_side: 0.0,
+            cex_continuation_score_side: 0.0,
+            cex_continuation_edge_gate: 0.0,
+            cex_continuation_liquidity_gate: 0.0,
+            entry_ask,
+            exit_bid: 0.70,
+            entry_ask_size: if fillable { 100.0 } else { 0.0 },
+            exit_bid_size: if fillable { 100.0 } else { 0.0 },
+            opposite_ask: 1.0 - entry_ask,
+            opposite_bid: 1.0 - entry_ask - 0.02,
+            up_down_ask_sum: 1.0,
+            pm_spread_bps: 50.0,
+            pm_lag_secs: 1.0,
+            entry_ask_change_10s: 0.0,
+            entry_ask_change_30s: 0.0,
+            exit_bid_change_30s: 0.0,
+            pm_spread_change_30s: 0.0,
+            entry_size_change_30s: 0.0,
+            up_down_ask_sum_change_30s: 0.0,
+            pm_reprice_speed_30s: 0.0,
+            pm_quote_stability_30s: 1.0,
+            deribit_mark_iv: 0.0,
+            deribit_bid_iv: 0.0,
+            deribit_ask_iv: 0.0,
+            deribit_iv_spread: 0.0,
+            deribit_iv_lag_secs: 0.0,
+            deribit_iv_horizon: 0.0,
+            deribit_iv_gap_horizon: 0.0,
+            deribit_iv_change_30s: 0.0,
+            deribit_iv_change_60s: 0.0,
+            deribit_underlying_basis_bps: 0.0,
+            deribit_delta: 0.0,
+            deribit_gamma: 0.0,
+            deribit_vega: 0.0,
+            deribit_theta: 0.0,
+            stake_usd: 15.0,
+            entry_shares: if entry_ask > 0.0 {
+                15.0 / entry_ask
+            } else {
+                0.0
+            },
+            entry_fee_usd: 0.0,
+            entry_capacity_ratio: if fillable { 10.0 } else { 0.0 },
+            exit_capacity_ratio: if fillable { 10.0 } else { 0.0 },
+            entry_liquidity_usd: if fillable { 1500.0 } else { 0.0 },
+            exit_liquidity_usd: if fillable { 1500.0 } else { 0.0 },
+            liquidity_shortfall_usd: if fillable { 0.0 } else { 15.0 },
+            slippage_to_fill_15u_bps: 0.0,
+            entry_sweep_avg_price_15u: entry_ask,
+            exit_sweep_avg_price_15u: 0.70,
+            entry_sweep_shares_15u: if entry_ask > 0.0 {
+                15.0 / entry_ask
+            } else {
+                0.0
+            },
+            exit_sweep_shares_15u: 15.0 / 0.70,
+            entry_sweep_levels_15u: if fillable { 1.0 } else { 0.0 },
+            exit_sweep_levels_15u: if fillable { 1.0 } else { 0.0 },
+            entry_sweep_slippage_bps: 0.0,
+            exit_sweep_slippage_bps: 0.0,
+            roundtrip_cost_usd: 0.0,
+            roundtrip_pnl_now_15u: executable_pnl,
+            roundtrip_pnl_now_full_depth_15u: executable_pnl,
+            portfolio_stake_usd: 15.0,
+            portfolio_event_exposure_usd: 15.0,
+            same_event_observation_count: 1.0,
+            same_event_side_observation_count: 1.0,
+            side_is_up: 1.0,
+            label_settlement_win: Some(if executable_pnl.unwrap_or(0.0) > 0.0 {
+                1.0
+            } else {
+                0.0
+            }),
+            label_executable_pnl_15u: executable_pnl,
+            label_full_depth_executable_pnl_15u: executable_pnl,
+            label_executable_fillable: fillable,
+            label_exit_fillable: fillable,
+            label_full_depth_entry_fillable: fillable,
+            label_full_depth_exit_fillable: fillable,
+            label_future_exit_bid_change_30s: None,
+            label_future_exit_bid_change_60s: None,
+            label_future_exit_pnl_30s: None,
+            label_future_exit_fillable_30s: None,
         }
     }
 
@@ -1525,6 +1741,46 @@ mod tests {
     }
 
     #[test]
+    fn expected_value_uses_direction_probability_and_executable_price() {
+        let high_probability_rich_entry = expected_value_per_share(0.70, 0.75);
+        let lower_probability_cheap_entry = expected_value_per_share(0.58, 0.35);
+
+        assert!(
+            high_probability_rich_entry < 0.0,
+            "high direction probability is not enough when the executable ask is too rich"
+        );
+        assert!(
+            lower_probability_cheap_entry > high_probability_rich_entry,
+            "expected value must compare probability and executable price together"
+        );
+        assert!(
+            expected_value_per_staked_dollar(0.57, 0.28)
+                > expected_value_per_staked_dollar(0.72, 0.70),
+            "lower probability can still be better when payoff per staked dollar is higher"
+        );
+    }
+
+    #[test]
+    fn snapshot_objective_counts_only_fillable_executable_orders() {
+        let mut params = test_params();
+        params.cooldown_secs = 0;
+        params.min_entry_score = 0.0;
+
+        let rows = vec![
+            test_row("event-fillable", 0.62, 0.30, Some(2.0), true, 0),
+            test_row("event-not-fillable", 0.62, 0.30, Some(999.0), false, 1),
+        ];
+        let metrics =
+            evaluate_snapshot_objective(&rows, &params, 1, 15.0, StrategyProfile::Champion);
+
+        assert_eq!(metrics.selected, 2);
+        assert_eq!(metrics.trades, 1);
+        assert_eq!(metrics.rejected_non_executable, 1);
+        assert!((metrics.net_pnl - 2.0).abs() < 1e-9);
+        assert!(metrics.avg_expected_value_per_stake.is_finite());
+    }
+
+    #[test]
     fn stable_objective_prefers_smooth_compounding_over_choppy_sharpe() {
         let smooth = stable_compounding_objective(StableObjectiveInputs {
             trades: 800,
@@ -1536,6 +1792,7 @@ mod tests {
             log_growth: 12.0,
             avg_entry_price: 0.42,
             avg_reward_risk: 1.35,
+            avg_expected_value_per_stake: 0.19,
             fill_rate: 0.95,
             reject_rate: 0.02,
             positive_day_rate: 1.0,
@@ -1552,6 +1809,7 @@ mod tests {
             log_growth: 2.0,
             avg_entry_price: 0.72,
             avg_reward_risk: 0.35,
+            avg_expected_value_per_stake: -0.05,
             fill_rate: 0.70,
             reject_rate: 0.25,
             positive_day_rate: 0.50,

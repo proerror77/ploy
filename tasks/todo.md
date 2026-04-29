@@ -1,3 +1,27 @@
+# PM5D Expectancy And Fillable-Order Gate (2026-04-29)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: runtime entry expectancy, direction-probability usage, and fillable order gate semantics.
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: optimizer parity, expected-value diagnostics, and fillable-only evaluation.
+- `tasks/todo.md`
+  - Owner: correction plan, verification evidence, and remaining dry-run caveats.
+
+## Tasks
+
+- [x] Make expected value explicit in runtime entry scoring without removing direction probability.
+- [x] Align snapshot optimizer gates/diagnostics with runtime expected-value semantics.
+- [x] Add focused tests for high-probability but negative-EV rejection, lower-probability better-EV preference, and non-fillable exclusion.
+- [ ] Run formatter, diff checks, and targeted Rust tests.
+
+## Review
+
+- 2026-04-29: User correction: do not optimize by win rate alone, but also do not discard direction probability. Direction probability remains the alpha input; expected value is the execution-scale gate combining probability, executable entry price, payoff/loss, fee, and fillability.
+- 2026-04-29: Runtime entry scoring now computes expected value explicitly from direction probability, executable ask, payout/loss, and crypto fee. Snapshot profiles still require non-negative configured EV (`three_layer_min_edge`), and score also includes expected value per staked dollar so lower-probability but better-priced orders can outrank high-probability rich entries.
+- 2026-04-29: Snapshot optimizer now emits average expected value per share and per staked dollar, includes per-stake EV in the stability objective/generalization penalty, and has focused tests proving non-fillable rows are selected/rejected as non-executable rather than counted as executable PnL.
+
 # PM5D Holistic Snapshot Optimizer Fix (2026-04-29)
 
 Issue: https://github.com/proerror77/ploy/issues/224
