@@ -13,12 +13,12 @@
 //! If no --db-url is given, uses synthetic market data.
 
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
-    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
-    StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy, config::FullConfig,
+    config::FullConfig, DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder,
+    ReversalStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
+    StrategyLogic, StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -182,6 +182,32 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
+fn force_backtest_mode(mut config: RuntimeConfig) -> RuntimeConfig {
+    config.mode = RuntimeMode::Backtest;
+    config.skip_settlement_exits = false;
+    config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_backtest_forces_backtest_runtime_mode() {
+        let config = force_backtest_mode(RuntimeConfig {
+            mode: RuntimeMode::DryRun,
+            throttle_hz: Some(10),
+            max_updates: Some(123),
+            skip_settlement_exits: true,
+        });
+
+        assert_eq!(config.mode, RuntimeMode::Backtest);
+        assert_eq!(config.throttle_hz, Some(10));
+        assert_eq!(config.max_updates, Some(123));
+        assert!(!config.skip_settlement_exits);
+    }
+}
+
 fn main() {
     // Parse CLI flags
     let args: Vec<String> = std::env::args().collect();
@@ -198,7 +224,7 @@ fn main() {
         if let Some(ref path) = config_path {
             let config = FullConfig::from_file(path).expect("Failed to parse config");
             let sim = config.sim_executor_config();
-            let rt = config.runtime_config();
+            let rt = force_backtest_mode(config.runtime_config());
             let strategy_variant = config.runtime.canonical_strategy_variant();
             let backtest_options = HistoricalLoadOptions {
                 include_reference_prices: config.backtest_data.include_reference_prices,
@@ -279,12 +305,12 @@ fn main() {
                     impact_coefficient: dec!(0.1),
                     ..Default::default()
                 },
-                RuntimeConfig {
+                force_backtest_mode(RuntimeConfig {
                     mode: RuntimeMode::Backtest,
                     throttle_hz: None,
                     max_updates: None,
                     skip_settlement_exits: false,
-                },
+                }),
                 HistoricalLoadOptions::default(),
             )
         };
