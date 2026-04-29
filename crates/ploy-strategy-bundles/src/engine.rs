@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use ploy_trading::{PnlSnapshot, RiskSnapshot, TradingRuntime};
+use ploy_trading::{PnlSnapshot, RiskSnapshot, TradingIntent, TradingRuntime};
 use rust_decimal::Decimal;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -75,6 +75,7 @@ where
     recorder: Box<dyn Recorder>,
     trading: TradingRuntime,
     config: RuntimeConfig,
+    deployment_id: Option<String>,
 }
 
 impl<S, F, E> StrategyRuntime<S, F, E>
@@ -98,7 +99,18 @@ where
             recorder,
             trading: TradingRuntime::default(),
             config,
+            deployment_id: None,
         }
+    }
+
+    /// Attach the platform deployment identity used to attribute strategy orders.
+    pub fn with_deployment_id(mut self, deployment_id: impl Into<String>) -> Self {
+        let deployment_id = deployment_id.into();
+        let deployment_id = deployment_id.trim();
+        if !deployment_id.is_empty() {
+            self.deployment_id = Some(deployment_id.to_string());
+        }
+        self
     }
 
     /// Run the strategy loop until the feed is exhausted or max_updates reached.
@@ -159,11 +171,12 @@ where
 
             // 2. Execute each decision.
             for decision in decisions {
-                let (intent, signal) = match decision {
+                let (mut intent, signal) = match decision {
                     StrategyDecision::Enter { intent, signal } => (intent, signal),
                     StrategyDecision::Exit(intent) => (intent, None),
                     StrategyDecision::Hold => continue,
                 };
+                self.ensure_deployment_attribution(&mut intent);
                 let strategy_name = self.strategy.name().to_string();
                 let signal_ref = signal.as_ref();
 
@@ -326,6 +339,23 @@ where
         &self.trading
     }
 
+    fn ensure_deployment_attribution(&self, intent: &mut TradingIntent) {
+        if intent.deployment_id.is_empty() {
+            if let Some(deployment_id) = self.deployment_id.as_deref() {
+                intent.deployment_id = deployment_id.to_string();
+            }
+        }
+
+        if intent.deployment_id.is_empty()
+            && matches!(self.config.mode, RuntimeMode::Live | RuntimeMode::DryRun)
+        {
+            panic!(
+                "strategy runtime in {:?} emitted intent {} without deployment_id and runtime deployment_id is not configured",
+                self.config.mode, intent.intent_id
+            );
+        }
+    }
+
     /// Extract timestamp from a market update (for throttling).
     fn update_ts(update: &MarketUpdate) -> Option<DateTime<Utc>> {
         match update {
@@ -475,7 +505,7 @@ mod tests {
 
     struct CollectingRecorder {
         signals: Arc<Mutex<Vec<SignalRecord>>>,
-        orders: Arc<Mutex<Vec<(String, String)>>>,
+        orders: Arc<Mutex<Vec<(String, String, String)>>>,
         fills: Arc<Mutex<Vec<String>>>,
     }
 
@@ -493,10 +523,11 @@ mod tests {
             _report: &ExecutionReport,
             _order_id: &str,
         ) {
-            self.orders
-                .lock()
-                .unwrap()
-                .push((strategy.to_string(), intent.intent_id.clone()));
+            self.orders.lock().unwrap().push((
+                strategy.to_string(),
+                intent.intent_id.clone(),
+                intent.deployment_id.clone(),
+            ));
         }
 
         async fn record_fill(
@@ -568,7 +599,8 @@ mod tests {
             skip_settlement_exits: false,
         };
 
-        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config)
+            .with_deployment_id("test.dryrun");
         let result = runtime.run().await;
 
         assert_eq!(result.intents_submitted, 0);
@@ -608,6 +640,32 @@ mod tests {
                 rejection_reason: None,
                 slippage: Some(Decimal::ZERO),
                 market_impact: Some(Decimal::ZERO),
+            }
+        }
+
+        async fn cancel(&mut self, _order_id: &str) -> bool {
+            true
+        }
+    }
+
+    struct CapturingExecutor {
+        deployment_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Executor for CapturingExecutor {
+        async fn submit(&mut self, intent: &TradingIntent, order_id: &str) -> ExecutionReport {
+            self.deployment_ids
+                .lock()
+                .unwrap()
+                .push(intent.deployment_id.clone());
+            ExecutionReport {
+                order_id: order_id.to_string(),
+                fill: None,
+                rejected: false,
+                rejection_reason: None,
+                slippage: None,
+                market_impact: None,
             }
         }
 
@@ -691,13 +749,90 @@ mod tests {
             skip_settlement_exits: false,
         };
 
-        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config)
+            .with_deployment_id("test.dryrun");
         let result = runtime.run().await;
 
         assert_eq!(result.intents_submitted, 1);
         assert_eq!(result.fills_recorded, 1);
         assert_eq!(order_store.lock().unwrap().len(), 1);
         assert_eq!(fill_store.lock().unwrap().as_slice(), ["fill-1"]);
+    }
+
+    #[tokio::test]
+    async fn fills_empty_intent_deployment_id_before_submit_and_record() {
+        let now = Utc::now();
+        let signal = SignalRecord {
+            strategy: "pm5d.threelayer".into(),
+            event_id: Some("evt1".into()),
+            token_id: Some("token-up".into()),
+            intent_id: Some("intent-attribution".into()),
+            symbol: "BTCUSDT".into(),
+            direction: "UP".into(),
+            p_hat: 0.71,
+            edge: 0.08,
+            entry_price: dec!(0.30),
+            decision: "enter".into(),
+            ts: now,
+        };
+        let intent = TradingIntent {
+            intent_id: "intent-attribution".into(),
+            deployment_id: String::new(),
+            market_id: "evt1".into(),
+            token_id: "token-up".into(),
+            side: TradeSide::Buy,
+            quantity: dec!(10),
+            limit_price: Some(dec!(0.30)),
+            purpose: IntentPurpose::Entry,
+            created_at: now,
+        };
+        let order_store = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Box::new(CollectingRecorder {
+            signals: Arc::new(Mutex::new(Vec::new())),
+            orders: order_store.clone(),
+            fills: Arc::new(Mutex::new(Vec::new())),
+        });
+        let strategy = RecordingStrategy {
+            emitted: false,
+            signal,
+            intent,
+        };
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let submitted_deployments = Arc::new(Mutex::new(Vec::new()));
+        let executor = CapturingExecutor {
+            deployment_ids: submitted_deployments.clone(),
+        };
+        let config = RuntimeConfig {
+            mode: RuntimeMode::DryRun,
+            throttle_hz: None,
+            max_updates: None,
+            skip_settlement_exits: false,
+        };
+
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config)
+            .with_deployment_id("pm5d.threelayer.obi-soft.dryrun");
+        let result = runtime.run().await;
+
+        assert_eq!(result.intents_submitted, 1);
+        assert_eq!(
+            submitted_deployments.lock().unwrap().as_slice(),
+            ["pm5d.threelayer.obi-soft.dryrun"]
+        );
+        assert_eq!(
+            order_store.lock().unwrap()[0].2,
+            "pm5d.threelayer.obi-soft.dryrun"
+        );
+        let snapshot = runtime.trading().snapshot(&BTreeMap::new());
+        assert_eq!(
+            snapshot.intents[0].deployment_id,
+            "pm5d.threelayer.obi-soft.dryrun"
+        );
     }
 
     #[tokio::test]
@@ -752,7 +887,8 @@ mod tests {
             skip_settlement_exits: true,
         };
 
-        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config)
+            .with_deployment_id("test.live");
         let _ = runtime.run().await;
         let snapshot = runtime.trading().snapshot(&BTreeMap::new());
 
@@ -807,7 +943,8 @@ mod tests {
             skip_settlement_exits: true,
         };
 
-        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config);
+        let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config)
+            .with_deployment_id("test.live");
         let _ = runtime.run().await;
 
         assert_eq!(*fill_count.lock().unwrap(), 0);

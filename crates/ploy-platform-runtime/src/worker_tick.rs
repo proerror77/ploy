@@ -28,6 +28,8 @@ pub fn build_worker_launch_spec(
         "run".to_string(),
         "--config".to_string(),
         config_path.to_string_lossy().into_owned(),
+        "--deployment-id".to_string(),
+        record.deployment_id.clone(),
         "--foreground".to_string(),
     ];
     if record.runtime_mode == "paper" {
@@ -187,7 +189,7 @@ pub fn refresh_source_health(control_plane: &mut ControlPlane, listen_addr: &str
 
 #[cfg(test)]
 mod tests {
-    use super::{refresh_source_health, tick_workers, WorkerTickConfig};
+    use super::{WorkerTickConfig, refresh_source_health, tick_workers};
     use ploy_deployments::WorkerSupervisor;
     use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
     use ploy_platform::{ControlPlane, DeploymentRecord};
@@ -284,14 +286,22 @@ mod tests {
             &config(),
         );
 
-        assert!(spec
-            .command
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("ploy-platform-runtime-test-runner-")));
-        assert!(spec
+        assert!(
+            spec.command
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("ploy-platform-runtime-test-runner-"))
+        );
+        assert!(
+            spec.args
+                .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string())
+        );
+        let deployment_id_arg = spec
             .args
-            .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string()));
+            .windows(2)
+            .find(|window| window[0] == "--deployment-id")
+            .map(|window| window[1].as_str());
+        assert_eq!(deployment_id_arg, Some("pm5d.v2.paper"));
         assert!(spec.args.contains(&"--dry-run".to_string()));
     }
 

@@ -180,11 +180,12 @@ pub(crate) async fn run_live_or_dry_run_entry(
     symbols: &[String],
     strategy: Box<dyn StrategyLogic>,
     runtime_config: RuntimeModeConfig,
+    deployment_id: String,
 ) -> (
     ploy_strategy_bundles::RuntimeResult,
     ploy_trading::TradingRuntimeSnapshot,
 ) {
-    run_live_or_dry_run(config, symbols, strategy, runtime_config).await
+    run_live_or_dry_run(config, symbols, strategy, runtime_config, deployment_id).await
 }
 
 async fn run_live_or_dry_run(
@@ -192,6 +193,7 @@ async fn run_live_or_dry_run(
     symbols: &[String],
     strategy: Box<dyn StrategyLogic>,
     runtime_config: RuntimeModeConfig,
+    deployment_id: String,
 ) -> (
     ploy_strategy_bundles::RuntimeResult,
     ploy_trading::TradingRuntimeSnapshot,
@@ -298,7 +300,8 @@ async fn run_live_or_dry_run(
                 executor,
                 recorder,
                 runtime_config,
-            );
+            )
+            .with_deployment_id(deployment_id.clone());
             let result = runtime.run().await;
             let snapshot = runtime
                 .trading()
@@ -313,7 +316,8 @@ async fn run_live_or_dry_run(
             executor,
             recorder,
             runtime_config,
-        );
+        )
+        .with_deployment_id(deployment_id);
         let result = runtime.run().await;
         let snapshot = runtime
             .trading()

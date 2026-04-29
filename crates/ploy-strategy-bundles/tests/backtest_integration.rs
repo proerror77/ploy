@@ -46,16 +46,16 @@ fn build_scenario() -> Vec<MarketUpdate> {
         bid: Some(dec!(0.29)),
         ask: Some(dec!(0.30)),
         ts: now,
-            bid_size: None,
-            ask_size: None,
+        bid_size: None,
+        ask_size: None,
     });
     updates.push(MarketUpdate::Quote {
         token_id: "dn-btc-001".into(),
         bid: Some(dec!(0.69)),
         ask: Some(dec!(0.70)),
         ts: now,
-            bid_size: None,
-            ask_size: None,
+        bid_size: None,
+        ask_size: None,
     });
 
     // 4. BTC trends up over several updates so realized vol has a usable estimate.
@@ -440,7 +440,8 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         SimulatedExecutor::new(sim_config.clone()),
         Box::new(NullRecorder),
         runtime_config.clone(),
-    );
+    )
+    .with_deployment_id("test.recorded.dryrun");
     let recorded_result = recorded_runtime.run().await;
     let recorded_snapshot = recorded_runtime
         .trading()
@@ -563,7 +564,8 @@ async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
         SimulatedExecutor::new(sim_config.clone()),
         Box::new(NullRecorder),
         runtime_config.clone(),
-    );
+    )
+    .with_deployment_id("test.recorded.dryrun");
     let recorded_result = recorded_runtime.run().await;
     drop(recorded_runtime);
 
@@ -676,7 +678,8 @@ async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior()
         SimulatedExecutor::new(sim_config.clone()),
         Box::new(NullRecorder),
         runtime_config.clone(),
-    );
+    )
+    .with_deployment_id("test.recorded.dryrun");
     let recorded_result = recorded_runtime.run().await;
     drop(recorded_runtime);
 

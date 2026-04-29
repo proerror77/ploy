@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use ploy_strategy_bundles::{ExecutionReport, NullRecorder, Recorder, RuntimeMode, SignalRecord};
 use ploy_trading::{FillRecord, TradeSide, TradingIntent};
-use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use serde_json::json;
 use std::collections::HashMap;
 use tracing::{info, warn};
