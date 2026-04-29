@@ -86,6 +86,7 @@ Issue: https://github.com/proerror77/ploy/issues/227
 - [x] Rerun optimizer after the direction-probability lower-bound fix and compare by full executable-EV metrics.
 - [x] Decouple raw directional-alpha gating from calibrated EV probability, then rerun optimizer.
 - [x] Widen non-neutral optimizer direction search from `0.525` to `0.515` and rerun optimizer.
+- [ ] Promote the strongest near-powered champion candidate to dry-run only for real filled-order sampling.
 
 ## Review
 
@@ -102,6 +103,7 @@ Issue: https://github.com/proerror77/ploy/issues/227
 - 2026-04-29: Runtime and snapshot optimizer now gate on raw transformed directional alpha, while calibrated probability remains the executable-EV input. Focused verification passed: `rustfmt --edition 2024 crates/ploy-strategy-bundles/src/strategies/three_layer.rs crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-alpha-ev-decouple-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-strategy-bundles three_layer --lib` (`33 passed, 103 filtered out`), and `CARGO_TARGET_DIR=/tmp/ploy-alpha-ev-decouple-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`23 passed`).
 - 2026-04-29: PR #239 merged to `main@47909153`; deploy run `25104259509` succeeded. Tango verification showed `ployd` active/running with `NRestarts=0`, `active_alert_count=0`, no cargo/rustc process, PM5D dry-run deployments running, and `pm5d.threelayer.live` still Paused. Post-decoupling optimizer reruns (`25104557967` champion, `25104559763` obi_soft, `25104561219` continuation_soft, `25104562806` mixed) improved PnL but were still validation-underpowered: continuation_soft had validation PnL `+1124.04`, DD `15.26`, EV gap `0`, but only `23` trades; champion had `17`, mixed `8`, obi_soft `5`. No candidate should be promoted yet.
 - 2026-04-29: Widened optimizer direction-probability search lower bound from `0.525` to `0.515` after the post-decoupling runs still selected the lower bound and remained underpowered. This remains non-neutral (`>0.50`) while giving EV/fillable-price selection more room. Focused verification passed: `rustfmt --edition 2024 crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `git diff --check`, and `CARGO_TARGET_DIR=/tmp/ploy-direction-bound-515-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`23 passed`).
+- 2026-04-29: With `0.515` search bound, shifted-window champion run `25105940653` was the strongest candidate but still technically validation-underpowered by one trade: validation PnL `+7322.43`, trades `199/200`, max DD `120.06`, fill rate `88.05%`, reject rate `11.95%`, avg realized return/stake `2.4531`, EV gap `0`, positive day/symbol `100%/100%`, concentration `52.61%`. Because it is not live-ready by the optimizer's own sample gate, it is only being promoted to `pm5d.threelayer.champion.dryrun` for real filled-order sampling.
 
 # Dry-run Report Contracts And Multi-strategy UI (2026-04-29)
 
