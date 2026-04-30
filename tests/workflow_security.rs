@@ -32,6 +32,48 @@ fn ci_runs_dependency_vulnerability_audit() {
 }
 
 #[test]
+fn rust_toolchain_actions_pin_required_toolchain_input() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workflows_dir = repo_root.join(".github/workflows");
+    let mut offenders = Vec::new();
+
+    for entry in fs::read_dir(&workflows_dir).expect("failed to read workflow directory") {
+        let path = entry.expect("failed to read workflow entry").path();
+        if !matches!(path.extension().and_then(|ext| ext.to_str()), Some("yml" | "yaml")) {
+            continue;
+        }
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        let lines: Vec<_> = content.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            if !line.contains("uses: dtolnay/rust-toolchain@master") {
+                continue;
+            }
+            let window = lines
+                .iter()
+                .skip(idx + 1)
+                .take(6)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !window.contains("toolchain: stable") {
+                offenders.push(format!(
+                    "{}:{}: dtolnay/rust-toolchain@master must set `toolchain: stable`",
+                    path.strip_prefix(repo_root).unwrap_or(&path).display(),
+                    idx + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "rust toolchain workflow guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn release_platform_workflow_pins_host_fingerprints() {
     let content = workflow_contents(".github/workflows/release-platform.yml");
     let mut offenders = Vec::new();

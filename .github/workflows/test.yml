@@ -59,6 +59,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
@@ -99,6 +101,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: stable
           components: clippy, rustfmt
 
       - name: Install build dependencies
@@ -187,6 +190,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
 
       - name: Install build dependencies
         run: |
@@ -256,6 +261,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
 
       - name: Install build dependencies
         run: |
@@ -335,6 +342,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
 
       - name: Install build dependencies
         run: |
@@ -401,6 +410,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
 
       - name: Install build dependencies
         run: |
@@ -476,6 +487,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -521,6 +534,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
 
       - name: Install build dependencies
         run: |
