@@ -132,7 +132,7 @@
 - [x] Preserve existing direction/probability/edge buckets so direction
   probability remains visible in replay evidence.
 - [x] Run focused example tests, diff checks, and feature compile.
-- [ ] Push PR update and run remote replay evidence without deploying dry-run.
+- [x] Push PR update and run remote replay evidence without deploying dry-run.
 
 ## Review
 
@@ -155,6 +155,15 @@
   Updated the diagnostic recorder to retain exit reason by `fill_id` from the
   original exit intent before closed-trade pairing. Re-ran the same focused
   example test, parquet-feature compile, and diff check successfully.
+- 2026-04-30: Remote optimize replay run `25153555409` completed successfully
+  on `ploy-ci-1` with official-only settlement and executable LOB liquidity.
+  Best held-out validation was still negative: PnL `-$41.65`, 7 trades, Sharpe
+  `-99.545`. The worst validation buckets were `exit_price=<0.35`
+  (`-$60.46/4`), `roundtrip_price_move=<-0.20` (`-$60.46/4`),
+  `direction_exit=DOWN:settlement` (`-$52.49/5`), and
+  `exit_reason=settlement` (`-$52.49/5`). Conclusion: no dry-run deployment;
+  the next research step should address settlement/late-hold loss risk before
+  more threshold tuning.
 
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
