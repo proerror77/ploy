@@ -25,6 +25,7 @@ pub struct ThreeLayerConfig {
     pub symbols: Vec<String>,
     pub profile: ThreeLayerProfile,
     pub min_direction_prob: f64,
+    pub allowed_directions: Vec<String>,
     pub min_distance_over_sigma: f64,
     pub min_confirmation_score: f64,
     pub require_confirmation: bool,
@@ -58,6 +59,7 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             symbols: c.symbols,
             profile: c.three_layer_strategy_profile,
             min_direction_prob: c.three_layer_min_direction_prob,
+            allowed_directions: c.three_layer_allowed_directions,
             min_distance_over_sigma: c.three_layer_min_distance_over_sigma,
             min_confirmation_score: c.three_layer_min_confirmation_score,
             require_confirmation: c.three_layer_require_confirmation,
@@ -88,6 +90,16 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
 }
 
 const DRIFT_WINDOW_SECS: f64 = 30.0;
+
+impl ThreeLayerConfig {
+    fn allows_direction(&self, direction: &str) -> bool {
+        self.allowed_directions.is_empty()
+            || self
+                .allowed_directions
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(direction))
+    }
+}
 const VOL_WINDOW_SECS: f64 = 120.0;
 const MIN_VOL_POINTS: usize = 5;
 const ACCOUNT_BALANCE_REJECT_PAUSE_SECS: i64 = 15;
@@ -947,6 +959,10 @@ impl ThreeLayerStrategy {
             } else {
                 (&event.down_token, "DOWN")
             };
+            if !self.config.allows_direction(direction) {
+                self.bump("skip_direction_filter");
+                continue;
+            }
 
             // Skip if already positioned or have active order on this token
             if positions.net_qty(token_id) > Decimal::ZERO {
@@ -1758,6 +1774,7 @@ mod tests {
             symbols: vec!["BTCUSDT".into()],
             profile: ThreeLayerProfile::Mixed,
             min_direction_prob: 0.56,
+            allowed_directions: Vec::new(),
             min_distance_over_sigma: 0.3,
             min_confirmation_score: 0.10,
             require_confirmation: false,
@@ -1784,6 +1801,17 @@ mod tests {
             max_entry_price: 0.85,
             min_entry_score: 0.30,
         }
+    }
+
+    #[test]
+    fn direction_filter_allows_research_side_gates_without_changing_default() {
+        let mut config = test_config();
+        assert!(config.allows_direction("UP"));
+        assert!(config.allows_direction("DOWN"));
+
+        config.allowed_directions = vec!["UP".to_string()];
+        assert!(config.allows_direction("up"));
+        assert!(!config.allows_direction("DOWN"));
     }
 
     fn discover_test_event(strategy: &mut ThreeLayerStrategy, now: DateTime<Utc>) {

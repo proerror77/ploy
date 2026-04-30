@@ -282,6 +282,7 @@ fn main() {
                     max_daily_loss_usd: None,
                     allowed_window_secs: vec![300, 900],
                     three_layer_min_direction_prob: 0.56,
+                    three_layer_allowed_directions: Vec::new(),
                     three_layer_min_distance_over_sigma: 0.3,
                     three_layer_min_confirmation_score: 0.10,
                     three_layer_require_confirmation: false,

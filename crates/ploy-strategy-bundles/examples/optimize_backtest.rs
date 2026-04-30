@@ -249,6 +249,23 @@ mod tests {
         assert!(diagnostics.trade_buckets.contains_key("p_hat=0.60-0.70"));
         assert!(diagnostics.trade_buckets.contains_key("edge=0.05-0.10"));
     }
+
+    #[test]
+    fn direction_filter_codes_map_to_strategy_config_values() {
+        assert!(
+            DirectionFilter::from_code(0)
+                .allowed_directions()
+                .is_empty()
+        );
+        assert_eq!(
+            DirectionFilter::from_code(1).allowed_directions(),
+            vec!["UP".to_string()]
+        );
+        assert_eq!(
+            DirectionFilter::from_code(2).allowed_directions(),
+            vec!["DOWN".to_string()]
+        );
+    }
 }
 
 fn load_research_snapshot_manifest(path: &str) -> ResearchSnapshotManifestProbe {
@@ -1510,6 +1527,7 @@ fn make_directional_config(
         max_daily_loss_usd: None,
         allowed_window_secs: vec![300, 900],
         three_layer_min_direction_prob: 0.52,
+        three_layer_allowed_directions: Vec::new(),
         three_layer_min_distance_over_sigma: 0.15,
         three_layer_min_confirmation_score: 0.03,
         three_layer_require_confirmation: false,
@@ -1583,6 +1601,7 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
         max_daily_loss_usd: None,
         allowed_window_secs: vec![300],
         three_layer_min_direction_prob: 0.52,
+        three_layer_allowed_directions: Vec::new(),
         three_layer_min_distance_over_sigma: 0.15,
         three_layer_min_confirmation_score: 0.03,
         three_layer_require_confirmation: false,
@@ -1605,6 +1624,7 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
 struct ThreeLayerSearchParams {
     min_entry_score: f64,
     min_direction_prob: f64,
+    direction_filter: DirectionFilter,
     min_distance_over_sigma: f64,
     min_confirmation_score: f64,
     min_drift_confirmation: f64,
@@ -1617,6 +1637,39 @@ struct ThreeLayerSearchParams {
     cooldown_secs: i64,
     min_time_remaining_secs: i64,
     max_time_remaining_secs: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DirectionFilter {
+    Both,
+    UpOnly,
+    DownOnly,
+}
+
+impl DirectionFilter {
+    fn from_code(code: i64) -> Self {
+        match code {
+            1 => Self::UpOnly,
+            2 => Self::DownOnly,
+            _ => Self::Both,
+        }
+    }
+
+    fn as_label(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::UpOnly => "up_only",
+            Self::DownOnly => "down_only",
+        }
+    }
+
+    fn allowed_directions(self) -> Vec<String> {
+        match self {
+            Self::Both => Vec::new(),
+            Self::UpOnly => vec!["UP".to_string()],
+            Self::DownOnly => vec!["DOWN".to_string()],
+        }
+    }
 }
 
 fn make_three_layer_config(
@@ -1632,6 +1685,7 @@ fn make_three_layer_config(
     config.cooldown_secs = p.cooldown_secs as u64;
     config.three_layer_min_entry_score = p.min_entry_score;
     config.three_layer_min_direction_prob = p.min_direction_prob;
+    config.three_layer_allowed_directions = p.direction_filter.allowed_directions();
     config.three_layer_min_distance_over_sigma = p.min_distance_over_sigma;
     config.three_layer_min_confirmation_score = p.min_confirmation_score;
     config.three_layer_min_drift_confirmation = p.min_drift_confirmation;
@@ -2341,6 +2395,7 @@ fn main() {
         let p_min_entry_score = FloatParam::new(0.30, 0.85).name("three_layer_min_entry_score");
         let p_min_direction_prob =
             FloatParam::new(0.56, 0.85).name("three_layer_min_direction_prob");
+        let p_direction_filter = IntParam::new(0, 2).name("three_layer_direction_filter");
         let p_min_distance_over_sigma =
             FloatParam::new(0.20, 0.90).name("three_layer_min_distance_over_sigma");
         let p_min_confirmation_score =
@@ -2362,6 +2417,7 @@ fn main() {
 
         let p_min_entry_score_c = p_min_entry_score.clone();
         let p_min_direction_prob_c = p_min_direction_prob.clone();
+        let p_direction_filter_c = p_direction_filter.clone();
         let p_min_distance_over_sigma_c = p_min_distance_over_sigma.clone();
         let p_min_confirmation_score_c = p_min_confirmation_score.clone();
         let p_min_drift_confirmation_c = p_min_drift_confirmation.clone();
@@ -2382,6 +2438,7 @@ fn main() {
                 let params = ThreeLayerSearchParams {
                     min_entry_score: p_min_entry_score_c.suggest(trial)?,
                     min_direction_prob: p_min_direction_prob_c.suggest(trial)?,
+                    direction_filter: DirectionFilter::from_code(p_direction_filter_c.suggest(trial)?),
                     min_distance_over_sigma: p_min_distance_over_sigma_c.suggest(trial)?,
                     min_confirmation_score: p_min_confirmation_score_c.suggest(trial)?,
                     min_drift_confirmation: p_min_drift_confirmation_c.suggest(trial)?,
@@ -2469,6 +2526,7 @@ fn main() {
                 );
                 record["trial_id"] = json!(trial_id);
                 record["strategy_variant"] = json!("three_layer");
+                record["direction_filter"] = json!(params.direction_filter.as_label());
                 let mut validation_record = outcome_timing_json(
                     "validation",
                     &val_ref,
@@ -2478,6 +2536,7 @@ fn main() {
                 );
                 validation_record["trial_id"] = json!(trial_id);
                 validation_record["strategy_variant"] = json!("three_layer");
+                validation_record["direction_filter"] = json!(params.direction_filter.as_label());
                 {
                     let mut timings = trial_timings_c.lock().unwrap();
                     timings.push(record);
@@ -2485,7 +2544,7 @@ fn main() {
                 }
 
                 eprintln!(
-                    "  Trial {:>3}: source={} score={:>8.2} train_pnl=${:>8.2} val_pnl=${:>8.2} val_sharpe={:>7.3} val_trades={:>4} updates={} elapsed={:.1}s | params: entry={:.3} dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} prior_w={:.2} conf_w={:.2} tp={:.3} stop={:.4} cd={}s",
+                    "  Trial {:>3}: source={} score={:>8.2} train_pnl=${:>8.2} val_pnl=${:>8.2} val_sharpe={:>7.3} val_trades={:>4} updates={} elapsed={:.1}s | params: entry={:.3} dir_prob={:.3} side={} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} prior_w={:.2} conf_w={:.2} tp={:.3} stop={:.4} cd={}s",
                     trial_id,
                     train_ref.kind(),
                     score,
@@ -2497,6 +2556,7 @@ fn main() {
                     outcome.elapsed_secs,
                     params.min_entry_score,
                     params.min_direction_prob,
+                    params.direction_filter.as_label(),
                     params.min_distance_over_sigma,
                     params.min_confirmation_score,
                     params.min_drift_confirmation,
@@ -2519,6 +2579,9 @@ fn main() {
         let best_params = ThreeLayerSearchParams {
             min_entry_score: best.get(&p_min_entry_score).unwrap_or(0.30),
             min_direction_prob: best.get(&p_min_direction_prob).unwrap_or(0.52),
+            direction_filter: DirectionFilter::from_code(
+                best.get(&p_direction_filter).unwrap_or(0),
+            ),
             min_distance_over_sigma: best.get(&p_min_distance_over_sigma).unwrap_or(0.15),
             min_confirmation_score: best.get(&p_min_confirmation_score).unwrap_or(0.03),
             min_drift_confirmation: best.get(&p_min_drift_confirmation).unwrap_or(0.0002),
@@ -2549,13 +2612,15 @@ fn main() {
             max_updates,
         )
         .expect("Validation backtest failed");
-        validation_timings.push(outcome_timing_json(
+        let mut validation_record = outcome_timing_json(
             "validation",
             &val_source,
             &val_outcome,
             validation_started.elapsed().as_secs_f64(),
             Some(val_outcome.sharpe),
-        ));
+        );
+        validation_record["direction_filter"] = json!(best_params.direction_filter.as_label());
+        validation_timings.push(validation_record);
         eprintln!("Val Source:  {}", val_source.kind());
         eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
         eprintln!("Val PnL:     ${:.2}", val_outcome.net_pnl);
@@ -2574,6 +2639,10 @@ fn main() {
             "three_layer_min_direction_prob = {:.4}",
             best_params.min_direction_prob
         );
+        let allowed_directions = best_params.direction_filter.allowed_directions();
+        if !allowed_directions.is_empty() {
+            eprintln!("three_layer_allowed_directions = {:?}", allowed_directions);
+        }
         eprintln!(
             "three_layer_min_distance_over_sigma = {:.4}",
             best_params.min_distance_over_sigma

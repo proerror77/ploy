@@ -154,6 +154,10 @@ pub struct DirectionalConfig {
     #[serde(default = "default_tl_min_direction_prob")]
     pub three_layer_min_direction_prob: f64,
 
+    /// Direction side filter for research/promotion gates. Empty = allow both.
+    #[serde(default)]
+    pub three_layer_allowed_directions: Vec<String>,
+
     /// Direction gate: minimum |distance_over_sigma| to consider a trade.
     #[serde(default = "default_tl_min_distance_over_sigma")]
     pub three_layer_min_distance_over_sigma: f64,
@@ -1832,6 +1836,7 @@ mod tests {
             reversal_stop_distance_pct: 0.025,
             three_layer_strategy_profile: ThreeLayerProfile::Mixed,
             three_layer_min_direction_prob: 0.56,
+            three_layer_allowed_directions: Vec::new(),
             three_layer_min_distance_over_sigma: 0.3,
             three_layer_min_confirmation_score: 0.10,
             three_layer_require_confirmation: false,
