@@ -18,7 +18,7 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Print the audit in the text report and persist it in `evaluation.json`.
 - [x] Add focused tests for aligned and inverted model-side PnL.
 - [x] Run focused local verification.
-- [ ] Push PR and rerun Factor Review V2 on `ploy-ci-1`.
+- [x] Push PR and rerun Factor Review V2 on `ploy-ci-1`.
 
 ## Review
 
@@ -37,6 +37,18 @@ Issue: https://github.com/proerror77/ploy/issues/256
   factors_v2 --lib`, `CARGO_TARGET_DIR=/tmp/ploy-side-audit rtk cargo check
   -p ploy-research --features db,polars-export --example factor_review_v2`,
   and `git diff --check`.
+- 2026-05-01: PR #260 merged to main at `08992fca`; Factor Review V2 run
+  `25189687152` succeeded on `ploy-ci-1` for `2026-04-25 -> 2026-04-26`,
+  `BTCUSDT,ETHUSDT`, `stake_usd=15`, artifact
+  `/tmp/ploy-factor-review-25189687152/factor-review-v2-25189687152/factor-review-v2/evaluation.json`.
+- 2026-05-01: CI side audit says the current direction/edge side selection is
+  not deployable. `model_probability/all` favored side had settlement win rate
+  `38.77%`, avg executable PnL `-6.4841`, t-stat `-30.51`; the opposite side
+  had settlement win rate `61.23%`, avg executable PnL `+2.8001`, t-stat
+  `9.21`. `model_edge/all` showed the same inversion: favored avg PnL
+  `-3.1583`, t-stat `-9.62`; opposite avg PnL `+2.1511`, t-stat `13.13`.
+  Next research should audit/fix side or settlement sign convention before any
+  parameter retuning, dry-run reset, or deployment.
 
 # PM5D Executable EV Factor Buckets (2026-04-30)
 
