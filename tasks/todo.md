@@ -72,6 +72,50 @@
   Local `actionlint` was unavailable; GitHub workflow lint remains the source
   of truth after push.
 
+# PM5D Bayesian EV Gate (2026-04-30)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+  - Owner: backward-compatible config fields for market-prior Bayesian EV gating.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: runtime probability fusion, EV gate, signal/report probability semantics.
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+  - Owner: three-layer optimizer labeling and search path.
+- `tasks/todo.md`
+  - Owner: plan/review evidence.
+
+## Tasks
+
+- [x] Add conservative market-prior Bayesian fusion before the three-layer executable EV gate.
+- [x] Keep direction probability as a hard alpha gate while using posterior probability for EV and p_hat.
+- [x] Move three-layer optimizer scoring toward validation filled-PnL stability and include Bayesian EV parameters.
+- [x] Add regression tests for posterior shrinkage, confirmation bumping, and optimizer objective selection.
+- [x] Run focused Rust verification without touching Tango live state.
+
+## Review
+
+- 2026-04-30: Added backward-compatible three-layer Bayesian EV parameters:
+  `three_layer_market_prior_weight` and `three_layer_confirmation_logit_weight`.
+  The raw direction probability still gates alpha strength, while entry EV now
+  uses a posterior probability blended from model probability, executable PM ask
+  prior, and OBI/confirmation logit evidence. `SignalRecord.p_hat` now records
+  the posterior used for executable EV; logs include both `model_p` and posterior.
+- 2026-04-30: Updated `optimize_backtest` so three-layer trials evaluate both
+  train and validation splits. Objective selection is validation filled-PnL
+  dominant with a train/validation gap penalty and sparse-validation rejection.
+  The optimizer search space now includes the market-prior and confirmation
+  logit weights.
+- 2026-04-30: Verification passed: `rustfmt --edition 2024` on touched Rust
+  files, `rtk git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test
+  rtk cargo test -p ploy-strategy-bundles three_layer --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles --example optimize_backtest`, `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test
+  rtk cargo test -p ploy-strategy-bundles config --lib`, and
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo check -p
+  ploy-strategy-bundles --example optimize_backtest`. `cargo check` emitted
+  existing dead-code/profile warnings only.
+
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
 ## Files

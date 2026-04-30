@@ -184,6 +184,40 @@ mod tests {
         assert!(error.contains("date span 7 days exceeds --max-days 3"));
         assert!(error.contains("before parquet preflight scan"));
     }
+
+    fn outcome(net_pnl: f64, trade_count: usize, sharpe: f64) -> BacktestOutcome {
+        BacktestOutcome {
+            net_pnl,
+            trade_count,
+            sharpe,
+            updates_processed: 0,
+            elapsed_secs: 0.0,
+            intents_submitted: 0,
+            fills_recorded: 0,
+            diagnostics: BacktestDiagnostics::default(),
+        }
+    }
+
+    #[test]
+    fn three_layer_objective_prefers_validation_pnl_over_train_sharpe() {
+        let overfit_train = outcome(500.0, 30, 20.0);
+        let weak_validation = outcome(-50.0, 20, 5.0);
+        let stable_train = outcome(80.0, 20, 4.0);
+        let stable_validation = outcome(60.0, 20, 3.0);
+
+        assert!(
+            three_layer_objective_score(&stable_train, &stable_validation)
+                > three_layer_objective_score(&overfit_train, &weak_validation)
+        );
+    }
+
+    #[test]
+    fn three_layer_objective_rejects_sparse_validation() {
+        let train = outcome(100.0, 20, 5.0);
+        let sparse_validation = outcome(1000.0, 2, 99.0);
+
+        assert!(three_layer_objective_score(&train, &sparse_validation) <= -999_000.0);
+    }
 }
 
 fn load_research_snapshot_manifest(path: &str) -> ResearchSnapshotManifestProbe {
@@ -932,6 +966,14 @@ struct BacktestOutcome {
     diagnostics: BacktestDiagnostics,
 }
 
+fn three_layer_objective_score(train: &BacktestOutcome, validation: &BacktestOutcome) -> f64 {
+    if validation.trade_count < 5 {
+        return -1_000_000.0 + validation.net_pnl;
+    }
+    let train_val_gap = (train.net_pnl - validation.net_pnl).abs();
+    validation.net_pnl - 0.25 * train_val_gap + 0.10 * validation.sharpe.max(0.0)
+}
+
 #[derive(Debug, Clone, Default)]
 struct BacktestDiagnostics {
     signals_recorded: u64,
@@ -1260,6 +1302,8 @@ fn make_directional_config(
         three_layer_cex_contrarian: false,
         three_layer_probability_shrink: 1.0,
         three_layer_probability_haircut: 0.0,
+        three_layer_market_prior_weight: 0.35,
+        three_layer_confirmation_logit_weight: 1.0,
         three_layer_take_profit_ask: 0.70,
         three_layer_stop_distance_pct: 0.020,
         three_layer_max_pm_lag_secs: 15,
@@ -1331,6 +1375,8 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
         three_layer_cex_contrarian: false,
         three_layer_probability_shrink: 1.0,
         three_layer_probability_haircut: 0.0,
+        three_layer_market_prior_weight: 0.35,
+        three_layer_confirmation_logit_weight: 1.0,
         three_layer_take_profit_ask: 0.70,
         three_layer_stop_distance_pct: 0.020,
         three_layer_max_pm_lag_secs: 15,
@@ -1345,6 +1391,8 @@ struct ThreeLayerSearchParams {
     min_drift_confirmation: f64,
     min_edge: f64,
     min_reward_risk: f64,
+    market_prior_weight: f64,
+    confirmation_logit_weight: f64,
     take_profit_ask: f64,
     stop_distance_pct: f64,
     cooldown_secs: i64,
@@ -1369,6 +1417,8 @@ fn make_three_layer_config(
     config.three_layer_min_drift_confirmation = p.min_drift_confirmation;
     config.three_layer_min_edge = p.min_edge;
     config.three_layer_min_reward_risk = p.min_reward_risk;
+    config.three_layer_market_prior_weight = p.market_prior_weight;
+    config.three_layer_confirmation_logit_weight = p.confirmation_logit_weight;
     config.three_layer_take_profit_ask = p.take_profit_ask;
     config.three_layer_stop_distance_pct = p.stop_distance_pct;
     config
@@ -2062,6 +2112,7 @@ fn main() {
             .expect("three_layer optimizer requires a config baseline");
         // ── three_layer parameter search ──────────────────────────────────────
         let train_ref = train_source.clone();
+        let val_ref = val_source.clone();
         let symbols_ref_c = Arc::clone(&symbols_ref);
         let executor_config_c = Arc::clone(&executor_config);
         let base_config_c = Arc::clone(base_config);
@@ -2077,6 +2128,10 @@ fn main() {
             FloatParam::new(0.0001, 0.001).name("three_layer_min_drift_confirmation");
         let p_min_edge = FloatParam::new(0.02, 0.06).name("three_layer_min_edge");
         let p_min_reward_risk = FloatParam::new(0.8, 2.0).name("three_layer_min_reward_risk");
+        let p_market_prior_weight =
+            FloatParam::new(0.10, 0.75).name("three_layer_market_prior_weight");
+        let p_confirmation_logit_weight =
+            FloatParam::new(0.0, 2.5).name("three_layer_confirmation_logit_weight");
         let p_take_profit_ask = FloatParam::new(0.60, 0.85).name("three_layer_take_profit_ask");
         let p_stop_distance_pct =
             FloatParam::new(0.010, 0.040).name("three_layer_stop_distance_pct");
@@ -2090,6 +2145,8 @@ fn main() {
         let p_min_drift_confirmation_c = p_min_drift_confirmation.clone();
         let p_min_edge_c = p_min_edge.clone();
         let p_min_reward_risk_c = p_min_reward_risk.clone();
+        let p_market_prior_weight_c = p_market_prior_weight.clone();
+        let p_confirmation_logit_weight_c = p_confirmation_logit_weight.clone();
         let p_take_profit_ask_c = p_take_profit_ask.clone();
         let p_stop_distance_pct_c = p_stop_distance_pct.clone();
         let p_cooldown_secs_c = p_cooldown_secs.clone();
@@ -2107,6 +2164,8 @@ fn main() {
                     min_drift_confirmation: p_min_drift_confirmation_c.suggest(trial)?,
                     min_edge: p_min_edge_c.suggest(trial)?,
                     min_reward_risk: p_min_reward_risk_c.suggest(trial)?,
+                    market_prior_weight: p_market_prior_weight_c.suggest(trial)?,
+                    confirmation_logit_weight: p_confirmation_logit_weight_c.suggest(trial)?,
                     take_profit_ask: p_take_profit_ask_c.suggest(trial)?,
                     stop_distance_pct: p_stop_distance_pct_c.suggest(trial)?,
                     cooldown_secs: p_cooldown_secs_c.suggest(trial)?,
@@ -2123,7 +2182,7 @@ fn main() {
                 let trial_started = Instant::now();
                 let outcome = match run_backtest(
                     "three_layer",
-                    config,
+                    config.clone(),
                     &train_ref,
                     executor_config_c.as_ref(),
                     max_updates,
@@ -2148,23 +2207,69 @@ fn main() {
                     }
                 };
 
-                // Sharpe = mean(pnl_per_trade) / std(pnl_per_trade) * sqrt(trades_per_year).
-                // Penalty for sparse trials is already applied inside run_backtest.
-                let score = outcome.sharpe;
+                let validation_started = Instant::now();
+                let validation = match run_backtest(
+                    "three_layer",
+                    config,
+                    &val_ref,
+                    executor_config_c.as_ref(),
+                    max_updates,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        trial_timings_c.lock().unwrap().push(json!({
+                            "trial_id": trial_id,
+                            "strategy_variant": "three_layer",
+                            "split": "validation",
+                            "source_label": val_ref.label(),
+                            "source_kind": val_ref.kind(),
+                            "wall_secs": round_secs(validation_started.elapsed().as_secs_f64()),
+                            "error": &error,
+                        }));
+                        eprintln!(
+                            "  Trial {:>3}: validation source={} error={error}",
+                            trial_id,
+                            val_ref.kind()
+                        );
+                        return Ok::<f64, Error>(-1_000_000.0);
+                    }
+                };
+
+                let score = three_layer_objective_score(&outcome, &validation);
                 let trial_wall_secs = trial_started.elapsed().as_secs_f64();
-                let mut record =
-                    outcome_timing_json("train", &train_ref, &outcome, trial_wall_secs, Some(score));
+                let mut record = outcome_timing_json(
+                    "train",
+                    &train_ref,
+                    &outcome,
+                    trial_wall_secs,
+                    Some(score),
+                );
                 record["trial_id"] = json!(trial_id);
                 record["strategy_variant"] = json!("three_layer");
-                trial_timings_c.lock().unwrap().push(record);
+                let mut validation_record = outcome_timing_json(
+                    "validation",
+                    &val_ref,
+                    &validation,
+                    validation_started.elapsed().as_secs_f64(),
+                    Some(score),
+                );
+                validation_record["trial_id"] = json!(trial_id);
+                validation_record["strategy_variant"] = json!("three_layer");
+                {
+                    let mut timings = trial_timings_c.lock().unwrap();
+                    timings.push(record);
+                    timings.push(validation_record);
+                }
 
                 eprintln!(
-                    "  Trial {:>3}: source={} sharpe={:>7.3} trades={:>4} pnl=${:>8.2} updates={} elapsed={:.1}s | params: dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} tp={:.3} stop={:.4} cd={}s",
+                    "  Trial {:>3}: source={} score={:>8.2} train_pnl=${:>8.2} val_pnl=${:>8.2} val_sharpe={:>7.3} val_trades={:>4} updates={} elapsed={:.1}s | params: dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} prior_w={:.2} conf_w={:.2} tp={:.3} stop={:.4} cd={}s",
                     trial_id,
                     train_ref.kind(),
-                    outcome.sharpe,
-                    outcome.trade_count,
+                    score,
                     outcome.net_pnl,
+                    validation.net_pnl,
+                    validation.sharpe,
+                    validation.trade_count,
                     outcome.updates_processed,
                     outcome.elapsed_secs,
                     params.min_direction_prob,
@@ -2173,6 +2278,8 @@ fn main() {
                     params.min_drift_confirmation,
                     params.min_edge,
                     params.min_reward_risk,
+                    params.market_prior_weight,
+                    params.confirmation_logit_weight,
                     params.take_profit_ask,
                     params.stop_distance_pct,
                     params.cooldown_secs,
@@ -2192,6 +2299,8 @@ fn main() {
             min_drift_confirmation: best.get(&p_min_drift_confirmation).unwrap_or(0.0002),
             min_edge: best.get(&p_min_edge).unwrap_or(0.02),
             min_reward_risk: best.get(&p_min_reward_risk).unwrap_or(0.9),
+            market_prior_weight: best.get(&p_market_prior_weight).unwrap_or(0.35),
+            confirmation_logit_weight: best.get(&p_confirmation_logit_weight).unwrap_or(1.0),
             take_profit_ask: best.get(&p_take_profit_ask).unwrap_or(0.70),
             stop_distance_pct: best.get(&p_stop_distance_pct).unwrap_or(0.020),
             cooldown_secs: best.get(&p_cooldown_secs).unwrap_or(30),
@@ -2201,7 +2310,7 @@ fn main() {
         };
 
         eprintln!("\n=== Best Parameters (Training) ===");
-        eprintln!("Sharpe:                      {:.3}", best.value);
+        eprintln!("Objective:                   {:.3}", best.value);
 
         eprintln!("\n=== Validation (held-out, out-of-sample) ===");
         let val_config =
@@ -2252,6 +2361,14 @@ fn main() {
         eprintln!(
             "three_layer_min_reward_risk = {:.4}",
             best_params.min_reward_risk
+        );
+        eprintln!(
+            "three_layer_market_prior_weight = {:.4}",
+            best_params.market_prior_weight
+        );
+        eprintln!(
+            "three_layer_confirmation_logit_weight = {:.4}",
+            best_params.confirmation_logit_weight
         );
         eprintln!(
             "three_layer_take_profit_ask = {:.4}",

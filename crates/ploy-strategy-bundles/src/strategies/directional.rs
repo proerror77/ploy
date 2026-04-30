@@ -194,6 +194,14 @@ pub struct DirectionalConfig {
     #[serde(default = "default_tl_probability_haircut")]
     pub three_layer_probability_haircut: f64,
 
+    /// Bayesian EV: blend the calibrated model probability with the executable PM ask prior.
+    #[serde(default = "default_tl_market_prior_weight")]
+    pub three_layer_market_prior_weight: f64,
+
+    /// Bayesian EV: add order-flow confirmation as a log-odds evidence bump.
+    #[serde(default = "default_tl_confirmation_logit_weight")]
+    pub three_layer_confirmation_logit_weight: f64,
+
     /// Take-profit: exit when token ask reaches this level.
     #[serde(default = "default_tl_take_profit_ask")]
     pub three_layer_take_profit_ask: f64,
@@ -369,6 +377,12 @@ fn default_tl_probability_shrink() -> f64 {
 }
 fn default_tl_probability_haircut() -> f64 {
     0.0
+}
+fn default_tl_market_prior_weight() -> f64 {
+    0.35
+}
+fn default_tl_confirmation_logit_weight() -> f64 {
+    1.0
 }
 fn default_tl_take_profit_ask() -> f64 {
     0.70
@@ -1828,6 +1842,8 @@ mod tests {
             three_layer_cex_contrarian: false,
             three_layer_probability_shrink: 1.0,
             three_layer_probability_haircut: 0.0,
+            three_layer_market_prior_weight: 0.35,
+            three_layer_confirmation_logit_weight: 1.0,
             three_layer_take_profit_ask: 0.70,
             three_layer_stop_distance_pct: 0.020,
             three_layer_max_pm_lag_secs: 15,

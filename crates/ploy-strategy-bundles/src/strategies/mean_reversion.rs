@@ -1064,6 +1064,8 @@ mod tests {
             three_layer_cex_contrarian: false,
             three_layer_probability_shrink: 1.0,
             three_layer_probability_haircut: 0.0,
+            three_layer_market_prior_weight: 0.35,
+            three_layer_confirmation_logit_weight: 1.0,
             three_layer_take_profit_ask: 0.70,
             three_layer_stop_distance_pct: 0.020,
             three_layer_max_pm_lag_secs: 15,

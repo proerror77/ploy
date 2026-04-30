@@ -35,6 +35,8 @@ pub struct ThreeLayerConfig {
     pub cex_contrarian: bool,
     pub probability_shrink: f64,
     pub probability_haircut: f64,
+    pub market_prior_weight: f64,
+    pub confirmation_logit_weight: f64,
     pub take_profit_ask: f64,
     pub stop_distance_pct: f64,
     pub max_pm_lag_secs: u64,
@@ -66,6 +68,8 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             cex_contrarian: c.three_layer_cex_contrarian,
             probability_shrink: c.three_layer_probability_shrink,
             probability_haircut: c.three_layer_probability_haircut,
+            market_prior_weight: c.three_layer_market_prior_weight,
+            confirmation_logit_weight: c.three_layer_confirmation_logit_weight,
             take_profit_ask: c.three_layer_take_profit_ask,
             stop_distance_pct: c.three_layer_stop_distance_pct,
             max_pm_lag_secs: c.three_layer_max_pm_lag_secs,
@@ -344,6 +348,41 @@ fn calibrate_direction_probability(
     let shrink = probability_shrink.clamp(0.0, 1.0);
     let haircut = probability_haircut.clamp(0.0, 0.49);
     (0.5 + (direction_probability - 0.5) * shrink - haircut).clamp(0.01, 0.99)
+}
+
+fn logit(p: f64) -> f64 {
+    let p = p.clamp(0.01, 0.99);
+    (p / (1.0 - p)).ln()
+}
+
+fn inv_logit(x: f64) -> f64 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+fn bayesian_execution_probability(
+    model_probability: f64,
+    market_prior: f64,
+    confirmation_score: f64,
+    config: &ThreeLayerConfig,
+) -> f64 {
+    if !model_probability.is_finite() || !market_prior.is_finite() {
+        return f64::NAN;
+    }
+
+    let prior_weight = config.market_prior_weight.clamp(0.0, 0.95);
+    let model_weight = 1.0 - prior_weight;
+    let confirmation_bump = if confirmation_score.is_finite() {
+        confirmation_score * config.confirmation_logit_weight.clamp(0.0, 5.0)
+    } else {
+        0.0
+    };
+
+    inv_logit(
+        model_weight * logit(model_probability)
+            + prior_weight * logit(market_prior)
+            + confirmation_bump,
+    )
+    .clamp(0.01, 0.99)
 }
 
 fn executable_edge_threshold(config: &ThreeLayerConfig) -> f64 {
@@ -960,8 +999,14 @@ impl ThreeLayerStrategy {
             }
 
             // Layer 3: Edge score
+            let posterior_p =
+                bayesian_execution_probability(effective_p, ask, confirmation_score, &self.config);
+            if !posterior_p.is_finite() {
+                self.bump("skip_bad_posterior_probability");
+                continue;
+            }
             let Some((entry_price_f, edge, rr, edge_score)) =
-                evaluate_edge_score(effective_p, ask, regime, &self.config)
+                evaluate_edge_score(posterior_p, ask, regime, &self.config)
             else {
                 self.bump("skip_edge_score");
                 continue;
@@ -997,6 +1042,8 @@ impl ThreeLayerStrategy {
                     direction_score = format!("{:.3}", direction_score),
                     edge_score = format!("{:.3}", edge_score),
                     confirmation_score = format!("{:.3}", confirmation_score),
+                    model_p = effective_p,
+                    posterior_p,
                     pm_momentum_score = format!("{:.3}", pm_momentum_score),
                     min_entry_score = self.config.min_entry_score,
                     profile = %self.config.profile,
@@ -1072,7 +1119,7 @@ impl ThreeLayerStrategy {
                 intent_id: Some(intent_id),
                 symbol: symbol.to_string(),
                 direction: direction.to_string(),
-                p_hat: effective_p,
+                p_hat: posterior_p,
                 edge,
                 entry_price,
                 decision: "enter".to_string(),
@@ -1088,7 +1135,8 @@ impl ThreeLayerStrategy {
                 edge_score = format!("{:.3}", edge_score),
                 confirmation_score = format!("{:.3}", confirmation_score),
                 pm_momentum_score = format!("{:.3}", pm_momentum_score),
-                p_hat = effective_p,
+                model_p = effective_p,
+                p_hat = posterior_p,
                 edge,
                 entry_price = %entry_price,
                 profile = %self.config.profile,
@@ -1720,6 +1768,8 @@ mod tests {
             cex_contrarian: false,
             probability_shrink: 1.0,
             probability_haircut: 0.0,
+            market_prior_weight: 0.35,
+            confirmation_logit_weight: 1.0,
             take_profit_ask: 0.70,
             stop_distance_pct: 0.020,
             max_pm_lag_secs: 15,
@@ -2494,6 +2544,32 @@ mod tests {
             expected_value_per_share(calibrated, 0.60) < 0.0,
             "calibrated probability should prevent rich-entry EV overstatement"
         );
+    }
+
+    #[test]
+    fn bayesian_execution_probability_blends_model_with_market_prior() {
+        let mut config = test_config();
+        config.market_prior_weight = 0.50;
+        config.confirmation_logit_weight = 0.0;
+
+        let posterior = bayesian_execution_probability(0.80, 0.55, 0.0, &config);
+
+        assert!(posterior > 0.55);
+        assert!(posterior < 0.80);
+    }
+
+    #[test]
+    fn bayesian_execution_probability_uses_confirmation_as_evidence() {
+        let mut config = test_config();
+        config.market_prior_weight = 0.35;
+        config.confirmation_logit_weight = 1.0;
+
+        let neutral = bayesian_execution_probability(0.62, 0.58, 0.0, &config);
+        let confirmed = bayesian_execution_probability(0.62, 0.58, 0.20, &config);
+        let opposed = bayesian_execution_probability(0.62, 0.58, -0.20, &config);
+
+        assert!(confirmed > neutral);
+        assert!(opposed < neutral);
     }
 
     #[test]
