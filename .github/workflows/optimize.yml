@@ -249,20 +249,6 @@ jobs:
           mkdir -p artifacts/optimize
           started=$(date +%s)
 
-          # shellcheck disable=SC2329
-          health_summary() {
-            echo "## Optimize preflight host health" >> "${GITHUB_STEP_SUMMARY}"
-            {
-              echo '```'
-              date -u
-              free -h || true
-              df -h "${OPT_DATA_DIR}" "${PLOY_DUCKDB_TEMP_DIR}" || true
-              ps -eo pid,ppid,stat,%mem,%cpu,comm,args --sort=-%mem | head -25 || true
-              echo '```'
-            } >> "${GITHUB_STEP_SUMMARY}"
-          }
-          trap 'status=$?; health_summary; rm -rf "${PLOY_DUCKDB_TEMP_DIR}"; exit ${status}' EXIT
-
           time_flags=()
           if [ -n "${OPT_TRAIN_START_TS}" ]; then
             time_flags+=(--train-start-ts "${OPT_TRAIN_START_TS}")
@@ -316,6 +302,16 @@ jobs:
           elapsed=$(( $(date +%s) - started ))
           printf '{"phase":"optimize_preflight_workflow_step","wall_secs":%s,"status":%s}\n' "${elapsed}" "${status}" \
             > artifacts/optimize/preflight-workflow-timing.json
+          {
+            echo "## Optimize preflight host health"
+            echo '```'
+            date -u
+            free -h || true
+            df -h "${OPT_DATA_DIR}" "${PLOY_DUCKDB_TEMP_DIR}" || true
+            ps -eo pid,ppid,stat,%mem,%cpu,comm,args --sort=-%mem | head -25 || true
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
           exit "${status}"
 
       - name: Run optimize
@@ -330,27 +326,6 @@ jobs:
           started=$(date +%s)
           rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
           mkdir -p "${PLOY_DUCKDB_TEMP_DIR}"
-
-          # shellcheck disable=SC2329
-          health_summary() {
-            echo "## Optimize host health" >> "${GITHUB_STEP_SUMMARY}"
-            {
-              echo '```'
-              date -u
-              free -h || true
-              df -h "${OPT_DATA_DIR}" "${PLOY_DUCKDB_TEMP_DIR}" || true
-              ps -eo pid,ppid,stat,%mem,%cpu,comm,args --sort=-%mem | head -25 || true
-              echo '```'
-            } >> "${GITHUB_STEP_SUMMARY}"
-          }
-          # shellcheck disable=SC2329
-          cleanup() {
-            status=$?
-            health_summary
-            rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
-            exit "${status}"
-          }
-          trap cleanup EXIT
 
           time_flags=()
           if [ -n "${OPT_TRAIN_START_TS}" ]; then
@@ -430,6 +405,15 @@ jobs:
             "${elapsed}" "${status}" "${snapshot_backed}" \
             > artifacts/optimize/workflow-timing.json
           {
+            echo "## Optimize host health"
+            echo '```'
+            date -u
+            free -h || true
+            df -h "${OPT_DATA_DIR}" "${PLOY_DUCKDB_TEMP_DIR}" || true
+            ps -eo pid,ppid,stat,%mem,%cpu,comm,args --sort=-%mem | head -25 || true
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          {
             echo "## Optimize timing"
             echo '```json'
             if [ -f artifacts/optimize/timing.json ]; then
@@ -439,6 +423,7 @@ jobs:
             fi
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
+          rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
           exit "${status}"
 
       - name: Upload optimize provenance
