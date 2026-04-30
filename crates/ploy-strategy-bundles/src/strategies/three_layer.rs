@@ -42,6 +42,7 @@ pub struct ThreeLayerConfig {
     pub stop_distance_pct: f64,
     pub pre_settlement_exit_secs: u64,
     pub pre_settlement_min_exit_bid: f64,
+    pub pre_settlement_entry_buffer_secs: u64,
     pub late_hold_ev_margin: Option<f64>,
     pub max_pm_lag_secs: u64,
     pub min_time_remaining_secs: u64,
@@ -79,6 +80,7 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             stop_distance_pct: c.three_layer_stop_distance_pct,
             pre_settlement_exit_secs: c.three_layer_pre_settlement_exit_secs,
             pre_settlement_min_exit_bid: c.three_layer_pre_settlement_min_exit_bid,
+            pre_settlement_entry_buffer_secs: c.three_layer_pre_settlement_entry_buffer_secs,
             late_hold_ev_margin: c.three_layer_late_hold_ev_margin,
             max_pm_lag_secs: c.three_layer_max_pm_lag_secs,
             min_time_remaining_secs: c.min_time_remaining_secs,
@@ -1025,12 +1027,15 @@ impl ThreeLayerStrategy {
         }
         for event in &candidates {
             let time_remaining = (event.end_time - now).num_seconds();
-            if self.config.pre_settlement_exit_secs > 0
-                && time_remaining >= 0
-                && time_remaining as u64 <= self.config.pre_settlement_exit_secs
-            {
-                self.bump("skip_pre_settlement_entry");
-                continue;
+            if self.config.pre_settlement_exit_secs > 0 && time_remaining >= 0 {
+                let blocked_entry_secs = self
+                    .config
+                    .pre_settlement_exit_secs
+                    .saturating_add(self.config.pre_settlement_entry_buffer_secs);
+                if time_remaining as u64 <= blocked_entry_secs {
+                    self.bump("skip_pre_settlement_entry");
+                    continue;
+                }
             }
             let Some(price_to_beat) = event.price_to_beat.and_then(|price| price.to_f64()) else {
                 self.bump("skip_no_price_to_beat");
@@ -1881,6 +1886,7 @@ mod tests {
         assert_eq!(tlc.take_profit_ask, 0.70);
         assert_eq!(tlc.pre_settlement_exit_secs, 0);
         assert_eq!(tlc.pre_settlement_min_exit_bid, 0.01);
+        assert_eq!(tlc.pre_settlement_entry_buffer_secs, 0);
         assert_eq!(tlc.late_hold_ev_margin, None);
         assert!((tlc.min_entry_score - 0.30).abs() < f64::EPSILON);
         assert!(!tlc.symbols.is_empty());
@@ -1968,6 +1974,7 @@ mod tests {
             stop_distance_pct: 0.020,
             pre_settlement_exit_secs: 0,
             pre_settlement_min_exit_bid: 0.01,
+            pre_settlement_entry_buffer_secs: 0,
             late_hold_ev_margin: None,
             max_pm_lag_secs: 15,
             min_time_remaining_secs: 60,
@@ -2675,6 +2682,60 @@ mod tests {
         assert!(
             decisions.is_empty(),
             "entry should not open inside the configured pre-settlement exit window"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_pre_settlement_entry"), Some(&1));
+    }
+
+    #[test]
+    fn entry_skips_inside_pre_settlement_entry_buffer_when_enabled() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        config.pre_settlement_exit_secs = 90;
+        config.pre_settlement_entry_buffer_secs = 30;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        strategy.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: Arc::from("evt1"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("token-up"),
+                down_token: Arc::from("token-down"),
+                end_time: now + chrono::Duration::seconds(110),
+                window_secs: 300,
+                price_to_beat: Some(dec!(100000)),
+                resolved_up_won: None,
+            },
+            &PositionLedger::default(),
+            &OrderLedger::default(),
+        );
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &entry_quote("token-up", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "entry should not open inside the configured pre-settlement entry buffer"
         );
         let diagnostics = strategy
             .diagnostics()

@@ -315,7 +315,9 @@
   `exit_reason=late_hold_ev` attribution.
 - [x] Preserve hard-exit attribution priority over late-hold EV exits.
 - [x] Run focused local Rust verification.
-- [ ] Push PR update and run remote OOS filled replay without deploying dry-run.
+- [x] Push PR update and run remote OOS filled replay without deploying dry-run.
+- [x] Add a default-preserving pre-settlement entry buffer for the next replay
+  iteration.
 
 ## Review
 
@@ -354,6 +356,37 @@
   `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo check -p
   ploy-strategy-bundles --features parquet-feed --example optimize_backtest`.
   Feature compile emitted existing workspace dead-code/profile warnings.
+- 2026-04-30: Pushed commit `7d7a7ca0` to PR #254. PR GitHub Actions passed;
+  CodeRabbit review remained pending at the time of this note. Remote optimize
+  run `25164547353` checked out `feat/pm5d-bayesian-ev-gate@7d7a7ca0` and
+  completed successfully on `ploy-ci-1` with official-only settlement,
+  executable LOB liquidity, and no dry-run deployment. The strategy still
+  failed held-out validation: PnL `-$82.79`, 21 trades, Sharpe `-89.316`.
+  Worst buckets remained structural execution losses:
+  `roundtrip_price_move=<-0.20` (`-$101.53/9`), `exit_price=<0.35`
+  (`-$100.97/9`), `exit_reason=pre_settlement` (`-$70.37/13`), and
+  `exit_reason=settlement` (`-$45.42/3`). Direction probability remained
+  visible but insufficient: `p_hat=>=0.70` was `-$82.79/21`. Conclusion: no
+  dry-run reset or deployment.
+- 2026-04-30: Added the next default-preserving repair:
+  `three_layer_pre_settlement_entry_buffer_secs`. The entry gate now blocks
+  new positions inside `pre_settlement_exit_secs + entry_buffer_secs`, so the
+  optimizer can avoid configurations that open a trade only seconds before the
+  forced pre-settlement liquidation window. The optimizer searches `0..120s`,
+  records the value in train/validation timing JSON, logs it per trial, and
+  prints it in the Best Config TOML.
+- 2026-04-30: Buffer-gate local verification passed:
+  `rustfmt --edition 2024` on touched Rust files, `rtk git diff --check`,
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles entry_skips_inside_pre_settlement_entry_buffer_when_enabled
+  --lib`, `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles three_layer --lib`, `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test
+  rtk cargo test -p ploy-strategy-bundles --example optimize_backtest`,
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles config --lib`, `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test
+  rtk cargo test -p ploy-strategy-bundles --test backtest_integration`, and
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo check -p
+  ploy-strategy-bundles --features parquet-feed --example optimize_backtest`.
 
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 

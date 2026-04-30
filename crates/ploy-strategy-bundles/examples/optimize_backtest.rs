@@ -1722,6 +1722,7 @@ fn make_directional_config(
         three_layer_stop_distance_pct: 0.020,
         three_layer_pre_settlement_exit_secs: 0,
         three_layer_pre_settlement_min_exit_bid: 0.01,
+        three_layer_pre_settlement_entry_buffer_secs: 0,
         three_layer_late_hold_ev_margin: None,
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
@@ -1799,6 +1800,7 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
         three_layer_stop_distance_pct: 0.020,
         three_layer_pre_settlement_exit_secs: 0,
         three_layer_pre_settlement_min_exit_bid: 0.01,
+        three_layer_pre_settlement_entry_buffer_secs: 0,
         three_layer_late_hold_ev_margin: None,
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
@@ -1821,6 +1823,7 @@ struct ThreeLayerSearchParams {
     stop_distance_pct: f64,
     pre_settlement_exit_secs: i64,
     pre_settlement_min_exit_bid: f64,
+    pre_settlement_entry_buffer_secs: i64,
     late_hold_ev_margin: Option<f64>,
     cooldown_secs: i64,
     min_time_remaining_secs: i64,
@@ -1886,6 +1889,7 @@ fn make_three_layer_config(
     config.three_layer_stop_distance_pct = p.stop_distance_pct;
     config.three_layer_pre_settlement_exit_secs = p.pre_settlement_exit_secs as u64;
     config.three_layer_pre_settlement_min_exit_bid = p.pre_settlement_min_exit_bid;
+    config.three_layer_pre_settlement_entry_buffer_secs = p.pre_settlement_entry_buffer_secs as u64;
     config.three_layer_late_hold_ev_margin = p.late_hold_ev_margin;
     config
 }
@@ -2632,6 +2636,8 @@ fn main() {
             IntParam::new(0, 180).name("three_layer_pre_settlement_exit_secs");
         let p_pre_settlement_min_exit_bid =
             FloatParam::new(0.01, 0.35).name("three_layer_pre_settlement_min_exit_bid");
+        let p_pre_settlement_entry_buffer_secs =
+            IntParam::new(0, 120).name("three_layer_pre_settlement_entry_buffer_secs");
         let p_late_hold_ev_margin_code =
             IntParam::new(0, 4).name("three_layer_late_hold_ev_margin_code");
         let p_cooldown_secs = IntParam::new(60, 300).name("cooldown_secs");
@@ -2653,6 +2659,7 @@ fn main() {
         let p_stop_distance_pct_c = p_stop_distance_pct.clone();
         let p_pre_settlement_exit_secs_c = p_pre_settlement_exit_secs.clone();
         let p_pre_settlement_min_exit_bid_c = p_pre_settlement_min_exit_bid.clone();
+        let p_pre_settlement_entry_buffer_secs_c = p_pre_settlement_entry_buffer_secs.clone();
         let p_late_hold_ev_margin_code_c = p_late_hold_ev_margin_code.clone();
         let p_cooldown_secs_c = p_cooldown_secs.clone();
         let p_min_time_remaining_secs_c = p_min_time_remaining_secs.clone();
@@ -2678,6 +2685,8 @@ fn main() {
                     stop_distance_pct: p_stop_distance_pct_c.suggest(trial)?,
                     pre_settlement_exit_secs: p_pre_settlement_exit_secs_c.suggest(trial)?,
                     pre_settlement_min_exit_bid: p_pre_settlement_min_exit_bid_c.suggest(trial)?,
+                    pre_settlement_entry_buffer_secs: p_pre_settlement_entry_buffer_secs_c
+                        .suggest(trial)?,
                     late_hold_ev_margin: late_hold_ev_margin_from_code(
                         p_late_hold_ev_margin_code_c.suggest(trial)?,
                     ),
@@ -2774,6 +2783,10 @@ fn main() {
                 validation_record["min_entry_price"] = json!(params.min_entry_price);
                 record["late_hold_ev_margin"] = json!(params.late_hold_ev_margin);
                 validation_record["late_hold_ev_margin"] = json!(params.late_hold_ev_margin);
+                record["pre_settlement_entry_buffer_secs"] =
+                    json!(params.pre_settlement_entry_buffer_secs);
+                validation_record["pre_settlement_entry_buffer_secs"] =
+                    json!(params.pre_settlement_entry_buffer_secs);
                 {
                     let mut timings = trial_timings_c.lock().unwrap();
                     timings.push(record);
@@ -2781,7 +2794,7 @@ fn main() {
                 }
 
                 eprintln!(
-                    "  Trial {:>3}: source={} score={:>8.2} train_pnl=${:>8.2} val_pnl=${:>8.2} val_sharpe={:>7.3} val_trades={:>4} updates={} elapsed={:.1}s | params: entry={:.3} min_px={:.3} dir_prob={:.3} side={} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} prior_w={:.2} conf_w={:.2} tp={:.3} stop={:.4} pre_settle={}s min_exit_bid={:.3} late_ev={} cd={}s",
+                    "  Trial {:>3}: source={} score={:>8.2} train_pnl=${:>8.2} val_pnl=${:>8.2} val_sharpe={:>7.3} val_trades={:>4} updates={} elapsed={:.1}s | params: entry={:.3} min_px={:.3} dir_prob={:.3} side={} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} prior_w={:.2} conf_w={:.2} tp={:.3} stop={:.4} pre_settle={}s entry_buf={}s min_exit_bid={:.3} late_ev={} cd={}s",
                     trial_id,
                     train_ref.kind(),
                     score,
@@ -2805,6 +2818,7 @@ fn main() {
                     params.take_profit_ask,
                     params.stop_distance_pct,
                     params.pre_settlement_exit_secs,
+                    params.pre_settlement_entry_buffer_secs,
                     params.pre_settlement_min_exit_bid,
                     format_late_hold_ev_margin(params.late_hold_ev_margin),
                     params.cooldown_secs,
@@ -2835,6 +2849,9 @@ fn main() {
             stop_distance_pct: best.get(&p_stop_distance_pct).unwrap_or(0.020),
             pre_settlement_exit_secs: best.get(&p_pre_settlement_exit_secs).unwrap_or(0),
             pre_settlement_min_exit_bid: best.get(&p_pre_settlement_min_exit_bid).unwrap_or(0.01),
+            pre_settlement_entry_buffer_secs: best
+                .get(&p_pre_settlement_entry_buffer_secs)
+                .unwrap_or(0),
             late_hold_ev_margin: late_hold_ev_margin_from_code(
                 best.get(&p_late_hold_ev_margin_code).unwrap_or(0),
             ),
@@ -2869,6 +2886,8 @@ fn main() {
         validation_record["direction_filter"] = json!(best_params.direction_filter.as_label());
         validation_record["min_entry_price"] = json!(best_params.min_entry_price);
         validation_record["late_hold_ev_margin"] = json!(best_params.late_hold_ev_margin);
+        validation_record["pre_settlement_entry_buffer_secs"] =
+            json!(best_params.pre_settlement_entry_buffer_secs);
         validation_timings.push(validation_record);
         eprintln!("Val Source:  {}", val_source.kind());
         eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
@@ -2933,6 +2952,10 @@ fn main() {
         eprintln!(
             "three_layer_pre_settlement_min_exit_bid = {:.4}",
             best_params.pre_settlement_min_exit_bid
+        );
+        eprintln!(
+            "three_layer_pre_settlement_entry_buffer_secs = {}",
+            best_params.pre_settlement_entry_buffer_secs
         );
         eprintln!(
             "{}",
