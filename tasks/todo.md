@@ -287,6 +287,74 @@
   deployment; next implementable research should target dynamic exit EV or
   stricter late-hold loss avoidance.
 
+# PM5D Late-Hold EV Exit Research (2026-04-30)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+  - Owner: backward-compatible default-disabled late-hold EV exit config.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: late/expiry executable hold-vs-sell EV exit logic.
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+  - Owner: late-hold EV optimizer search space and exit attribution labels.
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+- `crates/ploy-strategy-bundles/src/strategies/mean_reversion.rs`
+- `crates/ploy-strategy-bundles/tests/backtest_integration.rs`
+  - Owner: manual config initializer compatibility.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add a default-disabled `three_layer_late_hold_ev_margin` control.
+- [x] Emit late/expiry exits only when executable sell value beats posterior
+  hold value by the configured margin and adverse drift/confirmation is present.
+- [x] Preserve direction probability as a core posterior input rather than
+  replacing it with bid-only liquidation logic.
+- [x] Add optimizer search, best-config output, timing JSON, and
+  `exit_reason=late_hold_ev` attribution.
+- [x] Preserve hard-exit attribution priority over late-hold EV exits.
+- [x] Run focused local Rust verification.
+- [ ] Push PR update and run remote OOS filled replay without deploying dry-run.
+
+## Review
+
+- 2026-04-30: Added a default-off late-hold EV exit. When enabled, three-layer
+  compares the posterior hold probability for the held side against the
+  executable bid after estimated crypto fee, and only exits in Late/Expiry when
+  the sell value is better by the configured margin and the trade has adverse
+  confirmation or adverse short-term drift. Take-profit remains higher priority,
+  and existing bid-size coverage still gates all position exits.
+- 2026-04-30: Extended `optimize_backtest` to search discrete late-hold EV
+  margins (`off`, `0.00`, `0.02`, `0.05`, `0.08`), print the winning TOML only
+  when enabled, include the value in timing JSON, and classify exits as
+  `late_hold_ev`.
+- 2026-04-30: Review follow-up: kept existing hard-exit priority ahead of
+  late-hold EV (`take-profit`, `pre-settlement`, then `stop-loss`) so new
+  research attribution does not rewrite those buckets. The optimizer Best TOML
+  output now explicitly says to remove `three_layer_late_hold_ev_margin` when
+  the winning search value is `off`, avoiding stale enabled config lines during
+  copy/paste.
+- 2026-04-30: Local verification passed: `rustfmt --edition 2024` on touched
+  Rust files, `rtk git diff --check`, `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test
+  rtk cargo test -p ploy-strategy-bundles
+  late_hold_ev_exit_emits_only_when_enabled_and_adverse --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles late_hold_ev --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles late_hold_ev_margin_mapping_and_toml_hint_are_explicit
+  --example optimize_backtest`,
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles three_layer --lib`, `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test
+  rtk cargo test -p ploy-strategy-bundles --example optimize_backtest`,
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles config --lib`, and `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test
+  rtk cargo test -p ploy-strategy-bundles --test backtest_integration`.
+  Additional parquet-feature compile passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo check -p
+  ploy-strategy-bundles --features parquet-feed --example optimize_backtest`.
+  Feature compile emitted existing workspace dead-code/profile warnings.
+
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
 ## Files

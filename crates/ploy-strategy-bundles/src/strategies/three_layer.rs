@@ -42,6 +42,7 @@ pub struct ThreeLayerConfig {
     pub stop_distance_pct: f64,
     pub pre_settlement_exit_secs: u64,
     pub pre_settlement_min_exit_bid: f64,
+    pub late_hold_ev_margin: Option<f64>,
     pub max_pm_lag_secs: u64,
     pub min_time_remaining_secs: u64,
     pub max_time_remaining_secs: u64,
@@ -78,6 +79,7 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             stop_distance_pct: c.three_layer_stop_distance_pct,
             pre_settlement_exit_secs: c.three_layer_pre_settlement_exit_secs,
             pre_settlement_min_exit_bid: c.three_layer_pre_settlement_min_exit_bid,
+            late_hold_ev_margin: c.three_layer_late_hold_ev_margin,
             max_pm_lag_secs: c.three_layer_max_pm_lag_secs,
             min_time_remaining_secs: c.min_time_remaining_secs,
             max_time_remaining_secs: c.max_time_remaining_secs,
@@ -150,12 +152,16 @@ impl DriftTracker {
         now.1 - anchor.1
     }
 
-    fn sigma_horizon(&mut self, horizon_secs: f64) -> f64 {
+    fn sigma_horizon(&self, horizon_secs: f64) -> f64 {
         if self.history.len() < MIN_VOL_POINTS {
             return 0.0;
         }
-        let contiguous = self.history.make_contiguous();
-        let returns: Vec<f64> = contiguous.windows(2).map(|w| w[1].1 - w[0].1).collect();
+        let values = self
+            .history
+            .iter()
+            .map(|(_, price)| *price)
+            .collect::<Vec<_>>();
+        let returns: Vec<f64> = values.windows(2).map(|w| w[1] - w[0]).collect();
         if returns.is_empty() {
             return 0.0;
         }
@@ -546,24 +552,8 @@ fn evaluate_direction_score(
         return None;
     }
 
-    let model_prob_up = norm_cdf(distance_over_sigma);
-
-    let direction_prob = match regime {
-        Regime::Early => model_prob_up,
-        Regime::Middle => {
-            let lob_nudge = (cum_mprice_drift_5m / 100.0).clamp(-0.08, 0.08);
-            (model_prob_up + lob_nudge).clamp(0.01, 0.99)
-        }
-        Regime::Late => {
-            let drift_nudge = (drift_30s * 500.0).clamp(-0.12, 0.12);
-            let lob_nudge = (cum_mprice_drift_5m / 80.0).clamp(-0.06, 0.06);
-            (model_prob_up + drift_nudge + lob_nudge).clamp(0.01, 0.99)
-        }
-        Regime::Expiry => {
-            let drift_nudge = (drift_30s * 800.0).clamp(-0.15, 0.15);
-            (model_prob_up + drift_nudge).clamp(0.01, 0.99)
-        }
-    };
+    let direction_prob =
+        model_probability_up(distance_over_sigma, cum_mprice_drift_5m, drift_30s, regime);
 
     let (direction_sign, raw_effective_p) = if config.alpha_contrarian {
         let inverse_alpha_p = direction_prob.max(1.0 - direction_prob);
@@ -600,6 +590,49 @@ fn evaluate_direction_score(
     };
 
     Some((direction_sign, effective_p, direction_score))
+}
+
+fn model_probability_up(
+    distance_over_sigma: f64,
+    cum_mprice_drift_5m: f64,
+    drift_30s: f64,
+    regime: Regime,
+) -> f64 {
+    let model_prob_up = norm_cdf(distance_over_sigma);
+    match regime {
+        Regime::Early => model_prob_up,
+        Regime::Middle => {
+            let lob_nudge = (cum_mprice_drift_5m / 100.0).clamp(-0.08, 0.08);
+            (model_prob_up + lob_nudge).clamp(0.01, 0.99)
+        }
+        Regime::Late => {
+            let drift_nudge = (drift_30s * 500.0).clamp(-0.12, 0.12);
+            let lob_nudge = (cum_mprice_drift_5m / 80.0).clamp(-0.06, 0.06);
+            (model_prob_up + drift_nudge + lob_nudge).clamp(0.01, 0.99)
+        }
+        Regime::Expiry => {
+            let drift_nudge = (drift_30s * 800.0).clamp(-0.15, 0.15);
+            (model_prob_up + drift_nudge).clamp(0.01, 0.99)
+        }
+    }
+}
+
+fn raw_probability_for_side(
+    model_probability_up: f64,
+    is_up: bool,
+    config: &ThreeLayerConfig,
+) -> f64 {
+    if config.alpha_contrarian {
+        if is_up {
+            1.0 - model_probability_up
+        } else {
+            model_probability_up
+        }
+    } else if is_up {
+        model_probability_up
+    } else {
+        1.0 - model_probability_up
+    }
 }
 
 /// Layer 2: Confirmation bonus (-0.2 to +0.2).
@@ -792,6 +825,84 @@ impl ThreeLayerStrategy {
             return Decimal::ZERO;
         }
         (self.config.stake_usd / entry_price).round_dp(6)
+    }
+
+    fn late_hold_ev_gap(
+        &self,
+        event: &EventWindow,
+        is_up: bool,
+        now: DateTime<Utc>,
+        spot_price: f64,
+        exit_bid: Decimal,
+    ) -> Option<f64> {
+        let margin = self.config.late_hold_ev_margin?;
+        let price_to_beat = event.price_to_beat.and_then(|price| price.to_f64())?;
+        if price_to_beat <= 0.0 {
+            return None;
+        }
+        let drift_tracker = self.drift.get(event.symbol.as_ref())?;
+        let time_remaining_secs = (event.end_time - now).num_seconds().max(1);
+        let regime = Regime::from_secs(time_remaining_secs);
+        if !matches!(regime, Regime::Late | Regime::Expiry) {
+            return None;
+        }
+        let sigma_h = drift_tracker.sigma_horizon(time_remaining_secs as f64);
+        let distance_over_sigma = if sigma_h > 0.0 {
+            (spot_price - price_to_beat) / (sigma_h * price_to_beat)
+        } else {
+            0.0
+        };
+        let drift_30s = drift_tracker.drift_30s();
+        let cum_mprice_drift_5m = self
+            .mprice_acc
+            .get(event.symbol.as_ref())
+            .map(|acc| acc.cum_drift())
+            .unwrap_or(0.0);
+        let model_p_up =
+            model_probability_up(distance_over_sigma, cum_mprice_drift_5m, drift_30s, regime);
+        let raw_side_p = raw_probability_for_side(model_p_up, is_up, &self.config);
+        if !raw_side_p.is_finite() {
+            return None;
+        }
+        let calibrated_p = calibrate_direction_probability(
+            raw_side_p,
+            self.config.probability_shrink,
+            self.config.probability_haircut,
+        );
+        if !calibrated_p.is_finite() {
+            return None;
+        }
+        let direction_sign = if is_up { 1.0 } else { -1.0 };
+        let lob = self
+            .lob
+            .get(event.symbol.as_ref())
+            .copied()
+            .unwrap_or_default();
+        let confirmation_score = profile_confirmation_score(
+            direction_sign,
+            &lob,
+            cum_mprice_drift_5m,
+            drift_30s,
+            regime,
+            &self.config,
+        );
+        let adverse_confirmation = confirmation_score <= -self.config.min_confirmation_score.abs();
+        let adverse_drift = drift_30s * direction_sign < -self.config.min_drift_confirmation.abs();
+        if !adverse_confirmation && !adverse_drift {
+            return None;
+        }
+        let bid = exit_bid.to_f64()?;
+        if !bid.is_finite() || bid <= 0.0 {
+            return None;
+        }
+        let posterior_p =
+            bayesian_execution_probability(calibrated_p, bid, confirmation_score, &self.config);
+        if !posterior_p.is_finite() {
+            return None;
+        }
+        let executable_sell_value = (bid - crypto_fee_cost(bid)).max(0.0);
+        let hold_gap = posterior_p - executable_sell_value;
+        (hold_gap < -margin.max(0.0)).then_some(hold_gap)
     }
 
     fn reject_cooldown_secs(&self) -> i64 {
@@ -1298,6 +1409,31 @@ impl ThreeLayerStrategy {
                             purpose: IntentPurpose::Exit,
                             created_at: now,
                         }));
+                        continue;
+                    }
+                }
+
+                if let Some(spot_price) = spot {
+                    if self
+                        .late_hold_ev_gap(event, is_up, now, spot_price, exit_bid)
+                        .is_some()
+                    {
+                        decisions.push(StrategyDecision::Exit(TradingIntent {
+                            intent_id: format!(
+                                "tl_late_ev_{}_{}",
+                                token_id,
+                                now.timestamp_millis()
+                            ),
+                            deployment_id: String::new(),
+                            market_id: event.event_id.to_string(),
+                            token_id: token_id.to_string(),
+                            side: TradeSide::Sell,
+                            quantity: qty,
+                            limit_price: Some(exit_bid),
+                            purpose: IntentPurpose::Exit,
+                            created_at: now,
+                        }));
+                        continue;
                     }
                 }
             }
@@ -1745,6 +1881,7 @@ mod tests {
         assert_eq!(tlc.take_profit_ask, 0.70);
         assert_eq!(tlc.pre_settlement_exit_secs, 0);
         assert_eq!(tlc.pre_settlement_min_exit_bid, 0.01);
+        assert_eq!(tlc.late_hold_ev_margin, None);
         assert!((tlc.min_entry_score - 0.30).abs() < f64::EPSILON);
         assert!(!tlc.symbols.is_empty());
     }
@@ -1831,6 +1968,7 @@ mod tests {
             stop_distance_pct: 0.020,
             pre_settlement_exit_secs: 0,
             pre_settlement_min_exit_bid: 0.01,
+            late_hold_ev_margin: None,
             max_pm_lag_secs: 15,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
@@ -1888,6 +2026,75 @@ mod tests {
             timestamp: now,
         });
         positions
+    }
+
+    fn run_late_hold_exit_case<F>(
+        now: DateTime<Utc>,
+        configure: F,
+        final_price: Decimal,
+    ) -> Vec<StrategyDecision>
+    where
+        F: FnOnce(&mut ThreeLayerConfig),
+    {
+        let mut config = test_config();
+        config.take_profit_ask = 0.99;
+        configure(&mut config);
+        let mut strategy = ThreeLayerStrategy::new(config);
+        let positions = position_with_token("token-up", now);
+        let orders = OrderLedger::default();
+
+        for (offset_secs, price) in [
+            (-24, dec!(100000)),
+            (-18, dec!(100100)),
+            (-12, dec!(99900)),
+            (-6, dec!(100000)),
+        ] {
+            strategy.on_update(
+                &MarketUpdate::SpotPrice {
+                    symbol: Arc::from("BTCUSDT"),
+                    price,
+                    ts: now + chrono::Duration::seconds(offset_secs),
+                },
+                &positions,
+                &orders,
+            );
+        }
+        strategy.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: Arc::from("evt1"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("token-up"),
+                down_token: Arc::from("token-down"),
+                end_time: now + chrono::Duration::seconds(30),
+                window_secs: 300,
+                price_to_beat: Some(dec!(100000)),
+                resolved_up_won: None,
+            },
+            &PositionLedger::default(),
+            &OrderLedger::default(),
+        );
+        strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: final_price,
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-up"),
+                bid: Some(dec!(0.70)),
+                ask: Some(dec!(0.72)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        )
     }
 
     fn active_order_for_token(token_id: &str, now: DateTime<Utc>) -> OrderLedger {
@@ -1964,7 +2171,20 @@ mod tests {
 
         let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
         let mut strategy = ThreeLayerStrategy::new(test_config());
-        discover_test_event(&mut strategy, now);
+        strategy.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: Arc::from("evt1"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("token-up"),
+                down_token: Arc::from("token-down"),
+                end_time: now + chrono::Duration::seconds(30),
+                window_secs: 300,
+                price_to_beat: Some(dec!(100000)),
+                resolved_up_won: None,
+            },
+            &PositionLedger::default(),
+            &OrderLedger::default(),
+        );
         let positions = position_with_token("token-down", now);
         let orders = OrderLedger::default();
 
@@ -2191,6 +2411,80 @@ mod tests {
                 assert_eq!(intent.limit_price, Some(dec!(0.12)));
             }
             other => panic!("Expected one pre-settlement exit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn late_hold_ev_exit_emits_only_when_enabled_and_adverse() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+
+        assert!(
+            run_late_hold_exit_case(now, |_| {}, dec!(98500)).is_empty(),
+            "disabled late-hold EV margin must preserve existing behavior"
+        );
+
+        let decisions = run_late_hold_exit_case(
+            now,
+            |config| {
+                config.late_hold_ev_margin = Some(0.0);
+            },
+            dec!(98500),
+        );
+
+        match decisions.as_slice() {
+            [StrategyDecision::Exit(intent)] => {
+                assert!(intent.intent_id.starts_with("tl_late_ev_"));
+                assert_eq!(intent.limit_price, Some(dec!(0.70)));
+            }
+            other => panic!("Expected one late-hold EV exit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn late_hold_ev_does_not_override_pre_settlement_exit() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let decisions = run_late_hold_exit_case(
+            now,
+            |config| {
+                config.late_hold_ev_margin = Some(0.0);
+                config.pre_settlement_exit_secs = 60;
+                config.pre_settlement_min_exit_bid = 0.05;
+            },
+            dec!(98500),
+        );
+
+        match decisions.as_slice() {
+            [StrategyDecision::Exit(intent)] => {
+                assert!(intent.intent_id.starts_with("tl_pre_settle_"));
+                assert_eq!(intent.limit_price, Some(dec!(0.70)));
+            }
+            other => panic!("Expected pre-settlement priority, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn late_hold_ev_does_not_override_stop_loss_exit() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let decisions = run_late_hold_exit_case(
+            now,
+            |config| {
+                config.late_hold_ev_margin = Some(0.0);
+            },
+            dec!(97000),
+        );
+
+        match decisions.as_slice() {
+            [StrategyDecision::Exit(intent)] => {
+                assert!(intent.intent_id.starts_with("tl_sl_"));
+                assert_eq!(intent.limit_price, Some(dec!(0.70)));
+            }
+            other => panic!("Expected stop-loss priority, got {:?}", other),
         }
     }
 

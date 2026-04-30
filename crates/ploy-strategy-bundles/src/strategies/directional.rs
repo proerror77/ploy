@@ -223,6 +223,11 @@ pub struct DirectionalConfig {
     #[serde(default = "default_tl_pre_settlement_min_exit_bid")]
     pub three_layer_pre_settlement_min_exit_bid: f64,
 
+    /// Late-hold EV exit: exit in Late/Expiry when hold EV trails executable sell value.
+    /// None disables this gate.
+    #[serde(default)]
+    pub three_layer_late_hold_ev_margin: Option<f64>,
+
     /// Maximum PM quote staleness (seconds) before rejecting entry.
     #[serde(default = "default_tl_max_pm_lag_secs")]
     pub three_layer_max_pm_lag_secs: u64,
@@ -1868,6 +1873,7 @@ mod tests {
             three_layer_stop_distance_pct: 0.020,
             three_layer_pre_settlement_exit_secs: 0,
             three_layer_pre_settlement_min_exit_bid: 0.01,
+            three_layer_late_hold_ev_margin: None,
             three_layer_max_pm_lag_secs: 15,
             three_layer_min_entry_score: 0.30,
             min_time_remaining_secs: 60,
