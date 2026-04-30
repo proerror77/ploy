@@ -22,7 +22,15 @@ on:
       data_dir:
         description: "Local Parquet data dir (leave empty to use DB)"
         required: false
-        default: "/tmp/ploy-parquet"
+        default: ""
+      sync_parquet_data:
+        description: "Sync the full Parquet tree from Tango before running"
+        required: false
+        default: "false"
+      issue_number:
+        description: "Optional GitHub issue number for posting backtest evidence"
+        required: false
+        default: ""
 
 concurrency:
   group: backtest-${{ github.ref }}
@@ -30,6 +38,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -62,16 +71,26 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          cache-targets: "true"
+          cache-targets: "false"
           key: backtest-${{ hashFiles('crates/ploy-strategy-bundles/**', 'Cargo.lock') }}
 
       - name: Build run_backtest
+        env:
+          DATA_DIR: ${{ github.event.inputs.data_dir }}
         run: |
+          set -euo pipefail
           . /home/runner/.cargo/env
-          cargo build --release --locked \
-            -p ploy-strategy-bundles \
-            --features ploy-strategy-bundles/parquet-feed \
+          cargo_args=(
+            build
+            --release
+            --locked
+            -p ploy-strategy-bundles
             --example run_backtest
+          )
+          if [ -n "$DATA_DIR" ]; then
+            cargo_args+=(--features ploy-strategy-bundles/parquet-feed)
+          fi
+          cargo "${cargo_args[@]}"
 
       - name: Upload run_backtest binary
         uses: actions/upload-artifact@v4
@@ -103,10 +122,11 @@ jobs:
         run: chmod +x target/release/examples/run_backtest
 
       - name: Sync Parquet data from Tango-1-1
-        if: ${{ github.event.inputs.data_dir != '' }}
+        if: ${{ github.event.inputs.data_dir != '' && github.event.inputs.sync_parquet_data == 'true' }}
         env:
           DATA_DIR: ${{ github.event.inputs.data_dir }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
           echo "${{ secrets.TANGO_SSH_KEY }}" > ~/.ssh/tango_key
           chmod 600 ~/.ssh/tango_key
@@ -122,14 +142,91 @@ jobs:
           START_DATE: ${{ github.event.inputs.start_date }}
           END_DATE: ${{ github.event.inputs.end_date }}
           DATA_DIR: ${{ github.event.inputs.data_dir }}
+          SYNC_PARQUET_DATA: ${{ github.event.inputs.sync_parquet_data }}
+          PLOY_RESEARCH_DATABASE_URL: ${{ secrets.PLOY_RESEARCH_DATABASE_URL || vars.PLOY_RESEARCH_DATABASE_URL }}
         run: |
+          set -euo pipefail
+          mkdir -p artifacts/backtest
           extra_args=()
           if [ -n "$DATA_DIR" ]; then
+            if [ ! -d "$DATA_DIR" ]; then
+              echo "DATA_DIR '$DATA_DIR' does not exist (sync_parquet_data=$SYNC_PARQUET_DATA); set sync_parquet_data=true or leave data_dir empty to use DB" >&2
+              exit 2
+            fi
             extra_args=(--data-dir "$DATA_DIR")
+          elif [ -z "${PLOY_RESEARCH_DATABASE_URL}" ]; then
+            echo "PLOY_RESEARCH_DATABASE_URL is required when data_dir is empty" >&2
+            exit 1
+          fi
+          if [ -n "${PLOY_RESEARCH_DATABASE_URL}" ]; then
+            extra_args+=(--db-url "${PLOY_RESEARCH_DATABASE_URL}")
           fi
           ./target/release/examples/run_backtest \
             --config "${CONFIG}" \
-            --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
             --start-date "${START_DATE}" \
             --end-date "${END_DATE}" \
+            --git-ref "${{ github.event.inputs.git_ref }}" \
+            --output-json artifacts/backtest/evaluation.json \
             "${extra_args[@]}"
+
+      - name: Publish backtest summary
+        if: always()
+        run: |
+          {
+            echo "## PM5D Backtest"
+            echo ""
+            echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
+            echo "- Config: \`${{ github.event.inputs.config }}\`"
+            echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`"
+            if [ -f artifacts/backtest/evaluation.json ]; then
+              echo "- Artifact: \`backtest-evaluation-${{ github.run_id }}\`"
+              echo ""
+              echo '```json'
+              python3 -c 'import json; data=json.load(open("artifacts/backtest/evaluation.json")); print(json.dumps({"producer": data.get("producer"), "replay_mode": data.get("replay_mode"), "canonical_result": data.get("canonical_result"), "metrics": data.get("metrics"), "risk_flags": data.get("risk_flags")}, indent=2, sort_keys=True))'
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload backtest evaluation artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-evaluation-${{ github.run_id }}
+          path: artifacts/backtest/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Comment backtest evidence on issue
+        if: ${{ always() && github.event.inputs.issue_number != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const issue_number = Number("${{ github.event.inputs.issue_number }}");
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            let metrics = {};
+            let riskFlags = [];
+            if (fs.existsSync("artifacts/backtest/evaluation.json")) {
+              const data = JSON.parse(fs.readFileSync("artifacts/backtest/evaluation.json", "utf8"));
+              metrics = data.metrics || {};
+              riskFlags = data.risk_flags || [];
+            }
+            const body = [
+              "Backtest evidence:",
+              "",
+              `- Workflow: ${context.workflow}`,
+              `- Run URL: ${runUrl}`,
+              `- Git ref: ${{ github.event.inputs.git_ref }}`,
+              `- Dataset/window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}`,
+              `- Config: \`${{ github.event.inputs.config }}\``,
+              `- Artifact: \`backtest-evaluation-${process.env.GITHUB_RUN_ID}\``,
+              `- Headline metrics: \`${JSON.stringify(metrics)}\``,
+              `- Caveats: \`${riskFlags.join(", ") || "none"}\``,
+              "- Decision: pending replay/dry-run parity review"
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body
+            });

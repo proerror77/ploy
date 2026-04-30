@@ -22,9 +22,75 @@ use ploy_strategy_bundles::{
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeMap;
+use std::fs::{create_dir_all, File};
+use std::path::Path;
 use std::sync::Arc;
+
+#[derive(Debug, Clone, Serialize)]
+struct EvaluationWindow {
+    start_date: Option<String>,
+    end_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BacktestAccountingContract {
+    name: &'static str,
+    executor: &'static str,
+    fee_model: &'static str,
+    grouping: &'static str,
+    stake_usd: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BacktestDataBreakdown {
+    spot: u64,
+    quote: u64,
+    event_discovered: u64,
+    event_expired: u64,
+    l2: u64,
+    kline: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BacktestMetrics {
+    updates_processed: u64,
+    elapsed_secs: f64,
+    fills_recorded: u64,
+    trade_count: u64,
+    realized_pnl: String,
+    total_fees: String,
+    net_pnl: String,
+    deployed_capital: String,
+    sell_proceeds: String,
+    peak_capital: String,
+    roi_on_deployed_capital_pct: Option<String>,
+    roi_on_peak_capital_pct: Option<String>,
+    open_positions: u64,
+    active_orders: u64,
+    gross_exposure: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BacktestEvaluationArtifact {
+    schema_version: u32,
+    artifact_type: &'static str,
+    producer: &'static str,
+    generated_at: chrono::DateTime<Utc>,
+    git_ref: String,
+    strategy_variant: String,
+    replay_mode: String,
+    canonical_result: bool,
+    symbols: Vec<String>,
+    config: Option<String>,
+    window: EvaluationWindow,
+    accounting_contract: BacktestAccountingContract,
+    data_breakdown: Option<BacktestDataBreakdown>,
+    metrics: BacktestMetrics,
+    risk_flags: Vec<String>,
+}
 
 /// Generate synthetic market data: 1 hour of 5-min windows for 3 symbols.
 ///
@@ -179,6 +245,13 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
+fn git_ref_from_args(args: &[String]) -> String {
+    flag_value(args, "--git-ref")
+        .or_else(|| std::env::var("GITHUB_SHA").ok())
+        .or_else(|| std::env::var("GITHUB_REF_NAME").ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 fn main() {
     // Parse CLI flags
     let args: Vec<String> = std::env::args().collect();
@@ -188,6 +261,8 @@ fn main() {
     let data_dir = flag_value(&args, "--data-dir");
     let start_date = flag_value(&args, "--start-date");
     let end_date = flag_value(&args, "--end-date");
+    let output_json = flag_value(&args, "--output-json");
+    let git_ref = git_ref_from_args(&args);
 
     let (strategy_variant, strategy_config, sim_config, runtime_config, backtest_options) =
         if let Some(ref path) = config_path {
@@ -345,7 +420,25 @@ fn main() {
             let result = rt.block_on(runtime.run());
             let mark_prices = BTreeMap::new();
             let snapshot = runtime.trading().snapshot(&mark_prices);
-            print_results(result, snapshot, stake_usd);
+            print_results(&result, &snapshot, stake_usd);
+            if let Some(path) = output_json.as_deref() {
+                write_backtest_json(
+                    path,
+                    BacktestArtifactInput {
+                        git_ref: &git_ref,
+                        strategy_variant: &strategy_variant,
+                        replay_mode: "parquet-stream",
+                        symbols: &strategy_config.symbols,
+                        config: config_path.as_deref(),
+                        start_date: start_date.as_deref(),
+                        end_date: end_date.as_deref(),
+                        stake_usd,
+                        data_breakdown: None,
+                        result: &result,
+                        snapshot: &snapshot,
+                    },
+                );
+            }
         }
     } else {
         let data: Vec<MarketUpdate> = if let Some(ref url) = db_url {
@@ -389,18 +482,54 @@ fn main() {
             updates
         };
 
+        let data_breakdown = Some(summarize_data_breakdown(&data));
         let feed = HistoricalFeed::new(data);
         let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
         let result = rt.block_on(runtime.run());
         let mark_prices = BTreeMap::new();
         let snapshot = runtime.trading().snapshot(&mark_prices);
-        print_results(result, snapshot, stake_usd);
+        print_results(&result, &snapshot, stake_usd);
+        if let Some(path) = output_json.as_deref() {
+            write_backtest_json(
+                path,
+                BacktestArtifactInput {
+                    git_ref: &git_ref,
+                    strategy_variant: &strategy_variant,
+                    replay_mode: if db_url.is_some() {
+                        "database"
+                    } else {
+                        "synthetic"
+                    },
+                    symbols: &strategy_config.symbols,
+                    config: config_path.as_deref(),
+                    start_date: start_date.as_deref(),
+                    end_date: end_date.as_deref(),
+                    stake_usd,
+                    data_breakdown,
+                    result: &result,
+                    snapshot: &snapshot,
+                },
+            );
+        }
     }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn print_data_breakdown(updates: &[MarketUpdate]) {
+    let breakdown = summarize_data_breakdown(updates);
+    eprintln!(
+        "Data breakdown: spot={} quote={} discovered={} expired={} l2={} kline={}",
+        breakdown.spot,
+        breakdown.quote,
+        breakdown.event_discovered,
+        breakdown.event_expired,
+        breakdown.l2,
+        breakdown.kline
+    );
+}
+
+fn summarize_data_breakdown(updates: &[MarketUpdate]) -> BacktestDataBreakdown {
     let mut spot_count = 0u64;
     let mut quote_count = 0u64;
     let mut event_discovered = 0u64;
@@ -422,14 +551,19 @@ fn print_data_breakdown(updates: &[MarketUpdate]) {
             MarketUpdate::Kline { .. } => kline_count += 1,
         }
     }
-    eprintln!(
-        "Data breakdown: spot={spot_count} quote={quote_count} discovered={event_discovered} expired={event_expired} l2={l2_count} kline={kline_count}"
-    );
+    BacktestDataBreakdown {
+        spot: spot_count,
+        quote: quote_count,
+        event_discovered,
+        event_expired,
+        l2: l2_count,
+        kline: kline_count,
+    }
 }
 
 fn print_results(
-    result: ploy_strategy_bundles::RuntimeResult,
-    snapshot: ploy_trading::TradingRuntimeSnapshot,
+    result: &ploy_strategy_bundles::RuntimeResult,
+    snapshot: &ploy_trading::TradingRuntimeSnapshot,
     stake_usd: Decimal,
 ) {
     let cashflow = snapshot.fill_cashflow_summary();
@@ -527,4 +661,127 @@ fn print_results(
     eprintln!("Open positions:  {}", result.risk.open_positions);
     eprintln!("Active orders:   {}", result.risk.active_orders);
     eprintln!("Gross exposure:  {}", result.risk.gross_exposure);
+}
+
+struct BacktestArtifactInput<'a> {
+    git_ref: &'a str,
+    strategy_variant: &'a str,
+    replay_mode: &'a str,
+    symbols: &'a [String],
+    config: Option<&'a str>,
+    start_date: Option<&'a str>,
+    end_date: Option<&'a str>,
+    stake_usd: Decimal,
+    data_breakdown: Option<BacktestDataBreakdown>,
+    result: &'a ploy_strategy_bundles::RuntimeResult,
+    snapshot: &'a ploy_trading::TradingRuntimeSnapshot,
+}
+
+fn write_backtest_json(path: &str, input: BacktestArtifactInput<'_>) {
+    let artifact = build_backtest_artifact(input);
+    if let Some(parent) = Path::new(path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        create_dir_all(parent).unwrap_or_else(|error| {
+            panic!(
+                "failed to create backtest evaluation artifact directory {}: {error}",
+                parent.display()
+            )
+        });
+    }
+    let file = File::create(path).unwrap_or_else(|error| {
+        panic!("failed to create backtest evaluation artifact {path}: {error}")
+    });
+    serde_json::to_writer_pretty(file, &artifact).unwrap_or_else(|error| {
+        panic!("failed to write backtest evaluation artifact {path}: {error}")
+    });
+}
+
+fn build_backtest_artifact(input: BacktestArtifactInput<'_>) -> BacktestEvaluationArtifact {
+    let cashflow = input.snapshot.fill_cashflow_summary();
+    let trade_count = input.result.fills_recorded / 2;
+    let peak_capital = peak_capital(input.snapshot, input.stake_usd);
+    let roi_on_deployed_capital_pct = cashflow
+        .roi_on_deployed_capital()
+        .map(|roi| (roi * Decimal::from(100)).round_dp(4).to_string());
+    let roi_on_peak_capital_pct = if peak_capital > Decimal::ZERO {
+        Some(
+            (input.result.pnl.net_pnl() / peak_capital * Decimal::from(100))
+                .round_dp(4)
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    let metrics = BacktestMetrics {
+        updates_processed: input.result.updates_processed,
+        elapsed_secs: input.result.elapsed_secs,
+        fills_recorded: input.result.fills_recorded,
+        trade_count,
+        realized_pnl: input.result.pnl.realized_pnl.to_string(),
+        total_fees: input.result.pnl.total_fees.to_string(),
+        net_pnl: input.result.pnl.net_pnl().to_string(),
+        deployed_capital: cashflow.deployed_capital().to_string(),
+        sell_proceeds: cashflow.gross_sell_proceeds.to_string(),
+        peak_capital: peak_capital.round_dp(4).to_string(),
+        roi_on_deployed_capital_pct,
+        roi_on_peak_capital_pct,
+        open_positions: input.result.risk.open_positions as u64,
+        active_orders: input.result.risk.active_orders as u64,
+        gross_exposure: input.result.risk.gross_exposure.to_string(),
+    };
+    let mut risk_flags = Vec::new();
+    if metrics.trade_count == 0 {
+        risk_flags.push("no_trades".to_string());
+    }
+    if input.replay_mode == "synthetic" {
+        risk_flags.push("synthetic_data_not_canonical".to_string());
+    }
+    if input.data_breakdown.is_none() && input.replay_mode != "parquet-stream" {
+        risk_flags.push("missing_data_breakdown".to_string());
+    }
+    BacktestEvaluationArtifact {
+        schema_version: 1,
+        artifact_type: "strategy_evaluation",
+        producer: "run_backtest",
+        generated_at: Utc::now(),
+        git_ref: input.git_ref.to_string(),
+        strategy_variant: input.strategy_variant.to_string(),
+        replay_mode: input.replay_mode.to_string(),
+        canonical_result: input.replay_mode != "synthetic",
+        symbols: input.symbols.to_vec(),
+        config: input.config.map(str::to_string),
+        window: EvaluationWindow {
+            start_date: input.start_date.map(str::to_string),
+            end_date: input.end_date.map(str::to_string),
+        },
+        accounting_contract: BacktestAccountingContract {
+            name: "pm5d_simulated_executor_event_accounting",
+            executor: "SimulatedExecutor",
+            fee_model: "runtime configured simulated executor fees",
+            grouping: "fills are summarized as round-trip trades; PM5D promotion still requires replay/dry-run parity",
+            stake_usd: input.stake_usd.to_string(),
+        },
+        data_breakdown: input.data_breakdown,
+        metrics,
+        risk_flags,
+    }
+}
+
+fn peak_capital(snapshot: &ploy_trading::TradingRuntimeSnapshot, stake_usd: Decimal) -> Decimal {
+    let mut open_positions: i64 = 0;
+    let mut peak_positions: i64 = 0;
+    for fill in &snapshot.fills {
+        match fill.side {
+            ploy_trading::TradeSide::Buy => {
+                open_positions += 1;
+                peak_positions = peak_positions.max(open_positions);
+            }
+            ploy_trading::TradeSide::Sell => {
+                open_positions = (open_positions - 1).max(0);
+            }
+        }
+    }
+    Decimal::from(peak_positions) * stake_usd
 }
