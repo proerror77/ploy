@@ -56,6 +56,12 @@ if [[ -f "${workflow}" ]]; then
   require_text "${workflow}" "--output-json" "optimize structured evaluation artifact"
   require_text "${workflow}" "upload-artifact" "optimize evaluation artifact upload"
   require_text "${workflow}" "timeout" "optimize process timeout wrapper"
+  if grep -Fq "Swatinem/rust-cache" "${workflow}"; then
+    failures+=("optimize workflow must not use Swatinem/rust-cache post steps after the backtest cache hang")
+  fi
+  if grep -Fq "download-artifact" "${workflow}" || grep -Fq "optimize_backtest-\${{ github.sha }}" "${workflow}"; then
+    failures+=("optimize workflow must build and run optimize_backtest in one job, not pass the binary through artifacts")
+  fi
 
   if ! python3 - "${workflow}" <<'PY'
 import re

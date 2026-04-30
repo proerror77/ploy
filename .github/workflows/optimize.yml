@@ -71,6 +71,10 @@ on:
         description: "Process timeout for optimize_backtest"
         required: false
         default: "90"
+      issue_number:
+        description: "Optional GitHub issue number for posting optimize evidence"
+        required: false
+        default: ""
 
 concurrency:
   group: optimize-${{ github.ref }}
@@ -78,16 +82,17 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  build:
-    name: Build optimize_backtest binary
+  optimize:
+    name: Build and run optimize on ploy-ci-1
     runs-on: [self-hosted, ploy-ci-1]
-    timeout-minutes: 45
+    timeout-minutes: 150
     environment: ploy-ci-1
 
     steps:
@@ -95,7 +100,7 @@ jobs:
         run: |
           if [ -d "${GITHUB_WORKSPACE}" ]; then
             sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
-            sudo rm -rf "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/.cargo-lock" || true
+            sudo rm -rf "${GITHUB_WORKSPACE}/.cargo-lock" || true
           fi
 
       - name: Checkout code
@@ -106,13 +111,6 @@ jobs:
       - name: Add cargo to PATH
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          cache-targets: "true"
-          key: optimize-${{ hashFiles('crates/ploy-strategy-bundles/**', 'Cargo.lock') }}
-
       - name: Build optimize_backtest
         run: |
           . /home/runner/.cargo/env
@@ -120,42 +118,6 @@ jobs:
             -p ploy-strategy-bundles \
             --features ploy-strategy-bundles/parquet-feed \
             --example optimize_backtest
-
-      - name: Upload optimize_backtest binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: optimize_backtest-${{ github.sha }}
-          path: target/release/examples/optimize_backtest
-          retention-days: 1
-
-  optimize:
-    name: Run optimize on ploy-ci-1
-    runs-on: [self-hosted, ploy-ci-1]
-    timeout-minutes: 120
-    environment: ploy-ci-1
-    needs: [build]
-
-    steps:
-      - name: Repair runner workspace permissions
-        run: |
-          if [ -d "${GITHUB_WORKSPACE}" ]; then
-            sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
-            sudo rm -rf "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/.cargo-lock" || true
-          fi
-
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.git_ref }}
-
-      - name: Download optimize_backtest binary
-        uses: actions/download-artifact@v4
-        with:
-          name: optimize_backtest-${{ github.sha }}
-          path: target/release/examples
-
-      - name: Make binary executable
-        run: chmod +x target/release/examples/optimize_backtest
 
       - name: Sync Parquet data from Tango-1-1
         run: |
@@ -288,3 +250,41 @@ jobs:
           path: artifacts/optimize/
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Comment optimize evidence on issue
+        if: ${{ always() && github.event.inputs.issue_number != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const issue_number = Number("${{ github.event.inputs.issue_number }}");
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const artifactPath = fs.existsSync("artifacts/optimize/evaluation.json")
+              ? "artifacts/optimize/evaluation.json"
+              : "artifacts/optimize/preflight-evaluation.json";
+            let flags = [];
+            let validation = {};
+            if (fs.existsSync(artifactPath)) {
+              const data = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+              flags = data.risk_flags || [];
+              validation = data.validation || {};
+            }
+            const body = [
+              "Optimize evidence:",
+              "",
+              `- Workflow: ${context.workflow}`,
+              `- Run URL: ${runUrl}`,
+              `- Git ref: ${{ github.event.inputs.git_ref }}`,
+              `- Dataset/window: train ${{ github.event.inputs.train_start }} -> ${{ github.event.inputs.train_end }}, validation ${{ github.event.inputs.val_start }} -> ${{ github.event.inputs.val_end }}`,
+              `- Symbols: ${{ github.event.inputs.symbols }}`,
+              `- Artifact: \`optimize-evaluation-${process.env.GITHUB_RUN_ID}\``,
+              `- Headline metrics: \`${JSON.stringify(validation)}\``,
+              `- Caveats: \`${flags.join(", ") || "none"}\``,
+              "- Decision: pending"
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body
+            });

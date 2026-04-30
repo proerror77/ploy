@@ -1,0 +1,84 @@
+name: Strategy Research Hypothesis
+description: Track one testable strategy research idea, factor, filter, or data question.
+title: "[Research] "
+labels: "research:hypothesis"
+body:
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+      description: State the single claim this issue should test.
+      placeholder: "Example: PM5D entries improve when CEX momentum reverses while PM quote lags and LOB support remains one-sided."
+    validations:
+      required: true
+  - type: textarea
+    id: edge
+    attributes:
+      label: Expected edge mechanism
+      description: Explain why this should make money after spread, fees, stale quotes, and queue effects.
+    validations:
+      required: true
+  - type: textarea
+    id: data
+    attributes:
+      label: Required data
+      description: List tables, windows, symbols, labels, settlement fields, or freshness checks.
+      placeholder: binance_price_ticks, binance_lob_ticks, clob_quote_ticks, pm_token_settlements, signal_history
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow plan
+      description: Name the workflow and inputs that should test this idea.
+      placeholder: factor-review-v2.yml with start_date, end_date, symbols, stake_usd, max_quote_age_secs
+    validations:
+      required: true
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Success and failure criteria
+      description: Define the metrics and thresholds that decide continue, revise, reject, or promote.
+    validations:
+      required: true
+  - type: textarea
+    id: accounting
+    attributes:
+      label: Accounting contract
+      description: State whether this is exploratory diagnostics or executable strategy accounting.
+      placeholder: One PM5D event counts as one deployable trade; multiple entry-time rows are diagnostics unless a runtime rule can execute them.
+    validations:
+      required: true
+  - type: textarea
+    id: parity
+    attributes:
+      label: Replay / dry-run parity plan
+      description: Define how replay results will be compared against dry-run behavior.
+      value: |
+        - Replay window:
+        - Dry-run window:
+        - Event ids / markets:
+        - Compare fields: decision timestamp, quote, signal inputs, side, entry price, fill status, settlement, PnL
+        - Expected acceptable mismatch:
+        - Follow-up issue trigger:
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Fill this after the workflow run.
+      value: |
+        - Workflow:
+        - Run URL:
+        - Git ref:
+        - Dataset/window:
+        - Symbols:
+        - Config:
+        - Artifact:
+        - Headline metrics:
+        - Replay/dry-run parity:
+        - Caveats:
+        - Decision:
+    validations:
+      required: false

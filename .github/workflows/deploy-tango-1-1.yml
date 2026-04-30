@@ -60,6 +60,14 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
+      - name: Enforce main-only deploy
+        if: ${{ inputs.deploy }}
+        run: |
+          if [ "${{ github.event.inputs.git_ref }}" != "main" ]; then
+            echo "Deployments that mutate tango-1-1 must use git_ref=main" >&2
+            exit 1
+          fi
+
       - name: Set reproducible build environment
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
 

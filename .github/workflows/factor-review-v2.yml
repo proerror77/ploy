@@ -43,6 +43,10 @@ on:
         description: "Selected quantile for execution metrics"
         required: false
         default: "0.2"
+      issue_number:
+        description: "Optional GitHub issue number for posting factor evidence"
+        required: false
+        default: ""
 
 concurrency:
   group: factor-review-v2-${{ github.ref }}
@@ -50,6 +54,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -94,11 +99,17 @@ jobs:
             --example factor_review_v2
 
       - name: Run factor review
+        env:
+          PLOY_RESEARCH_DATABASE_URL: ${{ secrets.PLOY_RESEARCH_DATABASE_URL || vars.PLOY_RESEARCH_DATABASE_URL }}
         run: |
           set -euo pipefail
+          if [ -z "${PLOY_RESEARCH_DATABASE_URL}" ]; then
+            echo "PLOY_RESEARCH_DATABASE_URL is required" >&2
+            exit 1
+          fi
           mkdir -p artifacts/factor-review-v2
           ./target/release/examples/factor_review_v2 \
-            --db-url "postgresql://postgres:postgres@172.16.0.204:5432/ploy" \
+            --db-url "${PLOY_RESEARCH_DATABASE_URL}" \
             --symbols "${{ github.event.inputs.symbols }}" \
             --start-date "${{ github.event.inputs.start_date }}" \
             --end-date "${{ github.event.inputs.end_date }}" \
@@ -136,3 +147,35 @@ jobs:
           name: factor-review-v2-${{ github.run_id }}
           path: artifacts/factor-review-v2/
           retention-days: 14
+
+      - name: Comment factor evidence on issue
+        if: ${{ always() && github.event.inputs.issue_number != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const issue_number = Number("${{ github.event.inputs.issue_number }}");
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            let flags = [];
+            if (fs.existsSync("artifacts/factor-review-v2/evaluation.json")) {
+              const data = JSON.parse(fs.readFileSync("artifacts/factor-review-v2/evaluation.json", "utf8"));
+              flags = data.risk_flags || [];
+            }
+            const body = [
+              "Factor review evidence:",
+              "",
+              `- Workflow: ${context.workflow}`,
+              `- Run URL: ${runUrl}`,
+              `- Git ref: ${{ github.event.inputs.git_ref }}`,
+              `- Dataset/window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}`,
+              `- Symbols: ${{ github.event.inputs.symbols }}`,
+              `- Artifact: \`factor-review-v2-${process.env.GITHUB_RUN_ID}\``,
+              `- Caveats: \`${flags.join(", ") || "none"}\``,
+              "- Decision: pending"
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body
+            });

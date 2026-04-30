@@ -45,10 +45,10 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  build:
-    name: Build run_backtest binary
+  backtest:
+    name: Build and run backtest on ploy-ci-1
     runs-on: [self-hosted, ploy-ci-1]
-    timeout-minutes: 45
+    timeout-minutes: 75
     environment: ploy-ci-1
 
     steps:
@@ -56,7 +56,7 @@ jobs:
         run: |
           if [ -d "${GITHUB_WORKSPACE}" ]; then
             sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
-            sudo rm -rf "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/.cargo-lock" || true
+            sudo rm -rf "${GITHUB_WORKSPACE}/.cargo-lock" || true
           fi
 
       - name: Checkout code
@@ -66,13 +66,6 @@ jobs:
 
       - name: Add cargo to PATH
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          cache-targets: "false"
-          key: backtest-${{ hashFiles('crates/ploy-strategy-bundles/**', 'Cargo.lock') }}
 
       - name: Build run_backtest
         env:
@@ -91,35 +84,6 @@ jobs:
             cargo_args+=(--features ploy-strategy-bundles/parquet-feed)
           fi
           cargo "${cargo_args[@]}"
-
-      - name: Upload run_backtest binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: run_backtest-${{ github.sha }}
-          path: target/release/examples/run_backtest
-          retention-days: 1
-
-  backtest:
-    name: Run backtest on ploy-ci-1
-    runs-on: [self-hosted, ploy-ci-1]
-    timeout-minutes: 30
-    environment: ploy-ci-1
-    needs: [build]
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.git_ref }}
-
-      - name: Download run_backtest binary
-        uses: actions/download-artifact@v4
-        with:
-          name: run_backtest-${{ github.sha }}
-          path: target/release/examples
-
-      - name: Make binary executable
-        run: chmod +x target/release/examples/run_backtest
 
       - name: Sync Parquet data from Tango-1-1
         if: ${{ github.event.inputs.data_dir != '' && github.event.inputs.sync_parquet_data == 'true' }}
@@ -204,13 +168,24 @@ jobs:
             const fs = require("fs");
             const issue_number = Number("${{ github.event.inputs.issue_number }}");
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
-            let metrics = {};
+            let metrics = null;
             let riskFlags = [];
+            let decision = "pending replay/dry-run parity review";
             if (fs.existsSync("artifacts/backtest/evaluation.json")) {
               const data = JSON.parse(fs.readFileSync("artifacts/backtest/evaluation.json", "utf8"));
-              metrics = data.metrics || {};
+              metrics = data.metrics || null;
               riskFlags = data.risk_flags || [];
+              if (!metrics || Object.keys(metrics).length === 0) {
+                riskFlags.push("missing_headline_metrics");
+                decision = "fix-workflow-or-artifact";
+              }
+            } else {
+              riskFlags.push("missing_evaluation_artifact");
+              decision = "fix-workflow-or-data-source";
             }
+            const headlineMetrics = metrics && Object.keys(metrics).length > 0
+              ? JSON.stringify(metrics)
+              : "unavailable";
             const body = [
               "Backtest evidence:",
               "",
@@ -220,9 +195,9 @@ jobs:
               `- Dataset/window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}`,
               `- Config: \`${{ github.event.inputs.config }}\``,
               `- Artifact: \`backtest-evaluation-${process.env.GITHUB_RUN_ID}\``,
-              `- Headline metrics: \`${JSON.stringify(metrics)}\``,
+              `- Headline metrics: \`${headlineMetrics}\``,
               `- Caveats: \`${riskFlags.join(", ") || "none"}\``,
-              "- Decision: pending replay/dry-run parity review"
+              `- Decision: ${decision}`
             ].join("\n");
             await github.rest.issues.createComment({
               owner: context.repo.owner,

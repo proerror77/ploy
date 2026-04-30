@@ -63,6 +63,143 @@ fn release_platform_workflow_pins_host_fingerprints() {
 }
 
 #[test]
+fn ack_acr_workflows_require_immutable_image_tags() {
+    let build = workflow_contents(".github/workflows/build-push-acr.yml");
+    let deploy = workflow_contents(".github/workflows/deploy-ack.yml");
+    let mut offenders = Vec::new();
+
+    if !build.contains("default: false") {
+        offenders.push("build-push-acr.yml: push_images must default to false".to_string());
+    }
+    if build.contains(":latest") {
+        offenders.push("build-push-acr.yml: must not build or push mutable :latest tags".to_string());
+    }
+    if !build.contains("BUILD_SHA=$(git rev-parse HEAD)") {
+        offenders.push("build-push-acr.yml: must tag images with the checked-out commit".to_string());
+    }
+    if !build.contains("ACR image pushes must use git_ref=main") {
+        offenders.push("build-push-acr.yml: image pushes must be gated to git_ref=main".to_string());
+    }
+
+    if deploy.contains("default: \"latest\"") || deploy.contains("image_tag: latest") {
+        offenders.push("deploy-ack.yml: must not default to or allow latest image tags".to_string());
+    }
+    if !deploy.contains("^[0-9a-f]{40}$") {
+        offenders.push("deploy-ack.yml: must require full immutable SHA image tags".to_string());
+    }
+    if !deploy.contains("provenance_ref") || !deploy.contains("compare/${image_tag}...${provenance_ref}") {
+        offenders.push("deploy-ack.yml: must validate image SHA provenance against main or release refs".to_string());
+    }
+    if !deploy.contains("environment: ack") {
+        offenders.push("deploy-ack.yml: must use an environment-scoped deployment".to_string());
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "ACK/ACR immutable-image guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn mutating_deploy_workflows_enforce_main_only() {
+    let workflows = [
+        (
+            ".github/workflows/deploy-tango-1-1.yml",
+            "Deployments that mutate tango-1-1 must use git_ref=main",
+        ),
+        (
+            ".github/workflows/deploy-trade.yml",
+            "Deployments that mutate ploy-trade-1 must use git_ref=main",
+        ),
+        (
+            ".github/workflows/release-platform.yml",
+            "Platform deployments must use git_ref=main",
+        ),
+    ];
+    let mut offenders = Vec::new();
+
+    for (path, message) in workflows {
+        let content = workflow_contents(path);
+        if !content.contains("if: ${{ inputs.deploy }}") {
+            offenders.push(format!("{path}: main-only guard must apply when deploy=true"));
+        }
+        if !content.contains(message) {
+            offenders.push(format!("{path}: missing main-only deploy guard message"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "main-only deploy guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn strategy_research_evidence_comments_are_decision_grade() {
+    let backtest = workflow_contents(".github/workflows/backtest.yml");
+    let parity_workflow = workflow_contents(".github/workflows/replay-dryrun-parity.yml");
+    let parity_script = workflow_contents("scripts/replay_dryrun_parity.py");
+    let mut offenders = Vec::new();
+
+    if !backtest.contains("missing_headline_metrics") {
+        offenders.push("backtest.yml: must flag empty headline metrics".to_string());
+    }
+    if !backtest.contains("missing_evaluation_artifact") {
+        offenders.push("backtest.yml: must flag missing evaluation artifacts".to_string());
+    }
+    if !backtest.contains("fix-workflow-or-data-source") {
+        offenders.push("backtest.yml: failed data-source runs must not look pending-successful".to_string());
+    }
+    if !parity_workflow.contains("Strict parity ready") {
+        offenders.push("replay-dryrun-parity.yml: issue evidence must show strict parity readiness".to_string());
+    }
+    if !parity_workflow.contains("Missing strict fields") {
+        offenders.push("replay-dryrun-parity.yml: issue evidence must list missing strict fields".to_string());
+    }
+    if !parity_script.contains("STRICT_FIELD_ALIASES") {
+        offenders.push("replay_dryrun_parity.py: must normalize known event-field aliases".to_string());
+    }
+    if !parity_script.contains("strict_parity_ready") {
+        offenders.push("replay_dryrun_parity.py: must emit strict parity readiness".to_string());
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "strategy research evidence guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn optimize_workflow_builds_and_runs_in_one_job() {
+    let content = workflow_contents(".github/workflows/optimize.yml");
+    let mut offenders = Vec::new();
+
+    if content.contains("download-artifact") || content.contains("optimize_backtest-${{ github.sha }}") {
+        offenders.push(
+            "optimize.yml: must not pass optimize_backtest through a binary artifact".to_string(),
+        );
+    }
+    if content.contains("Swatinem/rust-cache") {
+        offenders.push(
+            "optimize.yml: must not use Swatinem/rust-cache after cache post-step hangs"
+                .to_string(),
+        );
+    }
+    if !content.contains("name: Build and run optimize on ploy-ci-1") {
+        offenders.push("optimize.yml: must use the single build-and-run job".to_string());
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "optimize workflow single-job guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn checked_in_platform_service_enforces_guardrails() {
     let content = workflow_contents("deployment/ployd.service");
     let required = [
