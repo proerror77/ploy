@@ -141,6 +141,10 @@ Keep the control planes separate:
 
 - Research workflows can run on feature branches when they do not mutate
   deployment state.
+- Keep `workflow_dispatch` inputs at or below GitHub's 10-input limit. Put
+  advanced or rarely changed knobs into an `options_json` input, validate keys
+  in the workflow, and fail on unknown options so typoed experiments do not run
+  with silent defaults.
 - Deployment workflows that affect `tango-1-1`, `ploy-trade-1`, or production
   state must run from `main`.
 - Remote data and heavy research belong on `ploy-ci-1`, `tango-1-1`, ACK, or
@@ -149,7 +153,9 @@ Keep the control planes separate:
   secrets `PLOY_RESEARCH_DATABASE_URL` and `PLOY_DB_URL`; verify the private
   endpoint with Aliyun CLI before changing those secrets.
 - ACK/ACR image workflows must use immutable checked-out commit SHA tags only.
-  Do not push or deploy `latest`.
+  Do not push or deploy `latest`. ACK deployments must also pass through the
+  GitHub `ack` environment, which requires reviewer approval and disables admin
+  bypass before mutating the cluster.
 - Runtime deployment evidence must include remote host verification, not only
   a successful workflow conclusion.
 - Replay/dry-run parity is promotion evidence only when the parity artifact says

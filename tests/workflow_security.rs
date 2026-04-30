@@ -13,6 +13,14 @@ fn ci_runs_dependency_vulnerability_audit() {
     let content = workflow_contents(".github/workflows/test.yml");
     let mut offenders = Vec::new();
 
+    if !content.contains("name: Workflow lint") {
+        offenders.push("test.yml: missing workflow lint job".to_string());
+    }
+
+    if !content.contains("actionlint/cmd/actionlint@v1.7.7") {
+        offenders.push("test.yml: missing pinned actionlint installation".to_string());
+    }
+
     if !content.contains("taiki-e/install-action@cargo-audit") {
         offenders.push("test.yml: missing cargo-audit installer step".to_string());
     }

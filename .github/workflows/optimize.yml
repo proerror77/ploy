@@ -31,50 +31,10 @@ on:
         description: "Comma-separated symbols to optimize"
         required: false
         default: "BTCUSDT,ETHUSDT"
-      data_dir:
-        description: "Local Parquet data dir (rsynced from tango)"
+      options_json:
+        description: "Advanced options JSON: data_dir, limits, preflight_only, max_updates, timeout, issue_number"
         required: false
-        default: "/tmp/ploy-parquet"
-      max_preflight_rows:
-        description: "Fail before replay when estimated train+val rows exceed this"
-        required: false
-        default: "15000000"
-      max_preflight_bytes:
-        description: "Fail before replay when local Parquet bytes exceed this (supports GiB)"
-        required: false
-        default: "80GiB"
-      max_symbols:
-        description: "Fail before replay when symbol count exceeds this"
-        required: false
-        default: "6"
-      max_days:
-        description: "Fail before replay when train start through validation end exceeds this many days"
-        required: false
-        default: "8"
-      allow_large_window:
-        description: "Override preflight guardrails after bounded smoke/host-health checks"
-        required: false
-        default: "false"
-      preflight_only:
-        description: "Only produce the manifest and exit before replay/optimization"
-        required: false
-        default: "false"
-      max_updates:
-        description: "Optional smoke-only runtime update cap; blank is canonical full replay"
-        required: false
-        default: ""
-      duckdb_memory_limit:
-        description: "DuckDB memory_limit for preflight/replay"
-        required: false
-        default: "6GB"
-      optimize_timeout_minutes:
-        description: "Process timeout for optimize_backtest"
-        required: false
-        default: "90"
-      issue_number:
-        description: "Optional GitHub issue number for posting optimize evidence"
-        required: false
-        default: ""
+        default: '{"data_dir":"/tmp/ploy-parquet","max_preflight_rows":15000000,"max_preflight_bytes":"80GiB","max_symbols":6,"max_days":8,"allow_large_window":false,"preflight_only":false,"max_updates":"","duckdb_memory_limit":"6GB","optimize_timeout_minutes":90,"issue_number":""}'
 
 concurrency:
   group: optimize-${{ github.ref }}
@@ -111,6 +71,56 @@ jobs:
       - name: Add cargo to PATH
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
+      - name: Parse advanced options
+        env:
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          defaults = {
+              "data_dir": "/tmp/ploy-parquet",
+              "max_preflight_rows": "15000000",
+              "max_preflight_bytes": "80GiB",
+              "max_symbols": "6",
+              "max_days": "8",
+              "allow_large_window": "false",
+              "preflight_only": "false",
+              "max_updates": "",
+              "duckdb_memory_limit": "6GB",
+              "optimize_timeout_minutes": "90",
+              "issue_number": "",
+          }
+          bool_keys = {"allow_large_window", "preflight_only"}
+          raw = os.environ.get("OPTIONS_JSON", "").strip()
+          data = json.loads(raw) if raw else {}
+          if not isinstance(data, dict):
+              raise SystemExit("options_json must be a JSON object")
+          unknown = sorted(set(data) - set(defaults))
+          if unknown:
+              raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+
+          values = dict(defaults)
+          for key, value in data.items():
+              if key in bool_keys:
+                  if isinstance(value, bool):
+                      values[key] = "true" if value else "false"
+                  elif str(value).lower() in {"true", "false"}:
+                      values[key] = str(value).lower()
+                  else:
+                      raise SystemExit(f"options_json value for {key} must be boolean")
+              else:
+                  values[key] = str(value)
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              for key, value in values.items():
+                  if "\n" in value:
+                      raise SystemExit(f"options_json value for {key} must be single-line")
+                  handle.write(f"OPT_{key.upper()}={value}\n")
+          PY
+
       - name: Build optimize_backtest
         run: |
           . /home/runner/.cargo/env
@@ -124,11 +134,11 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.TANGO_SSH_KEY }}" > ~/.ssh/tango_key
           chmod 600 ~/.ssh/tango_key
-          mkdir -p ${{ github.event.inputs.data_dir }}
+          mkdir -p "${OPT_DATA_DIR}"
           rsync -az \
             -e "ssh -i ~/.ssh/tango_key -o StrictHostKeyChecking=no" \
             root@172.16.0.204:/opt/ploy/data/parquet/ \
-            ${{ github.event.inputs.data_dir }}/
+            "${OPT_DATA_DIR}/"
 
       - name: Prepare DuckDB spill directory
         run: |
@@ -136,7 +146,7 @@ jobs:
           rm -rf "${DUCKDB_TEMP_DIR}"
           mkdir -p "${DUCKDB_TEMP_DIR}"
           echo "PLOY_DUCKDB_TEMP_DIR=${DUCKDB_TEMP_DIR}" >> "${GITHUB_ENV}"
-          echo "PLOY_DUCKDB_MEMORY_LIMIT=${{ github.event.inputs.duckdb_memory_limit }}" >> "${GITHUB_ENV}"
+          echo "PLOY_DUCKDB_MEMORY_LIMIT=${OPT_DUCKDB_MEMORY_LIMIT}" >> "${GITHUB_ENV}"
           echo "DuckDB spill directory: ${DUCKDB_TEMP_DIR}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Preflight Parquet manifest
@@ -151,7 +161,7 @@ jobs:
               echo '```'
               date -u
               free -h || true
-              df -h "${{ github.event.inputs.data_dir }}" "${PLOY_DUCKDB_TEMP_DIR}" || true
+              df -h "${OPT_DATA_DIR}" "${PLOY_DUCKDB_TEMP_DIR}" || true
               ps -eo pid,ppid,stat,%mem,%cpu,comm,args --sort=-%mem | head -25 || true
               echo '```'
             } >> "${GITHUB_STEP_SUMMARY}"
@@ -159,37 +169,40 @@ jobs:
           trap 'status=$?; health_summary; rm -rf "${PLOY_DUCKDB_TEMP_DIR}"; exit ${status}' EXIT
 
           extra_flags=()
-          if [ "${{ github.event.inputs.allow_large_window }}" = "true" ]; then
+          if [ "${OPT_ALLOW_LARGE_WINDOW}" = "true" ]; then
             extra_flags+=(--allow-large-window)
           fi
-          if [ -n "${{ github.event.inputs.max_updates }}" ]; then
-            extra_flags+=(--max-updates "${{ github.event.inputs.max_updates }}")
+          if [ -n "${OPT_MAX_UPDATES}" ]; then
+            extra_flags+=(--max-updates "${OPT_MAX_UPDATES}")
           fi
 
           ./target/release/examples/optimize_backtest \
             --preflight-only \
             --strategy-variant three_layer \
-            --data-dir "${{ github.event.inputs.data_dir }}" \
+            --data-dir "${OPT_DATA_DIR}" \
             --train-start "${{ github.event.inputs.train_start }}" \
             --train-end "${{ github.event.inputs.train_end }}" \
             --val-start "${{ github.event.inputs.val_start }}" \
             --val-end "${{ github.event.inputs.val_end }}" \
             --symbols "${{ github.event.inputs.symbols }}" \
             --trials "${{ github.event.inputs.trials }}" \
-            --max-preflight-rows "${{ github.event.inputs.max_preflight_rows }}" \
-            --max-preflight-bytes "${{ github.event.inputs.max_preflight_bytes }}" \
-            --max-symbols "${{ github.event.inputs.max_symbols }}" \
-            --max-days "${{ github.event.inputs.max_days }}" \
-            --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
+            --max-preflight-rows "${OPT_MAX_PREFLIGHT_ROWS}" \
+            --max-preflight-bytes "${OPT_MAX_PREFLIGHT_BYTES}" \
+            --max-symbols "${OPT_MAX_SYMBOLS}" \
+            --max-days "${OPT_MAX_DAYS}" \
+            --duckdb-memory-limit "${OPT_DUCKDB_MEMORY_LIMIT}" \
             --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
             --git-ref "${{ github.event.inputs.git_ref }}" \
             --output-json artifacts/optimize/preflight-evaluation.json \
             "${extra_flags[@]}"
 
       - name: Run optimize
-        if: ${{ github.event.inputs.preflight_only != 'true' }}
         run: |
           set -euo pipefail
+          if [ "${OPT_PREFLIGHT_ONLY}" = "true" ]; then
+            echo "preflight_only=true; skipping optimize replay" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
           . /home/runner/.cargo/env
           mkdir -p artifacts/optimize
           rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
@@ -201,7 +214,7 @@ jobs:
               echo '```'
               date -u
               free -h || true
-              df -h "${{ github.event.inputs.data_dir }}" "${PLOY_DUCKDB_TEMP_DIR}" || true
+              df -h "${OPT_DATA_DIR}" "${PLOY_DUCKDB_TEMP_DIR}" || true
               ps -eo pid,ppid,stat,%mem,%cpu,comm,args --sort=-%mem | head -25 || true
               echo '```'
             } >> "${GITHUB_STEP_SUMMARY}"
@@ -215,28 +228,28 @@ jobs:
           trap cleanup EXIT
 
           extra_flags=()
-          if [ "${{ github.event.inputs.allow_large_window }}" = "true" ]; then
+          if [ "${OPT_ALLOW_LARGE_WINDOW}" = "true" ]; then
             extra_flags+=(--allow-large-window)
           fi
-          if [ -n "${{ github.event.inputs.max_updates }}" ]; then
-            extra_flags+=(--max-updates "${{ github.event.inputs.max_updates }}")
+          if [ -n "${OPT_MAX_UPDATES}" ]; then
+            extra_flags+=(--max-updates "${OPT_MAX_UPDATES}")
           fi
 
-          timeout --preserve-status "${{ github.event.inputs.optimize_timeout_minutes }}m" \
+          timeout --preserve-status "${OPT_OPTIMIZE_TIMEOUT_MINUTES}m" \
           ./target/release/examples/optimize_backtest \
             --strategy-variant three_layer \
-            --data-dir "${{ github.event.inputs.data_dir }}" \
+            --data-dir "${OPT_DATA_DIR}" \
             --train-start "${{ github.event.inputs.train_start }}" \
             --train-end "${{ github.event.inputs.train_end }}" \
             --val-start "${{ github.event.inputs.val_start }}" \
             --val-end "${{ github.event.inputs.val_end }}" \
             --symbols "${{ github.event.inputs.symbols }}" \
             --trials "${{ github.event.inputs.trials }}" \
-            --max-preflight-rows "${{ github.event.inputs.max_preflight_rows }}" \
-            --max-preflight-bytes "${{ github.event.inputs.max_preflight_bytes }}" \
-            --max-symbols "${{ github.event.inputs.max_symbols }}" \
-            --max-days "${{ github.event.inputs.max_days }}" \
-            --duckdb-memory-limit "${{ github.event.inputs.duckdb_memory_limit }}" \
+            --max-preflight-rows "${OPT_MAX_PREFLIGHT_ROWS}" \
+            --max-preflight-bytes "${OPT_MAX_PREFLIGHT_BYTES}" \
+            --max-symbols "${OPT_MAX_SYMBOLS}" \
+            --max-days "${OPT_MAX_DAYS}" \
+            --duckdb-memory-limit "${OPT_DUCKDB_MEMORY_LIMIT}" \
             --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
             --git-ref "${{ github.event.inputs.git_ref }}" \
             --output-json artifacts/optimize/evaluation.json \
@@ -252,12 +265,17 @@ jobs:
           retention-days: 14
 
       - name: Comment optimize evidence on issue
-        if: ${{ always() && github.event.inputs.issue_number != '' }}
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require("fs");
-            const issue_number = Number("${{ github.event.inputs.issue_number }}");
+            const issueNumberRaw = process.env.OPT_ISSUE_NUMBER || "";
+            if (!issueNumberRaw) {
+              core.info("No issue_number configured in options_json; skipping issue comment.");
+              return;
+            }
+            const issue_number = Number(issueNumberRaw);
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
             const artifactPath = fs.existsSync("artifacts/optimize/evaluation.json")
               ? "artifacts/optimize/evaluation.json"

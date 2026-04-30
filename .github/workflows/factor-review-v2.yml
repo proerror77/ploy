@@ -31,22 +31,10 @@ on:
         description: "Maximum PM quote age"
         required: false
         default: "30"
-      top_n:
-        description: "Number of factor rows to print"
+      options_json:
+        description: "Advanced options JSON: top_n, min_observations, top_quantile, issue_number"
         required: false
-        default: "50"
-      min_observations:
-        description: "Minimum observations for a factor"
-        required: false
-        default: "20"
-      top_quantile:
-        description: "Selected quantile for execution metrics"
-        required: false
-        default: "0.2"
-      issue_number:
-        description: "Optional GitHub issue number for posting factor evidence"
-        required: false
-        default: ""
+        default: '{"top_n":50,"min_observations":20,"top_quantile":0.2,"issue_number":""}'
 
 concurrency:
   group: factor-review-v2-${{ github.ref }}
@@ -83,6 +71,37 @@ jobs:
       - name: Add cargo to PATH
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
+      - name: Parse advanced options
+        env:
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          defaults = {
+              "top_n": "50",
+              "min_observations": "20",
+              "top_quantile": "0.2",
+              "issue_number": "",
+          }
+          raw = os.environ.get("OPTIONS_JSON", "").strip()
+          data = json.loads(raw) if raw else {}
+          if not isinstance(data, dict):
+              raise SystemExit("options_json must be a JSON object")
+          unknown = sorted(set(data) - set(defaults))
+          if unknown:
+              raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+          values = defaults | {key: str(value) for key, value in data.items()}
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              for key, value in values.items():
+                  if "\n" in value:
+                      raise SystemExit(f"options_json value for {key} must be single-line")
+                  handle.write(f"FACTOR_{key.upper()}={value}\n")
+          PY
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -116,9 +135,9 @@ jobs:
             --stake-usd "${{ github.event.inputs.stake_usd }}" \
             --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
             --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
-            --min-observations "${{ github.event.inputs.min_observations }}" \
-            --top-quantile "${{ github.event.inputs.top_quantile }}" \
-            --top-n "${{ github.event.inputs.top_n }}" \
+            --min-observations "${FACTOR_MIN_OBSERVATIONS}" \
+            --top-quantile "${FACTOR_TOP_QUANTILE}" \
+            --top-n "${FACTOR_TOP_N}" \
             --git-ref "${{ github.event.inputs.git_ref }}" \
             --output-json artifacts/factor-review-v2/evaluation.json \
             | tee artifacts/factor-review-v2/report.txt
@@ -149,12 +168,17 @@ jobs:
           retention-days: 14
 
       - name: Comment factor evidence on issue
-        if: ${{ always() && github.event.inputs.issue_number != '' }}
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require("fs");
-            const issue_number = Number("${{ github.event.inputs.issue_number }}");
+            const issueNumberRaw = process.env.FACTOR_ISSUE_NUMBER || "";
+            if (!issueNumberRaw) {
+              core.info("No issue_number configured in options_json; skipping issue comment.");
+              return;
+            }
+            const issue_number = Number(issueNumberRaw);
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
             let flags = [];
             if (fs.existsSync("artifacts/factor-review-v2/evaluation.json")) {
