@@ -58,7 +58,7 @@ jobs:
           esac
           status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${image_tag}...${provenance_ref}" --jq .status)"
           case "${status}" in
-            behind|identical)
+            ahead|identical)
               ;;
             *)
               echo "image_tag ${image_tag} is not contained in provenance ref ${provenance_ref}" >&2

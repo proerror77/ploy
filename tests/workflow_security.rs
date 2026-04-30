@@ -132,6 +132,9 @@ fn ack_acr_workflows_require_immutable_image_tags() {
     if !deploy.contains("provenance_ref") || !deploy.contains("compare/${image_tag}...${provenance_ref}") {
         offenders.push("deploy-ack.yml: must validate image SHA provenance against main or release refs".to_string());
     }
+    if !deploy.contains("ahead|identical") {
+        offenders.push("deploy-ack.yml: GitHub compare status must allow refs ahead of the image SHA".to_string());
+    }
     if !deploy.contains("environment: ack") {
         offenders.push("deploy-ack.yml: must use an environment-scoped deployment".to_string());
     }
