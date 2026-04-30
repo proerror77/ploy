@@ -215,9 +215,18 @@ fn research_issue_workflows_apply_decision_labels() {
 
     for (workflow, evidence_label) in [
         (".github/workflows/backtest.yml", "evidence:backtest"),
-        (".github/workflows/replay-dryrun-parity.yml", "evidence:parity"),
-        (".github/workflows/factor-review-v2.yml", "evidence:factor-review"),
-        (".github/workflows/factor-walk-forward-v2.yml", "evidence:walk-forward"),
+        (
+            ".github/workflows/replay-dryrun-parity.yml",
+            "evidence:parity",
+        ),
+        (
+            ".github/workflows/factor-review-v2.yml",
+            "evidence:factor-review",
+        ),
+        (
+            ".github/workflows/factor-walk-forward-v2.yml",
+            "evidence:walk-forward",
+        ),
         (".github/workflows/optimize.yml", "evidence:optimize"),
     ] {
         let content = workflow_contents(workflow);
@@ -225,13 +234,84 @@ fn research_issue_workflows_apply_decision_labels() {
             offenders.push(format!("{workflow}: missing shared research label helper"));
         }
         if !content.contains(evidence_label) {
-            offenders.push(format!("{workflow}: missing evidence label `{evidence_label}`"));
+            offenders.push(format!(
+                "{workflow}: missing evidence label `{evidence_label}`"
+            ));
         }
     }
 
     assert!(
         offenders.is_empty(),
         "research issue label guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn strategy_research_runbook_stays_strategy_agnostic() {
+    let runbook = workflow_contents("docs/runbooks/strategy-research-cicd.md");
+    let research_template = workflow_contents(".github/ISSUE_TEMPLATE/strategy_research.yml");
+    let implementation_template =
+        workflow_contents(".github/ISSUE_TEMPLATE/strategy_implementation.yml");
+    let backtest = workflow_contents(".github/workflows/backtest.yml");
+    let optimize = workflow_contents(".github/workflows/optimize.yml");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "Strategy-Agnostic Research and Runtime CI/CD Runbook",
+        "Four-Layer Model",
+        "Platform CI",
+        "Research CI",
+        "Runtime CD",
+        "Promotion Gate",
+        "PM5D is one current strategy profile, not the center of the CI/CD model",
+        "strategy_family",
+        "strategy_profile",
+    ] {
+        if !runbook.contains(needle) {
+            offenders.push(format!("strategy-research-cicd.md: missing `{needle}`"));
+        }
+    }
+
+    for forbidden in [
+        "PM5D factor diagnostics",
+        "PM5D walk-forward diagnostics",
+        "PM5D backtest",
+        "For PM5D, one event",
+    ] {
+        if runbook.contains(forbidden) {
+            offenders.push(format!(
+                "strategy-research-cicd.md: workflow contract is still PM5D-centered via `{forbidden}`"
+            ));
+        }
+    }
+
+    if research_template.contains("PM5D") {
+        offenders
+            .push("strategy_research.yml: placeholders should be strategy-agnostic".to_string());
+    }
+    if !research_template.contains("id: strategy_family")
+        || !research_template.contains("id: strategy_profile")
+    {
+        offenders.push("strategy_research.yml: missing strategy family/profile fields".to_string());
+    }
+    if !implementation_template.contains("id: strategy_family")
+        || !implementation_template.contains("id: strategy_profile")
+    {
+        offenders.push(
+            "strategy_implementation.yml: missing strategy family/profile fields".to_string(),
+        );
+    }
+    if !backtest.contains("name: Strategy Backtest") || backtest.contains("## PM5D Backtest") {
+        offenders.push("backtest.yml: workflow naming should be strategy-agnostic".to_string());
+    }
+    if !optimize.contains("name: Optimize strategy params") {
+        offenders.push("optimize.yml: workflow naming should be strategy-agnostic".to_string());
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "strategy-agnostic CI/CD guard failed:\n{}",
         offenders.join("\n")
     );
 }
@@ -353,7 +433,9 @@ fn host_deploy_workflows_require_main_provenance_and_pinned_ssh() {
             || !content.contains("must use git_ref=main")
             || !content.contains("does not match origin/main")
         {
-            offenders.push(format!("{name}: deployment is not hard-gated to main provenance"));
+            offenders.push(format!(
+                "{name}: deployment is not hard-gated to main provenance"
+            ));
         }
         if content.contains("StrictHostKeyChecking no")
             || content.contains("UserKnownHostsFile /dev/null")
@@ -364,12 +446,15 @@ fn host_deploy_workflows_require_main_provenance_and_pinned_ssh() {
             || !content.contains("UserKnownHostsFile ~/.ssh/known_hosts")
             || !content.contains(known_hosts_secret)
         {
-            offenders.push(format!("{name}: missing pinned known_hosts SSH verification"));
+            offenders.push(format!(
+                "{name}: missing pinned known_hosts SSH verification"
+            ));
         }
     }
 
     if !trade.contains("default: false") {
-        offenders.push("deploy-trade.yml: live trade deploy should default deploy=false".to_string());
+        offenders
+            .push("deploy-trade.yml: live trade deploy should default deploy=false".to_string());
     }
 
     assert!(

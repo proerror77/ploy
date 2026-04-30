@@ -3,12 +3,28 @@ description: Track one testable strategy research idea, factor, filter, or data 
 title: "[Research] "
 labels: "research:hypothesis"
 body:
+  - type: input
+    id: strategy_family
+    attributes:
+      label: Strategy family
+      description: Broad family this hypothesis belongs to.
+      placeholder: binary-options, sports, copy-trading, market-making, event-ML
+    validations:
+      required: true
+  - type: input
+    id: strategy_profile
+    attributes:
+      label: Strategy profile / config
+      description: Concrete profile or config under test. Use `new` if it does not exist yet.
+      placeholder: config/strategies/<family>.<profile>.toml or new
+    validations:
+      required: true
   - type: textarea
     id: hypothesis
     attributes:
       label: Hypothesis
       description: State the single claim this issue should test.
-      placeholder: "Example: PM5D entries improve when CEX momentum reverses while PM quote lags and LOB support remains one-sided."
+      placeholder: "Example: Entries improve when the external reference market moves first while the prediction-market quote lags and liquidity remains one-sided."
     validations:
       required: true
   - type: textarea
@@ -23,7 +39,7 @@ body:
     attributes:
       label: Required data
       description: List tables, windows, symbols, labels, settlement fields, or freshness checks.
-      placeholder: binance_price_ticks, binance_lob_ticks, clob_quote_ticks, pm_token_settlements, signal_history
+      placeholder: price ticks, order-book snapshots, prediction-market quotes, settlement labels, runtime order/fill history
     validations:
       required: true
   - type: textarea
@@ -31,7 +47,7 @@ body:
     attributes:
       label: Workflow plan
       description: Name the workflow and inputs that should test this idea.
-      placeholder: factor-review-v2.yml with start_date, end_date, symbols, stake_usd, options_json
+      placeholder: research-snapshot.yml, factor-review-v2.yml, optimize.yml, backtest.yml, or replay-dryrun-parity.yml with exact inputs
     validations:
       required: true
   - type: textarea
@@ -46,7 +62,7 @@ body:
     attributes:
       label: Accounting contract
       description: State whether this is exploratory diagnostics or executable strategy accounting.
-      placeholder: One PM5D event counts as one deployable trade; multiple entry-time rows are diagnostics unless a runtime rule can execute them.
+      placeholder: One market event counts as one deployable trade unless the runtime can execute multiple entries under the same risk rules.
     validations:
       required: true
   - type: textarea
@@ -72,8 +88,9 @@ body:
         - Workflow:
         - Run URL:
         - Git ref:
+        - Strategy family/profile:
         - Dataset/window:
-        - Symbols:
+        - Symbols/markets:
         - Config:
         - Artifact:
         - Headline metrics:

@@ -1,4 +1,4 @@
-name: Optimize three_layer params (snapshot-backed)
+name: Optimize strategy params (snapshot-backed)
 
 on:
   workflow_dispatch:

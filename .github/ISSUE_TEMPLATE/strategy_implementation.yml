@@ -18,6 +18,22 @@ body:
       description: Describe the exact strategy/runtime behavior this issue should change.
     validations:
       required: true
+  - type: input
+    id: strategy_family
+    attributes:
+      label: Strategy family
+      description: Broad family affected by this implementation.
+      placeholder: binary-options, sports, copy-trading, market-making, event-ML
+    validations:
+      required: true
+  - type: input
+    id: strategy_profile
+    attributes:
+      label: Strategy profile / config
+      description: Concrete profile or config affected by this implementation.
+      placeholder: config/strategies/<family>.<profile>.toml
+    validations:
+      required: true
   - type: textarea
     id: scope
     attributes:
