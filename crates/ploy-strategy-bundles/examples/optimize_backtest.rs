@@ -1385,6 +1385,7 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
 }
 
 struct ThreeLayerSearchParams {
+    min_entry_score: f64,
     min_direction_prob: f64,
     min_distance_over_sigma: f64,
     min_confirmation_score: f64,
@@ -1411,6 +1412,7 @@ fn make_three_layer_config(
     config.min_time_remaining_secs = p.min_time_remaining_secs as u64;
     config.max_time_remaining_secs = p.max_time_remaining_secs as u64;
     config.cooldown_secs = p.cooldown_secs as u64;
+    config.three_layer_min_entry_score = p.min_entry_score;
     config.three_layer_min_direction_prob = p.min_direction_prob;
     config.three_layer_min_distance_over_sigma = p.min_distance_over_sigma;
     config.three_layer_min_confirmation_score = p.min_confirmation_score;
@@ -2118,27 +2120,29 @@ fn main() {
         let base_config_c = Arc::clone(base_config);
         let trial_timings_c = Arc::clone(&trial_timings);
 
+        let p_min_entry_score = FloatParam::new(0.30, 0.85).name("three_layer_min_entry_score");
         let p_min_direction_prob =
-            FloatParam::new(0.52, 0.70).name("three_layer_min_direction_prob");
+            FloatParam::new(0.56, 0.85).name("three_layer_min_direction_prob");
         let p_min_distance_over_sigma =
-            FloatParam::new(0.10, 0.60).name("three_layer_min_distance_over_sigma");
+            FloatParam::new(0.20, 0.90).name("three_layer_min_distance_over_sigma");
         let p_min_confirmation_score =
-            FloatParam::new(0.05, 0.30).name("three_layer_min_confirmation_score");
+            FloatParam::new(0.10, 0.50).name("three_layer_min_confirmation_score");
         let p_min_drift_confirmation =
             FloatParam::new(0.0001, 0.001).name("three_layer_min_drift_confirmation");
-        let p_min_edge = FloatParam::new(0.02, 0.06).name("three_layer_min_edge");
-        let p_min_reward_risk = FloatParam::new(0.8, 2.0).name("three_layer_min_reward_risk");
+        let p_min_edge = FloatParam::new(0.03, 0.18).name("three_layer_min_edge");
+        let p_min_reward_risk = FloatParam::new(1.0, 3.0).name("three_layer_min_reward_risk");
         let p_market_prior_weight =
             FloatParam::new(0.10, 0.75).name("three_layer_market_prior_weight");
         let p_confirmation_logit_weight =
             FloatParam::new(0.0, 2.5).name("three_layer_confirmation_logit_weight");
-        let p_take_profit_ask = FloatParam::new(0.60, 0.85).name("three_layer_take_profit_ask");
+        let p_take_profit_ask = FloatParam::new(0.65, 0.95).name("three_layer_take_profit_ask");
         let p_stop_distance_pct =
-            FloatParam::new(0.010, 0.040).name("three_layer_stop_distance_pct");
-        let p_cooldown_secs = IntParam::new(30, 120).name("cooldown_secs");
+            FloatParam::new(0.006, 0.030).name("three_layer_stop_distance_pct");
+        let p_cooldown_secs = IntParam::new(60, 300).name("cooldown_secs");
         let p_min_time_remaining_secs = IntParam::new(60, 150).name("min_time_remaining_secs");
         let p_max_time_span_secs = IntParam::new(30, 120).name("three_layer_time_span_secs");
 
+        let p_min_entry_score_c = p_min_entry_score.clone();
         let p_min_direction_prob_c = p_min_direction_prob.clone();
         let p_min_distance_over_sigma_c = p_min_distance_over_sigma.clone();
         let p_min_confirmation_score_c = p_min_confirmation_score.clone();
@@ -2158,6 +2162,7 @@ fn main() {
                 let trial_id = trial.id();
                 let min_time_remaining_secs = p_min_time_remaining_secs_c.suggest(trial)?;
                 let params = ThreeLayerSearchParams {
+                    min_entry_score: p_min_entry_score_c.suggest(trial)?,
                     min_direction_prob: p_min_direction_prob_c.suggest(trial)?,
                     min_distance_over_sigma: p_min_distance_over_sigma_c.suggest(trial)?,
                     min_confirmation_score: p_min_confirmation_score_c.suggest(trial)?,
@@ -2262,7 +2267,7 @@ fn main() {
                 }
 
                 eprintln!(
-                    "  Trial {:>3}: source={} score={:>8.2} train_pnl=${:>8.2} val_pnl=${:>8.2} val_sharpe={:>7.3} val_trades={:>4} updates={} elapsed={:.1}s | params: dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} prior_w={:.2} conf_w={:.2} tp={:.3} stop={:.4} cd={}s",
+                    "  Trial {:>3}: source={} score={:>8.2} train_pnl=${:>8.2} val_pnl=${:>8.2} val_sharpe={:>7.3} val_trades={:>4} updates={} elapsed={:.1}s | params: entry={:.3} dir_prob={:.3} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} prior_w={:.2} conf_w={:.2} tp={:.3} stop={:.4} cd={}s",
                     trial_id,
                     train_ref.kind(),
                     score,
@@ -2272,6 +2277,7 @@ fn main() {
                     validation.trade_count,
                     outcome.updates_processed,
                     outcome.elapsed_secs,
+                    params.min_entry_score,
                     params.min_direction_prob,
                     params.min_distance_over_sigma,
                     params.min_confirmation_score,
@@ -2293,6 +2299,7 @@ fn main() {
         let best = study.best_trial().expect("No completed trials");
         let best_min_time_remaining_secs = best.get(&p_min_time_remaining_secs).unwrap_or(60);
         let best_params = ThreeLayerSearchParams {
+            min_entry_score: best.get(&p_min_entry_score).unwrap_or(0.30),
             min_direction_prob: best.get(&p_min_direction_prob).unwrap_or(0.52),
             min_distance_over_sigma: best.get(&p_min_distance_over_sigma).unwrap_or(0.15),
             min_confirmation_score: best.get(&p_min_confirmation_score).unwrap_or(0.03),
@@ -2341,6 +2348,10 @@ fn main() {
 
         eprintln!("\n=== Best Config (TOML) ===");
         eprintln!("# Paste into [strategy] section of your config file");
+        eprintln!(
+            "three_layer_min_entry_score = {:.4}",
+            best_params.min_entry_score
+        );
         eprintln!(
             "three_layer_min_direction_prob = {:.4}",
             best_params.min_direction_prob
