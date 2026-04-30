@@ -223,15 +223,37 @@ mod tests {
     fn closed_trade_bucket_diagnostics_capture_directional_ev_metadata() {
         let mut diagnostics = BacktestDiagnostics::default();
         let signal = EntrySignalSnapshot {
+            event_id: Some("event-1".to_string()),
             symbol: "BTCUSDT".to_string(),
             direction: "up".to_string(),
             p_hat: 0.64,
             edge: 0.08,
             entry_price: 0.47,
+            entry_ts: utc_ts(21),
+        };
+        let entry_fill = FillRecord {
+            fill_id: "entry-fill".to_string(),
+            order_id: "entry-order".to_string(),
+            token_id: "token-up".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(10),
+            price: dec!(0.47),
+            fee: dec!(0.01),
+            timestamp: utc_ts(21),
+        };
+        let exit_fill = FillRecord {
+            fill_id: "exit-fill".to_string(),
+            order_id: "tl_sl_token-up_1".to_string(),
+            token_id: "token-up".to_string(),
+            side: TradeSide::Sell,
+            quantity: dec!(10),
+            price: dec!(0.39),
+            fee: dec!(0.01),
+            timestamp: utc_ts(21) + chrono::Duration::seconds(75),
         };
 
-        diagnostics.record_closed_trade_buckets(Some(&signal), -3.5);
-        diagnostics.record_closed_trade_buckets(Some(&signal), 1.0);
+        diagnostics.record_closed_trade_buckets(Some(&signal), &entry_fill, &exit_fill, -3.5);
+        diagnostics.record_closed_trade_buckets(Some(&signal), &entry_fill, &exit_fill, 1.0);
 
         let direction = diagnostics
             .trade_buckets
@@ -248,6 +270,22 @@ mod tests {
         );
         assert!(diagnostics.trade_buckets.contains_key("p_hat=0.60-0.70"));
         assert!(diagnostics.trade_buckets.contains_key("edge=0.05-0.10"));
+        assert!(
+            diagnostics
+                .trade_buckets
+                .contains_key("exit_reason=stop_loss")
+        );
+        assert!(diagnostics.trade_buckets.contains_key("hold_secs=60-120"));
+        assert!(
+            diagnostics
+                .trade_buckets
+                .contains_key("exit_price=0.35-0.50")
+        );
+        assert!(
+            diagnostics
+                .trade_buckets
+                .contains_key("direction_exit=up:stop_loss")
+        );
     }
 
     #[test]
@@ -1061,14 +1099,55 @@ impl BacktestDiagnostics {
         parts.join(" ")
     }
 
-    fn record_closed_trade_buckets(&mut self, signal: Option<&EntrySignalSnapshot>, pnl: f64) {
+    fn record_closed_trade_buckets(
+        &mut self,
+        signal: Option<&EntrySignalSnapshot>,
+        entry: &FillRecord,
+        exit: &FillRecord,
+        pnl: f64,
+    ) {
+        let exit_reason = exit_reason_bucket(&exit.order_id);
+        let hold_secs = (exit.timestamp - entry.timestamp).num_seconds().max(0);
+        let exit_price = decimal_to_f64(exit.price);
+        let entry_price = decimal_to_f64(entry.price);
+
+        self.record_trade_bucket(&format!("exit_reason={exit_reason}"), pnl);
+        self.record_trade_bucket(&format!("hold_secs={}", hold_secs_bucket(hold_secs)), pnl);
+        self.record_trade_bucket(&format!("exit_price={}", price_bucket(exit_price)), pnl);
+        self.record_trade_bucket(
+            &format!(
+                "roundtrip_price_move={}",
+                price_move_bucket(exit_price - entry_price)
+            ),
+            pnl,
+        );
+
         let Some(signal) = signal else {
             self.record_trade_bucket("signal=missing", pnl);
             return;
         };
 
+        if signal.event_id.is_none() {
+            self.record_trade_bucket("event_id=missing", pnl);
+        }
+        let signal_to_fill_secs = (entry.timestamp - signal.entry_ts).num_seconds().max(0);
+        self.record_trade_bucket(
+            &format!(
+                "signal_to_fill_secs={}",
+                hold_secs_bucket(signal_to_fill_secs)
+            ),
+            pnl,
+        );
         self.record_trade_bucket(&format!("symbol={}", signal.symbol), pnl);
         self.record_trade_bucket(&format!("direction={}", signal.direction), pnl);
+        self.record_trade_bucket(
+            &format!("direction_exit={}:{}", signal.direction, exit_reason),
+            pnl,
+        );
+        self.record_trade_bucket(
+            &format!("symbol_exit={}:{}", signal.symbol, exit_reason),
+            pnl,
+        );
         self.record_trade_bucket(
             &format!("entry_price={}", price_bucket(signal.entry_price)),
             pnl,
@@ -1129,21 +1208,25 @@ impl BacktestDiagnostics {
 
 #[derive(Debug, Clone)]
 struct EntrySignalSnapshot {
+    event_id: Option<String>,
     symbol: String,
     direction: String,
     p_hat: f64,
     edge: f64,
     entry_price: f64,
+    entry_ts: DateTime<Utc>,
 }
 
 impl EntrySignalSnapshot {
     fn from_signal(signal: &SignalRecord) -> Self {
         Self {
+            event_id: signal.event_id.clone(),
             symbol: signal.symbol.clone(),
             direction: signal.direction.clone(),
             p_hat: signal.p_hat,
             edge: signal.edge,
             entry_price: decimal_to_f64(signal.entry_price),
+            entry_ts: signal.ts,
         }
     }
 }
@@ -1214,6 +1297,50 @@ fn edge_bucket(value: f64) -> &'static str {
         "0.05-0.10"
     } else {
         ">=0.10"
+    }
+}
+
+fn hold_secs_bucket(value: i64) -> &'static str {
+    if value < 30 {
+        "<30"
+    } else if value < 60 {
+        "30-60"
+    } else if value < 120 {
+        "60-120"
+    } else if value < 240 {
+        "120-240"
+    } else {
+        ">=240"
+    }
+}
+
+fn price_move_bucket(value: f64) -> &'static str {
+    if value < -0.20 {
+        "<-0.20"
+    } else if value < -0.10 {
+        "-0.20--0.10"
+    } else if value < 0.0 {
+        "-0.10-0"
+    } else if value < 0.10 {
+        "0-0.10"
+    } else if value < 0.20 {
+        "0.10-0.20"
+    } else {
+        ">=0.20"
+    }
+}
+
+fn exit_reason_bucket(order_id: &str) -> &'static str {
+    if order_id.starts_with("tl_tp_") || order_id.contains("_take_profit_") {
+        "take_profit"
+    } else if order_id.starts_with("tl_sl_") || order_id.contains("_stop_loss_") {
+        "stop_loss"
+    } else if order_id.starts_with("tl_settle_") || order_id.contains("_settle_") {
+        "settlement"
+    } else if order_id.contains("_exit_") || order_id.contains("exit") {
+        "strategy_exit"
+    } else {
+        "unknown"
     }
 }
 
@@ -1438,7 +1565,7 @@ fn run_backtest(
                 let signal = entry_signals_by_token
                     .get_mut(*token_id)
                     .and_then(|signals| signals.pop_front());
-                diagnostics.record_closed_trade_buckets(signal.as_ref(), pnl);
+                diagnostics.record_closed_trade_buckets(signal.as_ref(), entry, exit, pnl);
                 per_trade_pnl.push(pnl);
                 i += 2;
             } else {

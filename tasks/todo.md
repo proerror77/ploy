@@ -116,6 +116,40 @@
   ploy-strategy-bundles --example optimize_backtest`. `cargo check` emitted
   existing dead-code/profile warnings only.
 
+# PM5D Replay Loss Attribution Diagnostics (2026-04-30)
+
+## Files
+
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+  - Owner: closed filled-trade replay diagnostics for optimizer artifacts.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add exit-reason, hold-duration, exit-price, and round-trip price-move
+  buckets to filled closed-trade diagnostics.
+- [x] Preserve existing direction/probability/edge buckets so direction
+  probability remains visible in replay evidence.
+- [x] Run focused example tests, diff checks, and feature compile.
+- [ ] Push PR update and run remote replay evidence without deploying dry-run.
+
+## Review
+
+- 2026-04-30: Added loss-attribution buckets to the optimizer timing JSON and
+  stderr worst-bucket summaries. Closed filled trades are now grouped by
+  `exit_reason`, `hold_secs`, `exit_price`, `roundtrip_price_move`,
+  `direction_exit`, and `symbol_exit` in addition to existing symbol,
+  direction, `p_hat`, edge, and entry-price buckets. This is research-only
+  instrumentation; it does not change runtime entry/exit logic or deploy state.
+- 2026-04-30: Focused example verification passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles --example optimize_backtest`.
+- 2026-04-30: Additional verification passed: `rtk git diff --check` and
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo check -p
+  ploy-strategy-bundles --features parquet-feed --example optimize_backtest`.
+  The feature compile emitted existing workspace dead-code/profile warnings.
+
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
 ## Files
