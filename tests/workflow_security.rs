@@ -219,11 +219,9 @@ fn auto_review_uses_bounded_workspace_checks() {
                 .to_string(),
         );
     }
-    if !content
-        .contains("cargo check --locked -p ploy-research --features db,polars-export,ml,rl,strategy-runtime --lib")
-    {
+    if content.contains("cargo clippy") || content.contains("Swatinem/rust-cache") {
         offenders.push(
-            "auto-review.yml: missing bounded ploy-research heavy feature contract check"
+            "auto-review.yml: advisory review should not duplicate heavy compile/test matrix work"
                 .to_string(),
         );
     }
@@ -231,6 +229,26 @@ fn auto_review_uses_bounded_workspace_checks() {
     assert!(
         offenders.is_empty(),
         "auto-review workflow guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn test_matrix_owns_research_heavy_feature_contract() {
+    let content = workflow_contents(".github/workflows/test.yml");
+    let mut offenders = Vec::new();
+
+    if !content
+        .contains("cargo check --locked -p ploy-research --features db,polars-export,ml,rl,strategy-runtime --lib")
+    {
+        offenders.push(
+            "test.yml: missing ploy-research heavy feature contract check".to_string(),
+        );
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "research heavy CI guard failed:\n{}",
         offenders.join("\n")
     );
 }
