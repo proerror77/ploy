@@ -227,6 +227,40 @@
   dynamic exit EV / no-entry-near-settlement gates rather than treating
   pre-settlement liquidation as sufficient risk control.
 
+# PM5D No-Entry Near Settlement Gate (2026-04-30)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: prevent opening positions inside the configured pre-settlement exit
+    window and test the diagnostic counter.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add a default-preserving entry gate that only activates when
+  `three_layer_pre_settlement_exit_secs` is enabled.
+- [x] Add a regression test proving entries are suppressed inside the same
+  liquidation window.
+- [x] Run focused local verification.
+- [ ] Run remote OOS filled replay without deploying dry-run.
+
+## Review
+
+- 2026-04-30: Added a `skip_pre_settlement_entry` gate so three-layer does not
+  open new positions when the event is already inside the configured
+  pre-settlement exit window. This removes the self-conflicting pattern seen in
+  replay run `25156274346`, where the optimizer could choose entries inside a
+  window that immediately forced liquidation. Defaults remain unchanged because
+  `three_layer_pre_settlement_exit_secs = 0` disables both the exit and this
+  entry gate.
+- 2026-04-30: Local verification passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles entry_skips_inside_pre_settlement_exit_window_when_enabled
+  --lib` and `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test
+  -p ploy-strategy-bundles three_layer --lib`.
+
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
 ## Files

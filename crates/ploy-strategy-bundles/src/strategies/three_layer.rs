@@ -914,6 +914,13 @@ impl ThreeLayerStrategy {
         }
         for event in &candidates {
             let time_remaining = (event.end_time - now).num_seconds();
+            if self.config.pre_settlement_exit_secs > 0
+                && time_remaining >= 0
+                && time_remaining as u64 <= self.config.pre_settlement_exit_secs
+            {
+                self.bump("skip_pre_settlement_entry");
+                continue;
+            }
             let Some(price_to_beat) = event.price_to_beat.and_then(|price| price.to_f64()) else {
                 self.bump("skip_no_price_to_beat");
                 continue;
@@ -2327,6 +2334,59 @@ mod tests {
             }
             other => panic!("expected one executable entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn entry_skips_inside_pre_settlement_exit_window_when_enabled() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        config.pre_settlement_exit_secs = 90;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        strategy.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: Arc::from("evt1"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("token-up"),
+                down_token: Arc::from("token-down"),
+                end_time: now + chrono::Duration::seconds(80),
+                window_secs: 300,
+                price_to_beat: Some(dec!(100000)),
+                resolved_up_won: None,
+            },
+            &PositionLedger::default(),
+            &OrderLedger::default(),
+        );
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &entry_quote("token-up", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "entry should not open inside the configured pre-settlement exit window"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_pre_settlement_entry"), Some(&1));
     }
 
     #[test]
