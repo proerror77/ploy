@@ -1,3 +1,43 @@
+# PM5D Side Direction Audit (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: pairwise UP/DOWN direction audit for side-label, model-side, and
+    flipped-side executable EV diagnostics.
+- `crates/ploy-research/src/lib.rs`
+  - Owner: public export for direction audit summary consumers.
+- `tasks/todo.md`
+  - Owner: plan, verification evidence, and research decision notes.
+
+## Tasks
+
+- [x] Add pairwise model-side versus flipped-side audit to factor review.
+- [x] Print the audit in the text report and persist it in `evaluation.json`.
+- [x] Add focused tests for aligned and inverted model-side PnL.
+- [x] Run focused local verification.
+- [ ] Push PR and rerun Factor Review V2 on `ploy-ci-1`.
+
+## Review
+
+- 2026-05-01: Added `direction_side_audit` to `FactorReviewV2Report`. It pairs
+  UP/DOWN rows by event, symbol, and tick timestamp, then compares
+  model-probability-favored and model-edge-favored sides against their opposite
+  sides using settlement win rate, fillability, executable 15u PnL, ROI, and
+  t-stat.
+- 2026-05-01: Text reports now include
+  `Direction Side Audit: Favored vs Opposite Executable EV`; JSON artifacts
+  inherit the new field through the report payload.
+- 2026-05-01: Local verification passed:
+  `rustfmt --edition 2024 --config skip_children=true
+  crates/ploy-research/src/factors_v2.rs crates/ploy-research/src/lib.rs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-side-audit rtk cargo test -p ploy-research
+  factors_v2 --lib`, `CARGO_TARGET_DIR=/tmp/ploy-side-audit rtk cargo check
+  -p ploy-research --features db,polars-export --example factor_review_v2`,
+  and `git diff --check`.
+
 # PM5D Executable EV Factor Buckets (2026-04-30)
 
 Issue: https://github.com/proerror77/ploy/issues/256
