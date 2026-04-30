@@ -85,7 +85,8 @@ pub use factors_new::{
     scan_into_registry,
 };
 pub use factors_v2::{
-    DataHealthReport, DeribitFeatureSnapshot, ExecutableEvBucketSummary, FactorComboComponent,
+    DataHealthReport, DeribitFeatureSnapshot, DirectionSideAuditLegSummary,
+    DirectionSideAuditSummary, ExecutableEvBucketSummary, FactorComboComponent,
     FactorComboV1Aggregate, FactorComboV1Options, FactorComboV1Report, FactorComboV1Window,
     FactorFamily, FactorObservationV2, FactorReviewOptions, FactorReviewV2Report,
     FactorSelectionMetrics, FactorStabilityDecision, FactorStabilityOptions, FactorStabilityReport,

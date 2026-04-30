@@ -341,11 +341,48 @@ pub struct ExecutableEvBucketSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DirectionSideAuditLegSummary {
+    pub rows: usize,
+    pub fillable_rows: usize,
+    pub fill_rate: f64,
+    pub settlement_win_rows: usize,
+    pub settlement_win_rate: f64,
+    pub pnl_rows: usize,
+    pub total_pnl_15u: f64,
+    pub avg_pnl_15u: f64,
+    pub roi_on_stake: f64,
+    pub t_stat: f64,
+    pub underpowered: bool,
+    pub positive_ev: bool,
+    pub statistically_supported: bool,
+    pub avg_side_model_prob: f64,
+    pub avg_side_model_edge: f64,
+    pub avg_entry_ask: f64,
+    pub avg_entry_capacity_ratio: f64,
+    pub avg_entry_liquidity_usd: f64,
+    pub avg_entry_sweep_slippage_bps: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DirectionSideAuditSummary {
+    pub selector: String,
+    pub bucket: String,
+    pub pairs: usize,
+    pub pnl_pair_rows: usize,
+    pub total_pnl_delta_15u: f64,
+    pub avg_pnl_delta_15u: f64,
+    pub avg_selector_margin: f64,
+    pub favored: DirectionSideAuditLegSummary,
+    pub opposite: DirectionSideAuditLegSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct FactorReviewV2Report {
     pub options: FactorReviewOptions,
     pub health: DataHealthReport,
     pub reviews: Vec<SingleFactorReview>,
     pub executable_ev_buckets: Vec<ExecutableEvBucketSummary>,
+    pub direction_side_audit: Vec<DirectionSideAuditSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -1546,11 +1583,13 @@ fn review_factor_rows_with_descriptor_filter(
             })
     });
     let executable_ev_buckets = build_executable_ev_buckets(v2_rows, &options);
+    let direction_side_audit = build_direction_side_audit(v2_rows, &options);
     FactorReviewV2Report {
         options,
         health,
         reviews,
         executable_ev_buckets,
+        direction_side_audit,
     }
 }
 
@@ -2801,6 +2840,8 @@ pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usiz
             .into_iter()
             .take(top_n),
     );
+    out.push_str("\n=== Direction Side Audit: Favored vs Opposite Executable EV ===\n");
+    push_direction_side_audit_rows(&mut out, report.direction_side_audit.iter().take(top_n * 2));
     out
 }
 
@@ -2897,6 +2938,35 @@ where
             bucket.avg_liquidity_shortfall_usd,
             bucket.avg_slippage_to_fill_bps,
             bucket.avg_roundtrip_cost_usd,
+        ));
+    }
+}
+
+fn push_direction_side_audit_rows<'a, I>(out: &mut String, summaries: I)
+where
+    I: IntoIterator<Item = &'a DirectionSideAuditSummary>,
+{
+    out.push_str("selector,bucket,pairs,pnl_pairs,avg_margin,favored_fill_rate,favored_settle_win,favored_pnl_rows,favored_avg_pnl,favored_t_stat,favored_supported,opposite_fill_rate,opposite_settle_win,opposite_pnl_rows,opposite_avg_pnl,opposite_t_stat,pnl_delta\n");
+    for summary in summaries {
+        out.push_str(&format!(
+            "{},{},{},{},{:.4},{:.4},{:.4},{},{:.4},{:.4},{},{:.4},{:.4},{},{:.4},{:.4},{:.4}\n",
+            summary.selector,
+            summary.bucket,
+            summary.pairs,
+            summary.pnl_pair_rows,
+            summary.avg_selector_margin,
+            summary.favored.fill_rate,
+            summary.favored.settlement_win_rate,
+            summary.favored.pnl_rows,
+            summary.favored.avg_pnl_15u,
+            summary.favored.t_stat,
+            summary.favored.statistically_supported,
+            summary.opposite.fill_rate,
+            summary.opposite.settlement_win_rate,
+            summary.opposite.pnl_rows,
+            summary.opposite.avg_pnl_15u,
+            summary.opposite.t_stat,
+            summary.avg_pnl_delta_15u,
         ));
     }
 }
@@ -3086,6 +3156,259 @@ fn summarize_executable_ev_bucket(
         avg_exit_sweep_slippage_bps: mean(rows.iter().map(|row| row.exit_sweep_slippage_bps)),
         avg_roundtrip_cost_usd: mean(rows.iter().map(|row| row.roundtrip_cost_usd)),
     }
+}
+
+#[derive(Default)]
+struct DirectionPair<'a> {
+    up: Option<&'a FactorObservationV2>,
+    down: Option<&'a FactorObservationV2>,
+}
+
+struct DirectionSideSelection<'a> {
+    favored: &'a FactorObservationV2,
+    opposite: &'a FactorObservationV2,
+    margin: f64,
+}
+
+fn build_direction_side_audit(
+    rows: &[FactorObservationV2],
+    options: &FactorReviewOptions,
+) -> Vec<DirectionSideAuditSummary> {
+    let min_sample = options.min_observations.max(30);
+    let pairs = paired_direction_rows(rows);
+    let mut summaries = Vec::new();
+    append_direction_side_selector(
+        &mut summaries,
+        "model_probability",
+        &pairs,
+        options.stake_usd,
+        min_sample,
+        select_probability_favored_side,
+        |selection| probability_bucket(selection.favored.side_model_prob),
+    );
+    append_direction_side_selector(
+        &mut summaries,
+        "model_edge",
+        &pairs,
+        options.stake_usd,
+        min_sample,
+        select_edge_favored_side,
+        |selection| model_edge_bucket(selection.favored.side_model_edge),
+    );
+    summaries.sort_by(|a, b| {
+        a.selector
+            .cmp(&b.selector)
+            .then_with(|| audit_bucket_sort_key(&a.bucket).cmp(&audit_bucket_sort_key(&b.bucket)))
+            .then_with(|| a.bucket.cmp(&b.bucket))
+    });
+    summaries
+}
+
+fn paired_direction_rows(rows: &[FactorObservationV2]) -> Vec<DirectionPair<'_>> {
+    let mut groups: BTreeMap<(String, String, DateTime<Utc>), DirectionPair<'_>> = BTreeMap::new();
+    for row in rows {
+        let pair = groups
+            .entry((row.event_id.clone(), row.symbol.clone(), row.tick_ts))
+            .or_default();
+        match row.side {
+            ReviewSide::Up => pair.up = Some(row),
+            ReviewSide::Down => pair.down = Some(row),
+        }
+    }
+    groups
+        .into_values()
+        .filter(|pair| pair.up.is_some() && pair.down.is_some())
+        .collect()
+}
+
+fn append_direction_side_selector<F, B>(
+    summaries: &mut Vec<DirectionSideAuditSummary>,
+    selector: &str,
+    pairs: &[DirectionPair<'_>],
+    stake_usd: f64,
+    min_sample: usize,
+    select_fn: F,
+    bucket_fn: B,
+) where
+    F: for<'a> Fn(&'a DirectionPair<'a>) -> Option<DirectionSideSelection<'a>>,
+    B: for<'a> Fn(&DirectionSideSelection<'a>) -> Option<String>,
+{
+    let selections = pairs
+        .iter()
+        .filter_map(select_fn)
+        .collect::<Vec<DirectionSideSelection<'_>>>();
+    if selections.is_empty() {
+        return;
+    }
+    summaries.push(summarize_direction_side_audit(
+        selector,
+        "all",
+        &selections,
+        stake_usd,
+        min_sample,
+    ));
+
+    let mut groups: BTreeMap<String, Vec<DirectionSideSelection<'_>>> = BTreeMap::new();
+    for selection in selections {
+        if let Some(bucket) = bucket_fn(&selection) {
+            groups.entry(bucket).or_default().push(selection);
+        }
+    }
+    for (bucket, bucket_selections) in groups {
+        summaries.push(summarize_direction_side_audit(
+            selector,
+            &bucket,
+            &bucket_selections,
+            stake_usd,
+            min_sample,
+        ));
+    }
+}
+
+fn select_probability_favored_side<'a>(
+    pair: &'a DirectionPair<'a>,
+) -> Option<DirectionSideSelection<'a>> {
+    let up = pair.up?;
+    let down = pair.down?;
+    select_higher_metric_side(up, down, up.side_model_prob, down.side_model_prob)
+}
+
+fn select_edge_favored_side<'a>(pair: &'a DirectionPair<'a>) -> Option<DirectionSideSelection<'a>> {
+    let up = pair.up?;
+    let down = pair.down?;
+    select_higher_metric_side(up, down, up.side_model_edge, down.side_model_edge)
+}
+
+fn select_higher_metric_side<'a>(
+    up: &'a FactorObservationV2,
+    down: &'a FactorObservationV2,
+    up_value: f64,
+    down_value: f64,
+) -> Option<DirectionSideSelection<'a>> {
+    if !up_value.is_finite() || !down_value.is_finite() {
+        return None;
+    }
+    if (up_value - down_value).abs() <= EPS {
+        return None;
+    }
+    if up_value > down_value {
+        Some(DirectionSideSelection {
+            favored: up,
+            opposite: down,
+            margin: up_value - down_value,
+        })
+    } else {
+        Some(DirectionSideSelection {
+            favored: down,
+            opposite: up,
+            margin: down_value - up_value,
+        })
+    }
+}
+
+fn summarize_direction_side_audit(
+    selector: &str,
+    bucket: &str,
+    selections: &[DirectionSideSelection<'_>],
+    stake_usd: f64,
+    min_sample: usize,
+) -> DirectionSideAuditSummary {
+    let favored_rows = selections
+        .iter()
+        .map(|selection| selection.favored)
+        .collect::<Vec<_>>();
+    let opposite_rows = selections
+        .iter()
+        .map(|selection| selection.opposite)
+        .collect::<Vec<_>>();
+    let pnl_deltas = selections
+        .iter()
+        .filter_map(|selection| {
+            match (
+                executable_pnl(selection.favored),
+                executable_pnl(selection.opposite),
+            ) {
+                (Some(favored), Some(opposite)) => Some(favored - opposite),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    let total_pnl_delta_15u = pnl_deltas.iter().sum::<f64>();
+    let avg_pnl_delta_15u = if pnl_deltas.is_empty() {
+        f64::NAN
+    } else {
+        total_pnl_delta_15u / pnl_deltas.len() as f64
+    };
+    DirectionSideAuditSummary {
+        selector: selector.to_string(),
+        bucket: bucket.to_string(),
+        pairs: selections.len(),
+        pnl_pair_rows: pnl_deltas.len(),
+        total_pnl_delta_15u,
+        avg_pnl_delta_15u,
+        avg_selector_margin: mean(selections.iter().map(|selection| selection.margin)),
+        favored: summarize_direction_side_leg(&favored_rows, stake_usd, min_sample),
+        opposite: summarize_direction_side_leg(&opposite_rows, stake_usd, min_sample),
+    }
+}
+
+fn summarize_direction_side_leg(
+    rows: &[&FactorObservationV2],
+    stake_usd: f64,
+    min_sample: usize,
+) -> DirectionSideAuditLegSummary {
+    let pnl_values = rows
+        .iter()
+        .filter_map(|row| executable_pnl(row))
+        .collect::<Vec<_>>();
+    let total_pnl_15u = pnl_values.iter().sum::<f64>();
+    let avg_pnl_15u = if pnl_values.is_empty() {
+        f64::NAN
+    } else {
+        total_pnl_15u / pnl_values.len() as f64
+    };
+    let roi_on_stake = if stake_usd > 0.0 && !pnl_values.is_empty() {
+        total_pnl_15u / (stake_usd * pnl_values.len() as f64)
+    } else {
+        f64::NAN
+    };
+    let t_stat = trade_t_stat(&pnl_values);
+    let underpowered = pnl_values.len() < min_sample;
+    let positive_ev = avg_pnl_15u.is_finite() && avg_pnl_15u > 0.0;
+    let statistically_supported =
+        positive_ev && !underpowered && t_stat.is_finite() && t_stat >= 2.0;
+    let settlement_win_rows = rows
+        .iter()
+        .filter(|row| row.label_settlement_win.is_some_and(|label| label >= 0.5))
+        .count();
+    DirectionSideAuditLegSummary {
+        rows: rows.len(),
+        fillable_rows: rows.iter().filter(|row| entry_fillable(row)).count(),
+        fill_rate: ratio(
+            rows.iter().filter(|row| entry_fillable(row)).count(),
+            rows.len(),
+        ),
+        settlement_win_rows,
+        settlement_win_rate: ratio(settlement_win_rows, rows.len()),
+        pnl_rows: pnl_values.len(),
+        total_pnl_15u,
+        avg_pnl_15u,
+        roi_on_stake,
+        t_stat,
+        underpowered,
+        positive_ev,
+        statistically_supported,
+        avg_side_model_prob: mean(rows.iter().map(|row| row.side_model_prob)),
+        avg_side_model_edge: mean(rows.iter().map(|row| row.side_model_edge)),
+        avg_entry_ask: mean(rows.iter().map(|row| row.entry_ask)),
+        avg_entry_capacity_ratio: mean(rows.iter().map(|row| row.entry_capacity_ratio)),
+        avg_entry_liquidity_usd: mean(rows.iter().map(|row| row.entry_liquidity_usd)),
+        avg_entry_sweep_slippage_bps: mean(rows.iter().map(|row| row.entry_sweep_slippage_bps)),
+    }
+}
+
+fn audit_bucket_sort_key(bucket: &str) -> usize {
+    if bucket == "all" { 0 } else { 1 }
 }
 
 fn probability_bucket(value: f64) -> Option<String> {
@@ -5792,6 +6115,7 @@ mod tests {
                 test_ev_bucket("entry_price", "0.35..0.45", 1.0, false, true),
                 test_ev_bucket("entry_price", ">=0.65", -1.0, false, false),
             ],
+            direction_side_audit: Vec::new(),
         };
 
         let best = sorted_executable_ev_buckets(&report, true);
@@ -6247,6 +6571,68 @@ mod tests {
     }
 
     #[test]
+    fn direction_side_audit_reports_aligned_model_side_ev() {
+        let mut observations = Vec::new();
+        for i in 0..40 {
+            let mut obs = base_obs();
+            obs.event_id = format!("event-{i}");
+            obs.model_prob_up = 0.72;
+            obs.pm_up_ask = 0.45 + f64::from(i % 4) * 0.01;
+            obs.pm_down_ask = 0.50;
+            obs.model_edge_up = obs.model_prob_up - obs.pm_up_ask - crypto_fee_cost(obs.pm_up_ask);
+            obs.settlement_up = 1.0;
+            observations.push(obs);
+        }
+
+        let report = review_factors_v2(&observations, FactorReviewOptions::default());
+        let audit = report
+            .direction_side_audit
+            .iter()
+            .find(|summary| summary.selector == "model_probability" && summary.bucket == "all")
+            .expect("probability audit");
+
+        assert_eq!(audit.pairs, 40);
+        assert_eq!(audit.favored.settlement_win_rate, 1.0);
+        assert_eq!(audit.opposite.settlement_win_rate, 0.0);
+        assert!(audit.favored.avg_pnl_15u > 0.0);
+        assert!(audit.opposite.avg_pnl_15u < 0.0);
+        assert!(audit.avg_pnl_delta_15u > 0.0);
+
+        let text = format_factor_review_v2_report(&report, 5);
+        assert!(text.contains("=== Direction Side Audit: Favored vs Opposite Executable EV ==="));
+        assert!(text.contains("model_probability,all"));
+    }
+
+    #[test]
+    fn direction_side_audit_exposes_inverted_model_side_ev() {
+        let mut observations = Vec::new();
+        for i in 0..40 {
+            let mut obs = base_obs();
+            obs.event_id = format!("event-{i}");
+            obs.model_prob_up = 0.72;
+            obs.pm_up_ask = 0.45 + f64::from(i % 4) * 0.01;
+            obs.pm_down_ask = 0.50;
+            obs.model_edge_up = obs.model_prob_up - obs.pm_up_ask - crypto_fee_cost(obs.pm_up_ask);
+            obs.settlement_up = 0.0;
+            observations.push(obs);
+        }
+
+        let report = review_factors_v2(&observations, FactorReviewOptions::default());
+        let audit = report
+            .direction_side_audit
+            .iter()
+            .find(|summary| summary.selector == "model_probability" && summary.bucket == "all")
+            .expect("probability audit");
+
+        assert_eq!(audit.pairs, 40);
+        assert_eq!(audit.favored.settlement_win_rate, 0.0);
+        assert_eq!(audit.opposite.settlement_win_rate, 1.0);
+        assert!(audit.favored.avg_pnl_15u < 0.0);
+        assert!(audit.opposite.avg_pnl_15u > 0.0);
+        assert!(audit.avg_pnl_delta_15u < 0.0);
+    }
+
+    #[test]
     fn factor_review_report_separates_future_exit_diagnostics() {
         let health = DataHealthReport {
             source_observations: 10,
@@ -6298,6 +6684,7 @@ mod tests {
                 review("side_model_edge", 10.0),
             ],
             executable_ev_buckets: Vec::new(),
+            direction_side_audit: Vec::new(),
         };
 
         let text = format_factor_review_v2_report(&report, 10);
