@@ -272,6 +272,20 @@
   (`symbol=ETHUSDT`, `-$29.37/7`). Conclusion: still no dry-run reset or
   deployment; next research should split by symbol/regime and test a dynamic
   exit EV gate before adding more entry thresholds.
+- 2026-04-30: Symbol-split remote replays also failed, so the result is not a
+  simple universe-selection fix. BTC-only run `25157071358` finished with
+  validation PnL `-$33.94`, 9 trades, Sharpe `-138.508`; worst buckets were
+  `roundtrip_price_move=<-0.20` (`-$34.68/4`),
+  `exit_reason=pre_settlement` (`-$33.94/9`), and `p_hat=>=0.70`
+  (`-$33.94/8`). The first ETH-only run `25157071384` was cancelled by workflow
+  concurrency, then single-run ETH replay `25157262221` finished with
+  validation PnL `-$62.66`, 10 trades, Sharpe `-149.351`; worst buckets were
+  `hold_secs=120-240` (`-$66.03/5`), `exit_reason=settlement` (`-$60.49/4`),
+  and `roundtrip_price_move=<-0.20` (`-$60.49/4`). Direction probability remains
+  relevant as an input, but `p_hat=>=0.70` is still not enough to create
+  positive filled EV on either symbol. Conclusion remains no dry-run reset or
+  deployment; next implementable research should target dynamic exit EV or
+  stricter late-hold loss avoidance.
 
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
