@@ -189,7 +189,7 @@
   current position.
 - [x] Add optimizer search parameters and label exits as `pre_settlement`.
 - [x] Run focused local Rust verification.
-- [ ] Push PR update and run remote replay without deploying dry-run.
+- [x] Push PR update and run remote replay without deploying dry-run.
 
 ## Review
 
@@ -215,6 +215,17 @@
   ploy-strategy-bundles --features parquet-feed --example optimize_backtest`,
   and `rtk git diff --check`. Feature compile emitted existing workspace
   dead-code/profile warnings.
+- 2026-04-30: Remote optimize replay run `25156274346` completed successfully
+  on `ploy-ci-1` with official-only settlement, executable LOB liquidity, and
+  no dry-run deployment. The best training-selected config remained negative
+  out of sample: validation PnL `-$41.25`, 35 trades, Sharpe `-55.136`.
+  `pre_settlement` exits were exercised, but they did not create positive EV:
+  worst validation buckets included `roundtrip_price_move=<-0.20`
+  (`-$52.58/7`), `exit_reason=pre_settlement` (`-$52.35/24`), and
+  `direction_exit=DOWN:pre_settlement` (`-$38.34/20`). Conclusion: no dry-run
+  reset/deployment from this branch. The next research step should test
+  dynamic exit EV / no-entry-near-settlement gates rather than treating
+  pre-settlement liquidation as sufficient risk control.
 
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
