@@ -149,6 +149,12 @@
   `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo check -p
   ploy-strategy-bundles --features parquet-feed --example optimize_backtest`.
   The feature compile emitted existing workspace dead-code/profile warnings.
+- 2026-04-30: Remote replay run `25153286942` showed the first implementation
+  could emit the new buckets, but exit reasons were still `unknown` because
+  snapshot fill `order_id` does not preserve the strategy intent prefix.
+  Updated the diagnostic recorder to retain exit reason by `fill_id` from the
+  original exit intent before closed-trade pairing. Re-ran the same focused
+  example test, parquet-feature compile, and diff check successfully.
 
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 

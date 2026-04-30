@@ -252,8 +252,20 @@ mod tests {
             timestamp: utc_ts(21) + chrono::Duration::seconds(75),
         };
 
-        diagnostics.record_closed_trade_buckets(Some(&signal), &entry_fill, &exit_fill, -3.5);
-        diagnostics.record_closed_trade_buckets(Some(&signal), &entry_fill, &exit_fill, 1.0);
+        diagnostics.record_closed_trade_buckets(
+            Some(&signal),
+            &entry_fill,
+            &exit_fill,
+            "stop_loss",
+            -3.5,
+        );
+        diagnostics.record_closed_trade_buckets(
+            Some(&signal),
+            &entry_fill,
+            &exit_fill,
+            "stop_loss",
+            1.0,
+        );
 
         let direction = diagnostics
             .trade_buckets
@@ -1069,6 +1081,7 @@ struct BacktestDiagnostics {
     rejection_reasons: BTreeMap<String, u64>,
     strategy: Vec<(String, u64)>,
     entry_signals_by_token: BTreeMap<String, Vec<EntrySignalSnapshot>>,
+    exit_reasons_by_fill_id: BTreeMap<String, String>,
     trade_buckets: BTreeMap<String, TradeBucketStats>,
 }
 
@@ -1104,9 +1117,9 @@ impl BacktestDiagnostics {
         signal: Option<&EntrySignalSnapshot>,
         entry: &FillRecord,
         exit: &FillRecord,
+        exit_reason: &str,
         pnl: f64,
     ) {
-        let exit_reason = exit_reason_bucket(&exit.order_id);
         let hold_secs = (exit.timestamp - entry.timestamp).num_seconds().max(0);
         let exit_price = decimal_to_f64(exit.price);
         let entry_price = decimal_to_f64(entry.price);
@@ -1428,6 +1441,11 @@ impl Recorder for DiagnosticRecorder {
                     .or_default()
                     .push(EntrySignalSnapshot::from_signal(signal));
             }
+        } else if intent.purpose == IntentPurpose::Exit && fill.side == TradeSide::Sell {
+            diagnostics.exit_reasons_by_fill_id.insert(
+                fill.fill_id.clone(),
+                exit_reason_bucket(&intent.intent_id).to_string(),
+            );
         }
     }
 
@@ -1565,7 +1583,18 @@ fn run_backtest(
                 let signal = entry_signals_by_token
                     .get_mut(*token_id)
                     .and_then(|signals| signals.pop_front());
-                diagnostics.record_closed_trade_buckets(signal.as_ref(), entry, exit, pnl);
+                let exit_reason = diagnostics
+                    .exit_reasons_by_fill_id
+                    .get(&exit.fill_id)
+                    .cloned()
+                    .unwrap_or_else(|| exit_reason_bucket(&exit.order_id).to_string());
+                diagnostics.record_closed_trade_buckets(
+                    signal.as_ref(),
+                    entry,
+                    exit,
+                    &exit_reason,
+                    pnl,
+                );
                 per_trade_pnl.push(pnl);
                 i += 2;
             } else {
