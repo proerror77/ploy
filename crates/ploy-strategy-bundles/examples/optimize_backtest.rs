@@ -49,12 +49,12 @@ use ploy_strategy_bundles::{
     ReversalStrategy, RuntimeConfig, RuntimeMode, SignalRecord, SimulatedExecutor,
     SimulatedExecutorConfig, StrategyLogic, StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy,
 };
-use ploy_trading::{FillRecord, TradeSide, TradingIntent};
+use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
 use rust_decimal_macros::dec;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -217,6 +217,37 @@ mod tests {
         let sparse_validation = outcome(1000.0, 2, 99.0);
 
         assert!(three_layer_objective_score(&train, &sparse_validation) <= -999_000.0);
+    }
+
+    #[test]
+    fn closed_trade_bucket_diagnostics_capture_directional_ev_metadata() {
+        let mut diagnostics = BacktestDiagnostics::default();
+        let signal = EntrySignalSnapshot {
+            symbol: "BTCUSDT".to_string(),
+            direction: "up".to_string(),
+            p_hat: 0.64,
+            edge: 0.08,
+            entry_price: 0.47,
+        };
+
+        diagnostics.record_closed_trade_buckets(Some(&signal), -3.5);
+        diagnostics.record_closed_trade_buckets(Some(&signal), 1.0);
+
+        let direction = diagnostics
+            .trade_buckets
+            .get("direction=up")
+            .expect("direction bucket recorded");
+        assert_eq!(direction.trades, 2);
+        assert_eq!(direction.wins, 1);
+        assert!((direction.net_pnl + 2.5).abs() < 1e-9);
+
+        assert!(
+            diagnostics
+                .trade_buckets
+                .contains_key("entry_price=0.35-0.50")
+        );
+        assert!(diagnostics.trade_buckets.contains_key("p_hat=0.60-0.70"));
+        assert!(diagnostics.trade_buckets.contains_key("edge=0.05-0.10"));
     }
 }
 
@@ -982,6 +1013,8 @@ struct BacktestDiagnostics {
     fills_recorded_by_recorder: u64,
     rejection_reasons: BTreeMap<String, u64>,
     strategy: Vec<(String, u64)>,
+    entry_signals_by_token: BTreeMap<String, Vec<EntrySignalSnapshot>>,
+    trade_buckets: BTreeMap<String, TradeBucketStats>,
 }
 
 impl BacktestDiagnostics {
@@ -1010,6 +1043,161 @@ impl BacktestDiagnostics {
 
         parts.join(" ")
     }
+
+    fn record_closed_trade_buckets(&mut self, signal: Option<&EntrySignalSnapshot>, pnl: f64) {
+        let Some(signal) = signal else {
+            self.record_trade_bucket("signal=missing", pnl);
+            return;
+        };
+
+        self.record_trade_bucket(&format!("symbol={}", signal.symbol), pnl);
+        self.record_trade_bucket(&format!("direction={}", signal.direction), pnl);
+        self.record_trade_bucket(
+            &format!("entry_price={}", price_bucket(signal.entry_price)),
+            pnl,
+        );
+        self.record_trade_bucket(&format!("p_hat={}", probability_bucket(signal.p_hat)), pnl);
+        self.record_trade_bucket(&format!("edge={}", edge_bucket(signal.edge)), pnl);
+    }
+
+    fn record_trade_bucket(&mut self, key: &str, pnl: f64) {
+        self.trade_buckets
+            .entry(key.to_string())
+            .or_default()
+            .record(pnl);
+    }
+
+    fn top_trade_buckets(&self, limit: usize) -> Vec<(&String, &TradeBucketStats)> {
+        let mut buckets = self
+            .trade_buckets
+            .iter()
+            .filter(|(_, stats)| stats.trades > 0)
+            .collect::<Vec<_>>();
+        buckets.sort_by(|a, b| {
+            a.1.net_pnl
+                .partial_cmp(&b.1.net_pnl)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.1.trades.cmp(&a.1.trades))
+                .then_with(|| a.0.cmp(b.0))
+        });
+        buckets.into_iter().take(limit).collect()
+    }
+
+    fn trade_buckets_json(&self, limit: usize) -> Vec<serde_json::Value> {
+        self.top_trade_buckets(limit)
+            .into_iter()
+            .map(|(key, stats)| {
+                json!({
+                    "bucket": key,
+                    "trades": stats.trades,
+                    "net_pnl": round_secs(stats.net_pnl),
+                    "avg_pnl": round_secs(stats.avg_pnl()),
+                    "win_rate": round_secs(stats.win_rate()),
+                })
+            })
+            .collect()
+    }
+
+    fn negative_trade_bucket_summary(&self, limit: usize) -> String {
+        self.top_trade_buckets(limit)
+            .into_iter()
+            .filter(|(_, stats)| stats.net_pnl < 0.0)
+            .map(|(key, stats)| {
+                format!("{}:${:.2}/{}", key, round_secs(stats.net_pnl), stats.trades)
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EntrySignalSnapshot {
+    symbol: String,
+    direction: String,
+    p_hat: f64,
+    edge: f64,
+    entry_price: f64,
+}
+
+impl EntrySignalSnapshot {
+    fn from_signal(signal: &SignalRecord) -> Self {
+        Self {
+            symbol: signal.symbol.clone(),
+            direction: signal.direction.clone(),
+            p_hat: signal.p_hat,
+            edge: signal.edge,
+            entry_price: decimal_to_f64(signal.entry_price),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TradeBucketStats {
+    trades: u64,
+    wins: u64,
+    net_pnl: f64,
+}
+
+impl TradeBucketStats {
+    fn record(&mut self, pnl: f64) {
+        self.trades += 1;
+        if pnl > 0.0 {
+            self.wins += 1;
+        }
+        self.net_pnl += pnl;
+    }
+
+    fn avg_pnl(&self) -> f64 {
+        if self.trades == 0 {
+            0.0
+        } else {
+            self.net_pnl / self.trades as f64
+        }
+    }
+
+    fn win_rate(&self) -> f64 {
+        if self.trades == 0 {
+            0.0
+        } else {
+            self.wins as f64 / self.trades as f64
+        }
+    }
+}
+
+fn decimal_to_f64(value: rust_decimal::Decimal) -> f64 {
+    value.to_string().parse::<f64>().unwrap_or(0.0)
+}
+
+fn price_bucket(value: f64) -> &'static str {
+    if value < 0.35 {
+        "<0.35"
+    } else if value < 0.50 {
+        "0.35-0.50"
+    } else if value < 0.65 {
+        "0.50-0.65"
+    } else {
+        ">=0.65"
+    }
+}
+
+fn probability_bucket(value: f64) -> &'static str {
+    if value < 0.60 {
+        "<0.60"
+    } else if value < 0.70 {
+        "0.60-0.70"
+    } else {
+        ">=0.70"
+    }
+}
+
+fn edge_bucket(value: f64) -> &'static str {
+    if value < 0.05 {
+        "<0.05"
+    } else if value < 0.10 {
+        "0.05-0.10"
+    } else {
+        ">=0.10"
+    }
 }
 
 fn top_counts(counts: &[(String, u64)], limit: usize) -> String {
@@ -1028,7 +1216,11 @@ fn top_counts(counts: &[(String, u64)], limit: usize) -> String {
 }
 
 fn print_backtest_diagnostics(label: &str, outcome: &BacktestOutcome) {
-    if outcome.trade_count > 0 && outcome.diagnostics.orders_rejected == 0 {
+    let negative_buckets = outcome.diagnostics.negative_trade_bucket_summary(6);
+    if outcome.trade_count > 0
+        && outcome.diagnostics.orders_rejected == 0
+        && negative_buckets.is_empty()
+    {
         return;
     }
 
@@ -1038,6 +1230,9 @@ fn print_backtest_diagnostics(label: &str, outcome: &BacktestOutcome) {
         outcome.fills_recorded,
         outcome.diagnostics.summary(),
     );
+    if !negative_buckets.is_empty() {
+        eprintln!("      worst_buckets {label}: {negative_buckets}");
+    }
 }
 
 struct DiagnosticRecorder {
@@ -1074,12 +1269,22 @@ impl Recorder for DiagnosticRecorder {
     async fn record_fill(
         &mut self,
         _strategy: &str,
-        _intent: &TradingIntent,
-        _signal: Option<&SignalRecord>,
-        _fill: &FillRecord,
+        intent: &TradingIntent,
+        signal: Option<&SignalRecord>,
+        fill: &FillRecord,
         _report: &ExecutionReport,
     ) {
-        self.diagnostics.lock().unwrap().fills_recorded_by_recorder += 1;
+        let mut diagnostics = self.diagnostics.lock().unwrap();
+        diagnostics.fills_recorded_by_recorder += 1;
+        if intent.purpose == IntentPurpose::Entry && fill.side == TradeSide::Buy {
+            if let Some(signal) = signal {
+                diagnostics
+                    .entry_signals_by_token
+                    .entry(fill.token_id.clone())
+                    .or_default()
+                    .push(EntrySignalSnapshot::from_signal(signal));
+            }
+        }
     }
 
     async fn flush(&mut self) {}
@@ -1126,6 +1331,7 @@ fn outcome_timing_json(
         "intents_submitted": outcome.intents_submitted,
         "fills_recorded": outcome.fills_recorded,
         "orders_rejected": outcome.diagnostics.orders_rejected,
+        "trade_buckets": outcome.diagnostics.trade_buckets_json(32),
     })
 }
 
@@ -1196,15 +1402,27 @@ fn run_backtest(
             .or_default()
             .push(fill);
     }
+    let mut entry_signals_by_token = diagnostics
+        .entry_signals_by_token
+        .clone()
+        .into_iter()
+        .map(|(token, signals)| (token, VecDeque::from(signals)))
+        .collect::<HashMap<_, _>>();
     let mut per_trade_pnl = Vec::new();
-    for token_fills in by_token.values() {
+    for (token_id, token_fills) in by_token.iter_mut() {
+        token_fills.sort_by_key(|fill| fill.timestamp);
         let mut i = 0;
         while i + 1 < token_fills.len() {
             let entry = token_fills[i];
             let exit = token_fills[i + 1];
             if entry.side == TradeSide::Buy && exit.side == TradeSide::Sell {
                 let pnl = (exit.price - entry.price) * entry.quantity - entry.fee - exit.fee;
-                per_trade_pnl.push(pnl.to_string().parse::<f64>().unwrap_or(0.0));
+                let pnl = decimal_to_f64(pnl);
+                let signal = entry_signals_by_token
+                    .get_mut(*token_id)
+                    .and_then(|signals| signals.pop_front());
+                diagnostics.record_closed_trade_buckets(signal.as_ref(), pnl);
+                per_trade_pnl.push(pnl);
                 i += 2;
             } else {
                 i += 1;

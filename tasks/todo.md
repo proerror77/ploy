@@ -10925,3 +10925,27 @@ Review:
 - 2026-04-30: The root cause is predicate shape, not a missing index. `LOWER(market_family)` and `COALESCE(end_time/start_time, NOW())` prevent the planner from using existing btree indexes. Rewriting to `market_family = 'crypto'` plus explicit null-aware time predicates produced a `Bitmap Heap Scan` using `idx_pm_market_catalog_family_end_time` and executed in `~0.08-0.18ms` on the live DB.
 - 2026-04-30: Local verification passed: `rtk cargo test -p ploy-market-data active_markets_query_keeps_catalog_filters_indexable --lib`, `rtk cargo test -p ploy-market-data trade_collector_config_fills_safe_defaults --lib`, `rtk cargo check -p ploy-market-data`, and `git diff --check`. Full rustfmt check was not used because current crate import ordering outside this slice would create unrelated formatting churn.
 - 2026-04-30: PR #250 merged and deployed artifact `0eb6efa7`, but deploy run `25138661077` failed at the dry-run report postflight because the report had zero `strategies` rows immediately after restart while top-level diagnostics were valid. The deployed collector and `ployd` services remained active with `NRestarts=0`. The postflight checker should require top-level contract fields and validate per-strategy diagnostics only when strategy diagnostics are present.
+
+# PM5D Bayesian EV Replay Diagnostics (2026-04-30)
+
+## Files
+
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+  - Owner: filled closed-trade diagnostics for replay/optimizer artifacts.
+- `tasks/todo.md`
+  - Owner: plan, verification evidence, and deploy/no-deploy decision notes.
+
+## Tasks
+
+- [x] Keep deployment blocked until filled-order replay evidence is positive out-of-sample.
+- [x] Verify runtime signal/fill attribution path before adding diagnostics.
+- [x] Add closed-trade PnL buckets by symbol, direction, entry price, posterior probability, and edge.
+- [x] Emit bucket diagnostics into optimizer timing JSON and stderr summaries.
+- [x] Run focused local tests and diff checks.
+- [ ] Push PR updates and run remote replay with diagnostics; decide next strategy change from bucket evidence.
+
+## Review
+
+- 2026-04-30: Current Bayesian EV branch is not deployable. Full filled replay on `2026-04-25` train / `2026-04-26` validation stayed negative after tightened TPE search: best validation PnL `-$197.52`, `35` trades, Sharpe `-54.93`. The correct next step is diagnostics by factor bucket, not another blind threshold pass.
+- 2026-04-30: Added replay diagnostics that retain entry `SignalRecord` metadata only after a true entry fill, pair later closed fills by token, and bucket realized closed-trade PnL by symbol, direction, entry price, posterior `p_hat`, and edge. The worst negative buckets now print to stderr, and compact bucket stats are included in timing JSON for train/validation trials.
+- 2026-04-30: Local verification passed: `rustfmt --edition 2024 crates/ploy-strategy-bundles/examples/optimize_backtest.rs`, `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p ploy-strategy-bundles --example optimize_backtest` (`5 passed`), `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo check -p ploy-strategy-bundles --features parquet-feed --example optimize_backtest` (`0 errors`, existing warnings), and `git diff --check`.
