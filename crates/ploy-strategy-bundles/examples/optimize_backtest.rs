@@ -1623,6 +1623,7 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
 
 struct ThreeLayerSearchParams {
     min_entry_score: f64,
+    min_entry_price: f64,
     min_direction_prob: f64,
     direction_filter: DirectionFilter,
     min_distance_over_sigma: f64,
@@ -1683,6 +1684,7 @@ fn make_three_layer_config(
     config.min_time_remaining_secs = p.min_time_remaining_secs as u64;
     config.max_time_remaining_secs = p.max_time_remaining_secs as u64;
     config.cooldown_secs = p.cooldown_secs as u64;
+    config.min_entry_price = p.min_entry_price;
     config.three_layer_min_entry_score = p.min_entry_score;
     config.three_layer_min_direction_prob = p.min_direction_prob;
     config.three_layer_allowed_directions = p.direction_filter.allowed_directions();
@@ -2393,6 +2395,7 @@ fn main() {
         let trial_timings_c = Arc::clone(&trial_timings);
 
         let p_min_entry_score = FloatParam::new(0.30, 0.85).name("three_layer_min_entry_score");
+        let p_min_entry_price = FloatParam::new(0.25, 0.65).name("three_layer_min_entry_price");
         let p_min_direction_prob =
             FloatParam::new(0.56, 0.85).name("three_layer_min_direction_prob");
         let p_direction_filter = IntParam::new(0, 2).name("three_layer_direction_filter");
@@ -2416,6 +2419,7 @@ fn main() {
         let p_max_time_span_secs = IntParam::new(30, 120).name("three_layer_time_span_secs");
 
         let p_min_entry_score_c = p_min_entry_score.clone();
+        let p_min_entry_price_c = p_min_entry_price.clone();
         let p_min_direction_prob_c = p_min_direction_prob.clone();
         let p_direction_filter_c = p_direction_filter.clone();
         let p_min_distance_over_sigma_c = p_min_distance_over_sigma.clone();
@@ -2437,6 +2441,7 @@ fn main() {
                 let min_time_remaining_secs = p_min_time_remaining_secs_c.suggest(trial)?;
                 let params = ThreeLayerSearchParams {
                     min_entry_score: p_min_entry_score_c.suggest(trial)?,
+                    min_entry_price: p_min_entry_price_c.suggest(trial)?,
                     min_direction_prob: p_min_direction_prob_c.suggest(trial)?,
                     direction_filter: DirectionFilter::from_code(p_direction_filter_c.suggest(trial)?),
                     min_distance_over_sigma: p_min_distance_over_sigma_c.suggest(trial)?,
@@ -2527,6 +2532,7 @@ fn main() {
                 record["trial_id"] = json!(trial_id);
                 record["strategy_variant"] = json!("three_layer");
                 record["direction_filter"] = json!(params.direction_filter.as_label());
+                record["min_entry_price"] = json!(params.min_entry_price);
                 let mut validation_record = outcome_timing_json(
                     "validation",
                     &val_ref,
@@ -2537,6 +2543,7 @@ fn main() {
                 validation_record["trial_id"] = json!(trial_id);
                 validation_record["strategy_variant"] = json!("three_layer");
                 validation_record["direction_filter"] = json!(params.direction_filter.as_label());
+                validation_record["min_entry_price"] = json!(params.min_entry_price);
                 {
                     let mut timings = trial_timings_c.lock().unwrap();
                     timings.push(record);
@@ -2544,7 +2551,7 @@ fn main() {
                 }
 
                 eprintln!(
-                    "  Trial {:>3}: source={} score={:>8.2} train_pnl=${:>8.2} val_pnl=${:>8.2} val_sharpe={:>7.3} val_trades={:>4} updates={} elapsed={:.1}s | params: entry={:.3} dir_prob={:.3} side={} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} prior_w={:.2} conf_w={:.2} tp={:.3} stop={:.4} cd={}s",
+                    "  Trial {:>3}: source={} score={:>8.2} train_pnl=${:>8.2} val_pnl=${:>8.2} val_sharpe={:>7.3} val_trades={:>4} updates={} elapsed={:.1}s | params: entry={:.3} min_px={:.3} dir_prob={:.3} side={} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} prior_w={:.2} conf_w={:.2} tp={:.3} stop={:.4} cd={}s",
                     trial_id,
                     train_ref.kind(),
                     score,
@@ -2555,6 +2562,7 @@ fn main() {
                     outcome.updates_processed,
                     outcome.elapsed_secs,
                     params.min_entry_score,
+                    params.min_entry_price,
                     params.min_direction_prob,
                     params.direction_filter.as_label(),
                     params.min_distance_over_sigma,
@@ -2578,6 +2586,7 @@ fn main() {
         let best_min_time_remaining_secs = best.get(&p_min_time_remaining_secs).unwrap_or(60);
         let best_params = ThreeLayerSearchParams {
             min_entry_score: best.get(&p_min_entry_score).unwrap_or(0.30),
+            min_entry_price: best.get(&p_min_entry_price).unwrap_or(0.25),
             min_direction_prob: best.get(&p_min_direction_prob).unwrap_or(0.52),
             direction_filter: DirectionFilter::from_code(
                 best.get(&p_direction_filter).unwrap_or(0),
@@ -2620,6 +2629,7 @@ fn main() {
             Some(val_outcome.sharpe),
         );
         validation_record["direction_filter"] = json!(best_params.direction_filter.as_label());
+        validation_record["min_entry_price"] = json!(best_params.min_entry_price);
         validation_timings.push(validation_record);
         eprintln!("Val Source:  {}", val_source.kind());
         eprintln!("Val Sharpe:  {:.3}", val_outcome.sharpe);
@@ -2635,6 +2645,7 @@ fn main() {
             "three_layer_min_entry_score = {:.4}",
             best_params.min_entry_score
         );
+        eprintln!("min_entry_price = {:.4}", best_params.min_entry_price);
         eprintln!(
             "three_layer_min_direction_prob = {:.4}",
             best_params.min_direction_prob
