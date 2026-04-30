@@ -244,7 +244,7 @@
 - [x] Add a regression test proving entries are suppressed inside the same
   liquidation window.
 - [x] Run focused local verification.
-- [ ] Run remote OOS filled replay without deploying dry-run.
+- [x] Run remote OOS filled replay without deploying dry-run.
 
 ## Review
 
@@ -260,6 +260,18 @@
   ploy-strategy-bundles entry_skips_inside_pre_settlement_exit_window_when_enabled
   --lib` and `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test
   -p ploy-strategy-bundles three_layer --lib`.
+- 2026-04-30: Remote optimize replay run `25156787073` completed successfully
+  on `ploy-ci-1` with the same official-only settlement and executable LOB
+  inputs, and no dry-run deployment. The no-entry gate improved but did not
+  validate the strategy: held-out validation PnL moved from `-$41.25` to
+  `-$27.43`, but only across 16 trades with Sharpe `-68.528`. The gate fired
+  materially (`skip_pre_settlement_entry=550517` on validation), yet worst
+  validation buckets remained negative: `exit_price=<0.35` (`-$31.75/4`),
+  `exit_reason=pre_settlement` (`-$27.88/15`), and
+  `roundtrip_price_move=<-0.20` (`-$28.04/3`). ETH also dominated the loss
+  (`symbol=ETHUSDT`, `-$29.37/7`). Conclusion: still no dry-run reset or
+  deployment; next research should split by symbol/regime and test a dynamic
+  exit EV gate before adding more entry thresholds.
 
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
