@@ -1,3 +1,37 @@
+# PM5D Binance Direction EV Audit (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: executable PnL/EV accounting for Binance/CEX direction buckets.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add fillable-order and executable PnL metrics to Binance/CEX direction buckets.
+- [x] Keep settlement-direction support separate from executable-EV support.
+- [x] Add focused tests covering positive and inverted direction buckets with PnL evidence.
+- [x] Run focused local verification.
+- [ ] Open PR, run CI, then rerun Factor Review V2 on `ploy-ci-1`.
+
+## Review
+
+- 2026-05-01: Extended `binance_direction_audit` so every factor bucket now reports
+  `fillable`, `fill_rate`, `pnl_rows`, `total_pnl`, `avg_pnl`, `roi`,
+  `pnl_t_stat`, `positive_ev`, `ev_supported`, and entry ask/capacity/liquidity
+  diagnostics. This prevents the next research pass from confusing direction
+  win-rate with tradable Polymarket expectancy.
+- 2026-05-01: Local verification passed:
+  `rustfmt --edition 2024 --config skip_children=true
+  crates/ploy-research/src/factors_v2.rs crates/ploy-research/src/lib.rs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-binance-direction-ev-audit rtk cargo test -p
+  ploy-research factors_v2 --lib`, `CARGO_TARGET_DIR=/tmp/ploy-binance-direction-ev-audit
+  rtk cargo check -p ploy-research --features db,polars-export --example
+  factor_review_v2`, and `git diff --check`.
+
 # PM5D Binance Direction Audit (2026-05-01)
 
 Issue: https://github.com/proerror77/ploy/issues/256

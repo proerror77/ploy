@@ -383,14 +383,27 @@ pub struct BinanceDirectionBucketSummary {
     pub layer: ThreeLayerArchive,
     pub bucket: String,
     pub rows: usize,
+    pub fillable_rows: usize,
+    pub fill_rate: f64,
     pub settlement_rows: usize,
     pub settlement_win_rows: usize,
     pub settlement_win_rate: f64,
     pub lift_vs_coinflip: f64,
     pub t_stat_vs_coinflip: f64,
+    pub pnl_rows: usize,
+    pub total_pnl_15u: f64,
+    pub avg_pnl_15u: f64,
+    pub roi_on_stake: f64,
+    pub pnl_t_stat: f64,
+    pub positive_ev: bool,
+    pub executable_ev_supported: bool,
     pub avg_factor_value: f64,
     pub min_factor_value: f64,
     pub max_factor_value: f64,
+    pub avg_entry_ask: f64,
+    pub avg_entry_capacity_ratio: f64,
+    pub avg_entry_liquidity_usd: f64,
+    pub avg_entry_sweep_slippage_bps: f64,
     pub by_symbol_positive_ratio: f64,
     pub by_time_bucket_positive_ratio: f64,
     pub statistically_supported: bool,
@@ -3028,23 +3041,36 @@ fn push_binance_direction_audit_rows<'a, I>(out: &mut String, summaries: I)
 where
     I: IntoIterator<Item = &'a BinanceDirectionBucketSummary>,
 {
-    out.push_str("factor,family,layer,bucket,rows,settlement_rows,win_rate,lift,t_stat,supported,avg_value,min_value,max_value,symbol_pos,time_bucket_pos\n");
+    out.push_str("factor,family,layer,bucket,rows,fillable,fill_rate,settlement_rows,win_rate,lift,t_stat,dir_supported,pnl_rows,total_pnl,avg_pnl,roi,pnl_t_stat,positive_ev,ev_supported,avg_value,min_value,max_value,avg_entry,avg_capacity,avg_entry_liquidity,avg_sweep_slippage,symbol_pos,time_bucket_pos\n");
     for summary in summaries {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{:.6},{:.6},{:.6},{:.4},{:.4}\n",
+            "{},{},{},{},{},{},{:.4},{},{:.4},{:.4},{:.4},{},{},{:.4},{:.4},{:.4},{:.4},{},{},{:.6},{:.6},{:.6},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
             summary.factor,
             summary.family.as_str(),
             summary.layer.as_str(),
             summary.bucket,
             summary.rows,
+            summary.fillable_rows,
+            summary.fill_rate,
             summary.settlement_rows,
             summary.settlement_win_rate,
             summary.lift_vs_coinflip,
             summary.t_stat_vs_coinflip,
             summary.statistically_supported,
+            summary.pnl_rows,
+            summary.total_pnl_15u,
+            summary.avg_pnl_15u,
+            summary.roi_on_stake,
+            summary.pnl_t_stat,
+            summary.positive_ev,
+            summary.executable_ev_supported,
             summary.avg_factor_value,
             summary.min_factor_value,
             summary.max_factor_value,
+            summary.avg_entry_ask,
+            summary.avg_entry_capacity_ratio,
+            summary.avg_entry_liquidity_usd,
+            summary.avg_entry_sweep_slippage_bps,
             summary.by_symbol_positive_ratio,
             summary.by_time_bucket_positive_ratio,
         ));
@@ -3061,7 +3087,14 @@ fn build_binance_direction_audit(
         .into_iter()
         .filter(is_binance_direction_descriptor)
     {
-        append_binance_direction_factor(&mut summaries, rows, descriptor, options, min_sample);
+        append_binance_direction_factor(
+            &mut summaries,
+            rows,
+            descriptor,
+            options,
+            options.stake_usd,
+            min_sample,
+        );
     }
     summaries.sort_by(|a, b| {
         a.factor
@@ -3106,6 +3139,7 @@ fn append_binance_direction_factor(
     rows: &[FactorObservationV2],
     descriptor: FactorV2Descriptor,
     options: &FactorReviewOptions,
+    stake_usd: f64,
     min_sample: usize,
 ) {
     let mut scored = rows
@@ -3135,12 +3169,14 @@ fn append_binance_direction_factor(
         descriptor,
         "bottom_quantile",
         &bottom,
+        stake_usd,
         min_sample,
     ));
     summaries.push(summarize_binance_direction_bucket(
         descriptor,
         "top_quantile",
         &top,
+        stake_usd,
         min_sample,
     ));
 }
@@ -3149,6 +3185,7 @@ fn summarize_binance_direction_bucket(
     descriptor: FactorV2Descriptor,
     bucket: &str,
     rows: &[(&FactorObservationV2, f64)],
+    stake_usd: f64,
     min_sample: usize,
 ) -> BinanceDirectionBucketSummary {
     let labels = rows
@@ -3159,6 +3196,27 @@ fn summarize_binance_direction_bucket(
     let settlement_win_rows = labels.iter().filter(|label| **label >= 0.5).count();
     let settlement_win_rate = ratio(settlement_win_rows, labels.len());
     let t_stat_vs_coinflip = settlement_t_stat_vs_coinflip(settlement_win_rows, labels.len());
+    let pnl_values = rows
+        .iter()
+        .filter_map(|(row, _)| executable_pnl(row))
+        .collect::<Vec<_>>();
+    let total_pnl_15u = pnl_values.iter().sum::<f64>();
+    let avg_pnl_15u = if pnl_values.is_empty() {
+        f64::NAN
+    } else {
+        total_pnl_15u / pnl_values.len() as f64
+    };
+    let roi_on_stake = if stake_usd > 0.0 && !pnl_values.is_empty() {
+        total_pnl_15u / (stake_usd * pnl_values.len() as f64)
+    } else {
+        f64::NAN
+    };
+    let pnl_t_stat = trade_t_stat(&pnl_values);
+    let positive_ev = avg_pnl_15u.is_finite() && avg_pnl_15u > 0.0;
+    let executable_ev_supported = positive_ev
+        && pnl_values.len() >= min_sample
+        && pnl_t_stat.is_finite()
+        && pnl_t_stat >= 2.0;
     let values = rows.iter().map(|(_, value)| *value).collect::<Vec<_>>();
     let selected_rows = rows.iter().map(|(row, _)| *row).collect::<Vec<_>>();
     BinanceDirectionBucketSummary {
@@ -3167,14 +3225,38 @@ fn summarize_binance_direction_bucket(
         layer: descriptor.layer,
         bucket: bucket.to_string(),
         rows: rows.len(),
+        fillable_rows: selected_rows
+            .iter()
+            .filter(|row| entry_fillable(row))
+            .count(),
+        fill_rate: ratio(
+            selected_rows
+                .iter()
+                .filter(|row| entry_fillable(row))
+                .count(),
+            selected_rows.len(),
+        ),
         settlement_rows: labels.len(),
         settlement_win_rows,
         settlement_win_rate,
         lift_vs_coinflip: settlement_win_rate - 0.5,
         t_stat_vs_coinflip,
+        pnl_rows: pnl_values.len(),
+        total_pnl_15u,
+        avg_pnl_15u,
+        roi_on_stake,
+        pnl_t_stat,
+        positive_ev,
+        executable_ev_supported,
         avg_factor_value: mean(values.iter().copied()),
         min_factor_value: finite_min(values.iter().copied()),
         max_factor_value: finite_max(values.iter().copied()),
+        avg_entry_ask: mean(selected_rows.iter().map(|row| row.entry_ask)),
+        avg_entry_capacity_ratio: mean(selected_rows.iter().map(|row| row.entry_capacity_ratio)),
+        avg_entry_liquidity_usd: mean(selected_rows.iter().map(|row| row.entry_liquidity_usd)),
+        avg_entry_sweep_slippage_bps: mean(
+            selected_rows.iter().map(|row| row.entry_sweep_slippage_bps),
+        ),
         by_symbol_positive_ratio: settlement_positive_group_ratio(&selected_rows, |row| {
             row.symbol.clone()
         }),
@@ -6908,6 +6990,7 @@ mod tests {
             let mut obs = base_obs();
             obs.event_id = format!("event-{i}");
             obs.drift_30s = 0.002;
+            obs.pm_up_ask = 0.45 + (i % 5) as f64 * 0.01;
             obs.settlement_up = 1.0;
             observations.push(obs);
         }
@@ -6929,11 +7012,16 @@ mod tests {
         assert_eq!(top.settlement_win_rate, 1.0);
         assert!(top.t_stat_vs_coinflip > 2.0);
         assert!(top.statistically_supported);
+        assert_eq!(top.fillable_rows, 40);
+        assert_eq!(top.pnl_rows, 40);
+        assert!(top.avg_pnl_15u > 0.0);
+        assert!(top.executable_ev_supported);
 
         let text = format_factor_review_v2_report(&report, 5);
         assert!(
             text.contains("=== Binance/CEX Direction Audit: Settlement Predictive Buckets ===")
         );
+        assert!(text.contains("ev_supported"));
     }
 
     #[test]
@@ -6943,6 +7031,8 @@ mod tests {
             let mut obs = base_obs();
             obs.event_id = format!("event-{i}");
             obs.drift_30s = 0.002;
+            obs.pm_up_ask = 0.45 + (i % 5) as f64 * 0.01;
+            obs.pm_down_ask = 0.45 + (i % 5) as f64 * 0.01;
             obs.settlement_up = 0.0;
             observations.push(obs);
         }
@@ -6968,8 +7058,11 @@ mod tests {
         assert_eq!(top.settlement_win_rate, 0.0);
         assert!(top.t_stat_vs_coinflip < -2.0);
         assert!(!top.statistically_supported);
+        assert!(top.avg_pnl_15u < 0.0);
+        assert!(!top.executable_ev_supported);
         assert_eq!(bottom.settlement_win_rate, 1.0);
         assert!(bottom.statistically_supported);
+        assert!(bottom.executable_ev_supported);
     }
 
     #[test]
