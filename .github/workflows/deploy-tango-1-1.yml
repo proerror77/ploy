@@ -135,10 +135,7 @@ jobs:
           cp "target/${PLATFORM_TARGET}/release/new-ploy-runner" dist/bin/ploy-runner
           cp "target/${PLATFORM_TARGET}/release/examples/factor_research" dist/bin/factor-research
           cp "target/${PLATFORM_TARGET}/release/examples/optimize_backtest" dist/bin/optimize-backtest
-          cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
-          cp config/strategies/02-pm5d.live.toml dist/config/strategies/02-pm5d.live.toml
-          cp config/strategies/02-pm5d-threelayer.unified.toml dist/config/strategies/02-pm5d-threelayer.unified.toml
-          cp config/strategies/02-pm5d-threelayer.live.toml dist/config/strategies/02-pm5d-threelayer.live.toml
+          cp config/strategies/*.toml dist/config/strategies/
           cp config/deployments/*.json dist/config/deployments/
           cp scripts/binance_aggtrade_collector.py dist/scripts/binance_aggtrade_collector.py
           cp scripts/binance_price_collector.py dist/scripts/binance_price_collector.py
@@ -357,10 +354,7 @@ jobs:
             install -m 0755 ./bin/ploy-runner ${DEPLOY_ROOT}/bin/ploy-runner
             install -m 0755 ./bin/factor-research ${DEPLOY_ROOT}/bin/factor-research
             install -m 0755 ./bin/optimize-backtest ${DEPLOY_ROOT}/bin/optimize-backtest
-            install -m 0644 ./config/strategies/02-pm5d.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.unified.toml
-            install -m 0644 ./config/strategies/02-pm5d.live.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.live.toml
-            install -m 0644 ./config/strategies/02-pm5d-threelayer.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.unified.toml
-            install -m 0644 ./config/strategies/02-pm5d-threelayer.live.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.live.toml
+            install -m 0644 ./config/strategies/*.toml ${DEPLOY_ROOT}/config/strategies/
             install -m 0644 ./config/deployments/*.json ${DEPLOY_ROOT}/config/deployments/
             install -m 0755 ./scripts/binance_aggtrade_collector.py ${DEPLOY_ROOT}/scripts/binance_aggtrade_collector.py
             install -m 0755 ./scripts/binance_price_collector.py ${DEPLOY_ROOT}/scripts/binance_price_collector.py
