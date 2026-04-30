@@ -387,6 +387,20 @@
   rtk cargo test -p ploy-strategy-bundles --test backtest_integration`, and
   `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo check -p
   ploy-strategy-bundles --features parquet-feed --example optimize_backtest`.
+- 2026-04-30: Pushed commit `398171a1` to PR #254. PR GitHub Actions passed.
+  The correct parquet-stream replay attempts for the buffer change were
+  cancelled before completion (`25164986690`, `25165363411`, `25165550513`);
+  unrelated default snapshot optimize runs between them failed as underpowered
+  and were not used for PM5D decisions. The last correct run `25165550513`
+  confirmed checkout of `feat/pm5d-bayesian-ev-gate@398171a1`, reached
+  parquet-stream `Run optimize`, and produced only partial evidence before
+  cancellation: trial 0 validation PnL `-$41.71` over 28 trades, trial 1
+  `-$74.30` over 5 trades, trial 2 `-$209.05` over 24 trades, and trial 3
+  zero validation trades. Partial worst buckets still included
+  `exit_reason=pre_settlement`, `exit_price=<0.35`, `roundtrip_price_move=<-0.20`,
+  and `exit_reason=settlement`. Conclusion remains no dry-run reset or
+  deployment; this branch still needs an uninterrupted official-settlement
+  OOS replay before any promotion decision.
 
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
