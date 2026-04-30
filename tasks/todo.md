@@ -1,3 +1,44 @@
+# PM5D Binance Direction Audit (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: Binance/CEX-only settlement-direction audit that does not use
+    Polymarket ask/edge for first-stage signal selection.
+- `crates/ploy-research/src/lib.rs`
+  - Owner: public export for the new direction-audit summary.
+- `tasks/todo.md`
+  - Owner: plan, verification evidence, and research decision notes.
+
+## Tasks
+
+- [x] Add Binance/CEX-only direction bucket summaries to factor review.
+- [x] Print the audit in text reports and persist it in `evaluation.json`.
+- [x] Add focused tests for predictive and inverted CEX direction buckets.
+- [x] Run focused local verification.
+- [ ] Push PR and rerun Factor Review V2 on `ploy-ci-1`.
+
+## Review
+
+- 2026-05-01: Added `binance_direction_audit` to `FactorReviewV2Report`.
+  It evaluates only side-aligned Binance/CEX-derived factors against
+  settlement labels, without using Polymarket ask, market fair probability, or
+  model edge for first-stage selection.
+- 2026-05-01: The audit reports top/bottom factor quantiles with settlement
+  win rate, lift versus coinflip, binomial t-stat, average/min/max factor
+  value, symbol consistency, and regime/time-bucket consistency. Text reports
+  now include `Binance/CEX Direction Audit: Settlement Predictive Buckets`;
+  JSON artifacts inherit the new field through the report payload.
+- 2026-05-01: Local verification passed:
+  `rustfmt --edition 2024 --config skip_children=true
+  crates/ploy-research/src/factors_v2.rs crates/ploy-research/src/lib.rs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-binance-direction-audit rtk cargo test -p
+  ploy-research factors_v2 --lib`, `CARGO_TARGET_DIR=/tmp/ploy-binance-direction-audit
+  rtk cargo check -p ploy-research --features db,polars-export --example
+  factor_review_v2`, and `git diff --check`.
+
 # PM5D Side Direction Audit (2026-05-01)
 
 Issue: https://github.com/proerror77/ploy/issues/256

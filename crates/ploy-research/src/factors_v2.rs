@@ -377,12 +377,33 @@ pub struct DirectionSideAuditSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BinanceDirectionBucketSummary {
+    pub factor: String,
+    pub family: FactorFamily,
+    pub layer: ThreeLayerArchive,
+    pub bucket: String,
+    pub rows: usize,
+    pub settlement_rows: usize,
+    pub settlement_win_rows: usize,
+    pub settlement_win_rate: f64,
+    pub lift_vs_coinflip: f64,
+    pub t_stat_vs_coinflip: f64,
+    pub avg_factor_value: f64,
+    pub min_factor_value: f64,
+    pub max_factor_value: f64,
+    pub by_symbol_positive_ratio: f64,
+    pub by_time_bucket_positive_ratio: f64,
+    pub statistically_supported: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct FactorReviewV2Report {
     pub options: FactorReviewOptions,
     pub health: DataHealthReport,
     pub reviews: Vec<SingleFactorReview>,
     pub executable_ev_buckets: Vec<ExecutableEvBucketSummary>,
     pub direction_side_audit: Vec<DirectionSideAuditSummary>,
+    pub binance_direction_audit: Vec<BinanceDirectionBucketSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -1584,12 +1605,14 @@ fn review_factor_rows_with_descriptor_filter(
     });
     let executable_ev_buckets = build_executable_ev_buckets(v2_rows, &options);
     let direction_side_audit = build_direction_side_audit(v2_rows, &options);
+    let binance_direction_audit = build_binance_direction_audit(v2_rows, &options);
     FactorReviewV2Report {
         options,
         health,
         reviews,
         executable_ev_buckets,
         direction_side_audit,
+        binance_direction_audit,
     }
 }
 
@@ -2842,6 +2865,13 @@ pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usiz
     );
     out.push_str("\n=== Direction Side Audit: Favored vs Opposite Executable EV ===\n");
     push_direction_side_audit_rows(&mut out, report.direction_side_audit.iter().take(top_n * 2));
+    out.push_str("\n=== Binance/CEX Direction Audit: Settlement Predictive Buckets ===\n");
+    push_binance_direction_audit_rows(
+        &mut out,
+        sorted_binance_direction_audit(report)
+            .into_iter()
+            .take(top_n * 2),
+    );
     out
 }
 
@@ -2969,6 +2999,202 @@ where
             summary.avg_pnl_delta_15u,
         ));
     }
+}
+
+fn sorted_binance_direction_audit(
+    report: &FactorReviewV2Report,
+) -> Vec<&BinanceDirectionBucketSummary> {
+    let mut rows = report
+        .binance_direction_audit
+        .iter()
+        .filter(|summary| summary.settlement_win_rate.is_finite())
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| {
+        b.t_stat_vs_coinflip
+            .partial_cmp(&a.t_stat_vs_coinflip)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.lift_vs_coinflip
+                    .partial_cmp(&a.lift_vs_coinflip)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.factor.cmp(&b.factor))
+            .then_with(|| a.bucket.cmp(&b.bucket))
+    });
+    rows
+}
+
+fn push_binance_direction_audit_rows<'a, I>(out: &mut String, summaries: I)
+where
+    I: IntoIterator<Item = &'a BinanceDirectionBucketSummary>,
+{
+    out.push_str("factor,family,layer,bucket,rows,settlement_rows,win_rate,lift,t_stat,supported,avg_value,min_value,max_value,symbol_pos,time_bucket_pos\n");
+    for summary in summaries {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{:.6},{:.6},{:.6},{:.4},{:.4}\n",
+            summary.factor,
+            summary.family.as_str(),
+            summary.layer.as_str(),
+            summary.bucket,
+            summary.rows,
+            summary.settlement_rows,
+            summary.settlement_win_rate,
+            summary.lift_vs_coinflip,
+            summary.t_stat_vs_coinflip,
+            summary.statistically_supported,
+            summary.avg_factor_value,
+            summary.min_factor_value,
+            summary.max_factor_value,
+            summary.by_symbol_positive_ratio,
+            summary.by_time_bucket_positive_ratio,
+        ));
+    }
+}
+
+fn build_binance_direction_audit(
+    rows: &[FactorObservationV2],
+    options: &FactorReviewOptions,
+) -> Vec<BinanceDirectionBucketSummary> {
+    let min_sample = options.min_observations.max(30);
+    let mut summaries = Vec::new();
+    for descriptor in factor_v2_descriptors()
+        .into_iter()
+        .filter(is_binance_direction_descriptor)
+    {
+        append_binance_direction_factor(&mut summaries, rows, descriptor, options, min_sample);
+    }
+    summaries.sort_by(|a, b| {
+        a.factor
+            .cmp(&b.factor)
+            .then_with(|| audit_bucket_sort_key(&a.bucket).cmp(&audit_bucket_sort_key(&b.bucket)))
+            .then_with(|| a.bucket.cmp(&b.bucket))
+    });
+    summaries
+}
+
+fn is_binance_direction_descriptor(descriptor: &FactorV2Descriptor) -> bool {
+    matches!(
+        descriptor.name,
+        "side_model_prob"
+            | "side_distance_over_sigma"
+            | "drift_10s"
+            | "drift_30s"
+            | "obi_10_side"
+            | "depth_imbalance_side"
+            | "depth_acceleration_side"
+            | "microprice_offset_side_bps"
+            | "cum_mprice_drift_5m_side"
+            | "cum_trade_imbalance_5m_side"
+            | "obi_delta_10s_side"
+            | "obi_delta_30s_side"
+            | "obi_persistence_30s_side"
+            | "depth_imbalance_delta_30s_side"
+            | "microprice_momentum_30s_side"
+            | "trade_imbalance_delta_10s_side"
+            | "trade_imbalance_delta_30s_side"
+            | "cex_bar_return_30s_side"
+            | "cex_bar_return_60s_side"
+            | "cex_signed_volume_ratio_30s_side"
+            | "cex_consecutive_bar_side"
+            | "cex_breakout_volume_side"
+            | "cex_continuation_score_side"
+    )
+}
+
+fn append_binance_direction_factor(
+    summaries: &mut Vec<BinanceDirectionBucketSummary>,
+    rows: &[FactorObservationV2],
+    descriptor: FactorV2Descriptor,
+    options: &FactorReviewOptions,
+    min_sample: usize,
+) {
+    let mut scored = rows
+        .iter()
+        .filter_map(|row| {
+            let value = (descriptor.accessor)(row);
+            (value.is_finite() && row.label_settlement_win.is_some()).then_some((row, value))
+        })
+        .collect::<Vec<_>>();
+    if scored.len() < min_sample {
+        return;
+    }
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let selected_n = ((scored.len() as f64) * options.top_quantile.clamp(0.01, 1.0))
+        .ceil()
+        .max(1.0) as usize;
+    let selected_n = selected_n.min(scored.len());
+    let bottom = scored.iter().take(selected_n).copied().collect::<Vec<_>>();
+    let top = scored
+        .iter()
+        .rev()
+        .take(selected_n)
+        .copied()
+        .collect::<Vec<_>>();
+
+    summaries.push(summarize_binance_direction_bucket(
+        descriptor,
+        "bottom_quantile",
+        &bottom,
+        min_sample,
+    ));
+    summaries.push(summarize_binance_direction_bucket(
+        descriptor,
+        "top_quantile",
+        &top,
+        min_sample,
+    ));
+}
+
+fn summarize_binance_direction_bucket(
+    descriptor: FactorV2Descriptor,
+    bucket: &str,
+    rows: &[(&FactorObservationV2, f64)],
+    min_sample: usize,
+) -> BinanceDirectionBucketSummary {
+    let labels = rows
+        .iter()
+        .filter_map(|(row, _)| row.label_settlement_win)
+        .filter(|label| label.is_finite())
+        .collect::<Vec<_>>();
+    let settlement_win_rows = labels.iter().filter(|label| **label >= 0.5).count();
+    let settlement_win_rate = ratio(settlement_win_rows, labels.len());
+    let t_stat_vs_coinflip = settlement_t_stat_vs_coinflip(settlement_win_rows, labels.len());
+    let values = rows.iter().map(|(_, value)| *value).collect::<Vec<_>>();
+    let selected_rows = rows.iter().map(|(row, _)| *row).collect::<Vec<_>>();
+    BinanceDirectionBucketSummary {
+        factor: descriptor.name.to_string(),
+        family: descriptor.family,
+        layer: descriptor.layer,
+        bucket: bucket.to_string(),
+        rows: rows.len(),
+        settlement_rows: labels.len(),
+        settlement_win_rows,
+        settlement_win_rate,
+        lift_vs_coinflip: settlement_win_rate - 0.5,
+        t_stat_vs_coinflip,
+        avg_factor_value: mean(values.iter().copied()),
+        min_factor_value: finite_min(values.iter().copied()),
+        max_factor_value: finite_max(values.iter().copied()),
+        by_symbol_positive_ratio: settlement_positive_group_ratio(&selected_rows, |row| {
+            row.symbol.clone()
+        }),
+        by_time_bucket_positive_ratio: settlement_positive_group_ratio(&selected_rows, |row| {
+            row.regime.as_str().to_string()
+        }),
+        statistically_supported: labels.len() >= min_sample
+            && settlement_win_rate.is_finite()
+            && settlement_win_rate > 0.5
+            && t_stat_vs_coinflip.is_finite()
+            && t_stat_vs_coinflip >= 2.0,
+    }
+}
+
+fn settlement_t_stat_vs_coinflip(wins: usize, total: usize) -> f64 {
+    if total == 0 {
+        return f64::NAN;
+    }
+    let p_hat = wins as f64 / total as f64;
+    (p_hat - 0.5) / (0.25 / total as f64).sqrt()
 }
 
 fn build_executable_ev_buckets(
@@ -5851,6 +6077,30 @@ where
     positive as f64 / groups.len() as f64
 }
 
+fn settlement_positive_group_ratio<F>(rows: &[&FactorObservationV2], key_fn: F) -> f64
+where
+    F: Fn(&FactorObservationV2) -> String,
+{
+    let mut groups: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for row in rows {
+        if let Some(label) = row.label_settlement_win.filter(|label| label.is_finite()) {
+            let entry = groups.entry(key_fn(row)).or_default();
+            entry.1 += 1;
+            if label >= 0.5 {
+                entry.0 += 1;
+            }
+        }
+    }
+    if groups.is_empty() {
+        return f64::NAN;
+    }
+    let positive = groups
+        .values()
+        .filter(|(wins, total)| *total > 0 && (*wins as f64 / *total as f64) > 0.5)
+        .count();
+    positive as f64 / groups.len() as f64
+}
+
 fn trade_sharpe(pnls: &[f64]) -> f64 {
     if pnls.len() < 2 {
         return f64::NAN;
@@ -5905,6 +6155,24 @@ fn mean(values: impl Iterator<Item = f64>) -> f64 {
     } else {
         vals.iter().sum::<f64>() / vals.len() as f64
     }
+}
+
+fn finite_min(values: impl Iterator<Item = f64>) -> f64 {
+    values
+        .filter(|value| value.is_finite())
+        .fold(None, |min: Option<f64>, value| {
+            Some(min.map_or(value, |current| current.min(value)))
+        })
+        .unwrap_or(f64::NAN)
+}
+
+fn finite_max(values: impl Iterator<Item = f64>) -> f64 {
+    values
+        .filter(|value| value.is_finite())
+        .fold(None, |max: Option<f64>, value| {
+            Some(max.map_or(value, |current| current.max(value)))
+        })
+        .unwrap_or(f64::NAN)
 }
 
 fn stddev(values: &[f64]) -> f64 {
@@ -6116,6 +6384,7 @@ mod tests {
                 test_ev_bucket("entry_price", ">=0.65", -1.0, false, false),
             ],
             direction_side_audit: Vec::new(),
+            binance_direction_audit: Vec::new(),
         };
 
         let best = sorted_executable_ev_buckets(&report, true);
@@ -6633,6 +6902,77 @@ mod tests {
     }
 
     #[test]
+    fn binance_direction_audit_reports_predictive_cex_bucket() {
+        let mut observations = Vec::new();
+        for i in 0..40 {
+            let mut obs = base_obs();
+            obs.event_id = format!("event-{i}");
+            obs.drift_30s = 0.002;
+            obs.settlement_up = 1.0;
+            observations.push(obs);
+        }
+
+        let report = review_factors_v2(
+            &observations,
+            FactorReviewOptions {
+                top_quantile: 0.5,
+                ..FactorReviewOptions::default()
+            },
+        );
+        let top = report
+            .binance_direction_audit
+            .iter()
+            .find(|summary| summary.factor == "drift_30s" && summary.bucket == "top_quantile")
+            .expect("drift top bucket");
+
+        assert_eq!(top.settlement_rows, 40);
+        assert_eq!(top.settlement_win_rate, 1.0);
+        assert!(top.t_stat_vs_coinflip > 2.0);
+        assert!(top.statistically_supported);
+
+        let text = format_factor_review_v2_report(&report, 5);
+        assert!(
+            text.contains("=== Binance/CEX Direction Audit: Settlement Predictive Buckets ===")
+        );
+    }
+
+    #[test]
+    fn binance_direction_audit_exposes_inverted_cex_bucket() {
+        let mut observations = Vec::new();
+        for i in 0..40 {
+            let mut obs = base_obs();
+            obs.event_id = format!("event-{i}");
+            obs.drift_30s = 0.002;
+            obs.settlement_up = 0.0;
+            observations.push(obs);
+        }
+
+        let report = review_factors_v2(
+            &observations,
+            FactorReviewOptions {
+                top_quantile: 0.5,
+                ..FactorReviewOptions::default()
+            },
+        );
+        let top = report
+            .binance_direction_audit
+            .iter()
+            .find(|summary| summary.factor == "drift_30s" && summary.bucket == "top_quantile")
+            .expect("drift top bucket");
+        let bottom = report
+            .binance_direction_audit
+            .iter()
+            .find(|summary| summary.factor == "drift_30s" && summary.bucket == "bottom_quantile")
+            .expect("drift bottom bucket");
+
+        assert_eq!(top.settlement_win_rate, 0.0);
+        assert!(top.t_stat_vs_coinflip < -2.0);
+        assert!(!top.statistically_supported);
+        assert_eq!(bottom.settlement_win_rate, 1.0);
+        assert!(bottom.statistically_supported);
+    }
+
+    #[test]
     fn factor_review_report_separates_future_exit_diagnostics() {
         let health = DataHealthReport {
             source_observations: 10,
@@ -6685,6 +7025,7 @@ mod tests {
             ],
             executable_ev_buckets: Vec::new(),
             direction_side_audit: Vec::new(),
+            binance_direction_audit: Vec::new(),
         };
 
         let text = format_factor_review_v2_report(&report, 10);
