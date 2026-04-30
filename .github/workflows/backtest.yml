@@ -1,4 +1,4 @@
-name: Backtest pm_5m_directional
+name: Strategy Backtest
 
 on:
   workflow_dispatch:
@@ -137,7 +137,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## PM5D Backtest"
+            echo "## Strategy Backtest"
             echo ""
             echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
             echo "- Config: \`${{ github.event.inputs.config }}\`"

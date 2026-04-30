@@ -1,3 +1,47 @@
+# Strategy-Agnostic CI/CD Framing (2026-04-30)
+
+## Files
+
+- `docs/runbooks/strategy-research-cicd.md`
+  - Owner: generic research/runtime CI/CD architecture and promotion gates.
+- `.github/ISSUE_TEMPLATE/strategy_research.yml`
+  - Owner: strategy-family/profile issue fields and generic hypothesis template.
+- `.github/ISSUE_TEMPLATE/strategy_implementation.yml`
+  - Owner: promoted runtime implementation template.
+- `.github/workflows/backtest.yml`
+  - Owner: generic backtest workflow naming.
+- `.github/workflows/optimize.yml`
+  - Owner: generic optimizer workflow naming.
+- `tests/workflow_security.rs`
+  - Owner: regression guard that generic CI/CD docs/templates stay strategy-agnostic.
+- `tasks/todo.md`
+  - Owner: plan and verification notes.
+
+## Tasks
+
+- [x] Reframe CI/CD as Platform CI, Research CI, Runtime CD, and Promotion Gate.
+- [x] Move PM5D from the main flow into a current-profile example section.
+- [x] Add strategy family/profile fields to research and implementation issue templates.
+- [x] Rename backtest/optimize workflow display names to be strategy-agnostic.
+- [x] Add workflow security regression checks for the generic framing.
+- [x] Run focused verification and push a PR.
+
+## Review
+
+- 2026-04-30: Rewrote the strategy CI/CD runbook around four generic layers:
+  Platform CI, Research CI, Runtime CD, and Promotion Gate. PM5D is now listed
+  only as a current binary-options profile, not as the architecture.
+- 2026-04-30: Added `strategy_family` and `strategy_profile` fields to research
+  and implementation issue templates, and removed PM5D-specific placeholders
+  from the generic issue forms.
+- 2026-04-30: Renamed the backtest and optimize workflow display names to
+  generic strategy terms while preserving their current default configs.
+- 2026-04-30: Verification passed: `rustfmt --edition 2024
+  tests/workflow_security.rs`, `git diff --check`, `/opt/homebrew/bin/timeout
+  180 rtk cargo test --test workflow_security`, and YAML parsing for the touched
+  issue templates/workflows. Local `actionlint` was unavailable; GitHub workflow
+  lint remains the source of truth after push.
+
 # Research Issue Label Automation (2026-04-30)
 
 ## Files

@@ -1,145 +1,189 @@
-# Strategy Research CI/CD Runbook
+# Strategy-Agnostic Research and Runtime CI/CD Runbook
 
-This runbook defines how strategy ideas move from research issues to GitHub
-Actions, evidence, implementation, and deployment decisions.
+This runbook defines the generic path for any strategy family to move from an
+idea to research evidence, implementation, dry-run observation, parity review,
+and promotion or rejection.
 
-## Current Workflow Map
+PM5D is one current strategy profile, not the center of the CI/CD model. New
+families such as sports, copy-trading, market-making, or event-ML should reuse
+the same control loop and add only profile-specific configs, data requirements,
+and verification thresholds.
 
-| Purpose | Workflow | Default role |
+## Four-Layer Model
+
+| Layer | Purpose | Output |
 | --- | --- | --- |
-| PR validation | `.github/workflows/test.yml` | Required correctness gate for code, contracts, frontend, integration, and workflow lint |
-| PM5D factor diagnostics | `.github/workflows/factor-review-v2.yml` | Snapshot-backed factor review on `ploy-ci-1` |
-| PM5D walk-forward diagnostics | `.github/workflows/factor-walk-forward-v2.yml` | Snapshot-backed rolling factor validation |
-| Research snapshot | `.github/workflows/research-snapshot.yml` | Compile reusable research evidence from remote data |
-| Tick-preserving optimization | `.github/workflows/optimize.yml` | Bounded train/validation optimization from a snapshot or explicit live-parquet debug path |
-| PM5D backtest | `.github/workflows/backtest.yml` | Build and run `run_backtest` on `ploy-ci-1` against remote DB or synced Parquet |
-| Replay/dry-run parity | `.github/workflows/replay-dryrun-parity.yml` | Compare replay/backtest artifact evidence against a dry-run JSON report |
-| Event ML rolling evidence | `.github/workflows/event-ml-rolling-evidence.yml` | Produce event-root rolling ML datasets and compact reports |
-| Market data audit | `.github/workflows/market-data-gap-audit.yml` | Scheduled/manual Tango data freshness and gap gate |
-| Image build | `.github/workflows/build-push-acr.yml` | Build ACK images; push only immutable checked-out SHA tags |
-| ACK deploy | `.github/workflows/deploy-ack.yml` | Deploy immutable SHA image tags through the protected `ack` GitHub environment |
-| Tango deploy | `.github/workflows/deploy-tango-1-1.yml` | Ship CI-built artifacts to `tango-1-1` and verify host health |
-| Trade deploy | `.github/workflows/deploy-trade.yml` | Deploy runner/configs to `ploy-trade-1` |
-| Platform release | `.github/workflows/release-platform.yml` | Build platform bundle and optionally deploy it |
+| Platform CI | Prove code, contracts, dependencies, workflow syntax, frontend, and integration lanes are healthy | Mergeable PR |
+| Research CI | Turn a hypothesis into auditable evidence without mutating runtime state | Evidence artifact, issue comment, decision labels |
+| Runtime CD | Deploy only reviewed `main` artifacts to protected environments | Remote health and config verification |
+| Promotion Gate | Reconcile replay expectations with dry-run behavior before scaling risk | `promote`, `collect-more`, `revise`, `fix-*`, or `reject` |
 
-## Research Lifecycle
-
-1. Create a parent strategy issue for a strategy direction, for example
-   `PM5D three-layer factor expansion`.
-2. Create child research issues for individual factors, filters, execution
-   assumptions, data-source checks, or accounting questions.
-3. Run the smallest workflow that can falsify the child issue's hypothesis:
-   `research-snapshot.yml` for reusable evidence, `factor-review-v2.yml` or
-   `factor-walk-forward-v2.yml` for diagnostics, `optimize.yml` for parameter
-   search, and `backtest.yml` for executable replay/backtest checks.
-4. Attach evidence back to the issue: workflow URL, git ref, input window,
-   symbols, config, artifact name, headline metrics, caveats, and decision.
-5. Close rejected ideas with the failure reason. Keep promising ideas open until
-   they are linked to an implementation issue or PR.
-6. Promote only after the research issue has a concrete decision:
-   `continue`, `revise`, `reject`, or `promote to runtime`.
-7. Create a separate implementation issue/PR for runtime changes. Do not mix
-   exploratory research conclusions and deployable runtime edits in one issue.
-8. Deploy only after PR validation passes and the deployment workflow is run
-   from `main`.
-
-## Idea Validation Loop
-
-For a new strategy idea, the default loop is:
+## Generic Control Loop
 
 ```text
-Idea
-  -> define hypothesis and expected edge
-  -> create or update a GitHub research issue
-  -> design the replay/backtest experiment
-  -> run remote workflow on ploy-ci-1/Tango/ACK data
-  -> inspect accounting, labels, fills, quote age, and rejected opportunities
-  -> implement the smallest runtime change needed for dry-run
-  -> deploy dry-run from main through GitHub Actions
-  -> compare replay vs dry-run on the same market/event/time window
-  -> decide: revise idea, fix data/runtime mismatch, keep collecting, or promote
+Idea / hypothesis
+  -> create a research issue
+  -> declare strategy_family, profile, data window, assumptions, and success criteria
+  -> run the smallest research workflow that can falsify the hypothesis
+  -> attach artifact-backed evidence and labels to the issue
+  -> if evidence supports runtime work, create an implementation issue / PR
+  -> PR validation through Platform CI
+  -> merge to protected main
+  -> deploy dry-run from main through protected Runtime CD
+  -> verify remote service, config, persistence, and data freshness
+  -> compare replay/backtest evidence with dry-run evidence
+  -> decide: promote, collect-more, revise, fix-data, fix-runtime, fix-workflow, or reject
 ```
 
 The loop is not complete after a profitable backtest. It is complete only when
-the dry-run behavior can be reconciled against replay expectations or the
-mismatch is understood and turned into the next issue.
+the dry-run behavior is reconciled against replay expectations, or when the
+mismatch is understood and tracked as a follow-up issue.
 
-Required loop gates:
+## Workflow Map
 
-- **Backtest design gate**: define the hypothesis, event window, data sources,
-  execution assumptions, entry/exit rules, stake model, and expected metrics
-  before running the workflow.
-- **Replay evidence gate**: record the workflow run, git ref, config, dataset
-  window, selected events, predicted entries, fills, PnL, quote age, and known
-  data gaps.
-- **Dry-run gate**: deploy only from `main`, keep risk limits explicit, and
-  verify the remote service/config after the workflow completes.
-- **Parity gate**: compare replay and dry-run on event id, decision timestamp,
-  observed quote, signal inputs, intended side, entry price, fill/not-fill,
-  settlement, and PnL.
-- **Decision gate**: close the loop with one of `revise`, `fix-data`,
-  `fix-runtime`, `collect-more`, `reject`, or `promote`.
+| Purpose | Workflow | Default role |
+| --- | --- | --- |
+| PR validation | `.github/workflows/test.yml` | Required Platform CI gate for code, contracts, frontend, integration, dependency audit, and workflow lint |
+| Research snapshot | `.github/workflows/research-snapshot.yml` | Compile reusable research evidence from remote data |
+| Factor diagnostics | `.github/workflows/factor-review-v2.yml` | Snapshot-backed factor review on `ploy-ci-1` |
+| Walk-forward diagnostics | `.github/workflows/factor-walk-forward-v2.yml` | Rolling factor validation across train/test windows |
+| Parameter optimization | `.github/workflows/optimize.yml` | Bounded train/validation optimization from a snapshot or explicit debug data source |
+| Replay/backtest accounting | `.github/workflows/backtest.yml` | Build and run replay/backtest accounting in one job on `ploy-ci-1` |
+| Replay/dry-run parity | `.github/workflows/replay-dryrun-parity.yml` | Compare replay/backtest evidence against a dry-run JSON report |
+| Event ML rolling evidence | `.github/workflows/event-ml-rolling-evidence.yml` | Produce event-root rolling ML datasets and compact reports |
+| Market data audit | `.github/workflows/market-data-gap-audit.yml` | Scheduled/manual Tango data freshness and gap gate |
+| Image build | `.github/workflows/build-push-acr.yml` | Build ACK images; push only immutable checked-out SHA tags |
+| ACK deploy | `.github/workflows/deploy-ack.yml` | Deploy immutable SHA image tags through the protected `ack` environment |
+| Tango deploy | `.github/workflows/deploy-tango-1-1.yml` | Ship CI-built artifacts to `tango-1-1` and verify host health |
+| Trade deploy | `.github/workflows/deploy-trade.yml` | Deploy runner/configs to `ploy-trade-1` through a protected environment |
+| Platform release | `.github/workflows/release-platform.yml` | Build platform bundle and optionally deploy it |
 
-Replay/dry-run mismatches are first-class findings. Do not hide them inside a
-single research report. Open or link a follow-up issue for the specific mismatch:
-data freshness, quote reconstruction, runtime config drift, fill model,
-settlement label, signal timing, or execution friction.
+## Research Issue Contract
 
-## Evidence Contract
+Every research issue must describe one testable claim. Use child issues when a
+strategy direction splits into independent factors, filters, data checks, or
+execution assumptions.
 
-Every research issue should end with an evidence block:
+Required fields:
+
+- `strategy_family`: broad family such as binary-options, sports, copy-trading,
+  market-making, or event-ML.
+- `strategy_profile`: concrete profile/config under test, or `new` if it does
+  not exist yet.
+- `hypothesis`: the single claim this issue should prove or falsify.
+- `expected edge mechanism`: why the idea should survive spread, fees, stale
+  quotes, queue position, settlement, and execution friction.
+- `required data`: tables, symbols, windows, labels, settlement fields, and
+  freshness checks.
+- `workflow plan`: the workflow and exact inputs to run.
+- `success and failure criteria`: thresholds for continue, revise, reject, or
+  promote.
+- `accounting contract`: whether the workflow is exploratory diagnostics or
+  executable strategy accounting.
+- `parity plan`: how replay/backtest behavior will be compared against dry-run
+  behavior.
+
+Evidence block:
 
 ```text
 Evidence:
 - Workflow:
 - Run URL:
 - Git ref:
+- Strategy family/profile:
 - Dataset/window:
-- Symbols:
+- Symbols/markets:
 - Config:
 - Artifact:
 - Headline metrics:
+- Replay/dry-run parity:
 - Caveats:
 - Decision:
 ```
 
 Backtest evidence must explicitly state whether it is exploratory diagnostics or
-executable strategy accounting. For PM5D, one event should not be counted as
-multiple deployable trades just because multiple entry-time rows were observed.
+executable strategy accounting. Event-scoped strategies must not count multiple
+diagnostic rows as multiple deployable trades unless the runtime can execute the
+same entries under the same risk rules.
 
-## CI/CD Architecture
+## Decision Labels
 
-The intended control loop is:
+Research workflows write evidence comments and apply labels so the issue queue
+can be filtered without reading every artifact.
 
-```text
-GitHub issue
-  -> workflow_dispatch with explicit git_ref and inputs
-  -> GitHub Actions run on ubuntu-latest, ploy-ci-1, tango-1-1, or ACK
-  -> structured artifact plus step summary
-  -> issue evidence comment and decision label
-  -> implementation issue / PR when promoted
-  -> PR validation
-  -> main merge
-  -> deploy workflow from main
-  -> remote service/config/health verification
-```
+Evidence labels:
 
-Keep the control planes separate:
+- `evidence:factor-review`
+- `evidence:walk-forward`
+- `evidence:optimize`
+- `evidence:backtest`
+- `evidence:parity`
+- `evidence:missing-artifact`
+- `evidence:missing-metrics`
+
+Decision labels:
+
+- `decision:pending`
+- `decision:continue`
+- `decision:collect-more`
+- `decision:promote`
+- `decision:reject`
+- `decision:revise`
+- `decision:fix-data`
+- `decision:fix-runtime`
+- `decision:fix-workflow`
+
+Parity labels:
+
+- `parity:blocked`
+- `parity:ready`
+
+## Promotion Rules
+
+Do not promote a strategy from research directly to live. Promotion is staged:
+
+1. `decision:promote` on the research issue means it can become an
+   implementation issue or PR.
+2. Runtime code/config changes must pass Platform CI and merge to `main`.
+3. Dry-run deployment must be triggered from `main` through a protected
+   environment.
+4. Remote verification must prove service health, expected config, persistence,
+   data freshness, and no on-host Rust build.
+5. Replay/dry-run parity must either report `strict_parity_ready=true` or create
+   a follow-up issue explaining the mismatch.
+6. Live promotion requires a separate approval with explicit stake, loss, and
+   rollback limits.
+
+## Current Strategy Profiles
+
+Current workflows still include profile defaults for the active binary-options
+line. Treat these as defaults, not architecture:
+
+| Family | Profile/config examples | Notes |
+| --- | --- | --- |
+| binary-options | `02-pm5d-threelayer.*.toml`, `pm5d.threelayer.*.dryrun` | Current most exercised strategy family |
+| event-ML | event-root rolling evidence workflows | Research/data pipeline, not a live strategy by itself |
+
+When adding a new family, update configs and workflow inputs so the family can
+reuse the same evidence, PR, deploy, and parity loop. Do not fork a separate
+CI/CD architecture unless the data plane or runtime target is genuinely
+different.
+
+## Control-Plane Rules
 
 - Research workflows can run on feature branches when they do not mutate
   deployment state.
 - Keep `workflow_dispatch` inputs at or below GitHub's 10-input limit. Put
-  advanced or rarely changed knobs into an `options_json` input, validate keys
-  in the workflow, and fail on unknown options so typoed experiments do not run
-  with silent defaults.
+  advanced or rarely changed knobs into `options_json`, validate keys in the
+  workflow, and fail on unknown options.
 - Deployment workflows that affect `tango-1-1`, `ploy-trade-1`, ACK, or
   production state must run from `main`.
 - Host deployment workflows must be dispatched from `main` with `git_ref=main`
-  before mutating remote state. Tango and trade SSH deploys require pinned
-  `known_hosts` secrets (`TANGO_1_1_KNOWN_HOSTS` and
-  `PLOY_TRADE_1_KNOWN_HOSTS`), not opportunistic host-key acceptance. The
-  entries should be keyed by the workflow aliases `tango-1-1` and
-  `ploy-trade-1` because the deploy SSH config sets `HostKeyAlias`.
+  before mutating remote state.
+- Tango and trade SSH deploys require pinned `known_hosts` secrets
+  (`TANGO_1_1_KNOWN_HOSTS` and `PLOY_TRADE_1_KNOWN_HOSTS`). Entries should be
+  keyed by the workflow aliases `tango-1-1` and `ploy-trade-1` because the deploy
+  SSH config sets `HostKeyAlias`.
 - Remote data and heavy research belong on `ploy-ci-1`, `tango-1-1`, ACK, or
   CI-built artifacts, not local PostgreSQL assumptions.
 - `ploy-ci-1` research workflows read Tango PostgreSQL through GitHub Actions
@@ -147,21 +191,16 @@ Keep the control planes separate:
   endpoint with Aliyun CLI before changing those secrets.
 - ACK/ACR image workflows must use immutable checked-out commit SHA tags only.
   Do not push or deploy `latest`. ACK deployments must also pass through the
-  GitHub `ack` environment, which requires reviewer approval and disables admin
-  bypass before mutating the cluster.
-- Runtime deployment evidence must include remote host verification, not only
-  a successful workflow conclusion.
-- Replay/dry-run parity is promotion evidence only when the parity artifact says
-  `strict_parity_ready=true`. Missing strict fields are a follow-up issue, not a
-  pass.
+  protected `ack` environment before mutating the cluster.
+- Runtime deployment evidence must include remote host verification, not only a
+  successful workflow conclusion.
 
-## Recommended Improvements
+## Remaining Improvements
 
-1. Make the dry-run report expose stricter event-level parity fields when the
-   operator API contract is ready.
-2. Configure repository settings so `main`, `tango-1-1`, `ploy-trade-1`,
-   `production`, and `ploy-ci-1` enforce the same branch/environment policy that
-   the workflow files expect.
-3. Keep ACK workflows marked as cluster/deployment workflows, separate from the
-   current Tango-first PM5D research loop unless ACK becomes the canonical
-   research runner.
+1. Make dry-run reports and replay artifacts expose the same strict event-level
+   fields so parity can become a full proof instead of a readiness gate.
+2. Move family/profile selection into first-class workflow inputs where the
+   implementation currently relies on profile-specific defaults.
+3. Add automated metric parsers for factor, walk-forward, and optimize evidence
+   so workflows can label `decision:collect-more`, `decision:reject`, or
+   `decision:promote` without manual review.
