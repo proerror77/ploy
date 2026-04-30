@@ -1,0 +1,129 @@
+name: Replay Dry-run Parity
+
+on:
+  workflow_dispatch:
+    inputs:
+      replay_run_id:
+        description: "GitHub Actions run id containing a replay/backtest artifact"
+        required: true
+      replay_artifact_name:
+        description: "Artifact name from the replay/backtest run"
+        required: true
+      dryrun_report_url:
+        description: "Dry-run JSON report URL to compare against replay"
+        required: true
+      issue_number:
+        description: "Optional GitHub issue number for posting parity evidence"
+        required: false
+        default: ""
+
+concurrency:
+  group: replay-dryrun-parity-${{ github.event.inputs.replay_run_id }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  parity:
+    name: Compare replay and dry-run evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download replay artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/replay
+          gh run download "${{ github.event.inputs.replay_run_id }}" \
+            --name "${{ github.event.inputs.replay_artifact_name }}" \
+            --dir artifacts/replay
+
+      - name: Fetch dry-run report
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/dryrun
+          curl -fsSL "${{ github.event.inputs.dryrun_report_url }}" \
+            -o artifacts/dryrun/dryrun.json
+
+      - name: Run parity comparison
+        run: |
+          set -euo pipefail
+          python3 scripts/replay_dryrun_parity.py \
+            --replay-json artifacts/replay \
+            --dryrun-json artifacts/dryrun/dryrun.json \
+            --output-json artifacts/parity/parity-evaluation.json
+
+      - name: Publish parity summary
+        if: always()
+        run: |
+          {
+            echo "## Replay vs Dry-run Parity"
+            echo ""
+            echo "- Replay run: ${{ github.event.inputs.replay_run_id }}"
+            echo "- Replay artifact: \`${{ github.event.inputs.replay_artifact_name }}\`"
+            echo "- Dry-run report: ${{ github.event.inputs.dryrun_report_url }}"
+            if [ -f artifacts/parity/parity-evaluation.json ]; then
+              echo "- Artifact: \`replay-dryrun-parity-${{ github.run_id }}\`"
+              echo ""
+              echo '```json'
+              python3 -c 'import json; data=json.load(open("artifacts/parity/parity-evaluation.json")); event=data.get("event_comparison") or {}; print(json.dumps({"decision": data.get("decision"), "risk_flags": data.get("risk_flags"), "strict_parity_ready": event.get("strict_parity_ready"), "missing_strict_fields": event.get("missing_strict_fields"), "shared_event_count": event.get("shared_event_count")}, indent=2, sort_keys=True))'
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload parity evaluation artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: replay-dryrun-parity-${{ github.run_id }}
+          path: artifacts/parity/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Comment parity evidence on issue
+        if: ${{ always() && github.event.inputs.issue_number != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const issue_number = Number("${{ github.event.inputs.issue_number }}");
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            let decision = "missing parity artifact";
+            let flags = [];
+            let strictReady = false;
+            let missingFields = [];
+            if (fs.existsSync("artifacts/parity/parity-evaluation.json")) {
+              const data = JSON.parse(fs.readFileSync("artifacts/parity/parity-evaluation.json", "utf8"));
+              decision = data.decision || decision;
+              flags = data.risk_flags || [];
+              strictReady = Boolean(data.event_comparison?.strict_parity_ready);
+              missingFields = data.event_comparison?.missing_strict_fields || [];
+            }
+            const body = [
+              "Replay/dry-run parity evidence:",
+              "",
+              `- Workflow: ${context.workflow}`,
+              `- Run URL: ${runUrl}`,
+              `- Replay run: ${{ github.event.inputs.replay_run_id }}`,
+              `- Replay artifact: \`${{ github.event.inputs.replay_artifact_name }}\``,
+              `- Dry-run report: ${{ github.event.inputs.dryrun_report_url }}`,
+              `- Artifact: \`replay-dryrun-parity-${process.env.GITHUB_RUN_ID}\``,
+              `- Strict parity ready: \`${strictReady}\``,
+              `- Missing strict fields: \`${missingFields.join(", ") || "none"}\``,
+              `- Caveats: \`${flags.join(", ") || "none"}\``,
+              `- Decision: ${decision}`
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body
+            });

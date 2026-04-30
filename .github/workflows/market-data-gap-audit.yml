@@ -123,11 +123,13 @@ jobs:
             *) echo "invalid fail_on value: ${fail_on}" >&2; exit 1 ;;
           esac
 
-          echo "run_full=${run_full}" >> "$GITHUB_OUTPUT"
-          echo "lookback_hours=${lookback_hours}" >> "$GITHUB_OUTPUT"
-          echo "bucket_minutes=${bucket_minutes}" >> "$GITHUB_OUTPUT"
-          echo "symbols=${symbols}" >> "$GITHUB_OUTPUT"
-          echo "fail_on=${fail_on}" >> "$GITHUB_OUTPUT"
+          {
+            echo "run_full=${run_full}"
+            echo "lookback_hours=${lookback_hours}"
+            echo "bucket_minutes=${bucket_minutes}"
+            echo "symbols=${symbols}"
+            echo "fail_on=${fail_on}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Run remote gap audits
         env:
@@ -146,6 +148,7 @@ jobs:
             local remote_file="${remote_dir}/${audit_kind}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
             local local_file="artifacts/market-data-gap-audit/${audit_kind}.json"
 
+            # shellcheck disable=SC2029
             ssh tango-1-1 \
               "DEPLOY_ROOT='${DEPLOY_ROOT}' AUDIT_KIND='${audit_kind}' LOOKBACK_HOURS='${lookback_hours}' BUCKET_MINUTES='${BUCKET_MINUTES}' SYMBOLS='${SYMBOLS}' REMOTE_FILE='${remote_file}' /bin/bash -s" <<'EOF'
           set -euo pipefail

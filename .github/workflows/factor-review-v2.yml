@@ -35,61 +35,14 @@ on:
         description: "Maximum PM quote age"
         required: false
         default: "30"
-      top_n:
-        description: "Number of factor rows to print"
-        required: false
-        default: "50"
-      min_observations:
-        description: "Minimum observations for a factor"
-        required: false
-        default: "20"
-      top_quantile:
-        description: "Selected quantile for execution metrics"
-        required: false
-        default: "0.2"
       snapshot_run_id:
         description: "Optional Research Snapshot workflow run id to consume"
         required: false
         default: ""
-      compile_snapshot:
-        description: "Compile a fresh snapshot before review when snapshot_run_id is empty"
+      options_json:
+        description: "Advanced options JSON: top_n, snapshot/data/audit settings, issue_number"
         required: false
-        default: "true"
-      allow_direct_db_debug:
-        description: "Allow non-canonical direct DB review when no snapshot is present"
-        required: false
-        default: "false"
-      optimizer_data_dir:
-        description: "Immutable parquet-feed dir recorded in compiled snapshot manifests"
-        required: false
-        default: "/tmp/ploy-parquet"
-      data_profile:
-        description: "Project data requirements profile for fresh snapshots"
-        type: choice
-        required: true
-        default: "pm5d-execution"
-        options:
-          - pm5d-execution
-          - pm5d-vol
-          - all
-          - custom
-      custom_required_sources:
-        description: "Comma-separated sources when data_profile=custom"
-        required: false
-        default: ""
-      audit_lookback_hours:
-        description: "Market-data audit lookback in hours"
-        required: false
-        default: "168"
-      data_gate:
-        description: "Fail threshold for required-source audit"
-        type: choice
-        required: true
-        default: "never"
-        options:
-          - critical
-          - warn
-          - never
+        default: '{"top_n":50,"min_observations":20,"top_quantile":0.2,"compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","issue_number":""}'
 
 concurrency:
   group: factor-review-v2-${{ github.ref }}
@@ -98,6 +51,7 @@ concurrency:
 permissions:
   contents: read
   actions: read
+  issues: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -127,10 +81,70 @@ jobs:
       - name: Add cargo to PATH
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Ensure psql client
-        if: ${{ github.event.inputs.snapshot_run_id == '' && github.event.inputs.compile_snapshot == 'true' }}
+      - name: Parse advanced options
+        env:
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          defaults = {
+              "top_n": "50",
+              "min_observations": "20",
+              "top_quantile": "0.2",
+              "compile_snapshot": "true",
+              "allow_direct_db_debug": "false",
+              "optimizer_data_dir": "/tmp/ploy-parquet",
+              "data_profile": "pm5d-execution",
+              "custom_required_sources": "",
+              "audit_lookback_hours": "168",
+              "data_gate": "never",
+              "issue_number": "",
+          }
+          bool_keys = {"compile_snapshot", "allow_direct_db_debug"}
+          choices = {
+              "data_profile": {"pm5d-execution", "pm5d-vol", "all", "custom"},
+              "data_gate": {"critical", "warn", "never"},
+          }
+          raw = os.environ.get("OPTIONS_JSON", "").strip()
+          data = json.loads(raw) if raw else {}
+          if not isinstance(data, dict):
+              raise SystemExit("options_json must be a JSON object")
+          unknown = sorted(set(data) - set(defaults))
+          if unknown:
+              raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+
+          values = dict(defaults)
+          for key, value in data.items():
+              if key in bool_keys:
+                  if isinstance(value, bool):
+                      values[key] = "true" if value else "false"
+                  elif str(value).lower() in {"true", "false"}:
+                      values[key] = str(value).lower()
+                  else:
+                      raise SystemExit(f"options_json value for {key} must be boolean")
+              else:
+                  values[key] = str(value)
+              if key in choices and values[key] not in choices[key]:
+                  allowed = ", ".join(sorted(choices[key]))
+                  raise SystemExit(f"options_json value for {key} must be one of: {allowed}")
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              for key, value in values.items():
+                  if "\n" in value:
+                      raise SystemExit(f"options_json value for {key} must be single-line")
+                  handle.write(f"FACTOR_{key.upper()}={value}\n")
+          PY
+
+      - name: Ensure psql client
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.snapshot_run_id }}" ] || [ "${FACTOR_COMPILE_SNAPSHOT}" != "true" ]; then
+            echo "No fresh snapshot requested; skipping psql client check."
+            exit 0
+          fi
           if command -v psql >/dev/null 2>&1; then
             psql --version
             exit 0
@@ -145,12 +159,10 @@ jobs:
 
       - name: Resolve data requirements
         id: data_scope
-        if: ${{ github.event.inputs.snapshot_run_id == '' && github.event.inputs.compile_snapshot == 'true' }}
-        env:
-          DATA_PROFILE: ${{ github.event.inputs.data_profile }}
-          CUSTOM_REQUIRED_SOURCES: ${{ github.event.inputs.custom_required_sources }}
         run: |
           set -euo pipefail
+          DATA_PROFILE="${FACTOR_DATA_PROFILE}"
+          CUSTOM_REQUIRED_SOURCES="${FACTOR_CUSTOM_REQUIRED_SOURCES}"
           case "${DATA_PROFILE}" in
             pm5d-execution)
               required_sources="polymarket_quotes,polymarket_orderbooks,binance_price,binance_agg_trades,binance_lob"
@@ -185,13 +197,17 @@ jobs:
 
       - name: Audit required market data
         id: data_audit
-        if: ${{ github.event.inputs.snapshot_run_id == '' && github.event.inputs.compile_snapshot == 'true' }}
         env:
           REQUIRED_SOURCES: ${{ steps.data_scope.outputs.required_sources }}
-          AUDIT_LOOKBACK_HOURS: ${{ github.event.inputs.audit_lookback_hours }}
-          DATA_GATE: ${{ github.event.inputs.data_gate }}
         run: |
           set -euo pipefail
+          AUDIT_LOOKBACK_HOURS="${FACTOR_AUDIT_LOOKBACK_HOURS}"
+          export DATA_GATE="${FACTOR_DATA_GATE}"
+          if [ -n "${{ github.event.inputs.snapshot_run_id }}" ] || [ "${FACTOR_COMPILE_SNAPSHOT}" != "true" ]; then
+            echo "No fresh snapshot requested; skipping scoped data audit."
+            echo "overall_status=skipped" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
           mkdir -p artifacts/research-snapshot
           PLOY_DATABASE__URL="${PLOY_DB_URL:?PLOY_DB_URL secret is required}" \
             scripts/audit_market_data_gaps.py \
@@ -275,9 +291,12 @@ jobs:
             --require quality.md
 
       - name: Compile research snapshot
-        if: ${{ github.event.inputs.snapshot_run_id == '' && github.event.inputs.compile_snapshot == 'true' }}
         run: |
           set -euo pipefail
+          if [ -n "${{ github.event.inputs.snapshot_run_id }}" ] || [ "${FACTOR_COMPILE_SNAPSHOT}" != "true" ]; then
+            echo "No fresh snapshot requested; skipping snapshot compile."
+            exit 0
+          fi
           deribit_args=()
           if [ "${{ steps.data_scope.outputs.include_deribit }}" != "true" ]; then
             deribit_args+=(--skip-deribit)
@@ -293,7 +312,7 @@ jobs:
             --observation-sample-secs "${{ github.event.inputs.observation_sample_secs }}" \
             --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
             --output-dir artifacts/research-snapshot \
-            --optimizer-data-dir "${{ github.event.inputs.optimizer_data_dir }}" \
+            --optimizer-data-dir "${FACTOR_OPTIMIZER_DATA_DIR}" \
             --data-requirements "${{ steps.data_scope.outputs.required_sources }}" \
             --data-audit-status "${{ steps.data_audit.outputs.overall_status }}" \
             --data-audit-report data-gap-audit.json \
@@ -308,7 +327,7 @@ jobs:
           if [ -f artifacts/research-snapshot/manifest.json ]; then
             source_args=(--snapshot-dir artifacts/research-snapshot)
             echo "canonical_result=snapshot" | tee artifacts/factor-review-v2/source.txt
-          elif [ "${{ github.event.inputs.allow_direct_db_debug }}" = "true" ]; then
+          elif [ "${FACTOR_ALLOW_DIRECT_DB_DEBUG}" = "true" ]; then
             source_args=(--db-url "${PLOY_DB_URL:?PLOY_DB_URL secret is required}" --allow-direct-db-debug)
             echo "canonical_result=no direct_db_debug=true" | tee artifacts/factor-review-v2/source.txt
           else
@@ -324,9 +343,9 @@ jobs:
             --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
             --observation-sample-secs "${{ github.event.inputs.observation_sample_secs }}" \
             --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
-            --min-observations "${{ github.event.inputs.min_observations }}" \
-            --top-quantile "${{ github.event.inputs.top_quantile }}" \
-            --top-n "${{ github.event.inputs.top_n }}" \
+            --min-observations "${FACTOR_MIN_OBSERVATIONS}" \
+            --top-quantile "${FACTOR_TOP_QUANTILE}" \
+            --top-n "${FACTOR_TOP_N}" \
             | tee artifacts/factor-review-v2/report.txt
 
       - name: Publish summary
@@ -367,3 +386,33 @@ jobs:
             artifacts/factor-review-v2/
             artifacts/research-snapshot/
           retention-days: 14
+
+      - name: Comment factor evidence on issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumberRaw = process.env.FACTOR_ISSUE_NUMBER || "";
+            if (!issueNumberRaw) {
+              core.info("No issue_number configured in options_json; skipping issue comment.");
+              return;
+            }
+            const issue_number = Number(issueNumberRaw);
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const body = [
+              "Factor review evidence:",
+              "",
+              `- Workflow: ${context.workflow}`,
+              `- Run URL: ${runUrl}`,
+              `- Git ref: ${{ github.event.inputs.git_ref }}`,
+              `- Dataset/window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}`,
+              `- Symbols: ${{ github.event.inputs.symbols }}`,
+              `- Artifact: \`factor-review-v2-${process.env.GITHUB_RUN_ID}\``,
+              "- Decision: pending"
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body
+            });

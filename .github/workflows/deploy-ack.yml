@@ -4,23 +4,67 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Image tag to deploy (SHA or 'latest')"
+        description: "Immutable 40-character image SHA tag to deploy"
         required: true
-        default: "latest"
+        default: ""
+      provenance_ref:
+        description: "Reviewed provenance ref containing image_tag (main, release/*, or version tag)"
+        required: true
+        default: "main"
       component:
         description: "Component to deploy (all/ployd/strategy/collectors)"
         required: true
         default: "all"
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
     name: Deploy to ACK cluster
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment: ack
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Validate immutable image tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image_tag="${{ github.event.inputs.image_tag }}"
+          provenance_ref="${{ github.event.inputs.provenance_ref }}"
+          if [ -z "${image_tag}" ]; then
+            echo "image_tag is required and must be the immutable SHA tag produced by build-push-acr.yml" >&2
+            exit 1
+          fi
+          if [ "${image_tag}" = "latest" ]; then
+            echo "ACK deploy cannot use mutable latest image tags" >&2
+            exit 1
+          fi
+          if ! printf '%s' "${image_tag}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "image_tag must be a full 40-character lowercase git SHA tag" >&2
+            exit 1
+          fi
+          case "${provenance_ref}" in
+            main|release/*|v[0-9]*)
+              ;;
+            *)
+              echo "provenance_ref must be main, release/*, or a version tag" >&2
+              exit 1
+              ;;
+          esac
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${image_tag}...${provenance_ref}" --jq .status)"
+          case "${status}" in
+            ahead|identical)
+              ;;
+            *)
+              echo "image_tag ${image_tag} is not contained in provenance ref ${provenance_ref}" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
