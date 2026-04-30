@@ -1,3 +1,40 @@
+# CI/CD Deployment Hardening (2026-04-30)
+
+## Files
+
+- `.github/workflows/deploy-tango-1-1.yml`
+  - Owner: main-only Tango deployment provenance and pinned SSH host verification.
+- `.github/workflows/deploy-trade.yml`
+  - Owner: protected trade deployment, default-safe dispatch, and pinned SSH host verification.
+- `tests/workflow_security.rs`
+  - Owner: regression guards for host deploy workflow policy.
+- `docs/runbooks/strategy-research-cicd.md`
+  - Owner: CI/CD runbook updates for deploy provenance and host-key policy.
+- `tasks/todo.md`
+  - Owner: plan and verification notes.
+
+## Tasks
+
+- [x] Add a hard deploy gate requiring workflow dispatch from `main` with `git_ref=main`.
+- [x] Require pinned SSH `known_hosts` secrets for Tango and trade deploys.
+- [x] Put trade deploy behind a dedicated GitHub environment and default real deploys to false.
+- [x] Add workflow security tests for deploy provenance and SSH host-key verification.
+- [x] Run focused workflow security verification and push the PR update.
+
+## Review
+
+- 2026-04-30: Added deploy-time provenance gates to Tango and trade workflows:
+  real deployment now requires the workflow dispatch branch and checked-out
+  `git_ref` to both resolve to `origin/main`.
+- 2026-04-30: Replaced disabled SSH host verification with required pinned
+  `known_hosts` secrets and `HostKeyAlias` for `tango-1-1` and `ploy-trade-1`.
+  Trade deploy now uses the `ploy-trade-1` GitHub environment and defaults
+  `deploy=false`.
+- 2026-04-30: Verification passed: `git diff --check` and
+  `/opt/homebrew/bin/timeout 180 rtk cargo test --test workflow_security`.
+  Local `actionlint` was unavailable; GitHub workflow lint remains the source
+  of truth after push.
+
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
 ## Files

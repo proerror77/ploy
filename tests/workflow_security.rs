@@ -282,6 +282,62 @@ fn release_platform_workflow_pins_host_fingerprints() {
 }
 
 #[test]
+fn host_deploy_workflows_require_main_provenance_and_pinned_ssh() {
+    let tango = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
+    let trade = workflow_contents(".github/workflows/deploy-trade.yml");
+    let mut offenders = Vec::new();
+
+    for (name, content, environment, known_hosts_secret) in [
+        (
+            "deploy-tango-1-1.yml",
+            &tango,
+            "environment: tango-1-1",
+            "TANGO_1_1_KNOWN_HOSTS",
+        ),
+        (
+            "deploy-trade.yml",
+            &trade,
+            "environment: ploy-trade-1",
+            "PLOY_TRADE_1_KNOWN_HOSTS",
+        ),
+    ] {
+        if !content.contains(environment) {
+            offenders.push(format!("{name}: missing protected deployment environment"));
+        }
+        if !content.contains("Validate deploy provenance") {
+            offenders.push(format!("{name}: missing deploy provenance validation step"));
+        }
+        if !content.contains("must dispatch the workflow from main")
+            || !content.contains("must use git_ref=main")
+            || !content.contains("does not match origin/main")
+        {
+            offenders.push(format!("{name}: deployment is not hard-gated to main provenance"));
+        }
+        if content.contains("StrictHostKeyChecking no")
+            || content.contains("UserKnownHostsFile /dev/null")
+        {
+            offenders.push(format!("{name}: disables SSH host-key verification"));
+        }
+        if !content.contains("StrictHostKeyChecking yes")
+            || !content.contains("UserKnownHostsFile ~/.ssh/known_hosts")
+            || !content.contains(known_hosts_secret)
+        {
+            offenders.push(format!("{name}: missing pinned known_hosts SSH verification"));
+        }
+    }
+
+    if !trade.contains("default: false") {
+        offenders.push("deploy-trade.yml: live trade deploy should default deploy=false".to_string());
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "host deploy workflow hardening check failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn checked_in_platform_service_enforces_guardrails() {
     let content = workflow_contents("deployment/ployd.service");
     let required = [

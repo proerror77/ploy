@@ -134,6 +134,12 @@ Keep the control planes separate:
   with silent defaults.
 - Deployment workflows that affect `tango-1-1`, `ploy-trade-1`, ACK, or
   production state must run from `main`.
+- Host deployment workflows must be dispatched from `main` with `git_ref=main`
+  before mutating remote state. Tango and trade SSH deploys require pinned
+  `known_hosts` secrets (`TANGO_1_1_KNOWN_HOSTS` and
+  `PLOY_TRADE_1_KNOWN_HOSTS`), not opportunistic host-key acceptance. The
+  entries should be keyed by the workflow aliases `tango-1-1` and
+  `ploy-trade-1` because the deploy SSH config sets `HostKeyAlias`.
 - Remote data and heavy research belong on `ploy-ci-1`, `tango-1-1`, ACK, or
   CI-built artifacts, not local PostgreSQL assumptions.
 - `ploy-ci-1` research workflows read Tango PostgreSQL through GitHub Actions
@@ -154,6 +160,9 @@ Keep the control planes separate:
 1. Add label automation for research decisions after evidence is posted.
 2. Make the dry-run report expose stricter event-level parity fields when the
    operator API contract is ready.
-3. Keep ACK workflows marked as cluster/deployment workflows, separate from the
+3. Configure repository settings so `main`, `tango-1-1`, `ploy-trade-1`,
+   `production`, and `ploy-ci-1` enforce the same branch/environment policy that
+   the workflow files expect.
+4. Keep ACK workflows marked as cluster/deployment workflows, separate from the
    current Tango-first PM5D research loop unless ACK becomes the canonical
    research runner.
