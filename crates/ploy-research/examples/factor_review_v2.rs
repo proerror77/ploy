@@ -14,20 +14,23 @@
 //!     [--lob-sample-secs 5] \
 //!     [--observation-sample-secs 30] \
 //!     [--max-quote-age-secs 30] \
-//!     [--top-n 20]
+//!     [--top-n 20] \
+//!     [--git-ref main] \
+//!     [--output-json artifacts/factor-review-v2/evaluation.json]
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
-    FactorObservation, FactorReviewOptions, ResearchSnapshotRequest,
-    build_factor_observations_with_lob_sampled, format_factor_review_v2_report,
-    load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
-    load_research_pm_book_snapshots_sampled, load_research_snapshot,
-    review_factors_v2_with_deribit_and_pm_books, validate_snapshot_request,
+    FactorObservation, FactorReviewOptions, FactorReviewV2Report, ResearchSnapshotManifest,
+    ResearchSnapshotRequest, build_factor_observations_with_lob_sampled,
+    format_factor_review_v2_report, load_deribit_feature_snapshots,
+    load_research_lob_snapshots_sampled, load_research_pm_book_snapshots_sampled,
+    load_research_snapshot, review_factors_v2_with_deribit_and_pm_books, validate_snapshot_request,
 };
+use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
-use std::time::Duration;
+use std::{fs::File, path::Path, path::PathBuf, time::Duration};
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2)
@@ -57,6 +60,37 @@ fn parse_date_end(raw: &str) -> DateTime<Utc> {
 fn parse_timestamp(raw: &str) -> DateTime<Utc> {
     raw.parse::<DateTime<Utc>>()
         .unwrap_or_else(|_| panic!("invalid timestamp: {raw}"))
+}
+
+#[derive(Debug, Serialize)]
+struct FactorReviewWindow {
+    start: DateTime<Utc>,
+    end_exclusive: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct FactorReviewAccountingContract {
+    stake_usd: f64,
+    settlement_basis: &'static str,
+    fillability_basis: &'static str,
+    pnl_basis: &'static str,
+    cost_basis: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct FactorReviewV2Artifact<'a> {
+    schema_version: u32,
+    artifact_type: &'static str,
+    producer: &'static str,
+    generated_at: DateTime<Utc>,
+    git_ref: Option<&'a str>,
+    window: FactorReviewWindow,
+    symbols: &'a [String],
+    accounting_contract: FactorReviewAccountingContract,
+    canonical_result: &'a str,
+    risk_flags: Vec<String>,
+    snapshot_manifest: Option<&'a ResearchSnapshotManifest>,
+    report: &'a FactorReviewV2Report,
 }
 
 fn slice_by_time<T, F>(items: &[T], start: DateTime<Utc>, end: DateTime<Utc>, ts_fn: F) -> &[T]
@@ -101,6 +135,8 @@ async fn main() {
     let top_n: usize = flag_value(&args, "--top-n")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(20);
+    let git_ref = flag_value(&args, "--git-ref");
+    let output_json = flag_value(&args, "--output-json").map(PathBuf::from);
     let options = FactorReviewOptions {
         stake_usd: flag_value(&args, "--stake-usd")
             .and_then(|raw| raw.parse().ok())
@@ -125,6 +161,7 @@ async fn main() {
         std::process::exit(2);
     }
     let mut snapshot_provenance: Option<String> = None;
+    let mut snapshot_manifest: Option<ResearchSnapshotManifest> = None;
     let (observations, deribit_snapshots, all_pm_book_snapshots): (
         Vec<FactorObservation>,
         Vec<_>,
@@ -189,6 +226,7 @@ async fn main() {
                 .unwrap_or("<not-recorded>"),
             snapshot.manifest.include_deribit
         ));
+        snapshot_manifest = Some(snapshot.manifest.clone());
         (
             snapshot.observations,
             snapshot.deribit_snapshots,
@@ -300,6 +338,11 @@ async fn main() {
         eprintln!("factor_observations: {}", observations.len());
         (observations, deribit_snapshots, all_pm_book_snapshots)
     };
+    let canonical_result = if snapshot_manifest.is_some() {
+        "snapshot"
+    } else {
+        "direct_db_debug"
+    };
 
     if observations.is_empty() {
         eprintln!("no observations — check date range, symbols, quote coverage, and settlements");
@@ -312,8 +355,109 @@ async fn main() {
         &all_pm_book_snapshots,
         options,
     );
+    if let Some(output_json) = output_json.as_deref() {
+        write_factor_review_artifact(
+            output_json,
+            &report,
+            start,
+            end,
+            &symbols,
+            git_ref.as_deref(),
+            canonical_result,
+            snapshot_manifest.as_ref(),
+        );
+    }
     if let Some(snapshot_provenance) = snapshot_provenance {
         println!("{snapshot_provenance}");
     }
     println!("{}", format_factor_review_v2_report(&report, top_n));
+}
+
+fn write_factor_review_artifact(
+    path: &Path,
+    report: &FactorReviewV2Report,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    symbols: &[String],
+    git_ref: Option<&str>,
+    canonical_result: &str,
+    snapshot_manifest: Option<&ResearchSnapshotManifest>,
+) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|err| panic!("create output dir {} failed: {err}", parent.display()));
+    }
+    let artifact = FactorReviewV2Artifact {
+        schema_version: 1,
+        artifact_type: "factor_review_v2_evaluation",
+        producer: "factor_review_v2",
+        generated_at: Utc::now(),
+        git_ref,
+        window: FactorReviewWindow {
+            start,
+            end_exclusive: end,
+        },
+        symbols,
+        accounting_contract: FactorReviewAccountingContract {
+            stake_usd: report.options.stake_usd,
+            settlement_basis: "official_polymarket_settlement_required",
+            fillability_basis: "prefer_full_depth_entry_fillable_else_top_book",
+            pnl_basis: "prefer_full_depth_executable_pnl_15u_else_top_book_executable_pnl_15u",
+            cost_basis: "entry_crypto_fee_plus_full_depth_sweep_slippage_when_available",
+        },
+        canonical_result,
+        risk_flags: factor_review_risk_flags(report, canonical_result, snapshot_manifest),
+        snapshot_manifest,
+        report,
+    };
+    let file =
+        File::create(path).unwrap_or_else(|err| panic!("create {} failed: {err}", path.display()));
+    serde_json::to_writer_pretty(file, &artifact)
+        .unwrap_or_else(|err| panic!("write {} failed: {err}", path.display()));
+    eprintln!("factor_review_v2_artifact={}", path.display());
+}
+
+fn factor_review_risk_flags(
+    report: &FactorReviewV2Report,
+    canonical_result: &str,
+    snapshot_manifest: Option<&ResearchSnapshotManifest>,
+) -> Vec<String> {
+    let mut flags = Vec::new();
+    if canonical_result != "snapshot" {
+        flags.push("non_canonical_direct_db_debug".to_string());
+    }
+    if snapshot_manifest.is_some_and(|manifest| !manifest.require_official_settlement) {
+        flags.push("snapshot_without_official_settlement".to_string());
+    }
+    if report.health.v2_rows == 0 {
+        flags.push("no_v2_rows".to_string());
+    }
+    if report.health.executable_pnl_rows == 0 && report.health.full_depth_executable_pnl_rows == 0 {
+        flags.push("no_executable_pnl_rows".to_string());
+    }
+    if report.health.full_depth_entry_fill_rate() < 0.05 {
+        flags.push("low_full_depth_entry_fill_rate".to_string());
+    }
+    if !report
+        .executable_ev_buckets
+        .iter()
+        .any(|bucket| bucket.statistically_supported)
+    {
+        flags.push("no_statistically_supported_positive_ev_bucket".to_string());
+    }
+    if report
+        .executable_ev_buckets
+        .iter()
+        .any(|bucket| bucket.positive_ev)
+        && !report
+            .executable_ev_buckets
+            .iter()
+            .any(|bucket| bucket.positive_ev && !bucket.underpowered)
+    {
+        flags.push("positive_ev_buckets_underpowered_only".to_string());
+    }
+    flags
 }

@@ -33,8 +33,8 @@ pub use dataset::{
 };
 #[cfg(feature = "db")]
 pub use deribit::{
-    load_deribit_feature_snapshots, load_deribit_feature_snapshots_with_timings,
-    DeribitFeatureLoadResult,
+    DeribitFeatureLoadResult, load_deribit_feature_snapshots,
+    load_deribit_feature_snapshots_with_timings,
 };
 pub use event_ml::{
     ArchitectureArtifact, EVENT_ML_ARCHITECTURE_VERSION, EventMlArchitecture, LaneReadiness,
@@ -58,13 +58,14 @@ pub use factors::{
     load_research_pm_book_snapshots_sampled,
 };
 pub use replay::replay_fills;
-#[cfg(feature = "db")]
-pub use research_snapshot::{build_research_snapshot_from_database, ResearchSnapshotBuildOptions};
 pub use research_snapshot::{
-    load_research_snapshot, validate_snapshot_request, write_research_snapshot, ResearchSnapshot,
-    ResearchSnapshotArtifacts, ResearchSnapshotManifest, ResearchSnapshotPhaseTiming,
-    ResearchSnapshotRequest, ResearchSnapshotRowCounts, RESEARCH_SNAPSHOT_SCHEMA_VERSION,
+    RESEARCH_SNAPSHOT_SCHEMA_VERSION, ResearchSnapshot, ResearchSnapshotArtifacts,
+    ResearchSnapshotManifest, ResearchSnapshotPhaseTiming, ResearchSnapshotRequest,
+    ResearchSnapshotRowCounts, load_research_snapshot, validate_snapshot_request,
+    write_research_snapshot,
 };
+#[cfg(feature = "db")]
+pub use research_snapshot::{ResearchSnapshotBuildOptions, build_research_snapshot_from_database};
 
 pub const CRATE_MARKER: &str = "ploy-research";
 
@@ -84,11 +85,11 @@ pub use factors_new::{
     scan_into_registry,
 };
 pub use factors_v2::{
-    DataHealthReport, DeribitFeatureSnapshot, FactorComboComponent, FactorComboV1Aggregate,
-    FactorComboV1Options, FactorComboV1Report, FactorComboV1Window, FactorFamily,
-    FactorObservationV2, FactorReviewOptions, FactorReviewV2Report, FactorSelectionMetrics,
-    FactorStabilityDecision, FactorStabilityOptions, FactorStabilityReport, FactorStabilityRow,
-    FactorV2Descriptor, FactorWalkForwardAggregate, FactorWalkForwardOptions,
+    DataHealthReport, DeribitFeatureSnapshot, ExecutableEvBucketSummary, FactorComboComponent,
+    FactorComboV1Aggregate, FactorComboV1Options, FactorComboV1Report, FactorComboV1Window,
+    FactorFamily, FactorObservationV2, FactorReviewOptions, FactorReviewV2Report,
+    FactorSelectionMetrics, FactorStabilityDecision, FactorStabilityOptions, FactorStabilityReport,
+    FactorStabilityRow, FactorV2Descriptor, FactorWalkForwardAggregate, FactorWalkForwardOptions,
     FactorWalkForwardReport, FactorWalkForwardWindow, FillabilityBucketRow, FillabilityDecision,
     FillabilityReviewOptions, FillabilityReviewReport, LiquidityGateV1Options,
     LiquidityGateV1Report, LiquidityGatedAlphaV1Options, LiquidityGatedAlphaV1Report,
