@@ -18,7 +18,7 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Print the audit in text reports and persist it in `evaluation.json`.
 - [x] Add focused tests for predictive and inverted CEX direction buckets.
 - [x] Run focused local verification.
-- [ ] Push PR and rerun Factor Review V2 on `ploy-ci-1`.
+- [x] Push PR and rerun Factor Review V2 on `ploy-ci-1`.
 
 ## Review
 
@@ -38,6 +38,20 @@ Issue: https://github.com/proerror77/ploy/issues/256
   ploy-research factors_v2 --lib`, `CARGO_TARGET_DIR=/tmp/ploy-binance-direction-audit
   rtk cargo check -p ploy-research --features db,polars-export --example
   factor_review_v2`, and `git diff --check`.
+- 2026-05-01: PR #262 CI passed, and Factor Review V2 run `25193234029`
+  produced artifact `factor-review-v2-25193234029`. The new Binance/CEX-only
+  audit found supported direction buckets before using Polymarket prices:
+  `cex_bar_return_60s_side` top quantile had `4866` settlement rows, `66.81%`
+  win rate, `+16.81pp` lift, and `t=23.45`; `cex_consecutive_bar_side` top
+  quantile had `66.44%` win rate and `t=22.94`; `cex_bar_return_30s_side`
+  top quantile had `63.71%` win rate and `t=19.12`. The same artifact still
+  shows the old model-probability/edge side selector is wrong for execution:
+  `model_probability/all` favored-side avg PnL was `-6.48` while the opposite
+  side was `+2.80`, and `model_edge/all` favored-side avg PnL was `-3.16`
+  while the opposite side was `+2.15`. Research should therefore build the
+  next candidate from supported CEX direction buckets plus a separately
+  calibrated PM mispricing/executable-EV gate, not from the old
+  `model_prob_up - ask` selector.
 
 # PM5D Side Direction Audit (2026-05-01)
 
