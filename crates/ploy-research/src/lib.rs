@@ -46,9 +46,9 @@ pub use attribution::{AttributionReport, RegimePnl, factor_pnl, regime_pnl};
 pub use backtest::{BacktestMetrics, SimulatedFill, run_binary_backtest};
 pub use factors_new::{FactorMeta, FactorRegistry, scan_into_registry};
 pub use factors_v2::{
-    DataHealthReport, DeribitFeatureSnapshot, FactorFamily, FactorObservationV2,
-    FactorReviewOptions, FactorReviewV2Report, FactorV2Descriptor, ReviewSide, SingleFactorReview,
-    ThreeLayerArchive, build_data_health_report, build_factor_observations_v2,
+    DataHealthReport, DeribitFeatureSnapshot, ExecutableEvBucketSummary, FactorFamily,
+    FactorObservationV2, FactorReviewOptions, FactorReviewV2Report, FactorV2Descriptor, ReviewSide,
+    SingleFactorReview, ThreeLayerArchive, build_data_health_report, build_factor_observations_v2,
     build_factor_observations_v2_with_deribit, factor_v2_descriptors,
     format_factor_review_v2_report, review_factors_v2, review_factors_v2_with_deribit,
 };

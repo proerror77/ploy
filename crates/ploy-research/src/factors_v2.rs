@@ -275,10 +275,37 @@ pub struct SingleFactorReview {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ExecutableEvBucketSummary {
+    pub dimension: String,
+    pub bucket: String,
+    pub rows: usize,
+    pub fillable_rows: usize,
+    pub fill_rate: f64,
+    pub pnl_rows: usize,
+    pub total_pnl_15u: f64,
+    pub avg_pnl_15u: f64,
+    pub roi_on_stake: f64,
+    pub t_stat: f64,
+    pub underpowered: bool,
+    pub positive_ev: bool,
+    pub statistically_supported: bool,
+    pub avg_side_model_prob: f64,
+    pub avg_side_model_edge: f64,
+    pub avg_entry_ask: f64,
+    pub avg_exit_bid: f64,
+    pub avg_pm_lag_secs: f64,
+    pub avg_entry_capacity_ratio: f64,
+    pub avg_entry_liquidity_usd: f64,
+    pub avg_exit_liquidity_usd: f64,
+    pub avg_liquidity_shortfall_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct FactorReviewV2Report {
     pub options: FactorReviewOptions,
     pub health: DataHealthReport,
     pub reviews: Vec<SingleFactorReview>,
+    pub executable_ev_buckets: Vec<ExecutableEvBucketSummary>,
 }
 
 pub fn build_factor_observations_v2(
@@ -809,10 +836,12 @@ pub fn review_factors_v2_with_deribit(
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     });
+    let executable_ev_buckets = build_executable_ev_buckets(&v2_rows, &options);
     FactorReviewV2Report {
         options,
         health,
         reviews,
+        executable_ev_buckets,
     }
 }
 
@@ -869,7 +898,350 @@ pub fn format_factor_review_v2_report(report: &FactorReviewV2Report, top_n: usiz
             review.by_time_bucket_positive_ratio,
         ));
     }
+    out.push_str("\n=== Executable EV Buckets: Best Non-Underpowered Avg PnL ===\n");
+    out.push_str("dimension,bucket,rows,fillable,fill_rate,pnl_rows,total_pnl,avg_pnl,roi,t_stat,underpowered,avg_prob,avg_edge,avg_entry,avg_capacity,avg_entry_liquidity,avg_shortfall\n");
+    let mut best_buckets: Vec<&ExecutableEvBucketSummary> = report
+        .executable_ev_buckets
+        .iter()
+        .filter(|bucket| !bucket.underpowered && bucket.avg_pnl_15u.is_finite())
+        .collect();
+    best_buckets.sort_by(|a, b| {
+        b.avg_pnl_15u
+            .partial_cmp(&a.avg_pnl_15u)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for bucket in best_buckets.iter().take(top_n) {
+        push_executable_ev_bucket_row(&mut out, bucket);
+    }
+
+    out.push_str("\n=== Executable EV Buckets: Worst Avg PnL ===\n");
+    out.push_str("dimension,bucket,rows,fillable,fill_rate,pnl_rows,total_pnl,avg_pnl,roi,t_stat,underpowered,avg_prob,avg_edge,avg_entry,avg_capacity,avg_entry_liquidity,avg_shortfall\n");
+    let mut worst_buckets: Vec<&ExecutableEvBucketSummary> = report
+        .executable_ev_buckets
+        .iter()
+        .filter(|bucket| bucket.avg_pnl_15u.is_finite())
+        .collect();
+    worst_buckets.sort_by(|a, b| {
+        a.avg_pnl_15u
+            .partial_cmp(&b.avg_pnl_15u)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for bucket in worst_buckets.iter().take(top_n) {
+        push_executable_ev_bucket_row(&mut out, bucket);
+    }
     out
+}
+
+fn push_executable_ev_bucket_row(out: &mut String, bucket: &ExecutableEvBucketSummary) {
+    out.push_str(&format!(
+        "{},{},{},{},{:.4},{},{:.4},{:.4},{:.4},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+        bucket.dimension,
+        bucket.bucket,
+        bucket.rows,
+        bucket.fillable_rows,
+        bucket.fill_rate,
+        bucket.pnl_rows,
+        bucket.total_pnl_15u,
+        bucket.avg_pnl_15u,
+        bucket.roi_on_stake,
+        bucket.t_stat,
+        bucket.underpowered,
+        bucket.avg_side_model_prob,
+        bucket.avg_side_model_edge,
+        bucket.avg_entry_ask,
+        bucket.avg_entry_capacity_ratio,
+        bucket.avg_entry_liquidity_usd,
+        bucket.avg_liquidity_shortfall_usd,
+    ));
+}
+
+fn build_executable_ev_buckets(
+    rows: &[FactorObservationV2],
+    options: &FactorReviewOptions,
+) -> Vec<ExecutableEvBucketSummary> {
+    let min_sample = options.min_observations.max(30);
+    let mut summaries = Vec::new();
+    append_executable_ev_dimension(
+        &mut summaries,
+        rows,
+        options.stake_usd,
+        min_sample,
+        "direction_probability",
+        |row| probability_bucket(row.side_model_prob),
+    );
+    append_executable_ev_dimension(
+        &mut summaries,
+        rows,
+        options.stake_usd,
+        min_sample,
+        "model_edge_after_fee",
+        |row| model_edge_bucket(row.side_model_edge),
+    );
+    append_executable_ev_dimension(
+        &mut summaries,
+        rows,
+        options.stake_usd,
+        min_sample,
+        "entry_price",
+        |row| price_bucket(row.entry_ask),
+    );
+    append_executable_ev_dimension(
+        &mut summaries,
+        rows,
+        options.stake_usd,
+        min_sample,
+        "time_regime",
+        |row| Some(row.regime.as_str().to_string()),
+    );
+    append_executable_ev_dimension(
+        &mut summaries,
+        rows,
+        options.stake_usd,
+        min_sample,
+        "symbol",
+        |row| (!row.symbol.is_empty()).then(|| row.symbol.clone()),
+    );
+    append_executable_ev_dimension(
+        &mut summaries,
+        rows,
+        options.stake_usd,
+        min_sample,
+        "side",
+        |row| Some(row.side.as_str().to_string()),
+    );
+    append_executable_ev_dimension(
+        &mut summaries,
+        rows,
+        options.stake_usd,
+        min_sample,
+        "pm_lag_secs",
+        |row| pm_lag_bucket(row.pm_lag_secs),
+    );
+    append_executable_ev_dimension(
+        &mut summaries,
+        rows,
+        options.stake_usd,
+        min_sample,
+        "entry_capacity_ratio",
+        |row| capacity_bucket(row.entry_capacity_ratio),
+    );
+    append_executable_ev_dimension(
+        &mut summaries,
+        rows,
+        options.stake_usd,
+        min_sample,
+        "entry_liquidity_usd",
+        |row| liquidity_bucket(row.entry_liquidity_usd),
+    );
+    append_executable_ev_dimension(
+        &mut summaries,
+        rows,
+        options.stake_usd,
+        min_sample,
+        "liquidity_shortfall_usd",
+        |row| shortfall_bucket(row.liquidity_shortfall_usd),
+    );
+    summaries.sort_by(|a, b| {
+        a.dimension
+            .cmp(&b.dimension)
+            .then_with(|| a.bucket.cmp(&b.bucket))
+    });
+    summaries
+}
+
+fn append_executable_ev_dimension<F>(
+    summaries: &mut Vec<ExecutableEvBucketSummary>,
+    rows: &[FactorObservationV2],
+    stake_usd: f64,
+    min_sample: usize,
+    dimension: &str,
+    bucket_fn: F,
+) where
+    F: Fn(&FactorObservationV2) -> Option<String>,
+{
+    let mut groups: BTreeMap<String, Vec<&FactorObservationV2>> = BTreeMap::new();
+    for row in rows {
+        if let Some(bucket) = bucket_fn(row) {
+            groups.entry(bucket).or_default().push(row);
+        }
+    }
+    for (bucket, bucket_rows) in groups {
+        summaries.push(summarize_executable_ev_bucket(
+            dimension,
+            &bucket,
+            &bucket_rows,
+            stake_usd,
+            min_sample,
+        ));
+    }
+}
+
+fn summarize_executable_ev_bucket(
+    dimension: &str,
+    bucket: &str,
+    rows: &[&FactorObservationV2],
+    stake_usd: f64,
+    min_sample: usize,
+) -> ExecutableEvBucketSummary {
+    let pnl_values: Vec<f64> = rows
+        .iter()
+        .filter_map(|row| row.label_executable_pnl_15u)
+        .filter(|pnl| pnl.is_finite())
+        .collect();
+    let total_pnl_15u = pnl_values.iter().sum::<f64>();
+    let avg_pnl_15u = if pnl_values.is_empty() {
+        f64::NAN
+    } else {
+        total_pnl_15u / pnl_values.len() as f64
+    };
+    let roi_on_stake = if stake_usd > 0.0 && !pnl_values.is_empty() {
+        total_pnl_15u / (stake_usd * pnl_values.len() as f64)
+    } else {
+        f64::NAN
+    };
+    let t_stat = trade_t_stat(&pnl_values);
+    let underpowered = pnl_values.len() < min_sample;
+    let positive_ev = avg_pnl_15u.is_finite() && avg_pnl_15u > 0.0;
+    let statistically_supported =
+        positive_ev && !underpowered && t_stat.is_finite() && t_stat >= 2.0;
+
+    ExecutableEvBucketSummary {
+        dimension: dimension.to_string(),
+        bucket: bucket.to_string(),
+        rows: rows.len(),
+        fillable_rows: rows
+            .iter()
+            .filter(|row| row.label_executable_fillable)
+            .count(),
+        fill_rate: ratio(
+            rows.iter()
+                .filter(|row| row.label_executable_fillable)
+                .count(),
+            rows.len(),
+        ),
+        pnl_rows: pnl_values.len(),
+        total_pnl_15u,
+        avg_pnl_15u,
+        roi_on_stake,
+        t_stat,
+        underpowered,
+        positive_ev,
+        statistically_supported,
+        avg_side_model_prob: mean(rows.iter().map(|row| row.side_model_prob)),
+        avg_side_model_edge: mean(rows.iter().map(|row| row.side_model_edge)),
+        avg_entry_ask: mean(rows.iter().map(|row| row.entry_ask)),
+        avg_exit_bid: mean(rows.iter().map(|row| row.exit_bid)),
+        avg_pm_lag_secs: mean(rows.iter().map(|row| row.pm_lag_secs)),
+        avg_entry_capacity_ratio: mean(rows.iter().map(|row| row.entry_capacity_ratio)),
+        avg_entry_liquidity_usd: mean(rows.iter().map(|row| row.entry_liquidity_usd)),
+        avg_exit_liquidity_usd: mean(rows.iter().map(|row| row.exit_liquidity_usd)),
+        avg_liquidity_shortfall_usd: mean(rows.iter().map(|row| row.liquidity_shortfall_usd)),
+    }
+}
+
+fn probability_bucket(value: f64) -> Option<String> {
+    finite_bucket(
+        value,
+        &[
+            (0.50, "<0.50"),
+            (0.55, "0.50..0.55"),
+            (0.60, "0.55..0.60"),
+            (0.65, "0.60..0.65"),
+            (0.70, "0.65..0.70"),
+        ],
+        ">=0.70",
+    )
+}
+
+fn model_edge_bucket(value: f64) -> Option<String> {
+    finite_bucket(
+        value,
+        &[
+            (-0.05, "<-0.05"),
+            (0.00, "-0.05..0.00"),
+            (0.02, "0.00..0.02"),
+            (0.05, "0.02..0.05"),
+            (0.10, "0.05..0.10"),
+        ],
+        ">=0.10",
+    )
+}
+
+fn price_bucket(value: f64) -> Option<String> {
+    finite_bucket(
+        value,
+        &[
+            (0.35, "<0.35"),
+            (0.45, "0.35..0.45"),
+            (0.55, "0.45..0.55"),
+            (0.65, "0.55..0.65"),
+        ],
+        ">=0.65",
+    )
+}
+
+fn pm_lag_bucket(value: f64) -> Option<String> {
+    finite_bucket(
+        value,
+        &[
+            (2.0, "<2s"),
+            (5.0, "2..5s"),
+            (15.0, "5..15s"),
+            (30.0, "15..30s"),
+        ],
+        ">=30s",
+    )
+}
+
+fn capacity_bucket(value: f64) -> Option<String> {
+    finite_bucket(
+        value,
+        &[
+            (0.50, "<0.50x"),
+            (1.00, "0.50..1.00x"),
+            (2.00, "1.00..2.00x"),
+            (5.00, "2.00..5.00x"),
+        ],
+        ">=5.00x",
+    )
+}
+
+fn liquidity_bucket(value: f64) -> Option<String> {
+    finite_bucket(
+        value,
+        &[
+            (15.0, "<15u"),
+            (50.0, "15..50u"),
+            (150.0, "50..150u"),
+            (500.0, "150..500u"),
+        ],
+        ">=500u",
+    )
+}
+
+fn shortfall_bucket(value: f64) -> Option<String> {
+    finite_bucket(
+        value,
+        &[
+            (EPS, "0u"),
+            (5.0, "0..5u"),
+            (15.0, "5..15u"),
+            (50.0, "15..50u"),
+        ],
+        ">=50u",
+    )
+}
+
+fn finite_bucket(value: f64, thresholds: &[(f64, &str)], upper_label: &str) -> Option<String> {
+    if !value.is_finite() {
+        return None;
+    }
+    for (threshold, label) in thresholds {
+        if value < *threshold {
+            return Some((*label).to_string());
+        }
+    }
+    Some(upper_label.to_string())
 }
 
 fn review_one_factor(
@@ -1599,6 +1971,24 @@ fn trade_sharpe(pnls: &[f64]) -> f64 {
     }
 }
 
+fn trade_t_stat(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return f64::NAN;
+    }
+    let avg = values.iter().sum::<f64>() / values.len() as f64;
+    let sample_var = values
+        .iter()
+        .map(|value| (value - avg).powi(2))
+        .sum::<f64>()
+        / (values.len() - 1) as f64;
+    let sample_std = sample_var.sqrt();
+    if sample_std <= EPS {
+        f64::NAN
+    } else {
+        avg / (sample_std / (values.len() as f64).sqrt())
+    }
+}
+
 fn max_drawdown(pnls: &[(DateTime<Utc>, f64)]) -> f64 {
     let mut ordered = pnls.to_vec();
     ordered.sort_by_key(|(ts, _)| *ts);
@@ -1772,6 +2162,47 @@ mod tests {
     }
 
     #[test]
+    fn review_reports_executable_ev_buckets_for_direction_and_fillability() {
+        let mut observations = Vec::new();
+        for i in 0..40 {
+            let mut obs = base_obs();
+            obs.event_id = format!("event-{i}");
+            obs.model_prob_up = 0.75;
+            obs.pm_up_ask = if i % 2 == 0 { 0.50 } else { 0.52 };
+            obs.pm_up_ask_size = 40.0;
+            obs.pm_up_bid = obs.pm_up_ask - 0.02;
+            obs.pm_up_bid_size = 40.0;
+            obs.model_edge_up = obs.model_prob_up - obs.pm_up_ask - crypto_fee_cost(obs.pm_up_ask);
+            obs.settlement_up = 1.0;
+            observations.push(obs);
+        }
+
+        let report = review_factors_v2(&observations, FactorReviewOptions::default());
+        let direction_bucket = report
+            .executable_ev_buckets
+            .iter()
+            .find(|bucket| bucket.dimension == "direction_probability" && bucket.bucket == ">=0.70")
+            .expect("high direction-probability bucket should be present");
+
+        assert_eq!(direction_bucket.rows, 40);
+        assert_eq!(direction_bucket.pnl_rows, 40);
+        assert!(direction_bucket.fill_rate > 0.99);
+        assert!(direction_bucket.avg_pnl_15u > 0.0);
+        assert!(!direction_bucket.underpowered);
+        assert!(direction_bucket.positive_ev);
+        assert!(direction_bucket.statistically_supported);
+
+        let capacity_bucket = report
+            .executable_ev_buckets
+            .iter()
+            .find(|bucket| {
+                bucket.dimension == "entry_capacity_ratio" && bucket.bucket == "1.00..2.00x"
+            })
+            .expect("capacity bucket should be present");
+        assert!(capacity_bucket.avg_entry_liquidity_usd >= DEFAULT_STAKE_USD);
+    }
+
+    #[test]
     fn factor_review_report_serializes_accounting_contract_fields() {
         let report = review_factors_v2(&[base_obs()], FactorReviewOptions::default());
         let value = serde_json::to_value(&report).expect("report should serialize");
@@ -1780,5 +2211,14 @@ mod tests {
         assert_eq!(value["health"]["source_observations"], 1);
         assert!(value["health"]["executable_pnl_rows"].as_u64().unwrap() > 0);
         assert!(value["reviews"].is_array());
+        assert!(value["executable_ev_buckets"].is_array());
+        assert!(
+            value["executable_ev_buckets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|bucket| bucket["dimension"] == "direction_probability")
+        );
+        assert!(format_factor_review_v2_report(&report, 5).contains("Executable EV Buckets"));
     }
 }
