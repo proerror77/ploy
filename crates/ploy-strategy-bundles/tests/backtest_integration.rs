@@ -213,6 +213,8 @@ async fn backtest_full_loop_produces_entry() {
         three_layer_take_profit_ask: 0.70,
         three_layer_stop_distance_pct: 0.020,
         three_layer_max_pm_lag_secs: 15,
+        three_layer_market_prior_weight: 0.35,
+        three_layer_confirmation_logit_weight: 1.0,
         three_layer_min_entry_score: 0.30,
     };
 
@@ -352,6 +354,8 @@ async fn empty_feed_produces_zero_trades() {
         three_layer_take_profit_ask: 0.70,
         three_layer_stop_distance_pct: 0.020,
         three_layer_max_pm_lag_secs: 15,
+        three_layer_market_prior_weight: 0.35,
+        three_layer_confirmation_logit_weight: 1.0,
         three_layer_min_entry_score: 0.30,
     };
 
@@ -429,6 +433,8 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         three_layer_take_profit_ask: 0.70,
         three_layer_stop_distance_pct: 0.020,
         three_layer_max_pm_lag_secs: 15,
+        three_layer_market_prior_weight: 0.35,
+        three_layer_confirmation_logit_weight: 1.0,
         three_layer_min_entry_score: 0.30,
     };
     let sim_config = SimulatedExecutorConfig {
@@ -556,6 +562,8 @@ async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
         three_layer_take_profit_ask: 0.70,
         three_layer_stop_distance_pct: 0.020,
         three_layer_max_pm_lag_secs: 15,
+        three_layer_market_prior_weight: 0.35,
+        three_layer_confirmation_logit_weight: 1.0,
         three_layer_min_entry_score: 0.30,
     };
     let sim_config = SimulatedExecutorConfig {
@@ -676,6 +684,8 @@ async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior()
         three_layer_take_profit_ask: 0.70,
         three_layer_stop_distance_pct: 0.020,
         three_layer_max_pm_lag_secs: 15,
+        three_layer_market_prior_weight: 0.35,
+        three_layer_confirmation_logit_weight: 1.0,
         three_layer_min_entry_score: 0.30,
     };
     let sim_config = SimulatedExecutorConfig {
