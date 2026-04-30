@@ -1346,6 +1346,8 @@ fn price_move_bucket(value: f64) -> &'static str {
 fn exit_reason_bucket(order_id: &str) -> &'static str {
     if order_id.starts_with("tl_tp_") || order_id.contains("_take_profit_") {
         "take_profit"
+    } else if order_id.starts_with("tl_pre_settle_") {
+        "pre_settlement"
     } else if order_id.starts_with("tl_sl_") || order_id.contains("_stop_loss_") {
         "stop_loss"
     } else if order_id.starts_with("tl_settle_") || order_id.contains("_settle_") {
@@ -1698,6 +1700,8 @@ fn make_directional_config(
         three_layer_confirmation_logit_weight: 1.0,
         three_layer_take_profit_ask: 0.70,
         three_layer_stop_distance_pct: 0.020,
+        three_layer_pre_settlement_exit_secs: 0,
+        three_layer_pre_settlement_min_exit_bid: 0.01,
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
     }
@@ -1772,6 +1776,8 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
         three_layer_confirmation_logit_weight: 1.0,
         three_layer_take_profit_ask: 0.70,
         three_layer_stop_distance_pct: 0.020,
+        three_layer_pre_settlement_exit_secs: 0,
+        three_layer_pre_settlement_min_exit_bid: 0.01,
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
     }
@@ -1791,6 +1797,8 @@ struct ThreeLayerSearchParams {
     confirmation_logit_weight: f64,
     take_profit_ask: f64,
     stop_distance_pct: f64,
+    pre_settlement_exit_secs: i64,
+    pre_settlement_min_exit_bid: f64,
     cooldown_secs: i64,
     min_time_remaining_secs: i64,
     max_time_remaining_secs: i64,
@@ -1853,6 +1861,8 @@ fn make_three_layer_config(
     config.three_layer_confirmation_logit_weight = p.confirmation_logit_weight;
     config.three_layer_take_profit_ask = p.take_profit_ask;
     config.three_layer_stop_distance_pct = p.stop_distance_pct;
+    config.three_layer_pre_settlement_exit_secs = p.pre_settlement_exit_secs as u64;
+    config.three_layer_pre_settlement_min_exit_bid = p.pre_settlement_min_exit_bid;
     config
 }
 
@@ -2570,6 +2580,10 @@ fn main() {
         let p_take_profit_ask = FloatParam::new(0.65, 0.95).name("three_layer_take_profit_ask");
         let p_stop_distance_pct =
             FloatParam::new(0.006, 0.030).name("three_layer_stop_distance_pct");
+        let p_pre_settlement_exit_secs =
+            IntParam::new(0, 180).name("three_layer_pre_settlement_exit_secs");
+        let p_pre_settlement_min_exit_bid =
+            FloatParam::new(0.01, 0.35).name("three_layer_pre_settlement_min_exit_bid");
         let p_cooldown_secs = IntParam::new(60, 300).name("cooldown_secs");
         let p_min_time_remaining_secs = IntParam::new(60, 150).name("min_time_remaining_secs");
         let p_max_time_span_secs = IntParam::new(30, 120).name("three_layer_time_span_secs");
@@ -2587,6 +2601,8 @@ fn main() {
         let p_confirmation_logit_weight_c = p_confirmation_logit_weight.clone();
         let p_take_profit_ask_c = p_take_profit_ask.clone();
         let p_stop_distance_pct_c = p_stop_distance_pct.clone();
+        let p_pre_settlement_exit_secs_c = p_pre_settlement_exit_secs.clone();
+        let p_pre_settlement_min_exit_bid_c = p_pre_settlement_min_exit_bid.clone();
         let p_cooldown_secs_c = p_cooldown_secs.clone();
         let p_min_time_remaining_secs_c = p_min_time_remaining_secs.clone();
         let p_max_time_span_secs_c = p_max_time_span_secs.clone();
@@ -2609,6 +2625,8 @@ fn main() {
                     confirmation_logit_weight: p_confirmation_logit_weight_c.suggest(trial)?,
                     take_profit_ask: p_take_profit_ask_c.suggest(trial)?,
                     stop_distance_pct: p_stop_distance_pct_c.suggest(trial)?,
+                    pre_settlement_exit_secs: p_pre_settlement_exit_secs_c.suggest(trial)?,
+                    pre_settlement_min_exit_bid: p_pre_settlement_min_exit_bid_c.suggest(trial)?,
                     cooldown_secs: p_cooldown_secs_c.suggest(trial)?,
                     min_time_remaining_secs,
                     max_time_remaining_secs: min_time_remaining_secs
@@ -2707,7 +2725,7 @@ fn main() {
                 }
 
                 eprintln!(
-                    "  Trial {:>3}: source={} score={:>8.2} train_pnl=${:>8.2} val_pnl=${:>8.2} val_sharpe={:>7.3} val_trades={:>4} updates={} elapsed={:.1}s | params: entry={:.3} min_px={:.3} dir_prob={:.3} side={} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} prior_w={:.2} conf_w={:.2} tp={:.3} stop={:.4} cd={}s",
+                    "  Trial {:>3}: source={} score={:>8.2} train_pnl=${:>8.2} val_pnl=${:>8.2} val_sharpe={:>7.3} val_trades={:>4} updates={} elapsed={:.1}s | params: entry={:.3} min_px={:.3} dir_prob={:.3} side={} dist_sigma={:.3} conf={:.3} drift={:.5} edge={:.3} rr={:.2} prior_w={:.2} conf_w={:.2} tp={:.3} stop={:.4} pre_settle={}s min_exit_bid={:.3} cd={}s",
                     trial_id,
                     train_ref.kind(),
                     score,
@@ -2730,6 +2748,8 @@ fn main() {
                     params.confirmation_logit_weight,
                     params.take_profit_ask,
                     params.stop_distance_pct,
+                    params.pre_settlement_exit_secs,
+                    params.pre_settlement_min_exit_bid,
                     params.cooldown_secs,
                 );
                 print_backtest_diagnostics(&format!("trial {trial_id}"), &outcome);
@@ -2756,6 +2776,8 @@ fn main() {
             confirmation_logit_weight: best.get(&p_confirmation_logit_weight).unwrap_or(1.0),
             take_profit_ask: best.get(&p_take_profit_ask).unwrap_or(0.70),
             stop_distance_pct: best.get(&p_stop_distance_pct).unwrap_or(0.020),
+            pre_settlement_exit_secs: best.get(&p_pre_settlement_exit_secs).unwrap_or(0),
+            pre_settlement_min_exit_bid: best.get(&p_pre_settlement_min_exit_bid).unwrap_or(0.01),
             cooldown_secs: best.get(&p_cooldown_secs).unwrap_or(30),
             min_time_remaining_secs: best_min_time_remaining_secs,
             max_time_remaining_secs: best_min_time_remaining_secs
@@ -2842,6 +2864,14 @@ fn main() {
         eprintln!(
             "three_layer_stop_distance_pct = {:.4}",
             best_params.stop_distance_pct
+        );
+        eprintln!(
+            "three_layer_pre_settlement_exit_secs = {}",
+            best_params.pre_settlement_exit_secs
+        );
+        eprintln!(
+            "three_layer_pre_settlement_min_exit_bid = {:.4}",
+            best_params.pre_settlement_min_exit_bid
         );
         eprintln!("cooldown_secs = {}", best_params.cooldown_secs);
         eprintln!(

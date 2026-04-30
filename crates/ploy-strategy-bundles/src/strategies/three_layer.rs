@@ -40,6 +40,8 @@ pub struct ThreeLayerConfig {
     pub confirmation_logit_weight: f64,
     pub take_profit_ask: f64,
     pub stop_distance_pct: f64,
+    pub pre_settlement_exit_secs: u64,
+    pub pre_settlement_min_exit_bid: f64,
     pub max_pm_lag_secs: u64,
     pub min_time_remaining_secs: u64,
     pub max_time_remaining_secs: u64,
@@ -74,6 +76,8 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             confirmation_logit_weight: c.three_layer_confirmation_logit_weight,
             take_profit_ask: c.three_layer_take_profit_ask,
             stop_distance_pct: c.three_layer_stop_distance_pct,
+            pre_settlement_exit_secs: c.three_layer_pre_settlement_exit_secs,
+            pre_settlement_min_exit_bid: c.three_layer_pre_settlement_min_exit_bid,
             max_pm_lag_secs: c.three_layer_max_pm_lag_secs,
             min_time_remaining_secs: c.min_time_remaining_secs,
             max_time_remaining_secs: c.max_time_remaining_secs,
@@ -1238,6 +1242,33 @@ impl ThreeLayerStrategy {
                     }
                 }
 
+                if self.config.pre_settlement_exit_secs > 0 {
+                    let secs_to_end = (event.end_time - now).num_seconds();
+                    if secs_to_end >= 0
+                        && secs_to_end as u64 <= self.config.pre_settlement_exit_secs
+                        && exit_bid
+                            .to_f64()
+                            .is_some_and(|bid| bid >= self.config.pre_settlement_min_exit_bid)
+                    {
+                        decisions.push(StrategyDecision::Exit(TradingIntent {
+                            intent_id: format!(
+                                "tl_pre_settle_{}_{}",
+                                token_id,
+                                now.timestamp_millis()
+                            ),
+                            deployment_id: String::new(),
+                            market_id: event.event_id.to_string(),
+                            token_id: token_id.to_string(),
+                            side: TradeSide::Sell,
+                            quantity: qty,
+                            limit_price: Some(exit_bid),
+                            purpose: IntentPurpose::Exit,
+                            created_at: now,
+                        }));
+                        continue;
+                    }
+                }
+
                 // Stop loss
                 if let (Some(price_to_beat), Some(spot_price)) =
                     (event.price_to_beat.and_then(|v| v.to_f64()), spot)
@@ -1705,6 +1736,8 @@ mod tests {
         assert_eq!(tlc.min_edge, 0.03);
         assert_eq!(tlc.min_reward_risk, 1.2);
         assert_eq!(tlc.take_profit_ask, 0.70);
+        assert_eq!(tlc.pre_settlement_exit_secs, 0);
+        assert_eq!(tlc.pre_settlement_min_exit_bid, 0.01);
         assert!((tlc.min_entry_score - 0.30).abs() < f64::EPSILON);
         assert!(!tlc.symbols.is_empty());
     }
@@ -1789,6 +1822,8 @@ mod tests {
             confirmation_logit_weight: 1.0,
             take_profit_ask: 0.70,
             stop_distance_pct: 0.020,
+            pre_settlement_exit_secs: 0,
+            pre_settlement_min_exit_bid: 0.01,
             max_pm_lag_secs: 15,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
@@ -2102,6 +2137,54 @@ mod tests {
             decisions.is_empty(),
             "a high ask alone is not an executable take-profit sell"
         );
+    }
+
+    #[test]
+    fn pre_settlement_exit_emits_before_event_expiry_when_enabled() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.take_profit_ask = 0.99;
+        config.pre_settlement_exit_secs = 90;
+        config.pre_settlement_min_exit_bid = 0.05;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        strategy.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: Arc::from("evt1"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("token-up"),
+                down_token: Arc::from("token-down"),
+                end_time: now + chrono::Duration::seconds(80),
+                window_secs: 300,
+                price_to_beat: Some(dec!(100000)),
+                resolved_up_won: None,
+            },
+            &PositionLedger::default(),
+            &OrderLedger::default(),
+        );
+        let positions = position_with_token("token-down", now);
+
+        let decisions = strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-down"),
+                bid: Some(dec!(0.12)),
+                ask: Some(dec!(0.14)),
+                bid_size: Some(dec!(100)),
+                ask_size: Some(dec!(100)),
+                ts: now,
+            },
+            &positions,
+            &OrderLedger::default(),
+        );
+
+        match decisions.as_slice() {
+            [StrategyDecision::Exit(intent)] => {
+                assert!(intent.intent_id.starts_with("tl_pre_settle_"));
+                assert_eq!(intent.limit_price, Some(dec!(0.12)));
+            }
+            other => panic!("Expected one pre-settlement exit, got {:?}", other),
+        }
     }
 
     #[test]

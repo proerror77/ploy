@@ -1069,6 +1069,8 @@ mod tests {
             three_layer_confirmation_logit_weight: 1.0,
             three_layer_take_profit_ask: 0.70,
             three_layer_stop_distance_pct: 0.020,
+            three_layer_pre_settlement_exit_secs: 0,
+            three_layer_pre_settlement_min_exit_bid: 0.01,
             three_layer_max_pm_lag_secs: 15,
             three_layer_min_entry_score: 0.30,
         }

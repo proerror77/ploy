@@ -165,6 +165,57 @@
   the next research step should address settlement/late-hold loss risk before
   more threshold tuning.
 
+# PM5D Pre-Settlement Exit Research (2026-04-30)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/directional.rs`
+  - Owner: backward-compatible three-layer exit-risk config fields.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: executable pre-settlement exit logic.
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+  - Owner: pre-settlement exit search space and replay attribution labels.
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+- `crates/ploy-strategy-bundles/src/strategies/mean_reversion.rs`
+- `crates/ploy-strategy-bundles/tests/backtest_integration.rs`
+  - Owner: manual config initializer compatibility.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add default-disabled pre-settlement exit controls.
+- [x] Emit executable pre-settlement exits only when bid liquidity can fill the
+  current position.
+- [x] Add optimizer search parameters and label exits as `pre_settlement`.
+- [x] Run focused local Rust verification.
+- [ ] Push PR update and run remote replay without deploying dry-run.
+
+## Review
+
+- 2026-04-30: Added `three_layer_pre_settlement_exit_secs` and
+  `three_layer_pre_settlement_min_exit_bid`. Defaults preserve current
+  behavior (`0` disables early settlement-risk exits). When enabled, three-layer
+  exits an open position before event end only after bid size is sufficient and
+  executable top bid is above the configured floor. Take-profit remains higher
+  priority so profitable exits keep their `take_profit` reason.
+- 2026-04-30: Extended `optimize_backtest` to search the pre-settlement exit
+  window and minimum exit bid, and to classify such exits as
+  `exit_reason=pre_settlement` in loss-attribution buckets.
+- 2026-04-30: Local verification passed: `rustfmt --edition 2024` on touched
+  Rust files, `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test
+  -p ploy-strategy-bundles three_layer --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles --example optimize_backtest`,
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles config --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo test -p
+  ploy-strategy-bundles --test backtest_integration`,
+  `CARGO_TARGET_DIR=/tmp/ploy-bayesian-ev-gate-test rtk cargo check -p
+  ploy-strategy-bundles --features parquet-feed --example optimize_backtest`,
+  and `rtk git diff --check`. Feature compile emitted existing workspace
+  dead-code/profile warnings.
+
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
 ## Files

@@ -214,6 +214,15 @@ pub struct DirectionalConfig {
     #[serde(default = "default_tl_stop_distance_pct")]
     pub three_layer_stop_distance_pct: f64,
 
+    /// Settlement-risk control: exit executable positions this many seconds before event end.
+    /// Zero disables pre-settlement exits.
+    #[serde(default = "default_tl_pre_settlement_exit_secs")]
+    pub three_layer_pre_settlement_exit_secs: u64,
+
+    /// Settlement-risk control: only pre-settlement exit when top bid is at least this price.
+    #[serde(default = "default_tl_pre_settlement_min_exit_bid")]
+    pub three_layer_pre_settlement_min_exit_bid: f64,
+
     /// Maximum PM quote staleness (seconds) before rejecting entry.
     #[serde(default = "default_tl_max_pm_lag_secs")]
     pub three_layer_max_pm_lag_secs: u64,
@@ -393,6 +402,12 @@ fn default_tl_take_profit_ask() -> f64 {
 }
 fn default_tl_stop_distance_pct() -> f64 {
     0.020
+}
+fn default_tl_pre_settlement_exit_secs() -> u64 {
+    0
+}
+fn default_tl_pre_settlement_min_exit_bid() -> f64 {
+    0.01
 }
 fn default_tl_max_pm_lag_secs() -> u64 {
     15
@@ -1851,6 +1866,8 @@ mod tests {
             three_layer_confirmation_logit_weight: 1.0,
             three_layer_take_profit_ask: 0.70,
             three_layer_stop_distance_pct: 0.020,
+            three_layer_pre_settlement_exit_secs: 0,
+            three_layer_pre_settlement_min_exit_bid: 0.01,
             three_layer_max_pm_lag_secs: 15,
             three_layer_min_entry_score: 0.30,
             min_time_remaining_secs: 60,
