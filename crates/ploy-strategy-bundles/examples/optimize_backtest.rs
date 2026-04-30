@@ -41,7 +41,7 @@
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
 use ploy_feed_loaders::{
-    HistoricalLoadOptions as DbHistoricalLoadOptions, load_from_database_with_options,
+    load_from_database_with_options, HistoricalLoadOptions as DbHistoricalLoadOptions,
 };
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
@@ -951,6 +951,12 @@ fn make_directional_config(
         three_layer_stop_distance_pct: 0.020,
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
+        three_layer_strategy_profile: "default".into(),
+        three_layer_require_confirmation: false,
+        three_layer_probability_shrink: 1.0,
+        three_layer_probability_haircut: 0.0,
+        three_layer_alpha_contrarian: false,
+        three_layer_cex_contrarian: false,
     }
 }
 
@@ -1016,6 +1022,12 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
         three_layer_stop_distance_pct: 0.020,
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
+        three_layer_strategy_profile: "default".into(),
+        three_layer_require_confirmation: false,
+        three_layer_probability_shrink: 1.0,
+        three_layer_probability_haircut: 0.0,
+        three_layer_alpha_contrarian: false,
+        three_layer_cex_contrarian: false,
     }
 }
 
@@ -1083,6 +1095,12 @@ fn make_three_layer_config(symbols: &[String], p: &ThreeLayerSearchParams) -> Di
         three_layer_stop_distance_pct: p.stop_distance_pct,
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
+        three_layer_strategy_profile: "default".into(),
+        three_layer_require_confirmation: false,
+        three_layer_probability_shrink: 1.0,
+        three_layer_probability_haircut: 0.0,
+        three_layer_alpha_contrarian: false,
+        three_layer_cex_contrarian: false,
     }
 }
 
@@ -1111,24 +1129,18 @@ mod tests {
         let flags =
             optimize_risk_flags(false, 10, 8, &outcome(4, 1.0, 1.0), &outcome(3, -1.0, -0.5));
 
-        assert!(
-            flags
-                .iter()
-                .any(|flag| flag == "non_canonical_smoke_limited_result")
-        );
+        assert!(flags
+            .iter()
+            .any(|flag| flag == "non_canonical_smoke_limited_result"));
         assert!(flags.iter().any(|flag| flag == "incomplete_trial_count"));
         assert!(flags.iter().any(|flag| flag == "low_train_trade_count"));
-        assert!(
-            flags
-                .iter()
-                .any(|flag| flag == "low_validation_trade_count")
-        );
+        assert!(flags
+            .iter()
+            .any(|flag| flag == "low_validation_trade_count"));
         assert!(flags.iter().any(|flag| flag == "negative_validation_pnl"));
-        assert!(
-            flags
-                .iter()
-                .any(|flag| flag == "negative_validation_sharpe")
-        );
+        assert!(flags
+            .iter()
+            .any(|flag| flag == "negative_validation_sharpe"));
     }
 }
 

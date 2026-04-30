@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tracing::info;
@@ -41,6 +41,9 @@ pub struct ThreeLayerConfig {
     pub min_entry_price: f64,
     pub max_entry_price: f64,
     pub min_entry_score: f64,
+    pub require_confirmation: bool,
+    pub probability_shrink: f64,
+    pub probability_haircut: f64,
 }
 
 impl From<DirectionalConfig> for ThreeLayerConfig {
@@ -66,6 +69,9 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             min_entry_price: c.min_entry_price,
             max_entry_price: c.max_entry_price,
             min_entry_score: c.three_layer_min_entry_score,
+            require_confirmation: c.three_layer_require_confirmation,
+            probability_shrink: c.three_layer_probability_shrink,
+            probability_haircut: c.three_layer_probability_haircut,
         }
     }
 }
@@ -257,7 +263,11 @@ fn norm_cdf(x: f64) -> f64 {
     let d = 0.3989422804014327 * (-x * x / 2.0).exp();
     let p =
         d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-    if x >= 0.0 { 1.0 - p } else { p }
+    if x >= 0.0 {
+        1.0 - p
+    } else {
+        p
+    }
 }
 
 /// Layer 1: Direction score (0.0 – 1.0).
@@ -278,7 +288,9 @@ fn evaluate_direction_score(
         return None;
     }
 
-    let model_prob_up = norm_cdf(distance_over_sigma);
+    let raw_model_prob_up = norm_cdf(distance_over_sigma);
+    let shrink = config.probability_shrink.clamp(0.0, 2.0);
+    let model_prob_up = (0.5 + (raw_model_prob_up - 0.5) * shrink).clamp(0.01, 0.99);
 
     let direction_prob = match regime {
         Regime::Early => model_prob_up,
@@ -297,11 +309,20 @@ fn evaluate_direction_score(
         }
     };
 
-    let (direction_sign, effective_p) = if direction_prob >= 0.5 {
+    let (direction_sign, mut effective_p) = if direction_prob >= 0.5 {
         (1.0_f64, direction_prob)
     } else {
         (-1.0_f64, 1.0 - direction_prob)
     };
+    effective_p = (effective_p - config.probability_haircut.max(0.0)).clamp(0.5, 0.99);
+    if effective_p < config.min_direction_prob {
+        return None;
+    }
+    if matches!(regime, Regime::Late | Regime::Expiry)
+        && drift_30s * direction_sign < config.min_drift_confirmation
+    {
+        return None;
+    }
 
     // Continuous score: how far effective_p is above 0.50, normalized to [0, 1].
     let direction_score = ((effective_p - 0.50) / 0.50).clamp(0.0, 1.0);
@@ -355,6 +376,10 @@ fn evaluate_edge_score(
     let rr = if risk > 0.0 { reward / risk } else { 0.0 };
 
     // Continuous score: edge normalized by 0.10 (a 10% edge = perfect score).
+    if edge < config.min_edge || rr < config.min_reward_risk {
+        return None;
+    }
+
     let edge_score = (edge / 0.10).clamp(0.0, 1.0);
 
     Some((ask, edge, rr, edge_score))
@@ -543,6 +568,20 @@ impl ThreeLayerStrategy {
                 regime,
                 &self.config,
             );
+            if self.config.require_confirmation
+                && confirmation_bonus < self.config.min_confirmation_score
+            {
+                info!(
+                    strategy = "three_layer",
+                    symbol = %symbol,
+                    direction,
+                    confirmation_bonus = format!("{:.3}", confirmation_bonus),
+                    min_confirmation_score = self.config.min_confirmation_score,
+                    regime = regime.as_str(),
+                    "confirmation below hard threshold"
+                );
+                continue;
+            }
 
             // Layer 3: Edge score
             let (entry_price_f, edge, _rr, edge_score) =
@@ -1042,6 +1081,9 @@ mod tests {
         assert_eq!(tlc.min_reward_risk, 1.2);
         assert_eq!(tlc.take_profit_ask, 0.70);
         assert!((tlc.min_entry_score - 0.30).abs() < f64::EPSILON);
+        assert!(!tlc.require_confirmation);
+        assert!((tlc.probability_shrink - 1.0).abs() < f64::EPSILON);
+        assert!((tlc.probability_haircut - 0.0).abs() < f64::EPSILON);
         assert!(!tlc.symbols.is_empty());
     }
 
@@ -1091,6 +1133,9 @@ mod tests {
             min_entry_price: 0.15,
             max_entry_price: 0.85,
             min_entry_score: 0.30,
+            require_confirmation: false,
+            probability_shrink: 1.0,
+            probability_haircut: 0.0,
         }
     }
 
@@ -1145,17 +1190,11 @@ mod tests {
         let (_ask, edge, _rr, edge_score) = result.unwrap();
         assert!(edge > 0.0);
         assert!(edge_score > 0.0 && edge_score <= 1.0);
-        // ask=0.50 → fee=0.005, edge=0.52-0.50-0.005=0.015 → edge_score=0.15
+        // ask=0.50 -> fee=0.005, edge=0.52-0.50-0.005=0.015, below min_edge.
         let result = evaluate_edge_score(0.52, 0.50, Regime::Early, &config);
         assert!(
-            result.is_some(),
-            "edge_score model should not reject low edge, just score it low"
-        );
-        let (_ask, _edge, _rr, edge_score) = result.unwrap();
-        assert!(
-            edge_score < 0.3,
-            "low edge should produce low score, got {}",
-            edge_score
+            result.is_none(),
+            "edge gate should reject non-positive EV after fees"
         );
     }
 

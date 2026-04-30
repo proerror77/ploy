@@ -13,8 +13,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -184,6 +184,28 @@ pub struct DirectionalConfig {
     /// Scoring model: minimum total score to enter (0.0-1.0).
     #[serde(default = "default_tl_min_entry_score")]
     pub three_layer_min_entry_score: f64,
+    /// Optional label for experiment tracking; strategy behavior is controlled
+    /// by the explicit gates below, not by this label.
+    #[serde(default = "default_tl_strategy_profile")]
+    pub three_layer_strategy_profile: String,
+    /// When true, aligned LOB/microprice confirmation must pass the configured
+    /// confirmation threshold before entry.
+    #[serde(default)]
+    pub three_layer_require_confirmation: bool,
+    /// Shrink model probability toward 50% before direction/edge gates.
+    #[serde(default = "default_tl_probability_shrink")]
+    pub three_layer_probability_shrink: f64,
+    /// Subtract a conservative haircut from effective directional probability.
+    #[serde(default)]
+    pub three_layer_probability_haircut: f64,
+    /// Parsed for experiment manifests. Current three-layer logic is directional
+    /// and does not invert alpha based on this flag.
+    #[serde(default)]
+    pub three_layer_alpha_contrarian: bool,
+    /// Parsed for experiment manifests. Current three-layer logic is directional
+    /// and does not invert CEX confirmation based on this flag.
+    #[serde(default)]
+    pub three_layer_cex_contrarian: bool,
 
     // Timing
     #[serde(default = "default_min_time")]
@@ -341,6 +363,12 @@ fn default_tl_max_pm_lag_secs() -> u64 {
 }
 fn default_tl_min_entry_score() -> f64 {
     0.30
+}
+fn default_tl_strategy_profile() -> String {
+    "default".into()
+}
+fn default_tl_probability_shrink() -> f64 {
+    1.0
 }
 fn default_min_time() -> u64 {
     60
@@ -1786,6 +1814,12 @@ mod tests {
             three_layer_stop_distance_pct: 0.020,
             three_layer_max_pm_lag_secs: 15,
             three_layer_min_entry_score: 0.30,
+            three_layer_strategy_profile: "default".into(),
+            three_layer_require_confirmation: false,
+            three_layer_probability_shrink: 1.0,
+            three_layer_probability_haircut: 0.0,
+            three_layer_alpha_contrarian: false,
+            three_layer_cex_contrarian: false,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
             cooldown_secs: 0,

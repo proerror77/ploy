@@ -332,6 +332,12 @@ fn main() {
                     three_layer_stop_distance_pct: 0.020,
                     three_layer_max_pm_lag_secs: 15,
                     three_layer_min_entry_score: 0.30,
+                    three_layer_strategy_profile: "default".into(),
+                    three_layer_require_confirmation: false,
+                    three_layer_probability_shrink: 1.0,
+                    three_layer_probability_haircut: 0.0,
+                    three_layer_alpha_contrarian: false,
+                    three_layer_cex_contrarian: false,
                 },
                 SimulatedExecutorConfig {
                     use_spread: true,
