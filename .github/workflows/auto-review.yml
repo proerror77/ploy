@@ -29,6 +29,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -61,8 +63,26 @@ jobs:
         id: fmt
         run: |
           set +e
-          cargo fmt --all -- --check > fmt.log 2>&1
-          status=$?
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --name-only --diff-filter=ACMRT \
+              "${{ github.event.pull_request.base.sha }}"...HEAD \
+              -- '*.rs' ':!vendor/**' > fmt-files.txt
+          else
+            git ls-files '*.rs' ':!vendor/**' > fmt-files.txt
+          fi
+
+          if [ -s fmt-files.txt ]; then
+            {
+              echo "Checked Rust files:"
+              sed 's/^/- /' fmt-files.txt
+              echo
+              xargs rustfmt --check < fmt-files.txt
+            } > fmt.log 2>&1
+            status=$?
+          else
+            echo "No changed Rust files to format-check." > fmt.log
+            status=0
+          fi
           echo "status=$status" >> "$GITHUB_OUTPUT"
           tail -n 80 fmt.log > fmt.tail.log || true
           exit 0
@@ -74,7 +94,13 @@ jobs:
           SCCACHE_CACHE_SIZE: 10G
         run: |
           set +e
-          cargo clippy --all-targets --features rl > clippy.log 2>&1
+          {
+            echo "## default workspace members"
+            cargo clippy --locked --all-targets
+            echo
+            echo "## research heavy feature contract"
+            cargo check --locked -p ploy-research --features db,polars-export,ml,rl,strategy-runtime --lib
+          } > clippy.log 2>&1
           status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
           tail -n 120 clippy.log > clippy.tail.log || true

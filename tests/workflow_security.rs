@@ -146,7 +146,9 @@ fn research_workflows_do_not_transfer_runtime_binaries_between_jobs() {
         "optimize-runner-${{ github.sha }}",
     ] {
         if optimize.contains(forbidden) {
-            offenders.push(format!("optimize.yml: fragile binary artifact pattern still contains `{forbidden}`"));
+            offenders.push(format!(
+                "optimize.yml: fragile binary artifact pattern still contains `{forbidden}`"
+            ));
         }
     }
     for forbidden in [
@@ -155,7 +157,9 @@ fn research_workflows_do_not_transfer_runtime_binaries_between_jobs() {
         "run_backtest-${{ github.sha }}",
     ] {
         if backtest.contains(forbidden) {
-            offenders.push(format!("backtest.yml: fragile binary artifact pattern still contains `{forbidden}`"));
+            offenders.push(format!(
+                "backtest.yml: fragile binary artifact pattern still contains `{forbidden}`"
+            ));
         }
     }
 
@@ -173,7 +177,8 @@ fn replay_dryrun_parity_reports_strict_readiness() {
     let mut offenders = Vec::new();
 
     if !script.contains("strict_parity_ready") {
-        offenders.push("replay_dryrun_parity.py: missing strict parity readiness field".to_string());
+        offenders
+            .push("replay_dryrun_parity.py: missing strict parity readiness field".to_string());
     }
     if !script.contains("missing_strict_parity_fields") {
         offenders.push("replay_dryrun_parity.py: missing strict parity caveat".to_string());
@@ -185,6 +190,47 @@ fn replay_dryrun_parity_reports_strict_readiness() {
     assert!(
         offenders.is_empty(),
         "replay/dry-run parity guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn auto_review_uses_bounded_workspace_checks() {
+    let content = workflow_contents(".github/workflows/auto-review.yml");
+    let mut offenders = Vec::new();
+
+    if content.contains("cargo fmt --all -- --check") {
+        offenders.push(
+            "auto-review.yml: cargo fmt --all also formats local path dependencies such as vendor SDKs"
+                .to_string(),
+        );
+    }
+    if content.contains("cargo clippy --all-targets --features rl") {
+        offenders.push(
+            "auto-review.yml: rl is not a feature on the default workspace member set".to_string(),
+        );
+    }
+    if !content.contains("git diff --name-only --diff-filter=ACMRT")
+        || !content.contains("':!vendor/**'")
+        || !content.contains("xargs rustfmt --check")
+    {
+        offenders.push(
+            "auto-review.yml: formatting should target PR Rust file changes only and exclude vendor path dependencies"
+                .to_string(),
+        );
+    }
+    if !content
+        .contains("cargo check --locked -p ploy-research --features db,polars-export,ml,rl,strategy-runtime --lib")
+    {
+        offenders.push(
+            "auto-review.yml: missing bounded ploy-research heavy feature contract check"
+                .to_string(),
+        );
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "auto-review workflow guard failed:\n{}",
         offenders.join("\n")
     );
 }
@@ -202,15 +248,12 @@ fn release_platform_workflow_pins_host_fingerprints() {
 
     if content.matches("fingerprint:").count() != 2 {
         offenders.push(
-            "release-platform.yml: expected fingerprint pinning on both appleboy steps"
-                .to_string(),
+            "release-platform.yml: expected fingerprint pinning on both appleboy steps".to_string(),
         );
     }
 
     if !content.contains("EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT") {
-        offenders.push(
-            "release-platform.yml: missing EC2 fingerprint secret wiring".to_string(),
-        );
+        offenders.push("release-platform.yml: missing EC2 fingerprint secret wiring".to_string());
     }
 
     assert!(
