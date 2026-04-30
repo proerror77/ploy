@@ -195,6 +195,48 @@ fn replay_dryrun_parity_reports_strict_readiness() {
 }
 
 #[test]
+fn research_issue_workflows_apply_decision_labels() {
+    let helper = workflow_contents(".github/scripts/research-issue-labels.js");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "applyResearchIssueLabels",
+        "labelsForDecision",
+        "decision:pending",
+        "decision:fix-data",
+        "decision:fix-runtime",
+        "evidence:missing-metrics",
+        "parity:blocked",
+    ] {
+        if !helper.contains(needle) {
+            offenders.push(format!("research-issue-labels.js: missing `{needle}`"));
+        }
+    }
+
+    for (workflow, evidence_label) in [
+        (".github/workflows/backtest.yml", "evidence:backtest"),
+        (".github/workflows/replay-dryrun-parity.yml", "evidence:parity"),
+        (".github/workflows/factor-review-v2.yml", "evidence:factor-review"),
+        (".github/workflows/factor-walk-forward-v2.yml", "evidence:walk-forward"),
+        (".github/workflows/optimize.yml", "evidence:optimize"),
+    ] {
+        let content = workflow_contents(workflow);
+        if !content.contains("research-issue-labels.js") {
+            offenders.push(format!("{workflow}: missing shared research label helper"));
+        }
+        if !content.contains(evidence_label) {
+            offenders.push(format!("{workflow}: missing evidence label `{evidence_label}`"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "research issue label guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn auto_review_uses_bounded_workspace_checks() {
     let content = workflow_contents(".github/workflows/auto-review.yml");
     let mut offenders = Vec::new();

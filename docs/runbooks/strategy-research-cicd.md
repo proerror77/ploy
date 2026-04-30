@@ -157,12 +157,11 @@ Keep the control planes separate:
 
 ## Recommended Improvements
 
-1. Add label automation for research decisions after evidence is posted.
-2. Make the dry-run report expose stricter event-level parity fields when the
+1. Make the dry-run report expose stricter event-level parity fields when the
    operator API contract is ready.
-3. Configure repository settings so `main`, `tango-1-1`, `ploy-trade-1`,
+2. Configure repository settings so `main`, `tango-1-1`, `ploy-trade-1`,
    `production`, and `ploy-ci-1` enforce the same branch/environment policy that
    the workflow files expect.
-4. Keep ACK workflows marked as cluster/deployment workflows, separate from the
+3. Keep ACK workflows marked as cluster/deployment workflows, separate from the
    current Tango-first PM5D research loop unless ACK becomes the canonical
    research runner.

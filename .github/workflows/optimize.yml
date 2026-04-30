@@ -440,6 +440,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const { applyResearchIssueLabels } = require("./.github/scripts/research-issue-labels.js");
             const issueNumberRaw = process.env.OPT_ISSUE_NUMBER || "";
             if (!issueNumberRaw) {
               core.info("No issue_number configured in options_json; skipping issue comment.");
@@ -463,4 +464,11 @@ jobs:
               repo: context.repo.repo,
               issue_number,
               body
+            });
+            await applyResearchIssueLabels({
+              github,
+              context,
+              core,
+              issue_number,
+              labels: ["evidence:optimize", "decision:pending"]
             });

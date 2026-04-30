@@ -166,6 +166,7 @@ jobs:
         with:
           script: |
             const fs = require("fs");
+            const { applyResearchIssueLabels, labelsForDecision } = require("./.github/scripts/research-issue-labels.js");
             const issue_number = Number("${{ github.event.inputs.issue_number }}");
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
             let metrics = null;
@@ -205,3 +206,11 @@ jobs:
               issue_number,
               body
             });
+            const labels = ["evidence:backtest", ...labelsForDecision(decision)];
+            if (riskFlags.includes("missing_headline_metrics")) {
+              labels.push("evidence:missing-metrics");
+            }
+            if (riskFlags.includes("missing_evaluation_artifact")) {
+              labels.push("evidence:missing-artifact");
+            }
+            await applyResearchIssueLabels({ github, context, core, issue_number, labels });
