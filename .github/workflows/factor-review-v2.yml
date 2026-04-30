@@ -346,6 +346,8 @@ jobs:
             --min-observations "${FACTOR_MIN_OBSERVATIONS}" \
             --top-quantile "${FACTOR_TOP_QUANTILE}" \
             --top-n "${FACTOR_TOP_N}" \
+            --git-ref "${{ github.event.inputs.git_ref }}" \
+            --output-json artifacts/factor-review-v2/evaluation.json \
             | tee artifacts/factor-review-v2/report.txt
 
       - name: Publish summary
@@ -359,6 +361,31 @@ jobs:
             echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
             if [ -f artifacts/factor-review-v2/source.txt ]; then
               echo "- Source: $(cat artifacts/factor-review-v2/source.txt)"
+            fi
+            if [ -f artifacts/factor-review-v2/evaluation.json ]; then
+              echo "- Evaluation: \`evaluation.json\`"
+              echo ""
+              echo '```json'
+              python3 - <<'PY'
+          import json
+          data = json.load(open("artifacts/factor-review-v2/evaluation.json", encoding="utf-8"))
+          report = data.get("report") or {}
+          buckets = report.get("executable_ev_buckets") or []
+          supported = [b for b in buckets if b.get("statistically_supported")]
+          positive = [b for b in buckets if b.get("positive_ev") and not b.get("underpowered")]
+          headline = {
+              "canonical_result": data.get("canonical_result"),
+              "risk_flags": data.get("risk_flags") or [],
+              "bucket_counts": {
+                  "total": len(buckets),
+                  "positive_non_underpowered": len(positive),
+                  "statistically_supported": len(supported),
+              },
+              "best_supported_buckets": supported[:5],
+          }
+          print(json.dumps(headline, indent=2, sort_keys=True))
+          PY
+              echo '```'
             fi
             if [ -f artifacts/research-snapshot/data-gap-audit.md ]; then
               echo ""
@@ -392,7 +419,8 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const { applyResearchIssueLabels } = require("./.github/scripts/research-issue-labels.js");
+            const fs = require("fs");
+            const { applyResearchIssueLabels, labelsForDecision } = require("./.github/scripts/research-issue-labels.js");
             const issueNumberRaw = process.env.FACTOR_ISSUE_NUMBER || "";
             if (!issueNumberRaw) {
               core.info("No issue_number configured in options_json; skipping issue comment.");
@@ -400,6 +428,30 @@ jobs:
             }
             const issue_number = Number(issueNumberRaw);
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            let decision = "fix-workflow-or-artifact";
+            let riskFlags = ["missing_evaluation_artifact"];
+            let bucketSummary = "unavailable";
+            if (fs.existsSync("artifacts/factor-review-v2/evaluation.json")) {
+              const data = JSON.parse(fs.readFileSync("artifacts/factor-review-v2/evaluation.json", "utf8"));
+              riskFlags = data.risk_flags || [];
+              const buckets = data.report?.executable_ev_buckets || [];
+              const positive = buckets.filter((bucket) => bucket.positive_ev && !bucket.underpowered);
+              const supported = buckets.filter((bucket) => bucket.statistically_supported);
+              const best = [...supported].sort((a, b) => (b.avg_pnl_15u || 0) - (a.avg_pnl_15u || 0)).slice(0, 3);
+              bucketSummary = JSON.stringify({
+                total: buckets.length,
+                positive_non_underpowered: positive.length,
+                statistically_supported: supported.length,
+                best_supported: best.map((bucket) => ({
+                  dimension: bucket.dimension,
+                  bucket: bucket.bucket,
+                  pnl_rows: bucket.pnl_rows,
+                  avg_pnl_15u: bucket.avg_pnl_15u,
+                  t_stat: bucket.t_stat
+                }))
+              });
+              decision = supported.length > 0 ? "candidate-for-oos-replay-gate" : "no-deploy-factor-review-only";
+            }
             const body = [
               "Factor review evidence:",
               "",
@@ -409,7 +461,9 @@ jobs:
               `- Dataset/window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}`,
               `- Symbols: ${{ github.event.inputs.symbols }}`,
               `- Artifact: \`factor-review-v2-${process.env.GITHUB_RUN_ID}\``,
-              "- Decision: pending"
+              `- Executable EV buckets: \`${bucketSummary}\``,
+              `- Risk flags: \`${riskFlags.join(", ") || "none"}\``,
+              `- Decision: ${decision}`
             ].join("\n");
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -422,5 +476,5 @@ jobs:
               context,
               core,
               issue_number,
-              labels: ["evidence:factor-review", "decision:pending"]
+              labels: ["evidence:factor-review", ...labelsForDecision(decision), ...(riskFlags.includes("missing_evaluation_artifact") ? ["evidence:missing-artifact"] : [])]
             });

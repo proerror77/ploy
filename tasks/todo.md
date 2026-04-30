@@ -1,3 +1,54 @@
+# PM5D Executable EV Factor Buckets (2026-04-30)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: bucket-level executable EV summaries across direction, price,
+    liquidity, lag, and fillability factors.
+- `crates/ploy-research/examples/factor_review_v2.rs`
+  - Owner: structured factor-review artifact with canonical source,
+    accounting contract, risk flags, and report payload.
+- `.github/workflows/factor-review-v2.yml`
+  - Owner: CI evidence generation on `ploy-ci-1` and issue artifact/comment wiring.
+- `crates/ploy-research/src/lib.rs`
+  - Owner: public export for factor-review artifact consumers.
+- `tasks/todo.md`
+  - Owner: plan, verification evidence, and remaining research decision notes.
+
+## Tasks
+
+- [x] Finish executable EV bucket summaries in factor review.
+- [x] Add JSON artifact output to `factor_review_v2`.
+- [x] Wire `factor-review-v2.yml` to persist `evaluation.json`.
+- [x] Add focused tests for direction/fillability bucket behavior and report text.
+- [x] Run focused Rust/workflow verification.
+- [ ] Push branch and run factor-review CI on `ploy-ci-1` for issue `#256`.
+
+## Review
+
+- 2026-04-30: Added `ExecutableEvBucketSummary` to factor review output so
+  direction probability, model edge, entry price, symbol/side, PM lag,
+  capacity, liquidity, shortfall, and slippage buckets are judged by filled
+  executable PnL, ROI on stake, t-stat, sample size, and fillability instead of
+  win rate alone.
+- 2026-04-30: `factor_review_v2` now writes
+  `artifacts/factor-review-v2/evaluation.json` with git ref, window, symbols,
+  official-settlement/fillability/PnL accounting contract, risk flags, optional
+  snapshot manifest, and the full report payload.
+- 2026-04-30: `factor-review-v2.yml` now passes `--git-ref` and
+  `--output-json`, includes EV bucket/risk-flag headline JSON in the step
+  summary, and comments issue evidence with a no-deploy verdict unless a
+  statistically supported positive executable-EV bucket exists.
+- 2026-04-30: Local verification passed: `rustfmt --edition 2024 --config
+  skip_children=true` on touched Rust files, `git diff --check`, workflow YAML
+  parse, `node --check .github/scripts/research-issue-labels.js`,
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-ev-main rtk cargo test -p ploy-research
+  factors_v2 --lib`, and `CARGO_TARGET_DIR=/tmp/ploy-factor-ev-main rtk cargo
+  check -p ploy-research --features db,polars-export --example
+  factor_review_v2 --example research_snapshot_compile`.
+
 # Strategy-Agnostic CI/CD Framing (2026-04-30)
 
 ## Files
