@@ -264,7 +264,7 @@ fn main() {
     let output_json = flag_value(&args, "--output-json");
     let git_ref = git_ref_from_args(&args);
 
-    let (strategy_variant, strategy_config, sim_config, runtime_config, backtest_options) =
+    let (strategy_variant, strategy_config, sim_config, mut runtime_config, backtest_options) =
         if let Some(ref path) = config_path {
             let config = FullConfig::from_file(path).expect("Failed to parse config");
             let sim = config.sim_executor_config();
@@ -350,6 +350,7 @@ fn main() {
                 HistoricalLoadOptions::default(),
             )
         };
+    runtime_config.mode = RuntimeMode::Backtest;
 
     eprintln!("=== PM5D Backtest ===");
     eprintln!("Mode:    {:?}", runtime_config.mode);
