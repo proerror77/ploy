@@ -27,38 +27,6 @@ on:
         description: "Chronological events per child event-root dataset"
         required: true
         default: "150"
-      lob_sample_secs:
-        description: "Binance LOB sample interval for factor export"
-        required: false
-        default: "30"
-      max_quote_age_secs:
-        description: "Maximum PM quote age for factor observations"
-        required: false
-        default: "30"
-      entry_secs:
-        description: "Event ML entry seconds before settlement"
-        required: false
-        default: "60"
-      tolerance_secs:
-        description: "Entry row tolerance in seconds"
-        required: false
-        default: "30"
-      search_l2:
-        description: "Comma-separated logistic L2 grid"
-        required: false
-        default: "0,0.001,0.01"
-      search_min_edge:
-        description: "Comma-separated minimum edge grid"
-        required: false
-        default: "0,0.02,0.05"
-      search_learning_rate:
-        description: "Comma-separated learning-rate grid"
-        required: false
-        default: "0.03,0.05"
-      search_epochs:
-        description: "Logistic search epochs per candidate"
-        required: false
-        default: "500"
       run_workflow:
         description: "Run full event_ml_rolling_workflow after dataset split"
         required: false
@@ -67,6 +35,10 @@ on:
         description: "Upload raw event-root Parquet datasets as artifacts"
         required: false
         default: "false"
+      options_json:
+        description: "Advanced options JSON: sampling, entry/tolerance, logistic search grid"
+        required: false
+        default: '{"lob_sample_secs":30,"max_quote_age_secs":30,"entry_secs":60,"tolerance_secs":30,"search_l2":"0,0.001,0.01","search_min_edge":"0,0.02,0.05","search_learning_rate":"0.03,0.05","search_epochs":500}'
 
 concurrency:
   group: event-ml-rolling-evidence-${{ github.ref }}
@@ -101,6 +73,42 @@ jobs:
 
       - name: Add cargo to PATH
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Parse advanced options
+        env:
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          defaults = {
+              "lob_sample_secs": "30",
+              "max_quote_age_secs": "30",
+              "entry_secs": "60",
+              "tolerance_secs": "30",
+              "search_l2": "0,0.001,0.01",
+              "search_min_edge": "0,0.02,0.05",
+              "search_learning_rate": "0.03,0.05",
+              "search_epochs": "500",
+          }
+          raw = os.environ.get("OPTIONS_JSON", "").strip()
+          data = json.loads(raw) if raw else {}
+          if not isinstance(data, dict):
+              raise SystemExit("options_json must be a JSON object")
+          unknown = sorted(set(data) - set(defaults))
+          if unknown:
+              raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+          values = dict(defaults)
+          values.update({key: str(value) for key, value in data.items()})
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              for key, value in values.items():
+                  if "\n" in value:
+                      raise SystemExit(f"options_json value for {key} must be single-line")
+                  handle.write(f"EVENT_ML_{key.upper()}={value}\n")
+          PY
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -142,8 +150,8 @@ jobs:
             --end-date "${{ github.event.inputs.end_date }}" \
             --discover-valid-5m-windows \
             --max-windows "${{ github.event.inputs.source_windows }}" \
-            --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
-            --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
+            --lob-sample-secs "${EVENT_ML_LOB_SAMPLE_SECS}" \
+            --max-quote-age-secs "${EVENT_ML_MAX_QUOTE_AGE_SECS}" \
             --export-event-dataset artifacts/event-ml/source_event_root \
             | tee artifacts/event-ml/reports/source_export.txt
 
@@ -174,12 +182,12 @@ jobs:
             --example event_ml_rolling_workflow -- \
             --datasets "${DATASETS}" \
             --output-root artifacts/event-ml/rolling_workflow \
-            --entry-secs "${{ github.event.inputs.entry_secs }}" \
-            --tolerance-secs "${{ github.event.inputs.tolerance_secs }}" \
-            --search-l2 "${{ github.event.inputs.search_l2 }}" \
-            --search-min-edge "${{ github.event.inputs.search_min_edge }}" \
-            --search-learning-rate "${{ github.event.inputs.search_learning_rate }}" \
-            --search-epochs "${{ github.event.inputs.search_epochs }}" \
+            --entry-secs "${EVENT_ML_ENTRY_SECS}" \
+            --tolerance-secs "${EVENT_ML_TOLERANCE_SECS}" \
+            --search-l2 "${EVENT_ML_SEARCH_L2}" \
+            --search-min-edge "${EVENT_ML_SEARCH_MIN_EDGE}" \
+            --search-learning-rate "${EVENT_ML_SEARCH_LEARNING_RATE}" \
+            --search-epochs "${EVENT_ML_SEARCH_EPOCHS}" \
             | tee artifacts/event-ml/reports/rolling_workflow.txt
 
       - name: Collect compact reports

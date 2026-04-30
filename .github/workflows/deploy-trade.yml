@@ -11,7 +11,7 @@ on:
         description: "Copy the built runner to ploy-trade-1 and restart services"
         type: boolean
         required: true
-        default: true
+        default: false
 
 concurrency:
   group: deploy-trade-1
@@ -35,12 +35,36 @@ jobs:
     name: Build and deploy to ploy-trade-1
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    environment: ploy-trade-1
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Validate deploy provenance
+        if: ${{ inputs.deploy }}
+        env:
+          INPUT_GIT_REF: ${{ github.event.inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "Deployments to ploy-trade-1 must dispatch the workflow from main; got ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          if [ "${INPUT_GIT_REF}" != "main" ]; then
+            echo "Deployments to ploy-trade-1 must use git_ref=main; got ${INPUT_GIT_REF}" >&2
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin main
+          checked_out_sha="$(git rev-parse HEAD)"
+          main_sha="$(git rev-parse origin/main)"
+          if [ "${checked_out_sha}" != "${main_sha}" ]; then
+            echo "Checked-out deploy SHA ${checked_out_sha} does not match origin/main ${main_sha}" >&2
+            exit 1
+          fi
+          echo "Deploy provenance verified: git_ref=main sha=${checked_out_sha}"
 
       - name: Set reproducible build environment
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
@@ -103,8 +127,17 @@ jobs:
 
       - name: Configure SSH
         if: ${{ inputs.deploy }}
+        env:
+          PLOY_TRADE_1_KNOWN_HOSTS: ${{ secrets.PLOY_TRADE_1_KNOWN_HOSTS }}
         run: |
+          set -euo pipefail
           install -m 700 -d ~/.ssh
+          if [ -z "${PLOY_TRADE_1_KNOWN_HOSTS}" ]; then
+            echo "PLOY_TRADE_1_KNOWN_HOSTS secret is required for pinned SSH host verification" >&2
+            exit 1
+          fi
+          printf '%s\n' "${PLOY_TRADE_1_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
           printf '%s\n' '${{ secrets.PLOY_TRADE_1_SSH_KEY }}' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           cat > ~/.ssh/config <<EOF
@@ -112,8 +145,9 @@ jobs:
             HostName ${{ secrets.PLOY_TRADE_1_HOST }}
             User root
             IdentityFile ~/.ssh/deploy_key
-            StrictHostKeyChecking no
-            UserKnownHostsFile /dev/null
+            HostKeyAlias ploy-trade-1
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
             ServerAliveInterval 30
             ServerAliveCountMax 20
             ConnectTimeout 30
@@ -153,6 +187,11 @@ jobs:
             if systemctl is-enabled --quiet ploy-strategy-dryrun.service; then
               systemctl is-active --quiet ploy-strategy-dryrun.service
               echo "ploy-strategy-dryrun.service: active"
+            fi
+            if pgrep -af '(^|/)cargo|(^|/)rustc' >/dev/null; then
+              echo "Unexpected Rust build process running on ploy-trade-1" >&2
+              pgrep -af '(^|/)cargo|(^|/)rustc' >&2
+              exit 1
             fi
           REMOTE
 

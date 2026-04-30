@@ -1,3 +1,77 @@
+# Research Issue Label Automation (2026-04-30)
+
+## Files
+
+- `.github/scripts/research-issue-labels.js`
+  - Owner: shared GitHub issue label helper for research evidence workflows.
+- `.github/workflows/backtest.yml`
+- `.github/workflows/replay-dryrun-parity.yml`
+- `.github/workflows/factor-review-v2.yml`
+- `.github/workflows/factor-walk-forward-v2.yml`
+- `.github/workflows/optimize.yml`
+  - Owner: apply evidence and decision labels after issue evidence comments.
+- `tests/workflow_security.rs`
+  - Owner: guard that research workflows keep label automation wired.
+- `docs/runbooks/strategy-research-cicd.md`
+- `tasks/todo.md`
+
+## Tasks
+
+- [x] Add a shared helper that creates missing research labels and rotates managed state labels.
+- [x] Apply `evidence:*`, `decision:*`, and `parity:*` labels from research workflows.
+- [x] Add workflow security tests for label automation wiring.
+- [x] Run focused verification and push the PR update.
+
+## Review
+
+- 2026-04-30: Added a shared research issue label helper that creates missing
+  labels, applies evidence/decision/parity labels, and removes stale managed
+  `decision:*`, `parity:*`, and `evidence:missing-*` labels.
+- 2026-04-30: Wired label automation into backtest, replay/dry-run parity,
+  factor review, walk-forward, and optimize evidence comments.
+- 2026-04-30: Verification passed: `node --check
+  .github/scripts/research-issue-labels.js`, `git diff --check`, and
+  `/opt/homebrew/bin/timeout 180 rtk cargo test --test workflow_security`.
+  Local `actionlint` was unavailable; GitHub workflow lint remains the source
+  of truth after push.
+
+# CI/CD Deployment Hardening (2026-04-30)
+
+## Files
+
+- `.github/workflows/deploy-tango-1-1.yml`
+  - Owner: main-only Tango deployment provenance and pinned SSH host verification.
+- `.github/workflows/deploy-trade.yml`
+  - Owner: protected trade deployment, default-safe dispatch, and pinned SSH host verification.
+- `tests/workflow_security.rs`
+  - Owner: regression guards for host deploy workflow policy.
+- `docs/runbooks/strategy-research-cicd.md`
+  - Owner: CI/CD runbook updates for deploy provenance and host-key policy.
+- `tasks/todo.md`
+  - Owner: plan and verification notes.
+
+## Tasks
+
+- [x] Add a hard deploy gate requiring workflow dispatch from `main` with `git_ref=main`.
+- [x] Require pinned SSH `known_hosts` secrets for Tango and trade deploys.
+- [x] Put trade deploy behind a dedicated GitHub environment and default real deploys to false.
+- [x] Add workflow security tests for deploy provenance and SSH host-key verification.
+- [x] Run focused workflow security verification and push the PR update.
+
+## Review
+
+- 2026-04-30: Added deploy-time provenance gates to Tango and trade workflows:
+  real deployment now requires the workflow dispatch branch and checked-out
+  `git_ref` to both resolve to `origin/main`.
+- 2026-04-30: Replaced disabled SSH host verification with required pinned
+  `known_hosts` secrets and `HostKeyAlias` for `tango-1-1` and `ploy-trade-1`.
+  Trade deploy now uses the `ploy-trade-1` GitHub environment and defaults
+  `deploy=false`.
+- 2026-04-30: Verification passed: `git diff --check` and
+  `/opt/homebrew/bin/timeout 180 rtk cargo test --test workflow_security`.
+  Local `actionlint` was unavailable; GitHub workflow lint remains the source
+  of truth after push.
+
 # PM5D OBI-Hard Dry-Run Candidate (2026-04-29)
 
 ## Files

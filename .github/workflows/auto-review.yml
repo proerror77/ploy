@@ -29,73 +29,53 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.91
-          components: clippy, rustfmt
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev libpq-dev clang lld
-          sudo apt-get install -y sccache || cargo install sccache --locked
-          sudo apt-get install -y mold || true
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: auto-review
-
-      - name: Cache sccache
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/sccache
-          key: ${{ runner.os }}-sccache-auto-review-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-sccache-auto-review-
-            ${{ runner.os }}-sccache-
+          components: rustfmt
 
       - name: Check formatting
         id: fmt
         run: |
           set +e
-          cargo fmt --all -- --check > fmt.log 2>&1
-          status=$?
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --name-only --diff-filter=ACMRT \
+              "${{ github.event.pull_request.base.sha }}"...HEAD \
+              -- '*.rs' ':!vendor/**' > fmt-files.txt
+          else
+            git ls-files '*.rs' ':!vendor/**' > fmt-files.txt
+          fi
+
+          if [ -s fmt-files.txt ]; then
+            {
+              echo "Checked Rust files:"
+              sed 's/^/- /' fmt-files.txt
+              echo
+              xargs rustfmt --check < fmt-files.txt
+            } > fmt.log 2>&1
+            status=$?
+          else
+            echo "No changed Rust files to format-check." > fmt.log
+            status=0
+          fi
           echo "status=$status" >> "$GITHUB_OUTPUT"
           tail -n 80 fmt.log > fmt.tail.log || true
           exit 0
-
-      - name: Run clippy review
-        id: clippy
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_CACHE_SIZE: 10G
-        run: |
-          set +e
-          cargo clippy --all-targets --features rl > clippy.log 2>&1
-          status=$?
-          echo "status=$status" >> "$GITHUB_OUTPUT"
-          tail -n 120 clippy.log > clippy.tail.log || true
-          exit 0
-
-      - name: Show sccache stats
-        if: always()
-        run: sccache --show-stats || true
 
       - name: Create or update auto-review comment
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/github-script@v9
         env:
           FMT_STATUS: ${{ steps.fmt.outputs.status }}
-          CLIPPY_STATUS: ${{ steps.clippy.outputs.status }}
         with:
           script: |
             const fs = require("fs");
             const marker = "<!-- auto-review-bot -->";
             const fmtOk = process.env.FMT_STATUS === "0";
-            const clippyOk = process.env.CLIPPY_STATUS === "0";
 
             const readLog = (path) => {
               try {
@@ -107,27 +87,18 @@ jobs:
             };
 
             const fmtLog = readLog("fmt.tail.log");
-            const clippyLog = readLog("clippy.tail.log");
 
             const body = [
               marker,
               "## Auto Review Summary",
               "",
-              `- \`cargo fmt --check\`: ${fmtOk ? "PASS" : "NEEDS FIX"}`,
-              `- \`cargo clippy\`: ${clippyOk ? "PASS" : "NEEDS FIX"}`,
+              `- Changed Rust formatting: ${fmtOk ? "PASS" : "NEEDS FIX"}`,
+              "- Compile/test matrix: handled by the required `Test` workflow checks.",
               "",
               "<details><summary>fmt output (tail)</summary>",
               "",
               "```text",
               fmtLog,
-              "```",
-              "",
-              "</details>",
-              "",
-              "<details><summary>clippy output (tail)</summary>",
-              "",
-              "```text",
-              clippyLog,
               "```",
               "",
               "</details>",

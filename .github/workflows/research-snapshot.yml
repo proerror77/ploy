@@ -23,49 +23,10 @@ on:
         description: "Fixed notional used by executable labels"
         required: true
         default: "15"
-      lob_sample_secs:
-        description: "Binance and PM LOB sample interval"
+      options_json:
+        description: "Advanced options JSON: sampling, optimizer_data_dir, data_profile, audit gate"
         required: false
-        default: "30"
-      observation_sample_secs:
-        description: "Factor observation output interval"
-        required: false
-        default: "30"
-      max_quote_age_secs:
-        description: "Maximum PM quote age"
-        required: false
-        default: "30"
-      optimizer_data_dir:
-        description: "Immutable parquet-feed dir used by optimize_backtest"
-        required: true
-        default: "/tmp/ploy-parquet"
-      data_profile:
-        description: "Project data requirements profile"
-        type: choice
-        required: true
-        default: "pm5d-execution"
-        options:
-          - pm5d-execution
-          - pm5d-vol
-          - all
-          - custom
-      custom_required_sources:
-        description: "Comma-separated sources when data_profile=custom"
-        required: false
-        default: ""
-      audit_lookback_hours:
-        description: "Market-data audit lookback in hours"
-        required: false
-        default: "168"
-      data_gate:
-        description: "Fail threshold for required-source audit"
-        type: choice
-        required: true
-        default: "never"
-        options:
-          - critical
-          - warn
-          - never
+        default: '{"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never"}'
 
 concurrency:
   group: research-snapshot-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}-${{ github.event.inputs.symbols }}
@@ -102,6 +63,51 @@ jobs:
       - name: Add cargo to PATH
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
+      - name: Parse advanced options
+        env:
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          defaults = {
+              "lob_sample_secs": "30",
+              "observation_sample_secs": "30",
+              "max_quote_age_secs": "30",
+              "optimizer_data_dir": "/tmp/ploy-parquet",
+              "data_profile": "pm5d-execution",
+              "custom_required_sources": "",
+              "audit_lookback_hours": "168",
+              "data_gate": "never",
+          }
+          choices = {
+              "data_profile": {"pm5d-execution", "pm5d-vol", "all", "custom"},
+              "data_gate": {"critical", "warn", "never"},
+          }
+          raw = os.environ.get("OPTIONS_JSON", "").strip()
+          data = json.loads(raw) if raw else {}
+          if not isinstance(data, dict):
+              raise SystemExit("options_json must be a JSON object")
+          unknown = sorted(set(data) - set(defaults))
+          if unknown:
+              raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+
+          values = dict(defaults)
+          values.update({key: str(value) for key, value in data.items()})
+          for key, allowed in choices.items():
+              if values[key] not in allowed:
+                  choices_text = ", ".join(sorted(allowed))
+                  raise SystemExit(f"options_json value for {key} must be one of: {choices_text}")
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              for key, value in values.items():
+                  if "\n" in value:
+                      raise SystemExit(f"options_json value for {key} must be single-line")
+                  handle.write(f"SNAPSHOT_{key.upper()}={value}\n")
+          PY
+
       - name: Ensure psql client
         run: |
           set -euo pipefail
@@ -119,11 +125,10 @@ jobs:
 
       - name: Resolve data requirements
         id: data_scope
-        env:
-          DATA_PROFILE: ${{ github.event.inputs.data_profile }}
-          CUSTOM_REQUIRED_SOURCES: ${{ github.event.inputs.custom_required_sources }}
         run: |
           set -euo pipefail
+          DATA_PROFILE="${SNAPSHOT_DATA_PROFILE}"
+          CUSTOM_REQUIRED_SOURCES="${SNAPSHOT_CUSTOM_REQUIRED_SOURCES}"
           case "${DATA_PROFILE}" in
             pm5d-execution)
               required_sources="polymarket_quotes,polymarket_orderbooks,binance_price,binance_agg_trades,binance_lob"
@@ -160,10 +165,10 @@ jobs:
         id: data_audit
         env:
           REQUIRED_SOURCES: ${{ steps.data_scope.outputs.required_sources }}
-          AUDIT_LOOKBACK_HOURS: ${{ github.event.inputs.audit_lookback_hours }}
-          DATA_GATE: ${{ github.event.inputs.data_gate }}
         run: |
           set -euo pipefail
+          AUDIT_LOOKBACK_HOURS="${SNAPSHOT_AUDIT_LOOKBACK_HOURS}"
+          export DATA_GATE="${SNAPSHOT_DATA_GATE}"
           mkdir -p artifacts/research-snapshot
           PLOY_DATABASE__URL="${PLOY_DB_URL:?PLOY_DB_URL secret is required}" \
             scripts/audit_market_data_gaps.py \
@@ -244,11 +249,11 @@ jobs:
             --start-date "${{ github.event.inputs.start_date }}" \
             --end-date "${{ github.event.inputs.end_date }}" \
             --stake-usd "${{ github.event.inputs.stake_usd }}" \
-            --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
-            --observation-sample-secs "${{ github.event.inputs.observation_sample_secs }}" \
-            --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
+            --lob-sample-secs "${SNAPSHOT_LOB_SAMPLE_SECS}" \
+            --observation-sample-secs "${SNAPSHOT_OBSERVATION_SAMPLE_SECS}" \
+            --max-quote-age-secs "${SNAPSHOT_MAX_QUOTE_AGE_SECS}" \
             --output-dir artifacts/research-snapshot \
-            --optimizer-data-dir "${{ github.event.inputs.optimizer_data_dir }}" \
+            --optimizer-data-dir "${SNAPSHOT_OPTIMIZER_DATA_DIR}" \
             --data-requirements "${{ steps.data_scope.outputs.required_sources }}" \
             --data-audit-status "${{ steps.data_audit.outputs.overall_status }}" \
             --data-audit-report data-gap-audit.json \
@@ -264,7 +269,7 @@ jobs:
             echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
             echo "- Symbols: ${{ github.event.inputs.symbols }}"
             echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
-            echo "- Data profile: ${{ github.event.inputs.data_profile }}"
+            echo "- Data profile: ${SNAPSHOT_DATA_PROFILE}"
             echo "- Data requirements: ${{ steps.data_scope.outputs.required_sources }}"
             echo "- Include Deribit: ${{ steps.data_scope.outputs.include_deribit }}"
             echo ""

@@ -10,7 +10,10 @@ on:
       push_images:
         description: "Push images to ACR"
         type: boolean
-        default: true
+        default: false
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,6 +37,17 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Capture checked-out commit
+        run: echo "BUILD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Enforce immutable image push provenance
+        if: ${{ github.event.inputs.push_images == 'true' }}
+        run: |
+          if [ "${{ github.event.inputs.git_ref }}" != "main" ]; then
+            echo "ACR image pushes must use git_ref=main" >&2
+            exit 1
+          fi
 
       - name: Set reproducible build environment
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
@@ -109,28 +123,25 @@ jobs:
       - name: Build and push ploy-runner image
         run: |
           IMAGE="${ACR_REGISTRY}/${ACR_NAMESPACE}/ploy-runner"
-          docker build -f Dockerfile.runner -t "${IMAGE}:${{ github.sha }}" -t "${IMAGE}:latest" .
+          docker build -f Dockerfile.runner -t "${IMAGE}:${BUILD_SHA}" .
           if [ "${{ github.event.inputs.push_images }}" = "true" ]; then
-            docker push "${IMAGE}:${{ github.sha }}"
-            docker push "${IMAGE}:latest"
+            docker push "${IMAGE}:${BUILD_SHA}"
           fi
 
       - name: Build and push ploy-collector image
         run: |
           IMAGE="${ACR_REGISTRY}/${ACR_NAMESPACE}/ploy-collector"
-          docker build -f Dockerfile.collector -t "${IMAGE}:${{ github.sha }}" -t "${IMAGE}:latest" .
+          docker build -f Dockerfile.collector -t "${IMAGE}:${BUILD_SHA}" .
           if [ "${{ github.event.inputs.push_images }}" = "true" ]; then
-            docker push "${IMAGE}:${{ github.sha }}"
-            docker push "${IMAGE}:latest"
+            docker push "${IMAGE}:${BUILD_SHA}"
           fi
 
       - name: Build and push ploy-research image
         run: |
           IMAGE="${ACR_REGISTRY}/${ACR_NAMESPACE}/ploy-research"
-          docker build -f Dockerfile.research -t "${IMAGE}:${{ github.sha }}" -t "${IMAGE}:latest" .
+          docker build -f Dockerfile.research -t "${IMAGE}:${BUILD_SHA}" .
           if [ "${{ github.event.inputs.push_images }}" = "true" ]; then
-            docker push "${IMAGE}:${{ github.sha }}"
-            docker push "${IMAGE}:latest"
+            docker push "${IMAGE}:${BUILD_SHA}"
           fi
 
       - name: Summary
@@ -140,5 +151,6 @@ jobs:
             echo "- ploy-runner: built"
             echo "- ploy-collector: built"
             echo "- ploy-research: built"
-            echo "- SHA: ${{ github.sha }}"
+            echo "- Image tag: \`${BUILD_SHA}\`"
+            echo "- Push images: \`${{ github.event.inputs.push_images }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

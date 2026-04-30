@@ -147,8 +147,64 @@ ci/<short-description>        — CI/workflow changes
 ### Deployment
 - **Backtest**: trigger `backtest.yml` (workflow_dispatch) with `git_ref=main`
 - **Deploy dryrun/live**: trigger `deploy-tango-1-1.yml` (workflow_dispatch) with `git_ref=main`
+- **Deploy trade**: trigger `deploy-trade.yml` (workflow_dispatch) with `git_ref=main`
+- **Release platform**: trigger `release-platform.yml` (workflow_dispatch) with `git_ref=main`
+- **ACK deploy**: trigger `build-push-acr.yml` with `push_images=true` only from `git_ref=main`, then `deploy-ack.yml` with the immutable 40-character SHA image tag
 - Never deploy from a feature branch directly
 - Never build Rust on tango-1-1 — CI builds and ships artifacts only
+
+### GitHub Actions / CLI Principles
+
+- Use GitHub Actions as the default build, test, research, and deploy execution
+  surface when work needs Linux, remote data, repository secrets, or trading-host
+  delivery.
+- Use `gh` as the default control surface for PR checks, workflow dispatch,
+  run monitoring, failed-log inspection, and workflow result evidence.
+- Treat CI failure as actionable engineering feedback: inspect the failed run,
+  fix the root cause, push a new commit, and re-run the relevant checks.
+- Treat successful CI as necessary but not sufficient for deployments. After
+  deploy, verify the affected remote service, config, systemd guardrails, and
+  public/operator endpoint.
+- Deployments that affect `tango-1-1`, trade services, ACK, or production-like
+  state must run from `main`. Feature branches may run build-only or
+  research-only workflows only when they do not mutate deployment state.
+- Container/image deploy paths must use immutable checked-out commit SHA tags.
+  Do not push or deploy mutable `latest` tags.
+- Keep deployment secrets in GitHub environments/repository secrets. Never place
+  secrets in local files, commits, logs, pasted command output, or ad hoc scripts.
+- Prefer environment-scoped workflows (`tango-1-1`, `production`, `ploy-ci-1`,
+  `ack`) over direct SSH when an equivalent workflow exists.
+- Do not recover from failed CI/CD by hot-patching Rust binaries or compiling
+  source on trading hosts. Fix the workflow or source and redeploy CI-built
+  artifacts.
+
+### Research Issue Workflow
+
+- Strategy research ideas should be captured as GitHub issues instead of staying
+  only in chat, local notes, or one-off scripts.
+- Follow `docs/runbooks/strategy-research-cicd.md` for the canonical research
+  issue -> workflow -> evidence -> implementation -> deployment loop.
+- For PM5D / five-minute strategy work, split ideas by factor, hypothesis, data
+  source, execution assumption, or implementation lane so each issue has one
+  testable claim.
+- Each research issue should include: hypothesis, expected edge mechanism,
+  required data, backtest or replay method, success metrics, failure criteria,
+  and the next decision the result should unlock.
+- Prefer issue chains for compound strategy work: parent issue for the strategy
+  direction, child issues for individual factors, filters, execution models,
+  and runtime integration.
+- Backtest/research issues must distinguish exploratory diagnostics from
+  executable strategy accounting. Do not treat multiple entry-time rows from the
+  same event as independent deployable trades.
+- Research evidence should be attached back to the issue: workflow run URL,
+  git ref, dataset/window, config, headline metrics, known caveats, and the
+  resulting decision (`continue`, `revise`, `reject`, or `promote to runtime`).
+- Missing artifacts, empty headline metrics, or missing replay/dry-run strict
+  parity fields are caveats that block promotion; record them as follow-up work
+  instead of treating the run as successful evidence.
+- When an issue leads to implementation, create or link a separate
+  implementation issue/PR so research conclusions, code changes, and deployment
+  decisions stay traceable.
 
 ### Local environment
 - No local database. All data, backtests, and services run on tango-1-1 via CI/CD.

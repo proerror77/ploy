@@ -61,6 +61,29 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
+      - name: Validate deploy provenance
+        if: ${{ inputs.deploy }}
+        env:
+          INPUT_GIT_REF: ${{ github.event.inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "Deployments to tango-1-1 must dispatch the workflow from main; got ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          if [ "${INPUT_GIT_REF}" != "main" ]; then
+            echo "Deployments to tango-1-1 must use git_ref=main; got ${INPUT_GIT_REF}" >&2
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin main
+          checked_out_sha="$(git rev-parse HEAD)"
+          main_sha="$(git rev-parse origin/main)"
+          if [ "${checked_out_sha}" != "${main_sha}" ]; then
+            echo "Checked-out deploy SHA ${checked_out_sha} does not match origin/main ${main_sha}" >&2
+            exit 1
+          fi
+          echo "Deploy provenance verified: git_ref=main sha=${checked_out_sha}"
+
       - name: Set reproducible build environment
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
 
@@ -228,8 +251,17 @@ jobs:
 
       - name: Configure SSH for deploy
         if: ${{ inputs.deploy }}
+        env:
+          TANGO_1_1_KNOWN_HOSTS: ${{ secrets.TANGO_1_1_KNOWN_HOSTS }}
         run: |
+          set -euo pipefail
           install -m 700 -d ~/.ssh
+          if [ -z "${TANGO_1_1_KNOWN_HOSTS}" ]; then
+            echo "TANGO_1_1_KNOWN_HOSTS secret is required for pinned SSH host verification" >&2
+            exit 1
+          fi
+          printf '%s\n' "${TANGO_1_1_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
           printf '%s\n' '${{ secrets.TANGO_1_1_SSH_KEY }}' > ~/.ssh/tango_1_1_key
           chmod 600 ~/.ssh/tango_1_1_key
           cat > ~/.ssh/config <<EOF
@@ -237,8 +269,9 @@ jobs:
             HostName ${DEPLOY_HOST}
             User root
             IdentityFile ~/.ssh/tango_1_1_key
-            StrictHostKeyChecking no
-            UserKnownHostsFile /dev/null
+            HostKeyAlias tango-1-1
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
             ServerAliveInterval 30
             ServerAliveCountMax 20
             ConnectTimeout 30
