@@ -282,6 +282,10 @@ mod tests {
     use chrono::Utc;
     use ploy_operator_contracts::{DesiredState, ObservedState};
     use std::path::PathBuf;
+    #[cfg(target_os = "linux")]
+    use std::thread;
+    #[cfg(target_os = "linux")]
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_pid_file(label: &str) -> PathBuf {
@@ -303,6 +307,21 @@ mod tests {
             working_directory: std::env::current_dir().expect("cwd"),
             pid_file: unique_pid_file("test"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_process_identity(pid: u32, spec: &WorkerLaunchSpec) {
+        for _ in 0..20 {
+            if super::process_matches_spec(pid, spec) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            super::process_matches_spec(pid, spec),
+            "process {pid} did not settle to the expected launch identity"
+        );
     }
 
     #[test]
@@ -351,16 +370,15 @@ mod tests {
         let pid_file = unique_pid_file("existing");
         let _ = std::fs::remove_file(&pid_file);
 
-        let first = DeploymentRuntime::new(WorkerLaunchSpec {
+        let spec = WorkerLaunchSpec {
             pid_file: pid_file.clone(),
             ..shell_sleep_spec()
-        });
+        };
+        let first = DeploymentRuntime::new(spec.clone());
         let pid = first.boot_status().pid.expect("first pid");
+        wait_for_process_identity(pid, &spec);
 
-        let second = DeploymentRuntime::new(WorkerLaunchSpec {
-            pid_file: pid_file.clone(),
-            ..shell_sleep_spec()
-        });
+        let second = DeploymentRuntime::new(spec);
         assert_eq!(second.boot_status().pid, Some(pid));
 
         let _ = std::fs::remove_file(pid_file);
