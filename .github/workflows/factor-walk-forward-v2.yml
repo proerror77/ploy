@@ -324,6 +324,14 @@ jobs:
             build_args+=(--example research_snapshot_compile)
           fi
           cargo build "${build_args[@]}"
+          if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+            mkdir -p target/release/examples
+            for binary in factor_walk_forward_v2 research_snapshot_compile; do
+              if [ -x "${CARGO_TARGET_DIR}/release/examples/${binary}" ]; then
+                cp "${CARGO_TARGET_DIR}/release/examples/${binary}" "target/release/examples/${binary}"
+              fi
+            done
+          fi
 
       - name: Compile research snapshot
         run: |

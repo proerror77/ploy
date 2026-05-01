@@ -11281,3 +11281,35 @@ Review:
   --no-default-features`, and `CARGO_TARGET_DIR=/tmp/ploy-research-all-in-check
   rtk cargo check -p ploy-research --example three_layer_snapshot_optimize
   --no-default-features`.
+
+# PM5D Persistent Target Binary Path Fix (2026-05-01)
+
+## Files
+
+- `.github/workflows/factor-review-v2.yml`
+  - Owner: factor-review binary path compatibility when `CARGO_TARGET_DIR` is set.
+- `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: walk-forward binary path compatibility when `CARGO_TARGET_DIR` is set.
+- `.github/workflows/optimize.yml`
+  - Owner: optimizer binary copy path compatibility when `CARGO_TARGET_DIR` is set.
+- `tasks/todo.md`
+  - Owner: failure evidence and verification notes.
+
+## Tasks
+
+- [x] Diagnose failed main walk-forward speed run `25199046583`.
+- [x] Keep persistent target reuse, but copy built example binaries back to the
+  workflow's existing `target/release/examples/` execution path.
+- [ ] Verify workflow syntax and rerun snapshot-backed main speed tests.
+
+## Review
+
+- 2026-05-01: Main speed test `25199046583` proved the new snapshot-reuse path
+  correctly configured `CARGO_TARGET_DIR` and skipped the GitHub cargo cache
+  step, but failed in `Run factor walk-forward` with exit code `127` because
+  the binary was built under the persistent cargo target directory while the run
+  step still executed `./target/release/examples/factor_walk_forward_v2`.
+- 2026-05-01: The minimal fix is to keep the existing workflow execution path
+  stable and copy built example binaries from `${CARGO_TARGET_DIR}` back into
+  `target/release/examples/` after `cargo build`. Optimize now copies from
+  `${CARGO_TARGET_DIR:-target}` before creating `optimize-runner`.
