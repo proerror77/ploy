@@ -73,11 +73,31 @@ def safe_extract(zip_path: Path, output_dir: Path) -> None:
         archive.extractall(output_dir)
 
 
+def copy_tree_contents(source_dir: Path, output_dir: Path) -> None:
+    if not source_dir.is_dir():
+        raise RuntimeError(f"strip prefix is not a directory in artifact: {source_dir}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for item in source_dir.iterdir():
+        target = output_dir / item.name
+        if item.is_dir():
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-id", required=True, help="Workflow run id that owns the artifact")
     parser.add_argument("--name", required=True, help="Artifact name to download")
     parser.add_argument("--output-dir", required=True, help="Directory to extract the artifact into")
+    parser.add_argument(
+        "--strip-prefix",
+        default="",
+        help="Optional artifact subdirectory whose contents should become the output root",
+    )
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--api-url", default=os.environ.get("GITHUB_API_URL", "https://api.github.com"))
     parser.add_argument("--token", default=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"))
@@ -123,12 +143,18 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     with tempfile.TemporaryDirectory(prefix="ploy-artifact-") as tmp:
         zip_path = Path(tmp) / "artifact.zip"
+        extract_dir = Path(tmp) / "extract"
         try:
             download_file(artifact["archive_download_url"], args.token, zip_path)
         except urllib.error.HTTPError as err:
             print(f"failed to download artifact: HTTP {err.code}: {err.read().decode('utf-8')}", file=sys.stderr)
             return 1
-        safe_extract(zip_path, output_dir)
+        if args.strip_prefix:
+            safe_extract(zip_path, extract_dir)
+            shutil.rmtree(output_dir, ignore_errors=True)
+            copy_tree_contents(extract_dir / args.strip_prefix, output_dir)
+        else:
+            safe_extract(zip_path, output_dir)
 
     missing = [path for path in args.require if not (output_dir / path).exists()]
     if missing:

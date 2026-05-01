@@ -278,12 +278,30 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf artifacts/research-snapshot
-          python3 scripts/download_github_artifact.py \
+          if python3 scripts/download_github_artifact.py \
             --run-id "${SNAPSHOT_RUN_ID}" \
             --name "research-snapshot-${SNAPSHOT_RUN_ID}" \
             --output-dir artifacts/research-snapshot \
             --require manifest.json \
-            --require quality.md
+            --require quality.md; then
+            echo "Downloaded standalone research snapshot artifact."
+          else
+            echo "Standalone research snapshot artifact not found; trying embedded downstream artifacts."
+            python3 scripts/download_github_artifact.py \
+              --run-id "${SNAPSHOT_RUN_ID}" \
+              --name "factor-walk-forward-v2-${SNAPSHOT_RUN_ID}" \
+              --strip-prefix research-snapshot \
+              --output-dir artifacts/research-snapshot \
+              --require manifest.json \
+              --require quality.md \
+            || python3 scripts/download_github_artifact.py \
+              --run-id "${SNAPSHOT_RUN_ID}" \
+              --name "factor-review-v2-${SNAPSHOT_RUN_ID}" \
+              --strip-prefix research-snapshot \
+              --output-dir artifacts/research-snapshot \
+              --require manifest.json \
+              --require quality.md
+          fi
 
       - name: Compile research snapshot
         run: |
