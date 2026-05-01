@@ -80,6 +80,13 @@ jobs:
       - name: Add cargo to PATH
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
+      - name: Configure snapshot optimizer cargo target
+        if: ${{ github.event.inputs.snapshot_run_id != '' }}
+        run: |
+          scripts/configure_research_cargo_target.sh \
+            --profile pm5d-snapshot-optimize \
+            --features default
+
       - name: Parse advanced options
         env:
           OPTIONS_JSON: ${{ github.event.inputs.options_json }}
@@ -135,6 +142,46 @@ jobs:
                   handle.write(f"OPT_{key.upper()}={value}\n")
           PY
 
+      - name: Download research snapshot
+        if: ${{ github.event.inputs.snapshot_run_id != '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/research-snapshot
+          cache_args=()
+          if [ -n "${RUNNER_WORKSPACE:-}" ]; then
+            cache_args=(--cache-dir "${RUNNER_WORKSPACE}/_ploy-research-snapshots")
+          fi
+          if python3 scripts/download_github_artifact.py \
+            --run-id "${SNAPSHOT_RUN_ID}" \
+            --name "research-snapshot-${SNAPSHOT_RUN_ID}" \
+            --output-dir artifacts/research-snapshot \
+            --require manifest.json \
+            --require quality.md \
+            "${cache_args[@]}"; then
+            echo "Downloaded standalone research snapshot artifact."
+          else
+            echo "Standalone research snapshot artifact not found; trying embedded downstream artifacts."
+            python3 scripts/download_github_artifact.py \
+              --run-id "${SNAPSHOT_RUN_ID}" \
+              --name "factor-review-v2-${SNAPSHOT_RUN_ID}" \
+              --strip-prefix research-snapshot \
+              --output-dir artifacts/research-snapshot \
+              --require manifest.json \
+              --require quality.md \
+              "${cache_args[@]}" \
+            || python3 scripts/download_github_artifact.py \
+              --run-id "${SNAPSHOT_RUN_ID}" \
+              --name "factor-walk-forward-v2-${SNAPSHOT_RUN_ID}" \
+              --strip-prefix research-snapshot \
+              --output-dir artifacts/research-snapshot \
+              --require manifest.json \
+              --require quality.md \
+              "${cache_args[@]}"
+          fi
+
       - name: Build optimize runner
         run: |
           set -euo pipefail
@@ -154,39 +201,6 @@ jobs:
           fi
           chmod +x target/release/examples/optimize-runner
 
-      - name: Download research snapshot
-        if: ${{ github.event.inputs.snapshot_run_id != '' }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
-        run: |
-          set -euo pipefail
-          rm -rf artifacts/research-snapshot
-          if python3 scripts/download_github_artifact.py \
-            --run-id "${SNAPSHOT_RUN_ID}" \
-            --name "research-snapshot-${SNAPSHOT_RUN_ID}" \
-            --output-dir artifacts/research-snapshot \
-            --require manifest.json \
-            --require quality.md; then
-            echo "Downloaded standalone research snapshot artifact."
-          else
-            echo "Standalone research snapshot artifact not found; trying embedded downstream artifacts."
-            python3 scripts/download_github_artifact.py \
-              --run-id "${SNAPSHOT_RUN_ID}" \
-              --name "factor-review-v2-${SNAPSHOT_RUN_ID}" \
-              --strip-prefix research-snapshot \
-              --output-dir artifacts/research-snapshot \
-              --require manifest.json \
-              --require quality.md \
-            || python3 scripts/download_github_artifact.py \
-              --run-id "${SNAPSHOT_RUN_ID}" \
-              --name "factor-walk-forward-v2-${SNAPSHOT_RUN_ID}" \
-              --strip-prefix research-snapshot \
-              --output-dir artifacts/research-snapshot \
-              --require manifest.json \
-              --require quality.md
-          fi
-
       - name: Sync Parquet data from Tango-1-1
         run: |
           set -euo pipefail
@@ -204,6 +218,7 @@ jobs:
             "${OPT_DATA_DIR}/"
 
       - name: Prepare DuckDB spill directory
+        if: ${{ github.event.inputs.snapshot_run_id == '' }}
         run: |
           DUCKDB_TEMP_DIR="${RUNNER_TEMP:-/tmp}/ploy-optimize-duckdb-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           rm -rf "${DUCKDB_TEMP_DIR}"
@@ -342,8 +357,10 @@ jobs:
           . /home/runner/.cargo/env
           mkdir -p artifacts/optimize
           started=$(date +%s)
-          rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
-          mkdir -p "${PLOY_DUCKDB_TEMP_DIR}"
+          if [ ! -f artifacts/research-snapshot/manifest.json ]; then
+            rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
+            mkdir -p "${PLOY_DUCKDB_TEMP_DIR}"
+          fi
 
           time_flags=()
           if [ -n "${OPT_TRAIN_START_TS}" ]; then
@@ -427,7 +444,11 @@ jobs:
             echo '```'
             date -u
             free -h || true
-            df -h "${OPT_DATA_DIR}" "${PLOY_DUCKDB_TEMP_DIR}" || true
+            if [ -f artifacts/research-snapshot/manifest.json ]; then
+              df -h "${OPT_DATA_DIR}" || true
+            else
+              df -h "${OPT_DATA_DIR}" "${PLOY_DUCKDB_TEMP_DIR}" || true
+            fi
             ps -eo pid,ppid,stat,%mem,%cpu,comm,args --sort=-%mem | head -25 || true
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -441,7 +462,9 @@ jobs:
             fi
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
-          rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
+          if [ ! -f artifacts/research-snapshot/manifest.json ]; then
+            rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
+          fi
           exit "${status}"
 
       - name: Upload optimize provenance

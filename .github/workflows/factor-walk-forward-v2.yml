@@ -69,6 +69,13 @@ jobs:
       - name: Add cargo to PATH
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
+      - name: Configure snapshot-reuse cargo target
+        if: ${{ github.event.inputs.snapshot_run_id != '' }}
+        run: |
+          scripts/configure_research_cargo_target.sh \
+            --profile pm5d-factor-research \
+            --features db
+
       - name: Parse advanced options
         env:
           OPTIONS_JSON: ${{ github.event.inputs.options_json }}
@@ -262,12 +269,17 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf artifacts/research-snapshot
+          cache_args=()
+          if [ -n "${RUNNER_WORKSPACE:-}" ]; then
+            cache_args=(--cache-dir "${RUNNER_WORKSPACE}/_ploy-research-snapshots")
+          fi
           if python3 scripts/download_github_artifact.py \
             --run-id "${SNAPSHOT_RUN_ID}" \
             --name "research-snapshot-${SNAPSHOT_RUN_ID}" \
             --output-dir artifacts/research-snapshot \
             --require manifest.json \
-            --require quality.md; then
+            --require quality.md \
+            "${cache_args[@]}"; then
             echo "Downloaded standalone research snapshot artifact."
           else
             echo "Standalone research snapshot artifact not found; trying embedded downstream artifacts."
@@ -278,21 +290,23 @@ jobs:
               --output-dir artifacts/research-snapshot \
               --require manifest.json \
               --require quality.md \
+              "${cache_args[@]}" \
             || python3 scripts/download_github_artifact.py \
               --run-id "${SNAPSHOT_RUN_ID}" \
               --name "factor-review-v2-${SNAPSHOT_RUN_ID}" \
               --strip-prefix research-snapshot \
               --output-dir artifacts/research-snapshot \
               --require manifest.json \
-              --require quality.md
+              --require quality.md \
+              "${cache_args[@]}"
           fi
 
       - name: Cache cargo build
+        if: ${{ github.event.inputs.snapshot_run_id == '' }}
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           cache-targets: "true"
-          save-if: ${{ github.event.inputs.snapshot_run_id == '' }}
           key: factor-walk-forward-v2-db-only-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
 
       - name: Build factor walk-forward
