@@ -55,6 +55,9 @@ enum StrategyProfile {
     ObiHard,
     /// Strategy C: Strategy A plus CEX continuation soft score.
     ContinuationSoft,
+    /// CEX direction first: Binance-side momentum is the directional selector;
+    /// Polymarket ask/liquidity only gate executable EV.
+    CexDirectionFirst,
 }
 
 impl StrategyProfile {
@@ -69,8 +72,11 @@ impl StrategyProfile {
             "continuation" | "continuation_soft" | "c" | "cex_continuation" => {
                 Ok(Self::ContinuationSoft)
             }
+            "cex_direction_first" | "cex_direction" | "direction_first" | "binance_direction" => {
+                Ok(Self::CexDirectionFirst)
+            }
             other => anyhow::bail!(
-                "unknown --strategy-profile {other:?}; expected mixed, champion, obi_soft, obi_hard, or continuation_soft"
+                "unknown --strategy-profile {other:?}; expected mixed, champion, obi_soft, obi_hard, continuation_soft, or cex_direction_first"
             ),
         }
     }
@@ -82,6 +88,7 @@ impl StrategyProfile {
             Self::ObiSoft => "obi_soft",
             Self::ObiHard => "obi_hard",
             Self::ContinuationSoft => "continuation_soft",
+            Self::CexDirectionFirst => "cex_direction_first",
         }
     }
 
@@ -92,6 +99,9 @@ impl StrategyProfile {
             Self::ObiSoft => "champion + CEX/PM order-book imbalance soft score",
             Self::ObiHard => "champion + hard CEX/PM order-book confirmation gate",
             Self::ContinuationSoft => "champion + CEX continuation soft score",
+            Self::CexDirectionFirst => {
+                "CEX direction first + Polymarket executable EV/liquidity gates"
+            }
         }
     }
 
@@ -99,19 +109,20 @@ impl StrategyProfile {
         match self {
             Self::Mixed => None,
             Self::Champion | Self::ObiSoft | Self::ObiHard | Self::ContinuationSoft => Some(true),
+            Self::CexDirectionFirst => Some(true),
         }
     }
 
     fn fixes_cex_contrarian(self) -> Option<bool> {
         match self {
-            Self::Champion | Self::ObiHard => Some(false),
+            Self::Champion | Self::ObiHard | Self::CexDirectionFirst => Some(false),
             Self::Mixed | Self::ObiSoft | Self::ContinuationSoft => None,
         }
     }
 
     fn fixes_confirmation_threshold(self) -> Option<f64> {
         match self {
-            Self::Champion => Some(0.0),
+            Self::Champion | Self::CexDirectionFirst => Some(0.0),
             Self::Mixed | Self::ObiSoft | Self::ObiHard | Self::ContinuationSoft => None,
         }
     }
@@ -119,7 +130,11 @@ impl StrategyProfile {
     fn fixes_require_confirmation(self) -> Option<bool> {
         match self {
             Self::ObiHard => Some(true),
-            Self::Mixed | Self::Champion | Self::ObiSoft | Self::ContinuationSoft => None,
+            Self::Mixed
+            | Self::Champion
+            | Self::ObiSoft
+            | Self::ContinuationSoft
+            | Self::CexDirectionFirst => None,
         }
     }
 }
@@ -349,6 +364,24 @@ fn calibrate_direction_probability(
     (0.5 + (direction_probability - 0.5) * shrink - haircut).clamp(0.01, 0.99)
 }
 
+fn cex_direction_signal(row: &FactorObservationV2) -> f64 {
+    let side = row.side.multiplier();
+    let return_60s = finite_or_zero(row.cex_bar_return_60s * side / 0.006).clamp(-1.0, 1.0);
+    let return_30s = finite_or_zero(row.cex_bar_return_30s * side / 0.003).clamp(-1.0, 1.0);
+    let continuation = finite_or_zero(row.cex_continuation_score_side).clamp(-1.0, 1.0);
+    let consecutive = finite_or_zero(row.cex_consecutive_bar_side / 3.0).clamp(-1.0, 1.0);
+
+    0.35 * return_60s + 0.25 * return_30s + 0.25 * continuation + 0.15 * consecutive
+}
+
+fn cex_direction_probability(row: &FactorObservationV2) -> f64 {
+    let signal = cex_direction_signal(row);
+    if !signal.is_finite() {
+        return f64::NAN;
+    }
+    (0.5 + 0.20 * signal).clamp(0.01, 0.99)
+}
+
 fn confirmation_score(row: &FactorObservationV2, profile: StrategyProfile) -> f64 {
     let side = row.side.multiplier();
     let continuation = finite_or_zero(row.cex_continuation_score_side).clamp(-1.0, 1.0);
@@ -373,6 +406,7 @@ fn confirmation_score(row: &FactorObservationV2, profile: StrategyProfile) -> f6
                 + 0.05 * trade_imbalance
         }
         StrategyProfile::ContinuationSoft => continuation,
+        StrategyProfile::CexDirectionFirst => cex_direction_signal(row),
     }
 }
 
@@ -383,8 +417,8 @@ fn three_layer_entry_score(
     params: &SnapshotThreeLayerParams,
     profile: StrategyProfile,
 ) -> f64 {
-    let alpha_prob = direction_alpha_probability(row, params);
-    let calibrated_prob = calibrated_model_probability(row, params);
+    let alpha_prob = profile_direction_probability(row, params, profile);
+    let calibrated_prob = calibrated_profile_probability(row, params, profile);
     let direction_score = directional_score(alpha_prob, params.min_direction_prob, 0.25, false);
     let distance_score = directional_score(
         row.side_distance_over_sigma,
@@ -425,6 +459,9 @@ fn three_layer_entry_score(
         0.50,
         params.cex_contrarian,
     );
+    if profile == StrategyProfile::CexDirectionFirst {
+        return 0.55 * direction_score + 0.28 * distance_score + 0.17 * drift_score;
+    }
     if profile == StrategyProfile::Champion {
         return 0.33 * direction_score
             + 0.17 * distance_score
@@ -482,6 +519,40 @@ fn calibrated_model_probability(
     )
 }
 
+fn profile_direction_probability(
+    row: &FactorObservationV2,
+    params: &SnapshotThreeLayerParams,
+    profile: StrategyProfile,
+) -> f64 {
+    match profile {
+        StrategyProfile::CexDirectionFirst => cex_direction_probability(row),
+        StrategyProfile::Mixed
+        | StrategyProfile::Champion
+        | StrategyProfile::ObiSoft
+        | StrategyProfile::ObiHard
+        | StrategyProfile::ContinuationSoft => direction_alpha_probability(row, params),
+    }
+}
+
+fn calibrated_profile_probability(
+    row: &FactorObservationV2,
+    params: &SnapshotThreeLayerParams,
+    profile: StrategyProfile,
+) -> f64 {
+    match profile {
+        StrategyProfile::CexDirectionFirst => calibrate_direction_probability(
+            cex_direction_probability(row),
+            params.probability_shrink,
+            params.probability_haircut,
+        ),
+        StrategyProfile::Mixed
+        | StrategyProfile::Champion
+        | StrategyProfile::ObiSoft
+        | StrategyProfile::ObiHard
+        | StrategyProfile::ContinuationSoft => calibrated_model_probability(row, params),
+    }
+}
+
 fn executable_edge_threshold(params: &SnapshotThreeLayerParams) -> f64 {
     params.min_edge.max(0.0)
 }
@@ -528,7 +599,7 @@ fn row_passes_gates(
     if !row.pm_lag_secs.is_finite() || row.pm_lag_secs < 0.0 || row.pm_lag_secs > 15.0 {
         return false;
     }
-    if !row.side_model_prob.is_finite() {
+    if profile != StrategyProfile::CexDirectionFirst && !row.side_model_prob.is_finite() {
         return false;
     }
     if !row.side_distance_over_sigma.is_finite() {
@@ -540,18 +611,21 @@ fn row_passes_gates(
         return false;
     }
 
-    let direction_alpha = direction_alpha_probability(row, params);
+    let direction_alpha = profile_direction_probability(row, params, profile);
     if !direction_alpha.is_finite() || direction_alpha < params.min_direction_prob {
         return false;
     }
 
-    let direction_probability = calibrated_model_probability(row, params);
+    let direction_probability = calibrated_profile_probability(row, params, profile);
     let edge = expected_value_per_share(direction_probability, row.entry_ask);
     if !edge.is_finite() || edge < executable_edge_threshold(params) {
         return false;
     }
     let reward_risk = reward_risk_ratio(row.entry_ask);
     if !reward_risk.is_finite() || reward_risk < params.min_reward_risk {
+        return false;
+    }
+    if profile == StrategyProfile::CexDirectionFirst && !entry_fillable(row) {
         return false;
     }
     let confirmation = confirmation_score(row, profile);
@@ -626,7 +700,7 @@ fn evaluate_snapshot_objective(
             rejected_non_executable += 1;
             continue;
         }
-        let direction_probability = calibrated_model_probability(row, params);
+        let direction_probability = calibrated_profile_probability(row, params, profile);
         let ev_per_share = expected_value_per_share(direction_probability, row.entry_ask);
         let ev_per_stake = expected_value_per_staked_dollar(direction_probability, row.entry_ask);
         if !ev_per_share.is_finite() || !ev_per_stake.is_finite() {
@@ -1681,12 +1755,14 @@ mod tests {
     use super::{
         OPTIMIZER_MAX_DIRECTION_PROB, OPTIMIZER_MIN_DIRECTION_PROB, SnapshotObjectiveMetrics,
         SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
-        calibrate_direction_probability, calibrated_model_probability, compounded_log_growth,
+        calibrate_direction_probability, calibrated_model_probability,
+        calibrated_profile_probability, cex_direction_probability, compounded_log_growth,
         default_min_trades_from_coverage, direction_alpha_probability, directional_score,
         evaluate_snapshot_objective, executable_edge_score, expected_value_per_share,
         expected_value_per_staked_dollar, holistic_selection_objective, max_drawdown,
-        parse_date_end, reward_risk_ratio, row_passes_gates, sample_power_multiplier,
-        stable_compounding_objective, trade_sharpe, transformed_model_probability,
+        parse_date_end, profile_direction_probability, reward_risk_ratio, row_passes_gates,
+        sample_power_multiplier, stable_compounding_objective, trade_sharpe,
+        transformed_model_probability,
     };
     use chrono::{TimeZone, Utc};
     use ploy_research::{FactorObservationV2, Regime, ReviewSide};
@@ -1896,6 +1972,14 @@ mod tests {
         }
     }
 
+    fn with_cex_direction(mut row: FactorObservationV2, direction: f64) -> FactorObservationV2 {
+        row.cex_bar_return_30s = 0.003 * direction;
+        row.cex_bar_return_60s = 0.006 * direction;
+        row.cex_consecutive_bar_side = 3.0 * direction;
+        row.cex_continuation_score_side = 0.80 * direction;
+        row
+    }
+
     #[test]
     fn date_end_is_exclusive_next_day() {
         assert_eq!(
@@ -2050,6 +2134,58 @@ mod tests {
         assert!(
             !row_passes_gates(&row, &params, StrategyProfile::ObiHard),
             "OBI-hard must keep direction/EV gates but add a fillable confirmation veto"
+        );
+    }
+
+    #[test]
+    fn cex_direction_first_rejects_cheap_pm_entry_without_cex_direction() {
+        let mut params = test_params();
+        params.min_direction_prob = 0.56;
+        params.min_entry_score = 0.0;
+        params.min_reward_risk = 0.20;
+        let row = test_row(
+            "event-cheap-but-neutral-cex",
+            0.90,
+            0.12,
+            Some(12.0),
+            true,
+            0,
+        );
+
+        assert_eq!(
+            cex_direction_probability(&row),
+            0.50,
+            "neutral CEX state should not inherit PM model probability"
+        );
+        assert!(
+            !row_passes_gates(&row, &params, StrategyProfile::CexDirectionFirst),
+            "PM ask/edge alone must not pass the CEX-direction-first selector"
+        );
+    }
+
+    #[test]
+    fn cex_direction_first_uses_cex_probability_before_pm_ev_gate() {
+        let mut params = test_params();
+        params.min_direction_prob = 0.56;
+        params.min_entry_score = 0.0;
+        params.min_reward_risk = 0.20;
+        let row = with_cex_direction(
+            test_row("event-cex-supported", 0.10, 0.30, Some(5.0), true, 0),
+            1.0,
+        );
+
+        assert!(direction_alpha_probability(&row, &params) < params.min_direction_prob);
+        assert!(
+            profile_direction_probability(&row, &params, StrategyProfile::CexDirectionFirst)
+                >= params.min_direction_prob
+        );
+        assert!(
+            calibrated_profile_probability(&row, &params, StrategyProfile::CexDirectionFirst)
+                > 0.65
+        );
+        assert!(
+            row_passes_gates(&row, &params, StrategyProfile::CexDirectionFirst),
+            "supported Binance/CEX direction should reach the PM executable EV gate even when the old PM-side model disagrees"
         );
     }
 
@@ -2236,6 +2372,10 @@ mod tests {
             StrategyProfile::parse("cex_continuation").unwrap(),
             StrategyProfile::ContinuationSoft
         );
+        assert_eq!(
+            StrategyProfile::parse("cex_direction_first").unwrap(),
+            StrategyProfile::CexDirectionFirst
+        );
         assert!(StrategyProfile::parse("unknown").is_err());
     }
 
@@ -2257,13 +2397,25 @@ mod tests {
             StrategyProfile::ContinuationSoft.fixes_alpha_contrarian(),
             Some(true)
         );
+        assert_eq!(
+            StrategyProfile::CexDirectionFirst.fixes_alpha_contrarian(),
+            Some(true)
+        );
         assert_eq!(StrategyProfile::Mixed.fixes_alpha_contrarian(), None);
         assert_eq!(
             StrategyProfile::Champion.fixes_cex_contrarian(),
             Some(false)
         );
         assert_eq!(
+            StrategyProfile::CexDirectionFirst.fixes_cex_contrarian(),
+            Some(false)
+        );
+        assert_eq!(
             StrategyProfile::Champion.fixes_confirmation_threshold(),
+            Some(0.0)
+        );
+        assert_eq!(
+            StrategyProfile::CexDirectionFirst.fixes_confirmation_threshold(),
             Some(0.0)
         );
         assert_eq!(StrategyProfile::ObiHard.fixes_cex_contrarian(), Some(false));
