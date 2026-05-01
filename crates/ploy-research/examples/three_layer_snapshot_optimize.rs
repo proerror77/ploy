@@ -64,6 +64,9 @@ enum StrategyProfile {
     /// Stable direction: low-degree research profile using improving PM exit bid
     /// plus positive CEX-continuation edge, with conservative probability EV.
     StableDirection,
+    /// Stable reversal: low-degree research profile for the observed inverted
+    /// alpha side, requiring PM exit-bid improvement before executable EV.
+    StableReversal,
 }
 
 impl StrategyProfile {
@@ -84,8 +87,11 @@ impl StrategyProfile {
             "stable_direction" | "stable_direction_soft" | "stable" | "stable_pm_cex" => {
                 Ok(Self::StableDirection)
             }
+            "stable_reversal" | "stable_contrarian" | "stable_alpha_reversal" => {
+                Ok(Self::StableReversal)
+            }
             other => anyhow::bail!(
-                "unknown --strategy-profile {other:?}; expected mixed, champion, obi_soft, obi_hard, continuation_soft, cex_direction_first, or stable_direction"
+                "unknown --strategy-profile {other:?}; expected mixed, champion, obi_soft, obi_hard, continuation_soft, cex_direction_first, stable_direction, or stable_reversal"
             ),
         }
     }
@@ -99,6 +105,7 @@ impl StrategyProfile {
             Self::ContinuationSoft => "continuation_soft",
             Self::CexDirectionFirst => "cex_direction_first",
             Self::StableDirection => "stable_direction",
+            Self::StableReversal => "stable_reversal",
         }
     }
 
@@ -115,6 +122,9 @@ impl StrategyProfile {
             Self::StableDirection => {
                 "stable PM exit-bid + CEX-continuation edge gates with conservative EV"
             }
+            Self::StableReversal => {
+                "stable PM exit-bid gate + contrarian alpha probability with conservative EV"
+            }
         }
     }
 
@@ -124,13 +134,14 @@ impl StrategyProfile {
             Self::Champion | Self::ObiSoft | Self::ObiHard | Self::ContinuationSoft => Some(true),
             Self::CexDirectionFirst => Some(true),
             Self::StableDirection => Some(false),
+            Self::StableReversal => Some(true),
         }
     }
 
     fn fixes_cex_contrarian(self) -> Option<bool> {
         match self {
             Self::Champion | Self::ObiHard | Self::CexDirectionFirst => Some(false),
-            Self::StableDirection => Some(false),
+            Self::StableDirection | Self::StableReversal => Some(false),
             Self::Mixed | Self::ObiSoft | Self::ContinuationSoft => None,
         }
     }
@@ -138,7 +149,7 @@ impl StrategyProfile {
     fn fixes_confirmation_threshold(self) -> Option<f64> {
         match self {
             Self::Champion | Self::CexDirectionFirst => Some(0.0),
-            Self::StableDirection => Some(0.10),
+            Self::StableDirection | Self::StableReversal => Some(0.10),
             Self::Mixed | Self::ObiSoft | Self::ObiHard | Self::ContinuationSoft => None,
         }
     }
@@ -147,14 +158,14 @@ impl StrategyProfile {
         match self {
             Self::ObiHard => Some(true),
             Self::CexDirectionFirst => Some(false),
-            Self::StableDirection => Some(true),
+            Self::StableDirection | Self::StableReversal => Some(true),
             Self::Mixed | Self::Champion | Self::ObiSoft | Self::ContinuationSoft => None,
         }
     }
 
     fn fixes_probability_shrink(self) -> Option<f64> {
         match self {
-            Self::StableDirection => Some(0.38),
+            Self::StableDirection | Self::StableReversal => Some(0.38),
             Self::Mixed
             | Self::Champion
             | Self::ObiSoft
@@ -166,7 +177,7 @@ impl StrategyProfile {
 
     fn fixes_probability_haircut(self) -> Option<f64> {
         match self {
-            Self::StableDirection => Some(0.04),
+            Self::StableDirection | Self::StableReversal => Some(0.04),
             Self::Mixed
             | Self::Champion
             | Self::ObiSoft
@@ -405,7 +416,9 @@ fn calibrate_direction_probability(
 fn direction_probability_search_floor(profile: StrategyProfile) -> f64 {
     match profile {
         StrategyProfile::CexDirectionFirst => CEX_DIRECTION_FIRST_MIN_DIRECTION_PROB,
-        StrategyProfile::StableDirection => STABLE_DIRECTION_MIN_DIRECTION_PROB,
+        StrategyProfile::StableDirection | StrategyProfile::StableReversal => {
+            STABLE_DIRECTION_MIN_DIRECTION_PROB
+        }
         StrategyProfile::Mixed
         | StrategyProfile::Champion
         | StrategyProfile::ObiSoft
@@ -420,7 +433,7 @@ fn min_edge_search_bounds(profile: StrategyProfile) -> (f64, f64) {
         // expected value per staked dollar, not per-share edge. This keeps the
         // search focused on executable expectancy instead of cheap low-probability
         // asks that only look good in per-share terms.
-        StrategyProfile::StableDirection => (0.15, 0.45),
+        StrategyProfile::StableDirection | StrategyProfile::StableReversal => (0.15, 0.45),
         StrategyProfile::Mixed
         | StrategyProfile::Champion
         | StrategyProfile::ObiSoft
@@ -474,6 +487,7 @@ fn confirmation_score(row: &FactorObservationV2, profile: StrategyProfile) -> f6
         StrategyProfile::ContinuationSoft => continuation,
         StrategyProfile::CexDirectionFirst => cex_direction_signal(row),
         StrategyProfile::StableDirection => stable_direction_confirmation_score(row),
+        StrategyProfile::StableReversal => stable_reversal_confirmation_score(row),
     }
 }
 
@@ -501,6 +515,32 @@ fn stable_direction_hard_gates_pass(
     stable_direction_confirmation_score(row) >= params.min_confirmation_score
 }
 
+fn stable_reversal_confirmation_score(row: &FactorObservationV2) -> f64 {
+    let exit_bid = finite_or_zero(row.exit_bid_change_30s / 0.08).clamp(-1.0, 1.0);
+    let entry_ask = finite_or_zero(row.entry_ask_change_30s / 0.08).clamp(-1.0, 1.0);
+    let pm_reprice = finite_or_zero(row.pm_reprice_speed_30s * 30.0 / 0.08).clamp(-1.0, 1.0);
+    let cex_edge_support = finite_or_zero(row.cex_continuation_edge_gate / 0.08)
+        .clamp(-1.0, 1.0)
+        .max(0.0);
+    0.45 * exit_bid + 0.25 * entry_ask + 0.20 * pm_reprice + 0.10 * cex_edge_support
+}
+
+fn stable_reversal_hard_gates_pass(
+    row: &FactorObservationV2,
+    params: &SnapshotThreeLayerParams,
+) -> bool {
+    if !row.label_full_depth_entry_fillable || !row.label_full_depth_exit_fillable {
+        return false;
+    }
+    if !row.exit_bid_change_30s.is_finite()
+        || !row.entry_ask_change_30s.is_finite()
+        || row.exit_bid_change_30s <= 0.0
+    {
+        return false;
+    }
+    stable_reversal_confirmation_score(row) >= params.min_confirmation_score
+}
+
 fn three_layer_entry_score(
     row: &FactorObservationV2,
     edge: f64,
@@ -521,7 +561,10 @@ fn three_layer_entry_score(
     let ev_per_stake = expected_value_per_staked_dollar(calibrated_prob, row.entry_ask);
     let per_stake_expectancy_score = directional_score(
         ev_per_stake,
-        if profile == StrategyProfile::StableDirection {
+        if matches!(
+            profile,
+            StrategyProfile::StableDirection | StrategyProfile::StableReversal
+        ) {
             params.min_edge
         } else {
             0.0
@@ -529,7 +572,10 @@ fn three_layer_entry_score(
         0.25,
         false,
     );
-    let expectancy_score = if profile == StrategyProfile::StableDirection {
+    let expectancy_score = if matches!(
+        profile,
+        StrategyProfile::StableDirection | StrategyProfile::StableReversal
+    ) {
         per_stake_expectancy_score
     } else {
         (0.70 * per_share_edge_score + 0.30 * per_stake_expectancy_score).clamp(-0.50, 1.0)
@@ -561,7 +607,10 @@ fn three_layer_entry_score(
     if profile == StrategyProfile::CexDirectionFirst {
         return 0.55 * direction_score + 0.28 * distance_score + 0.17 * drift_score;
     }
-    if profile == StrategyProfile::StableDirection {
+    if matches!(
+        profile,
+        StrategyProfile::StableDirection | StrategyProfile::StableReversal
+    ) {
         return 0.24 * direction_score
             + 0.12 * distance_score
             + 0.28 * expectancy_score
@@ -637,7 +686,8 @@ fn profile_direction_probability(
         | StrategyProfile::ObiSoft
         | StrategyProfile::ObiHard
         | StrategyProfile::ContinuationSoft
-        | StrategyProfile::StableDirection => direction_alpha_probability(row, params),
+        | StrategyProfile::StableDirection
+        | StrategyProfile::StableReversal => direction_alpha_probability(row, params),
     }
 }
 
@@ -657,7 +707,8 @@ fn calibrated_profile_probability(
         | StrategyProfile::ObiSoft
         | StrategyProfile::ObiHard
         | StrategyProfile::ContinuationSoft
-        | StrategyProfile::StableDirection => calibrated_model_probability(row, params),
+        | StrategyProfile::StableDirection
+        | StrategyProfile::StableReversal => calibrated_model_probability(row, params),
     }
 }
 
@@ -717,6 +768,9 @@ fn row_passes_gates(
     {
         return false;
     }
+    if profile == StrategyProfile::StableReversal && !stable_reversal_hard_gates_pass(row, params) {
+        return false;
+    }
 
     let drift_side = row.drift_30s * row.side.multiplier();
     if !drift_side.is_finite() {
@@ -733,7 +787,10 @@ fn row_passes_gates(
     if !edge.is_finite() {
         return false;
     }
-    if profile == StrategyProfile::StableDirection {
+    if matches!(
+        profile,
+        StrategyProfile::StableDirection | StrategyProfile::StableReversal
+    ) {
         let ev_per_stake = expected_value_per_staked_dollar(direction_probability, row.entry_ask);
         if !ev_per_stake.is_finite() || ev_per_stake < params.min_edge || edge <= 0.0 {
             return false;
@@ -1076,7 +1133,11 @@ fn profile_selection_objective(
     profile: StrategyProfile,
 ) -> f64 {
     let objective = holistic_selection_objective(train, validation, min_trades);
-    if profile != StrategyProfile::StableDirection || objective < -900_000.0 {
+    if !matches!(
+        profile,
+        StrategyProfile::StableDirection | StrategyProfile::StableReversal
+    ) || objective < -900_000.0
+    {
         return objective;
     }
 
@@ -1930,7 +1991,8 @@ mod tests {
         holistic_selection_objective, max_drawdown, min_edge_search_bounds, parse_date_end,
         profile_direction_probability, profile_selection_objective, reward_risk_ratio,
         row_passes_gates, sample_power_multiplier, stable_compounding_objective,
-        stable_direction_confirmation_score, trade_sharpe, transformed_model_probability,
+        stable_direction_confirmation_score, stable_reversal_confirmation_score, trade_sharpe,
+        transformed_model_probability,
     };
     use chrono::{TimeZone, Utc};
     use ploy_research::{FactorObservationV2, Regime, ReviewSide};
@@ -2396,6 +2458,41 @@ mod tests {
     }
 
     #[test]
+    fn stable_reversal_uses_inverted_alpha_with_pm_exit_confirmation() {
+        let mut params = test_params();
+        params.alpha_contrarian = StrategyProfile::StableReversal
+            .fixes_alpha_contrarian()
+            .unwrap();
+        params.min_direction_prob = STABLE_DIRECTION_MIN_DIRECTION_PROB;
+        params.min_confirmation_score = 0.10;
+        params.require_confirmation = true;
+        params.min_edge = 0.15;
+        params.min_entry_score = 0.0;
+        params.probability_shrink = StrategyProfile::StableReversal
+            .fixes_probability_shrink()
+            .unwrap();
+        params.probability_haircut = StrategyProfile::StableReversal
+            .fixes_probability_haircut()
+            .unwrap();
+
+        let mut row = test_row("event-stable-reversal", 0.22, 0.25, Some(8.0), true, 0);
+        row.exit_bid_change_30s = 0.08;
+        row.entry_ask_change_30s = 0.04;
+        row.pm_reprice_speed_30s = 0.04 / 30.0;
+
+        assert!(direction_alpha_probability(&row, &params) >= params.min_direction_prob);
+        assert!(stable_reversal_confirmation_score(&row) >= params.min_confirmation_score);
+        assert!(
+            row_passes_gates(&row, &params, StrategyProfile::StableReversal),
+            "stable_reversal should test the observed inverted alpha side only after PM exit-bid confirmation"
+        );
+        assert!(
+            !row_passes_gates(&row, &params, StrategyProfile::StableDirection),
+            "stable_direction should still reject the same low model-probability row"
+        );
+    }
+
+    #[test]
     fn snapshot_gate_rejects_non_fillable_entries_before_selection() {
         let mut params = test_params();
         params.cooldown_secs = 0;
@@ -2624,6 +2721,10 @@ mod tests {
             StrategyProfile::parse("stable_direction").unwrap(),
             StrategyProfile::StableDirection
         );
+        assert_eq!(
+            StrategyProfile::parse("stable_reversal").unwrap(),
+            StrategyProfile::StableReversal
+        );
         assert!(StrategyProfile::parse("unknown").is_err());
     }
 
@@ -2653,6 +2754,10 @@ mod tests {
             StrategyProfile::StableDirection.fixes_alpha_contrarian(),
             Some(false)
         );
+        assert_eq!(
+            StrategyProfile::StableReversal.fixes_alpha_contrarian(),
+            Some(true)
+        );
         assert_eq!(StrategyProfile::Mixed.fixes_alpha_contrarian(), None);
         assert_eq!(
             StrategyProfile::Champion.fixes_cex_contrarian(),
@@ -2667,6 +2772,10 @@ mod tests {
             Some(false)
         );
         assert_eq!(
+            StrategyProfile::StableReversal.fixes_cex_contrarian(),
+            Some(false)
+        );
+        assert_eq!(
             StrategyProfile::Champion.fixes_confirmation_threshold(),
             Some(0.0)
         );
@@ -2676,6 +2785,10 @@ mod tests {
         );
         assert_eq!(
             StrategyProfile::StableDirection.fixes_confirmation_threshold(),
+            Some(0.10)
+        );
+        assert_eq!(
+            StrategyProfile::StableReversal.fixes_confirmation_threshold(),
             Some(0.10)
         );
         assert_eq!(StrategyProfile::ObiHard.fixes_cex_contrarian(), Some(false));
@@ -2692,11 +2805,23 @@ mod tests {
             Some(true)
         );
         assert_eq!(
+            StrategyProfile::StableReversal.fixes_require_confirmation(),
+            Some(true)
+        );
+        assert_eq!(
             StrategyProfile::StableDirection.fixes_probability_shrink(),
             Some(0.38)
         );
         assert_eq!(
             StrategyProfile::StableDirection.fixes_probability_haircut(),
+            Some(0.04)
+        );
+        assert_eq!(
+            StrategyProfile::StableReversal.fixes_probability_shrink(),
+            Some(0.38)
+        );
+        assert_eq!(
+            StrategyProfile::StableReversal.fixes_probability_haircut(),
             Some(0.04)
         );
     }
