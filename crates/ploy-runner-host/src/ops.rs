@@ -1,6 +1,7 @@
 use ploy_market_data::collector::{CollectorConfig, QuoteCollector};
 use ploy_market_data::diagnostics::check_database;
 use ploy_market_data::pm_trades::{TradeCollector, TradeCollectorConfig};
+use ploy_market_data::scanner::{MarketDiscoveryCollectorConfig, run_market_discovery_collector};
 use sqlx::postgres::PgPoolOptions;
 
 pub fn print_usage() {
@@ -20,6 +21,19 @@ pub fn print_usage() {
     );
     eprintln!(
         "  env PLOY_QUOTE_COLLECTOR_STALE_AFTER_SECS Stale self-restart threshold (default: 120)"
+    );
+    eprintln!();
+    eprintln!("Options for 'collect-markets':");
+    eprintln!("  --symbols <list>  Comma-separated symbols (default: BTCUSDT,ETHUSDT,SOLUSDT)");
+    eprintln!("  --db-url <url>    Database URL (or DATABASE_URL/PLOY_DATABASE__URL)");
+    eprintln!(
+        "  env PLOY_MARKET_DISCOVERY_REFRESH_SECS     Gamma catalog refresh interval (default: 30)"
+    );
+    eprintln!(
+        "  env PLOY_MARKET_DISCOVERY_LOOKAHEAD_MINUTES Future expiry discovery window (default: 20)"
+    );
+    eprintln!(
+        "  env PLOY_MARKET_DISCOVERY_CAPTURE_SPORTS   true/false sports catalog capture (default: false)"
     );
     eprintln!();
     eprintln!("Options for 'collect-pm-trades':");
@@ -47,6 +61,44 @@ pub fn print_usage() {
     eprintln!(
         "  env PLOY_PM_TRADE_COLLECTOR_TAKER_ONLY      true/false Data API takerOnly (default: true)"
     );
+}
+
+pub async fn run_collect_markets(args: &[String]) {
+    let db_url = match db_url(args) {
+        Ok(db_url) => db_url,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+
+    let symbols_str = arg_value(args, "--symbols")
+        .map(String::as_str)
+        .unwrap_or("BTCUSDT,ETHUSDT,SOLUSDT");
+
+    let symbols = parse_symbols(symbols_str);
+
+    let pool = match PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            eprintln!("Failed to connect to database: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    let config = MarketDiscoveryCollectorConfig {
+        symbols,
+        refresh_interval_secs: env_u64("PLOY_MARKET_DISCOVERY_REFRESH_SECS", 30),
+        lookahead_minutes: env_i64("PLOY_MARKET_DISCOVERY_LOOKAHEAD_MINUTES", 20),
+        capture_sports_catalog: env_bool("PLOY_MARKET_DISCOVERY_CAPTURE_SPORTS", false),
+    };
+
+    run_market_discovery_collector(config, pool).await;
 }
 
 pub async fn run_check_db(args: &[String]) {

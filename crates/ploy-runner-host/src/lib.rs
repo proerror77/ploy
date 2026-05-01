@@ -14,6 +14,8 @@ fn print_usage_for(program: &str) {
     #[cfg(feature = "ops")]
     eprintln!("  check-db          Check database data completeness");
     #[cfg(feature = "ops")]
+    eprintln!("  collect-markets  Discover Polymarket markets into the local DB catalog");
+    #[cfg(feature = "ops")]
     eprintln!("  collect-quotes    Collect orderbook quotes from Polymarket CLOB WebSocket");
     #[cfg(feature = "ops")]
     eprintln!("  collect-pm-trades Collect public Polymarket trade prints from Data API");
@@ -55,6 +57,9 @@ pub async fn run_with_args(args: Vec<String>) {
         }
         Some("collect-quotes") => {
             run_collect_quotes(&args).await;
+        }
+        Some("collect-markets") => {
+            run_collect_markets(&args).await;
         }
         Some("collect-pm-trades") => {
             run_collect_pm_trades(&args).await;
@@ -132,6 +137,17 @@ async fn run_collect_quotes(args: &[String]) {
 #[cfg(not(feature = "ops"))]
 async fn run_collect_quotes(_args: &[String]) {
     eprintln!("The collect-quotes command requires the full/ops runner build");
+    std::process::exit(1);
+}
+
+#[cfg(feature = "ops")]
+async fn run_collect_markets(args: &[String]) {
+    ops::run_collect_markets(args).await;
+}
+
+#[cfg(not(feature = "ops"))]
+async fn run_collect_markets(_args: &[String]) {
+    eprintln!("The collect-markets command requires the full/ops runner build");
     std::process::exit(1);
 }
 

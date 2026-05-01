@@ -1,3 +1,30 @@
+# Central Market Discovery Service (2026-05-01)
+
+## Files
+
+- `crates/ploy-market-data/src/scanner.rs`
+- `crates/ploy-runner-host/src/lib.rs`
+- `crates/ploy-runner-host/src/ops.rs`
+- `deployment/systemd/ploy-market-discovery.service`
+- `.github/workflows/deploy-tango-1-1.yml`
+- `tests/test_runtime_market_data_boundary.py`
+- `tasks/todo.md`
+
+## Tasks
+
+- [x] Diagnose why the first local-market-data deploy left PM quote/trade collectors with zero active markets.
+- [x] Add a central `collect-markets` runner command that refreshes PM market catalog/metadata without starting strategy runtime feeds.
+- [x] Deploy a `ploy-market-discovery.service` and start it before quote/trade collectors.
+- [x] Add deployment gates that require active PM catalog/metadata rows before downstream PM collectors start.
+- [x] Run targeted local verification before PR/merge/deploy.
+- [ ] Merge, deploy, and verify Tango service/network state.
+
+## Review
+
+- 2026-05-01: The deploy failure exposed the hidden coupling: strategy runners had been providing market discovery by opening Gamma scanners directly. After runners were correctly moved to local DB feeds, the collector layer needed its own catalog refresh service.
+- 2026-05-01: Added central `collect-markets` / `ploy-market-discovery.service`; deploy now starts it before PM quote/trade collectors and gates on active `pm_market_catalog` plus `pm_market_metadata` rows.
+- 2026-05-01: Local verification passed: `rustfmt --edition 2024` on touched Rust files, `git diff --check`, `python3 -m unittest tests.test_runtime_market_data_boundary`, `rtk cargo test -p ploy-market-data scanner --lib`, and `rtk cargo check -p ploy-runner-host --features ops`. Cargo emitted pre-existing warnings only.
+
 # Strategy Runtime Local Market-Data Boundary (2026-05-01)
 
 ## Files
