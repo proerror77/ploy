@@ -22,7 +22,7 @@ RETENTION_BINANCE_AGGTRADE_DAYS="${PLOY_RETENTION_BINANCE_AGGTRADE_DAYS:-7}"
 RETENTION_BINANCE_LOB_DAYS="${PLOY_RETENTION_BINANCE_LOB_DAYS:-7}"
 RETENTION_NBA_OBS_DAYS="${PLOY_RETENTION_NBA_OBS_DAYS:-7}"
 RETENTION_ORDER_EXEC_DAYS="${PLOY_RETENTION_ORDER_EXEC_DAYS:-7}"
-RETENTION_LOG_DAYS="${PLOY_RETENTION_LOG_DAYS:-14}"
+RETENTION_LOG_DAYS="${PLOY_RETENTION_LOG_DAYS:-7}"
 JOURNAL_VACUUM_SIZE="${PLOY_JOURNAL_VACUUM_SIZE:-200M}"
 DERIBIT_PARTITION_LOOKBACK_DAYS="${PLOY_DERIBIT_PARTITION_LOOKBACK_DAYS:-7}"
 DERIBIT_PARTITION_LOOKAHEAD_DAYS="${PLOY_DERIBIT_PARTITION_LOOKAHEAD_DAYS:-14}"
@@ -236,6 +236,25 @@ SQL
 
 echo "==> Log retention"
 if [[ -d "$LOG_DIR" ]]; then
+  if cutoff_epoch=$(date -d "today - $((RETENTION_LOG_DAYS - 1)) days" +%s 2>/dev/null); then
+    while IFS= read -r -d '' path; do
+      basename="${path##*/}"
+      if [[ "$basename" =~ ([0-9]{4}-[0-9]{2}-[0-9]{2}) ]]; then
+        file_date="${BASH_REMATCH[1]}"
+        file_epoch=$(date -d "${file_date} 00:00:00" +%s 2>/dev/null || echo 0)
+        if (( file_epoch > 0 && file_epoch < cutoff_epoch )); then
+          rm -f -- "$path"
+        fi
+      fi
+    done < <(
+      find "$LOG_DIR" -maxdepth 1 -type f \
+        \( -name 'ploy.log.*' -o -name 'ploy.log.*.gz' \) \
+        -print0
+    )
+  else
+    echo "Skipping filename-date log pruning because GNU date -d is unavailable"
+  fi
+
   # Compress older uncompressed logs.
   find "$LOG_DIR" -maxdepth 1 -type f -name 'ploy.log.*' -mtime +1 ! -name '*.gz' -print0 \
     | xargs -0 -r gzip -9
