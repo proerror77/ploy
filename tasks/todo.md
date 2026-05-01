@@ -11158,3 +11158,44 @@ Review:
 - 2026-04-30: The root cause is predicate shape, not a missing index. `LOWER(market_family)` and `COALESCE(end_time/start_time, NOW())` prevent the planner from using existing btree indexes. Rewriting to `market_family = 'crypto'` plus explicit null-aware time predicates produced a `Bitmap Heap Scan` using `idx_pm_market_catalog_family_end_time` and executed in `~0.08-0.18ms` on the live DB.
 - 2026-04-30: Local verification passed: `rtk cargo test -p ploy-market-data active_markets_query_keeps_catalog_filters_indexable --lib`, `rtk cargo test -p ploy-market-data trade_collector_config_fills_safe_defaults --lib`, `rtk cargo check -p ploy-market-data`, and `git diff --check`. Full rustfmt check was not used because current crate import ordering outside this slice would create unrelated formatting churn.
 - 2026-04-30: PR #250 merged and deployed artifact `0eb6efa7`, but deploy run `25138661077` failed at the dry-run report postflight because the report had zero `strategies` rows immediately after restart while top-level diagnostics were valid. The deployed collector and `ployd` services remained active with `NRestarts=0`. The postflight checker should require top-level contract fields and validate per-strategy diagnostics only when strategy diagnostics are present.
+
+# PM5D Research Workflow Speed Pass (2026-05-01)
+
+## Files
+
+- `.github/workflows/research-snapshot.yml`
+  - Owner: fresh snapshot build/upload cost.
+- `.github/workflows/factor-review-v2.yml`
+  - Owner: snapshot-backed factor review build/upload cost.
+- `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: snapshot-backed walk-forward build/upload cost.
+- `tasks/todo.md`
+  - Owner: speed-pass plan and review evidence.
+
+## Tasks
+
+- [x] Remove unnecessary `polars-export` builds from PM5D research workflow binaries that only require `db`.
+- [x] Build only the factor binary on snapshot-reuse runs instead of also building `research_snapshot_compile`.
+- [x] Stop re-uploading full research snapshots from downstream runs that consumed an existing snapshot.
+- [x] Use no-compression artifact uploads for large already-compressed snapshot/report artifacts.
+- [x] Verify workflow syntax and focused local build boundaries.
+- [ ] Run a main-equivalent speed test after PR checks.
+
+## Review
+
+- 2026-05-01: Snapshot-reuse factor review / walk-forward runs now download
+  the snapshot before Rust build, compile only the relevant factor binary, and
+  omit `research_snapshot_compile` when `snapshot_run_id` is provided. The
+  workflows also use `--features db` instead of `db,polars-export`, matching the
+  example feature requirements in `crates/ploy-research/Cargo.toml`.
+- 2026-05-01: Downstream factor review / walk-forward artifacts no longer
+  re-upload the full `research-snapshot/` tree when they consumed an existing
+  snapshot. They upload result artifacts plus `snapshot-provenance/` instead, so
+  the run remains auditable without paying the 100MB+ snapshot upload cost or
+  accidentally advertising itself as a reusable snapshot source.
+- 2026-05-01: Local verification passed with workflow YAML parsing,
+  `git diff --check`, `scripts/check_optimize_verification_gates.sh`, and
+  `CARGO_TARGET_DIR=/tmp/ploy-research-workflow-speed-check rtk cargo check -p
+  ploy-research --features db --example factor_review_v2 --example
+  factor_walk_forward_v2 --example research_snapshot_compile
+  --no-default-features`.

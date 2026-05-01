@@ -259,22 +259,6 @@ jobs:
               raise SystemExit(f"scoped data audit gate failed: {status}")
           PY
 
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          cache-targets: "true"
-          key: factor-review-v2-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
-
-      - name: Build factor review and snapshot compiler
-        run: |
-          . /home/runner/.cargo/env
-          cargo build --release --locked \
-            -p ploy-research \
-            --features db,polars-export \
-            --example factor_review_v2 \
-            --example research_snapshot_compile
-
       - name: Download research snapshot
         if: ${{ github.event.inputs.snapshot_run_id != '' }}
         env:
@@ -307,6 +291,29 @@ jobs:
               --require manifest.json \
               --require quality.md
           fi
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-targets: "true"
+          key: factor-review-v2-db-only-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
+
+      - name: Build factor review
+        run: |
+          set -euo pipefail
+          . /home/runner/.cargo/env
+          build_args=(
+            --release
+            --locked
+            -p ploy-research
+            --features db
+            --example factor_review_v2
+          )
+          if [ -z "${{ github.event.inputs.snapshot_run_id }}" ]; then
+            build_args+=(--example research_snapshot_compile)
+          fi
+          cargo build "${build_args[@]}"
 
       - name: Compile research snapshot
         run: |
@@ -422,14 +429,40 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Stage report artifact
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/factor-review-v2-upload
+          mkdir -p artifacts/factor-review-v2-upload
+          if [ -d artifacts/factor-review-v2 ]; then
+            cp -R artifacts/factor-review-v2 artifacts/factor-review-v2-upload/
+          fi
+          if [ -z "${{ github.event.inputs.snapshot_run_id }}" ]; then
+            if [ -d artifacts/research-snapshot ]; then
+              cp -R artifacts/research-snapshot artifacts/factor-review-v2-upload/
+            fi
+          else
+            mkdir -p artifacts/factor-review-v2-upload/snapshot-provenance
+            {
+              echo "source_snapshot_run_id=${{ github.event.inputs.snapshot_run_id }}"
+              echo "full_snapshot_embedded=false"
+            } > artifacts/factor-review-v2-upload/snapshot-provenance/source.txt
+            for file in manifest.json quality.md data-gap-audit.md; do
+              if [ -f "artifacts/research-snapshot/${file}" ]; then
+                cp "artifacts/research-snapshot/${file}" \
+                  "artifacts/factor-review-v2-upload/snapshot-provenance/${file}"
+              fi
+            done
+          fi
+
       - name: Upload report artifact
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: factor-review-v2-${{ github.run_id }}
-          path: |
-            artifacts/factor-review-v2/
-            artifacts/research-snapshot/
+          path: artifacts/factor-review-v2-upload/
+          compression-level: 0
           retention-days: 14
 
       - name: Comment factor evidence on issue
