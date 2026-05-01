@@ -18,14 +18,19 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Emit both `gate-attrition.csv` and `strategy-matrix-results.csv` instead of relying on one-off profile outcomes.
 - [x] Add GitHub Actions workflow for snapshot-backed matrix research.
 - [x] Run local compile/tests and workflow syntax checks.
-- [ ] Push PR and watch checks.
-- [ ] Run the matrix against snapshot `25204438461` and parse artifacts.
+- [x] Push PR and watch checks.
+- [x] Run the matrix against snapshot `25204438461` and parse artifacts.
+- [x] Fix matrix fillability accounting so duplicate/cooldown throttling is not misreported as CLOB fill failure.
+- [ ] Push fillability-accounting fix and rerun strict matrix on `main`.
 
 ## Review
 
 - 2026-05-01: Added a systematic research path so edge discovery can move from single-profile trial-and-error to batch hypothesis testing. The first matrix spans model vs inverted direction probability, full-depth vs executable vs entry-only fillability, no/soft/hard PM confirmation, three time windows, and three EV floors.
 - 2026-05-01: The runner is intentionally deterministic and optimizer-free. It records row/event-side attrition after each gate, then reports realized executable PnL, fill rate, EV calibration gap, positive day/symbol rates, and deployable-candidate status for train and validation separately.
 - 2026-05-01: Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-edge-matrix rtk cargo check -p ploy-research --example three_layer_edge_matrix --no-default-features`, `CARGO_TARGET_DIR=/tmp/ploy-edge-matrix-default rtk cargo check -p ploy-research --example three_layer_edge_matrix`, Ruby YAML parse for `strategy-research-matrix.yml`, and `git diff --check`. Cargo emitted only the pre-existing vendor profile warning.
+- 2026-05-01: PR #289 merged as `691dd570cc135e5ac60eb96f0d97b4cb59968e14`. Strict matrix run `25210900032` used snapshot `25204438461`, train `2026-04-24 -> 2026-04-28`, validation `2026-04-29 -> 2026-05-01`, six symbols, and `min_trades=80`. It failed closed with no deployable candidate. The strongest validation family was `inverted + pm_none`, especially wide/middle windows: top row `inverted_entry_only_pm_none_wide_ev0.05` had `65` validation trades, PnL `+$705.62`, realized/stake `+0.724`, positive symbol rate `100%`, but missed sample power, EV calibration (`gap=0.348`), and positive day gate (`66.7%`).
+- 2026-05-01: Rolling diagnostic runs `25210972310`, `25210972276`, and `25210972363` with `min_trades=20` showed the same broad pattern: inverted direction was positive across folds while model direction was mostly negative. Across four matrix views, `Inverted` averaged `+$504.91` per validation row set with `316/324` positive rows; `Model` averaged `-$104.57` with only `82/324` positive rows. This supports investigating direction inversion/regime calibration, not removing direction probability.
+- 2026-05-01: While parsing artifacts, found a matrix-accounting bug: `fill_rate` was calculated as `trades / selected rows`, so duplicate event-side rows and cooldown-throttled rows were counted as unfilled orders. That conflates signal density with CLOB execution. The follow-up fix changes `fill_rate` to executable fills after duplicate/cooldown throttling and emits separate `selection_rate`, duplicate/cooldown rates, and non-executable rate.
 
 # Stable Reversal Fillability Snapshot Research (2026-05-01)
 
