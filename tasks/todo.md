@@ -1,3 +1,32 @@
+# Systematic Edge Matrix Research (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `crates/ploy-research/examples/three_layer_edge_matrix.rs`
+  - Owner: deterministic hypothesis matrix and gate-attribution runner over immutable research snapshots.
+- `.github/workflows/strategy-research-matrix.yml`
+  - Owner: CI entrypoint for snapshot-backed edge matrix research on `ploy-ci-1`.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Start from latest `origin/main` after PR #288 merge.
+- [x] Add deterministic matrix runner that evaluates direction mode, fillability, PM confirmation, time window, and EV floor combinations.
+- [x] Emit both `gate-attrition.csv` and `strategy-matrix-results.csv` instead of relying on one-off profile outcomes.
+- [x] Add GitHub Actions workflow for snapshot-backed matrix research.
+- [x] Run local compile/tests and workflow syntax checks.
+- [ ] Push PR and watch checks.
+- [ ] Run the matrix against snapshot `25204438461` and parse artifacts.
+
+## Review
+
+- 2026-05-01: Added a systematic research path so edge discovery can move from single-profile trial-and-error to batch hypothesis testing. The first matrix spans model vs inverted direction probability, full-depth vs executable vs entry-only fillability, no/soft/hard PM confirmation, three time windows, and three EV floors.
+- 2026-05-01: The runner is intentionally deterministic and optimizer-free. It records row/event-side attrition after each gate, then reports realized executable PnL, fill rate, EV calibration gap, positive day/symbol rates, and deployable-candidate status for train and validation separately.
+- 2026-05-01: Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-edge-matrix rtk cargo check -p ploy-research --example three_layer_edge_matrix --no-default-features`, `CARGO_TARGET_DIR=/tmp/ploy-edge-matrix-default rtk cargo check -p ploy-research --example three_layer_edge_matrix`, Ruby YAML parse for `strategy-research-matrix.yml`, and `git diff --check`. Cargo emitted only the pre-existing vendor profile warning.
+
 # Stable Reversal Fillability Snapshot Research (2026-05-01)
 
 Issue: https://github.com/proerror77/ploy/issues/256
