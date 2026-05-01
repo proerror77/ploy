@@ -1,0 +1,211 @@
+name: Strategy research matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref"
+        required: true
+        default: "main"
+      snapshot_run_id:
+        description: "Research Snapshot workflow run id"
+        required: true
+        default: ""
+      train_start:
+        description: "Train start date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-24"
+      train_end:
+        description: "Train end date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-28"
+      val_start:
+        description: "Validation start date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-29"
+      val_end:
+        description: "Validation end date (YYYY-MM-DD)"
+        required: true
+        default: "2026-05-01"
+      symbols:
+        description: "Comma-separated symbols"
+        required: false
+        default: "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT"
+      options_json:
+        description: "Advanced options JSON: min_trades, snapshot_registry_dir, timeout_minutes"
+        required: false
+        default: '{"min_trades":80,"snapshot_registry_dir":"","timeout_minutes":45}'
+
+concurrency:
+  group: strategy-research-matrix-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.snapshot_run_id }}-${{ github.event.inputs.train_start }}-${{ github.event.inputs.train_end }}-${{ github.event.inputs.val_start }}-${{ github.event.inputs.val_end }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  matrix:
+    name: Build and run strategy matrix on ploy-ci-1
+    runs-on: [self-hosted, ploy-ci-1]
+    timeout-minutes: 90
+    environment: ploy-ci-1
+
+    steps:
+      - name: Repair runner workspace permissions
+        run: |
+          if [ -d "${GITHUB_WORKSPACE}" ]; then
+            sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
+            sudo rm -rf "${GITHUB_WORKSPACE}/target" "${GITHUB_WORKSPACE}/.cargo-lock" || true
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Add cargo to PATH
+        run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Configure cargo target
+        run: |
+          scripts/configure_research_cargo_target.sh \
+            --profile pm5d-edge-matrix \
+            --features default
+
+      - name: Parse advanced options
+        env:
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          defaults = {
+              "min_trades": "80",
+              "snapshot_registry_dir": "",
+              "timeout_minutes": "45",
+          }
+          raw = os.environ.get("OPTIONS_JSON", "").strip()
+          data = json.loads(raw) if raw else {}
+          if not isinstance(data, dict):
+              raise SystemExit("options_json must be a JSON object")
+          unknown = sorted(set(data) - set(defaults))
+          if unknown:
+              raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+          values = dict(defaults)
+          for key, value in data.items():
+              values[key] = str(value)
+          for key in ("min_trades", "timeout_minutes"):
+              try:
+                  parsed = int(values[key])
+              except ValueError as exc:
+                  raise SystemExit(f"options_json value for {key} must be an integer") from exc
+              if parsed < 1:
+                  raise SystemExit(f"options_json value for {key} must be >= 1")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              for key, value in values.items():
+                  if "\n" in value:
+                      raise SystemExit(f"options_json value for {key} must be single-line")
+                  handle.write(f"MATRIX_{key.upper()}={value}\n")
+          PY
+
+      - name: Download research snapshot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/research-snapshot
+          registry_args=()
+          if [ -n "${MATRIX_SNAPSHOT_REGISTRY_DIR}" ]; then
+            registry_args=(--registry-dir "${MATRIX_SNAPSHOT_REGISTRY_DIR}")
+          fi
+          if scripts/restore_research_snapshot.sh \
+            --run-id "${SNAPSHOT_RUN_ID}" \
+            --output-dir artifacts/research-snapshot \
+            --require manifest.json \
+            --require quality.md \
+            "${registry_args[@]}"; then
+            echo "Restored runner-local research snapshot."
+            exit 0
+          fi
+          cache_args=()
+          if [ -n "${RUNNER_WORKSPACE:-}" ]; then
+            cache_args=(--cache-dir "${RUNNER_WORKSPACE}/_ploy-research-artifacts")
+          fi
+          python3 scripts/download_github_artifact.py \
+            --run-id "${SNAPSHOT_RUN_ID}" \
+            --name "research-snapshot-${SNAPSHOT_RUN_ID}" \
+            --output-dir artifacts/research-snapshot \
+            --require manifest.json \
+            --require quality.md \
+            "${cache_args[@]}"
+
+      - name: Build matrix runner
+        run: |
+          set -euo pipefail
+          . /home/runner/.cargo/env
+          cargo build --release --locked \
+            -p ploy-research \
+            --example three_layer_edge_matrix
+
+      - name: Run strategy matrix
+        run: |
+          set -euo pipefail
+          . /home/runner/.cargo/env
+          mkdir -p artifacts/edge-matrix
+          set +e
+          timeout --preserve-status "${MATRIX_TIMEOUT_MINUTES}m" \
+            "${CARGO_TARGET_DIR:-target}/release/examples/three_layer_edge_matrix" \
+              --snapshot-dir artifacts/research-snapshot \
+              --train-start "${{ github.event.inputs.train_start }}" \
+              --train-end "${{ github.event.inputs.train_end }}" \
+              --val-start "${{ github.event.inputs.val_start }}" \
+              --val-end "${{ github.event.inputs.val_end }}" \
+              --symbols "${{ github.event.inputs.symbols }}" \
+              --stake-usd 15 \
+              --min-trades "${MATRIX_MIN_TRADES}" \
+              --output-dir artifacts/edge-matrix \
+              2>&1 | tee artifacts/edge-matrix/report.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "## Strategy research matrix"
+            echo
+            echo "- Run status: ${status}"
+            echo "- Snapshot: ${{ github.event.inputs.snapshot_run_id }}"
+            echo "- Train: ${{ github.event.inputs.train_start }} -> ${{ github.event.inputs.train_end }}"
+            echo "- Validation: ${{ github.event.inputs.val_start }} -> ${{ github.event.inputs.val_end }}"
+            echo "- Symbols: ${{ github.event.inputs.symbols }}"
+            echo
+            if [ -f artifacts/edge-matrix/strategy-matrix-results.csv ]; then
+              echo "Top validation rows by trades:"
+              echo '```'
+              python3 - <<'PY'
+          import csv
+          from pathlib import Path
+          rows = list(csv.DictReader(Path("artifacts/edge-matrix/strategy-matrix-results.csv").open()))
+          rows = [row for row in rows if row["split"] == "validation"]
+          rows.sort(key=lambda row: (row["deployable_candidate"] == "true", int(row["trades"]), float(row["net_pnl"])), reverse=True)
+          for row in rows[:12]:
+              print(f'{row["hypothesis"]} trades={row["trades"]} pnl={float(row["net_pnl"]):.2f} fill={float(row["fill_rate"]):.2f} ev_gap={float(row["expectancy_calibration_gap"]):.3f} deployable={row["deployable_candidate"]}')
+          PY
+              echo '```'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+          exit "${status}"
+
+      - name: Upload strategy matrix artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: strategy-research-matrix-${{ github.run_id }}
+          path: artifacts/edge-matrix
+          if-no-files-found: ignore
+          retention-days: 14
