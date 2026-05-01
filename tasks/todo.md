@@ -11180,7 +11180,7 @@ Review:
 - [x] Use no-compression artifact uploads for large already-compressed snapshot/report artifacts.
 - [x] Verify workflow syntax and focused local build boundaries.
 - [x] Disable cargo cache saves on snapshot-reuse factor runs after first-speed-test evidence showed cache upload dominated runtime.
-- [ ] Run a main-equivalent speed test after PR checks.
+- [x] Run a main-equivalent speed test after PR checks.
 
 ## Review
 
@@ -11207,3 +11207,11 @@ Review:
   Snapshot-reuse factor workflows should restore cache/workspace state but not
   save a cargo cache; fresh snapshot-producing runs remain responsible for
   warming the cache.
+- 2026-05-01: PR #267 added `save-if:
+  ${{ github.event.inputs.snapshot_run_id == '' }}` for Factor Review V2 and
+  Walk-Forward V2 cargo cache steps. Post-merge main speed test `25198315997`
+  completed successfully in `2m11s`: snapshot download `15s`, cache restore
+  `35s`, db-only factor build `41s`, snapshot compile skipped, walk-forward
+  `26s`, staged slim artifact upload `2s`, and post-cache cleanup `1s`. This
+  is materially faster than the previous optimized-main run `25197515190`
+  (`4m50s`) and avoids the cache-save stall from `25198044053`.
