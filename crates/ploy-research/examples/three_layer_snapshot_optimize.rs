@@ -634,7 +634,7 @@ fn row_passes_gates(
     if !reward_risk.is_finite() || reward_risk < params.min_reward_risk {
         return false;
     }
-    if profile == StrategyProfile::CexDirectionFirst && !entry_fillable(row) {
+    if !entry_fillable(row) {
         return false;
     }
     let confirmation = confirmation_score(row, profile);
@@ -2206,7 +2206,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_objective_counts_only_fillable_executable_orders() {
+    fn snapshot_gate_rejects_non_fillable_entries_before_selection() {
         let mut params = test_params();
         params.cooldown_secs = 0;
         params.min_entry_score = 0.0;
@@ -2218,9 +2218,10 @@ mod tests {
         let metrics =
             evaluate_snapshot_objective(&rows, &params, 1, 15.0, StrategyProfile::Champion);
 
-        assert_eq!(metrics.selected, 2);
+        assert_eq!(metrics.candidates, 1);
+        assert_eq!(metrics.selected, 1);
         assert_eq!(metrics.trades, 1);
-        assert_eq!(metrics.rejected_non_executable, 1);
+        assert_eq!(metrics.rejected_non_executable, 0);
         assert!((metrics.net_pnl - 2.0).abs() < 1e-9);
         assert!(metrics.avg_expected_value_per_stake.is_finite());
     }

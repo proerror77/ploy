@@ -11404,7 +11404,8 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Record decision criteria and follow-up code-change trigger.
 - [x] Add a CEX-direction-first snapshot optimizer profile for the next experiment.
 - [x] Run `cex_direction_first` on snapshot `25193234029` and compare against champion run `25199998031`.
-- [ ] Tighten `cex_direction_first` confirmation/direction search boundaries and rerun.
+- [x] Tighten `cex_direction_first` confirmation/direction search boundaries and rerun.
+- [ ] Move snapshot selection to real entry-fillable orders before rerunning champion.
 
 ## Review
 
@@ -11474,3 +11475,11 @@ Issue: https://github.com/proerror77/ploy/issues/256
   `three_layer_require_confirmation=false` for this profile and raise its
   direction-probability search floor so it cannot solve by weak CEX direction
   plus cheap PM EV alone.
+- 2026-05-01: PR #275 merged the tighter `cex_direction_first` boundary. Main
+  rerun `25200601584` confirmed pure hard CEX direction is too sparse on this
+  snapshot: validation trades `8/40`, train trades `4/40`, validation PnL
+  `+86.71`, fill rate `100%`, but train PnL was slightly negative and the run
+  correctly failed as underpowered. Next research path is to fix the optimizer
+  accounting boundary for all profiles: require real entry fillability before a
+  row is counted as a selected strategy order, matching the runtime ask-size
+  check and the user's filled-order requirement.
