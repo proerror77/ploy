@@ -1,3 +1,32 @@
+# Stable Reversal Fillability Snapshot Research (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: add a snapshot-only reversal profile that tests executable round-trip fillability instead of full-depth-only fillability.
+- `.github/workflows/optimize.yml`
+  - Owner: document the new research-only profile in workflow dispatch help text.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Merge PR #287 with the fail-closed soft reversal evidence.
+- [x] Add `stable_reversal_fillable` as a snapshot-only profile.
+- [x] Keep direction probability, probability haircut/shrink, positive EV-per-staked-dollar, and executable PnL accounting active.
+- [x] Run focused local verification.
+- [ ] Push PR and watch checks.
+- [ ] Run split optimize experiments against snapshot `25204438461`.
+- [ ] Download artifacts and decide whether full-depth-only fillability was the main sparsity source.
+
+## Review
+
+- 2026-05-01: PR #287 merged on GitHub as `c1ae157072b39399ccd6bb7fa0f925cdeec5cd2f`; it proved that softening the PM exit-bid veto alone is still underpowered.
+- 2026-05-01: Added `stable_reversal_fillable` to isolate the next likely bottleneck: full-depth entry+exit labels. This profile still requires real executable round-trip labels (`label_executable_fillable && label_exit_fillable` or full-depth equivalent) and still scores realized executable PnL through the existing `executable_pnl` path.
+- 2026-05-01: Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-reversal-fillable rtk cargo test -p ploy-research --example three_layer_snapshot_optimize stable_reversal --no-default-features`, full `three_layer_snapshot_optimize` example tests with `--no-default-features`, Ruby YAML parse for `optimize.yml`, and `git diff --check`.
+
 # Stable Reversal Soft Snapshot Research (2026-05-01)
 
 Issue: https://github.com/proerror77/ploy/issues/256
