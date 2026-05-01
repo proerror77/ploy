@@ -47,6 +47,7 @@ env:
     037_research_time_conditioned_factor_metrics.sql
     039_fix_strategy_track_record_side_key.sql
     038_track_record_official_residual_settlement.sql
+    040_polymarket_v2_indexer_events.sql
 
 jobs:
   build-and-deploy:
@@ -178,6 +179,7 @@ jobs:
           cp scripts/audit_market_data_gaps.py dist/scripts/audit_market_data_gaps.py
           cp scripts/report_dryrun_summary.py dist/scripts/report_dryrun_summary.py
           cp scripts/check_dryrun_report_contract.py dist/scripts/check_dryrun_report_contract.py
+          cp scripts/import_polymarket_v2_indexer.py dist/scripts/import_polymarket_v2_indexer.py
           cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
           cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
           cp scripts/fix_clob_trade_partitions.sql dist/scripts/fix_clob_trade_partitions.sql
@@ -193,7 +195,11 @@ jobs:
           cp deployment/systemd/ploy-deribit-greeks-collector.service dist/deployment/systemd/ploy-deribit-greeks-collector.service
           cp deployment/systemd/ploy-market-discovery.service dist/deployment/systemd/ploy-market-discovery.service
           cp deployment/systemd/ploy-pm-trade-collector.service dist/deployment/systemd/ploy-pm-trade-collector.service
+          cp deployment/systemd/ploy-polymarket-v2-indexer-import.service dist/deployment/systemd/ploy-polymarket-v2-indexer-import.service
+          cp deployment/systemd/ploy-polymarket-v2-indexer-import.timer dist/deployment/systemd/ploy-polymarket-v2-indexer-import.timer
+          cp deployment/systemd/polymarket-v2-indexer.service dist/deployment/systemd/polymarket-v2-indexer.service
           cp deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf dist/deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf
+          cp deployment/env.polymarket-v2-indexer.example dist/deployment/env.polymarket-v2-indexer.example
           cp deployment/systemd/ploy-quote-collector.hardening.conf dist/deployment/systemd/ploy-quote-collector.hardening.conf
           tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
             -C dist -cf - . | gzip -n > "${DEPLOY_BUNDLE_NAME}"
@@ -420,6 +426,7 @@ jobs:
             install -m 0755 ./scripts/audit_market_data_gaps.py ${DEPLOY_ROOT}/scripts/audit_market_data_gaps.py
             install -m 0755 ./scripts/report_dryrun_summary.py ${DEPLOY_ROOT}/scripts/report_dryrun_summary.py
             install -m 0755 ./scripts/check_dryrun_report_contract.py ${DEPLOY_ROOT}/scripts/check_dryrun_report_contract.py
+            install -m 0755 ./scripts/import_polymarket_v2_indexer.py ${DEPLOY_ROOT}/scripts/import_polymarket_v2_indexer.py
             install -m 0644 ./scripts/fix_binance_lob_partitions.sql ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
             install -m 0644 ./scripts/fix_deribit_partitions.sql ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
             install -m 0644 ./scripts/fix_clob_trade_partitions.sql ${DEPLOY_ROOT}/scripts/fix_clob_trade_partitions.sql
@@ -437,8 +444,13 @@ jobs:
             install -m 0644 ./deployment/systemd/ploy-deribit-greeks-collector.service /etc/systemd/system/ploy-deribit-greeks-collector.service
             install -m 0644 ./deployment/systemd/ploy-market-discovery.service /etc/systemd/system/ploy-market-discovery.service
             install -m 0644 ./deployment/systemd/ploy-pm-trade-collector.service /etc/systemd/system/ploy-pm-trade-collector.service
+            install -m 0644 ./deployment/systemd/ploy-polymarket-v2-indexer-import.service /etc/systemd/system/ploy-polymarket-v2-indexer-import.service
+            install -m 0644 ./deployment/systemd/ploy-polymarket-v2-indexer-import.timer /etc/systemd/system/ploy-polymarket-v2-indexer-import.timer
+            install -m 0644 ./deployment/systemd/polymarket-v2-indexer.service /etc/systemd/system/polymarket-v2-indexer.service
+            install -m 0644 ./deployment/env.polymarket-v2-indexer.example ${DEPLOY_ROOT}/env.polymarket-v2-indexer.example
             install -m 0644 ./deployment/systemd/ploy-quote-collector.hardening.conf /etc/systemd/system/ploy-quote-collector.service.d/hardening.conf
             systemctl daemon-reload
+            systemctl enable --now ploy-polymarket-v2-indexer-import.timer
 
             # Apply additive runner migrations before restarting services.
             mkdir -p ${DEPLOY_ROOT}/migrations
