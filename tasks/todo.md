@@ -1,3 +1,28 @@
+# Strategy Runtime Local Market-Data Boundary (2026-05-01)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/config.rs`
+- `crates/ploy-market-data/src/feeds.rs`
+- `crates/ploy-strategy-runtime/src/live.rs`
+- `tests/test_runtime_market_data_boundary.py`
+- `tasks/todo.md`
+
+## Tasks
+
+- [x] Add an explicit market-data source contract so live/dry-run runners default to local DB feeds.
+- [x] Add a local DB Polymarket feed for event discovery, quotes, and expiry signals.
+- [x] Gate all direct Polymarket/RTDS/Gamma runtime feeds behind explicit opt-in.
+- [x] Add regression tests/static guards for the default local-only boundary.
+- [x] Run targeted verification and record remaining deployment risk.
+
+## Review
+
+- 2026-05-01: Added `[runtime].market_data_source` with default `local_db`; `external_direct` and `dual` are now explicit opt-in modes for strategy runners that intentionally open public feeds.
+- 2026-05-01: Added `spawn_db_polymarket_feed` so live/dry-run strategy runtimes can consume collector-owned `pm_market_metadata`, `clob_quote_ticks`, and `pm_token_settlements` rows for event discovery, quotes, and expiry signals without calling public Polymarket/Gamma endpoints.
+- 2026-05-01: `live.rs` now starts DB spot/aggTrade/L2/Polymarket feeds by default and refuses to start local-db live/dry-run mode without `DATABASE_URL`; direct RTDS/Gamma/scanner/sports feeds are behind `market_data_source.uses_external_direct()`.
+- 2026-05-01: Verification passed in a clean worktree: `rustfmt --edition 2024` on touched Rust files, `git diff --check`, `python3 -m unittest tests.test_runtime_market_data_boundary`, `rtk cargo test -p ploy-strategy-bundles config --lib`, `rtk cargo check -p ploy-market-data`, and `rtk cargo check -p ploy-strategy-runtime --features live,db-recorder`. Cargo emitted pre-existing dead-code/profile warnings only.
+
 # Research Snapshot Reuse Workflow Fix (2026-05-01)
 
 Issue: https://github.com/proerror77/ploy/issues/256

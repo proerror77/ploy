@@ -7,14 +7,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use futures::StreamExt;
-use ploy_market_contracts::{l2_updates_from_depth_totals, MarketUpdate};
+use ploy_market_contracts::{MarketUpdate, l2_updates_from_depth_totals, normalize_token_id};
 use polymarket_client_sdk::rtds::{Client as RtdsClient, EquityPriceMessage};
 use polymarket_client_sdk::types::U256;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -23,9 +23,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, warn};
 
 use crate::reference_prices::{
-    infer_pyth_asset_class, market_symbol_to_binance_symbol, normalize_reference_symbol,
-    pyth_symbol, upsert_reference_price, ReferenceAssetClass, ReferencePriceKey,
-    ReferencePriceRegistry, ReferencePriceSnapshot, ReferencePriceSource,
+    ReferenceAssetClass, ReferencePriceKey, ReferencePriceRegistry, ReferencePriceSnapshot,
+    ReferencePriceSource, infer_pyth_asset_class, market_symbol_to_binance_symbol,
+    normalize_reference_symbol, pyth_symbol, upsert_reference_price,
 };
 
 const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
@@ -461,6 +461,222 @@ pub fn spawn_db_l2_feed(
             }
         }
     })
+}
+
+/// Spawn a task that consumes collector-persisted Polymarket events and quotes.
+///
+/// This is the strategy-runtime boundary for live/dry-run mode: collector
+/// services own public Polymarket/Gamma/CLOB connectivity, while strategy
+/// runners consume the local database projection.
+pub fn spawn_db_polymarket_feed(
+    tx: Arc<broadcast::Sender<MarketUpdate>>,
+    symbols: Vec<String>,
+    pool: PgPool,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let symbols_upper: Vec<String> = symbols.iter().map(|s| s.to_uppercase()).collect();
+        let mut discovered_events = HashSet::new();
+        let mut expired_events = HashSet::new();
+        let mut last_quote_ts: HashMap<String, DateTime<Utc>> = HashMap::new();
+
+        info!(
+            symbols = ?symbols_upper,
+            "Starting DB Polymarket event/quote feed"
+        );
+
+        loop {
+            let now = Utc::now();
+            let mut active_tokens = Vec::new();
+
+            let rows: Vec<(
+                String,
+                Option<String>,
+                Option<DateTime<Utc>>,
+                Option<DateTime<Utc>>,
+                Option<String>,
+                Option<String>,
+                Option<Decimal>,
+            )> = match sqlx::query_as(
+                r#"
+                SELECT
+                    market_slug,
+                    symbol,
+                    start_time,
+                    end_time,
+                    ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->>0) AS up_token_id,
+                    ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->>1) AS down_token_id,
+                    price_to_beat
+                FROM pm_market_metadata
+                WHERE symbol = ANY($1)
+                  AND end_time > NOW() - INTERVAL '120 seconds'
+                  AND COALESCE(start_time, end_time - INTERVAL '300 seconds')
+                        < NOW() + INTERVAL '6 minutes'
+                  AND raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
+                ORDER BY start_time, end_time, market_slug
+                "#,
+            )
+            .bind(&symbols_upper)
+            .fetch_all(&pool)
+            .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    warn!(error = %error, "DB Polymarket event query failed");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+
+            for (event_id, symbol, start_time, end_time, up_token, down_token, price_to_beat) in
+                rows
+            {
+                let Some(symbol) = symbol.filter(|value| !value.is_empty()) else {
+                    continue;
+                };
+                let Some(end_time) = end_time else {
+                    continue;
+                };
+                let Some(up_token) = up_token.map(|value| normalize_token_id(&value)) else {
+                    continue;
+                };
+                let Some(down_token) = down_token.map(|value| normalize_token_id(&value)) else {
+                    continue;
+                };
+                if up_token.is_empty() || down_token.is_empty() {
+                    continue;
+                }
+
+                let start_time = start_time.unwrap_or(end_time - Duration::seconds(300));
+                let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
+
+                if discovered_events.insert(event_id.clone()) {
+                    let _ = tx.send(MarketUpdate::EventDiscovered {
+                        event_id: Arc::from(event_id.as_str()),
+                        symbol: Arc::from(symbol.as_str()),
+                        up_token: Arc::from(up_token.as_str()),
+                        down_token: Arc::from(down_token.as_str()),
+                        end_time,
+                        window_secs,
+                        price_to_beat,
+                        resolved_up_won: None,
+                    });
+                }
+
+                if end_time <= now {
+                    if expired_events.insert(event_id.clone()) {
+                        let resolved_up_won =
+                            resolve_db_event_outcome(&pool, &event_id, &up_token, &down_token)
+                                .await;
+                        let _ = tx.send(MarketUpdate::EventExpired {
+                            event_id: Arc::from(event_id.as_str()),
+                            end_time,
+                            resolved_up_won,
+                        });
+                    }
+                } else {
+                    active_tokens.push(up_token);
+                    active_tokens.push(down_token);
+                }
+            }
+
+            if !active_tokens.is_empty() {
+                let quote_rows: Vec<(
+                    String,
+                    Option<Decimal>,
+                    Option<Decimal>,
+                    Option<Decimal>,
+                    Option<Decimal>,
+                    DateTime<Utc>,
+                )> = match sqlx::query_as(
+                    r#"
+                    SELECT DISTINCT ON (token_id)
+                        token_id, best_bid, best_ask, bid_size, ask_size, received_at
+                    FROM clob_quote_ticks
+                    WHERE token_id = ANY($1)
+                      AND received_at > NOW() - INTERVAL '30 seconds'
+                      AND (best_bid IS NOT NULL OR best_ask IS NOT NULL)
+                    ORDER BY token_id, received_at DESC
+                    "#,
+                )
+                .bind(&active_tokens)
+                .fetch_all(&pool)
+                .await
+                {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        warn!(error = %error, "DB Polymarket quote query failed");
+                        Vec::new()
+                    }
+                };
+
+                for (token_id, bid, ask, bid_size, ask_size, ts) in quote_rows {
+                    if last_quote_ts
+                        .get(&token_id)
+                        .is_some_and(|last_ts| *last_ts >= ts)
+                    {
+                        continue;
+                    }
+                    last_quote_ts.insert(token_id.clone(), ts);
+                    if tx
+                        .send(MarketUpdate::Quote {
+                            token_id: Arc::from(token_id.as_str()),
+                            bid,
+                            ask,
+                            bid_size,
+                            ask_size,
+                            ts,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    })
+}
+
+async fn resolve_db_event_outcome(
+    pool: &PgPool,
+    event_id: &str,
+    up_token: &str,
+    down_token: &str,
+) -> Option<bool> {
+    let token_ids = vec![up_token.to_string(), down_token.to_string()];
+    let rows: Vec<(String, Option<Decimal>)> = sqlx::query_as(
+        r#"
+        SELECT token_id, settled_price
+        FROM pm_token_settlements
+        WHERE market_slug = $1
+          AND token_id = ANY($2)
+          AND resolved = TRUE
+        "#,
+    )
+    .bind(event_id)
+    .bind(&token_ids)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut up = None;
+    let mut down = None;
+    for (token_id, settled_price) in rows {
+        let token_id = normalize_token_id(&token_id);
+        if token_id == up_token {
+            up = settled_price;
+        } else if token_id == down_token {
+            down = settled_price;
+        }
+    }
+
+    match (up, down) {
+        (Some(up), Some(down)) if up != down => Some(up > down),
+        (Some(up), _) => Some(up > Decimal::new(5, 1)),
+        (_, Some(down)) => Some(down < Decimal::new(5, 1)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1128,8 +1344,8 @@ fn parse_agg_trade_msg(v: &serde_json::Value) -> Option<AggTradeMsg> {
 #[cfg(test)]
 mod tests {
     use super::{
-        book_quote_from_rest, l2_updates_from_book, parse_agg_trade_msg,
-        rtds_market_data_ws_config, RestBook,
+        RestBook, book_quote_from_rest, l2_updates_from_book, parse_agg_trade_msg,
+        rtds_market_data_ws_config,
     };
     use chrono::Utc;
     use ploy_market_contracts::MarketUpdate;

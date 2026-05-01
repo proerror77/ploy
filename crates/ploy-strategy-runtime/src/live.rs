@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use ploy_market_data::feeds::{
-    spawn_chainlink_feed, spawn_db_aggtrade_feed, spawn_db_l2_feed, spawn_db_spot_feed,
-    spawn_pyth_reference_feed, spawn_spot_feed,
+    spawn_chainlink_feed, spawn_db_aggtrade_feed, spawn_db_l2_feed, spawn_db_polymarket_feed,
+    spawn_db_spot_feed, spawn_pyth_reference_feed, spawn_spot_feed,
 };
 use ploy_market_data::reference_prices::new_reference_price_registry;
 use ploy_market_data::scanner::spawn_market_scanner;
@@ -14,7 +14,7 @@ use ploy_trading::{
     TradingRuntime, TradingRuntimeSnapshot,
 };
 use rust_decimal::Decimal;
-use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
+use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
 use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -318,7 +318,7 @@ mod execution {
 }
 
 use crate::recording::build_signal_recorder;
-use crate::{database_unavailable_is_fatal, RuntimeModeConfig};
+use crate::{RuntimeModeConfig, database_unavailable_is_fatal};
 
 #[derive(Debug, FromRow)]
 struct LiveOrderRestoreRow {
@@ -550,48 +550,69 @@ async fn run_live_or_dry_run(
     let (tx, rx) = broadcast::channel(8192);
     let tx = Arc::new(tx);
     let reference_prices = new_reference_price_registry();
+    let market_data_source = config.runtime.market_data_source;
 
-    let spot_handle = spawn_spot_feed(
-        tx.clone(),
-        reference_prices.clone(),
-        symbols.to_vec(),
-        db_pool.clone(),
-    );
-    let mut db_feed_handles = Vec::new();
-    if let Some(ref db) = db_pool {
-        db_feed_handles.push(spawn_db_spot_feed(tx.clone(), symbols.to_vec(), db.clone()));
-        db_feed_handles.push(spawn_db_aggtrade_feed(
-            tx.clone(),
-            symbols.to_vec(),
-            db.clone(),
-        ));
-        db_feed_handles.push(spawn_db_l2_feed(tx.clone(), symbols.to_vec(), db.clone()));
+    if market_data_source.uses_local_db() && db_pool.is_none() {
+        error!(
+            source = ?market_data_source,
+            "Local market-data source requires DATABASE_URL; refusing to open direct public feeds"
+        );
+        std::process::exit(1);
     }
-    let chainlink_handle = spawn_chainlink_feed(
-        tx.clone(),
-        reference_prices.clone(),
-        symbols.to_vec(),
-        db_pool.clone(),
-    );
-    let pyth_handle = spawn_pyth_reference_feed(
-        tx.clone(),
-        reference_prices.clone(),
-        config.reference_data.pyth_symbols.clone(),
-        db_pool.clone(),
-    );
-    let scanner_handle = spawn_market_scanner(
-        tx.clone(),
-        reference_prices.clone(),
-        symbols.to_vec(),
-        db_pool.clone(),
-        config.reference_data.capture_sports_state,
-    );
 
-    let sports_handle = if config.reference_data.capture_sports_state {
-        Some(spawn_sports_feed(tx.clone(), db_pool.clone()))
-    } else {
-        None
-    };
+    let mut feed_handles = Vec::new();
+    if market_data_source.uses_local_db() {
+        if let Some(ref db) = db_pool {
+            feed_handles.push(spawn_db_spot_feed(tx.clone(), symbols.to_vec(), db.clone()));
+            feed_handles.push(spawn_db_aggtrade_feed(
+                tx.clone(),
+                symbols.to_vec(),
+                db.clone(),
+            ));
+            feed_handles.push(spawn_db_l2_feed(tx.clone(), symbols.to_vec(), db.clone()));
+            feed_handles.push(spawn_db_polymarket_feed(
+                tx.clone(),
+                symbols.to_vec(),
+                db.clone(),
+            ));
+        }
+    }
+
+    if market_data_source.uses_external_direct() {
+        feed_handles.push(spawn_spot_feed(
+            tx.clone(),
+            reference_prices.clone(),
+            symbols.to_vec(),
+            db_pool.clone(),
+        ));
+        feed_handles.push(spawn_chainlink_feed(
+            tx.clone(),
+            reference_prices.clone(),
+            symbols.to_vec(),
+            db_pool.clone(),
+        ));
+        feed_handles.push(spawn_pyth_reference_feed(
+            tx.clone(),
+            reference_prices.clone(),
+            config.reference_data.pyth_symbols.clone(),
+            db_pool.clone(),
+        ));
+        feed_handles.push(spawn_market_scanner(
+            tx.clone(),
+            reference_prices.clone(),
+            symbols.to_vec(),
+            db_pool.clone(),
+            config.reference_data.capture_sports_state,
+        ));
+
+        if config.reference_data.capture_sports_state {
+            feed_handles.push(spawn_sports_feed(tx.clone(), db_pool.clone()));
+        }
+    } else if config.reference_data.capture_sports_state {
+        warn!(
+            "capture_sports_state requires market_data_source = external_direct or dual; local_db runtime will not open the sports WebSocket"
+        );
+    }
 
     let feed: Box<dyn Feed> = if let Some(record_path) = config.record_market_updates_path() {
         Box::new(
@@ -656,14 +677,7 @@ async fn run_live_or_dry_run(
         (result, snapshot)
     };
 
-    spot_handle.abort();
-    for handle in db_feed_handles {
-        handle.abort();
-    }
-    chainlink_handle.abort();
-    pyth_handle.abort();
-    scanner_handle.abort();
-    if let Some(handle) = sports_handle {
+    for handle in feed_handles {
         handle.abort();
     }
 

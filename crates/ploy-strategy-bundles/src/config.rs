@@ -74,8 +74,43 @@ pub struct RuntimeSection {
     pub to: Option<String>,
     /// Optional NDJSON log path for canonical `MarketUpdate` recording.
     pub record_market_updates_to: Option<PathBuf>,
+    /// Source boundary for live/dry-run market data.
+    ///
+    /// Defaults to `local_db`, where strategy runners consume collector-persisted
+    /// data and never open their own public Polymarket/RTDS/Gamma feeds.
+    #[serde(default)]
+    pub market_data_source: MarketDataSource,
     /// Required when `mode = "replay"`; points at a previously recorded NDJSON log.
     pub replay_market_updates_from: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketDataSource {
+    /// Consume locally persisted collector data only.
+    LocalDb,
+    /// Open direct public feeds from this strategy runner.
+    ExternalDirect,
+    /// Consume local DB feeds and also open direct public feeds.
+    Dual,
+}
+
+impl Default for MarketDataSource {
+    fn default() -> Self {
+        Self::LocalDb
+    }
+}
+
+impl MarketDataSource {
+    #[must_use]
+    pub fn uses_local_db(self) -> bool {
+        matches!(self, Self::LocalDb | Self::Dual)
+    }
+
+    #[must_use]
+    pub fn uses_external_direct(self) -> bool {
+        matches!(self, Self::ExternalDirect | Self::Dual)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -337,6 +372,7 @@ mode = "backtest"
 throttle_hz = 1
 max_updates = 10000
 record_market_updates_to = "tmp/sample.ndjson"
+market_data_source = "external_direct"
 
 [strategy]
 symbols = ["BTCUSDT", "ETHUSDT"]
@@ -377,6 +413,10 @@ enable_market_impact = true
         assert_eq!(
             config.runtime.record_market_updates_to.as_deref(),
             Some(Path::new("tmp/sample.ndjson"))
+        );
+        assert_eq!(
+            config.runtime.market_data_source,
+            MarketDataSource::ExternalDirect
         );
         assert_eq!(config.strategy.symbols, vec!["BTCUSDT", "ETHUSDT"]);
         assert_eq!(config.reference_data.pyth_symbols, vec!["AAPL", "XAUUSD"]);
@@ -443,6 +483,9 @@ mode = "dryrun"
         );
         assert!(config.reference_data.pyth_symbols.is_empty());
         assert!(!config.reference_data.capture_sports_state);
+        assert_eq!(config.runtime.market_data_source, MarketDataSource::LocalDb);
+        assert!(config.runtime.market_data_source.uses_local_db());
+        assert!(!config.runtime.market_data_source.uses_external_direct());
         assert!(!config.backtest_data.include_reference_prices);
         assert!(!config.backtest_data.include_sports_state);
         assert!(!config.backtest_data.require_official_settlement);
