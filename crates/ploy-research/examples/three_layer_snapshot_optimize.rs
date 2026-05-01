@@ -23,6 +23,7 @@ use serde::Serialize;
 const OPTIMIZER_MIN_DIRECTION_PROB: f64 = 0.515;
 const OPTIMIZER_MAX_DIRECTION_PROB: f64 = 0.68;
 const CEX_DIRECTION_FIRST_MIN_DIRECTION_PROB: f64 = 0.55;
+const LOG_GROWTH_RISK_BUDGET_STAKES: f64 = 40.0;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 struct SnapshotThreeLayerParams {
@@ -984,9 +985,9 @@ fn max_drawdown(pnls: &[f64]) -> f64 {
 }
 
 fn compounded_log_growth(pnls: &[f64], stake_usd: f64) -> f64 {
-    let stake = stake_usd.max(1.0);
+    let risk_budget = (stake_usd * LOG_GROWTH_RISK_BUDGET_STAKES).max(1.0);
     pnls.iter()
-        .map(|pnl| (1.0 + (pnl / stake).clamp(-0.99, 10.0)).ln())
+        .map(|pnl| (1.0 + (pnl / risk_budget).clamp(-0.99, 10.0)).ln())
         .sum()
 }
 
@@ -2309,7 +2310,14 @@ mod tests {
     fn drawdown_and_log_growth_capture_compounding_risk() {
         assert_eq!(max_drawdown(&[10.0, -5.0, -20.0, 15.0]), 25.0);
         assert!(compounded_log_growth(&[1.0, 1.0, 1.0], 15.0) > 0.0);
-        assert!(compounded_log_growth(&[-15.0], 15.0) < -4.0);
+        assert!(
+            compounded_log_growth(&[-15.0], 15.0) > -0.1,
+            "a fixed-size binary loss should be measured against the research risk budget, not treated as total ruin"
+        );
+        assert!(
+            compounded_log_growth(&[-15.0, 5.0, 5.0, 5.0], 15.0).abs() < 0.01,
+            "fixed-dollar sizing should make offsetting PnL roughly neutral in log-growth terms"
+        );
     }
 
     #[test]
