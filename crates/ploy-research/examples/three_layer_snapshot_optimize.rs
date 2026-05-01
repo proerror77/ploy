@@ -22,6 +22,7 @@ use serde::Serialize;
 
 const OPTIMIZER_MIN_DIRECTION_PROB: f64 = 0.515;
 const OPTIMIZER_MAX_DIRECTION_PROB: f64 = 0.68;
+const CEX_DIRECTION_FIRST_MIN_DIRECTION_PROB: f64 = 0.55;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 struct SnapshotThreeLayerParams {
@@ -130,11 +131,8 @@ impl StrategyProfile {
     fn fixes_require_confirmation(self) -> Option<bool> {
         match self {
             Self::ObiHard => Some(true),
-            Self::Mixed
-            | Self::Champion
-            | Self::ObiSoft
-            | Self::ContinuationSoft
-            | Self::CexDirectionFirst => None,
+            Self::CexDirectionFirst => Some(false),
+            Self::Mixed | Self::Champion | Self::ObiSoft | Self::ContinuationSoft => None,
         }
     }
 }
@@ -362,6 +360,17 @@ fn calibrate_direction_probability(
     let shrink = probability_shrink.clamp(0.0, 1.0);
     let haircut = probability_haircut.clamp(0.0, 0.49);
     (0.5 + (direction_probability - 0.5) * shrink - haircut).clamp(0.01, 0.99)
+}
+
+fn direction_probability_search_floor(profile: StrategyProfile) -> f64 {
+    match profile {
+        StrategyProfile::CexDirectionFirst => CEX_DIRECTION_FIRST_MIN_DIRECTION_PROB,
+        StrategyProfile::Mixed
+        | StrategyProfile::Champion
+        | StrategyProfile::ObiSoft
+        | StrategyProfile::ObiHard
+        | StrategyProfile::ContinuationSoft => OPTIMIZER_MIN_DIRECTION_PROB,
+    }
 }
 
 fn cex_direction_signal(row: &FactorObservationV2) -> f64 {
@@ -1392,9 +1401,11 @@ fn main() -> Result<()> {
     let train_rows = Arc::new(train_rows);
     let val_rows = Arc::new(val_rows);
     let study: Study<f64> = Study::maximize(TpeSampler::new());
-    let p_min_direction_prob =
-        FloatParam::new(OPTIMIZER_MIN_DIRECTION_PROB, OPTIMIZER_MAX_DIRECTION_PROB)
-            .name("three_layer_min_direction_prob");
+    let p_min_direction_prob = FloatParam::new(
+        direction_probability_search_floor(strategy_profile),
+        OPTIMIZER_MAX_DIRECTION_PROB,
+    )
+    .name("three_layer_min_direction_prob");
     let p_min_distance_over_sigma =
         FloatParam::new(-0.20, 0.60).name("three_layer_min_distance_over_sigma");
     let p_min_confirmation_score =
@@ -1533,7 +1544,7 @@ fn main() -> Result<()> {
     let best_params = SnapshotThreeLayerParams {
         min_direction_prob: best
             .get(&p_min_direction_prob)
-            .unwrap_or(OPTIMIZER_MIN_DIRECTION_PROB),
+            .unwrap_or_else(|| direction_probability_search_floor(strategy_profile)),
         min_distance_over_sigma: best.get(&p_min_distance_over_sigma).unwrap_or(0.10),
         min_confirmation_score: strategy_profile
             .fixes_confirmation_threshold()
@@ -1757,12 +1768,12 @@ mod tests {
         SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
         calibrate_direction_probability, calibrated_model_probability,
         calibrated_profile_probability, cex_direction_probability, compounded_log_growth,
-        default_min_trades_from_coverage, direction_alpha_probability, directional_score,
-        evaluate_snapshot_objective, executable_edge_score, expected_value_per_share,
-        expected_value_per_staked_dollar, holistic_selection_objective, max_drawdown,
-        parse_date_end, profile_direction_probability, reward_risk_ratio, row_passes_gates,
-        sample_power_multiplier, stable_compounding_objective, trade_sharpe,
-        transformed_model_probability,
+        default_min_trades_from_coverage, direction_alpha_probability,
+        direction_probability_search_floor, directional_score, evaluate_snapshot_objective,
+        executable_edge_score, expected_value_per_share, expected_value_per_staked_dollar,
+        holistic_selection_objective, max_drawdown, parse_date_end, profile_direction_probability,
+        reward_risk_ratio, row_passes_gates, sample_power_multiplier, stable_compounding_objective,
+        trade_sharpe, transformed_model_probability,
     };
     use chrono::{TimeZone, Utc};
     use ploy_research::{FactorObservationV2, Regime, ReviewSide};
@@ -2085,6 +2096,11 @@ mod tests {
             "optimizer must not search neutral direction-probability gates"
         );
         assert!(OPTIMIZER_MIN_DIRECTION_PROB < OPTIMIZER_MAX_DIRECTION_PROB);
+        assert!(
+            direction_probability_search_floor(StrategyProfile::CexDirectionFirst)
+                > OPTIMIZER_MIN_DIRECTION_PROB,
+            "CEX-direction-first must not solve by hugging the legacy weak direction floor"
+        );
     }
 
     #[test]
@@ -2422,6 +2438,10 @@ mod tests {
         assert_eq!(
             StrategyProfile::ObiHard.fixes_require_confirmation(),
             Some(true)
+        );
+        assert_eq!(
+            StrategyProfile::CexDirectionFirst.fixes_require_confirmation(),
+            Some(false)
         );
     }
 }

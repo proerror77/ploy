@@ -11403,7 +11403,8 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Promote only a passing profile to a wider symbol/window test.
 - [x] Record decision criteria and follow-up code-change trigger.
 - [x] Add a CEX-direction-first snapshot optimizer profile for the next experiment.
-- [ ] Run `cex_direction_first` on snapshot `25193234029` and compare against champion run `25199998031`.
+- [x] Run `cex_direction_first` on snapshot `25193234029` and compare against champion run `25199998031`.
+- [ ] Tighten `cex_direction_first` confirmation/direction search boundaries and rerun.
 
 ## Review
 
@@ -11459,3 +11460,17 @@ Issue: https://github.com/proerror77/ploy/issues/256
   ploy-research --example three_layer_snapshot_optimize --no-default-features`
   and `CARGO_TARGET_DIR=/tmp/ploy-cex-direction-first rtk cargo check -p
   ploy-research --example three_layer_snapshot_optimize --no-default-features`.
+- 2026-05-01: Main optimize run `25200366917` tested `cex_direction_first`
+  with 75 trials on snapshot `25193234029`. The run was powered and executable:
+  validation trades `68/40`, PnL `+1091.39`, fill rate `100%`, realized/stake
+  `+1.070`, and EV gap `0.133`. It is still not promotable because selection
+  objective was `-85.794`, below champion baseline `+3.815`, and the best
+  threshold hugged the weak legacy floor (`three_layer_min_direction_prob =
+  0.515`).
+- 2026-05-01: Follow-up run `25200409666` with 150 trials confirmed the current
+  `cex_direction_first` search boundary is not robust: the best result was
+  underpowered (`train=19`, `validation=8`, `min_trades=40`) and exited
+  non-zero by design. Next fix is not more blind trials; pin
+  `three_layer_require_confirmation=false` for this profile and raise its
+  direction-probability search floor so it cannot solve by weak CEX direction
+  plus cheap PM EV alone.
