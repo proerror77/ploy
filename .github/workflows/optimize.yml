@@ -186,18 +186,19 @@ jobs:
         run: |
           set -euo pipefail
           . /home/runner/.cargo/env
+          cargo_target_dir="${CARGO_TARGET_DIR:-target}"
           mkdir -p target/release/examples
           if [ -n "${{ github.event.inputs.snapshot_run_id }}" ]; then
             cargo build --release --locked \
               -p ploy-research \
               --example three_layer_snapshot_optimize
-            cp target/release/examples/three_layer_snapshot_optimize target/release/examples/optimize-runner
+            cp "${cargo_target_dir}/release/examples/three_layer_snapshot_optimize" target/release/examples/optimize-runner
           else
             cargo build --release --locked \
               -p ploy-strategy-bundles \
               --features ploy-strategy-bundles/parquet-feed \
               --example optimize_backtest
-            cp target/release/examples/optimize_backtest target/release/examples/optimize-runner
+            cp "${cargo_target_dir}/release/examples/optimize_backtest" target/release/examples/optimize-runner
           fi
           chmod +x target/release/examples/optimize-runner
 
