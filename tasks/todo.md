@@ -11215,3 +11215,69 @@ Review:
   `26s`, staged slim artifact upload `2s`, and post-cache cleanup `1s`. This
   is materially faster than the previous optimized-main run `25197515190`
   (`4m50s`) and avoids the cache-save stall from `25198044053`.
+
+# PM5D Research Workflow All-In Speed Pass (2026-05-01)
+
+## Files
+
+- `scripts/configure_research_cargo_target.sh`
+  - Owner: persistent local Cargo target selection for self-hosted research jobs.
+- `.github/workflows/factor-review-v2.yml`
+  - Owner: snapshot-reuse build/cache path.
+- `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: snapshot-reuse build/cache path.
+- `.github/workflows/optimize.yml`
+  - Owner: snapshot optimizer build/cache path.
+- `tasks/todo.md`
+  - Owner: plan and speed evidence.
+
+## Tasks
+
+- [x] Use Agent Team analysis lanes for cache, binary artifact, and snapshot fast-path opportunities.
+- [x] Add a persistent local `CARGO_TARGET_DIR` helper for PM5D research jobs on self-hosted runners.
+- [x] Skip GitHub cache restore entirely on snapshot-reuse factor review / walk-forward runs.
+- [x] Reuse the persistent local target for snapshot-backed optimizer builds.
+- [x] Add stale-target cleanup to the persistent target helper.
+- [x] Move snapshot download before snapshot optimizer build and skip DuckDB setup on snapshot-backed optimize.
+- [x] Add runner-local extracted snapshot cache to repeated artifact downloads.
+- [x] Verify scripts, workflow syntax, and affected Rust example build boundaries.
+- [ ] Land via PR and rerun main speed tests.
+
+## Review
+
+- 2026-05-01: Native Agent Team review split the remaining speed work into
+  cache/persistent-target, binary-artifact provenance, and snapshot-cache lanes.
+  The team rejected prebuilt research-runner artifacts for now because the repo
+  does not yet have a checksum/manifest/git-sha execution contract for binary
+  reuse. The safer path is persistent self-hosted `CARGO_TARGET_DIR` plus
+  runner-local extracted snapshot reuse.
+- 2026-05-01: Added `scripts/configure_research_cargo_target.sh` so
+  snapshot-backed PM5D research jobs use a stable target directory outside
+  `GITHUB_WORKSPACE`. The helper keys by lockfile, relevant crate manifests,
+  profile, feature set, and `rustc -Vv`, then prunes stale matching target dirs.
+- 2026-05-01: Factor Review V2 and Walk-Forward V2 now skip `Swatinem/rust-cache`
+  entirely when `snapshot_run_id` is set. This avoids both cache restore latency
+  and the earlier post-job cache-upload stall, while the self-hosted runner can
+  still reuse compiled artifacts through the persistent target directory.
+- 2026-05-01: `scripts/download_github_artifact.py` now supports `--cache-dir`
+  for runner-local extracted artifact reuse. The cache key includes repo, run id,
+  artifact id/name, and strip-prefix hash; cached payloads still must satisfy
+  required paths such as `manifest.json` and `quality.md`.
+- 2026-05-01: Snapshot-backed optimize now downloads the research snapshot before
+  building the optimizer, uses its own persistent target profile, and skips
+  DuckDB spill setup on snapshot-backed runs. The raw Parquet/debug path remains
+  gated behind the existing non-snapshot preflight and DuckDB guardrails.
+- 2026-05-01: Local verification passed: `python3 -m py_compile
+  scripts/download_github_artifact.py`, `bash -n
+  scripts/configure_research_cargo_target.sh`, YAML parse for
+  `factor-review-v2.yml`, `factor-walk-forward-v2.yml`, `optimize.yml`, and
+  `research-snapshot.yml`, `git diff --check`,
+  `scripts/check_optimize_verification_gates.sh`, `rtk cargo test --test
+  workflow_security research_workflows_do_not_transfer_runtime_binaries_between_jobs
+  -- --exact`, a cargo-target helper smoke, a downloader strip-prefix/cache
+  smoke, `CARGO_TARGET_DIR=/tmp/ploy-research-all-in-check rtk cargo check -p
+  ploy-research --features db --example factor_review_v2 --example
+  factor_walk_forward_v2 --example research_snapshot_compile
+  --no-default-features`, and `CARGO_TARGET_DIR=/tmp/ploy-research-all-in-check
+  rtk cargo check -p ploy-research --example three_layer_snapshot_optimize
+  --no-default-features`.
