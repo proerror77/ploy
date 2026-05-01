@@ -297,6 +297,7 @@ jobs:
         with:
           cache-on-failure: true
           cache-targets: "true"
+          save-if: ${{ github.event.inputs.snapshot_run_id == '' }}
           key: factor-review-v2-db-only-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
 
       - name: Build factor review
