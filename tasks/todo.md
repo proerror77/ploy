@@ -52,8 +52,8 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Include train/validation window and snapshot id in the optimize concurrency key.
 - [x] Expose the snapshot optimizer's existing `--min-trades` flag through `options_json` without changing the default dynamic floor.
 - [x] Run local workflow syntax validation.
-- [ ] Push PR and watch checks.
-- [ ] Re-run continuation split sensitivity after merge.
+- [x] Push PR and watch checks.
+- [x] Re-run continuation split sensitivity after merge.
 
 ## Review
 
@@ -61,6 +61,11 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - 2026-05-01: First six-profile matrix on `snapshot_run_id=25204438461`, train `2026-04-24..2026-04-28`, validation `2026-04-29..2026-05-01`, showed only `continuation_soft` clearing the default dynamic floor: validation trades `149`, validation PnL `$2755.46`, fill rate `1.0`, win rate `0.564`, positive symbol rate `1.0`, selection objective `8.381`, but EV calibration gap `0.288`.
 - 2026-05-01: Other profiles were underpowered in validation despite positive PnL: `champion` 8 validation trades, `obi_hard` 11, `mixed` 25, `obi_soft` 7, and `cex_direction_first` 9 with negative validation PnL.
 - 2026-05-01: Alternate `continuation_soft` splits were not stable enough for deployment: early split validation had only 14 trades, and late split had train 17 / validation 11 trades with validation EV gap `2.295`. Treat `continuation_soft` as a research candidate, not a dry-run/live promotion yet.
+- 2026-05-01: PR #282 merged to `main` as `1691e905` after rerunning a transiently stuck `Rust control-plane/core` CI lane; all PR checks passed on rerun.
+- 2026-05-01: Started post-merge strategy research on `snapshot_run_id=25204438461`: continuation split Optimize runs `25206122441`, `25206123751`, `25206125074`; main split with `min_trades=80` run `25206126442`; full-window Factor Walk-Forward V2 run `25206127574`.
+- 2026-05-01: Post-merge Optimize split sensitivity confirms `continuation_soft` is not promotion-ready. Rolling splits were fail-closed as underpowered even when PnL was positive: run `25206122441` had validation 51 trades vs min 134, `25206123751` had 17 vs min 109, and `25206125074` had train 28 / validation 19 vs min 144 with validation EV gap `1.173` and positive symbol rate `0.5`.
+- 2026-05-01: Main split sensitivity passed only at a relaxed floor: run `25206126442` (`min_trades=80`) had validation 192 trades, PnL `$2226.28`, fill rate `1.0`, win rate `0.505`, avg realized return/stake `0.773`, avg expected value/stake `1.306`, EV gap `0.533`, positive symbol rate `1.0`, and positive day rate `0.667`. A harder `min_trades=160` run `25206200518` found only 10 validation trades and failed as underpowered.
+- 2026-05-01: Factor Walk-Forward V2 run `25206127574` found stable factor families worth reworking into strategy logic: `exit_bid_change_30s` and `cex_continuation_edge_gate` had positive test PnL in all 6 windows, while raw CEX side factors such as `cex_bar_return_30s_side`, `cex_bar_return_60s_side`, and `cex_continuation_score_side` were negative or unstable. Next research should treat CEX continuation as a gated/inverted confirmation signal, not a direct side selector.
 
 # Central Market Discovery Service (2026-05-01)
 
