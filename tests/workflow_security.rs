@@ -465,6 +465,68 @@ fn host_deploy_workflows_require_main_provenance_and_pinned_ssh() {
 }
 
 #[test]
+fn research_workflows_require_private_tango_db_endpoint() {
+    let mut offenders = Vec::new();
+
+    let backtest = workflow_contents(".github/workflows/backtest.yml");
+    if !backtest.contains(
+        "PLOY_RESEARCH_DATABASE_URL must target Tango-1-1 private VPC endpoint 172.16.0.204",
+    ) {
+        offenders.push("backtest.yml: missing private Tango DB endpoint guard".to_string());
+    }
+    if !backtest.contains(
+        "urlparse(os.environ[\"PLOY_RESEARCH_DATABASE_URL\"]).hostname",
+    ) {
+        offenders.push("backtest.yml: must parse the research DB URL host before use".to_string());
+    }
+
+    let factor_review = workflow_contents(".github/workflows/factor-review-v2.yml");
+    if !factor_review
+        .contains("PLOY_DB_URL must target Tango-1-1 private VPC endpoint 172.16.0.204")
+    {
+        offenders.push("factor-review-v2.yml: missing private Tango DB endpoint guard".to_string());
+    }
+    if !factor_review.contains("urlparse(os.environ[\"PLOY_DB_URL\"]).hostname") {
+        offenders.push(
+            "factor-review-v2.yml: must parse the research DB URL host before use".to_string(),
+        );
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "research workflow private DB guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn optimize_workflow_builds_and_runs_in_one_job() {
+    let content = workflow_contents(".github/workflows/optimize.yml");
+    let mut offenders = Vec::new();
+
+    if content.contains("download-artifact") || content.contains("optimize_backtest-${{ github.sha }}") {
+        offenders.push(
+            "optimize.yml: must not pass optimize_backtest through a binary artifact".to_string(),
+        );
+    }
+    if content.contains("Swatinem/rust-cache") {
+        offenders.push(
+            "optimize.yml: must not use Swatinem/rust-cache after cache post-step hangs"
+                .to_string(),
+        );
+    }
+    if !content.contains("name: Build and run optimize on ploy-ci-1") {
+        offenders.push("optimize.yml: must use the single build-and-run job".to_string());
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "optimize workflow single-job guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn checked_in_platform_service_enforces_guardrails() {
     let content = workflow_contents("deployment/ployd.service");
     let required = [

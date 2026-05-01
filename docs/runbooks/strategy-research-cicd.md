@@ -189,6 +189,9 @@ different.
 - `ploy-ci-1` research workflows read Tango PostgreSQL through GitHub Actions
   secrets `PLOY_RESEARCH_DATABASE_URL` and `PLOY_DB_URL`; verify the private
   endpoint with Aliyun CLI before changing those secrets.
+- DB-mode research workflows must fail closed unless the research database URL
+  targets Tango's private VPC endpoint `172.16.0.204`. A public Tango endpoint
+  can turn large backtest query results into billable公网出流量.
 - ACK/ACR image workflows must use immutable checked-out commit SHA tags only.
   Do not push or deploy `latest`. ACK deployments must also pass through the
   protected `ack` environment before mutating the cluster.

@@ -5,6 +5,12 @@
 strategy_variant = "three_layer"
 mode = "dryrun"
 throttle_hz = 10
+# Canonical live-feed capture for replaying current/candidate configs against
+# the same MarketUpdate sequence. Keep this on one PM5D profile to avoid
+# duplicating high-frequency L2/aggTrade logs across parallel dry-runs.
+record_market_updates_to = "/opt/ploy/data/recordings/pm5d-threelayer-canonical.ndjson"
+record_market_updates_max_records = 300000
+record_market_updates_max_bytes = 268435456
 
 [strategy]
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "BNBUSDT"]

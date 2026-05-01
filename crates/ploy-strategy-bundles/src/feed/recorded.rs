@@ -18,11 +18,23 @@ use crate::traits::{Feed, MarketUpdate};
 
 const FLUSH_EVERY_RECORDS: usize = 256;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingLimits {
+    pub max_records: Option<u64>,
+    pub max_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecordedMarketUpdate {
     pub sequence: u64,
     pub recorded_at: DateTime<Utc>,
     pub update: MarketUpdate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppendOutcome {
+    Written,
+    LimitReached,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,10 +65,12 @@ struct MarketUpdateLogWriter {
     writer: BufWriter<File>,
     next_sequence: u64,
     pending_records: usize,
+    bytes_written: u64,
+    limits: RecordingLimits,
 }
 
 impl MarketUpdateLogWriter {
-    fn create(path: impl AsRef<Path>) -> io::Result<Self> {
+    fn create_with_limits(path: impl AsRef<Path>, limits: RecordingLimits) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -96,19 +110,41 @@ impl MarketUpdateLogWriter {
             writer: BufWriter::new(file),
             next_sequence: 0,
             pending_records: 0,
+            bytes_written: 0,
+            limits,
         })
     }
 
-    fn append(&mut self, update: &MarketUpdate) -> io::Result<()> {
+    fn append(&mut self, update: &MarketUpdate) -> io::Result<AppendOutcome> {
+        if self
+            .limits
+            .max_records
+            .is_some_and(|max_records| self.next_sequence >= max_records)
+        {
+            self.flush()?;
+            return Ok(AppendOutcome::LimitReached);
+        }
+
         let record = RecordedMarketUpdate {
             sequence: self.next_sequence,
             recorded_at: Utc::now(),
             update: update.clone(),
         };
-        self.next_sequence += 1;
+        let mut line = serde_json::to_vec(&record).map_err(io::Error::other)?;
+        line.push(b'\n');
 
-        serde_json::to_writer(&mut self.writer, &record).map_err(io::Error::other)?;
-        self.writer.write_all(b"\n")?;
+        if self.bytes_written > 0
+            && self.limits.max_bytes.is_some_and(|max_bytes| {
+                self.bytes_written + u64::try_from(line.len()).unwrap_or(u64::MAX) > max_bytes
+            })
+        {
+            self.flush()?;
+            return Ok(AppendOutcome::LimitReached);
+        }
+
+        self.next_sequence += 1;
+        self.writer.write_all(&line)?;
+        self.bytes_written += u64::try_from(line.len()).unwrap_or(u64::MAX);
         self.pending_records += 1;
 
         let is_lifecycle = matches!(
@@ -120,7 +156,7 @@ impl MarketUpdateLogWriter {
             self.flush()?;
         }
 
-        Ok(())
+        Ok(AppendOutcome::Written)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -150,9 +186,17 @@ pub struct RecordingFeed<F> {
 
 impl<F> RecordingFeed<F> {
     pub fn new(inner: F, path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::with_limits(inner, path, RecordingLimits::default())
+    }
+
+    pub fn with_limits(
+        inner: F,
+        path: impl AsRef<Path>,
+        limits: RecordingLimits,
+    ) -> io::Result<Self> {
         Ok(Self {
             inner,
-            writer: Some(MarketUpdateLogWriter::create(path)?),
+            writer: Some(MarketUpdateLogWriter::create_with_limits(path, limits)?),
         })
     }
 }
@@ -166,13 +210,25 @@ where
         let update = self.inner.next().await?;
 
         if let Some(writer) = self.writer.as_mut() {
-            if let Err(error) = writer.append(&update) {
-                error!(
-                    path = %writer.path.display(),
-                    error = %error,
-                    "Market-update recording failed; disabling recorder for the rest of the run",
-                );
-                self.writer = None;
+            match writer.append(&update) {
+                Ok(AppendOutcome::Written) => {}
+                Ok(AppendOutcome::LimitReached) => {
+                    info!(
+                        path = %writer.path.display(),
+                        records = writer.next_sequence,
+                        bytes = writer.bytes_written,
+                        "Market-update recording limit reached; preserving bounded replay log",
+                    );
+                    self.writer = None;
+                }
+                Err(error) => {
+                    error!(
+                        path = %writer.path.display(),
+                        error = %error,
+                        "Market-update recording failed; disabling recorder for the rest of the run",
+                    );
+                    self.writer = None;
+                }
             }
         }
 
@@ -272,8 +328,8 @@ mod tests {
                 bid: Some(dec!(0.39)),
                 ask: Some(dec!(0.40)),
                 ts: now + Duration::seconds(1),
-                    bid_size: None,
-                    ask_size: None,
+                bid_size: None,
+                ask_size: None,
             },
             MarketUpdate::SportsState {
                 game_id: "19439".into(),
@@ -319,6 +375,55 @@ mod tests {
 
         assert_eq!(recorded, updates);
         assert_eq!(replayed, updates);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn recording_feed_stops_after_record_limit_without_blocking_feed() {
+        let now = Utc::now();
+        let updates = vec![
+            MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            },
+            MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100010),
+                ts: now + Duration::seconds(1),
+            },
+            MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100020),
+                ts: now + Duration::seconds(2),
+            },
+        ];
+        let path = temp_log_path("recording-feed-limit");
+        let mut feed = RecordingFeed::with_limits(
+            crate::HistoricalFeed::new(updates.clone()),
+            &path,
+            RecordingLimits {
+                max_records: Some(2),
+                max_bytes: None,
+            },
+        )
+        .unwrap();
+
+        let mut forwarded = Vec::new();
+        while let Some(update) = feed.next().await {
+            forwarded.push(update);
+        }
+        drop(feed);
+
+        let mut replay = RecordedFeed::from_path(&path).unwrap();
+        let mut replayed = Vec::new();
+        while let Some(update) = replay.next().await {
+            replayed.push(update);
+        }
+
+        assert_eq!(forwarded, updates);
+        assert_eq!(replayed, updates[..2]);
 
         let _ = fs::remove_file(path);
     }

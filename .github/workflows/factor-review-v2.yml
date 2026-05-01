@@ -363,6 +363,11 @@ jobs:
           if [ "${{ steps.data_scope.outputs.include_deribit }}" != "true" ]; then
             deribit_args+=(--skip-deribit)
           fi
+          db_host="$(python3 -c 'import os; from urllib.parse import urlparse; print(urlparse(os.environ["PLOY_DB_URL"]).hostname or "")')"
+          if [ "${db_host}" != "172.16.0.204" ]; then
+            echo "PLOY_DB_URL must target Tango-1-1 private VPC endpoint 172.16.0.204" >&2
+            exit 1
+          fi
           mkdir -p artifacts/research-snapshot
           ./target/release/examples/research_snapshot_compile \
             --db-url "${PLOY_DB_URL:?PLOY_DB_URL secret is required}" \

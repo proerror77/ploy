@@ -238,6 +238,31 @@ When using a skill:
   `rtk cargo run -p ploy-research --example event_ml_workflow --features polars-export -- --dataset <event-root-dir>`.
 - Do not skip from raw event-root data straight to hyperparameter search, DL, or RL. The required order is coverage diagnostics, AutoML-style factor attribution, governed feature set, fixed baseline, model-family selection, hyperparameter search, walk-forward/executable-price backtest, then DL/RL gates.
 
+## OpenAI Model And Prompt Guidance
+
+- For OpenAI API, Codex, Responses API, or model-migration work, use the
+  `openai-docs` skill and current official OpenAI docs before changing model
+  strings or prompts.
+- Default new OpenAI mainline upgrades to `gpt-5.5` when the user asks for the
+  latest/current/default GPT-5 model. Preserve an explicitly requested target
+  model when the user names one.
+- Keep GPT-5.5 migrations narrow: update active OpenAI model defaults and the
+  directly related prompts only. Do not rewrite historical docs, examples,
+  fixtures, eval baselines, fallback routes, or third-party provider configs
+  unless the user explicitly asks.
+- Prefer outcome-first GPT-5.5 prompts: state the desired result, success
+  criteria, constraints, evidence sources, output shape, retrieval budget, and
+  validation loop. Remove process-heavy prompt scaffolding when it is not a real
+  invariant.
+- Treat `medium` reasoning as the balanced GPT-5.5 starting point. Re-evaluate
+  `low` for latency-sensitive workflows before escalating to `high` or `xhigh`;
+  preserve an existing visible reasoning setting on the first migration pass
+  unless docs or evals justify changing it.
+- For tool-heavy Responses workflows, keep preambles useful and verify that
+  assistant output item `phase` values are preserved when replaying items
+  manually. If phase handling requires code rewiring, report that as a separate
+  implementation task instead of hiding it in a prompt-only migration.
+
 ### Installed Skills
 
 - `karpathy-guidelines` — invoke when writing, reviewing, or refactoring code to avoid overcomplication, make surgical changes, surface assumptions, and define verifiable success criteria.
