@@ -11443,7 +11443,9 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Run `cex_direction_first` on snapshot `25193234029` and compare against champion run `25199998031`.
 - [x] Tighten `cex_direction_first` confirmation/direction search boundaries and rerun.
 - [x] Move snapshot selection to real entry-fillable orders before rerunning champion.
-- [ ] Fix optimizer log-growth risk budget so fixed 15u binary losses are not treated as total bankroll ruin.
+- [x] Fix optimizer log-growth risk budget so fixed 15u binary losses are not treated as total bankroll ruin.
+- [x] Rebaseline champion after fillable/log-growth objective fixes.
+- [x] Run a wider 6-symbol snapshot validation.
 
 ## Review
 
@@ -11530,3 +11532,24 @@ Issue: https://github.com/proerror77/ploy/issues/256
   `ln(1 + pnl / stake)`, so a normal fixed-size binary loss near `-15u` was
   treated like near-total bankroll ruin. The next fix should measure log growth
   against a research risk budget, not one order's stake.
+- 2026-05-01: PR #277 fixed log-growth accounting by measuring fixed-order PnL
+  against a research risk budget instead of a single 15u stake. Main run
+  `25200958289` then produced the first powered positive-objective champion
+  candidate on snapshot `25193234029`: selection objective `+2.671`, train
+  trades `222`, train PnL `+1986.14`, validation trades `65/40`, validation
+  PnL `+1390.38`, fill rate `100%`, validation objective `+7.160`, validation
+  realized/stake `+1.426`, EV gap `0.377`, and win rate `64.62%`. This is a
+  research candidate, not a dry-run promotion, because the evidence is still a
+  BTC/ETH two-day split.
+- 2026-05-01: Wider 6-symbol snapshot `25194611895` covers
+  `2026-04-21 -> 2026-04-26` with symbols
+  `BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,BNBUSDT,XRPUSDT`. A first rerun
+  `25201086735` failed only because the requested validation window extended
+  beyond snapshot coverage. Covered-window reruns were positive in PnL but
+  underpowered on validation: `25201113562` train `303` trades, train PnL
+  `+6787.23`, train objective `+20.37`, but validation only `5/65` trades;
+  `25201135214` train `267` trades, train PnL `+5891.34`, train objective
+  `+14.58`, but validation only `13/130` trades. Conclusion: the current
+  champion signal survives broader train data, but the available validation
+  slice is too sparse for promotion. Next step is a longer/fresher snapshot or
+  walk-forward split with enough validation opportunities, not dry-run deploy.
