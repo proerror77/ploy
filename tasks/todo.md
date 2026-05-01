@@ -32,6 +32,32 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - 2026-05-01: Fixed the targeted factor-review workflow gap: `factor-review-v2.yml` now accepts `options_json.factor_name_filter`, `factor_review_v2` accepts `--factor-name-filter`, and the library reuses the existing factor-name matching logic instead of adding a second filter implementation.
 - 2026-05-01: Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-stable-direction-snapshot rtk cargo test -p ploy-research --example three_layer_snapshot_optimize stable_direction --no-default-features`, `CARGO_TARGET_DIR=/tmp/ploy-factor-review-filter rtk cargo test -p ploy-research review_path_filters_factor_names_when_requested --lib`, `CARGO_TARGET_DIR=/tmp/ploy-factor-review-filter rtk cargo check -p ploy-research --features db,polars-export --example factor_review_v2`, Ruby YAML parse for `factor-review-v2.yml`, and `git diff --check`.
 
+# Stable Reversal Snapshot Research (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: add an optimizer-only reversal profile based on the targeted factor-review evidence.
+- `tasks/todo.md`
+  - Owner: plan, failed-run evidence, and verification evidence.
+
+## Tasks
+
+- [x] Review targeted factor evidence from run `25206708986`.
+- [x] Run `stable_direction` split checks and record fail-closed outcome.
+- [x] Add `stable_reversal` as a separate snapshot-only profile instead of overwriting the failed `stable_direction` experiment.
+- [ ] Run focused local verification.
+- [ ] Push PR and watch checks.
+- [ ] Run snapshot optimize splits for `stable_reversal` against snapshot `25204438461`.
+
+## Review
+
+- 2026-05-01: Targeted Factor Review V2 run `25206708986` used snapshot hash `fb338e1f202c3bda` with `factor_name_filter=exit_bid_change_30s,cex_continuation_edge_gate,side_model_prob,side_distance_over_sigma,entry_ask_change_30s,pm_reprice_speed_30s`. Data audit remained `critical`; entry fill rate was `19.40%`, full-depth entry fill rate `46.84%`.
+- 2026-05-01: Candidate factor evidence showed the current model side is likely inverted for executable EV: `side_model_prob` selected total PnL `$98,446.43` only in the bottom quantile, while the direction-side audit showed model-probability favored legs losing and opposite legs positive. `exit_bid_change_30s` and `cex_continuation_edge_gate` remained positive but are not sufficient alone.
+- 2026-05-01: `stable_direction` optimize reruns `25206762997`, `25206762999`, `25206763026`, and `25206768233` all failed closed. Best validation windows had only `1..8` trades versus `min_trades=80`, `0%` win rate, negative PnL, and EV gaps above `1.73`. Do not deploy or tune `stable_direction` further without changing the side logic.
+
 # Research Snapshot Local Registry Workflow (2026-05-01)
 
 Issue: https://github.com/proerror77/ploy/issues/256
