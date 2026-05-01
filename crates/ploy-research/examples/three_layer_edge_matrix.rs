@@ -12,8 +12,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use ploy_research::{
-    FactorObservationV2, FactorReviewOptions, build_data_health_report,
-    build_factor_observations_v2_with_deribit_and_pm_books, load_research_snapshot,
+    build_data_health_report, build_factor_observations_v2_with_deribit_and_pm_books,
+    load_research_snapshot, FactorObservationV2, FactorReviewOptions,
 };
 use serde::Serialize;
 
@@ -88,7 +88,12 @@ struct MatrixResult {
     rejected_non_executable: usize,
     net_pnl: f64,
     avg_pnl: f64,
+    trade_attempts_after_throttle: usize,
+    selection_rate: f64,
     fill_rate: f64,
+    duplicate_rate: f64,
+    cooldown_rate: f64,
+    non_executable_rate: f64,
     win_rate: f64,
     avg_entry_price: f64,
     avg_expected_value_per_stake: f64,
@@ -205,7 +210,11 @@ fn reward_risk_ratio(entry_price: f64) -> f64 {
     let fee = fee_cost(entry_price);
     let reward = 1.0 - entry_price - fee;
     let risk = entry_price + fee;
-    if risk <= 0.0 { f64::NAN } else { reward / risk }
+    if risk <= 0.0 {
+        f64::NAN
+    } else {
+        reward / risk
+    }
 }
 
 fn executable_pnl(row: &FactorObservationV2) -> Option<f64> {
@@ -243,7 +252,11 @@ fn pm_dynamics_score(row: &FactorObservationV2) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 fn pm_mode_passes(row: &FactorObservationV2, mode: PmMode) -> bool {
@@ -460,7 +473,12 @@ fn selected_metrics(
         } else {
             f64::NAN
         };
-    let fill_rate = ratio(trades, selected);
+    let trade_attempts_after_throttle = trades + rejected_non_executable;
+    let selection_rate = ratio(trades, selected);
+    let fill_rate = ratio(trades, trade_attempts_after_throttle);
+    let duplicate_rate = ratio(rejected_duplicate, selected);
+    let cooldown_rate = ratio(rejected_cooldown, selected);
+    let non_executable_rate = ratio(rejected_non_executable, trade_attempts_after_throttle);
     let win_rate = ratio(pnls.iter().filter(|pnl| **pnl > 0.0).count(), trades);
     let positive_day_rate = positive_bucket_rate(&pnl_by_day);
     let positive_symbol_rate = positive_bucket_rate(&pnl_by_symbol);
@@ -488,7 +506,12 @@ fn selected_metrics(
         rejected_non_executable,
         net_pnl,
         avg_pnl,
+        trade_attempts_after_throttle,
+        selection_rate,
         fill_rate,
+        duplicate_rate,
+        cooldown_rate,
+        non_executable_rate,
         win_rate,
         avg_entry_price,
         avg_expected_value_per_stake,
@@ -689,8 +712,17 @@ fn main() -> Result<()> {
                 format!("{:?}", row.fill_mode),
                 format!("{:?}", row.pm_mode),
                 row.trades.to_string(),
+                row.selected.to_string(),
+                row.trade_attempts_after_throttle.to_string(),
+                row.rejected_duplicate.to_string(),
+                row.rejected_cooldown.to_string(),
+                row.rejected_non_executable.to_string(),
                 format!("{:.6}", row.net_pnl),
+                format!("{:.6}", row.selection_rate),
                 format!("{:.6}", row.fill_rate),
+                format!("{:.6}", row.duplicate_rate),
+                format!("{:.6}", row.cooldown_rate),
+                format!("{:.6}", row.non_executable_rate),
                 format!("{:.6}", row.win_rate),
                 format!("{:.6}", row.avg_realized_return_per_stake),
                 format!("{:.6}", row.avg_expected_value_per_stake),
@@ -711,8 +743,17 @@ fn main() -> Result<()> {
             "fill_mode",
             "pm_mode",
             "trades",
+            "selected",
+            "trade_attempts_after_throttle",
+            "rejected_duplicate",
+            "rejected_cooldown",
+            "rejected_non_executable",
             "net_pnl",
+            "selection_rate",
             "fill_rate",
+            "duplicate_rate",
+            "cooldown_rate",
+            "non_executable_rate",
             "win_rate",
             "avg_realized_return_per_stake",
             "avg_expected_value_per_stake",
