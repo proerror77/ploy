@@ -198,12 +198,20 @@ gh workflow run event-ml-rolling-evidence.yml \
   -f run_workflow=true
 ```
 
-The workflow runs on `ploy-ci-1`, reads the remote research database at
-`172.16.0.204`, and performs:
+The workflow builds the required Rust examples on a GitHub-hosted Ubuntu
+runner first, uploads those binaries as an artifact, then runs the DB-adjacent
+evidence phase on `ploy-ci-1`. `ploy-ci-1` should only download and execute
+the prebuilt binaries while reading the remote research database at
+`172.16.0.204`; do not reintroduce `cargo build` or `cargo run` steps there.
+The self-hosted phase performs:
 
 1. `factor_research --export-event-dataset`
 2. `event_dataset_rolling_windows`
 3. `event_ml_rolling_workflow`
+
+`event_ml_rolling_workflow` also expects the sibling `event_ml_workflow`
+binary to be present next to it in the downloaded artifact, so rolling windows
+do not spawn nested Cargo builds on `ploy-ci-1`.
 
 It uploads a compact report artifact by default and deliberately avoids
 uploading raw Parquet datasets unless `upload_parquet_datasets=true` is passed.
