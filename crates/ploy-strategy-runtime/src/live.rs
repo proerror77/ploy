@@ -14,7 +14,7 @@ use ploy_trading::{
     TradingRuntime, TradingRuntimeSnapshot,
 };
 use rust_decimal::Decimal;
-use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
+use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
 use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -318,7 +318,7 @@ mod execution {
 }
 
 use crate::recording::build_signal_recorder;
-use crate::{RuntimeModeConfig, database_unavailable_is_fatal};
+use crate::{database_unavailable_is_fatal, RuntimeModeConfig};
 
 #[derive(Debug, FromRow)]
 struct LiveOrderRestoreRow {
@@ -584,6 +584,7 @@ async fn run_live_or_dry_run(
         reference_prices.clone(),
         symbols.to_vec(),
         db_pool.clone(),
+        config.reference_data.capture_sports_state,
     );
 
     let sports_handle = if config.reference_data.capture_sports_state {

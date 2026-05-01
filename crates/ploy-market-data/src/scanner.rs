@@ -25,12 +25,13 @@ use crate::discovery::crypto::discover_crypto_markets;
 use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::sports::discover_sports_markets;
 use crate::discovery::upsert_market_catalog;
-use crate::feeds::spawn_quote_feed;
+use crate::feeds::spawn_quote_feed_until;
 use crate::reference_prices::ReferencePriceRegistry;
 
 const SCAN_INTERVAL_SECS: u64 = 30;
 const SPORTS_DISCOVERY_REFRESH_SECS: i64 = 300;
 const SPORTS_DISCOVERY_LIMIT: i32 = 500;
+const QUOTE_FEED_GRACE_SECS: i64 = 90;
 /// How far back to look for open positions that need recovery on startup.
 const RECOVERY_LOOKBACK_HOURS: i64 = 48;
 
@@ -54,6 +55,7 @@ pub fn spawn_market_scanner(
     reference_prices: ReferencePriceRegistry,
     symbols: Vec<String>,
     pool: Option<PgPool>,
+    capture_sports_catalog: bool,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let client = GammaClient::default();
@@ -91,6 +93,7 @@ pub fn spawn_market_scanner(
             match client.markets(&request).await {
                 Ok(markets) => {
                     let mut new_tokens: Vec<U256> = Vec::new();
+                    let mut quote_stop_at: Option<DateTime<Utc>> = None;
                     let discovered =
                         discover_crypto_markets(&markets, &symbols, &reference_prices, now).await;
 
@@ -124,9 +127,13 @@ pub fn spawn_market_scanner(
 
                         if subscribed_tokens.insert(market.up_token.clone()) {
                             new_tokens.push(up_asset_id);
+                            quote_stop_at =
+                                extend_quote_feed_stop_at(quote_stop_at, market.end_time);
                         }
                         if subscribed_tokens.insert(market.down_token.clone()) {
                             new_tokens.push(down_asset_id);
+                            quote_stop_at =
+                                extend_quote_feed_stop_at(quote_stop_at, market.end_time);
                         }
 
                         let end_time = market.end_time.clone();
@@ -160,7 +167,12 @@ pub fn spawn_market_scanner(
                             total_tracked = tracked.len(),
                             "Discovered new markets, subscribing to quotes",
                         );
-                        let handle = spawn_quote_feed(tx.clone(), new_tokens, pool.clone());
+                        let handle = spawn_quote_feed_until(
+                            tx.clone(),
+                            new_tokens,
+                            pool.clone(),
+                            quote_stop_at,
+                        );
                         quote_handles.push(handle);
                     } else {
                         debug!(tracked = tracked.len(), "Scanner poll: no new markets");
@@ -171,7 +183,12 @@ pub fn spawn_market_scanner(
                 }
             }
 
-            if should_refresh_sports_catalog(now, last_sports_refresh, pool.is_some()) {
+            if should_refresh_sports_catalog(
+                now,
+                last_sports_refresh,
+                pool.is_some(),
+                capture_sports_catalog,
+            ) {
                 refresh_sports_catalog(&client, pool.as_ref()).await;
                 last_sports_refresh = Some(now);
             }
@@ -334,6 +351,11 @@ async fn recover_pending_open_positions(
 
     let mut new_tokens: Vec<U256> = Vec::new();
     let mut seen_events: HashSet<String> = HashSet::new();
+    let recovery_stop_at = rows
+        .iter()
+        .map(|(_, _, _, _, _, end_time, _)| *end_time)
+        .max()
+        .map(quote_feed_deadline);
 
     for (event_id, symbol, clob_json, _token_id, _market_side, end_time, price_to_beat) in rows {
         if !seen_events.insert(event_id.clone()) {
@@ -395,9 +417,22 @@ async fn recover_pending_open_positions(
             tokens = new_tokens.len(),
             "Recovery: subscribing to quote feeds for pending positions"
         );
-        let handle = spawn_quote_feed(tx.clone(), new_tokens, Some(pool.clone()));
+        let handle =
+            spawn_quote_feed_until(tx.clone(), new_tokens, Some(pool.clone()), recovery_stop_at);
         quote_handles.push(handle);
     }
+}
+
+fn extend_quote_feed_stop_at(
+    current: Option<DateTime<Utc>>,
+    event_end_time: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let deadline = quote_feed_deadline(event_end_time);
+    Some(current.map_or(deadline, |existing| existing.max(deadline)))
+}
+
+fn quote_feed_deadline(event_end_time: DateTime<Utc>) -> DateTime<Utc> {
+    event_end_time + Duration::seconds(QUOTE_FEED_GRACE_SECS)
 }
 
 fn parse_clob_token_pair(raw: &str) -> Option<(String, String)> {
@@ -481,8 +516,10 @@ fn should_refresh_sports_catalog(
     now: DateTime<Utc>,
     last_refresh: Option<DateTime<Utc>>,
     persistence_enabled: bool,
+    capture_sports_catalog: bool,
 ) -> bool {
-    persistence_enabled
+    capture_sports_catalog
+        && persistence_enabled
         && last_refresh
             .map(|ts| now - ts >= Duration::seconds(SPORTS_DISCOVERY_REFRESH_SECS))
             .unwrap_or(true)
@@ -605,7 +642,10 @@ async fn upsert_market_metadata(
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
 
-    use super::{parse_token_id, should_refresh_sports_catalog};
+    use super::{
+        extend_quote_feed_stop_at, parse_token_id, quote_feed_deadline,
+        should_refresh_sports_catalog,
+    };
 
     #[test]
     fn token_id_parser_accepts_decimal_strings() {
@@ -619,17 +659,38 @@ mod tests {
     #[test]
     fn sports_refresh_requires_pool_and_interval() {
         let now = Utc.with_ymd_and_hms(2026, 4, 6, 0, 5, 0).unwrap();
-        assert!(!should_refresh_sports_catalog(now, None, false));
-        assert!(should_refresh_sports_catalog(now, None, true));
+        assert!(!should_refresh_sports_catalog(now, None, false, true));
+        assert!(!should_refresh_sports_catalog(now, None, true, false));
+        assert!(should_refresh_sports_catalog(now, None, true, true));
         assert!(!should_refresh_sports_catalog(
             now,
             Some(now - Duration::seconds(10)),
+            true,
             true
         ));
         assert!(should_refresh_sports_catalog(
             now,
             Some(now - Duration::seconds(600)),
+            true,
             true
         ));
+    }
+
+    #[test]
+    fn quote_feed_deadline_tracks_latest_event_end_with_grace() {
+        let first_end = Utc.with_ymd_and_hms(2026, 4, 6, 0, 5, 0).unwrap();
+        let second_end = Utc.with_ymd_and_hms(2026, 4, 6, 0, 6, 0).unwrap();
+
+        let deadline = extend_quote_feed_stop_at(None, first_end);
+        assert_eq!(
+            deadline,
+            Some(first_end + Duration::seconds(super::QUOTE_FEED_GRACE_SECS))
+        );
+
+        let extended = extend_quote_feed_stop_at(deadline, second_end);
+        assert_eq!(extended, Some(quote_feed_deadline(second_end)));
+
+        let unchanged = extend_quote_feed_stop_at(extended, first_end);
+        assert_eq!(unchanged, extended);
     }
 }

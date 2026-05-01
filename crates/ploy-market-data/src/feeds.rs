@@ -571,6 +571,16 @@ pub fn spawn_quote_feed(
     token_ids: Vec<U256>,
     pool: Option<PgPool>,
 ) -> JoinHandle<()> {
+    spawn_quote_feed_until(tx, token_ids, pool, None)
+}
+
+/// Spawn a quote poller that optionally exits after `stop_at`.
+pub fn spawn_quote_feed_until(
+    tx: Arc<broadcast::Sender<MarketUpdate>>,
+    token_ids: Vec<U256>,
+    pool: Option<PgPool>,
+    stop_at: Option<DateTime<Utc>>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let http = reqwest::Client::new();
         let poll_interval = std::time::Duration::from_secs(5);
@@ -580,6 +590,15 @@ pub fn spawn_quote_feed(
         info!(tokens = token_ids.len(), "Starting REST quote poller");
 
         loop {
+            if stop_at.is_some_and(|deadline| Utc::now() >= deadline) {
+                info!(
+                    tokens = token_ids.len(),
+                    stop_at = ?stop_at,
+                    "Stopping REST quote poller after market window"
+                );
+                return;
+            }
+
             for token in &token_ids {
                 let token_str = token.to_string();
 
