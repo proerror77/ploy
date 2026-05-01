@@ -26,13 +26,41 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Stop new workflows from embedding full 1GB research snapshots in GitHub artifacts.
 - [x] Run local shell/YAML validation.
 - [x] Push PR.
-- [ ] Verify one new Research Snapshot run plus snapshot-backed walk-forward/optimize reuse on `ploy-ci-1`.
+- [x] Verify one new Research Snapshot run plus snapshot-backed walk-forward/optimize reuse on `ploy-ci-1`.
 
 ## Review
 
 - 2026-05-01: Workflow data flow is now `Tango DB -> ploy-ci-1 local registry -> downstream research jobs`, with GitHub artifacts reduced to provenance/report files. Existing full `research-snapshot-*` artifacts remain a fallback for older run ids.
 - 2026-05-01: Local verification passed: `bash -n scripts/publish_research_snapshot_registry.sh scripts/restore_research_snapshot.sh`, Ruby YAML parse for `research-snapshot.yml`, `optimize.yml`, `factor-review-v2.yml`, and `factor-walk-forward-v2.yml`, `git diff --check`, and a temp-dir publish/restore smoke test. `actionlint` was not installed locally.
 - 2026-05-01: PR #280 was opened and all PR checks passed, including `Workflow lint`, `Rust research heavy features`, and CodeRabbit.
+- 2026-05-01: Main verification passed. Research Snapshot `25203749439` uploaded only `research-snapshot-provenance-25203749439` (`19,702` bytes), and snapshot-backed Optimize `25203900387` restored from `/home/runner/actions-runner/_work/ploy/_ploy-research-snapshots/by-run/25203749439` with `snapshot_backed=true`.
+
+# Optimize Strategy Matrix Controls (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `.github/workflows/optimize.yml`
+  - Owner: allow independent split/profile research runs and expose snapshot optimizer sample-power sensitivity controls.
+- `tasks/todo.md`
+  - Owner: record matrix evidence and workflow-control rationale.
+
+## Tasks
+
+- [x] Diagnose why same-profile split experiments cancelled each other.
+- [x] Include train/validation window and snapshot id in the optimize concurrency key.
+- [x] Expose the snapshot optimizer's existing `--min-trades` flag through `options_json` without changing the default dynamic floor.
+- [x] Run local workflow syntax validation.
+- [ ] Push PR and watch checks.
+- [ ] Re-run continuation split sensitivity after merge.
+
+## Review
+
+- 2026-05-01: Seven-day Research Snapshot `25204438461` succeeded from `main@453f3394` in `23m46s`; `Compile snapshot` took `21m22s`, runner-local publish took `1s`, and the only GitHub artifact was `research-snapshot-provenance-25204438461` (`19,730` bytes).
+- 2026-05-01: First six-profile matrix on `snapshot_run_id=25204438461`, train `2026-04-24..2026-04-28`, validation `2026-04-29..2026-05-01`, showed only `continuation_soft` clearing the default dynamic floor: validation trades `149`, validation PnL `$2755.46`, fill rate `1.0`, win rate `0.564`, positive symbol rate `1.0`, selection objective `8.381`, but EV calibration gap `0.288`.
+- 2026-05-01: Other profiles were underpowered in validation despite positive PnL: `champion` 8 validation trades, `obi_hard` 11, `mixed` 25, `obi_soft` 7, and `cex_direction_first` 9 with negative validation PnL.
+- 2026-05-01: Alternate `continuation_soft` splits were not stable enough for deployment: early split validation had only 14 trades, and late split had train 17 / validation 11 trades with validation EV gap `2.295`. Treat `continuation_soft` as a research candidate, not a dry-run/live promotion yet.
 
 # Central Market Discovery Service (2026-05-01)
 
