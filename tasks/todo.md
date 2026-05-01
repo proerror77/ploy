@@ -1,3 +1,33 @@
+# Stable Reversal Soft Snapshot Research (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: add a snapshot-only soft PM-confirmation reversal profile.
+- `.github/workflows/optimize.yml`
+  - Owner: document the new research-only profile in workflow dispatch help text.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Merge PR #286 research evidence into `main`.
+- [x] Add `stable_reversal_soft` as a snapshot-only profile.
+- [x] Keep direction probability and executable EV gates active while softening the PM confirmation veto.
+- [x] Run focused local verification.
+- [ ] Push PR and watch checks.
+- [ ] Run split optimize experiments against snapshot `25204438461`.
+- [ ] Download artifacts and record powered/underpowered outcomes.
+
+## Review
+
+- 2026-05-01: PR #286 merged on GitHub as `8973a5d279eeac2f3a8d7a92cc125d0335ecbe28`; local `gh pr merge` hit the known `main` worktree checkout conflict after the remote merge, so work continued from a fresh `research/reversal-pm-soft` branch off `origin/main`.
+- 2026-05-01: Added `stable_reversal_soft` only to `three_layer_snapshot_optimize.rs`. It preserves the inverted-alpha direction hypothesis (`alpha_contrarian=true`), keeps direction probability floor meaningful (`min_direction_prob >= 0.54`), keeps probability shrink/haircut and positive EV-per-staked-dollar gates, and still requires full-depth entry/exit fillability.
+- 2026-05-01: The PM confirmation layer is now a soft score for this profile instead of a hard `exit_bid_change_30s > 0` veto. This directly tests whether the earlier `stable_reversal` evidence was real but made underpowered by an overly narrow PM exit-bid gate.
+- 2026-05-01: Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-reversal-pm-soft rtk cargo test -p ploy-research --example three_layer_snapshot_optimize stable_reversal --no-default-features`, full `three_layer_snapshot_optimize` example tests with `--no-default-features`, Ruby YAML parse for `optimize.yml`, and `git diff --check`.
+
 # Stable Direction Snapshot Research (2026-05-01)
 
 Issue: https://github.com/proerror77/ploy/issues/256
