@@ -105,7 +105,7 @@ class DryRunReportContractTests(unittest.TestCase):
                 "daily_sharpe_basis": "daily_net_pnl_sqrt_365",
             },
             "execution_diagnostics": {"basis": "strategy_runtime_orders"},
-            "strategies": [{"execution_diagnostics": {}}],
+            "strategies": [{"deployment_id": "test-deploy", "execution_diagnostics": {}}],
         }
 
         result = subprocess.run(
@@ -117,7 +117,7 @@ class DryRunReportContractTests(unittest.TestCase):
         )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("strategies[0].execution_diagnostics.basis", result.stderr)
+        self.assertIn("strategies[test-deploy].execution_diagnostics.basis", result.stderr)
 
     def test_strategy_label_prefers_versioned_experiment_label(self) -> None:
         summary = load_summary_module()
