@@ -40,12 +40,12 @@ on:
         required: false
         default: ""
       options_json:
-        description: "Advanced options JSON: timestamps, data_dir, limits, preflight_only, timeout, local snapshot registry"
+        description: "Advanced options JSON: timestamps, data_dir, limits, preflight_only, timeout, local snapshot registry, min_trades"
         required: false
-        default: '{"train_start_ts":"","train_end_ts":"","val_start_ts":"","val_end_ts":"","data_dir":"/tmp/ploy-parquet","max_preflight_rows":15000000,"max_preflight_bytes":"80GiB","max_symbols":6,"max_days":8,"allow_large_window":false,"preflight_only":false,"max_updates":"","duckdb_memory_limit":"6GB","optimize_timeout_minutes":90,"allow_live_parquet_debug":false,"issue_number":"","snapshot_registry_dir":""}'
+        default: '{"train_start_ts":"","train_end_ts":"","val_start_ts":"","val_end_ts":"","data_dir":"/tmp/ploy-parquet","max_preflight_rows":15000000,"max_preflight_bytes":"80GiB","max_symbols":6,"max_days":8,"allow_large_window":false,"preflight_only":false,"max_updates":"","duckdb_memory_limit":"6GB","optimize_timeout_minutes":90,"allow_live_parquet_debug":false,"issue_number":"","snapshot_registry_dir":"","min_trades":""}'
 
 concurrency:
-  group: optimize-${{ github.event.inputs.git_ref || github.ref }}-${{ github.event.inputs.strategy_profile || 'mixed' }}
+  group: optimize-${{ github.event.inputs.git_ref || github.ref }}-${{ github.event.inputs.strategy_profile || 'mixed' }}-${{ github.event.inputs.snapshot_run_id || 'live' }}-${{ github.event.inputs.train_start }}-${{ github.event.inputs.train_end }}-${{ github.event.inputs.val_start }}-${{ github.event.inputs.val_end }}
   cancel-in-progress: true
 
 permissions:
@@ -114,6 +114,7 @@ jobs:
               "allow_live_parquet_debug": "false",
               "issue_number": "",
               "snapshot_registry_dir": "",
+              "min_trades": "",
           }
           bool_keys = {"allow_large_window", "preflight_only", "allow_live_parquet_debug"}
           raw = os.environ.get("OPTIONS_JSON", "").strip()
@@ -135,6 +136,13 @@ jobs:
                       raise SystemExit(f"options_json value for {key} must be boolean")
               else:
                   values[key] = str(value)
+              if key == "min_trades" and values[key]:
+                  try:
+                      parsed = int(values[key])
+                  except ValueError as exc:
+                      raise SystemExit("options_json value for min_trades must be an integer") from exc
+                  if parsed < 1:
+                      raise SystemExit("options_json value for min_trades must be >= 1")
 
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
               for key, value in values.items():
@@ -392,6 +400,7 @@ jobs:
           fi
 
           extra_flags=()
+          snapshot_flags=()
           if [ "${OPT_ALLOW_LARGE_WINDOW}" = "true" ]; then
             extra_flags+=(--allow-large-window)
           fi
@@ -400,6 +409,9 @@ jobs:
           fi
           if [ "${OPT_ALLOW_LIVE_PARQUET_DEBUG}" = "true" ]; then
             extra_flags+=(--allow-live-parquet-debug)
+          fi
+          if [ -n "${OPT_MIN_TRADES}" ]; then
+            snapshot_flags+=(--min-trades "${OPT_MIN_TRADES}")
           fi
 
           set +e
@@ -417,6 +429,7 @@ jobs:
               --stake-usd 15 \
               --output-dir artifacts/optimize \
               "${time_flags[@]}" \
+              "${snapshot_flags[@]}" \
               2>&1 | tee artifacts/optimize/report.txt
             status=${PIPESTATUS[0]}
           else
