@@ -1,3 +1,39 @@
+# Research Snapshot Local Registry Workflow (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `.github/workflows/research-snapshot.yml`
+  - Owner: publish compiled snapshots to runner-local registry and upload only small provenance artifacts.
+- `.github/workflows/factor-review-v2.yml`
+  - Owner: restore snapshots from runner-local registry before GitHub artifact fallback.
+- `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: restore snapshots from runner-local registry before GitHub artifact fallback.
+- `.github/workflows/optimize.yml`
+  - Owner: restore snapshots from runner-local registry before GitHub artifact fallback.
+- `scripts/publish_research_snapshot_registry.sh`
+  - Owner: atomic by-hash/by-run local snapshot registry publication.
+- `scripts/restore_research_snapshot.sh`
+  - Owner: local snapshot restore into workflow workspace.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add a runner-local snapshot registry keyed by snapshot hash and workflow run id.
+- [x] Make downstream research workflows prefer local restore over GitHub artifact download.
+- [x] Stop new workflows from embedding full 1GB research snapshots in GitHub artifacts.
+- [x] Run local shell/YAML validation.
+- [x] Push PR.
+- [ ] Verify one new Research Snapshot run plus snapshot-backed walk-forward/optimize reuse on `ploy-ci-1`.
+
+## Review
+
+- 2026-05-01: Workflow data flow is now `Tango DB -> ploy-ci-1 local registry -> downstream research jobs`, with GitHub artifacts reduced to provenance/report files. Existing full `research-snapshot-*` artifacts remain a fallback for older run ids.
+- 2026-05-01: Local verification passed: `bash -n scripts/publish_research_snapshot_registry.sh scripts/restore_research_snapshot.sh`, Ruby YAML parse for `research-snapshot.yml`, `optimize.yml`, `factor-review-v2.yml`, and `factor-walk-forward-v2.yml`, `git diff --check`, and a temp-dir publish/restore smoke test. `actionlint` was not installed locally.
+- 2026-05-01: PR #280 was opened and all PR checks passed, including `Workflow lint`, `Rust research heavy features`, and CodeRabbit.
+
 # Central Market Discovery Service (2026-05-01)
 
 ## Files
