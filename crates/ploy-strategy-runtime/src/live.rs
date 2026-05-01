@@ -616,7 +616,12 @@ async fn run_live_or_dry_run(
 
     let feed: Box<dyn Feed> = if let Some(record_path) = config.record_market_updates_path() {
         Box::new(
-            RecordingFeed::new(LiveFeed::new(rx), record_path).unwrap_or_else(|error| {
+            RecordingFeed::with_limits(
+                LiveFeed::new(rx),
+                record_path,
+                config.record_market_updates_limits(),
+            )
+            .unwrap_or_else(|error| {
                 eprintln!(
                     "Failed to open market-update log {}: {error}",
                     record_path.display()

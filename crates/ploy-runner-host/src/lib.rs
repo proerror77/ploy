@@ -23,6 +23,7 @@ fn print_usage_for(program: &str) {
     eprintln!("Options for 'run':");
     eprintln!("  --config <path>          Unified TOML config file (required)");
     eprintln!("  --deployment-id <id>     Platform deployment identity for order attribution");
+    eprintln!("  --output-json <path>     Write a machine-readable runtime evaluation");
     eprintln!("  --dry-run                Force dry-run mode (simulated execution)");
     eprintln!("  --foreground             Run in foreground (default, kept for compat)");
     #[cfg(feature = "ops")]
@@ -35,6 +36,7 @@ fn print_mode_usage(program: &str) {
     eprintln!("Options:");
     eprintln!("  --config <path>          Unified TOML config file (required)");
     eprintln!("  --deployment-id <id>     Platform deployment identity for order attribution");
+    eprintln!("  --output-json <path>     Write a machine-readable runtime evaluation");
     eprintln!("  --dry-run                Force dry-run mode (simulated execution)");
     eprintln!("  --foreground             Run in foreground (default, kept for compat)");
 }
@@ -93,7 +95,8 @@ pub async fn run_with_implicit_run_args(args: Vec<String>) {
 
 fn normalize_mode_args(mut args: Vec<String>) -> Vec<String> {
     match args.get(1).map(String::as_str) {
-        None | Some("--config" | "--deployment-id" | "--dry-run" | "--foreground") => {
+        None
+        | Some("--config" | "--deployment-id" | "--output-json" | "--dry-run" | "--foreground") => {
             args.insert(1, "run".to_string());
         }
         _ => {}

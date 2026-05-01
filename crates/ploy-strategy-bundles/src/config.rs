@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use crate::engine::{RuntimeConfig, RuntimeMode};
 use crate::executor::SimulatedExecutorConfig;
+use crate::feed::RecordingLimits;
 use crate::strategies::directional::DirectionalConfig;
 
 /// Top-level config deserialized from a TOML file.
@@ -74,6 +75,10 @@ pub struct RuntimeSection {
     pub to: Option<String>,
     /// Optional NDJSON log path for canonical `MarketUpdate` recording.
     pub record_market_updates_to: Option<PathBuf>,
+    /// Optional hard cap for a bounded canonical `MarketUpdate` recording.
+    pub record_market_updates_max_records: Option<u64>,
+    /// Optional hard cap for a bounded canonical `MarketUpdate` recording.
+    pub record_market_updates_max_bytes: Option<u64>,
     /// Source boundary for live/dry-run market data.
     ///
     /// Defaults to `local_db`, where strategy runners consume collector-persisted
@@ -332,6 +337,13 @@ impl FullConfig {
         self.runtime.record_market_updates_to.as_deref()
     }
 
+    pub fn record_market_updates_limits(&self) -> RecordingLimits {
+        RecordingLimits {
+            max_records: self.runtime.record_market_updates_max_records,
+            max_bytes: self.runtime.record_market_updates_max_bytes,
+        }
+    }
+
     pub fn replay_market_updates_path(&self) -> Option<&Path> {
         self.runtime.replay_market_updates_from.as_deref()
     }
@@ -372,6 +384,8 @@ mode = "backtest"
 throttle_hz = 1
 max_updates = 10000
 record_market_updates_to = "tmp/sample.ndjson"
+record_market_updates_max_records = 1000
+record_market_updates_max_bytes = 1048576
 market_data_source = "external_direct"
 
 [strategy]
@@ -413,6 +427,18 @@ enable_market_impact = true
         assert_eq!(
             config.runtime.record_market_updates_to.as_deref(),
             Some(Path::new("tmp/sample.ndjson"))
+        );
+        assert_eq!(config.runtime.record_market_updates_max_records, Some(1000));
+        assert_eq!(
+            config.runtime.record_market_updates_max_bytes,
+            Some(1_048_576)
+        );
+        assert_eq!(
+            config.record_market_updates_limits(),
+            RecordingLimits {
+                max_records: Some(1000),
+                max_bytes: Some(1_048_576)
+            }
         );
         assert_eq!(
             config.runtime.market_data_source,

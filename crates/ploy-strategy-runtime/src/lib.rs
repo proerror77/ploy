@@ -21,6 +21,8 @@ use ploy_strategy_bundles::{FullConfig, RuntimeMode};
 #[cfg(feature = "replay")]
 use replay::run_replay_entry;
 use rust_decimal::Decimal;
+use serde_json::json;
+use std::path::Path;
 use tracing::info;
 
 pub use ploy_strategy_bundles::RuntimeMode as StrategyRuntimeMode;
@@ -35,11 +37,29 @@ pub async fn run_strategy_with_deployment_id(
     force_dry_run: bool,
     deployment_id: Option<String>,
 ) {
+    run_strategy_with_deployment_id_and_output(
+        config,
+        config_path,
+        force_dry_run,
+        deployment_id,
+        None,
+    )
+    .await;
+}
+
+pub async fn run_strategy_with_deployment_id_and_output(
+    config: FullConfig,
+    config_path: &str,
+    force_dry_run: bool,
+    deployment_id: Option<String>,
+    output_json: Option<&Path>,
+) {
     let mut runtime_config = config.runtime_config();
     if force_dry_run {
         runtime_config.mode = RuntimeMode::DryRun;
     }
     let deployment_id = resolve_deployment_id(deployment_id);
+    let deployment_label = deployment_id.clone();
     if matches!(runtime_config.mode, RuntimeMode::Live | RuntimeMode::DryRun)
         && deployment_id.is_none()
     {
@@ -105,6 +125,91 @@ pub async fn run_strategy_with_deployment_id(
             roi_on_deployed_capital = %roi_on_deployed_capital,
             "Replay/backtest cashflow summary",
         );
+    }
+
+    if let Some(output_path) = output_json {
+        write_strategy_evaluation(
+            output_path,
+            config_path,
+            deployment_label.as_deref(),
+            &result,
+            &snapshot,
+        );
+    }
+}
+
+fn write_strategy_evaluation(
+    output_path: &Path,
+    config_path: &str,
+    deployment_id: Option<&str>,
+    result: &ploy_strategy_bundles::RuntimeResult,
+    snapshot: &ploy_trading::TradingRuntimeSnapshot,
+) {
+    let cashflow = snapshot.fill_cashflow_summary();
+    let artifact = json!({
+        "schema_version": 1,
+        "artifact_type": "strategy_runtime_evaluation",
+        "producer": "new-ploy-runner",
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "config_path": config_path,
+        "deployment_id": deployment_id,
+        "mode": format!("{:?}", result.mode),
+        "result": {
+            "updates_processed": result.updates_processed,
+            "intents_submitted": result.intents_submitted,
+            "fills_recorded": result.fills_recorded,
+            "realized_pnl": result.pnl.realized_pnl,
+            "unrealized_pnl": result.pnl.unrealized_pnl,
+            "total_fees": result.pnl.total_fees,
+            "net_pnl": result.pnl.net_pnl(),
+            "risk": &result.risk,
+            "elapsed_secs": result.elapsed_secs,
+        },
+        "cashflow": {
+            "buy_shares": cashflow.buy_shares,
+            "sell_shares": cashflow.sell_shares,
+            "gross_buy_cost": cashflow.gross_buy_cost,
+            "gross_sell_proceeds": cashflow.gross_sell_proceeds,
+            "total_fees": cashflow.total_fees,
+            "deployed_capital": cashflow.deployed_capital(),
+            "net_pnl": cashflow.net_pnl(),
+            "roi_on_deployed_capital": cashflow.roi_on_deployed_capital(),
+        },
+        "snapshot_counts": {
+            "intents": snapshot.intents.len(),
+            "orders": snapshot.orders.len(),
+            "fills": snapshot.fills.len(),
+            "positions": snapshot.positions.len(),
+        },
+    });
+
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "Failed to create output JSON directory {}: {error}",
+                    parent.display()
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    match serde_json::to_vec_pretty(&artifact)
+        .map(|mut bytes| {
+            bytes.push(b'\n');
+            bytes
+        })
+        .and_then(|bytes| std::fs::write(output_path, bytes).map_err(serde_json::Error::io))
+    {
+        Ok(()) => info!(path = %output_path.display(), "Wrote strategy runtime evaluation JSON"),
+        Err(error) => {
+            eprintln!(
+                "Failed to write strategy runtime evaluation JSON {}: {error}",
+                output_path.display()
+            );
+            std::process::exit(1);
+        }
     }
 }
 

@@ -17,6 +17,7 @@ pub use executor::{CallbackExecutor, SimulatedExecutor, SimulatedExecutorConfig}
 pub use feed::StreamingParquetFeed;
 pub use feed::{
     HistoricalFeed, LiveFeed, RecordedFeed, RecordedFeedError, RecordedMarketUpdate, RecordingFeed,
+    RecordingLimits,
 };
 pub use ploy_market_contracts::{Feed, InstrumentKind, MarketUpdate, PredictionFamily, VenueKind};
 pub use recorder::BufferedRecorder;
