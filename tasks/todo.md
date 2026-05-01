@@ -11241,7 +11241,7 @@ Review:
 - [x] Move snapshot download before snapshot optimizer build and skip DuckDB setup on snapshot-backed optimize.
 - [x] Add runner-local extracted snapshot cache to repeated artifact downloads.
 - [x] Verify scripts, workflow syntax, and affected Rust example build boundaries.
-- [ ] Land via PR and rerun main speed tests.
+- [x] Land via PR and rerun main speed tests.
 
 ## Review
 
@@ -11281,6 +11281,20 @@ Review:
   --no-default-features`, and `CARGO_TARGET_DIR=/tmp/ploy-research-all-in-check
   rtk cargo check -p ploy-research --example three_layer_snapshot_optimize
   --no-default-features`.
+- 2026-05-01: PR #269 merged to `main` at `6021780e`. The first main speed
+  probe `25199046583` proved the new snapshot-reuse setup and cache skipping
+  worked, but exposed a binary path bug when `CARGO_TARGET_DIR` was set; PR
+  #270 fixed that and merged at `03208b29`.
+- 2026-05-01: Final main walk-forward speed run `25199217521` succeeded on
+  `main@03208b29` in `43s`: snapshot target configured, runner-local extracted
+  snapshot cache reused, GitHub cargo cache skipped, build step completed in
+  the same second, walk-forward ran in `26s`, and the report artifact uploaded
+  in `3s`. This is faster than the prior best `25198315997` at `2m11s`.
+- 2026-05-01: Snapshot-backed optimize smoke `25199304478` succeeded on
+  `main@03208b29` in `23s`: snapshot target configured, extracted snapshot
+  cache reused, build step completed in the same second with the warm persistent
+  target, DuckDB/preflight were skipped on the snapshot path, and optimize ran
+  in `7s`.
 
 # PM5D Persistent Target Binary Path Fix (2026-05-01)
 
@@ -11300,7 +11314,7 @@ Review:
 - [x] Diagnose failed main walk-forward speed run `25199046583`.
 - [x] Keep persistent target reuse, but copy built example binaries back to the
   workflow's existing `target/release/examples/` execution path.
-- [ ] Verify workflow syntax and rerun snapshot-backed main speed tests.
+- [x] Verify workflow syntax and rerun snapshot-backed main speed tests.
 
 ## Review
 
@@ -11313,3 +11327,9 @@ Review:
   stable and copy built example binaries from `${CARGO_TARGET_DIR}` back into
   `target/release/examples/` after `cargo build`. Optimize now copies from
   `${CARGO_TARGET_DIR:-target}` before creating `optimize-runner`.
+- 2026-05-01: PR #270 CI passed and merged. Post-merge run `25199217521`
+  verified the fixed walk-forward path by executing
+  `factor_walk_forward_v2` successfully from the existing
+  `target/release/examples/` path, and post-merge run `25199304478` verified
+  the fixed optimize path by creating and executing `optimize-runner`
+  successfully with `CARGO_TARGET_DIR` set.
