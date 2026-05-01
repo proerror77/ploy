@@ -40,9 +40,9 @@ on:
         required: false
         default: ""
       options_json:
-        description: "Advanced options JSON: timestamps, data_dir, limits, preflight_only, timeout"
+        description: "Advanced options JSON: timestamps, data_dir, limits, preflight_only, timeout, local snapshot registry"
         required: false
-        default: '{"train_start_ts":"","train_end_ts":"","val_start_ts":"","val_end_ts":"","data_dir":"/tmp/ploy-parquet","max_preflight_rows":15000000,"max_preflight_bytes":"80GiB","max_symbols":6,"max_days":8,"allow_large_window":false,"preflight_only":false,"max_updates":"","duckdb_memory_limit":"6GB","optimize_timeout_minutes":90,"allow_live_parquet_debug":false,"issue_number":""}'
+        default: '{"train_start_ts":"","train_end_ts":"","val_start_ts":"","val_end_ts":"","data_dir":"/tmp/ploy-parquet","max_preflight_rows":15000000,"max_preflight_bytes":"80GiB","max_symbols":6,"max_days":8,"allow_large_window":false,"preflight_only":false,"max_updates":"","duckdb_memory_limit":"6GB","optimize_timeout_minutes":90,"allow_live_parquet_debug":false,"issue_number":"","snapshot_registry_dir":""}'
 
 concurrency:
   group: optimize-${{ github.event.inputs.git_ref || github.ref }}-${{ github.event.inputs.strategy_profile || 'mixed' }}
@@ -113,6 +113,7 @@ jobs:
               "optimize_timeout_minutes": "90",
               "allow_live_parquet_debug": "false",
               "issue_number": "",
+              "snapshot_registry_dir": "",
           }
           bool_keys = {"allow_large_window", "preflight_only", "allow_live_parquet_debug"}
           raw = os.environ.get("OPTIONS_JSON", "").strip()
@@ -150,9 +151,22 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf artifacts/research-snapshot
+          registry_args=()
+          if [ -n "${OPT_SNAPSHOT_REGISTRY_DIR}" ]; then
+            registry_args=(--registry-dir "${OPT_SNAPSHOT_REGISTRY_DIR}")
+          fi
+          if scripts/restore_research_snapshot.sh \
+            --run-id "${SNAPSHOT_RUN_ID}" \
+            --output-dir artifacts/research-snapshot \
+            --require manifest.json \
+            --require quality.md \
+            "${registry_args[@]}"; then
+            echo "Restored runner-local research snapshot."
+            exit 0
+          fi
           cache_args=()
           if [ -n "${RUNNER_WORKSPACE:-}" ]; then
-            cache_args=(--cache-dir "${RUNNER_WORKSPACE}/_ploy-research-snapshots")
+            cache_args=(--cache-dir "${RUNNER_WORKSPACE}/_ploy-research-artifacts")
           fi
           if python3 scripts/download_github_artifact.py \
             --run-id "${SNAPSHOT_RUN_ID}" \

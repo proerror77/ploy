@@ -24,9 +24,9 @@ on:
         required: true
         default: "15"
       options_json:
-        description: "Advanced options JSON: sampling, optimizer_data_dir, data_profile, audit gate"
+        description: "Advanced options JSON: sampling, optimizer_data_dir, data_profile, audit gate, local snapshot registry"
         required: false
-        default: '{"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never"}'
+        default: '{"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":""}'
 
 concurrency:
   group: research-snapshot-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}-${{ github.event.inputs.symbols }}
@@ -81,6 +81,7 @@ jobs:
               "custom_required_sources": "",
               "audit_lookback_hours": "168",
               "data_gate": "never",
+              "snapshot_registry_dir": "",
           }
           choices = {
               "data_profile": {"pm5d-execution", "pm5d-vol", "all", "custom"},
@@ -260,6 +261,19 @@ jobs:
             "${deribit_args[@]}" \
             2>&1 | tee artifacts/research-snapshot/compile.log
 
+      - name: Publish snapshot to runner-local registry
+        run: |
+          set -euo pipefail
+          registry_args=()
+          if [ -n "${SNAPSHOT_SNAPSHOT_REGISTRY_DIR}" ]; then
+            registry_args=(--registry-dir "${SNAPSHOT_SNAPSHOT_REGISTRY_DIR}")
+          fi
+          scripts/publish_research_snapshot_registry.sh \
+            --snapshot-dir artifacts/research-snapshot \
+            --run-id "${GITHUB_RUN_ID}" \
+            --retention-days 14 \
+            "${registry_args[@]}"
+
       - name: Publish summary
         if: always()
         run: |
@@ -289,11 +303,28 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload research snapshot artifact
+      - name: Stage snapshot provenance artifact
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/research-snapshot-provenance
+          mkdir -p artifacts/research-snapshot-provenance
+          for file in manifest.json quality.md data-gap-audit.md data-gap-audit.json compile.log; do
+            if [ -f "artifacts/research-snapshot/${file}" ]; then
+              cp "artifacts/research-snapshot/${file}" artifacts/research-snapshot-provenance/
+            fi
+          done
+          {
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "full_snapshot_embedded=false"
+            echo "registry=runner-local"
+          } > artifacts/research-snapshot-provenance/source.txt
+
+      - name: Upload snapshot provenance artifact
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: research-snapshot-${{ github.run_id }}
-          path: artifacts/research-snapshot/
+          name: research-snapshot-provenance-${{ github.run_id }}
+          path: artifacts/research-snapshot-provenance/
           compression-level: 0
           retention-days: 14

@@ -28,9 +28,9 @@ on:
         required: false
         default: ""
       options_json:
-        description: "Advanced options JSON: walk windows, factor filters, snapshot/data/audit settings"
+        description: "Advanced options JSON: walk windows, factor filters, snapshot/data/audit settings, local snapshot registry"
         required: false
-        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","issue_number":""}'
+        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","issue_number":"","snapshot_registry_dir":""}'
 
 concurrency:
   group: factor-walk-forward-v2-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
@@ -104,6 +104,7 @@ jobs:
               "audit_lookback_hours": "168",
               "data_gate": "never",
               "issue_number": "",
+              "snapshot_registry_dir": "",
           }
           bool_keys = {"compile_snapshot", "allow_direct_db_debug"}
           choices = {
@@ -269,9 +270,22 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf artifacts/research-snapshot
+          registry_args=()
+          if [ -n "${WALK_SNAPSHOT_REGISTRY_DIR}" ]; then
+            registry_args=(--registry-dir "${WALK_SNAPSHOT_REGISTRY_DIR}")
+          fi
+          if scripts/restore_research_snapshot.sh \
+            --run-id "${SNAPSHOT_RUN_ID}" \
+            --output-dir artifacts/research-snapshot \
+            --require manifest.json \
+            --require quality.md \
+            "${registry_args[@]}"; then
+            echo "Restored runner-local research snapshot."
+            exit 0
+          fi
           cache_args=()
           if [ -n "${RUNNER_WORKSPACE:-}" ]; then
-            cache_args=(--cache-dir "${RUNNER_WORKSPACE}/_ploy-research-snapshots")
+            cache_args=(--cache-dir "${RUNNER_WORKSPACE}/_ploy-research-artifacts")
           fi
           if python3 scripts/download_github_artifact.py \
             --run-id "${SNAPSHOT_RUN_ID}" \
@@ -362,6 +376,24 @@ jobs:
             "${deribit_args[@]}" \
             2>&1 | tee artifacts/research-snapshot/compile.log
 
+      - name: Publish snapshot to runner-local registry
+        if: ${{ github.event.inputs.snapshot_run_id == '' }}
+        run: |
+          set -euo pipefail
+          if [ "${WALK_COMPILE_SNAPSHOT}" != "true" ] || [ ! -f artifacts/research-snapshot/manifest.json ]; then
+            echo "No freshly compiled snapshot to publish."
+            exit 0
+          fi
+          registry_args=()
+          if [ -n "${WALK_SNAPSHOT_REGISTRY_DIR}" ]; then
+            registry_args=(--registry-dir "${WALK_SNAPSHOT_REGISTRY_DIR}")
+          fi
+          scripts/publish_research_snapshot_registry.sh \
+            --snapshot-dir artifacts/research-snapshot \
+            --run-id "${GITHUB_RUN_ID}" \
+            --retention-days 14 \
+            "${registry_args[@]}"
+
       - name: Run factor walk-forward
         run: |
           set -euo pipefail
@@ -439,23 +471,19 @@ jobs:
           if [ -d artifacts/factor-walk-forward-v2 ]; then
             cp -R artifacts/factor-walk-forward-v2 artifacts/factor-walk-forward-v2-upload/
           fi
-          if [ -z "${{ github.event.inputs.snapshot_run_id }}" ]; then
-            if [ -d artifacts/research-snapshot ]; then
-              cp -R artifacts/research-snapshot artifacts/factor-walk-forward-v2-upload/
+          mkdir -p artifacts/factor-walk-forward-v2-upload/snapshot-provenance
+          {
+            echo "source_snapshot_run_id=${{ github.event.inputs.snapshot_run_id }}"
+            echo "producer_run_id=${GITHUB_RUN_ID}"
+            echo "full_snapshot_embedded=false"
+            echo "registry=runner-local"
+          } > artifacts/factor-walk-forward-v2-upload/snapshot-provenance/source.txt
+          for file in manifest.json quality.md data-gap-audit.md data-gap-audit.json compile.log; do
+            if [ -f "artifacts/research-snapshot/${file}" ]; then
+              cp "artifacts/research-snapshot/${file}" \
+                "artifacts/factor-walk-forward-v2-upload/snapshot-provenance/${file}"
             fi
-          else
-            mkdir -p artifacts/factor-walk-forward-v2-upload/snapshot-provenance
-            {
-              echo "source_snapshot_run_id=${{ github.event.inputs.snapshot_run_id }}"
-              echo "full_snapshot_embedded=false"
-            } > artifacts/factor-walk-forward-v2-upload/snapshot-provenance/source.txt
-            for file in manifest.json quality.md data-gap-audit.md; do
-              if [ -f "artifacts/research-snapshot/${file}" ]; then
-                cp "artifacts/research-snapshot/${file}" \
-                  "artifacts/factor-walk-forward-v2-upload/snapshot-provenance/${file}"
-              fi
-            done
-          fi
+          done
 
       - name: Upload report artifact
         if: always()
