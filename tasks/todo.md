@@ -11386,6 +11386,43 @@ Review:
   the fixed optimize path by creating and executing `optimize-runner`
   successfully with `CARGO_TARGET_DIR` set.
 
+# Event ML Build Offload (2026-05-01)
+
+## Files
+
+- `.github/workflows/event-ml-rolling-evidence.yml`
+  - Owner: GitHub-hosted build job and self-hosted execution boundary.
+- `crates/ploy-research/examples/event_ml_rolling_workflow.rs`
+  - Owner: rolling workflow child process selection.
+- `docs/runbooks/event-ml-automl-workflow.md`
+  - Owner: operator-facing workflow boundary.
+- `tasks/todo.md`
+  - Owner: implementation and verification notes.
+
+## Tasks
+
+- [x] Offload Event ML example compilation from `ploy-ci-1` to a GitHub-hosted runner.
+- [x] Ensure rolling Event ML execution uses sibling binaries instead of nested `cargo run`.
+- [x] Document the `ploy-ci-1` no-Cargo-build boundary for Event ML rolling evidence.
+- [x] Verify workflow syntax, Rust formatting/build behavior, and git diff hygiene.
+
+## Review
+
+- 2026-05-01: `event-ml-rolling-evidence.yml` now builds the required
+  `ploy-research` examples on GitHub-hosted `ubuntu-22.04`, uploads them as
+  `event-ml-example-binaries`, and makes the `ploy-ci-1` job download and
+  execute those binaries directly. The self-hosted job no longer has
+  `rust-cache`, `cargo build`, `cargo run`, or `/home/runner/.cargo/env` steps.
+- 2026-05-01: `event_ml_rolling_workflow` now prefers a sibling
+  `event_ml_workflow` binary before falling back to `cargo run`, so downloaded
+  CI artifacts do not spawn nested Cargo builds on `ploy-ci-1`.
+- 2026-05-01: Local verification passed: `ruby -e 'require "yaml";
+  YAML.load_file(".github/workflows/event-ml-rolling-evidence.yml")'`,
+  `rustfmt --check crates/ploy-research/examples/event_ml_rolling_workflow.rs`,
+  `git diff --check`, and `rtk cargo test -p ploy-research --example
+  event_ml_rolling_workflow --features polars-export
+  current_window_receives_prior_run_dirs`.
+
 # PM5D Profile Matrix Research (2026-05-01)
 
 Issue: https://github.com/proerror77/ploy/issues/256
