@@ -46,6 +46,39 @@ class RuntimeMarketDataBoundaryTests(unittest.TestCase):
                 f"{direct_feed} must stay behind explicit external-direct opt-in",
             )
 
+    def test_central_market_discovery_service_owns_pm_catalog_refresh(self) -> None:
+        runner_lib = ROOT / "crates" / "ploy-runner-host" / "src" / "lib.rs"
+        runner_ops = ROOT / "crates" / "ploy-runner-host" / "src" / "ops.rs"
+        scanner = ROOT / "crates" / "ploy-market-data" / "src" / "scanner.rs"
+        service = ROOT / "deployment" / "systemd" / "ploy-market-discovery.service"
+        workflow = ROOT / ".github" / "workflows" / "deploy-tango-1-1.yml"
+
+        self.assertIn("collect-markets", runner_lib.read_text())
+        self.assertIn("run_market_discovery_collector", runner_ops.read_text())
+
+        scanner_text = scanner.read_text()
+        self.assertIn("MarketDiscoveryCollectorConfig", scanner_text)
+        self.assertIn("refresh_crypto_catalog", scanner_text)
+        self.assertIn("persist_discovered_crypto_market", scanner_text)
+
+        service_text = service.read_text()
+        self.assertIn("ExecStart=/opt/ploy/bin/ploy-runner collect-markets", service_text)
+        self.assertIn("Restart=always", service_text)
+        self.assertIn("MemoryMax=768M", service_text)
+
+        workflow_text = workflow.read_text()
+        self.assertIn("ploy-market-discovery.service", workflow_text)
+        self.assertLess(
+            workflow_text.index("systemctl restart ploy-market-discovery.service"),
+            workflow_text.index("systemctl restart ploy-quote-collector.service"),
+            "market discovery must refresh catalog before quote collector subscribes",
+        )
+        self.assertLess(
+            workflow_text.index("systemctl restart ploy-market-discovery.service"),
+            workflow_text.index("systemctl restart ploy-pm-trade-collector.service"),
+            "market discovery must refresh catalog before trade collector polls",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

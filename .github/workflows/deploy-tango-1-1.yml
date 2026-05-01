@@ -191,6 +191,7 @@ jobs:
           cp deployment/systemd/ploy-binance-aggtrade-collector.service dist/deployment/systemd/ploy-binance-aggtrade-collector.service
           cp deployment/systemd/ploy-binance-lob-collector.service dist/deployment/systemd/ploy-binance-lob-collector.service
           cp deployment/systemd/ploy-deribit-greeks-collector.service dist/deployment/systemd/ploy-deribit-greeks-collector.service
+          cp deployment/systemd/ploy-market-discovery.service dist/deployment/systemd/ploy-market-discovery.service
           cp deployment/systemd/ploy-pm-trade-collector.service dist/deployment/systemd/ploy-pm-trade-collector.service
           cp deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf dist/deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf
           cp deployment/systemd/ploy-quote-collector.hardening.conf dist/deployment/systemd/ploy-quote-collector.hardening.conf
@@ -434,6 +435,7 @@ jobs:
             install -m 0644 ./deployment/systemd/ploy-binance-aggtrade-collector.service /etc/systemd/system/ploy-binance-aggtrade-collector.service
             install -m 0644 ./deployment/systemd/ploy-binance-lob-collector.service /etc/systemd/system/ploy-binance-lob-collector.service
             install -m 0644 ./deployment/systemd/ploy-deribit-greeks-collector.service /etc/systemd/system/ploy-deribit-greeks-collector.service
+            install -m 0644 ./deployment/systemd/ploy-market-discovery.service /etc/systemd/system/ploy-market-discovery.service
             install -m 0644 ./deployment/systemd/ploy-pm-trade-collector.service /etc/systemd/system/ploy-pm-trade-collector.service
             install -m 0644 ./deployment/systemd/ploy-quote-collector.hardening.conf /etc/systemd/system/ploy-quote-collector.service.d/hardening.conf
             systemctl daemon-reload
@@ -466,6 +468,18 @@ jobs:
             fi
             systemctl enable --now ploy-deribit-greeks-collector.service
             systemctl restart ploy-deribit-greeks-collector.service
+            systemctl enable --now ploy-market-discovery.service
+            systemctl restart ploy-market-discovery.service
+            wait_for_recent_rows \
+              "SELECT EXISTS (SELECT 1 FROM pm_market_catalog WHERE market_family = 'crypto' AND strategy_symbol IS NOT NULL AND end_time >= NOW())" \
+              "pm_market_catalog has no active crypto markets after market-discovery restart" \
+              20 \
+              3
+            wait_for_recent_rows \
+              "SELECT EXISTS (SELECT 1 FROM pm_market_metadata WHERE symbol IS NOT NULL AND end_time >= NOW())" \
+              "pm_market_metadata has no active crypto markets after market-discovery restart" \
+              20 \
+              3
             if service_exists ploy-quote-collector.service; then
               systemctl enable --now ploy-quote-collector.service
               systemctl restart ploy-quote-collector.service
@@ -496,6 +510,8 @@ jobs:
             fi
             systemctl is-active --quiet ploy-deribit-greeks-collector.service
             require_service_guardrails ploy-deribit-greeks-collector.service
+            systemctl is-active --quiet ploy-market-discovery.service
+            require_service_guardrails ploy-market-discovery.service
             if service_exists ployd.service; then
               systemctl is-active --quiet ployd.service
               curl -fsS http://127.0.0.1:8081/health
@@ -533,6 +549,16 @@ jobs:
               20 \
               3
             wait_for_recent_rows \
+              "SELECT EXISTS (SELECT 1 FROM pm_market_catalog WHERE market_family = 'crypto' AND strategy_symbol IS NOT NULL AND end_time >= NOW())" \
+              "pm_market_catalog has no active crypto markets after deploy" \
+              20 \
+              3
+            wait_for_recent_rows \
+              "SELECT EXISTS (SELECT 1 FROM pm_market_metadata WHERE symbol IS NOT NULL AND end_time >= NOW())" \
+              "pm_market_metadata has no active crypto markets after deploy" \
+              20 \
+              3
+            wait_for_recent_rows \
               "SELECT EXISTS (SELECT 1 FROM clob_trade_ticks WHERE received_at >= NOW() - INTERVAL '5 minutes')" \
               "clob_trade_ticks is not receiving PM trade prints after deploy" \
               20 \
@@ -561,6 +587,10 @@ jobs:
               "Traceback|psql failed|column \"option_type\" does not exist|column \"strike\" does not exist" \
               "deribit greeks collector failed after deploy"
             assert_no_recent_logs \
+              "ploy-market-discovery.service" \
+              "Failed to connect to database|panic|thread '.*' panicked" \
+              "market discovery collector failed after deploy"
+            assert_no_recent_logs \
               "ploy-pm-trade-collector.service" \
               "no partition of relation \"clob_trade_ticks\"" \
               "pm trade collector still lacks active partitions"
@@ -578,6 +608,7 @@ jobs:
             if service_exists ployd.service; then
               systemctl status ployd.service --no-pager
             fi
+            systemctl status ploy-market-discovery.service --no-pager
             if service_exists ploy-quote-collector.service; then
               systemctl status ploy-quote-collector.service --no-pager
             fi
@@ -596,6 +627,7 @@ jobs:
             if service_exists ployd.service; then
               journalctl -u ployd.service -n 20 --no-pager
             fi
+            journalctl -u ploy-market-discovery.service -n 20 --no-pager
             if service_exists ploy-quote-collector.service; then
               journalctl -u ploy-quote-collector.service -n 20 --no-pager
             fi
@@ -611,7 +643,7 @@ jobs:
             echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`"
             echo "- Transport: \`GitHub Actions -> OSS -> ECS\`"
             echo "- OSS object: \`${{ steps.upload_bundle_to_oss.outputs.bundle_object }}\`"
-            echo "- Services: \`ployd\` (if installed), \`ploy-binance-aggtrade-collector\`, \`ploy-binance-price-collector\`, \`ploy-binance-lob-collector\`, \`ploy-deribit-iv-collector\`, \`ploy-quote-collector\`, \`ploy-pm-trade-collector\`"
+            echo "- Services: \`ployd\` (if installed), \`ploy-binance-aggtrade-collector\`, \`ploy-binance-price-collector\`, \`ploy-binance-lob-collector\`, \`ploy-deribit-iv-collector\`, \`ploy-market-discovery\`, \`ploy-quote-collector\`, \`ploy-pm-trade-collector\`"
             echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`"
             echo "- Migrations: \`${DEPLOY_MIGRATIONS}\`"
             echo "- Postgres pre/postflight: required"

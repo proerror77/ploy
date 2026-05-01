@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use ploy_market_contracts::MarketUpdate;
-use polymarket_client_sdk::gamma::types::request::MarketsRequest;
 use polymarket_client_sdk::gamma::Client as GammaClient;
+use polymarket_client_sdk::gamma::types::request::MarketsRequest;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -21,16 +21,17 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::discovery::crypto::discover_crypto_markets;
 use crate::discovery::crypto::DiscoveredCryptoMarket;
+use crate::discovery::crypto::discover_crypto_markets;
 use crate::discovery::sports::discover_sports_markets;
 use crate::discovery::upsert_market_catalog;
 use crate::feeds::spawn_quote_feed_until;
-use crate::reference_prices::ReferencePriceRegistry;
+use crate::reference_prices::{ReferencePriceRegistry, new_reference_price_registry};
 
 const SCAN_INTERVAL_SECS: u64 = 30;
 const SPORTS_DISCOVERY_REFRESH_SECS: i64 = 300;
 const SPORTS_DISCOVERY_LIMIT: i32 = 500;
+const DEFAULT_DISCOVERY_LOOKAHEAD_MINUTES: i64 = 20;
 const QUOTE_FEED_GRACE_SECS: i64 = 90;
 /// How far back to look for open positions that need recovery on startup.
 const RECOVERY_LOOKBACK_HOURS: i64 = 48;
@@ -39,6 +40,85 @@ struct TrackedEvent {
     end_time: chrono::DateTime<Utc>,
     symbol: String,
     price_to_beat: Option<Decimal>,
+}
+
+/// Configuration for the central Polymarket market-discovery collector.
+///
+/// This collector owns Gamma/catalog discovery for live infrastructure. Strategy
+/// runners should consume the persisted rows instead of opening their own Gamma
+/// scanners.
+#[derive(Debug, Clone)]
+pub struct MarketDiscoveryCollectorConfig {
+    pub symbols: Vec<String>,
+    pub refresh_interval_secs: u64,
+    pub lookahead_minutes: i64,
+    pub capture_sports_catalog: bool,
+}
+
+impl MarketDiscoveryCollectorConfig {
+    #[must_use]
+    pub fn with_safe_defaults(mut self) -> Self {
+        if self.symbols.is_empty() {
+            self.symbols = vec![
+                "BTCUSDT".to_string(),
+                "ETHUSDT".to_string(),
+                "SOLUSDT".to_string(),
+            ];
+        }
+        if self.refresh_interval_secs == 0 {
+            self.refresh_interval_secs = SCAN_INTERVAL_SECS;
+        }
+        if self.lookahead_minutes <= 0 {
+            self.lookahead_minutes = DEFAULT_DISCOVERY_LOOKAHEAD_MINUTES;
+        }
+        self
+    }
+}
+
+/// Run the central market-discovery loop.
+///
+/// This intentionally persists catalog/metadata only. It does not emit runtime
+/// events or spawn quote feeds; dedicated collector services own those concerns.
+pub async fn run_market_discovery_collector(config: MarketDiscoveryCollectorConfig, pool: PgPool) {
+    let config = config.with_safe_defaults();
+    let client = GammaClient::default();
+    let reference_prices = new_reference_price_registry();
+    let mut last_sports_refresh: Option<DateTime<Utc>> = None;
+
+    info!(
+        symbols = ?config.symbols,
+        refresh_secs = config.refresh_interval_secs,
+        lookahead_minutes = config.lookahead_minutes,
+        capture_sports_catalog = config.capture_sports_catalog,
+        "Starting Polymarket market-discovery collector"
+    );
+
+    loop {
+        let now = Utc::now();
+        let discovered = refresh_crypto_catalog(
+            &client,
+            &pool,
+            &reference_prices,
+            &config.symbols,
+            now,
+            config.lookahead_minutes,
+        )
+        .await;
+
+        info!(discovered, "Polymarket market-discovery refresh complete");
+
+        if should_refresh_sports_catalog(
+            now,
+            last_sports_refresh,
+            true,
+            config.capture_sports_catalog,
+        ) {
+            refresh_sports_catalog(&client, Some(&pool)).await;
+            last_sports_refresh = Some(now);
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(config.refresh_interval_secs)).await;
+    }
 }
 
 /// Spawn a background task that periodically discovers active 5-min binary
@@ -525,6 +605,36 @@ fn should_refresh_sports_catalog(
             .unwrap_or(true)
 }
 
+async fn refresh_crypto_catalog(
+    client: &GammaClient,
+    pool: &PgPool,
+    reference_prices: &ReferencePriceRegistry,
+    symbols: &[String],
+    now: DateTime<Utc>,
+    lookahead_minutes: i64,
+) -> usize {
+    let mut request = MarketsRequest::default();
+    request.end_date_min = Some(now - Duration::minutes(1));
+    request.end_date_max = Some(now + Duration::minutes(lookahead_minutes));
+    request.closed = Some(false);
+    request.limit = Some(500);
+
+    match client.markets(&request).await {
+        Ok(markets) => {
+            let discovered =
+                discover_crypto_markets(&markets, symbols, reference_prices, now).await;
+            for market in &discovered {
+                persist_discovered_crypto_market(Some(pool), market).await;
+            }
+            discovered.len()
+        }
+        Err(error) => {
+            warn!(error = %error, "Gamma markets query failed during catalog refresh");
+            0
+        }
+    }
+}
+
 async fn refresh_sports_catalog(client: &GammaClient, pool: Option<&PgPool>) {
     let Some(pool) = pool else {
         return;
@@ -643,17 +753,44 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
 
     use super::{
-        extend_quote_feed_stop_at, parse_token_id, quote_feed_deadline,
-        should_refresh_sports_catalog,
+        MarketDiscoveryCollectorConfig, extend_quote_feed_stop_at, parse_token_id,
+        quote_feed_deadline, should_refresh_sports_catalog,
     };
 
     #[test]
     fn token_id_parser_accepts_decimal_strings() {
-        assert!(parse_token_id(
-            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
-        )
-        .is_some());
+        assert!(
+            parse_token_id(
+                "27239049953613250678046988034203198692578441444398010699401021233149338414941"
+            )
+            .is_some()
+        );
         assert!(parse_token_id("not-a-token").is_none());
+    }
+
+    #[test]
+    fn market_discovery_config_fills_safe_defaults() {
+        let config = MarketDiscoveryCollectorConfig {
+            symbols: Vec::new(),
+            refresh_interval_secs: 0,
+            lookahead_minutes: 0,
+            capture_sports_catalog: false,
+        }
+        .with_safe_defaults();
+
+        assert_eq!(
+            config.symbols,
+            vec![
+                "BTCUSDT".to_string(),
+                "ETHUSDT".to_string(),
+                "SOLUSDT".to_string()
+            ]
+        );
+        assert_eq!(config.refresh_interval_secs, super::SCAN_INTERVAL_SECS);
+        assert_eq!(
+            config.lookahead_minutes,
+            super::DEFAULT_DISCOVERY_LOOKAHEAD_MINUTES
+        );
     }
 
     #[test]
