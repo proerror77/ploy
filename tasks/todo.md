@@ -11385,3 +11385,77 @@ Review:
   `target/release/examples/` path, and post-merge run `25199304478` verified
   the fixed optimize path by creating and executing `optimize-runner`
   successfully with `CARGO_TARGET_DIR` set.
+
+# PM5D Profile Matrix Research (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `tasks/todo.md`
+  - Owner: profile-matrix plan, run IDs, and decision evidence.
+
+## Tasks
+
+- [x] Stop the accidental broad profile sweep that included legacy `mixed`.
+- [x] Verify whether evidence run `25193234029` contains a reusable research snapshot.
+- [x] Run staged BTC/ETH optimize matrix on `25193234029`.
+- [x] Promote only a passing profile to a wider symbol/window test.
+- [x] Record decision criteria and follow-up code-change trigger.
+- [x] Add a CEX-direction-first snapshot optimizer profile for the next experiment.
+- [ ] Run `cex_direction_first` on snapshot `25193234029` and compare against champion run `25199998031`.
+
+## Review
+
+- 2026-05-01: `25193234029` contains `factor-review-v2-25193234029` with an
+  embedded `research-snapshot/manifest.json`, so it is usable as a
+  snapshot-backed optimizer input. Its actual snapshot window is
+  `2026-04-25 -> 2026-04-27` and symbols are `BTCUSDT,ETHUSDT`; the staged
+  optimizer dates must use that actual coverage instead of the initially
+  suggested `2026-04-15 -> 2026-04-19` window.
+- 2026-05-01: Accidental broad sweep on snapshot `25194611895` was stopped or
+  discounted. `mixed` run `25199829515` was cancelled. `obi_soft` run
+  `25199829516` succeeded but failed the practical promotion gate because
+  validation fill rate was only `34.07%` despite positive PnL. `champion`
+  `25199829539`, `obi_hard` `25199829510`, and `continuation_soft`
+  `25199829538` were underpowered or failed.
+- 2026-05-01: Promotion gate for current three-layer code: validation must not
+  be underpowered, selection objective should be positive, validation PnL and
+  realized return per stake should be positive, fill rate should be at least
+  `75%`, expectancy calibration gap should stay near zero, and wider-symbol
+  tests should have positive symbol rate at least `67%`. Repeated failure means
+  the next code change should move to a CEX-direction-first selector with PM
+  mispricing/liquidity as the executable gate, rather than more tuning of the
+  old PM-side selection lineage.
+- 2026-05-01: Staged BTC/ETH matrix on snapshot `25193234029` used the actual
+  snapshot coverage (`train=2026-04-25`, `validation=2026-04-26`). Initial
+  25-trial runs were not promotable: `champion` run `25199922914` missed the
+  validation floor by one trade (`39/40`) despite validation PnL `+1303.61`;
+  `obi_hard` run `25199922736` had only `21/40` validation trades; `obi_soft`
+  run `25199922973` was powered (`46` validation trades) with PnL `+1250.99`
+  and fill rate `86.79%`, but selection objective stayed negative (`-11.768`).
+- 2026-05-01: 75-trial reruns found the current best baseline but still not a
+  deployable strategy. `champion` run `25199998031` was powered (`41/40`),
+  validation PnL `+1215.38`, selection objective `+3.815`, realized/stake
+  `+1.976`, EV gap `0.000`, and win rate `78.05%`, but fill rate was only
+  `73.21%`, just under the `75%` practical gate. `obi_soft` run `25199998469`
+  had better fill rate (`89.80%`) but objective `-25.068` and weaker PnL
+  `+846.29`. A 150-trial `champion` rerun `25200043068` overfit into an
+  underpowered validation slice (`23/40`) even though PnL stayed positive.
+- 2026-05-01: Current interpretation: direction probability is not being
+  ignored, and the optimizer is not merely selecting the lowest allowed
+  threshold. The fragile point is selector structure. The old PM/model-side
+  lineage can find profitable validation pockets, but sample power and
+  fillability are unstable. Blindly adding more trials is now lower value than
+  testing a selector that chooses direction from supported Binance/CEX factors
+  first, then uses Polymarket ask/liquidity only as executable EV gates.
+- 2026-05-01: Added snapshot optimizer profile `cex_direction_first`. Its
+  direction probability comes from side-aligned CEX 60s/30s returns,
+  continuation score, and consecutive-bar state. It keeps the meaningful
+  `min_direction_prob`, calibrated EV, reward/risk, PM freshness, and real
+  entry-fillability gates, but the selector score no longer rewards PM
+  momentum or liquidity labels. Local verification passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-cex-direction-first rtk cargo test -p
+  ploy-research --example three_layer_snapshot_optimize --no-default-features`
+  and `CARGO_TARGET_DIR=/tmp/ploy-cex-direction-first rtk cargo check -p
+  ploy-research --example three_layer_snapshot_optimize --no-default-features`.
