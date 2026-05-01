@@ -1,3 +1,44 @@
+# Research Snapshot Reuse Workflow Fix (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `scripts/download_github_artifact.py`
+  - Owner: cross-workflow artifact download and embedded snapshot extraction.
+- `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: walk-forward snapshot reuse before expensive fresh compile.
+- `.github/workflows/factor-review-v2.yml`
+  - Owner: factor-review snapshot reuse before expensive fresh compile.
+- `.github/workflows/optimize.yml`
+  - Owner: optimizer snapshot reuse before direct/live data fallback.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Diagnose why `snapshot_run_id=25194611895` failed to reuse the completed walk-forward snapshot.
+- [x] Add artifact extraction support for embedded `research-snapshot/` directories.
+- [x] Add workflow fallback from standalone `research-snapshot-*` to embedded downstream artifacts.
+- [x] Run local script/workflow text verification.
+- [ ] Push PR and verify a snapshot-reuse walk-forward run against `25194611895`.
+
+## Review
+
+- 2026-05-01: Root cause was artifact naming, not strategy runtime. The completed
+  walk-forward run uploaded `factor-walk-forward-v2-25194611895`, with
+  `research-snapshot/` embedded inside it, while downstream jobs only searched
+  for a standalone `research-snapshot-25194611895` artifact. That forced fresh
+  DB snapshot compiles for small follow-up studies.
+- 2026-05-01: Added `--strip-prefix` to the artifact downloader so embedded
+  snapshot directories can become the target snapshot root. Updated
+  factor-review, walk-forward, and optimize workflows to try standalone
+  snapshots first, then embedded factor-review/walk-forward artifacts.
+- 2026-05-01: Local verification passed: `python3 -m py_compile
+  scripts/download_github_artifact.py`, a local zip smoke test for
+  `research-snapshot/` extraction, `rg` checks for fallback artifact names, and
+  `git diff --check`.
+
 # PM5D Binance Direction EV Audit (2026-05-01)
 
 Issue: https://github.com/proerror77/ploy/issues/256
