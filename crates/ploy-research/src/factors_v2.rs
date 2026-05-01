@@ -1563,13 +1563,29 @@ pub fn review_factors_v2_with_deribit_and_pm_books(
     pm_books: &[ResearchPmBookSnapshot],
     options: FactorReviewOptions,
 ) -> FactorReviewV2Report {
+    review_factors_v2_with_deribit_and_pm_books_filtered(
+        source_rows,
+        deribit,
+        pm_books,
+        options,
+        None,
+    )
+}
+
+pub fn review_factors_v2_with_deribit_and_pm_books_filtered(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    options: FactorReviewOptions,
+    factor_name_filter: Option<&str>,
+) -> FactorReviewV2Report {
     let v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
         source_rows,
         deribit,
         pm_books,
         &options,
     );
-    review_factor_rows(source_rows, &v2_rows, options)
+    review_factor_rows_with_name_filter(source_rows, &v2_rows, options, factor_name_filter)
 }
 
 fn review_factor_rows(
@@ -1577,7 +1593,19 @@ fn review_factor_rows(
     v2_rows: &[FactorObservationV2],
     options: FactorReviewOptions,
 ) -> FactorReviewV2Report {
-    review_factor_rows_with_descriptor_filter(source_rows, v2_rows, options, |_| true)
+    review_factor_rows_with_name_filter(source_rows, v2_rows, options, None)
+}
+
+fn review_factor_rows_with_name_filter(
+    source_rows: &[FactorObservation],
+    v2_rows: &[FactorObservationV2],
+    options: FactorReviewOptions,
+    factor_name_filter: Option<&str>,
+) -> FactorReviewV2Report {
+    let factor_name_filter = factor_name_filter.map(ToOwned::to_owned);
+    review_factor_rows_with_descriptor_filter(source_rows, v2_rows, options, |descriptor| {
+        factor_name_matches_filter(descriptor.name, &factor_name_filter)
+    })
 }
 
 fn review_candidate_factor_rows(
@@ -1597,7 +1625,7 @@ fn review_factor_rows_with_descriptor_filter(
     source_rows: &[FactorObservation],
     v2_rows: &[FactorObservationV2],
     options: FactorReviewOptions,
-    descriptor_filter: fn(&FactorV2Descriptor) -> bool,
+    descriptor_filter: impl Fn(&FactorV2Descriptor) -> bool,
 ) -> FactorReviewV2Report {
     let health = build_data_health_report(source_rows, v2_rows);
     let mut reviews: Vec<SingleFactorReview> = factor_v2_descriptors()
@@ -6878,6 +6906,36 @@ mod tests {
                 .reviews
                 .iter()
                 .any(|review| review.factor == "side_model_edge")
+        );
+    }
+
+    #[test]
+    fn review_path_filters_factor_names_when_requested() {
+        let mut observations = Vec::new();
+        for i in 0..40 {
+            let mut obs = base_obs();
+            obs.event_id = format!("event-filter-{i}");
+            obs.model_prob_up = if i % 2 == 0 { 0.75 } else { 0.25 };
+            obs.model_edge_up = obs.model_prob_up - obs.pm_up_ask - crypto_fee_cost(obs.pm_up_ask);
+            obs.settlement_up = if i % 2 == 0 { 1.0 } else { 0.0 };
+            observations.push(obs);
+        }
+        let options = FactorReviewOptions::default();
+        let v2_rows = build_factor_observations_v2(&observations, &options);
+
+        let report = review_factor_rows_with_name_filter(
+            &observations,
+            &v2_rows,
+            options,
+            Some("side_model_prob"),
+        );
+
+        assert!(!report.reviews.is_empty());
+        assert!(
+            report
+                .reviews
+                .iter()
+                .all(|review| review.factor.contains("side_model_prob"))
         );
     }
 

@@ -26,7 +26,8 @@ use ploy_research::{
     ResearchSnapshotRequest, build_factor_observations_with_lob_sampled,
     format_factor_review_v2_report, load_deribit_feature_snapshots,
     load_research_lob_snapshots_sampled, load_research_pm_book_snapshots_sampled,
-    load_research_snapshot, review_factors_v2_with_deribit_and_pm_books, validate_snapshot_request,
+    load_research_snapshot, review_factors_v2_with_deribit_and_pm_books_filtered,
+    validate_snapshot_request,
 };
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
@@ -88,6 +89,7 @@ struct FactorReviewV2Artifact<'a> {
     symbols: &'a [String],
     accounting_contract: FactorReviewAccountingContract,
     canonical_result: &'a str,
+    factor_name_filter: Option<&'a str>,
     risk_flags: Vec<String>,
     snapshot_manifest: Option<&'a ResearchSnapshotManifest>,
     report: &'a FactorReviewV2Report,
@@ -137,6 +139,9 @@ async fn main() {
         .unwrap_or(20);
     let git_ref = flag_value(&args, "--git-ref");
     let output_json = flag_value(&args, "--output-json").map(PathBuf::from);
+    let factor_name_filter = flag_value(&args, "--factor-name-filter")
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty());
     let options = FactorReviewOptions {
         stake_usd: flag_value(&args, "--stake-usd")
             .and_then(|raw| raw.parse().ok())
@@ -150,8 +155,13 @@ async fn main() {
     };
 
     eprintln!(
-        "factor_review_v2: {} -> {} for {:?}, stake_usd={:.2}, observation_sample_secs={}",
-        start, end, symbols, options.stake_usd, observation_sample_secs
+        "factor_review_v2: {} -> {} for {:?}, stake_usd={:.2}, observation_sample_secs={}, factor_name_filter={}",
+        start,
+        end,
+        symbols,
+        options.stake_usd,
+        observation_sample_secs,
+        factor_name_filter.as_deref().unwrap_or("<none>")
     );
 
     let snapshot_dir = flag_value(&args, "--snapshot-dir");
@@ -349,11 +359,12 @@ async fn main() {
         return;
     }
 
-    let report = review_factors_v2_with_deribit_and_pm_books(
+    let report = review_factors_v2_with_deribit_and_pm_books_filtered(
         &observations,
         &deribit_snapshots,
         &all_pm_book_snapshots,
         options,
+        factor_name_filter.as_deref(),
     );
     if let Some(output_json) = output_json.as_deref() {
         write_factor_review_artifact(
@@ -364,6 +375,7 @@ async fn main() {
             &symbols,
             git_ref.as_deref(),
             canonical_result,
+            factor_name_filter.as_deref(),
             snapshot_manifest.as_ref(),
         );
     }
@@ -381,6 +393,7 @@ fn write_factor_review_artifact(
     symbols: &[String],
     git_ref: Option<&str>,
     canonical_result: &str,
+    factor_name_filter: Option<&str>,
     snapshot_manifest: Option<&ResearchSnapshotManifest>,
 ) {
     if let Some(parent) = path
@@ -409,6 +422,7 @@ fn write_factor_review_artifact(
             cost_basis: "entry_crypto_fee_plus_full_depth_sweep_slippage_when_available",
         },
         canonical_result,
+        factor_name_filter,
         risk_flags: factor_review_risk_flags(report, canonical_result, snapshot_manifest),
         snapshot_manifest,
         report,

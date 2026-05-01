@@ -1,3 +1,37 @@
+# Stable Direction Snapshot Research (2026-05-01)
+
+Issue: https://github.com/proerror77/ploy/issues/256
+
+## Files
+
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: add a low-degree stable-direction profile for replay/backtest only.
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: expose filtered factor-review reuse for targeted candidate factor checks.
+- `crates/ploy-research/src/lib.rs`
+  - Owner: export the filtered factor-review API for examples.
+- `crates/ploy-research/examples/factor_review_v2.rs`
+  - Owner: accept `--factor-name-filter` and persist filter provenance.
+- `.github/workflows/factor-review-v2.yml`
+  - Owner: allow `options_json.factor_name_filter` and pass it to the CLI.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Confirm prior research record was already merged to `main`.
+- [x] Add targeted factor-review filtering so candidate factors can be reviewed without full report noise.
+- [x] Add `stable_direction` snapshot optimizer profile with direction probability, full-depth fillability, PM exit-bid improvement, CEX continuation edge, and conservative EV gates.
+- [x] Run focused local verification.
+- [ ] Push PR and watch checks.
+- [ ] Run CI snapshot optimize/factor-review experiments against snapshot `25204438461`.
+
+## Review
+
+- 2026-05-01: Added optimizer-only `stable_direction` profile. It keeps direction probability meaningful (`min_direction_prob >= 0.55`) while requiring full-depth entry/exit fillability, positive `cex_continuation_edge_gate`, positive `exit_bid_change_30s`, conservative probability calibration (`shrink=0.38`, `haircut=0.04`), EV-per-stake gate, and additional selection penalties for fill rate below `0.98` or validation EV gap above `0.30`.
+- 2026-05-01: Fixed the targeted factor-review workflow gap: `factor-review-v2.yml` now accepts `options_json.factor_name_filter`, `factor_review_v2` accepts `--factor-name-filter`, and the library reuses the existing factor-name matching logic instead of adding a second filter implementation.
+- 2026-05-01: Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-stable-direction-snapshot rtk cargo test -p ploy-research --example three_layer_snapshot_optimize stable_direction --no-default-features`, `CARGO_TARGET_DIR=/tmp/ploy-factor-review-filter rtk cargo test -p ploy-research review_path_filters_factor_names_when_requested --lib`, `CARGO_TARGET_DIR=/tmp/ploy-factor-review-filter rtk cargo check -p ploy-research --features db,polars-export --example factor_review_v2`, Ruby YAML parse for `factor-review-v2.yml`, and `git diff --check`.
+
 # Research Snapshot Local Registry Workflow (2026-05-01)
 
 Issue: https://github.com/proerror77/ploy/issues/256

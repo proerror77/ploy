@@ -40,9 +40,9 @@ on:
         required: false
         default: ""
       options_json:
-        description: "Advanced options JSON: top_n, snapshot/data/audit settings, issue_number, local snapshot registry"
+        description: "Advanced options JSON: top_n, factor filters, snapshot/data/audit settings, issue_number, local snapshot registry"
         required: false
-        default: '{"top_n":50,"min_observations":20,"top_quantile":0.2,"compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","issue_number":"","snapshot_registry_dir":""}'
+        default: '{"top_n":50,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","issue_number":"","snapshot_registry_dir":""}'
 
 concurrency:
   group: factor-review-v2-${{ github.ref }}
@@ -101,6 +101,7 @@ jobs:
               "top_n": "50",
               "min_observations": "20",
               "top_quantile": "0.2",
+              "factor_name_filter": "",
               "compile_snapshot": "true",
               "allow_direct_db_debug": "false",
               "optimizer_data_dir": "/tmp/ploy-parquet",
@@ -431,6 +432,7 @@ jobs:
             --min-observations "${FACTOR_MIN_OBSERVATIONS}" \
             --top-quantile "${FACTOR_TOP_QUANTILE}" \
             --top-n "${FACTOR_TOP_N}" \
+            --factor-name-filter "${FACTOR_FACTOR_NAME_FILTER}" \
             --git-ref "${{ github.event.inputs.git_ref }}" \
             --output-json artifacts/factor-review-v2/evaluation.json \
             | tee artifacts/factor-review-v2/report.txt
