@@ -21,7 +21,10 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Push PR and watch checks.
 - [x] Run the matrix against snapshot `25204438461` and parse artifacts.
 - [x] Fix matrix fillability accounting so duplicate/cooldown throttling is not misreported as CLOB fill failure.
-- [ ] Push fillability-accounting fix and rerun strict matrix on `main`.
+- [x] Push fillability-accounting fix and rerun strict matrix on `main`.
+- [x] Audit UP/DOWN side-label generation for obvious sign reversal.
+- [x] Add row-level selection audit output to diagnose whether `inverted` is a true contrarian edge or a probability semantics error.
+- [ ] Rerun strict matrix with `selection-audit.csv` artifacts.
 
 ## Review
 
@@ -31,6 +34,9 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - 2026-05-01: PR #289 merged as `691dd570cc135e5ac60eb96f0d97b4cb59968e14`. Strict matrix run `25210900032` used snapshot `25204438461`, train `2026-04-24 -> 2026-04-28`, validation `2026-04-29 -> 2026-05-01`, six symbols, and `min_trades=80`. It failed closed with no deployable candidate. The strongest validation family was `inverted + pm_none`, especially wide/middle windows: top row `inverted_entry_only_pm_none_wide_ev0.05` had `65` validation trades, PnL `+$705.62`, realized/stake `+0.724`, positive symbol rate `100%`, but missed sample power, EV calibration (`gap=0.348`), and positive day gate (`66.7%`).
 - 2026-05-01: Rolling diagnostic runs `25210972310`, `25210972276`, and `25210972363` with `min_trades=20` showed the same broad pattern: inverted direction was positive across folds while model direction was mostly negative. Across four matrix views, `Inverted` averaged `+$504.91` per validation row set with `316/324` positive rows; `Model` averaged `-$104.57` with only `82/324` positive rows. This supports investigating direction inversion/regime calibration, not removing direction probability.
 - 2026-05-01: While parsing artifacts, found a matrix-accounting bug: `fill_rate` was calculated as `trades / selected rows`, so duplicate event-side rows and cooldown-throttled rows were counted as unfilled orders. That conflates signal density with CLOB execution. The follow-up fix changes `fill_rate` to executable fills after duplicate/cooldown throttling and emits separate `selection_rate`, duplicate/cooldown rates, and non-executable rate.
+- 2026-05-01: PR #290 merged as `425368e8db4bfc44117afc5d2ea9086f52114763`. Strict rerun `25211226040` showed top inverted candidates have `fill_rate=100%`; the remaining blockers are sample power, EV calibration gap, and positive-day stability, not executable fillability.
+- 2026-05-01: Side-label audit found no obvious UP/DOWN settlement reversal in `FactorObservationV2`: UP rows use `model_prob_up`, `pm_up_ask`, and `settlement_up`; DOWN rows use `1 - model_prob_up`, `pm_down_ask`, and `1 - settlement_up`. The suspicious part is the matrix `Inverted` mode itself: it uses `1 - side_model_prob` while still buying the same side, so it is a contrarian same-side probability transform rather than an opposite-side trade.
+- 2026-05-01: Added `selection-audit.csv` to the matrix artifacts. It records raw side probability, transformed probability, calibrated probability, side, settlement win, executable PnL, and selection status for rows after all gates. This is needed to decide whether the inverted family is a real contrarian/PM-lag edge or just a probability-semantics bug.
 
 # Stable Reversal Fillability Snapshot Research (2026-05-01)
 

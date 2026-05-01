@@ -106,6 +106,28 @@ struct MatrixResult {
     deployable_candidate: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SelectionAuditRow {
+    hypothesis: String,
+    split: String,
+    direction_mode: DirectionMode,
+    fill_mode: FillMode,
+    pm_mode: PmMode,
+    event_id: String,
+    symbol: String,
+    tick_ts: DateTime<Utc>,
+    side: String,
+    raw_side_model_prob: f64,
+    transformed_probability: f64,
+    calibrated_probability: f64,
+    entry_ask: f64,
+    expected_value_per_stake: f64,
+    side_distance_over_sigma: f64,
+    settlement_win: f64,
+    executable_pnl_15u: f64,
+    selection_status: String,
+}
+
 #[derive(Debug, Serialize)]
 struct MatrixSummary {
     snapshot_hash: String,
@@ -356,6 +378,7 @@ fn evaluate_hypothesis(
     split: &str,
     min_trades: usize,
     gate_rows: &mut Vec<GateRow>,
+    selection_audit_rows: &mut Vec<SelectionAuditRow>,
 ) -> MatrixResult {
     let mut current = rows.iter().collect::<Vec<_>>();
     gate_rows.push(gate_row(h, split, 0, "base", &current));
@@ -396,7 +419,7 @@ fn evaluate_hypothesis(
     });
     gate_rows.push(gate_row(h, split, 6, "reward_risk", &current));
 
-    selected_metrics(&current, h, split, min_trades)
+    selected_metrics(&current, h, split, min_trades, selection_audit_rows)
 }
 
 fn selected_metrics(
@@ -404,6 +427,7 @@ fn selected_metrics(
     h: MatrixHypothesis,
     split: &str,
     min_trades: usize,
+    selection_audit_rows: &mut Vec<SelectionAuditRow>,
 ) -> MatrixResult {
     let mut last_trade_by_symbol: HashMap<String, DateTime<Utc>> = HashMap::new();
     let mut traded_event_sides: HashSet<String> = HashSet::new();
@@ -422,20 +446,24 @@ fn selected_metrics(
         let event_side_key = format!("{}:{}", row.event_id, row.side.as_str());
         if traded_event_sides.contains(&event_side_key) {
             rejected_duplicate += 1;
+            selection_audit_rows.push(selection_audit_row(row, h, split, "duplicate", None));
             continue;
         }
         if let Some(last_ts) = last_trade_by_symbol.get(&row.symbol) {
             if (row.tick_ts - *last_ts).num_seconds() < h.cooldown_secs {
                 rejected_cooldown += 1;
+                selection_audit_rows.push(selection_audit_row(row, h, split, "cooldown", None));
                 continue;
             }
         }
         let Some(pnl) = executable_pnl(row) else {
             rejected_non_executable += 1;
+            selection_audit_rows.push(selection_audit_row(row, h, split, "non_executable", None));
             continue;
         };
         traded_event_sides.insert(event_side_key);
         last_trade_by_symbol.insert(row.symbol.clone(), row.tick_ts);
+        selection_audit_rows.push(selection_audit_row(row, h, split, "accepted", Some(pnl)));
         pnls.push(pnl);
         entry_sum += row.entry_ask;
         ev_stake_sum += expected_value_per_stake(calibrated_probability(row, h), row.entry_ask);
@@ -522,6 +550,37 @@ fn selected_metrics(
         min_trades,
         underpowered,
         deployable_candidate,
+    }
+}
+
+fn selection_audit_row(
+    row: &FactorObservationV2,
+    h: MatrixHypothesis,
+    split: &str,
+    status: &str,
+    pnl: Option<f64>,
+) -> SelectionAuditRow {
+    let transformed = transformed_probability(row, h.direction_mode);
+    let calibrated = calibrated_probability(row, h);
+    SelectionAuditRow {
+        hypothesis: h.name.to_string(),
+        split: split.to_string(),
+        direction_mode: h.direction_mode,
+        fill_mode: h.fill_mode,
+        pm_mode: h.pm_mode,
+        event_id: row.event_id.clone(),
+        symbol: row.symbol.clone(),
+        tick_ts: row.tick_ts,
+        side: row.side.as_str().to_string(),
+        raw_side_model_prob: row.side_model_prob,
+        transformed_probability: transformed,
+        calibrated_probability: calibrated,
+        entry_ask: row.entry_ask,
+        expected_value_per_stake: expected_value_per_stake(calibrated, row.entry_ask),
+        side_distance_over_sigma: row.side_distance_over_sigma,
+        settlement_win: row.label_settlement_win.unwrap_or(f64::NAN),
+        executable_pnl_15u: pnl.unwrap_or(f64::NAN),
+        selection_status: status.to_string(),
     }
 }
 
@@ -661,6 +720,7 @@ fn main() -> Result<()> {
     let val_rows = slice_by_time(&v2_rows, val_start, val_end);
     let hypotheses = hypotheses();
     let mut gate_rows = Vec::new();
+    let mut selection_audit_rows = Vec::new();
     let mut results = Vec::new();
     for h in &hypotheses {
         results.push(evaluate_hypothesis(
@@ -669,6 +729,7 @@ fn main() -> Result<()> {
             "train",
             min_trades,
             &mut gate_rows,
+            &mut selection_audit_rows,
         ));
         results.push(evaluate_hypothesis(
             &val_rows,
@@ -676,6 +737,7 @@ fn main() -> Result<()> {
             "validation",
             min_trades,
             &mut gate_rows,
+            &mut selection_audit_rows,
         ));
     }
 
@@ -803,6 +865,56 @@ fn main() -> Result<()> {
             "avg_executable_pnl",
         ],
         &gate_csv_rows,
+    )?;
+
+    let selection_audit_csv_rows = selection_audit_rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.hypothesis.clone(),
+                row.split.clone(),
+                format!("{:?}", row.direction_mode),
+                format!("{:?}", row.fill_mode),
+                format!("{:?}", row.pm_mode),
+                row.event_id.clone(),
+                row.symbol.clone(),
+                row.tick_ts.to_rfc3339(),
+                row.side.clone(),
+                format!("{:.6}", row.raw_side_model_prob),
+                format!("{:.6}", row.transformed_probability),
+                format!("{:.6}", row.calibrated_probability),
+                format!("{:.6}", row.entry_ask),
+                format!("{:.6}", row.expected_value_per_stake),
+                format!("{:.6}", row.side_distance_over_sigma),
+                format!("{:.6}", row.settlement_win),
+                format!("{:.6}", row.executable_pnl_15u),
+                row.selection_status.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    write_csv(
+        output_dir.join("selection-audit.csv"),
+        &[
+            "hypothesis",
+            "split",
+            "direction_mode",
+            "fill_mode",
+            "pm_mode",
+            "event_id",
+            "symbol",
+            "tick_ts",
+            "side",
+            "raw_side_model_prob",
+            "transformed_probability",
+            "calibrated_probability",
+            "entry_ask",
+            "expected_value_per_stake",
+            "side_distance_over_sigma",
+            "settlement_win",
+            "executable_pnl_15u",
+            "selection_status",
+        ],
+        &selection_audit_csv_rows,
     )?;
 
     let mut best_validation = summary
