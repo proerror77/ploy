@@ -11179,6 +11179,7 @@ Review:
 - [x] Stop re-uploading full research snapshots from downstream runs that consumed an existing snapshot.
 - [x] Use no-compression artifact uploads for large already-compressed snapshot/report artifacts.
 - [x] Verify workflow syntax and focused local build boundaries.
+- [x] Disable cargo cache saves on snapshot-reuse factor runs after first-speed-test evidence showed cache upload dominated runtime.
 - [ ] Run a main-equivalent speed test after PR checks.
 
 ## Review
@@ -11199,3 +11200,10 @@ Review:
   ploy-research --features db --example factor_review_v2 --example
   factor_walk_forward_v2 --example research_snapshot_compile
   --no-default-features`.
+- 2026-05-01: First main speed test after PR #266 was run
+  `25198044053`. Core path improved, but whole-workflow runtime regressed to
+  `7m03s` because the new db-only cache key had no hit and `Post Cache cargo
+  build` spent `4m53s` uploading a `339MB` target cache at very low throughput.
+  Snapshot-reuse factor workflows should restore cache/workspace state but not
+  save a cargo cache; fresh snapshot-producing runs remain responsible for
+  warming the cache.
