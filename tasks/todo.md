@@ -11405,7 +11405,8 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Add a CEX-direction-first snapshot optimizer profile for the next experiment.
 - [x] Run `cex_direction_first` on snapshot `25193234029` and compare against champion run `25199998031`.
 - [x] Tighten `cex_direction_first` confirmation/direction search boundaries and rerun.
-- [ ] Move snapshot selection to real entry-fillable orders before rerunning champion.
+- [x] Move snapshot selection to real entry-fillable orders before rerunning champion.
+- [ ] Fix optimizer log-growth risk budget so fixed 15u binary losses are not treated as total bankroll ruin.
 
 ## Review
 
@@ -11483,3 +11484,12 @@ Issue: https://github.com/proerror77/ploy/issues/256
   accounting boundary for all profiles: require real entry fillability before a
   row is counted as a selected strategy order, matching the runtime ask-size
   check and the user's filled-order requirement.
+- 2026-05-01: PR #276 merged the fillable-first selector accounting. Champion
+  reruns on main showed the edge did not disappear under real fillability:
+  `25200727084` had validation trades `51/40`, PnL `+1408.82`, fill rate
+  `100%`, realized/stake `+1.842`, EV gap `0.000`; `25200752154` had
+  validation trades `93/40`, PnL `+1297.33`, fill rate `100%`. Both still had
+  negative selection objective because `compounded_log_growth` measured
+  `ln(1 + pnl / stake)`, so a normal fixed-size binary loss near `-15u` was
+  treated like near-total bankroll ruin. The next fix should measure log growth
+  against a research risk budget, not one order's stake.
