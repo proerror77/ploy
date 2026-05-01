@@ -23,8 +23,8 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Add targeted factor-review filtering so candidate factors can be reviewed without full report noise.
 - [x] Add `stable_direction` snapshot optimizer profile with direction probability, full-depth fillability, PM exit-bid improvement, CEX continuation edge, and conservative EV gates.
 - [x] Run focused local verification.
-- [ ] Push PR and watch checks.
-- [ ] Run CI snapshot optimize/factor-review experiments against snapshot `25204438461`.
+- [x] Push PR and watch checks.
+- [x] Run CI snapshot optimize/factor-review experiments against snapshot `25204438461`.
 
 ## Review
 
@@ -48,15 +48,18 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Review targeted factor evidence from run `25206708986`.
 - [x] Run `stable_direction` split checks and record fail-closed outcome.
 - [x] Add `stable_reversal` as a separate snapshot-only profile instead of overwriting the failed `stable_direction` experiment.
-- [ ] Run focused local verification.
-- [ ] Push PR and watch checks.
-- [ ] Run snapshot optimize splits for `stable_reversal` against snapshot `25204438461`.
+- [x] Run focused local verification.
+- [x] Push PR and watch checks.
+- [x] Run snapshot optimize splits for `stable_reversal` against snapshot `25204438461`.
 
 ## Review
 
 - 2026-05-01: Targeted Factor Review V2 run `25206708986` used snapshot hash `fb338e1f202c3bda` with `factor_name_filter=exit_bid_change_30s,cex_continuation_edge_gate,side_model_prob,side_distance_over_sigma,entry_ask_change_30s,pm_reprice_speed_30s`. Data audit remained `critical`; entry fill rate was `19.40%`, full-depth entry fill rate `46.84%`.
 - 2026-05-01: Candidate factor evidence showed the current model side is likely inverted for executable EV: `side_model_prob` selected total PnL `$98,446.43` only in the bottom quantile, while the direction-side audit showed model-probability favored legs losing and opposite legs positive. `exit_bid_change_30s` and `cex_continuation_edge_gate` remained positive but are not sufficient alone.
 - 2026-05-01: `stable_direction` optimize reruns `25206762997`, `25206762999`, `25206763026`, and `25206768233` all failed closed. Best validation windows had only `1..8` trades versus `min_trades=80`, `0%` win rate, negative PnL, and EV gaps above `1.73`. Do not deploy or tune `stable_direction` further without changing the side logic.
+- 2026-05-01: PR #285 added `stable_reversal` and passed CI, then merged to `main` as `38ffa482`.
+- 2026-05-01: `stable_reversal` optimize runs `25207063163`, `25207063150`, `25207063148`, and `25207063147` also failed closed due sparse validation. The best train windows were profitable (`84` trades / `$2,497.10`, and `53` trades / `$1,689.29`) with `fill_rate=1.0`, `positive_day_rate=1.0`, `positive_symbol_rate=1.0`, and `EV gap=0`, but validation had only `1..2` trades versus `min_trades=80`. This supports investigating the inverted side, but not deployment.
+- 2026-05-01: Next research direction should loosen the PM confirmation layer without losing fillability: keep alpha contrarian and EV-per-stake, but compare `exit_bid_change_30s` hard gate versus softer PM dynamics scoring and possibly lower `min_entry_score`; then require walk-forward validation to clear sample power before any dry-run.
 
 # Research Snapshot Local Registry Workflow (2026-05-01)
 
