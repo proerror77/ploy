@@ -25,6 +25,7 @@ const OPTIMIZER_MAX_DIRECTION_PROB: f64 = 0.68;
 const CEX_DIRECTION_FIRST_MIN_DIRECTION_PROB: f64 = 0.55;
 const STABLE_DIRECTION_MIN_DIRECTION_PROB: f64 = 0.55;
 const STABLE_REVERSAL_SOFT_MIN_DIRECTION_PROB: f64 = 0.54;
+const STABLE_REVERSAL_FILLABLE_MIN_DIRECTION_PROB: f64 = 0.535;
 const LOG_GROWTH_RISK_BUDGET_STAKES: f64 = 40.0;
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -71,6 +72,9 @@ enum StrategyProfile {
     /// Stable reversal soft: same inverted alpha side, but PM dynamics are a
     /// score instead of a single-factor veto to test sample-power recovery.
     StableReversalSoft,
+    /// Stable reversal fillable: same soft reversal hypothesis, but uses actual
+    /// executable round-trip fillability instead of full-depth-only fillability.
+    StableReversalFillable,
 }
 
 impl StrategyProfile {
@@ -97,8 +101,11 @@ impl StrategyProfile {
             "stable_reversal_soft" | "reversal_pm_soft" | "stable_contrarian_soft" => {
                 Ok(Self::StableReversalSoft)
             }
+            "stable_reversal_fillable" | "reversal_fillable" | "stable_contrarian_fillable" => {
+                Ok(Self::StableReversalFillable)
+            }
             other => anyhow::bail!(
-                "unknown --strategy-profile {other:?}; expected mixed, champion, obi_soft, obi_hard, continuation_soft, cex_direction_first, stable_direction, stable_reversal, or stable_reversal_soft"
+                "unknown --strategy-profile {other:?}; expected mixed, champion, obi_soft, obi_hard, continuation_soft, cex_direction_first, stable_direction, stable_reversal, stable_reversal_soft, or stable_reversal_fillable"
             ),
         }
     }
@@ -114,6 +121,7 @@ impl StrategyProfile {
             Self::StableDirection => "stable_direction",
             Self::StableReversal => "stable_reversal",
             Self::StableReversalSoft => "stable_reversal_soft",
+            Self::StableReversalFillable => "stable_reversal_fillable",
         }
     }
 
@@ -136,6 +144,9 @@ impl StrategyProfile {
             Self::StableReversalSoft => {
                 "soft PM-dynamics score + contrarian alpha probability with conservative EV"
             }
+            Self::StableReversalFillable => {
+                "soft reversal + executable round-trip fillability with conservative EV"
+            }
         }
     }
 
@@ -145,14 +156,19 @@ impl StrategyProfile {
             Self::Champion | Self::ObiSoft | Self::ObiHard | Self::ContinuationSoft => Some(true),
             Self::CexDirectionFirst => Some(true),
             Self::StableDirection => Some(false),
-            Self::StableReversal | Self::StableReversalSoft => Some(true),
+            Self::StableReversal | Self::StableReversalSoft | Self::StableReversalFillable => {
+                Some(true)
+            }
         }
     }
 
     fn fixes_cex_contrarian(self) -> Option<bool> {
         match self {
             Self::Champion | Self::ObiHard | Self::CexDirectionFirst => Some(false),
-            Self::StableDirection | Self::StableReversal | Self::StableReversalSoft => Some(false),
+            Self::StableDirection
+            | Self::StableReversal
+            | Self::StableReversalSoft
+            | Self::StableReversalFillable => Some(false),
             Self::Mixed | Self::ObiSoft | Self::ContinuationSoft => None,
         }
     }
@@ -161,7 +177,7 @@ impl StrategyProfile {
         match self {
             Self::Champion | Self::CexDirectionFirst => Some(0.0),
             Self::StableDirection | Self::StableReversal => Some(0.10),
-            Self::StableReversalSoft => None,
+            Self::StableReversalSoft | Self::StableReversalFillable => None,
             Self::Mixed | Self::ObiSoft | Self::ObiHard | Self::ContinuationSoft => None,
         }
     }
@@ -171,14 +187,17 @@ impl StrategyProfile {
             Self::ObiHard => Some(true),
             Self::CexDirectionFirst => Some(false),
             Self::StableDirection | Self::StableReversal => Some(true),
-            Self::StableReversalSoft => Some(false),
+            Self::StableReversalSoft | Self::StableReversalFillable => Some(false),
             Self::Mixed | Self::Champion | Self::ObiSoft | Self::ContinuationSoft => None,
         }
     }
 
     fn fixes_probability_shrink(self) -> Option<f64> {
         match self {
-            Self::StableDirection | Self::StableReversal | Self::StableReversalSoft => Some(0.38),
+            Self::StableDirection
+            | Self::StableReversal
+            | Self::StableReversalSoft
+            | Self::StableReversalFillable => Some(0.38),
             Self::Mixed
             | Self::Champion
             | Self::ObiSoft
@@ -190,7 +209,10 @@ impl StrategyProfile {
 
     fn fixes_probability_haircut(self) -> Option<f64> {
         match self {
-            Self::StableDirection | Self::StableReversal | Self::StableReversalSoft => Some(0.04),
+            Self::StableDirection
+            | Self::StableReversal
+            | Self::StableReversalSoft
+            | Self::StableReversalFillable => Some(0.04),
             Self::Mixed
             | Self::Champion
             | Self::ObiSoft
@@ -433,6 +455,7 @@ fn direction_probability_search_floor(profile: StrategyProfile) -> f64 {
             STABLE_DIRECTION_MIN_DIRECTION_PROB
         }
         StrategyProfile::StableReversalSoft => STABLE_REVERSAL_SOFT_MIN_DIRECTION_PROB,
+        StrategyProfile::StableReversalFillable => STABLE_REVERSAL_FILLABLE_MIN_DIRECTION_PROB,
         StrategyProfile::Mixed
         | StrategyProfile::Champion
         | StrategyProfile::ObiSoft
@@ -449,6 +472,7 @@ fn min_edge_search_bounds(profile: StrategyProfile) -> (f64, f64) {
         // asks that only look good in per-share terms.
         StrategyProfile::StableDirection | StrategyProfile::StableReversal => (0.15, 0.45),
         StrategyProfile::StableReversalSoft => (0.08, 0.35),
+        StrategyProfile::StableReversalFillable => (0.05, 0.30),
         StrategyProfile::Mixed
         | StrategyProfile::Champion
         | StrategyProfile::ObiSoft
@@ -503,7 +527,9 @@ fn confirmation_score(row: &FactorObservationV2, profile: StrategyProfile) -> f6
         StrategyProfile::CexDirectionFirst => cex_direction_signal(row),
         StrategyProfile::StableDirection => stable_direction_confirmation_score(row),
         StrategyProfile::StableReversal => stable_reversal_confirmation_score(row),
-        StrategyProfile::StableReversalSoft => stable_reversal_soft_confirmation_score(row),
+        StrategyProfile::StableReversalSoft | StrategyProfile::StableReversalFillable => {
+            stable_reversal_soft_confirmation_score(row)
+        }
     }
 }
 
@@ -513,6 +539,7 @@ fn is_stable_research_profile(profile: StrategyProfile) -> bool {
         StrategyProfile::StableDirection
             | StrategyProfile::StableReversal
             | StrategyProfile::StableReversalSoft
+            | StrategyProfile::StableReversalFillable
     )
 }
 
@@ -583,6 +610,16 @@ fn stable_reversal_soft_hard_gates_pass(row: &FactorObservationV2) -> bool {
         || row.entry_ask_change_30s.is_finite()
         || row.pm_reprice_speed_30s.is_finite();
     has_pm_dynamic && stable_reversal_soft_confirmation_score(row) > -0.25
+}
+
+fn stable_reversal_fillable_hard_gates_pass(row: &FactorObservationV2) -> bool {
+    if !roundtrip_fillable(row) {
+        return false;
+    }
+    let has_pm_dynamic = row.exit_bid_change_30s.is_finite()
+        || row.entry_ask_change_30s.is_finite()
+        || row.pm_reprice_speed_30s.is_finite();
+    has_pm_dynamic && stable_reversal_soft_confirmation_score(row) > -0.30
 }
 
 fn three_layer_entry_score(
@@ -723,7 +760,8 @@ fn profile_direction_probability(
         | StrategyProfile::ContinuationSoft
         | StrategyProfile::StableDirection
         | StrategyProfile::StableReversal
-        | StrategyProfile::StableReversalSoft => direction_alpha_probability(row, params),
+        | StrategyProfile::StableReversalSoft
+        | StrategyProfile::StableReversalFillable => direction_alpha_probability(row, params),
     }
 }
 
@@ -745,7 +783,8 @@ fn calibrated_profile_probability(
         | StrategyProfile::ContinuationSoft
         | StrategyProfile::StableDirection
         | StrategyProfile::StableReversal
-        | StrategyProfile::StableReversalSoft => calibrated_model_probability(row, params),
+        | StrategyProfile::StableReversalSoft
+        | StrategyProfile::StableReversalFillable => calibrated_model_probability(row, params),
     }
 }
 
@@ -779,6 +818,11 @@ fn entry_fillable(row: &FactorObservationV2) -> bool {
     row.label_full_depth_entry_fillable || row.label_executable_fillable
 }
 
+fn roundtrip_fillable(row: &FactorObservationV2) -> bool {
+    (row.label_full_depth_entry_fillable && row.label_full_depth_exit_fillable)
+        || (row.label_executable_fillable && row.label_exit_fillable)
+}
+
 fn row_passes_gates(
     row: &FactorObservationV2,
     params: &SnapshotThreeLayerParams,
@@ -809,6 +853,11 @@ fn row_passes_gates(
         return false;
     }
     if profile == StrategyProfile::StableReversalSoft && !stable_reversal_soft_hard_gates_pass(row)
+    {
+        return false;
+    }
+    if profile == StrategyProfile::StableReversalFillable
+        && !stable_reversal_fillable_hard_gates_pass(row)
     {
         return false;
     }
@@ -2016,8 +2065,9 @@ fn main() -> Result<()> {
 mod tests {
     use super::{
         OPTIMIZER_MAX_DIRECTION_PROB, OPTIMIZER_MIN_DIRECTION_PROB,
-        STABLE_DIRECTION_MIN_DIRECTION_PROB, STABLE_REVERSAL_SOFT_MIN_DIRECTION_PROB,
-        SnapshotObjectiveMetrics, SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
+        STABLE_DIRECTION_MIN_DIRECTION_PROB, STABLE_REVERSAL_FILLABLE_MIN_DIRECTION_PROB,
+        STABLE_REVERSAL_SOFT_MIN_DIRECTION_PROB, SnapshotObjectiveMetrics,
+        SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
         calibrate_direction_probability, calibrated_model_probability,
         calibrated_profile_probability, cex_direction_probability, compounded_log_growth,
         default_min_trades_from_coverage, direction_alpha_probability,
@@ -2565,6 +2615,50 @@ mod tests {
     }
 
     #[test]
+    fn stable_reversal_fillable_uses_executable_roundtrip_not_full_depth_only() {
+        let mut params = test_params();
+        params.alpha_contrarian = StrategyProfile::StableReversalFillable
+            .fixes_alpha_contrarian()
+            .unwrap();
+        params.min_direction_prob = STABLE_REVERSAL_FILLABLE_MIN_DIRECTION_PROB;
+        params.min_confirmation_score = 0.0;
+        params.require_confirmation = false;
+        params.min_edge = 0.05;
+        params.min_reward_risk = 0.20;
+        params.min_entry_score = 0.0;
+        params.probability_shrink = StrategyProfile::StableReversalFillable
+            .fixes_probability_shrink()
+            .unwrap();
+        params.probability_haircut = StrategyProfile::StableReversalFillable
+            .fixes_probability_haircut()
+            .unwrap();
+
+        let mut row = test_row(
+            "event-stable-reversal-fillable",
+            0.22,
+            0.25,
+            Some(8.0),
+            true,
+            0,
+        );
+        row.label_full_depth_entry_fillable = false;
+        row.label_full_depth_exit_fillable = false;
+        row.label_full_depth_executable_pnl_15u = None;
+        row.exit_bid_change_30s = -0.01;
+        row.entry_ask_change_30s = 0.05;
+        row.pm_reprice_speed_30s = 0.05 / 30.0;
+
+        assert!(
+            row_passes_gates(&row, &params, StrategyProfile::StableReversalFillable),
+            "fillable reversal should test actual executable round-trip labels without requiring full-depth labels"
+        );
+        assert!(
+            !row_passes_gates(&row, &params, StrategyProfile::StableReversalSoft),
+            "soft reversal keeps the stricter full-depth entry+exit gate"
+        );
+    }
+
+    #[test]
     fn snapshot_gate_rejects_non_fillable_entries_before_selection() {
         let mut params = test_params();
         params.cooldown_secs = 0;
@@ -2801,6 +2895,10 @@ mod tests {
             StrategyProfile::parse("reversal_pm_soft").unwrap(),
             StrategyProfile::StableReversalSoft
         );
+        assert_eq!(
+            StrategyProfile::parse("reversal_fillable").unwrap(),
+            StrategyProfile::StableReversalFillable
+        );
         assert!(StrategyProfile::parse("unknown").is_err());
     }
 
@@ -2838,6 +2936,10 @@ mod tests {
             StrategyProfile::StableReversalSoft.fixes_alpha_contrarian(),
             Some(true)
         );
+        assert_eq!(
+            StrategyProfile::StableReversalFillable.fixes_alpha_contrarian(),
+            Some(true)
+        );
         assert_eq!(StrategyProfile::Mixed.fixes_alpha_contrarian(), None);
         assert_eq!(
             StrategyProfile::Champion.fixes_cex_contrarian(),
@@ -2860,6 +2962,10 @@ mod tests {
             Some(false)
         );
         assert_eq!(
+            StrategyProfile::StableReversalFillable.fixes_cex_contrarian(),
+            Some(false)
+        );
+        assert_eq!(
             StrategyProfile::Champion.fixes_confirmation_threshold(),
             Some(0.0)
         );
@@ -2877,6 +2983,10 @@ mod tests {
         );
         assert_eq!(
             StrategyProfile::StableReversalSoft.fixes_confirmation_threshold(),
+            None
+        );
+        assert_eq!(
+            StrategyProfile::StableReversalFillable.fixes_confirmation_threshold(),
             None
         );
         assert_eq!(StrategyProfile::ObiHard.fixes_cex_contrarian(), Some(false));
@@ -2898,6 +3008,10 @@ mod tests {
         );
         assert_eq!(
             StrategyProfile::StableReversalSoft.fixes_require_confirmation(),
+            Some(false)
+        );
+        assert_eq!(
+            StrategyProfile::StableReversalFillable.fixes_require_confirmation(),
             Some(false)
         );
         assert_eq!(
@@ -2925,12 +3039,28 @@ mod tests {
             Some(0.04)
         );
         assert_eq!(
+            StrategyProfile::StableReversalFillable.fixes_probability_shrink(),
+            Some(0.38)
+        );
+        assert_eq!(
+            StrategyProfile::StableReversalFillable.fixes_probability_haircut(),
+            Some(0.04)
+        );
+        assert_eq!(
             direction_probability_search_floor(StrategyProfile::StableReversalSoft),
             STABLE_REVERSAL_SOFT_MIN_DIRECTION_PROB
         );
         assert_eq!(
+            direction_probability_search_floor(StrategyProfile::StableReversalFillable),
+            STABLE_REVERSAL_FILLABLE_MIN_DIRECTION_PROB
+        );
+        assert_eq!(
             min_edge_search_bounds(StrategyProfile::StableReversalSoft),
             (0.08, 0.35)
+        );
+        assert_eq!(
+            min_edge_search_bounds(StrategyProfile::StableReversalFillable),
+            (0.05, 0.30)
         );
     }
 }
