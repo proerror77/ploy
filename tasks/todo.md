@@ -17,9 +17,9 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Add `stable_reversal_soft` as a snapshot-only profile.
 - [x] Keep direction probability and executable EV gates active while softening the PM confirmation veto.
 - [x] Run focused local verification.
-- [ ] Push PR and watch checks.
-- [ ] Run split optimize experiments against snapshot `25204438461`.
-- [ ] Download artifacts and record powered/underpowered outcomes.
+- [x] Push PR and watch checks.
+- [x] Run split optimize experiments against snapshot `25204438461`.
+- [x] Download artifacts and record powered/underpowered outcomes.
 
 ## Review
 
@@ -27,6 +27,8 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - 2026-05-01: Added `stable_reversal_soft` only to `three_layer_snapshot_optimize.rs`. It preserves the inverted-alpha direction hypothesis (`alpha_contrarian=true`), keeps direction probability floor meaningful (`min_direction_prob >= 0.54`), keeps probability shrink/haircut and positive EV-per-staked-dollar gates, and still requires full-depth entry/exit fillability.
 - 2026-05-01: The PM confirmation layer is now a soft score for this profile instead of a hard `exit_bid_change_30s > 0` veto. This directly tests whether the earlier `stable_reversal` evidence was real but made underpowered by an overly narrow PM exit-bid gate.
 - 2026-05-01: Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-reversal-pm-soft rtk cargo test -p ploy-research --example three_layer_snapshot_optimize stable_reversal --no-default-features`, full `three_layer_snapshot_optimize` example tests with `--no-default-features`, Ruby YAML parse for `optimize.yml`, and `git diff --check`.
+- 2026-05-01: PR #287 checks passed. Snapshot optimize runs `25207392411`, `25207393767`, `25207394950`, and `25207396047` all failed closed due sample power. Validation PnL was positive in all splits (`$38.72`, `$475.79`, `$112.94`, `$69.79`) and validation fill rate was `1.0`, but validation trades were only `4..9` versus `min_trades=80`. This means softening the PM exit-bid veto alone is not enough.
+- 2026-05-01: Next research should isolate the remaining sparsity source. The current likely bottleneck is the stable-profile full-depth entry+exit gate combined with conservative EV/time windows, not the PM exit-bid veto by itself. Any next profile must still measure actual executable PnL/fill rate instead of relaxing into unfillable orders.
 
 # Stable Direction Snapshot Research (2026-05-01)
 
