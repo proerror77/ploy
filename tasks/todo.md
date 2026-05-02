@@ -1,3 +1,27 @@
+# Repricing Momentum Snapshot Optimize Selector (2026-05-03)
+
+## Files
+
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: expose the merged `repricing_momentum` runtime profile through the snapshot optimizer CLI.
+- `.github/workflows/optimize.yml`
+  - Owner: keep the manual workflow profile description aligned with supported optimizer selectors.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add `repricing_momentum` / `spread_adjusted_external_move` aliases to `--strategy-profile`.
+- [x] Route `RepricingMomentum` through optimizer search bounds, confirmation scoring, and probability helpers.
+- [x] Update the optimize workflow input description so operators can select the profile intentionally.
+- [x] Add focused parser/fixed-profile regression coverage.
+- [x] Run focused local verification.
+- [ ] Commit, PR, merge, then run the snapshot optimize/replay gate.
+
+## Review
+
+- 2026-05-03: Added the missing `repricing_momentum` snapshot optimizer selector for the runtime-backed `ThreeLayerProfile::RepricingMomentum`. The optimizer now accepts `repricing`, `repricing_momentum`, `reprice_momentum`, and `spread_adjusted_external_move`, routes the profile through search bounds, confirmation scoring, model probability helpers, and the shared runtime profile mapping. Updated the manual optimize workflow profile description to include `repricing_momentum`. Focused verification passed: `rustfmt --edition 2021 --check crates/ploy-research/examples/three_layer_snapshot_optimize.rs`, `CARGO_TARGET_DIR=/tmp/ploy-repricing-profile-opt rtk cargo check -p ploy-research --example three_layer_snapshot_optimize --features db --no-default-features`, `CARGO_TARGET_DIR=/tmp/ploy-repricing-profile-opt rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --features db --no-default-features`, and `git diff --check`. The check emitted only pre-existing strategy-bundle dead-code warnings plus the vendor profile warning.
+
 # Repricing Momentum Runtime Scorer (2026-05-03)
 
 ## Files
