@@ -25,6 +25,7 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Audit UP/DOWN side-label generation for obvious sign reversal.
 - [x] Add row-level selection audit output to diagnose whether `inverted` is a true contrarian edge or a probability semantics error.
 - [x] Rerun strict matrix with `selection-audit.csv` artifacts.
+- [x] Run current-main single-day rolling diagnostics for the inverted edge.
 
 ## Review
 
@@ -38,6 +39,7 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - 2026-05-01: Side-label audit found no obvious UP/DOWN settlement reversal in `FactorObservationV2`: UP rows use `model_prob_up`, `pm_up_ask`, and `settlement_up`; DOWN rows use `1 - model_prob_up`, `pm_down_ask`, and `1 - settlement_up`. The suspicious part is the matrix `Inverted` mode itself: it uses `1 - side_model_prob` while still buying the same side, so it is a contrarian same-side probability transform rather than an opposite-side trade.
 - 2026-05-01: Added `selection-audit.csv` to the matrix artifacts. It records raw side probability, transformed probability, calibrated probability, side, settlement win, executable PnL, and selection status for rows after all gates. This is needed to decide whether the inverted family is a real contrarian/PM-lag edge or just a probability-semantics bug.
 - 2026-05-02: Re-ran the strict 7-day edge matrix on current `main` after parity fixes. Workflow run `25241818848` used snapshot `25204438461` / hash `fb338e1f202c3bda`, train `2026-04-24 -> 2026-04-28`, validation `2026-04-29 -> 2026-05-01`, six symbols, stake `15`, and `min_trades=80`. The run failed closed with zero deployable validation candidates and uploaded `strategy-matrix-results.csv`, `gate-attrition.csv`, `selection-audit.csv`, `edge-matrix-summary.json`, and `report.txt`. Validation still favors inverted direction over model direction (`Inverted` total validation PnL `+$20,538.21` across 2,022 accepted trades; `Model` `-$3,460.54` across 1,543 accepted trades), but the best row `inverted_entry_only_pm_none_wide_ev0.05` remains blocked by sample power (`65 < 80` trades), EV calibration gap (`0.348 > 0.30`), and positive-day stability (`66.7% < 70%`). This confirms the current evidence supports continued systematic research, not dry-run/live restoration.
+- 2026-05-02: Added `scripts/analyze_edge_matrix_artifact.py` and generated local ignored reports under `reports/strategy/edge-matrix-*.{json,md}` so matrix artifacts can be interpreted consistently without treating low-threshold diagnostics as deployable gates. Current-main single-day rolling diagnostics used `min_trades=20` only as a research probe. Runs `25242614746`, `25242615468`, `25242616093`, and `25242616810` found positive inverted/no-PM candidates on validation days `2026-04-27` through `2026-04-30`, but all remained below the strict `80`-trade floor. Run `25242617585` for `2026-05-01` failed closed with negative top-row PnL. The durable tracked conclusion is in `tasks/edge_matrix_rolling_20260502.md`: inverted direction is a real research lane, but daily stability is not good enough to restore dry-run/live.
 
 # Stable Reversal Fillability Snapshot Research (2026-05-01)
 
