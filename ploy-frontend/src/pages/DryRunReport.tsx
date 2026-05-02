@@ -81,6 +81,8 @@ type StrategySurfaceRow = {
   latestClosedAt: string | null;
   latestAgeHours: number | null;
   observedState: string;
+  desiredState: string;
+  isActive: boolean;
   strategy?: DryRunStrategyReport;
   deployment?: DeploymentSummary;
   snapshot?: TradingStateSnapshot;
@@ -148,6 +150,22 @@ function shouldShowUnreportedDryRunDeployment(deployment: DeploymentSummary, sna
     deployment.observed_state === 'starting' ||
     deployment.observed_state === 'degraded'
   );
+}
+
+function isActiveDeployment(deployment?: DeploymentSummary) {
+  return deployment?.desired_state === 'running' || deployment?.observed_state === 'running';
+}
+
+function statusBadge(row: StrategySurfaceRow) {
+  if (row.observedState === 'running') return 'success' as const;
+  if (row.observedState === 'failed' || row.observedState === 'degraded') return 'destructive' as const;
+  if (row.observedState === 'starting' || row.desiredState === 'running') return 'warning' as const;
+  return 'secondary' as const;
+}
+
+function statusLabel(row: StrategySurfaceRow) {
+  if (!row.deployment) return 'report only';
+  return `${row.desiredState}/${row.observedState}`;
 }
 
 function isDryRunSnapshot(snapshot: TradingStateSnapshot) {
@@ -566,6 +584,8 @@ export function DryRunReport() {
         latestClosedAt: strategy.summary.latest_closed_at ?? null,
         latestAgeHours: latestAge,
         observedState: deployment?.observed_state ?? 'unknown',
+        desiredState: deployment?.desired_state ?? 'unknown',
+        isActive: isActiveDeployment(deployment),
         strategy,
         deployment,
         snapshot,
@@ -611,6 +631,8 @@ export function DryRunReport() {
           latestClosedAt: null,
           latestAgeHours: null,
           observedState: deployment.observed_state,
+          desiredState: deployment.desired_state,
+          isActive: isActiveDeployment(deployment),
           deployment,
           snapshot,
         };
@@ -618,7 +640,12 @@ export function DryRunReport() {
       });
 
     return [...reported, ...missing].sort((a, b) => {
-      return a.attentionRank - b.attentionRank || toNumber(a.todayPnl) - toNumber(b.todayPnl) || b.todayClosedTrades - a.todayClosedTrades;
+      return (
+        Number(b.isActive) - Number(a.isActive) ||
+        a.attentionRank - b.attentionRank ||
+        toNumber(a.todayPnl) - toNumber(b.todayPnl) ||
+        b.todayClosedTrades - a.todayClosedTrades
+      );
     });
   }, [currentDay, deploymentById, dryRunDeployments, snapshotByDeployment, strategies]);
 
@@ -672,6 +699,7 @@ export function DryRunReport() {
   const greenTodayStrategies = strategyRows.filter((row) => row.todayClosedTrades > 0 && row.todayPnl > 0).length;
   const watchStrategies = strategyRows.filter((row) => row.health === 'watch' || row.health === 'degraded').length;
   const emptyStrategyCount = strategyRows.filter((row) => row.health === 'empty').length;
+  const activeStrategyCount = strategyRows.filter((row) => row.isActive).length;
   const portfolioPnl = toNumber(summary?.realized_pnl);
   const todayPortfolioPnl = toNumber(todayPortfolio?.net_pnl);
   const todayPortfolioClosed = todayPortfolio?.closed_trade_count ?? 0;
@@ -722,6 +750,7 @@ export function DryRunReport() {
               </h1>
               {selectedRow ? <Badge variant={healthBadge(selectedRow)}>{selectedRow.health}</Badge> : null}
               {selectedRow ? <Badge variant={performanceBadge(selectedRow)}>{selectedRow.performance}</Badge> : null}
+              {selectedRow ? <Badge variant={statusBadge(selectedRow)}>{statusLabel(selectedRow)}</Badge> : null}
             </div>
             <div className="mt-1 text-sm text-muted-foreground">
               {selectedRow?.strategyId ?? 'unknown'} · {selectedRow?.deploymentId ?? 'unknown'} · generated{' '}
@@ -734,8 +763,10 @@ export function DryRunReport() {
               <div>runtime</div>
             </div>
             <div className="rounded-md border bg-white px-3 py-2">
-              <div className="font-medium text-foreground">{selectedRow?.deployment?.observed_state ?? '-'}</div>
-              <div>observed</div>
+              <div className="font-medium text-foreground">
+                {selectedRow ? statusLabel(selectedRow) : '-'}
+              </div>
+              <div>state</div>
             </div>
             <div className="rounded-md border bg-white px-3 py-2">
               <div className="font-medium text-foreground">{formatShortTime(selectedRow?.latestClosedAt)}</div>
@@ -866,6 +897,9 @@ export function DryRunReport() {
         <div>
           <div className="mb-2 flex items-center gap-2">
             <Badge variant="outline">Dry-run</Badge>
+            <Badge variant={activeStrategyCount > 0 ? 'success' : 'secondary'}>
+              {activeStrategyCount} active
+            </Badge>
             <Badge variant={report.pairing.mixed_event_groups > 0 ? 'warning' : 'success'}>
               {report.pairing.mixed_event_groups} mixed events
             </Badge>
@@ -877,8 +911,8 @@ export function DryRunReport() {
         </div>
         <div className="grid grid-cols-4 gap-2 text-right text-xs text-muted-foreground">
           <div className="rounded-md border bg-white px-3 py-2">
-            <div className="font-medium text-foreground">{strategyRows.length}</div>
-            <div>strategies</div>
+            <div className="font-medium text-foreground">{activeStrategyCount}/{strategyRows.length}</div>
+            <div>active/report</div>
           </div>
           <div className="rounded-md border bg-white px-3 py-2">
             <div className="font-medium text-foreground">{greenTodayStrategies}</div>
@@ -973,7 +1007,12 @@ export function DryRunReport() {
                           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: row.color }} />
                           <span className="truncate font-medium">{row.label}</span>
                         </div>
-                        <div className="truncate text-xs text-muted-foreground">{row.strategyId} · {row.runtimeMode}</div>
+                        <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                          <Badge variant={statusBadge(row)} className="shrink-0">
+                            {statusLabel(row)}
+                          </Badge>
+                          <span className="truncate">{row.strategyId} · {row.runtimeMode}</span>
+                        </div>
                       </div>
                       <Badge variant={healthBadge(row)} className="w-fit">{row.health}</Badge>
                       <span>{row.todayClosedTrades}</span>
