@@ -64,6 +64,8 @@ enum StrategyProfile {
     ObiHard,
     /// Strategy C: Strategy A plus CEX continuation soft score.
     ContinuationSoft,
+    /// Strategy D: spread-adjusted external repricing momentum.
+    RepricingMomentum,
     /// CEX direction first: Binance-side momentum is the directional selector;
     /// Polymarket ask/liquidity only gate executable EV.
     CexDirectionFirst,
@@ -93,6 +95,10 @@ impl StrategyProfile {
             "continuation" | "continuation_soft" | "c" | "cex_continuation" => {
                 Ok(Self::ContinuationSoft)
             }
+            "repricing"
+            | "repricing_momentum"
+            | "reprice_momentum"
+            | "spread_adjusted_external_move" => Ok(Self::RepricingMomentum),
             "cex_direction_first" | "cex_direction" | "direction_first" | "binance_direction" => {
                 Ok(Self::CexDirectionFirst)
             }
@@ -109,7 +115,7 @@ impl StrategyProfile {
                 Ok(Self::StableReversalFillable)
             }
             other => anyhow::bail!(
-                "unknown --strategy-profile {other:?}; expected mixed, champion, obi_soft, obi_hard, continuation_soft, cex_direction_first, stable_direction, stable_reversal, stable_reversal_soft, or stable_reversal_fillable"
+                "unknown --strategy-profile {other:?}; expected mixed, champion, obi_soft, obi_hard, continuation_soft, repricing_momentum, cex_direction_first, stable_direction, stable_reversal, stable_reversal_soft, or stable_reversal_fillable"
             ),
         }
     }
@@ -121,6 +127,7 @@ impl StrategyProfile {
             Self::ObiSoft => "obi_soft",
             Self::ObiHard => "obi_hard",
             Self::ContinuationSoft => "continuation_soft",
+            Self::RepricingMomentum => "repricing_momentum",
             Self::CexDirectionFirst => "cex_direction_first",
             Self::StableDirection => "stable_direction",
             Self::StableReversal => "stable_reversal",
@@ -136,6 +143,7 @@ impl StrategyProfile {
             Self::ObiSoft => "champion + CEX/PM order-book imbalance soft score",
             Self::ObiHard => "champion + hard CEX/PM order-book confirmation gate",
             Self::ContinuationSoft => "champion + CEX continuation soft score",
+            Self::RepricingMomentum => "spread-adjusted external repricing momentum",
             Self::CexDirectionFirst => {
                 "CEX direction first + Polymarket executable EV/liquidity gates"
             }
@@ -157,7 +165,11 @@ impl StrategyProfile {
     fn fixes_alpha_contrarian(self) -> Option<bool> {
         match self {
             Self::Mixed => None,
-            Self::Champion | Self::ObiSoft | Self::ObiHard | Self::ContinuationSoft => Some(true),
+            Self::Champion
+            | Self::ObiSoft
+            | Self::ObiHard
+            | Self::ContinuationSoft
+            | Self::RepricingMomentum => Some(true),
             Self::CexDirectionFirst => Some(true),
             Self::StableDirection => Some(false),
             Self::StableReversal | Self::StableReversalSoft | Self::StableReversalFillable => {
@@ -173,7 +185,7 @@ impl StrategyProfile {
             | Self::StableReversal
             | Self::StableReversalSoft
             | Self::StableReversalFillable => Some(false),
-            Self::Mixed | Self::ObiSoft | Self::ContinuationSoft => None,
+            Self::Mixed | Self::ObiSoft | Self::ContinuationSoft | Self::RepricingMomentum => None,
         }
     }
 
@@ -182,7 +194,11 @@ impl StrategyProfile {
             Self::Champion | Self::CexDirectionFirst => Some(0.0),
             Self::StableDirection | Self::StableReversal => Some(0.10),
             Self::StableReversalSoft | Self::StableReversalFillable => None,
-            Self::Mixed | Self::ObiSoft | Self::ObiHard | Self::ContinuationSoft => None,
+            Self::Mixed
+            | Self::ObiSoft
+            | Self::ObiHard
+            | Self::ContinuationSoft
+            | Self::RepricingMomentum => None,
         }
     }
 
@@ -192,7 +208,11 @@ impl StrategyProfile {
             Self::CexDirectionFirst => Some(false),
             Self::StableDirection | Self::StableReversal => Some(true),
             Self::StableReversalSoft | Self::StableReversalFillable => Some(false),
-            Self::Mixed | Self::Champion | Self::ObiSoft | Self::ContinuationSoft => None,
+            Self::Mixed
+            | Self::Champion
+            | Self::ObiSoft
+            | Self::ContinuationSoft
+            | Self::RepricingMomentum => None,
         }
     }
 
@@ -207,6 +227,7 @@ impl StrategyProfile {
             | Self::ObiSoft
             | Self::ObiHard
             | Self::ContinuationSoft
+            | Self::RepricingMomentum
             | Self::CexDirectionFirst => None,
         }
     }
@@ -222,6 +243,7 @@ impl StrategyProfile {
             | Self::ObiSoft
             | Self::ObiHard
             | Self::ContinuationSoft
+            | Self::RepricingMomentum
             | Self::CexDirectionFirst => None,
         }
     }
@@ -233,6 +255,7 @@ impl StrategyProfile {
             Self::ObiSoft => Some(ThreeLayerProfile::ObiSoft),
             Self::ObiHard => Some(ThreeLayerProfile::ObiHard),
             Self::ContinuationSoft => Some(ThreeLayerProfile::ContinuationSoft),
+            Self::RepricingMomentum => Some(ThreeLayerProfile::RepricingMomentum),
             Self::CexDirectionFirst => None,
             Self::StableDirection
             | Self::StableReversal
@@ -477,7 +500,8 @@ fn direction_probability_search_floor(profile: StrategyProfile) -> f64 {
         | StrategyProfile::Champion
         | StrategyProfile::ObiSoft
         | StrategyProfile::ObiHard
-        | StrategyProfile::ContinuationSoft => OPTIMIZER_MIN_DIRECTION_PROB,
+        | StrategyProfile::ContinuationSoft
+        | StrategyProfile::RepricingMomentum => OPTIMIZER_MIN_DIRECTION_PROB,
     }
 }
 
@@ -495,6 +519,7 @@ fn min_edge_search_bounds(profile: StrategyProfile) -> (f64, f64) {
         | StrategyProfile::ObiSoft
         | StrategyProfile::ObiHard
         | StrategyProfile::ContinuationSoft
+        | StrategyProfile::RepricingMomentum
         | StrategyProfile::CexDirectionFirst => (0.0, 0.08),
     }
 }
@@ -534,7 +559,8 @@ fn confirmation_score(
         | StrategyProfile::Champion
         | StrategyProfile::ObiSoft
         | StrategyProfile::ObiHard
-        | StrategyProfile::ContinuationSoft => {}
+        | StrategyProfile::ContinuationSoft
+        | StrategyProfile::RepricingMomentum => {}
     }
     let Some(config) = model_config(params, profile) else {
         return f64::NAN;
@@ -789,6 +815,7 @@ fn profile_direction_probability(
         | StrategyProfile::ObiSoft
         | StrategyProfile::ObiHard
         | StrategyProfile::ContinuationSoft
+        | StrategyProfile::RepricingMomentum
         | StrategyProfile::StableDirection
         | StrategyProfile::StableReversal
         | StrategyProfile::StableReversalSoft
@@ -812,6 +839,7 @@ fn calibrated_profile_probability(
         | StrategyProfile::ObiSoft
         | StrategyProfile::ObiHard
         | StrategyProfile::ContinuationSoft
+        | StrategyProfile::RepricingMomentum
         | StrategyProfile::StableDirection
         | StrategyProfile::StableReversal
         | StrategyProfile::StableReversalSoft
@@ -2307,10 +2335,18 @@ mod tests {
             label_exit_fillable: fillable,
             label_full_depth_entry_fillable: fillable,
             label_full_depth_exit_fillable: fillable,
+            label_future_exit_bid_change_5s: None,
+            label_future_exit_bid_change_10s: None,
             label_future_exit_bid_change_30s: None,
             label_future_exit_bid_change_60s: None,
+            label_future_exit_pnl_5s: None,
+            label_future_exit_pnl_10s: None,
             label_future_exit_pnl_30s: None,
+            label_future_exit_pnl_60s: None,
+            label_future_exit_fillable_5s: None,
+            label_future_exit_fillable_10s: None,
             label_future_exit_fillable_30s: None,
+            label_future_exit_fillable_60s: None,
         }
     }
 
@@ -2907,6 +2943,10 @@ mod tests {
             StrategyProfile::ContinuationSoft
         );
         assert_eq!(
+            StrategyProfile::parse("spread_adjusted_external_move").unwrap(),
+            StrategyProfile::RepricingMomentum
+        );
+        assert_eq!(
             StrategyProfile::parse("cex_direction_first").unwrap(),
             StrategyProfile::CexDirectionFirst
         );
@@ -2945,6 +2985,10 @@ mod tests {
         );
         assert_eq!(
             StrategyProfile::ContinuationSoft.fixes_alpha_contrarian(),
+            Some(true)
+        );
+        assert_eq!(
+            StrategyProfile::RepricingMomentum.fixes_alpha_contrarian(),
             Some(true)
         );
         assert_eq!(
