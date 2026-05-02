@@ -14,7 +14,7 @@ db = ["dep:sqlx", "dep:ploy-feed-loaders"]
 polars-export = ["dep:polars"]
 ml = []
 rl = ["dep:burn", "dep:burn-ndarray"]
-strategy-runtime = ["dep:ploy-strategy-bundles"]
+strategy-runtime = []
 
 [dependencies]
 rand.workspace = true
@@ -23,7 +23,7 @@ polars = { workspace = true, optional = true }
 ploy-market-contracts.workspace = true
 ploy-operator-contracts.workspace = true
 ploy-feed-loaders = { workspace = true, optional = true }
-ploy-strategy-bundles = { workspace = true, optional = true }
+ploy-strategy-bundles.workspace = true
 ploy-trading.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true

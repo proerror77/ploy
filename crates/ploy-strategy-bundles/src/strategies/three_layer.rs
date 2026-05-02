@@ -11,9 +11,11 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use super::common::event::EventWindow;
-use super::common::fees::crypto_fee_cost;
 use super::common::quote::QuoteState;
 use super::common::settlement;
+use super::three_layer_model::{
+    self, BookConfirmationInputs, EntryScoreInputs, ThreeLayerModelConfig,
+};
 use super::three_layer_profile::ThreeLayerProfile;
 use crate::strategies::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
@@ -83,7 +85,27 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
     }
 }
 
-const DRIFT_WINDOW_SECS: f64 = 30.0;
+impl ThreeLayerConfig {
+    fn model_config(&self) -> ThreeLayerModelConfig {
+        ThreeLayerModelConfig {
+            profile: self.profile,
+            min_direction_prob: self.min_direction_prob,
+            min_distance_over_sigma: self.min_distance_over_sigma,
+            min_confirmation_score: self.min_confirmation_score,
+            min_drift_confirmation: self.min_drift_confirmation,
+            min_edge: self.min_edge,
+            min_reward_risk: self.min_reward_risk,
+            alpha_contrarian: self.alpha_contrarian,
+            cex_contrarian: self.cex_contrarian,
+            probability_shrink: self.probability_shrink,
+            probability_haircut: self.probability_haircut,
+            min_entry_price: self.min_entry_price,
+            max_entry_price: self.max_entry_price,
+            min_entry_score: self.min_entry_score,
+        }
+    }
+}
+
 const VOL_WINDOW_SECS: f64 = 120.0;
 const MIN_VOL_POINTS: usize = 5;
 const ACCOUNT_BALANCE_REJECT_PAUSE_SECS: i64 = 15;
@@ -297,61 +319,26 @@ impl LobState {
         self.signed_trade_imbalance = self.signed_trade_imbalance * decay + signed_qty;
         self.last_aggtrade_ts = Some(ts);
     }
-
-    fn confirmation_score(&self) -> f64 {
-        let trade_score = (self.signed_trade_imbalance / 50.0).clamp(-1.0, 1.0) * 0.30;
-        let obi_score = self.obi.clamp(-1.0, 1.0) * 0.25;
-        let obi_delta_score = self.obi_delta().clamp(-1.0, 1.0) * 0.25;
-        let depth_score = self.depth_imbalance().clamp(-1.0, 1.0) * 0.20;
-        trade_score + obi_score + obi_delta_score + depth_score
-    }
 }
 
 // ── Gate Functions ──────────────────────────────────────────────────
 
-/// Normal CDF approximation (Abramowitz & Stegun).
+#[cfg(test)]
 fn norm_cdf(x: f64) -> f64 {
-    let t = 1.0 / (1.0 + 0.2316419 * x.abs());
-    let d = 0.3989422804014327 * (-x * x / 2.0).exp();
-    let p =
-        d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-    if x >= 0.0 { 1.0 - p } else { p }
+    three_layer_model::norm_cdf(x)
 }
 
-fn threshold_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> f64 {
-    if !value.is_finite() || !threshold.is_finite() || !scale.is_finite() || scale <= 0.0 {
-        return -0.50;
-    }
-    let signed = if contrarian {
-        threshold - value
-    } else {
-        value - threshold
-    };
-    (signed / scale).clamp(-0.50, 1.0)
-}
-
+#[cfg(test)]
 fn calibrate_direction_probability(
     direction_probability: f64,
     probability_shrink: f64,
     probability_haircut: f64,
 ) -> f64 {
-    if !direction_probability.is_finite()
-        || !probability_shrink.is_finite()
-        || !probability_haircut.is_finite()
-    {
-        return f64::NAN;
-    }
-    let shrink = probability_shrink.clamp(0.0, 1.0);
-    let haircut = probability_haircut.clamp(0.0, 0.49);
-    (0.5 + (direction_probability - 0.5) * shrink - haircut).clamp(0.01, 0.99)
-}
-
-fn executable_edge_threshold(config: &ThreeLayerConfig) -> f64 {
-    if config.profile.uses_snapshot_scoring() {
-        config.min_edge.max(0.0)
-    } else {
-        config.min_edge
-    }
+    three_layer_model::calibrate_direction_probability(
+        direction_probability,
+        probability_shrink,
+        probability_haircut,
+    )
 }
 
 fn profile_confirmation_score(
@@ -362,120 +349,29 @@ fn profile_confirmation_score(
     regime: Regime,
     config: &ThreeLayerConfig,
 ) -> f64 {
-    match config.profile {
-        ThreeLayerProfile::Mixed => evaluate_confirmation_bonus(
+    three_layer_model::profile_confirmation_score(
+        BookConfirmationInputs {
             direction_sign,
-            lob,
+            obi: lob.obi,
+            obi_delta: lob.obi_delta(),
+            depth_imbalance: lob.depth_imbalance(),
             cum_mprice_drift_5m,
             drift_30s,
+            signed_trade_imbalance: lob.signed_trade_imbalance,
             regime,
-            config,
-        ),
-        ThreeLayerProfile::Champion => 0.0,
-        ThreeLayerProfile::ObiSoft | ThreeLayerProfile::ObiHard => {
-            let obi = (lob.obi * direction_sign).clamp(-1.0, 1.0);
-            let obi_delta = (lob.obi_delta() * direction_sign).clamp(-1.0, 1.0);
-            let depth = (lob.depth_imbalance() * direction_sign).clamp(-1.0, 1.0);
-            let microprice = (cum_mprice_drift_5m * direction_sign).clamp(-1.0, 1.0);
-            let trade_imbalance =
-                ((lob.signed_trade_imbalance / 50.0) * direction_sign).clamp(-1.0, 1.0);
-
-            0.30 * obi
-                + 0.20 * obi_delta
-                + 0.20 * obi
-                + 0.15 * depth
-                + 0.10 * microprice
-                + 0.05 * trade_imbalance
-        }
-        ThreeLayerProfile::ContinuationSoft => {
-            let drift_continuation = (drift_30s * direction_sign * 800.0).clamp(-1.0, 1.0);
-            let microprice = (cum_mprice_drift_5m * direction_sign).clamp(-1.0, 1.0);
-            let trade_imbalance =
-                ((lob.signed_trade_imbalance / 50.0) * direction_sign).clamp(-1.0, 1.0);
-            0.50 * drift_continuation + 0.30 * microprice + 0.20 * trade_imbalance
-        }
-    }
-}
-
-struct EntryScoreInputs {
-    direction_score: f64,
-    distance_over_sigma: f64,
-    direction_sign: f64,
-    edge: f64,
-    edge_score: f64,
-    confirmation: f64,
-    drift_30s: f64,
-    pm_momentum_score: f64,
-    liquidity_score: f64,
+        },
+        &config.model_config(),
+    )
 }
 
 fn evaluate_entry_score(config: &ThreeLayerConfig, inputs: EntryScoreInputs) -> f64 {
-    if !config.profile.uses_snapshot_scoring() {
-        return inputs.direction_score * 0.50
-            + inputs.edge_score * 0.35
-            + inputs.confirmation * 0.15;
-    }
-
-    let side_distance = inputs.distance_over_sigma * inputs.direction_sign;
-    let distance_score = threshold_score(
-        side_distance,
-        config.min_distance_over_sigma,
-        0.60,
-        config.alpha_contrarian,
-    );
-    let edge_score = threshold_score(inputs.edge, executable_edge_threshold(config), 0.08, false);
-    let drift_side = inputs.drift_30s * inputs.direction_sign;
-    let drift_score = ((drift_side - config.min_drift_confirmation) * 800.0).clamp(-0.50, 1.0);
-    let confirmation_score = threshold_score(
-        inputs.confirmation,
-        config.min_confirmation_score,
-        0.50,
-        config.cex_contrarian,
-    );
-
-    match config.profile {
-        ThreeLayerProfile::Champion => {
-            0.33 * inputs.direction_score
-                + 0.17 * distance_score
-                + 0.25 * edge_score
-                + 0.10 * drift_score
-                + 0.10 * inputs.pm_momentum_score
-                + 0.05 * inputs.liquidity_score
-        }
-        ThreeLayerProfile::ObiSoft
-        | ThreeLayerProfile::ObiHard
-        | ThreeLayerProfile::ContinuationSoft => {
-            0.25 * inputs.direction_score
-                + 0.12 * distance_score
-                + 0.18 * edge_score
-                + 0.15 * confirmation_score
-                + 0.10 * drift_score
-                + 0.12 * inputs.pm_momentum_score
-                + 0.08 * inputs.liquidity_score
-        }
-        ThreeLayerProfile::Mixed => unreachable!("mixed profile returned above"),
-    }
+    three_layer_model::evaluate_entry_score(&config.model_config(), inputs)
 }
 
 fn confirmation_gate_passes(value: f64, threshold: f64, contrarian: bool) -> bool {
-    if !value.is_finite() || !threshold.is_finite() {
-        return false;
-    }
-    if contrarian {
-        value <= threshold
-    } else {
-        value >= threshold
-    }
+    three_layer_model::confirmation_gate_passes(value, threshold, contrarian)
 }
 
-/// Layer 1: Direction score (0.0 – 1.0).
-/// Returns Some((direction_sign, calibrated_probability, direction_score)) or None
-/// only when the signal is too weak to even consider (below minimum distance in Early).
-///
-/// In snapshot-scored profiles, contrarian mode inverts the direction but keeps
-/// the transformed alpha probability monotonic: stronger inverse alpha scores
-/// higher. The hard direction gate uses raw alpha strength, while execution EV
-/// is evaluated with the calibrated probability.
 fn evaluate_direction_score(
     distance_over_sigma: f64,
     _sigma_horizon: f64,
@@ -484,71 +380,21 @@ fn evaluate_direction_score(
     regime: Regime,
     config: &ThreeLayerConfig,
 ) -> Option<(f64, f64, f64)> {
-    if !config.alpha_contrarian
-        && distance_over_sigma.abs() < config.min_distance_over_sigma
-        && regime == Regime::Early
-    {
-        return None;
-    }
-
-    let model_prob_up = norm_cdf(distance_over_sigma);
-
-    let direction_prob = match regime {
-        Regime::Early => model_prob_up,
-        Regime::Middle => {
-            let lob_nudge = (cum_mprice_drift_5m / 100.0).clamp(-0.08, 0.08);
-            (model_prob_up + lob_nudge).clamp(0.01, 0.99)
-        }
-        Regime::Late => {
-            let drift_nudge = (drift_30s * 500.0).clamp(-0.12, 0.12);
-            let lob_nudge = (cum_mprice_drift_5m / 80.0).clamp(-0.06, 0.06);
-            (model_prob_up + drift_nudge + lob_nudge).clamp(0.01, 0.99)
-        }
-        Regime::Expiry => {
-            let drift_nudge = (drift_30s * 800.0).clamp(-0.15, 0.15);
-            (model_prob_up + drift_nudge).clamp(0.01, 0.99)
-        }
-    };
-
-    let (direction_sign, raw_effective_p) = if config.alpha_contrarian {
-        let inverse_alpha_p = direction_prob.max(1.0 - direction_prob);
-        if direction_prob >= 0.5 {
-            (-1.0_f64, inverse_alpha_p)
-        } else {
-            (1.0_f64, inverse_alpha_p)
-        }
-    } else if direction_prob >= 0.5 {
-        (1.0_f64, direction_prob)
-    } else {
-        (-1.0_f64, 1.0 - direction_prob)
-    };
-    if !raw_effective_p.is_finite() || raw_effective_p < config.min_direction_prob {
-        return None;
-    }
-
-    let effective_p = calibrate_direction_probability(
-        raw_effective_p,
-        config.probability_shrink,
-        config.probability_haircut,
-    );
-    if !effective_p.is_finite() {
-        return None;
-    }
-
-    // In contrarian mode the direction is inverted, but the alpha strength is
-    // still the distance from 50/50. Do not treat the faded side's raw model
-    // probability as the executable probability.
-    let direction_score = if config.profile.uses_snapshot_scoring() {
-        threshold_score(raw_effective_p, config.min_direction_prob, 0.25, false)
-    } else {
-        ((effective_p - 0.50) / 0.50).clamp(0.0, 1.0)
-    };
-
-    Some((direction_sign, effective_p, direction_score))
+    let score = three_layer_model::evaluate_direction_score(
+        distance_over_sigma,
+        cum_mprice_drift_5m,
+        drift_30s,
+        regime,
+        &config.model_config(),
+    )?;
+    Some((
+        score.direction_sign,
+        score.effective_probability,
+        score.direction_score,
+    ))
 }
 
-/// Layer 2: Confirmation bonus (-0.2 to +0.2).
-/// Positive = LOB confirms direction, negative = LOB opposes (penalty, not veto).
+#[cfg(test)]
 fn evaluate_confirmation_bonus(
     direction_sign: f64,
     lob: &LobState,
@@ -557,88 +403,47 @@ fn evaluate_confirmation_bonus(
     regime: Regime,
     config: &ThreeLayerConfig,
 ) -> f64 {
-    let raw_score = lob.confirmation_score() + (cum_mprice_drift_5m / 200.0).clamp(-0.15, 0.15);
-    let aligned_score = direction_sign * raw_score;
-
-    // In Late/Expiry, drift agreement adds extra bonus/penalty.
-    let drift_factor = match regime {
-        Regime::Late | Regime::Expiry => {
-            let drift_aligned = drift_30s * direction_sign;
-            (drift_aligned * 500.0).clamp(-0.10, 0.10)
-        }
-        _ => 0.0,
-    };
-
-    let score = aligned_score + drift_factor;
-    if config.cex_contrarian {
-        (-score).clamp(-0.20, 0.20)
-    } else {
-        score.clamp(-0.20, 0.20)
-    }
+    let mut model_config = config.model_config();
+    model_config.profile = ThreeLayerProfile::Mixed;
+    three_layer_model::profile_confirmation_score(
+        BookConfirmationInputs {
+            direction_sign,
+            obi: lob.obi,
+            obi_delta: lob.obi_delta(),
+            depth_imbalance: lob.depth_imbalance(),
+            cum_mprice_drift_5m,
+            drift_30s,
+            signed_trade_imbalance: lob.signed_trade_imbalance,
+            regime,
+        },
+        &model_config,
+    )
 }
 
+#[cfg(test)]
 fn expected_value_per_share(direction_probability: f64, entry_price: f64) -> f64 {
-    if !direction_probability.is_finite()
-        || !entry_price.is_finite()
-        || !(0.0..=1.0).contains(&direction_probability)
-        || !(0.0..1.0).contains(&entry_price)
-    {
-        return f64::NAN;
-    }
-    let fee = crypto_fee_cost(entry_price);
-    let win_payoff = 1.0 - entry_price - fee;
-    let loss_cost = entry_price + fee;
-    direction_probability * win_payoff - (1.0 - direction_probability) * loss_cost
+    three_layer_model::expected_value_per_share(direction_probability, entry_price)
 }
 
+#[cfg(test)]
 fn expected_value_per_staked_dollar(direction_probability: f64, entry_price: f64) -> f64 {
-    let expected_value = expected_value_per_share(direction_probability, entry_price);
-    if !expected_value.is_finite() || !entry_price.is_finite() || entry_price <= 0.0 {
-        return f64::NAN;
-    }
-    expected_value / entry_price
+    three_layer_model::expected_value_per_staked_dollar(direction_probability, entry_price)
 }
 
-/// Layer 3: Expected-value score (0.0 – 1.0).
-/// Returns Some((entry_price, expected_value_per_share, reward_risk, expectancy_score)) or None
-/// only when the price is outside tradeable bounds.
 fn evaluate_edge_score(
     direction_probability: f64,
     ask: f64,
     _regime: Regime,
     config: &ThreeLayerConfig,
 ) -> Option<(f64, f64, f64, f64)> {
-    if ask < config.min_entry_price || ask > config.max_entry_price {
-        return None;
-    }
-
-    let fee = crypto_fee_cost(ask);
-    let edge = expected_value_per_share(direction_probability, ask);
-    if !edge.is_finite() {
-        return None;
-    }
-
-    let reward = 1.0 - ask - fee;
-    let risk = ask + fee;
-    let rr = if risk > 0.0 { reward / risk } else { 0.0 };
-
-    // Execution edge is always monotonic: higher cost-adjusted edge scores
-    // better. Contrarian mode can invert alpha, but not executable edge.
-    let required_edge = executable_edge_threshold(config);
-    if config.profile.uses_snapshot_scoring() && edge < required_edge {
-        return None;
-    }
-
-    let stake_expectancy = expected_value_per_staked_dollar(direction_probability, ask);
-    let edge_score = if config.profile.uses_snapshot_scoring() {
-        let per_share_score = threshold_score(edge, required_edge, 0.08, false);
-        let per_stake_score = threshold_score(stake_expectancy, 0.0, 0.25, false);
-        (0.70 * per_share_score + 0.30 * per_stake_score).clamp(-0.50, 1.0)
-    } else {
-        (stake_expectancy / 0.40).clamp(0.0, 1.0)
-    };
-
-    Some((ask, edge, rr, edge_score))
+    let score =
+        three_layer_model::evaluate_edge_score(direction_probability, ask, &config.model_config())?;
+    Some((
+        score.entry_price,
+        score.expected_value_per_share,
+        score.reward_risk,
+        score.edge_score,
+    ))
 }
 
 // ── ThreeLayerStrategy ─────────────────────────────────────────────
