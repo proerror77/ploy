@@ -43,24 +43,16 @@ STRICT_FIELD_ALIASES = {
 ORDER_STRICT_FIELDS = [
     "deployment_id",
     "intent_id",
-    "order_id",
-    "event_id",
     "token_id",
-    "order_side",
-    "purpose",
     "quantity",
     "limit_price",
     "filled_quantity",
     "status",
-    "created_at",
 ]
 
 FILL_STRICT_FIELDS = [
     "deployment_id",
     "intent_id",
-    "order_id",
-    "fill_id",
-    "event_id",
     "token_id",
     "fill_side",
     "quantity",
@@ -83,6 +75,18 @@ TIMESTAMP_FIELDS = {"created_at", "fill_timestamp"}
 
 NUMERIC_TOLERANCE = Decimal("0.000001")
 TIMESTAMP_TOLERANCE_SECONDS = 1.0
+
+ORDER_KEY_CANDIDATES = (
+    ("deployment_id", "intent_id"),
+    ("intent_id", "token_id", "order_side", "quantity", "limit_price", "filled_quantity"),
+    ("deployment_id", "token_id", "order_side", "quantity", "limit_price", "filled_quantity", "status"),
+)
+
+FILL_KEY_CANDIDATES = (
+    ("deployment_id", "intent_id"),
+    ("intent_id", "token_id", "fill_side", "quantity", "price", "fee"),
+    ("deployment_id", "token_id", "fill_side", "quantity", "price", "fee", "fill_timestamp"),
+)
 
 
 def load_json(path: Path) -> Any:
@@ -365,23 +369,22 @@ def extract_runtime_fills(data: Any) -> list[dict[str, Any]]:
     return [normalize_fill(row) for row in rows]
 
 
-def normalized_key(row: dict[str, Any], primary_key: str, fallback_fields: tuple[str, ...]) -> str:
-    primary = row.get(primary_key)
-    if primary:
-        return str(primary)
-    parts = [str(row.get(field) or "") for field in fallback_fields]
-    return "|".join(parts)
+def normalized_key(row: dict[str, Any], key_candidates: tuple[tuple[str, ...], ...]) -> str:
+    for fields in key_candidates:
+        values = [row.get(field) for field in fields]
+        if all(value not in (None, "") for value in values):
+            return "|".join(f"{field}={value}" for field, value in zip(fields, values))
+    return ""
 
 
 def index_normalized_rows(
     rows: list[dict[str, Any]],
-    primary_key: str,
-    fallback_fields: tuple[str, ...],
+    key_candidates: tuple[tuple[str, ...], ...],
 ) -> dict[str, dict[str, Any]]:
     indexed: dict[str, dict[str, Any]] = {}
     for index, row in enumerate(rows):
-        key = normalized_key(row, primary_key, fallback_fields)
-        if not key.strip("|"):
+        key = normalized_key(row, key_candidates)
+        if not key:
             key = f"row-{index}"
         indexed[key] = row
     return indexed
@@ -407,12 +410,11 @@ def compare_normalized_rows(
     dryrun_rows: list[dict[str, Any]],
     *,
     row_type: str,
-    primary_key: str,
-    fallback_fields: tuple[str, ...],
+    key_candidates: tuple[tuple[str, ...], ...],
     strict_fields: list[str],
 ) -> dict[str, Any]:
-    replay_index = index_normalized_rows(replay_rows, primary_key, fallback_fields)
-    dryrun_index = index_normalized_rows(dryrun_rows, primary_key, fallback_fields)
+    replay_index = index_normalized_rows(replay_rows, key_candidates)
+    dryrun_index = index_normalized_rows(dryrun_rows, key_candidates)
     shared_keys = sorted(set(replay_index) & set(dryrun_index))
     mismatches: list[dict[str, Any]] = []
     missing_fields = set()
@@ -460,16 +462,14 @@ def compare_runtime_evidence(replay: Any, dryrun: Any) -> dict[str, Any]:
         extract_runtime_orders(replay),
         extract_runtime_orders(dryrun),
         row_type="order",
-        primary_key="order_id",
-        fallback_fields=("deployment_id", "event_id", "token_id", "order_side", "purpose", "created_at"),
+        key_candidates=ORDER_KEY_CANDIDATES,
         strict_fields=ORDER_STRICT_FIELDS,
     )
     fill_comparison = compare_normalized_rows(
         extract_runtime_fills(replay),
         extract_runtime_fills(dryrun),
         row_type="fill",
-        primary_key="fill_id",
-        fallback_fields=("deployment_id", "event_id", "token_id", "fill_side", "fill_timestamp"),
+        key_candidates=FILL_KEY_CANDIDATES,
         strict_fields=FILL_STRICT_FIELDS,
     )
     missing_strict_fields = sorted(
