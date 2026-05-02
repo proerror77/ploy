@@ -1,3 +1,27 @@
+# Dry-Run Active UI Wiring (2026-05-02)
+
+## Files
+
+- `ploy-frontend/src/pages/OperatorCockpit.tsx`
+  - Owner: cockpit dry-run report attribution and deployment/runtime state display.
+- `ploy-frontend/src/pages/DryRunReport.tsx`
+  - Owner: public dry-run report ranking and strategy status display.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Confirm the live API has the champion deployment and report row.
+- [x] Make active/running dry-run deployments sort ahead of stopped historical report rows.
+- [x] Label report rows with deployment status so stopped history is not confused with the running strategy.
+- [ ] Deploy the updated public UI.
+
+## Review
+
+- 2026-05-02: Live API check confirmed `pm5d.threelayer.champion.dryrun` is the only PM5D dry-run in `running/running`; `pm5d.threelayer.live` remains `paused/paused`, and stopped historical dry-run strategies remain stopped. The dry-run report contains the champion row and refreshed to 24 closed trades with realized PnL `-$94.40`.
+- 2026-05-02: Updated the frontend so dry-run report rows are joined back to deployment state, active/running deployments sort ahead of stopped historical report rows, and both the operator cockpit and dry-run report display active/report counts plus `desired/observed` status badges.
+- 2026-05-02: Local frontend verification passed: `npm run lint`, `npm run contracts:check`, `npm run build`, and `git diff --check`.
+
 # PM5D Factor Stability Multi-Window Extension (2026-05-02)
 
 ## Files

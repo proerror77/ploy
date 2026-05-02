@@ -121,6 +121,29 @@ function shouldShowUnreportedDryRunDeployment(deployment: DeploymentSummary, sna
   );
 }
 
+function isActiveDeployment(deployment?: DeploymentSummary) {
+  return deployment?.desired_state === 'running' || deployment?.observed_state === 'running';
+}
+
+function deploymentStatusBadge(deployment?: DeploymentSummary) {
+  if (!deployment) return 'secondary' as const;
+  if (deployment.observed_state === 'running') return 'success' as const;
+  if (deployment.observed_state === 'failed') return 'destructive' as const;
+  if (
+    deployment.observed_state === 'degraded' ||
+    deployment.observed_state === 'starting' ||
+    deployment.desired_state === 'running'
+  ) {
+    return 'warning' as const;
+  }
+  return 'secondary' as const;
+}
+
+function deploymentStatusLabel(deployment?: DeploymentSummary) {
+  if (!deployment) return 'report only';
+  return `${deployment.desired_state}/${deployment.observed_state}`;
+}
+
 function compactTime(timestamp?: string | null) {
   if (!timestamp) return '-';
   return new Date(timestamp).toLocaleTimeString('zh-CN', {
@@ -458,11 +481,19 @@ export function OperatorCockpit() {
   }, [dryRunEquityCurve, dryRunStrategies]);
   const rankedStrategies = useMemo(() => {
     return [...dryRunStrategies].sort(
-      (a, b) =>
-        toNumber(b.summary.realized_pnl) - toNumber(a.summary.realized_pnl) ||
-        b.summary.closed_trades - a.summary.closed_trades
+      (a, b) => {
+        const aDeployment = dryRunDeployments.find((deployment) => deployment.deployment_id === a.deployment_id);
+        const bDeployment = dryRunDeployments.find((deployment) => deployment.deployment_id === b.deployment_id);
+        const aActive = isActiveDeployment(aDeployment) ? 0 : 1;
+        const bActive = isActiveDeployment(bDeployment) ? 0 : 1;
+        return (
+          aActive - bActive ||
+          toNumber(b.summary.realized_pnl) - toNumber(a.summary.realized_pnl) ||
+          b.summary.closed_trades - a.summary.closed_trades
+        );
+      }
     );
-  }, [dryRunStrategies]);
+  }, [dryRunDeployments, dryRunStrategies]);
   const dryRunStrategyByDeployment = useMemo(() => {
     const byDeployment = new Map<string, DryRunStrategyReport>();
     for (const strategy of dryRunStrategies) {
@@ -481,6 +512,13 @@ export function OperatorCockpit() {
       !dryRunStrategyByDeployment.has(deployment.deployment_id) &&
       shouldShowUnreportedDryRunDeployment(deployment, tradingByDeployment.get(deployment.deployment_id))
   );
+  const activeDryRunStrategyCount =
+    dryRunStrategies.filter((strategy) =>
+      isActiveDeployment(
+        dryRunDeployments.find((deployment) => deployment.deployment_id === strategy.deployment_id)
+      )
+    ).length +
+    unreportedDryRunDeployments.filter(isActiveDeployment).length;
 
   const eventAge = lastEventAt == null ? null : Math.max(0, Math.round((Date.now() - lastEventAt) / 1000));
   const cpuPressure =
@@ -608,8 +646,8 @@ export function OperatorCockpit() {
                 <FileText className="h-5 w-5" />
                 Dry-run Strategy Report
               </CardTitle>
-              <Badge variant={dryRunStrategies.length > 1 ? 'success' : 'secondary'}>
-                {dryRunStrategies.length} strategies
+              <Badge variant={activeDryRunStrategyCount > 0 ? 'success' : 'secondary'}>
+                {activeDryRunStrategyCount} active / {dryRunStrategies.length} report rows
               </Badge>
             </div>
           </CardHeader>
@@ -709,6 +747,9 @@ export function OperatorCockpit() {
                     <>
                       {rankedStrategies.map((strategy) => {
                         const pnl = toNumber(strategy.summary.realized_pnl);
+                        const deployment = dryRunDeployments.find(
+                          (entry) => entry.deployment_id === strategy.deployment_id
+                        );
                         return (
                           <div
                             key={`${strategy.runtime_mode}:${strategy.strategy_id}:${strategy.deployment_id}`}
@@ -716,8 +757,13 @@ export function OperatorCockpit() {
                           >
                             <div className="min-w-0">
                               <div className="truncate font-medium">{compactStrategyLabel(strategy)}</div>
-                              <div className="truncate text-xs text-muted-foreground">
-                                {strategy.deployment_id || strategy.strategy_id || 'unknown'} · {strategy.runtime_mode || 'unknown'}
+                              <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                                <Badge variant={deploymentStatusBadge(deployment)} className="shrink-0">
+                                  {deploymentStatusLabel(deployment)}
+                                </Badge>
+                                <span className="truncate">
+                                  {strategy.deployment_id || strategy.strategy_id || 'unknown'} · {strategy.runtime_mode || 'unknown'}
+                                </span>
                               </div>
                             </div>
                             <div>{strategy.summary.closed_trades}</div>
