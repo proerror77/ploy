@@ -1,3 +1,27 @@
+# Dry-Run Side/Regime Attribution (2026-05-02)
+
+## Files
+
+- `scripts/analyze_dryrun_correction_matrix.py`
+  - Owner: artifact-only attribution for dry-run correction matrix results.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Treat `UP-only` as a diagnostic symptom, not a deployable rule.
+- [x] Add an artifact analyzer that separates side support, direction transform, fill mode, liquidity, window, price, and TTR interactions.
+- [x] Run the analyzer on correction matrix run `25252555396`.
+- [x] Record the scientific attribution conclusion and next research gate.
+- [x] Verify and land the analyzer.
+
+## Review
+
+- 2026-05-02: Started from `origin/main` on `research/side-regime-attribution`. The research target is to test whether the apparent side effect is real edge or support/concentration artifact before any dry-run config changes.
+- 2026-05-02: Added `scripts/analyze_dryrun_correction_matrix.py` and ran it on artifact run `25252555396`. The analyzer output `reports/strategy/dryrun-correction-attribution-25252555396.{json,md}` locally. Verdict remains `research_only_no_deployable_edge`: `0` deployable candidates, `192` watchlist rows, and all watchlist rows blocked by `validation_underpowered`, `side_concentration_high`, and `window_concentration_high`.
+- 2026-05-02: Attribution shows `UP-only` is not a deployable edge. In validation, the apparent `UP-only` positive marginal result is mostly support/concentration behavior: `DistanceContrarian | Both` and `DistanceContrarian | UpOnly` are identical (`48` trades, `+$1,027.60`), while `Inverted | Both` and `Inverted | UpOnly` are also identical (`96` trades, `+$295.51`). This means the same selected rows are being counted under both policies, not that a robust "only trade UP" rule was discovered. The next gate is sample-power recovery for inverted/distance-contrarian entry-only candidates with side-neutral stability checks.
+- 2026-05-02: Local verification passed: `python3 -m py_compile scripts/analyze_dryrun_correction_matrix.py`, analyzer JSON smoke run against `/tmp/ploy-dryrun-correction-25252555396`, `python3 -m json.tool` on the smoke output, and `git diff --check`.
+
 # Dry-Run Correction Matrix Research (2026-05-02)
 
 ## Files
@@ -28,7 +52,7 @@
 - 2026-05-02: Started Aliyun `ploy-ci-1` and verified the GitHub runner returned `online/busy=false`. Direct `workflow_dispatch` for `dryrun-correction-matrix.yml` failed with GitHub `404` because newly added workflow files cannot be dispatched until they exist on the default branch. First post-merge step is to run the workflow on `main` with snapshot `25204438461`, train `2026-04-24 -> 2026-04-28`, validation `2026-04-29 -> 2026-05-01`, symbols `BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT`, and `min_trades=80`.
 - 2026-05-02: PR #300 was merged into `main` as `0558533afbe5a2cf12abc45b37c329313882a59b`. The first remote matrix run `25252090784` was cancelled after 20 minutes because the initial grid plus always-on selection audit was too heavy for an interactive research loop. Follow-up fix narrows the default grid and makes selection audit opt-in via `--selection-audit`; default artifacts still include paired candidates, split results, gate attrition, and summary JSON.
 - 2026-05-02: PR #301 was merged into `main` as `d97cbf2178f6e7e17bfe0f142212e4ff9e99106c`. Rerun `25252555396` completed in 6m18s on `ploy-ci-1` against snapshot `25204438461` / hash `fb338e1f202c3bda` and failed closed with zero deployable train-validation candidates. Artifacts: `dryrun-correction-paired-candidates.csv`, `dryrun-correction-results.csv`, `gate-attrition.csv`, `dryrun-correction-summary.json`, `selection-audit.csv`, and `report.txt`.
-- 2026-05-02: Rerun `25252555396` evaluated `3,888` paired hypotheses with `selection_audit_enabled=false`. Decisions: `0 deployable_candidate`, `192 watchlist`, `3,696 reject`. Best watchlist rows were inverted or distance-contrarian entry-only variants, but validation had only `1` accepted trade (`+$21.41`) versus `min_trades=80`; blockers were `validation_underpowered` plus symbol/side/window concentration. Aggregate validation by direction: `DistanceContrarian +$2,055.20 / 96 trades`, `Inverted +$591.01 / 192 trades`, `Model -$8,400.02 / 552 trades`. Aggregate validation by side: `UpOnly +$1,323.11 / 144 trades`, `DownOnly -$4,200.01 / 276 trades`; `15m` and `LowCost` policies produced `0` trades in this snapshot. Conclusion: do not modify dry-run/live config from this matrix; next research should target sample-power recovery for inverted/distance-contrarian UP-only entry-only signals or improve snapshot event-window labeling before revisiting 15m.
+- 2026-05-02: Rerun `25252555396` evaluated `3,888` paired hypotheses with `selection_audit_enabled=false`. Decisions: `0 deployable_candidate`, `192 watchlist`, `3,696 reject`. Best watchlist rows were inverted or distance-contrarian entry-only variants, but validation had only `1` accepted trade (`+$21.41`) versus `min_trades=80`; blockers were `validation_underpowered` plus symbol/side/window concentration. Aggregate validation by direction: `DistanceContrarian +$2,055.20 / 96 trades`, `Inverted +$591.01 / 192 trades`, `Model -$8,400.02 / 552 trades`. Aggregate validation by side: `UpOnly +$1,323.11 / 144 trades`, `DownOnly -$4,200.01 / 276 trades`; `15m` and `LowCost` policies produced `0` trades in this snapshot. Later side/regime attribution showed the apparent `UpOnly` marginal result was a support/concentration artifact, not an independent deployable rule. Conclusion: do not modify dry-run/live config from this matrix; next research should target sample-power recovery for inverted/distance-contrarian entry-only candidates with side-neutral stability gates, or improve snapshot event-window labeling before revisiting 15m.
 
 # Dry-Run Active UI Wiring (2026-05-02)
 
