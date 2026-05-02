@@ -1,3 +1,37 @@
+# PM5D Scientific Edge Search (2026-05-02)
+
+Issue: https://github.com/proerror77/ploy/issues/291
+
+## Files
+
+- `tasks/pm5d_factor_stability_20260502.md`
+  - Owner: durable evidence for PM5D factor-stability and side-neutral edge gates.
+- `tasks/todo.md`
+  - Owner: session plan and completion audit evidence.
+
+## Tasks
+
+- [x] Audit whether the previous `UP-only` read was a valid edge.
+- [x] Record the support/concentration artifact conclusion in issue `#291`.
+- [x] Attempt a six-symbol long-window snapshot for an 8-window stability test.
+- [x] Record the six-symbol snapshot OOM as infrastructure/data-size blocker.
+- [x] Run a long-window BTC/ETH/SOL batch snapshot and walk-forward.
+- [x] Record BTC/ETH/SOL batch evidence.
+- [x] Run the XRP/DOGE/BNB batch snapshot and walk-forward.
+- [x] Compare both symbol batches before any dry-run handoff.
+
+## Review
+
+- 2026-05-02: Completion audit found the objective is not complete after PR `#303`: that PR correctly rejected `UP-only` as a deployable rule, but did not find a deployable edge.
+- 2026-05-02: Updated issue `#291` with the PR `#303` side/regime attribution. `UP-only` is now explicitly tracked as support/concentration artifact because `Both` and `UpOnly` selected identical validation rows in the correction matrix.
+- 2026-05-02: Started `ploy-ci-1` and triggered long-window snapshot run `25253729919` for `2026-04-21 -> 2026-05-02`, six symbols, 30s LOB/sample settings. It failed with exit code `137` after `lob snapshot rows: 196375`, so this is an infrastructure/data-size blocker, not strategy evidence. Restarted the failed GitHub Actions runner service through Aliyun Cloud Assistant; no host Rust build was run manually.
+- 2026-05-02: Ran the BTC/ETH/SOL batch instead. Snapshot run `25254380121` succeeded with hash `762ae7751ad08a21`, window `2026-04-21T00:00:00Z -> 2026-05-02T00:00:00Z`, `114008` observations, `228016` V2 rows, and official settlement required. Factor walk-forward run `25255100665` succeeded against that snapshot.
+- 2026-05-02: BTC/ETH/SOL raw alpha factors reached `8` windows and were strongly positive in aggregate (`side_distance_over_sigma +51477.7591`, `side_model_prob +51373.4367`) but had one severe negative OOS window around `-37.6k`, so raw evidence is not deployable.
+- 2026-05-02: BTC/ETH/SOL liquidity-gated alpha factors are the strongest current lane but still watchlist only: `side_model_prob` and `side_distance_over_sigma` each had `7` effective windows, `85.71%` positive windows, about `+34.4k` total test PnL, `100%` fill, zero rejection, `85.71%` symbol-positive and time-bucket-positive rates, and reason `too_few_windows_positive_pnl`. This is not enough for dry-run/live restoration. The required next check is the queued `XRPUSDT,DOGEUSDT,BNBUSDT` batch.
+- 2026-05-02: XRP/DOGE/BNB snapshot run `25255158983` succeeded with hash `6e858cf3c0a607f0`, `108296` observations, `216592` V2 rows, and official settlement required. Factor walk-forward run `25255536366` succeeded against that snapshot.
+- 2026-05-02: XRP/DOGE/BNB raw alpha failed: `side_distance_over_sigma -17774.1481`, `side_model_prob -17805.3081`, both rejected for `nonpositive_executable_pnl` despite `8` windows. Liquidity-gated alpha stayed positive but small and still watchlist: both alpha factors had `7` effective windows, `100%` positive windows, `+1240.0377` total test PnL, `100%` fill, zero rejection, `95.24%` symbol-positive, `91.67%` time-bucket-positive, and reason `too_few_windows_positive_pnl`.
+- 2026-05-02: Cross-batch conclusion: there is a real research lane in liquidity-gated contrarian alpha, but no deployable edge yet. Raw alpha is concentrated in BTC/ETH/SOL and fails on XRP/DOGE/BNB. Liquidity-gated alpha is positive in both batches but below the `8` effective-window gate and second-batch PnL is much smaller. Do not restore dry-run/live; next work is either longer per-batch evidence or a memory-safe six-symbol snapshot compiler.
+
 # Dry-Run Side/Regime Attribution (2026-05-02)
 
 ## Files
