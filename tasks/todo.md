@@ -1,3 +1,23 @@
+# AutoFactor Target Metadata Fix (2026-05-03)
+
+## Files
+
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: ensure V2 AutoFactor seed reports display the actual target label used for evaluation.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Fix V2 AutoFactor report target metadata for `reprice_pnl_30s`.
+- [x] Add a focused regression test for requested target metadata.
+- [x] Run focused local verification.
+- [ ] Commit, PR, merge, and rerun the snapshot-backed factor workflow.
+
+## Review
+
+- 2026-05-03: Fixed V2 AutoFactor seed reports so every report row displays the target label actually used by `mine_domain_autofactors_from_v2` (`reprice_pnl_10s` or `reprice_pnl_30s`) instead of the seed candidate's default 10s metadata. Added a regression test that mines 30s labels and verifies formatted output contains only `reprice_pnl_30s`. Local verification passed: `rustfmt --edition 2021 --check crates/ploy-research/src/autofactor.rs`, `CARGO_TARGET_DIR=/tmp/ploy-autofactor-target rtk cargo test -p ploy-research autofactor --lib`, `CARGO_TARGET_DIR=/tmp/ploy-autofactor-target rtk cargo check -p ploy-research --example factor_walk_forward_v2 --features db --no-default-features`, and `git diff --check`. The example check emitted only pre-existing strategy-bundle dead-code warnings and the vendor profile warning.
+
 # AutoFactor Repricing Runner (2026-05-03)
 
 ## Files
