@@ -4,7 +4,7 @@ use chrono::{DateTime, Duration, Utc};
 use ploy_operator_contracts::Regime;
 use serde::{Deserialize, Serialize};
 
-use crate::factors::{FactorObservation, ResearchPmBookSnapshot, pearson_ic, spearman_ic};
+use crate::factors::{pearson_ic, spearman_ic, FactorObservation, ResearchPmBookSnapshot};
 
 const DEFAULT_STAKE_USD: f64 = 15.0;
 const DEFAULT_TOP_QUANTILE: f64 = 0.2;
@@ -228,10 +228,18 @@ pub struct FactorObservationV2 {
     pub label_exit_fillable: bool,
     pub label_full_depth_entry_fillable: bool,
     pub label_full_depth_exit_fillable: bool,
+    pub label_future_exit_bid_change_5s: Option<f64>,
+    pub label_future_exit_bid_change_10s: Option<f64>,
     pub label_future_exit_bid_change_30s: Option<f64>,
     pub label_future_exit_bid_change_60s: Option<f64>,
+    pub label_future_exit_pnl_5s: Option<f64>,
+    pub label_future_exit_pnl_10s: Option<f64>,
     pub label_future_exit_pnl_30s: Option<f64>,
+    pub label_future_exit_pnl_60s: Option<f64>,
+    pub label_future_exit_fillable_5s: Option<f64>,
+    pub label_future_exit_fillable_10s: Option<f64>,
     pub label_future_exit_fillable_30s: Option<f64>,
+    pub label_future_exit_fillable_60s: Option<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -566,6 +574,63 @@ pub struct FactorStabilityRow {
 pub struct FactorStabilityReport {
     pub options: FactorStabilityOptions,
     pub rows: Vec<FactorStabilityRow>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepricingIcOptions {
+    pub review: FactorReviewOptions,
+    pub min_window_observations: usize,
+    pub bucket_count: usize,
+    pub factor_name_filter: Option<String>,
+}
+
+impl Default for RepricingIcOptions {
+    fn default() -> Self {
+        Self {
+            review: FactorReviewOptions {
+                min_observations: 50,
+                ..Default::default()
+            },
+            min_window_observations: 50,
+            bucket_count: 5,
+            factor_name_filter: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RepricingIcReport {
+    pub options: RepricingIcOptions,
+    pub health: DataHealthReport,
+    pub rows: Vec<RepricingIcRow>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepricingIcRow {
+    pub factor: String,
+    pub family: FactorFamily,
+    pub layer: ThreeLayerArchive,
+    pub factor_role: &'static str,
+    pub target: String,
+    pub target_group: &'static str,
+    pub n: usize,
+    pub pearson_ic: f64,
+    pub spearman_ic: f64,
+    pub window_count: usize,
+    pub window_ic_mean: f64,
+    pub icir: f64,
+    pub positive_window_ratio: f64,
+    pub bottom_bucket_n: usize,
+    pub bottom_bucket_avg_label: f64,
+    pub top_bucket_n: usize,
+    pub top_bucket_avg_label: f64,
+    pub top_bucket_positive_label_rate: f64,
+    pub bucket_avg_labels: Vec<f64>,
+    pub monotonic_non_decreasing: bool,
+    pub avg_entry_ask: f64,
+    pub avg_pm_spread_bps: f64,
+    pub entry_fill_rate: f64,
+    pub exit_fill_rate: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1416,6 +1481,18 @@ pub fn factor_v2_descriptors() -> Vec<FactorV2Descriptor> {
             |r| r.roundtrip_pnl_now_15u.unwrap_or(f64::NAN),
         ),
         descriptor(
+            "future_exit_bid_change_5s",
+            FactorFamily::Exit,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.label_future_exit_bid_change_5s.unwrap_or(f64::NAN),
+        ),
+        descriptor(
+            "future_exit_bid_change_10s",
+            FactorFamily::Exit,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.label_future_exit_bid_change_10s.unwrap_or(f64::NAN),
+        ),
+        descriptor(
             "future_exit_bid_change_30s",
             FactorFamily::Exit,
             ThreeLayerArchive::PmExecutableLiquidityRiskGate,
@@ -1428,16 +1505,52 @@ pub fn factor_v2_descriptors() -> Vec<FactorV2Descriptor> {
             |r| r.label_future_exit_bid_change_60s.unwrap_or(f64::NAN),
         ),
         descriptor(
+            "future_exit_pnl_5s",
+            FactorFamily::Exit,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.label_future_exit_pnl_5s.unwrap_or(f64::NAN),
+        ),
+        descriptor(
+            "future_exit_pnl_10s",
+            FactorFamily::Exit,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.label_future_exit_pnl_10s.unwrap_or(f64::NAN),
+        ),
+        descriptor(
             "future_exit_pnl_30s",
             FactorFamily::Exit,
             ThreeLayerArchive::PmExecutableLiquidityRiskGate,
             |r| r.label_future_exit_pnl_30s.unwrap_or(f64::NAN),
         ),
         descriptor(
+            "future_exit_pnl_60s",
+            FactorFamily::Exit,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.label_future_exit_pnl_60s.unwrap_or(f64::NAN),
+        ),
+        descriptor(
+            "future_exit_fillable_5s",
+            FactorFamily::Exit,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.label_future_exit_fillable_5s.unwrap_or(f64::NAN),
+        ),
+        descriptor(
+            "future_exit_fillable_10s",
+            FactorFamily::Exit,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.label_future_exit_fillable_10s.unwrap_or(f64::NAN),
+        ),
+        descriptor(
             "future_exit_fillable_30s",
             FactorFamily::Exit,
             ThreeLayerArchive::PmExecutableLiquidityRiskGate,
             |r| r.label_future_exit_fillable_30s.unwrap_or(f64::NAN),
+        ),
+        descriptor(
+            "future_exit_fillable_60s",
+            FactorFamily::Exit,
+            ThreeLayerArchive::PmExecutableLiquidityRiskGate,
+            |r| r.label_future_exit_fillable_60s.unwrap_or(f64::NAN),
         ),
         descriptor(
             "exit_fillable",
@@ -1873,6 +1986,250 @@ pub fn build_factor_stability_report(
             })
     });
     FactorStabilityReport { options, rows }
+}
+
+pub fn review_repricing_ic_with_deribit(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    options: RepricingIcOptions,
+) -> RepricingIcReport {
+    let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    review_repricing_ic_rows(source_rows, &v2_rows, options)
+}
+
+pub fn review_repricing_ic_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    options: RepricingIcOptions,
+) -> RepricingIcReport {
+    let v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.review,
+    );
+    review_repricing_ic_rows(source_rows, &v2_rows, options)
+}
+
+fn review_repricing_ic_rows(
+    source_rows: &[FactorObservation],
+    v2_rows: &[FactorObservationV2],
+    options: RepricingIcOptions,
+) -> RepricingIcReport {
+    let health = build_data_health_report(source_rows, v2_rows);
+    let descriptors: Vec<FactorV2Descriptor> = factor_v2_descriptors()
+        .into_iter()
+        .filter(is_walk_forward_candidate_descriptor)
+        .filter(|descriptor| {
+            factor_name_matches_filter(descriptor.name, &options.factor_name_filter)
+        })
+        .collect();
+    let targets = repricing_ic_targets();
+    let mut rows = Vec::new();
+    for descriptor in descriptors {
+        for target in &targets {
+            if let Some(row) =
+                review_one_repricing_ic_target(v2_rows, descriptor, *target, &options)
+            {
+                rows.push(row);
+            }
+        }
+    }
+    rows.sort_by(|a, b| {
+        target_group_rank(a.target_group)
+            .cmp(&target_group_rank(b.target_group))
+            .then_with(|| {
+                b.spearman_ic
+                    .abs()
+                    .partial_cmp(&a.spearman_ic.abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.top_bucket_avg_label
+                    .partial_cmp(&a.top_bucket_avg_label)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    RepricingIcReport {
+        options,
+        health,
+        rows,
+    }
+}
+
+fn review_one_repricing_ic_target(
+    rows: &[FactorObservationV2],
+    descriptor: FactorV2Descriptor,
+    target: RepricingIcTargetDescriptor,
+    options: &RepricingIcOptions,
+) -> Option<RepricingIcRow> {
+    let scored: Vec<(&FactorObservationV2, f64, f64)> = rows
+        .iter()
+        .filter_map(|row| {
+            let score = (descriptor.accessor)(row);
+            let label = (target.accessor)(row)?;
+            (score.is_finite() && label.is_finite()).then_some((row, score, label))
+        })
+        .collect();
+    if scored.len() < options.review.min_observations {
+        return None;
+    }
+
+    let pairs: Vec<(f64, f64)> = scored
+        .iter()
+        .map(|(_, score, label)| (*score, *label))
+        .collect();
+    let pearson_ic = pair_pearson(&pairs);
+    let spearman_ic = pair_spearman(&pairs);
+
+    let mut grouped: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
+    for (row, score, label) in &scored {
+        grouped
+            .entry(repricing_ic_window_key(row))
+            .or_default()
+            .push((*score, *label));
+    }
+    let window_ics = grouped
+        .values()
+        .filter(|pairs| pairs.len() >= options.min_window_observations)
+        .map(|pairs| pair_spearman(pairs))
+        .filter(|ic| ic.is_finite())
+        .collect::<Vec<_>>();
+    let positive_windows = window_ics.iter().filter(|ic| **ic > 0.0).count();
+    let window_ic_mean = mean(window_ics.iter().copied());
+    let repricing_icir = icir(&window_ics);
+    let positive_window_ratio = ratio(positive_windows, window_ics.len());
+
+    let buckets = build_repricing_ic_buckets(&scored, options.bucket_count);
+    let bottom = buckets.first();
+    let top = buckets.last();
+    let bucket_avg_labels = buckets
+        .iter()
+        .map(|bucket| bucket.avg_label)
+        .collect::<Vec<_>>();
+    let monotonic_non_decreasing = bucket_avg_labels
+        .windows(2)
+        .all(|window| window[1] + EPS >= window[0]);
+
+    Some(RepricingIcRow {
+        factor: descriptor.name.to_string(),
+        family: descriptor.family,
+        layer: descriptor.layer,
+        factor_role: repricing_factor_role(descriptor.family),
+        target: target.name.to_string(),
+        target_group: target.group,
+        n: scored.len(),
+        pearson_ic,
+        spearman_ic,
+        window_count: window_ics.len(),
+        window_ic_mean,
+        icir: repricing_icir,
+        positive_window_ratio,
+        bottom_bucket_n: bottom.map(|bucket| bucket.n).unwrap_or(0),
+        bottom_bucket_avg_label: bottom.map(|bucket| bucket.avg_label).unwrap_or(f64::NAN),
+        top_bucket_n: top.map(|bucket| bucket.n).unwrap_or(0),
+        top_bucket_avg_label: top.map(|bucket| bucket.avg_label).unwrap_or(f64::NAN),
+        top_bucket_positive_label_rate: top
+            .map(|bucket| bucket.positive_label_rate)
+            .unwrap_or(f64::NAN),
+        bucket_avg_labels,
+        monotonic_non_decreasing,
+        avg_entry_ask: mean(scored.iter().map(|(row, _, _)| row.entry_ask)),
+        avg_pm_spread_bps: mean(scored.iter().map(|(row, _, _)| row.pm_spread_bps)),
+        entry_fill_rate: ratio(
+            scored
+                .iter()
+                .filter(|(row, _, _)| entry_fillable(row))
+                .count(),
+            scored.len(),
+        ),
+        exit_fill_rate: ratio(
+            scored
+                .iter()
+                .filter(|(row, _, _)| exit_fillable(row))
+                .count(),
+            scored.len(),
+        ),
+    })
+}
+
+pub fn format_repricing_ic_report(report: &RepricingIcReport, top_n: usize) -> String {
+    let mut out = String::new();
+    out.push_str("=== Repricing IC Report Data Health ===\n");
+    out.push_str(&format!(
+        "source_obs={} v2_rows={} settlement_labels={} executable_pnl_rows={} entry_fill={:.2}% exit_fill={:.2}%\n",
+        report.health.source_observations,
+        report.health.v2_rows,
+        report.health.settlement_label_rows,
+        report.health.executable_pnl_rows,
+        report.health.entry_fill_rate() * 100.0,
+        report.health.exit_fill_rate() * 100.0,
+    ));
+    push_full_depth_health_line(&mut out, &report.health);
+    out.push_str(&format!(
+        "min_obs={} min_window_obs={} bucket_count={} stake_usd={:.2}\n",
+        report.options.review.min_observations,
+        report.options.min_window_observations,
+        report.options.bucket_count,
+        report.options.review.stake_usd,
+    ));
+    out.push_str(
+        "labels are side-aligned candidate trades: BUY_YES and BUY_NO rows. reprice_pnl_h = future_exit_bid_at_or_after_h * entry_shares - stake - entry_fee.\n",
+    );
+    out.push_str(
+        "future_exit_* fields are labels/diagnostics only and are excluded from factor candidates. execution_filter rows explain tradability, not alpha.\n",
+    );
+
+    let top_n = top_n.max(1);
+    for group in [
+        "reprice_pnl",
+        "reprice_bid_change",
+        "volatility",
+        "settlement",
+        "execution",
+    ] {
+        let group_rows = report
+            .rows
+            .iter()
+            .filter(|row| row.target_group == group)
+            .take(top_n)
+            .collect::<Vec<_>>();
+        if group_rows.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n=== Repricing IC Target Group: {group} ===\n"));
+        out.push_str("target,factor,role,family,layer,n,pearson_ic,spearman_ic,window_count,window_ic_mean,icir,pos_window_ratio,bottom_n,bottom_avg,top_n,top_avg,top_pos_rate,monotonic,avg_entry_ask,avg_pm_spread_bps,entry_fill,exit_fill,bucket_avgs\n");
+        for row in group_rows {
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{:.4},{:.4},{},{:.4},{:.4},{:.4},{},{:.4},{},{:.4},{:.4},{},{:.4},{:.2},{:.4},{:.4},{}\n",
+                row.target,
+                row.factor,
+                row.factor_role,
+                row.family.as_str(),
+                row.layer.as_str(),
+                row.n,
+                row.pearson_ic,
+                row.spearman_ic,
+                row.window_count,
+                row.window_ic_mean,
+                row.icir,
+                row.positive_window_ratio,
+                row.bottom_bucket_n,
+                row.bottom_bucket_avg_label,
+                row.top_bucket_n,
+                row.top_bucket_avg_label,
+                row.top_bucket_positive_label_rate,
+                row.monotonic_non_decreasing,
+                row.avg_entry_ask,
+                row.avg_pm_spread_bps,
+                row.entry_fill_rate,
+                row.exit_fill_rate,
+                format_bucket_avgs(&row.bucket_avg_labels),
+            ));
+        }
+    }
+    out
 }
 
 pub fn walk_forward_factor_combo_v1_with_deribit(
@@ -3744,7 +4101,11 @@ fn summarize_direction_side_leg(
 }
 
 fn audit_bucket_sort_key(bucket: &str) -> usize {
-    if bucket == "all" { 0 } else { 1 }
+    if bucket == "all" {
+        0
+    } else {
+        1
+    }
 }
 
 fn probability_bucket(value: f64) -> Option<String> {
@@ -5763,10 +6124,18 @@ fn side_row(
         label_exit_fillable: exit_fillable,
         label_full_depth_entry_fillable: entry_sweep.fillable,
         label_full_depth_exit_fillable: exit_sweep.fillable,
+        label_future_exit_bid_change_5s: None,
+        label_future_exit_bid_change_10s: None,
         label_future_exit_bid_change_30s: None,
         label_future_exit_bid_change_60s: None,
+        label_future_exit_pnl_5s: None,
+        label_future_exit_pnl_10s: None,
         label_future_exit_pnl_30s: None,
+        label_future_exit_pnl_60s: None,
+        label_future_exit_fillable_5s: None,
+        label_future_exit_fillable_10s: None,
         label_future_exit_fillable_30s: None,
+        label_future_exit_fillable_60s: None,
     }
 }
 
@@ -5854,28 +6223,16 @@ fn enrich_rolling_features(rows: &mut [FactorObservationV2], deribit: &[DeribitF
                     prev.cum_trade_imbalance_5m,
                 ) * rows[idx].side.multiplier();
             }
-            if let Some(future_idx) =
-                future_idx_at_or_after(rows, indexes, pos, ts + chrono::Duration::seconds(30))
-            {
-                let future = rows[future_idx].clone();
-                rows[idx].label_future_exit_bid_change_30s =
-                    finite_diff(future.exit_bid, rows[idx].exit_bid);
-                rows[idx].label_future_exit_fillable_30s =
-                    Some(bool_num(future.label_exit_fillable));
-                if rows[idx].entry_shares.is_finite() && valid_price(future.exit_bid) {
-                    rows[idx].label_future_exit_pnl_30s = Some(
-                        rows[idx].entry_shares * future.exit_bid
-                            - rows[idx].stake_usd
-                            - rows[idx].entry_fee_usd,
-                    );
+            for horizon_secs in [5, 10, 30, 60] {
+                if let Some(future_idx) = future_idx_at_or_after(
+                    rows,
+                    indexes,
+                    pos,
+                    ts + chrono::Duration::seconds(horizon_secs),
+                ) {
+                    let future = rows[future_idx].clone();
+                    set_future_exit_labels(rows, idx, &future, horizon_secs);
                 }
-            }
-            if let Some(future_idx) =
-                future_idx_at_or_after(rows, indexes, pos, ts + chrono::Duration::seconds(60))
-            {
-                let future = rows[future_idx].clone();
-                rows[idx].label_future_exit_bid_change_60s =
-                    finite_diff(future.exit_bid, rows[idx].exit_bid);
             }
 
             rows[idx].pm_quote_stability_30s = quote_stability(rows, indexes, pos, 30);
@@ -5906,6 +6263,48 @@ fn enrich_rolling_features(rows: &mut [FactorObservationV2], deribit: &[DeribitF
                 }
             }
         }
+    }
+}
+
+fn set_future_exit_labels(
+    rows: &mut [FactorObservationV2],
+    idx: usize,
+    future: &FactorObservationV2,
+    horizon_secs: i64,
+) {
+    let bid_change = finite_diff(future.exit_bid, rows[idx].exit_bid);
+    let fillable = Some(bool_num(future.label_exit_fillable));
+    let pnl = if rows[idx].entry_shares.is_finite() && valid_price(future.exit_bid) {
+        Some(
+            rows[idx].entry_shares * future.exit_bid
+                - rows[idx].stake_usd
+                - rows[idx].entry_fee_usd,
+        )
+    } else {
+        None
+    };
+    match horizon_secs {
+        5 => {
+            rows[idx].label_future_exit_bid_change_5s = bid_change;
+            rows[idx].label_future_exit_fillable_5s = fillable;
+            rows[idx].label_future_exit_pnl_5s = pnl;
+        }
+        10 => {
+            rows[idx].label_future_exit_bid_change_10s = bid_change;
+            rows[idx].label_future_exit_fillable_10s = fillable;
+            rows[idx].label_future_exit_pnl_10s = pnl;
+        }
+        30 => {
+            rows[idx].label_future_exit_bid_change_30s = bid_change;
+            rows[idx].label_future_exit_fillable_30s = fillable;
+            rows[idx].label_future_exit_pnl_30s = pnl;
+        }
+        60 => {
+            rows[idx].label_future_exit_bid_change_60s = bid_change;
+            rows[idx].label_future_exit_fillable_60s = fillable;
+            rows[idx].label_future_exit_pnl_60s = pnl;
+        }
+        _ => {}
     }
 }
 
@@ -6086,7 +6485,11 @@ fn normalized_iv(value: f64) -> f64 {
     if !value.is_finite() {
         return f64::NAN;
     }
-    if value > 2.0 { value / 100.0 } else { value }
+    if value > 2.0 {
+        value / 100.0
+    } else {
+        value
+    }
 }
 
 fn finite_diff(now: f64, before: f64) -> Option<f64> {
@@ -6136,6 +6539,180 @@ fn continuation_score(
     } else {
         f64::NAN
     }
+}
+
+#[derive(Clone, Copy)]
+struct RepricingIcTargetDescriptor {
+    name: &'static str,
+    group: &'static str,
+    accessor: fn(&FactorObservationV2) -> Option<f64>,
+}
+
+struct RepricingIcBucketSummary {
+    n: usize,
+    avg_label: f64,
+    positive_label_rate: f64,
+}
+
+fn repricing_ic_targets() -> Vec<RepricingIcTargetDescriptor> {
+    vec![
+        repricing_target("reprice_pnl_5s", "reprice_pnl", |row| {
+            row.label_future_exit_pnl_5s
+        }),
+        repricing_target("reprice_pnl_10s", "reprice_pnl", |row| {
+            row.label_future_exit_pnl_10s
+        }),
+        repricing_target("reprice_pnl_30s", "reprice_pnl", |row| {
+            row.label_future_exit_pnl_30s
+        }),
+        repricing_target("reprice_pnl_60s", "reprice_pnl", |row| {
+            row.label_future_exit_pnl_60s
+        }),
+        repricing_target("reprice_bid_change_5s", "reprice_bid_change", |row| {
+            row.label_future_exit_bid_change_5s
+        }),
+        repricing_target("reprice_bid_change_10s", "reprice_bid_change", |row| {
+            row.label_future_exit_bid_change_10s
+        }),
+        repricing_target("reprice_bid_change_30s", "reprice_bid_change", |row| {
+            row.label_future_exit_bid_change_30s
+        }),
+        repricing_target("reprice_bid_change_60s", "reprice_bid_change", |row| {
+            row.label_future_exit_bid_change_60s
+        }),
+        repricing_target("abs_reprice_bid_change_5s", "volatility", |row| {
+            row.label_future_exit_bid_change_5s.map(f64::abs)
+        }),
+        repricing_target("abs_reprice_bid_change_10s", "volatility", |row| {
+            row.label_future_exit_bid_change_10s.map(f64::abs)
+        }),
+        repricing_target("abs_reprice_bid_change_30s", "volatility", |row| {
+            row.label_future_exit_bid_change_30s.map(f64::abs)
+        }),
+        repricing_target("abs_reprice_bid_change_60s", "volatility", |row| {
+            row.label_future_exit_bid_change_60s.map(f64::abs)
+        }),
+        repricing_target("settlement_executable_pnl", "settlement", executable_pnl),
+        repricing_target("settlement_win", "settlement", |row| {
+            row.label_settlement_win
+        }),
+        repricing_target("execution_entry_fillable", "execution", |row| {
+            Some(bool_num(entry_fillable(row)))
+        }),
+        repricing_target("execution_exit_fillable", "execution", |row| {
+            Some(bool_num(exit_fillable(row)))
+        }),
+        repricing_target("execution_future_exit_fillable_30s", "execution", |row| {
+            row.label_future_exit_fillable_30s
+        }),
+        repricing_target("execution_pm_spread_bps", "execution", |row| {
+            row.pm_spread_bps.is_finite().then_some(row.pm_spread_bps)
+        }),
+        repricing_target("execution_pm_spread_change_30s", "execution", |row| {
+            row.pm_spread_change_30s
+                .is_finite()
+                .then_some(row.pm_spread_change_30s)
+        }),
+    ]
+}
+
+fn repricing_target(
+    name: &'static str,
+    group: &'static str,
+    accessor: fn(&FactorObservationV2) -> Option<f64>,
+) -> RepricingIcTargetDescriptor {
+    RepricingIcTargetDescriptor {
+        name,
+        group,
+        accessor,
+    }
+}
+
+fn build_repricing_ic_buckets(
+    scored: &[(&FactorObservationV2, f64, f64)],
+    bucket_count: usize,
+) -> Vec<RepricingIcBucketSummary> {
+    let mut sorted = scored.to_vec();
+    sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let bucket_count = bucket_count.clamp(2, sorted.len().max(2));
+    let mut buckets = Vec::with_capacity(bucket_count);
+    for bucket_idx in 0..bucket_count {
+        let start = bucket_idx * sorted.len() / bucket_count;
+        let end = ((bucket_idx + 1) * sorted.len() / bucket_count).max(start + 1);
+        let slice = &sorted[start..end.min(sorted.len())];
+        let positives = slice.iter().filter(|(_, _, label)| *label > 0.0).count();
+        buckets.push(RepricingIcBucketSummary {
+            n: slice.len(),
+            avg_label: mean(slice.iter().map(|(_, _, label)| *label)),
+            positive_label_rate: ratio(positives, slice.len()),
+        });
+    }
+    buckets
+}
+
+fn repricing_ic_window_key(row: &FactorObservationV2) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        normalize_symbol(&row.symbol),
+        row.regime.as_str(),
+        distance_sigma_bucket(row),
+        time_remaining_bin(row),
+    )
+}
+
+fn distance_sigma_bucket(row: &FactorObservationV2) -> &'static str {
+    let distance = row.side_distance_over_sigma.abs();
+    if !distance.is_finite() {
+        "distance_unknown"
+    } else if distance < 0.5 {
+        "distance_lt_0_5"
+    } else if distance < 1.0 {
+        "distance_0_5_1"
+    } else if distance < 2.0 {
+        "distance_1_2"
+    } else {
+        "distance_gte_2"
+    }
+}
+
+fn repricing_factor_role(family: FactorFamily) -> &'static str {
+    match family {
+        FactorFamily::Execution
+        | FactorFamily::PmLiquidity
+        | FactorFamily::Exit
+        | FactorFamily::PortfolioRisk => "execution_filter",
+        FactorFamily::Alpha
+        | FactorFamily::CexLob
+        | FactorFamily::CexAggTrade
+        | FactorFamily::PmDynamics
+        | FactorFamily::DeribitVol
+        | FactorFamily::Regime => "alpha_or_repricing",
+    }
+}
+
+fn target_group_rank(group: &str) -> usize {
+    match group {
+        "reprice_pnl" => 0,
+        "reprice_bid_change" => 1,
+        "volatility" => 2,
+        "settlement" => 3,
+        "execution" => 4,
+        _ => 5,
+    }
+}
+
+fn format_bucket_avgs(values: &[f64]) -> String {
+    values
+        .iter()
+        .map(|value| {
+            if value.is_finite() {
+                format!("{value:.4}")
+            } else {
+                "nan".to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn descriptor(
@@ -6332,7 +6909,11 @@ fn signum(value: f64) -> f64 {
 }
 
 fn bool_num(value: bool) -> f64 {
-    if value { 1.0 } else { 0.0 }
+    if value {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 fn crypto_fee_cost(entry_price: f64) -> f64 {
@@ -6703,21 +7284,17 @@ mod tests {
         assert!(report.gate.selected_n < report.baseline_health.v2_rows);
         assert!((report.gate.entry_fill_rate - 1.0).abs() < EPS);
         assert!(!report.review.reviews.is_empty());
-        assert!(
-            report
-                .review
-                .reviews
-                .iter()
-                .all(|review| !review.factor.starts_with("future_exit_"))
-        );
+        assert!(report
+            .review
+            .reviews
+            .iter()
+            .all(|review| !review.factor.starts_with("future_exit_")));
         assert!(!report.walk_forward.windows.is_empty());
-        assert!(
-            report
-                .stability
-                .rows
-                .iter()
-                .any(|row| row.factor == "side_model_prob")
-        );
+        assert!(report
+            .stability
+            .rows
+            .iter()
+            .any(|row| row.factor == "side_model_prob"));
     }
 
     #[test]
@@ -6901,12 +7478,10 @@ mod tests {
 
         let report = review_factors_v2(&observations, FactorReviewOptions::default());
         assert!(report.health.entry_fill_rate() > 0.99);
-        assert!(
-            report
-                .reviews
-                .iter()
-                .any(|review| review.factor == "side_model_edge")
-        );
+        assert!(report
+            .reviews
+            .iter()
+            .any(|review| review.factor == "side_model_edge"));
     }
 
     #[test]
@@ -6931,12 +7506,10 @@ mod tests {
         );
 
         assert!(!report.reviews.is_empty());
-        assert!(
-            report
-                .reviews
-                .iter()
-                .all(|review| review.factor.contains("side_model_prob"))
-        );
+        assert!(report
+            .reviews
+            .iter()
+            .all(|review| review.factor.contains("side_model_prob")));
     }
 
     #[test]
@@ -7076,9 +7649,7 @@ mod tests {
         assert!(top.executable_ev_supported);
 
         let text = format_factor_review_v2_report(&report, 5);
-        assert!(
-            text.contains("=== Binance/CEX Direction Audit: Settlement Predictive Buckets ===")
-        );
+        assert!(text.contains("=== Binance/CEX Direction Audit: Settlement Predictive Buckets ==="));
         assert!(text.contains("ev_supported"));
     }
 
@@ -7192,6 +7763,67 @@ mod tests {
     }
 
     #[test]
+    fn repricing_ic_report_scores_side_aligned_future_exit_pnl() {
+        let mut rows = Vec::new();
+        let base_ts = Utc::now();
+        for (symbol_idx, symbol) in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+            .iter()
+            .enumerate()
+        {
+            for idx in 0..6 {
+                let score = idx as f64 + symbol_idx as f64 * 0.1;
+                let label = score * 0.25 - 0.5;
+                let mut obs = base_obs();
+                obs.event_id = format!("evt-{symbol}-{idx}");
+                obs.symbol = (*symbol).to_string();
+                obs.tick_ts = base_ts + chrono::Duration::seconds((symbol_idx * 100 + idx) as i64);
+                obs.model_edge_up = score;
+                obs.model_prob_up = (0.45 + score * 0.02).clamp(0.01, 0.99);
+                obs.distance_over_sigma = if symbol_idx % 2 == 0 { 0.25 } else { 1.25 };
+                let mut row = side_row(&obs, ReviewSide::Up, DEFAULT_STAKE_USD, None);
+                row.side_model_edge = score;
+                row.label_future_exit_pnl_30s = Some(label);
+                row.label_future_exit_bid_change_30s = Some(label / row.entry_shares);
+                rows.push(row);
+            }
+        }
+
+        let report = review_repricing_ic_rows(
+            &[],
+            &rows,
+            RepricingIcOptions {
+                review: FactorReviewOptions {
+                    min_observations: 20,
+                    ..Default::default()
+                },
+                min_window_observations: 5,
+                bucket_count: 5,
+                factor_name_filter: Some("side_model_edge,future_exit".to_string()),
+            },
+        );
+        let row = report
+            .rows
+            .iter()
+            .find(|row| row.factor == "side_model_edge" && row.target == "reprice_pnl_30s")
+            .expect("side_model_edge repricing row");
+
+        assert_eq!(row.factor_role, "alpha_or_repricing");
+        assert!(row.spearman_ic > 0.9);
+        assert_eq!(row.window_count, 4);
+        assert_eq!(row.positive_window_ratio, 1.0);
+        assert!(row.top_bucket_avg_label > row.bottom_bucket_avg_label);
+        assert!(row.monotonic_non_decreasing);
+        assert!(report
+            .rows
+            .iter()
+            .all(|row| !row.factor.starts_with("future_exit_")));
+
+        let text = format_repricing_ic_report(&report, 10);
+        assert!(text.contains("=== Repricing IC Target Group: reprice_pnl ==="));
+        assert!(text.contains("future_exit_* fields are labels/diagnostics only"));
+    }
+
+    #[test]
     fn walk_forward_report_prints_full_depth_health() {
         let report = FactorWalkForwardReport {
             options: FactorWalkForwardOptions::default(),
@@ -7270,18 +7902,14 @@ mod tests {
         assert!(side_model.threshold.is_finite());
         assert!(side_model.test.selected_n > 0);
         assert!(side_model.test.total_pnl_after_cost > 0.0);
-        assert!(
-            report
-                .aggregates
-                .iter()
-                .any(|aggregate| aggregate.factor == "side_model_prob")
-        );
-        assert!(
-            report
-                .windows
-                .iter()
-                .all(|window| !window.factor.starts_with("future_exit_"))
-        );
+        assert!(report
+            .aggregates
+            .iter()
+            .any(|aggregate| aggregate.factor == "side_model_prob"));
+        assert!(report
+            .windows
+            .iter()
+            .all(|window| !window.factor.starts_with("future_exit_")));
     }
 
     #[test]
@@ -7469,11 +8097,9 @@ mod tests {
 
         assert!(!report.windows.is_empty());
         assert!(report.aggregate.total_test_pnl_after_cost > 0.0);
-        assert!(
-            report
-                .windows
-                .iter()
-                .all(|window| !window.components.is_empty())
-        );
+        assert!(report
+            .windows
+            .iter()
+            .all(|window| !window.components.is_empty()));
     }
 }

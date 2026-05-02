@@ -11,17 +11,19 @@ use ploy_research::{
     FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
     FactorWalkForwardOptions, FillabilityReviewOptions, LiquidityGateV1Options,
     LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions, ResearchSnapshotRequest,
-    TradeFormationReviewOptions, build_factor_observations_with_lob_sampled,
+    RepricingIcOptions, TradeFormationReviewOptions, build_factor_observations_with_lob_sampled,
     build_factor_stability_report, format_factor_combo_v1_report, format_factor_stability_report,
     format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
     format_liquidity_gate_v1_report, format_liquidity_gated_alpha_v1_report,
-    format_meta_label_walk_forward_v1_report, format_trade_formation_v1_report,
+    format_meta_label_walk_forward_v1_report, format_repricing_ic_report,
+    format_trade_formation_v1_report,
     liquidity_gate_v1_with_deribit, liquidity_gated_alpha_v1_with_deribit,
     load_deribit_feature_snapshots, load_research_lob_snapshots_sampled,
     load_research_pm_book_snapshots_sampled, load_research_snapshot,
-    review_fillability_v1_with_deribit, review_trade_formation_v1_with_deribit,
-    validate_snapshot_request, walk_forward_factor_combo_v1_with_deribit,
-    walk_forward_factors_v2_with_deribit_and_pm_books, walk_forward_meta_label_v1_with_deribit,
+    review_fillability_v1_with_deribit, review_repricing_ic_with_deribit_and_pm_books,
+    review_trade_formation_v1_with_deribit, validate_snapshot_request,
+    walk_forward_factor_combo_v1_with_deribit, walk_forward_factors_v2_with_deribit_and_pm_books,
+    walk_forward_meta_label_v1_with_deribit,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -341,6 +343,19 @@ async fn main() {
         println!("{snapshot_provenance}");
     }
     println!("{}", format_factor_walk_forward_v2_report(&report));
+    let repricing_ic_report = review_repricing_ic_with_deribit_and_pm_books(
+        &observations,
+        &deribit_snapshots,
+        &all_pm_book_snapshots,
+        RepricingIcOptions {
+            review: options.review.clone(),
+            ..Default::default()
+        },
+    );
+    println!(
+        "{}",
+        format_repricing_ic_report(&repricing_ic_report, options.top_n)
+    );
     let fillability_report = review_fillability_v1_with_deribit(
         &observations,
         &deribit_snapshots,
