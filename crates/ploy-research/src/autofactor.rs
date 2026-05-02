@@ -394,20 +394,11 @@ pub fn mine_autofactors(
     reports.sort_by(|lhs, rhs| {
         decision_rank(rhs.decision)
             .cmp(&decision_rank(lhs.decision))
-            .then_with(|| {
-                rhs.icir
-                    .partial_cmp(&lhs.icir)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| {
-                rhs.spearman_ic
-                    .partial_cmp(&lhs.spearman_ic)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .then_with(|| rhs.icir.total_cmp(&lhs.icir))
+            .then_with(|| rhs.spearman_ic.total_cmp(&lhs.spearman_ic))
             .then_with(|| {
                 rhs.top_bucket_avg_label
-                    .partial_cmp(&lhs.top_bucket_avg_label)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&lhs.top_bucket_avg_label)
             })
     });
     Ok(reports)
