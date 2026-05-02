@@ -84,7 +84,8 @@ pub use autofactor::{
     AutoFactorDecision, AutoFactorError, AutoFactorMatrix, AutoFactorOptions, AutoFactorReport,
     AutoFactorV2Target, FactorExpr, NamedFactorExpr, autofactor_labels_from_v2,
     autofactor_matrix_from_v2, autofactor_windows_from_v2, domain_seed_candidates,
-    evaluate_named_factor, mine_autofactors, mine_domain_autofactors_from_v2,
+    evaluate_named_factor, format_autofactor_reports, mine_autofactors,
+    mine_domain_autofactors_from_v2,
 };
 pub use backtest::{BacktestMetrics, SimulatedFill, run_binary_backtest};
 pub use factors_new::{

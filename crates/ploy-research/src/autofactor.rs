@@ -215,6 +215,7 @@ impl AutoFactorDecision {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoFactorReport {
     pub name: String,
+    pub target: Option<String>,
     pub expr: FactorExpr,
     pub n: usize,
     pub pearson_ic: f64,
@@ -353,6 +354,7 @@ pub fn evaluate_named_factor(
 
     Ok(AutoFactorReport {
         name: factor.name.clone(),
+        target: factor.target.clone(),
         expr: factor.expr.clone(),
         n: scored.len(),
         pearson_ic: pearson,
@@ -409,6 +411,38 @@ pub fn mine_autofactors(
             })
     });
     Ok(reports)
+}
+
+pub fn format_autofactor_reports(reports: &[AutoFactorReport], top_n: usize) -> String {
+    let mut out = String::new();
+    out.push_str("=== AutoFactor Seed Candidate Report ===\n");
+    out.push_str(
+        "target labels are side-aligned executable repricing PnL; reports are candidate discovery gates, not deploy decisions.\n",
+    );
+    out.push_str(
+        "rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,monotonicity,top_bucket_avg_label,top_bucket_positive_label_rate,complexity\n",
+    );
+    for (idx, report) in reports.iter().take(top_n).enumerate() {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{:.6},{:.6},{},{:.6},{:.4},{:.4},{:.6},{:.4},{}\n",
+            idx + 1,
+            report.name,
+            report.target.as_deref().unwrap_or("<unspecified>"),
+            report.decision.as_str(),
+            report.reason,
+            report.n,
+            report.spearman_ic,
+            report.pearson_ic,
+            report.window_count,
+            report.icir,
+            report.positive_window_ratio,
+            report.monotonicity_score,
+            report.top_bucket_avg_label,
+            report.top_bucket_positive_label_rate,
+            report.complexity,
+        ));
+    }
+    out
 }
 
 pub fn mine_domain_autofactors_from_v2(
