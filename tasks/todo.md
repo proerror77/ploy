@@ -1,3 +1,33 @@
+# PM5D LOB Repricing IC Report (2026-05-03)
+
+Issue: https://github.com/proerror77/ploy/issues/305
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: side-aligned repricing IC/ICIR report, future-exit labels, and focused tests.
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: print the repricing IC report in the existing factor walk-forward workflow.
+- `crates/ploy-research/src/lib.rs`
+  - Owner: public exports for report types and entrypoints.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add side-aligned 5s/10s/30s/60s future-exit labels for candidate BUY_YES / BUY_NO rows.
+- [x] Add a Repricing IC report that scores factors against future executable repricing PnL, bid-change, settlement, volatility-style, and execution diagnostic targets.
+- [x] Exclude `future_exit_*` diagnostic labels from tradable factor candidates to avoid look-ahead leakage.
+- [x] Wire the report into `factor_walk_forward_v2`.
+- [x] Add focused regression tests and run local verification.
+- [ ] Commit and open PR.
+
+## Review
+
+- 2026-05-03: Added `RepricingIcReport` around side-aligned candidate rows. It reports target groups for `reprice_pnl`, `reprice_bid_change`, `volatility`, `settlement`, and `execution`, with Spearman/Pearson IC, window ICIR, positive-window ratio, five-bucket monotonicity, top/bottom bucket average label, fill rates, and factor role (`alpha_or_repricing` vs `execution_filter`).
+- 2026-05-03: Extended future-exit labels to 5s/10s/30s/60s bid-change, executable repricing PnL, and future exit fillability. The report text explicitly states these are labels/diagnostics only; `future_exit_*` descriptors remain excluded from tradable factor candidates.
+- 2026-05-03: Wired the report into `factor_walk_forward_v2` after the existing walk-forward section and before fillability/liquidity reports. Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-repricing-ic-target rtk cargo test -p ploy-research factors_v2 --lib`, `CARGO_TARGET_DIR=/tmp/ploy-repricing-ic-target rtk cargo check -p ploy-research --example factor_walk_forward_v2 --features db --no-default-features`, and `git diff --check`. The example check emitted only pre-existing strategy-bundle dead-code warnings and the vendor profile warning.
+
 # PM5D Scientific Edge Search (2026-05-02)
 
 Issue: https://github.com/proerror77/ploy/issues/291
