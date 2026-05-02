@@ -1748,13 +1748,11 @@ fn review_factor_rows_with_descriptor_filter(
         .collect();
     reviews.sort_by(|a, b| {
         b.selected_total_pnl_after_cost
-            .partial_cmp(&a.selected_total_pnl_after_cost)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&a.selected_total_pnl_after_cost)
             .then_with(|| {
                 b.executable_pnl_rank_ic
                     .abs()
-                    .partial_cmp(&a.executable_pnl_rank_ic.abs())
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&a.executable_pnl_rank_ic.abs())
             })
     });
     let executable_ev_buckets = build_executable_ev_buckets(v2_rows, &options);
@@ -1857,14 +1855,8 @@ fn walk_forward_factor_rows(
             fitted.sort_by(|a, b| {
                 b.test
                     .total_pnl_after_cost
-                    .partial_cmp(&a.test.total_pnl_after_cost)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        b.test
-                            .sharpe
-                            .partial_cmp(&a.test.sharpe)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
+                    .total_cmp(&a.test.total_pnl_after_cost)
+                    .then_with(|| b.test.sharpe.total_cmp(&a.test.sharpe))
             });
             windows.extend(fitted);
         }
@@ -1976,14 +1968,9 @@ pub fn build_factor_stability_report(
             .cmp(&decision_rank(a.decision))
             .then_with(|| {
                 b.total_test_pnl_after_cost
-                    .partial_cmp(&a.total_test_pnl_after_cost)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&a.total_test_pnl_after_cost)
             })
-            .then_with(|| {
-                b.positive_window_ratio
-                    .partial_cmp(&a.positive_window_ratio)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .then_with(|| b.positive_window_ratio.total_cmp(&a.positive_window_ratio))
     });
     FactorStabilityReport { options, rows }
 }
@@ -2039,17 +2026,8 @@ fn review_repricing_ic_rows(
     rows.sort_by(|a, b| {
         target_group_rank(a.target_group)
             .cmp(&target_group_rank(b.target_group))
-            .then_with(|| {
-                b.spearman_ic
-                    .abs()
-                    .partial_cmp(&a.spearman_ic.abs())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| {
-                b.top_bucket_avg_label
-                    .partial_cmp(&a.top_bucket_avg_label)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .then_with(|| b.spearman_ic.abs().total_cmp(&a.spearman_ic.abs()))
+            .then_with(|| b.top_bucket_avg_label.total_cmp(&a.top_bucket_avg_label))
     });
     RepricingIcReport {
         options,
@@ -2342,20 +2320,11 @@ pub fn review_fillability_v1_with_deribit(
     rows.sort_by(|a, b| {
         fillability_decision_rank(b.decision)
             .cmp(&fillability_decision_rank(a.decision))
-            .then_with(|| {
-                b.roundtrip_fill_rate
-                    .partial_cmp(&a.roundtrip_fill_rate)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| {
-                b.entry_fill_rate
-                    .partial_cmp(&a.entry_fill_rate)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .then_with(|| b.roundtrip_fill_rate.total_cmp(&a.roundtrip_fill_rate))
+            .then_with(|| b.entry_fill_rate.total_cmp(&a.entry_fill_rate))
             .then_with(|| {
                 b.total_executable_pnl_after_cost
-                    .partial_cmp(&a.total_executable_pnl_after_cost)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&a.total_executable_pnl_after_cost)
             })
     });
     FillabilityReviewReport {
@@ -3324,13 +3293,9 @@ fn sorted_executable_ev_buckets(
         .collect();
     buckets.sort_by(|a, b| {
         let ordering = if best_first {
-            b.avg_pnl_15u
-                .partial_cmp(&a.avg_pnl_15u)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.avg_pnl_15u.total_cmp(&a.avg_pnl_15u)
         } else {
-            a.avg_pnl_15u
-                .partial_cmp(&b.avg_pnl_15u)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            a.avg_pnl_15u.total_cmp(&b.avg_pnl_15u)
         };
         ordering
             .then_with(|| a.dimension.cmp(&b.dimension))
@@ -3409,13 +3374,8 @@ fn sorted_binance_direction_audit(
         .collect::<Vec<_>>();
     rows.sort_by(|a, b| {
         b.t_stat_vs_coinflip
-            .partial_cmp(&a.t_stat_vs_coinflip)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                b.lift_vs_coinflip
-                    .partial_cmp(&a.lift_vs_coinflip)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .total_cmp(&a.t_stat_vs_coinflip)
+            .then_with(|| b.lift_vs_coinflip.total_cmp(&a.lift_vs_coinflip))
             .then_with(|| a.factor.cmp(&b.factor))
             .then_with(|| a.bucket.cmp(&b.bucket))
     });
@@ -3537,7 +3497,7 @@ fn append_binance_direction_factor(
     if scored.len() < min_sample {
         return;
     }
-    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| a.1.total_cmp(&b.1));
     let selected_n = ((scored.len() as f64) * options.top_quantile.clamp(0.01, 1.0))
         .ceil()
         .max(1.0) as usize;
@@ -4247,8 +4207,7 @@ fn build_trade_formation_path_rows(
         .collect::<Vec<_>>();
     out.sort_by(|a, b| {
         b.total_pnl_after_cost
-            .partial_cmp(&a.total_pnl_after_cost)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&a.total_pnl_after_cost)
             .then_with(|| b.n.cmp(&a.n))
     });
     out
@@ -4324,13 +4283,8 @@ fn build_trade_formation_rule_rows(
         .collect::<Vec<_>>();
     out.sort_by(|a, b| {
         b.total_pnl_after_cost
-            .partial_cmp(&a.total_pnl_after_cost)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                b.win_rate
-                    .partial_cmp(&a.win_rate)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .total_cmp(&a.total_pnl_after_cost)
+            .then_with(|| b.win_rate.total_cmp(&a.win_rate))
     });
     out
 }
@@ -4944,8 +4898,7 @@ fn fit_combo_v1_window(
         family_components.sort_by(|a, b| {
             b.train_executable_pnl_rank_ic
                 .abs()
-                .partial_cmp(&a.train_executable_pnl_rank_ic.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.train_executable_pnl_rank_ic.abs())
         });
         components.extend(
             family_components
@@ -4957,8 +4910,7 @@ fn fit_combo_v1_window(
     components.sort_by(|a, b| {
         b.train_executable_pnl_rank_ic
             .abs()
-            .partial_cmp(&a.train_executable_pnl_rank_ic.abs())
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&a.train_executable_pnl_rank_ic.abs())
     });
     components.truncate(options.max_total_factors.max(1));
     if components.is_empty() {
@@ -4973,7 +4925,7 @@ fn fit_combo_v1_window(
     if train_scores.len() < options.walk_forward.review.min_observations {
         return None;
     }
-    train_scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    train_scores.sort_by(|a, b| b.total_cmp(a));
     let selected_n = ((train_scores.len() as f64)
         * options.walk_forward.review.top_quantile.clamp(0.01, 1.0))
     .ceil()
@@ -5281,14 +5233,9 @@ fn aggregate_meta_label_windows(
             .cmp(&decision_rank(a.decision))
             .then_with(|| {
                 b.total_test_pnl_after_cost
-                    .partial_cmp(&a.total_test_pnl_after_cost)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&a.total_test_pnl_after_cost)
             })
-            .then_with(|| {
-                b.positive_window_ratio
-                    .partial_cmp(&a.positive_window_ratio)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .then_with(|| b.positive_window_ratio.total_cmp(&a.positive_window_ratio))
     });
     out
 }
@@ -5410,7 +5357,7 @@ fn fit_walk_forward_factor(
     if directed_scores.is_empty() {
         return None;
     }
-    directed_scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    directed_scores.sort_by(|a, b| b.total_cmp(a));
     let selected_n = ((directed_scores.len() as f64) * options.top_quantile.clamp(0.01, 1.0))
         .ceil()
         .max(1.0) as usize;
@@ -5562,13 +5509,8 @@ fn aggregate_walk_forward_windows(
     }
     aggregates.sort_by(|a, b| {
         b.total_test_pnl_after_cost
-            .partial_cmp(&a.total_test_pnl_after_cost)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                b.positive_window_ratio
-                    .partial_cmp(&a.positive_window_ratio)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .total_cmp(&a.total_test_pnl_after_cost)
+            .then_with(|| b.positive_window_ratio.total_cmp(&a.positive_window_ratio))
     });
     aggregates
 }
@@ -5619,11 +5561,7 @@ fn review_one_factor(
     };
 
     let mut directed = scored;
-    directed.sort_by(|a, b| {
-        (b.1 * direction)
-            .partial_cmp(&(a.1 * direction))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    directed.sort_by(|a, b| (b.1 * direction).total_cmp(&(a.1 * direction)));
     let selected_n = ((directed.len() as f64) * options.top_quantile.clamp(0.01, 1.0))
         .ceil()
         .max(1.0) as usize;
@@ -6633,7 +6571,7 @@ fn build_repricing_ic_buckets(
     bucket_count: usize,
 ) -> Vec<RepricingIcBucketSummary> {
     let mut sorted = scored.to_vec();
-    sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| a.1.total_cmp(&b.1));
     let bucket_count = bucket_count.clamp(2, sorted.len().max(2));
     let mut buckets = Vec::with_capacity(bucket_count);
     for bucket_idx in 0..bucket_count {
