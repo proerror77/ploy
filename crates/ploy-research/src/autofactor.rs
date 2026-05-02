@@ -444,7 +444,14 @@ pub fn mine_domain_autofactors_from_v2(
     let matrix = autofactor_matrix_from_v2(rows)?;
     let labels = autofactor_labels_from_v2(rows, target);
     let windows = autofactor_windows_from_v2(rows);
-    let candidates = domain_seed_candidates(&matrix.input_names());
+    let target_name = target.as_str().to_string();
+    let candidates = domain_seed_candidates(&matrix.input_names())
+        .into_iter()
+        .map(|mut factor| {
+            factor.target = Some(target_name.clone());
+            factor
+        })
+        .collect::<Vec<_>>();
     mine_autofactors(&candidates, &matrix, &labels, &windows, options)
 }
 
@@ -1271,5 +1278,29 @@ mod tests {
         assert!(reports
             .iter()
             .any(|report| report.name == "poly_lag_pressure"));
+    }
+
+    #[test]
+    fn mines_domain_candidates_from_v2_uses_requested_target_metadata() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let options = AutoFactorOptions {
+            min_observations: 40,
+            min_window_observations: 10,
+            min_icir: 0.1,
+            ..Default::default()
+        };
+
+        let reports =
+            mine_domain_autofactors_from_v2(&rows, AutoFactorV2Target::RepricePnl30s, &options)
+                .expect("reports");
+
+        assert!(!reports.is_empty());
+        assert!(reports
+            .iter()
+            .all(|report| report.target.as_deref() == Some("reprice_pnl_30s")));
+
+        let formatted = format_autofactor_reports(&reports, reports.len());
+        assert!(formatted.contains("reprice_pnl_30s"));
+        assert!(!formatted.contains("reprice_pnl_10s"));
     }
 }
