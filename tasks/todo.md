@@ -24,7 +24,7 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Push fillability-accounting fix and rerun strict matrix on `main`.
 - [x] Audit UP/DOWN side-label generation for obvious sign reversal.
 - [x] Add row-level selection audit output to diagnose whether `inverted` is a true contrarian edge or a probability semantics error.
-- [ ] Rerun strict matrix with `selection-audit.csv` artifacts.
+- [x] Rerun strict matrix with `selection-audit.csv` artifacts.
 
 ## Review
 
@@ -37,6 +37,7 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - 2026-05-01: PR #290 merged as `425368e8db4bfc44117afc5d2ea9086f52114763`. Strict rerun `25211226040` showed top inverted candidates have `fill_rate=100%`; the remaining blockers are sample power, EV calibration gap, and positive-day stability, not executable fillability.
 - 2026-05-01: Side-label audit found no obvious UP/DOWN settlement reversal in `FactorObservationV2`: UP rows use `model_prob_up`, `pm_up_ask`, and `settlement_up`; DOWN rows use `1 - model_prob_up`, `pm_down_ask`, and `1 - settlement_up`. The suspicious part is the matrix `Inverted` mode itself: it uses `1 - side_model_prob` while still buying the same side, so it is a contrarian same-side probability transform rather than an opposite-side trade.
 - 2026-05-01: Added `selection-audit.csv` to the matrix artifacts. It records raw side probability, transformed probability, calibrated probability, side, settlement win, executable PnL, and selection status for rows after all gates. This is needed to decide whether the inverted family is a real contrarian/PM-lag edge or just a probability-semantics bug.
+- 2026-05-02: Re-ran the strict 7-day edge matrix on current `main` after parity fixes. Workflow run `25241818848` used snapshot `25204438461` / hash `fb338e1f202c3bda`, train `2026-04-24 -> 2026-04-28`, validation `2026-04-29 -> 2026-05-01`, six symbols, stake `15`, and `min_trades=80`. The run failed closed with zero deployable validation candidates and uploaded `strategy-matrix-results.csv`, `gate-attrition.csv`, `selection-audit.csv`, `edge-matrix-summary.json`, and `report.txt`. Validation still favors inverted direction over model direction (`Inverted` total validation PnL `+$20,538.21` across 2,022 accepted trades; `Model` `-$3,460.54` across 1,543 accepted trades), but the best row `inverted_entry_only_pm_none_wide_ev0.05` remains blocked by sample power (`65 < 80` trades), EV calibration gap (`0.348 > 0.30`), and positive-day stability (`66.7% < 70%`). This confirms the current evidence supports continued systematic research, not dry-run/live restoration.
 
 # Stable Reversal Fillability Snapshot Research (2026-05-01)
 
