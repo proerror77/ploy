@@ -1,3 +1,31 @@
+# Rust Native AutoFactor Engine (2026-05-03)
+
+## Files
+
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: Rust-native factor expression DSL, evaluator, IC/ICIR gate, bucket monotonicity, and seed candidate generation.
+- `crates/ploy-research/src/lib.rs`
+  - Owner: public exports for the AutoFactor foundation.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add a constrained factor-expression DSL with safe operators for runtime/replay parity.
+- [x] Add a vector evaluator over named primitive feature columns.
+- [x] Add IC/ICIR, positive-window ratio, bucket monotonicity, and hard gate reporting for repricing labels.
+- [x] Add deterministic domain seed candidates for Polymarket lag / OFI depth / IV shock formulas.
+- [x] Add focused tests and local verification.
+- [x] Commit and open PR.
+
+## Review
+
+- 2026-05-03: Added `crates/ploy-research/src/autofactor.rs` as the Rust-native minimum AutoFactor foundation. The module defines a serde-compatible `FactorExpr` DSL, safe numeric operators, rolling/delta/zscore transforms, `AutoFactorMatrix`, `NamedFactorExpr`, `AutoFactorOptions`, `AutoFactorReport`, and a candidate/watchlist/reject gate.
+- 2026-05-03: Added deterministic domain seed candidates for the first repricing-momentum lane: `ofi_l5_depth_norm`, `poly_lag_pressure`, `near_strike_iv_shock`, `stale_ofi_near_strike`, and `spread_adjusted_external_move`. These are intentionally narrow seeds for Polymarket lag / OFI-depth / near-strike IV shock discovery, not a live strategy.
+- 2026-05-03: Added a V2 adapter so existing `FactorObservationV2` rows can be converted into AutoFactor primitive columns, `reprice_pnl_10s` / `reprice_pnl_30s` labels, and `symbol × date × time-to-expiry × distance` windows. Added the identity `repricing_gap_side_10s` seed so the first narrow lane can test model-implied executable mispricing directly.
+- 2026-05-03: Exported the AutoFactor API from `crates/ploy-research/src/lib.rs`. Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-autofactor rtk cargo test -p ploy-research autofactor --lib` and `CARGO_TARGET_DIR=/tmp/ploy-autofactor rtk cargo check -p ploy-research --lib`. The focused test suite now covers the V2 adapter and seed mining path. The lib check emitted only pre-existing strategy-bundle dead-code warnings and the vendor profile warning.
+- 2026-05-03: Opened PR `#307` (`Add Rust AutoFactor discovery foundation`). This is a research/replay foundation only; no dry-run or live strategy was promoted.
+
 # PM5D LOB Repricing IC Report (2026-05-03)
 
 Issue: https://github.com/proerror77/ploy/issues/305

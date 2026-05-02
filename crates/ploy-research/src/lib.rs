@@ -1,4 +1,5 @@
 pub mod attribution;
+pub mod autofactor;
 pub mod backtest;
 pub mod backtesting;
 pub mod dataset;
@@ -79,6 +80,12 @@ pub fn crate_marker() -> &'static str {
 // factor registry uses the same type internally, but does not re-export its own
 // `factors_new::Regime` alias.
 pub use attribution::{AttributionReport, RegimePnl, factor_pnl, regime_pnl};
+pub use autofactor::{
+    AutoFactorDecision, AutoFactorError, AutoFactorMatrix, AutoFactorOptions, AutoFactorReport,
+    AutoFactorV2Target, FactorExpr, NamedFactorExpr, autofactor_labels_from_v2,
+    autofactor_matrix_from_v2, autofactor_windows_from_v2, domain_seed_candidates,
+    evaluate_named_factor, mine_autofactors, mine_domain_autofactors_from_v2,
+};
 pub use backtest::{BacktestMetrics, SimulatedFill, run_binary_backtest};
 pub use factors_new::{
     AutomlFactorAttribution, FactorMeta, FactorRegistry, register_automl_attributions,
