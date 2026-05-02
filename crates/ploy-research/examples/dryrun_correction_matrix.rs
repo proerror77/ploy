@@ -182,6 +182,7 @@ struct MatrixSummary {
     source_rows: usize,
     v2_rows: usize,
     hypothesis_count: usize,
+    selection_audit_enabled: bool,
     gate_rows: Vec<GateRow>,
     results: Vec<MatrixResult>,
     paired_candidates: Vec<PairedCandidate>,
@@ -558,6 +559,7 @@ fn evaluate_hypothesis(
     h: MatrixHypothesis,
     split: &str,
     min_trades: usize,
+    selection_audit_enabled: bool,
     gate_rows: &mut Vec<GateRow>,
     selection_audit_rows: &mut Vec<SelectionAuditRow>,
 ) -> MatrixResult {
@@ -616,6 +618,7 @@ fn evaluate_hypothesis(
         h,
         split,
         min_trades,
+        selection_audit_enabled,
         selection_audit_rows,
     )
 }
@@ -626,6 +629,7 @@ fn selected_metrics(
     h: MatrixHypothesis,
     split: &str,
     min_trades: usize,
+    selection_audit_enabled: bool,
     selection_audit_rows: &mut Vec<SelectionAuditRow>,
 ) -> MatrixResult {
     let mut last_trade_by_symbol: HashMap<String, DateTime<Utc>> = HashMap::new();
@@ -649,52 +653,60 @@ fn selected_metrics(
         let event_side_key = format!("{}:{}", row.event_id, row.side.as_str());
         if traded_event_sides.contains(&event_side_key) {
             rejected_duplicate += 1;
-            selection_audit_rows.push(selection_audit_row(
-                row,
-                event_windows,
-                h,
-                split,
-                "duplicate",
-                None,
-            ));
-            continue;
-        }
-        if let Some(last_ts) = last_trade_by_symbol.get(&row.symbol) {
-            if (row.tick_ts - *last_ts).num_seconds() < h.cooldown_secs {
-                rejected_cooldown += 1;
+            if selection_audit_enabled {
                 selection_audit_rows.push(selection_audit_row(
                     row,
                     event_windows,
                     h,
                     split,
-                    "cooldown",
+                    "duplicate",
                     None,
                 ));
+            }
+            continue;
+        }
+        if let Some(last_ts) = last_trade_by_symbol.get(&row.symbol) {
+            if (row.tick_ts - *last_ts).num_seconds() < h.cooldown_secs {
+                rejected_cooldown += 1;
+                if selection_audit_enabled {
+                    selection_audit_rows.push(selection_audit_row(
+                        row,
+                        event_windows,
+                        h,
+                        split,
+                        "cooldown",
+                        None,
+                    ));
+                }
                 continue;
             }
         }
         let Some(pnl) = executable_pnl(row) else {
             rejected_non_executable += 1;
+            if selection_audit_enabled {
+                selection_audit_rows.push(selection_audit_row(
+                    row,
+                    event_windows,
+                    h,
+                    split,
+                    "non_executable",
+                    None,
+                ));
+            }
+            continue;
+        };
+        traded_event_sides.insert(event_side_key);
+        last_trade_by_symbol.insert(row.symbol.clone(), row.tick_ts);
+        if selection_audit_enabled {
             selection_audit_rows.push(selection_audit_row(
                 row,
                 event_windows,
                 h,
                 split,
-                "non_executable",
-                None,
+                "accepted",
+                Some(pnl),
             ));
-            continue;
-        };
-        traded_event_sides.insert(event_side_key);
-        last_trade_by_symbol.insert(row.symbol.clone(), row.tick_ts);
-        selection_audit_rows.push(selection_audit_row(
-            row,
-            event_windows,
-            h,
-            split,
-            "accepted",
-            Some(pnl),
-        ));
+        }
         pnls.push(pnl);
         entry_sum += row.entry_ask;
         ev_stake_sum += expected_value_per_stake(calibrated_probability(row, h), row.entry_ask);
@@ -882,16 +894,14 @@ fn hypotheses() -> Vec<MatrixHypothesis> {
         ("ttr99_190", 99, 190),
         ("ttr99_150", 99, 150),
         ("ttr120_180", 120, 180),
-        ("ttr150_220", 150, 220),
     ];
     let entry_bands = [
         ("px10_85", 0.10, 0.85),
         ("px10_35", 0.10, 0.35),
         ("px15_55", 0.15, 0.55),
-        ("px20_55", 0.20, 0.55),
     ];
-    let ev_floors = [0.01, 0.03, 0.05];
-    let reward_risk_floors = [1.20, 1.80];
+    let ev_floors = [0.03, 0.05];
+    let reward_risk_floors = [1.20];
 
     for (direction_name, direction_mode, min_direction_prob, min_distance_over_sigma) in directions
     {
@@ -1095,6 +1105,7 @@ fn main() -> Result<()> {
         flag_value(&args, "--output-dir")
             .unwrap_or_else(|| "artifacts/dryrun-correction-matrix".to_string()),
     );
+    let selection_audit_enabled = args.iter().any(|arg| arg == "--selection-audit");
     fs::create_dir_all(&output_dir).context("create output dir")?;
 
     let started = Instant::now();
@@ -1159,6 +1170,7 @@ fn main() -> Result<()> {
             *h,
             "train",
             min_trades,
+            selection_audit_enabled,
             &mut gate_rows,
             &mut selection_audit_rows,
         ));
@@ -1168,6 +1180,7 @@ fn main() -> Result<()> {
             *h,
             "validation",
             min_trades,
+            selection_audit_enabled,
             &mut gate_rows,
             &mut selection_audit_rows,
         ));
@@ -1186,6 +1199,7 @@ fn main() -> Result<()> {
         source_rows: snapshot.observations.len(),
         v2_rows: v2_rows.len(),
         hypothesis_count: hypotheses.len(),
+        selection_audit_enabled,
         gate_rows,
         results,
         paired_candidates,
