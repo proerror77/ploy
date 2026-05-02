@@ -23,6 +23,7 @@
 - 2026-05-03: Wired the existing snapshot-backed `factor_walk_forward_v2` example to build `FactorObservationV2` rows once, run AutoFactor domain seed candidates against `reprice_pnl_10s` and `reprice_pnl_30s`, and print a CSV-style seed candidate gate report after the Repricing IC section.
 - 2026-05-03: Added `format_autofactor_reports` so the workflow output includes decision, reason, IC, ICIR, positive-window ratio, bucket monotonicity, top-bucket executable label, and complexity for each seed formula. Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-autofactor-runner rtk cargo test -p ploy-research autofactor --lib`, `CARGO_TARGET_DIR=/tmp/ploy-autofactor-runner rtk cargo check -p ploy-research --example factor_walk_forward_v2 --features db --no-default-features`, and `git diff --check`. The example check emitted only pre-existing strategy-bundle dead-code warnings and the vendor profile warning.
 - 2026-05-03: Opened PR `#308` (`Emit AutoFactor repricing seed reports`). This PR reuses the existing factor walk-forward workflow and does not promote any factor to dry-run/live.
+- 2026-05-03: First remote BTC/ETH/SOL seed run `25262011547` reached the AutoFactor output path and exposed a non-total float comparator in report sorting. Replaced `partial_cmp(...).unwrap_or(Equal)` with `f64::total_cmp` and re-ran focused local verification successfully.
 
 # Rust Native AutoFactor Engine (2026-05-03)
 
