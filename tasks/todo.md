@@ -11589,3 +11589,44 @@ Issue: https://github.com/proerror77/ploy/issues/256
   champion signal survives broader train data, but the available validation
   slice is too sparse for promotion. Next step is a longer/fresher snapshot or
   walk-forward split with enough validation opportunities, not dry-run deploy.
+
+# PM5D Dry-run / Backtest Parity Repair (2026-05-02)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: actual dry-run/live entry, exit, fillability, and scoring path.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer_model.rs`
+  - Owner: shared pure scoring contract to be introduced for runtime and research.
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: remove duplicated strategy formulas and call the shared scorer.
+- `crates/ploy-strategy-runtime/src/lib.rs`
+  - Owner: replay output must expose order/fill level evidence for parity.
+- `scripts/replay_dryrun_parity.py`
+  - Owner: compare recorded-feed replay with Tango dry-run rows at event/token/side/price/quantity level.
+- `scripts/export_strategy_runtime_evidence.py`
+  - Owner: export Tango `strategy_runtime_orders` / `strategy_runtime_fills` rows into the same evidence shape used by replay parity.
+- `.github/workflows/replay-dryrun-parity.yml`
+  - Owner: summarize strict runtime evidence parity from order/fill rows, not only event-level placeholders.
+- `tests/test_replay_dryrun_parity.py`
+  - Owner: fixture-level guard for strict order/fill parity and mismatch detection.
+- `config/strategies/02-pm5d-threelayer.*dryrun.toml`
+  - Owner: keep dry-run candidates paused until replay parity and event-level fillability pass.
+
+## Tasks
+
+- [x] Pause all Tango PM5D three-layer dry-run deployments while parity is unresolved.
+- [x] Introduce a shared three-layer scorer so optimizer/backtest and runtime cannot drift.
+- [x] Replace snapshot optimizer-only confirmation formulas with runtime-available inputs, or add runtime trackers for the missing factors before using them.
+- [ ] Make recorded canonical feed capture strategy-independent and long enough for a full dry-run observation window.
+- [x] Emit replay order/fill evidence and compare it against Tango `strategy_runtime_orders` / `strategy_runtime_fills`.
+- [ ] Require the promotion gate: same config, same canonical `MarketUpdate` sequence, same runtime scorer, event-level fillability, and positive after-cost EV.
+
+## Review
+
+- 2026-05-02: Paused `pm5d.threelayer.champion.dryrun`, `pm5d.threelayer.continuation-soft.dryrun`, `pm5d.threelayer.obi-hard.dryrun`, and `pm5d.threelayer.obi-soft.dryrun` on `tango-1-1`. Verified all `pm5d.threelayer.*dryrun` deployments plus `pm5d.threelayer.live` are `desired=Paused observed=Paused`.
+- 2026-05-02: Current mismatch is a strategy-research parity bug, not a reason to keep trying blind parameter sets. Runtime replay on the recorded feed is also negative, while older snapshot/backtest results were positive. Do not promote another candidate until snapshot optimizer, runtime, and recorded replay share the same scoring and executable fillability contract.
+- 2026-05-02: Concrete formula drift found: `obi_soft`/`obi_hard` snapshot scoring uses `obi_persistence_30s_side`, while runtime currently repeats OBI weight and does not track 30s side persistence. `continuation_soft` snapshot scoring uses `cex_continuation_score_side`, while runtime uses a different drift/microprice/trade-imbalance mix. Liquidity scoring also differs: snapshot uses fillability labels as score inputs, while runtime hard-gates ask size and then scores liquidity as `1.0`.
+- 2026-05-02: First repair slice landed locally: added `three_layer_model` as the shared pure scoring contract, moved runtime EV/direction/confirmation/entry-score evaluation through it, and connected `three_layer_snapshot_optimize` to the same model for runtime-backed profiles. Snapshot-only `obi_persistence_30s_side` and `cex_continuation_score_side` no longer drive deployable three-layer profile scoring; `cex_direction_first` remains explicitly research-only.
+- 2026-05-02: Focused verification passed: `CARGO_TARGET_DIR=/tmp/ploy-three-layer-model-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-strategy-bundles three_layer --lib` (`35 passed`), `CARGO_TARGET_DIR=/tmp/ploy-three-layer-model-test /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-research --example three_layer_snapshot_optimize --no-default-features` (`26 passed`), `cargo check` for `ploy-strategy-bundles --lib` and the optimizer example, plus `git diff --check`.
+- 2026-05-02: Second repair slice added strict order/fill evidence. Replay/backtest output now includes `runtime_evidence.intents/orders/fills` normalized from `TradingRuntimeSnapshot`, including deployment, intent/order/fill ids, event/token ids, side/purpose, quantity, prices, fees, status, and timestamps. `replay_dryrun_parity.py` now compares those rows against Tango exports at order/fill level with numeric and timestamp tolerances, and reports `runtime_evidence_comparison.strict_parity_ready`.

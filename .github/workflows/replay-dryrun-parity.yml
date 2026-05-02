@@ -74,7 +74,7 @@ jobs:
               echo "- Artifact: \`replay-dryrun-parity-${{ github.run_id }}\`"
               echo ""
               echo '```json'
-              python3 -c 'import json; data=json.load(open("artifacts/parity/parity-evaluation.json")); event=data.get("event_comparison") or {}; print(json.dumps({"decision": data.get("decision"), "risk_flags": data.get("risk_flags"), "strict_parity_ready": event.get("strict_parity_ready"), "missing_strict_fields": event.get("missing_strict_fields"), "shared_event_count": event.get("shared_event_count")}, indent=2, sort_keys=True))'
+              python3 -c 'import json; data=json.load(open("artifacts/parity/parity-evaluation.json")); runtime=data.get("runtime_evidence_comparison") or {}; orders=runtime.get("orders") or {}; fills=runtime.get("fills") or {}; print(json.dumps({"decision": data.get("decision"), "risk_flags": data.get("risk_flags"), "strict_parity_ready": runtime.get("strict_parity_ready"), "missing_strict_fields": runtime.get("missing_strict_fields"), "shared_orders": orders.get("shared_count"), "shared_fills": fills.get("shared_count")}, indent=2, sort_keys=True))'
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -105,8 +105,8 @@ jobs:
               const data = JSON.parse(fs.readFileSync("artifacts/parity/parity-evaluation.json", "utf8"));
               decision = data.decision || decision;
               flags = data.risk_flags || [];
-              strictReady = Boolean(data.event_comparison?.strict_parity_ready);
-              missingFields = data.event_comparison?.missing_strict_fields || [];
+              strictReady = Boolean(data.runtime_evidence_comparison?.strict_parity_ready);
+              missingFields = data.runtime_evidence_comparison?.missing_strict_fields || [];
             }
             const body = [
               "Replay/dry-run parity evidence:",

@@ -18,12 +18,16 @@ use ploy_research::{
     FactorObservationV2, FactorReviewOptions, ResearchSnapshotManifest, build_data_health_report,
     build_factor_observations_v2_with_deribit_and_pm_books, load_research_snapshot,
 };
+use ploy_strategy_bundles::ThreeLayerProfile;
+use ploy_strategy_bundles::strategies::three_layer_model as tl_model;
 use serde::Serialize;
 
 const OPTIMIZER_MIN_DIRECTION_PROB: f64 = 0.515;
 const OPTIMIZER_MAX_DIRECTION_PROB: f64 = 0.68;
 const CEX_DIRECTION_FIRST_MIN_DIRECTION_PROB: f64 = 0.55;
 const LOG_GROWTH_RISK_BUDGET_STAKES: f64 = 40.0;
+const SNAPSHOT_MIN_ENTRY_PRICE: f64 = 0.10;
+const SNAPSHOT_MAX_ENTRY_PRICE: f64 = 0.85;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 struct SnapshotThreeLayerParams {
@@ -136,6 +140,39 @@ impl StrategyProfile {
             Self::Mixed | Self::Champion | Self::ObiSoft | Self::ContinuationSoft => None,
         }
     }
+
+    fn runtime_profile(self) -> Option<ThreeLayerProfile> {
+        match self {
+            Self::Mixed => Some(ThreeLayerProfile::Mixed),
+            Self::Champion => Some(ThreeLayerProfile::Champion),
+            Self::ObiSoft => Some(ThreeLayerProfile::ObiSoft),
+            Self::ObiHard => Some(ThreeLayerProfile::ObiHard),
+            Self::ContinuationSoft => Some(ThreeLayerProfile::ContinuationSoft),
+            Self::CexDirectionFirst => None,
+        }
+    }
+}
+
+fn model_config(
+    params: &SnapshotThreeLayerParams,
+    profile: StrategyProfile,
+) -> Option<tl_model::ThreeLayerModelConfig> {
+    Some(tl_model::ThreeLayerModelConfig {
+        profile: profile.runtime_profile()?,
+        min_direction_prob: params.min_direction_prob,
+        min_distance_over_sigma: params.min_distance_over_sigma,
+        min_confirmation_score: params.min_confirmation_score,
+        min_drift_confirmation: params.min_drift_confirmation,
+        min_edge: params.min_edge,
+        min_reward_risk: params.min_reward_risk,
+        alpha_contrarian: params.alpha_contrarian,
+        cex_contrarian: params.cex_contrarian,
+        probability_shrink: params.probability_shrink,
+        probability_haircut: params.probability_haircut,
+        min_entry_price: SNAPSHOT_MIN_ENTRY_PRICE,
+        max_entry_price: SNAPSHOT_MAX_ENTRY_PRICE,
+        min_entry_score: params.min_entry_score,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -311,40 +348,16 @@ fn finite_or_zero(value: f64) -> f64 {
     if value.is_finite() { value } else { 0.0 }
 }
 
-fn crypto_fee_cost(entry_price: f64) -> f64 {
-    0.02 * entry_price * (1.0 - entry_price)
-}
-
 fn reward_risk_ratio(entry_price: f64) -> f64 {
-    if !entry_price.is_finite() || entry_price <= 0.0 || entry_price >= 1.0 {
-        return f64::NAN;
-    }
-    let fee = crypto_fee_cost(entry_price);
-    let reward = 1.0 - entry_price - fee;
-    let risk = entry_price + fee;
-    if risk <= 0.0 { f64::NAN } else { reward / risk }
+    tl_model::reward_risk_ratio(entry_price)
 }
 
 fn expected_value_per_share(direction_probability: f64, entry_price: f64) -> f64 {
-    if !direction_probability.is_finite()
-        || !entry_price.is_finite()
-        || !(0.0..=1.0).contains(&direction_probability)
-        || !(0.0..1.0).contains(&entry_price)
-    {
-        return f64::NAN;
-    }
-    let fee = crypto_fee_cost(entry_price);
-    let win_payoff = 1.0 - entry_price - fee;
-    let loss_cost = entry_price + fee;
-    direction_probability * win_payoff - (1.0 - direction_probability) * loss_cost
+    tl_model::expected_value_per_share(direction_probability, entry_price)
 }
 
 fn expected_value_per_staked_dollar(direction_probability: f64, entry_price: f64) -> f64 {
-    let expected_value = expected_value_per_share(direction_probability, entry_price);
-    if !expected_value.is_finite() || !entry_price.is_finite() || entry_price <= 0.0 {
-        return f64::NAN;
-    }
-    expected_value / entry_price
+    tl_model::expected_value_per_staked_dollar(direction_probability, entry_price)
 }
 
 fn calibrate_direction_probability(
@@ -352,15 +365,11 @@ fn calibrate_direction_probability(
     probability_shrink: f64,
     probability_haircut: f64,
 ) -> f64 {
-    if !direction_probability.is_finite()
-        || !probability_shrink.is_finite()
-        || !probability_haircut.is_finite()
-    {
-        return f64::NAN;
-    }
-    let shrink = probability_shrink.clamp(0.0, 1.0);
-    let haircut = probability_haircut.clamp(0.0, 0.49);
-    (0.5 + (direction_probability - 0.5) * shrink - haircut).clamp(0.01, 0.99)
+    tl_model::calibrate_direction_probability(
+        direction_probability,
+        probability_shrink,
+        probability_haircut,
+    )
 }
 
 fn direction_probability_search_floor(profile: StrategyProfile) -> f64 {
@@ -392,32 +401,33 @@ fn cex_direction_probability(row: &FactorObservationV2) -> f64 {
     (0.5 + 0.20 * signal).clamp(0.01, 0.99)
 }
 
-fn confirmation_score(row: &FactorObservationV2, profile: StrategyProfile) -> f64 {
+fn confirmation_score(
+    row: &FactorObservationV2,
+    params: &SnapshotThreeLayerParams,
+    profile: StrategyProfile,
+) -> f64 {
     let side = row.side.multiplier();
-    let continuation = finite_or_zero(row.cex_continuation_score_side).clamp(-1.0, 1.0);
-    let obi = finite_or_zero(row.obi_10 * side).clamp(-1.0, 1.0);
-    let obi_delta_10s = finite_or_zero(row.obi_delta_10s_side).clamp(-1.0, 1.0);
-    let obi_persistence_30s = finite_or_zero(row.obi_persistence_30s_side).clamp(-1.0, 1.0);
-    let depth = finite_or_zero(row.depth_imbalance * side).clamp(-1.0, 1.0);
-    let microprice = finite_or_zero(row.microprice_offset_bps * side / 10.0).clamp(-1.0, 1.0);
-    let trade_imbalance = finite_or_zero(row.trade_imbalance_delta_10s_side).clamp(-1.0, 1.0);
-
-    match profile {
-        StrategyProfile::Mixed => {
-            0.45 * continuation + 0.25 * obi + 0.15 * depth + 0.15 * microprice
-        }
-        StrategyProfile::Champion => 0.0,
-        StrategyProfile::ObiSoft | StrategyProfile::ObiHard => {
-            0.30 * obi
-                + 0.20 * obi_delta_10s
-                + 0.20 * obi_persistence_30s
-                + 0.15 * depth
-                + 0.10 * microprice
-                + 0.05 * trade_imbalance
-        }
-        StrategyProfile::ContinuationSoft => continuation,
-        StrategyProfile::CexDirectionFirst => cex_direction_signal(row),
+    if profile == StrategyProfile::CexDirectionFirst {
+        return cex_direction_signal(row);
     }
+    let Some(config) = model_config(params, profile) else {
+        return f64::NAN;
+    };
+    tl_model::profile_confirmation_score(
+        tl_model::BookConfirmationInputs {
+            direction_sign: side,
+            obi: finite_or_zero(row.obi_10),
+            obi_delta: finite_or_zero(row.obi_delta_10s_side * side),
+            depth_imbalance: finite_or_zero(row.depth_imbalance),
+            cum_mprice_drift_5m: finite_or_zero(row.microprice_offset_bps / 10.0),
+            drift_30s: finite_or_zero(row.drift_30s),
+            signed_trade_imbalance: finite_or_zero(
+                row.trade_imbalance_delta_10s_side * side * 50.0,
+            ),
+            regime: row.regime,
+        },
+        &config,
+    )
 }
 
 fn three_layer_entry_score(
@@ -427,26 +437,26 @@ fn three_layer_entry_score(
     params: &SnapshotThreeLayerParams,
     profile: StrategyProfile,
 ) -> f64 {
+    if profile == StrategyProfile::CexDirectionFirst {
+        let alpha_prob = profile_direction_probability(row, params, profile);
+        let direction_score = directional_score(alpha_prob, params.min_direction_prob, 0.25, false);
+        let distance_score = directional_score(
+            row.side_distance_over_sigma,
+            params.min_distance_over_sigma,
+            0.60,
+            params.alpha_contrarian,
+        );
+        let drift_side = row.drift_30s * row.side.multiplier();
+        let drift_score = ((drift_side - params.min_drift_confirmation) * 800.0).clamp(-0.50, 1.0);
+        return 0.55 * direction_score + 0.28 * distance_score + 0.17 * drift_score;
+    }
+
     let alpha_prob = profile_direction_probability(row, params, profile);
     let calibrated_prob = calibrated_profile_probability(row, params, profile);
+    let Some(config) = model_config(params, profile) else {
+        return -0.50;
+    };
     let direction_score = directional_score(alpha_prob, params.min_direction_prob, 0.25, false);
-    let distance_score = directional_score(
-        row.side_distance_over_sigma,
-        params.min_distance_over_sigma,
-        0.60,
-        params.alpha_contrarian,
-    );
-    let per_share_edge_score = executable_edge_score(edge, params);
-    let per_stake_expectancy_score = directional_score(
-        expected_value_per_staked_dollar(calibrated_prob, row.entry_ask),
-        0.0,
-        0.25,
-        false,
-    );
-    let expectancy_score =
-        (0.70 * per_share_edge_score + 0.30 * per_stake_expectancy_score).clamp(-0.50, 1.0);
-    let drift_side = row.drift_30s * row.side.multiplier();
-    let drift_score = ((drift_side - params.min_drift_confirmation) * 800.0).clamp(-0.50, 1.0);
     let pm_momentum = row
         .entry_ask_change_10s
         .max(row.entry_ask_change_30s)
@@ -456,37 +466,27 @@ fn three_layer_entry_score(
     } else {
         0.0
     };
-    let liquidity_score = if row.label_full_depth_entry_fillable {
-        1.0
-    } else if row.label_executable_fillable {
-        0.5
-    } else {
-        -0.5
+
+    let Some(edge_score) = tl_model::evaluate_edge_score(calibrated_prob, row.entry_ask, &config)
+        .map(|s| s.edge_score)
+    else {
+        return -0.50;
     };
-    let confirmation_score = directional_score(
-        confirmation,
-        params.min_confirmation_score,
-        0.50,
-        params.cex_contrarian,
-    );
-    if profile == StrategyProfile::CexDirectionFirst {
-        return 0.55 * direction_score + 0.28 * distance_score + 0.17 * drift_score;
-    }
-    if profile == StrategyProfile::Champion {
-        return 0.33 * direction_score
-            + 0.17 * distance_score
-            + 0.25 * expectancy_score
-            + 0.10 * drift_score
-            + 0.10 * pm_momentum_score
-            + 0.05 * liquidity_score;
-    }
-    0.25 * direction_score
-        + 0.12 * distance_score
-        + 0.18 * expectancy_score
-        + 0.15 * confirmation_score
-        + 0.10 * drift_score
-        + 0.12 * pm_momentum_score
-        + 0.08 * liquidity_score
+
+    tl_model::evaluate_entry_score(
+        &config,
+        tl_model::EntryScoreInputs {
+            direction_score,
+            distance_over_sigma: row.side_distance_over_sigma * row.side.multiplier(),
+            direction_sign: row.side.multiplier(),
+            edge,
+            edge_score,
+            confirmation,
+            drift_30s: row.drift_30s,
+            pm_momentum_score,
+            liquidity_score: 1.0,
+        },
+    )
 }
 
 fn confirmation_gate_passes(value: f64, threshold: f64, contrarian: bool) -> bool {
@@ -567,20 +567,13 @@ fn executable_edge_threshold(params: &SnapshotThreeLayerParams) -> f64 {
     params.min_edge.max(0.0)
 }
 
+#[cfg(test)]
 fn executable_edge_score(edge: f64, params: &SnapshotThreeLayerParams) -> f64 {
-    directional_score(edge, executable_edge_threshold(params), 0.08, false)
+    tl_model::threshold_score(edge, executable_edge_threshold(params), 0.08, false)
 }
 
 fn directional_score(value: f64, threshold: f64, scale: f64, contrarian: bool) -> f64 {
-    if !value.is_finite() || !threshold.is_finite() || !scale.is_finite() || scale <= 0.0 {
-        return -0.50;
-    }
-    let signed = if contrarian {
-        threshold - value
-    } else {
-        value - threshold
-    };
-    (signed / scale).clamp(-0.50, 1.0)
+    tl_model::threshold_score(value, threshold, scale, contrarian)
 }
 
 fn executable_pnl(row: &FactorObservationV2) -> Option<f64> {
@@ -603,7 +596,10 @@ fn row_passes_gates(
     {
         return false;
     }
-    if !row.entry_ask.is_finite() || row.entry_ask < 0.10 || row.entry_ask > 0.85 {
+    if !row.entry_ask.is_finite()
+        || row.entry_ask < SNAPSHOT_MIN_ENTRY_PRICE
+        || row.entry_ask > SNAPSHOT_MAX_ENTRY_PRICE
+    {
         return false;
     }
     if !row.pm_lag_secs.is_finite() || row.pm_lag_secs < 0.0 || row.pm_lag_secs > 15.0 {
@@ -638,7 +634,7 @@ fn row_passes_gates(
     if !entry_fillable(row) {
         return false;
     }
-    let confirmation = confirmation_score(row, profile);
+    let confirmation = confirmation_score(row, params, profile);
     if !confirmation.is_finite() {
         return false;
     }
