@@ -746,11 +746,7 @@ fn rolling_stat(values: &[f64], window: usize, stat: fn(&[f64]) -> f64) -> Vec<f
 
 fn build_buckets(scored: &[(usize, f64, f64)], bucket_count: usize) -> Vec<BucketSummary> {
     let mut sorted = scored.to_vec();
-    sorted.sort_by(|lhs, rhs| {
-        lhs.1
-            .partial_cmp(&rhs.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sorted.sort_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1));
     let bucket_count = bucket_count.clamp(2, sorted.len().max(2));
     (0..bucket_count)
         .filter_map(|bucket_idx| {
@@ -1205,11 +1201,9 @@ mod tests {
     fn evaluates_domain_candidate_with_icir_gate() {
         let (matrix, labels, windows) = synthetic_matrix(24);
         let candidates = domain_seed_candidates(&matrix.input_names());
-        assert!(
-            candidates
-                .iter()
-                .any(|item| item.name == "ofi_l5_depth_norm")
-        );
+        assert!(candidates
+            .iter()
+            .any(|item| item.name == "ofi_l5_depth_norm"));
         let options = AutoFactorOptions {
             min_observations: 20,
             min_window_observations: 6,
@@ -1274,10 +1268,8 @@ mod tests {
             .expect("repricing gap report");
         assert_eq!(repricing_gap.decision, AutoFactorDecision::Candidate);
         assert!(repricing_gap.spearman_ic > 0.95);
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "poly_lag_pressure")
-        );
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "poly_lag_pressure"));
     }
 }
