@@ -1,3 +1,30 @@
+# Repricing Momentum Runtime Scorer (2026-05-03)
+
+## Files
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer_profile.rs`
+  - Owner: add a replay-only candidate profile selector for repricing momentum.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer_model.rs`
+  - Owner: pure scorer for the IC-gated `spread_adjusted_external_move` formula.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: runtime wiring for the repricing scorer without enabling live/dry-run deployment.
+- `crates/ploy-research/examples/three_layer_snapshot_optimize.rs`
+  - Owner: keep snapshot optimizer scoring parity with the shared model inputs.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add a `repricing_momentum` profile and pure `spread_adjusted_external_move` scorer.
+- [x] Wire the scorer into three-layer runtime entry scoring with a profile-specific gate.
+- [x] Keep research optimizer calls compiling against the shared input contract.
+- [x] Add focused tests for profile parsing, formula parity, and scoring behavior.
+- [x] Run focused local verification and open PR.
+
+## Review
+
+- 2026-05-03: Added the `repricing_momentum` three-layer profile and shared `spread_adjusted_external_move_score(side_external_move_30s, side_spread)` helper so the IC-gated AutoFactor seed can be evaluated in the runtime/replay path. Runtime wiring computes the formula from available 30s log drift (`drift_30s * direction_sign`) and executable side spread, gates the profile on `three_layer_min_confirmation_score`, and records the score in entry-signal logs. The snapshot optimizer passes the same formula shape from `cex_bar_return_30s * side / (pm_spread_bps / 10000 + 0.01)`, preserving a shared scoring function while keeping source-specific primitives explicit. Local verification passed: `rustfmt --edition 2021 --check` on touched Rust files, `CARGO_TARGET_DIR=/tmp/ploy-repricing-scorer rtk cargo test -p ploy-strategy-bundles three_layer --lib`, `CARGO_TARGET_DIR=/tmp/ploy-repricing-scorer rtk cargo check -p ploy-research --example three_layer_snapshot_optimize --features db --no-default-features`, and `git diff --check`. The research example check emitted only pre-existing strategy-bundle dead-code warnings and the vendor profile warning. Opened PR #312.
+
 # AutoFactor Target Metadata Fix (2026-05-03)
 
 ## Files

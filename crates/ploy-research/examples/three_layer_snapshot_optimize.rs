@@ -15,11 +15,11 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
 use ploy_research::{
-    FactorObservationV2, FactorReviewOptions, ResearchSnapshotManifest, build_data_health_report,
-    build_factor_observations_v2_with_deribit_and_pm_books, load_research_snapshot,
+    build_data_health_report, build_factor_observations_v2_with_deribit_and_pm_books,
+    load_research_snapshot, FactorObservationV2, FactorReviewOptions, ResearchSnapshotManifest,
 };
-use ploy_strategy_bundles::ThreeLayerProfile;
 use ploy_strategy_bundles::strategies::three_layer_model as tl_model;
+use ploy_strategy_bundles::ThreeLayerProfile;
 use serde::Serialize;
 
 const OPTIMIZER_MIN_DIRECTION_PROB: f64 = 0.515;
@@ -434,7 +434,11 @@ fn validate_snapshot_scope(
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 fn reward_risk_ratio(entry_price: f64) -> f64 {
@@ -722,6 +726,10 @@ fn three_layer_entry_score(
             edge,
             edge_score,
             confirmation,
+            repricing_score: tl_model::spread_adjusted_external_move_score(
+                row.cex_bar_return_30s * row.side.multiplier(),
+                row.pm_spread_bps / 10_000.0,
+            ),
             drift_30s: row.drift_30s,
             pm_momentum_score,
             liquidity_score: 1.0,
@@ -2083,10 +2091,6 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OPTIMIZER_MAX_DIRECTION_PROB, OPTIMIZER_MIN_DIRECTION_PROB,
-        STABLE_DIRECTION_MIN_DIRECTION_PROB, STABLE_REVERSAL_FILLABLE_MIN_DIRECTION_PROB,
-        STABLE_REVERSAL_SOFT_MIN_DIRECTION_PROB, SnapshotObjectiveMetrics,
-        SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
         calibrate_direction_probability, calibrated_model_probability,
         calibrated_profile_probability, cex_direction_probability, compounded_log_growth,
         default_min_trades_from_coverage, direction_alpha_probability,
@@ -2097,6 +2101,10 @@ mod tests {
         row_passes_gates, sample_power_multiplier, stable_compounding_objective,
         stable_direction_confirmation_score, stable_reversal_confirmation_score,
         stable_reversal_soft_confirmation_score, trade_sharpe, transformed_model_probability,
+        SnapshotObjectiveMetrics, SnapshotThreeLayerParams, StableObjectiveInputs, StrategyProfile,
+        OPTIMIZER_MAX_DIRECTION_PROB, OPTIMIZER_MIN_DIRECTION_PROB,
+        STABLE_DIRECTION_MIN_DIRECTION_PROB, STABLE_REVERSAL_FILLABLE_MIN_DIRECTION_PROB,
+        STABLE_REVERSAL_SOFT_MIN_DIRECTION_PROB,
     };
     use chrono::{TimeZone, Utc};
     use ploy_research::{FactorObservationV2, Regime, ReviewSide};

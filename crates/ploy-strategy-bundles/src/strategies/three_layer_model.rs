@@ -43,6 +43,7 @@ pub struct EntryScoreInputs {
     pub edge: f64,
     pub edge_score: f64,
     pub confirmation: f64,
+    pub repricing_score: f64,
     pub drift_30s: f64,
     pub pm_momentum_score: f64,
     pub liquidity_score: f64,
@@ -75,13 +76,24 @@ pub fn threshold_score(value: f64, threshold: f64, scale: f64, contrarian: bool)
     (signed / scale).clamp(-0.50, 1.0)
 }
 
+pub fn spread_adjusted_external_move_score(side_external_move_30s: f64, side_spread: f64) -> f64 {
+    if !side_external_move_30s.is_finite() || !side_spread.is_finite() || side_spread < 0.0 {
+        return f64::NAN;
+    }
+    side_external_move_30s / (side_spread + 0.01)
+}
+
 /// Normal CDF approximation (Abramowitz & Stegun).
 pub fn norm_cdf(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.2316419 * x.abs());
     let d = 0.3989422804014327 * (-x * x / 2.0).exp();
     let p =
         d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-    if x >= 0.0 { 1.0 - p } else { p }
+    if x >= 0.0 {
+        1.0 - p
+    } else {
+        p
+    }
 }
 
 pub fn calibrate_direction_probability(
@@ -148,7 +160,11 @@ pub fn reward_risk_ratio(entry_price: f64) -> f64 {
     let fee = crypto_fee_cost(entry_price);
     let reward = 1.0 - entry_price - fee;
     let risk = entry_price + fee;
-    if risk <= 0.0 { f64::NAN } else { reward / risk }
+    if risk <= 0.0 {
+        f64::NAN
+    } else {
+        reward / risk
+    }
 }
 
 pub fn evaluate_direction_score(
@@ -270,6 +286,7 @@ pub fn profile_confirmation_score(
                 ((inputs.signed_trade_imbalance / 50.0) * inputs.direction_sign).clamp(-1.0, 1.0);
             0.50 * drift_continuation + 0.30 * microprice + 0.20 * trade_imbalance
         }
+        ThreeLayerProfile::RepricingMomentum => 0.0,
     }
 }
 
@@ -348,6 +365,12 @@ pub fn evaluate_entry_score(config: &ThreeLayerModelConfig, inputs: EntryScoreIn
         0.50,
         config.cex_contrarian,
     );
+    let repricing_score = threshold_score(
+        inputs.repricing_score,
+        config.min_confirmation_score,
+        0.10,
+        false,
+    );
 
     match config.profile {
         ThreeLayerProfile::Champion => {
@@ -367,6 +390,14 @@ pub fn evaluate_entry_score(config: &ThreeLayerModelConfig, inputs: EntryScoreIn
                 + 0.15 * confirmation_score
                 + 0.10 * drift_score
                 + 0.12 * inputs.pm_momentum_score
+                + 0.08 * inputs.liquidity_score
+        }
+        ThreeLayerProfile::RepricingMomentum => {
+            0.20 * inputs.direction_score
+                + 0.12 * distance_score
+                + 0.20 * edge_score
+                + 0.30 * repricing_score
+                + 0.10 * inputs.pm_momentum_score
                 + 0.08 * inputs.liquidity_score
         }
         ThreeLayerProfile::Mixed => unreachable!("mixed profile returned above"),
