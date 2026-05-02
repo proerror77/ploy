@@ -1,3 +1,29 @@
+# PM5D Factor Stability Multi-Window Extension (2026-05-02)
+
+## Files
+
+- `tasks/pm5d_factor_stability_20260502.md`
+  - Owner: durable record for PM5D factor-stability evidence and dry-run gate decisions.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Start `ploy-ci-1` only for the required self-hosted research workflow.
+- [x] Run Factor Walk-Forward V2 multi-window probe from the existing snapshot.
+- [x] Diagnose the failed first workflow dispatch as a date-boundary error.
+- [x] Parse the successful artifact and compare raw vs liquidity-gated factor stability.
+- [x] Stop `ploy-ci-1` and verify the GitHub runner is offline / not busy.
+- [x] Record the research conclusion without restoring dry-run/live.
+
+## Review
+
+- 2026-05-02: Multi-window Factor Walk-Forward V2 run `25244553632` succeeded on `main@cdeebdff` using snapshot `25204438461` / hash `fb338e1f202c3bda`, rolling shape `3d train -> 1d test -> 1d step`, five out-of-sample windows, six symbols, stake `15`, and `min_observations=80`. The earlier run `25244527617` failed because `end_date=2026-05-02` requested a window ending `2026-05-03T00:00:00Z`, outside the snapshot end `2026-05-02T00:00:00Z`; the successful rerun used `end_date=2026-05-01`.
+- 2026-05-02: Raw rolling factors stayed mixed. `side_model_prob` and `side_distance_over_sigma` were positive in aggregate across five windows (`+$21,111.2773` and `+$21,195.4296`) but had one bad validation window (`-$9,086.3107`) and only `0.8000` positive-window ratio. This is not enough to promote raw alpha.
+- 2026-05-02: Liquidity-gated `side_model_prob` and `side_distance_over_sigma` were positive in all five out-of-sample windows, each with total test PnL `+$21,192.4930`, minimum window PnL `+$875.4386`, fill rate `100%`, symbol-positive `100%`, and time-bucket-positive `95%`. `cex_continuation_edge_gate` also stayed positive across all five windows but was much smaller (`+$1,249.3031`) and less uniform by symbol/time bucket. PM dynamics, OBI persistence, and continuation score were rejected under the liquidity gate.
+- 2026-05-02: The result strengthens the liquidity-gated alpha lane, but it remains research-only. The workflow still marks the alpha factors `watchlist` with reason `too_few_windows_positive_pnl`, and the snapshot data audit status remains `critical`. Do not restore PM5D dry-run/live from this evidence; next step is longer/fresher rolling evidence or strict runtime-parity matrix over the liquidity-gated alpha lane.
+- 2026-05-02: After the workflow completed, `ploy-ci-1` was stopped in Aliyun as `Stopped / StopCharging`, and the GitHub runner reported `offline` with `busy=false`.
+
 # Systematic Edge Matrix Research (2026-05-01)
 
 Issue: https://github.com/proerror77/ploy/issues/256
