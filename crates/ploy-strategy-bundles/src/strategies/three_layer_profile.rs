@@ -1,6 +1,6 @@
 //! Runtime profile selector for the PM5D three-layer strategy.
 
-use serde::{Deserialize, Deserializer, Serialize, de};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
@@ -17,6 +17,8 @@ pub enum ThreeLayerProfile {
     ObiHard,
     /// Snapshot Strategy C: Champion plus CEX continuation soft score.
     ContinuationSoft,
+    /// Candidate Strategy D: external CEX repricing pressure adjusted by PM spread.
+    RepricingMomentum,
 }
 
 impl Default for ThreeLayerProfile {
@@ -33,6 +35,7 @@ impl ThreeLayerProfile {
             Self::ObiSoft => "obi_soft",
             Self::ObiHard => "obi_hard",
             Self::ContinuationSoft => "continuation_soft",
+            Self::RepricingMomentum => "repricing_momentum",
         }
     }
 
@@ -55,8 +58,12 @@ impl FromStr for ThreeLayerProfile {
             "continuation" | "continuation_soft" | "c" | "cex_continuation" => {
                 Ok(Self::ContinuationSoft)
             }
+            "repricing"
+            | "repricing_momentum"
+            | "reprice_momentum"
+            | "spread_adjusted_external_move" => Ok(Self::RepricingMomentum),
             other => Err(format!(
-                "unknown three_layer_strategy_profile {other:?}; expected mixed, champion, obi_soft, obi_hard, or continuation_soft"
+                "unknown three_layer_strategy_profile {other:?}; expected mixed, champion, obi_soft, obi_hard, continuation_soft, or repricing_momentum"
             )),
         }
     }
@@ -94,5 +101,21 @@ mod tests {
             ThreeLayerProfile::ObiHard
         );
         assert_eq!(ThreeLayerProfile::ObiHard.as_str(), "obi_hard");
+    }
+
+    #[test]
+    fn parses_repricing_momentum_aliases() {
+        assert_eq!(
+            ThreeLayerProfile::from_str("repricing_momentum").unwrap(),
+            ThreeLayerProfile::RepricingMomentum
+        );
+        assert_eq!(
+            ThreeLayerProfile::from_str("spread_adjusted_external_move").unwrap(),
+            ThreeLayerProfile::RepricingMomentum
+        );
+        assert_eq!(
+            ThreeLayerProfile::RepricingMomentum.as_str(),
+            "repricing_momentum"
+        );
     }
 }

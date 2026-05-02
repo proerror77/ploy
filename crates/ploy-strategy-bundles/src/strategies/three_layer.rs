@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -446,6 +446,10 @@ fn evaluate_edge_score(
     ))
 }
 
+fn spread_adjusted_external_move_score(side_external_move_30s: f64, side_spread: f64) -> f64 {
+    three_layer_model::spread_adjusted_external_move_score(side_external_move_30s, side_spread)
+}
+
 // ── ThreeLayerStrategy ─────────────────────────────────────────────
 
 pub struct ThreeLayerStrategy {
@@ -737,6 +741,7 @@ impl ThreeLayerStrategy {
                 self.bump("skip_no_pm_ask");
                 continue;
             };
+            let bid = quote.bid.and_then(|price| price.to_f64());
             let quote_age = (now - quote.ts).num_seconds();
             if quote_age > self.config.max_pm_lag_secs as i64 {
                 self.bump("skip_stale_pm_quote");
@@ -764,6 +769,23 @@ impl ThreeLayerStrategy {
                 continue;
             }
 
+            let side_spread = bid
+                .filter(|bid| bid.is_finite() && ask.is_finite() && ask > 0.0)
+                .map(|bid| ((ask - bid).max(0.0)) / ask)
+                .unwrap_or(f64::NAN);
+            let repricing_score =
+                spread_adjusted_external_move_score(drift_30s * direction_sign, side_spread);
+            if self.config.profile == ThreeLayerProfile::RepricingMomentum {
+                if !repricing_score.is_finite() {
+                    self.bump("skip_repricing_score_unavailable");
+                    continue;
+                }
+                if repricing_score < self.config.min_confirmation_score {
+                    self.bump("skip_repricing_score");
+                    continue;
+                }
+            }
+
             // Layer 3: Edge score
             let Some((entry_price_f, edge, rr, edge_score)) =
                 evaluate_edge_score(effective_p, ask, regime, &self.config)
@@ -786,6 +808,7 @@ impl ThreeLayerStrategy {
                     edge,
                     edge_score,
                     confirmation: confirmation_score,
+                    repricing_score,
                     drift_30s,
                     pm_momentum_score,
                     liquidity_score: 1.0,
@@ -802,6 +825,7 @@ impl ThreeLayerStrategy {
                     direction_score = format!("{:.3}", direction_score),
                     edge_score = format!("{:.3}", edge_score),
                     confirmation_score = format!("{:.3}", confirmation_score),
+                    repricing_score = format!("{:.3}", repricing_score),
                     pm_momentum_score = format!("{:.3}", pm_momentum_score),
                     min_entry_score = self.config.min_entry_score,
                     profile = %self.config.profile,
@@ -892,6 +916,7 @@ impl ThreeLayerStrategy {
                 direction_score = format!("{:.3}", direction_score),
                 edge_score = format!("{:.3}", edge_score),
                 confirmation_score = format!("{:.3}", confirmation_score),
+                repricing_score = format!("{:.3}", repricing_score),
                 pm_momentum_score = format!("{:.3}", pm_momentum_score),
                 p_hat = effective_p,
                 edge,
@@ -1460,6 +1485,11 @@ mod tests {
             serde_json::from_str(r#"{"strategy_profile":"obi_hard"}"#).unwrap();
         let tlc: ThreeLayerConfig = dc.into();
         assert_eq!(tlc.profile, ThreeLayerProfile::ObiHard);
+
+        let dc: DirectionalConfig =
+            serde_json::from_str(r#"{"strategy_profile":"repricing_momentum"}"#).unwrap();
+        let tlc: ThreeLayerConfig = dc.into();
+        assert_eq!(tlc.profile, ThreeLayerProfile::RepricingMomentum);
     }
 
     #[test]
@@ -1974,6 +2004,77 @@ mod tests {
     }
 
     #[test]
+    fn repricing_momentum_profile_gates_on_spread_adjusted_external_move() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::RepricingMomentum;
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        config.min_confirmation_score = 0.05;
+        config.min_entry_score = 0.0;
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        let mut strategy = ThreeLayerStrategy::new(config.clone());
+        discover_test_event(&mut strategy, now);
+        strategy.on_update(
+            &entry_quote("token-up", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        assert!(decisions.is_empty());
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_repricing_score"), Some(&1));
+
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        for i in 0..30 {
+            strategy.on_update(
+                &MarketUpdate::SpotPrice {
+                    symbol: Arc::from("BTCUSDT"),
+                    price: Decimal::from(99_400 + i * 20),
+                    ts: now - chrono::Duration::seconds(30 - i as i64),
+                },
+                &positions,
+                &orders,
+            );
+        }
+        strategy.on_update(
+            &entry_quote("token-up", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            matches!(decisions.as_slice(), [StrategyDecision::Enter { .. }]),
+            "positive side external move should pass repricing gate, got {decisions:?}"
+        );
+    }
+
+    #[test]
     fn balance_pause_blocks_entries_but_not_take_profit_exit() {
         use chrono::TimeZone;
 
@@ -2160,6 +2261,7 @@ mod tests {
                 edge: 0.01,
                 edge_score: 0.20,
                 confirmation: -1.0,
+                repricing_score: 0.0,
                 drift_30s: 0.0,
                 pm_momentum_score: 0.0,
                 liquidity_score: 1.0,
@@ -2174,6 +2276,7 @@ mod tests {
                 edge: 0.01,
                 edge_score: 0.20,
                 confirmation: 1.0,
+                repricing_score: 0.0,
                 drift_30s: 0.0,
                 pm_momentum_score: 0.0,
                 liquidity_score: 1.0,
@@ -2228,6 +2331,7 @@ mod tests {
                 edge: 0.06,
                 edge_score: 0.70,
                 confirmation: 0.0,
+                repricing_score: 0.0,
                 drift_30s: 0.0,
                 pm_momentum_score: 0.0,
                 liquidity_score: 1.0,
@@ -2238,6 +2342,59 @@ mod tests {
             soft_score > soft_config.min_entry_score,
             "OBI-soft should still be able to score weak confirmation instead of hard rejecting"
         );
+    }
+
+    #[test]
+    fn spread_adjusted_external_move_matches_autofactor_formula() {
+        let side_external_move_30s = 0.004;
+        let side_spread = 0.03;
+        let score = spread_adjusted_external_move_score(side_external_move_30s, side_spread);
+
+        assert!((score - 0.10).abs() < 1e-9);
+        assert!(spread_adjusted_external_move_score(0.004, f64::NAN).is_nan());
+        assert!(spread_adjusted_external_move_score(0.004, -0.01).is_nan());
+    }
+
+    #[test]
+    fn repricing_momentum_profile_rewards_spread_adjusted_external_move() {
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::RepricingMomentum;
+        config.min_confirmation_score = 0.05;
+        config.min_entry_score = 0.25;
+
+        let weak = evaluate_entry_score(
+            &config,
+            EntryScoreInputs {
+                direction_score: 0.20,
+                distance_over_sigma: 0.20,
+                direction_sign: 1.0,
+                edge: 0.04,
+                edge_score: 0.20,
+                confirmation: 0.0,
+                repricing_score: 0.01,
+                drift_30s: 0.0,
+                pm_momentum_score: 0.0,
+                liquidity_score: 1.0,
+            },
+        );
+        let strong = evaluate_entry_score(
+            &config,
+            EntryScoreInputs {
+                direction_score: 0.20,
+                distance_over_sigma: 0.20,
+                direction_sign: 1.0,
+                edge: 0.04,
+                edge_score: 0.20,
+                confirmation: 0.0,
+                repricing_score: 0.20,
+                drift_30s: 0.0,
+                pm_momentum_score: 0.0,
+                liquidity_score: 1.0,
+            },
+        );
+
+        assert!(strong > weak);
+        assert!(strong > config.min_entry_score);
     }
 
     #[test]
