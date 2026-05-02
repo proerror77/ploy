@@ -12,6 +12,7 @@ pub mod registry;
 pub mod reversal;
 pub mod sweep;
 pub mod three_layer;
+pub mod three_layer_model;
 pub mod three_layer_profile;
 
 pub use diff_enhanced::DiffEnhancedStrategy;

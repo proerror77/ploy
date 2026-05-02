@@ -22,6 +22,7 @@ use ploy_strategy_bundles::{FullConfig, RuntimeMode};
 use replay::run_replay_entry;
 use rust_decimal::Decimal;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::Path;
 use tracing::info;
 
@@ -181,6 +182,7 @@ fn write_strategy_evaluation(
             "fills": snapshot.fills.len(),
             "positions": snapshot.positions.len(),
         },
+        "runtime_evidence": normalized_runtime_evidence(snapshot, deployment_id),
     });
 
     if let Some(parent) = output_path.parent() {
@@ -210,6 +212,195 @@ fn write_strategy_evaluation(
             );
             std::process::exit(1);
         }
+    }
+}
+
+fn normalized_runtime_evidence(
+    snapshot: &ploy_trading::TradingRuntimeSnapshot,
+    fallback_deployment_id: Option<&str>,
+) -> serde_json::Value {
+    let intents_by_id: BTreeMap<&str, &ploy_trading::TradingIntent> = snapshot
+        .intents
+        .iter()
+        .map(|intent| (intent.intent_id.as_str(), intent))
+        .collect();
+    let orders_by_id: BTreeMap<&str, &ploy_trading::OrderRecord> = snapshot
+        .orders
+        .iter()
+        .map(|order| (order.order_id.as_str(), order))
+        .collect();
+
+    let mut fill_quantity_by_order: BTreeMap<&str, Decimal> = BTreeMap::new();
+    let mut fill_notional_by_order: BTreeMap<&str, Decimal> = BTreeMap::new();
+    for fill in &snapshot.fills {
+        *fill_quantity_by_order
+            .entry(fill.order_id.as_str())
+            .or_default() += fill.quantity;
+        *fill_notional_by_order
+            .entry(fill.order_id.as_str())
+            .or_default() += fill.quantity * fill.price;
+    }
+
+    let intents: Vec<_> = snapshot
+        .intents
+        .iter()
+        .map(|intent| {
+            let deployment_id =
+                evidence_deployment_id(intent.deployment_id.as_str(), fallback_deployment_id);
+            json!({
+                "deployment_id": deployment_id,
+                "intent_id": intent.intent_id.as_str(),
+                "event_id": intent.market_id.as_str(),
+                "market_id": intent.market_id.as_str(),
+                "token_id": intent.token_id.as_str(),
+                "side": trade_side_label(intent.side),
+                "order_side": trade_side_label(intent.side),
+                "purpose": intent_purpose_label(intent.purpose),
+                "quantity": intent.quantity,
+                "requested_qty": intent.quantity,
+                "limit_price": intent.limit_price,
+                "created_at": intent.created_at,
+            })
+        })
+        .collect();
+
+    let orders: Vec<_> = snapshot
+        .orders
+        .iter()
+        .map(|order| {
+            let intent = intents_by_id.get(order.intent_id.as_str()).copied();
+            let deployment_id =
+                evidence_deployment_id(order.deployment_id.as_str(), fallback_deployment_id)
+                    .or_else(|| {
+                        intent.and_then(|intent| {
+                            evidence_deployment_id(
+                                intent.deployment_id.as_str(),
+                                fallback_deployment_id,
+                            )
+                        })
+                    });
+            let fill_quantity = fill_quantity_by_order
+                .get(order.order_id.as_str())
+                .copied()
+                .unwrap_or(order.filled_qty);
+            let avg_fill_price = if fill_quantity.is_zero() {
+                None
+            } else {
+                fill_notional_by_order
+                    .get(order.order_id.as_str())
+                    .map(|notional| *notional / fill_quantity)
+            };
+
+            json!({
+                "deployment_id": deployment_id,
+                "intent_id": order.intent_id.as_str(),
+                "order_id": order.order_id.as_str(),
+                "venue_order_id": order.venue_order_id.as_deref(),
+                "event_id": intent.map(|intent| intent.market_id.as_str()),
+                "market_id": intent.map(|intent| intent.market_id.as_str()),
+                "token_id": order.token_id.as_str(),
+                "market_side": None::<String>,
+                "order_side": intent
+                    .map(|intent| trade_side_label(intent.side))
+                    .unwrap_or("UNKNOWN"),
+                "purpose": intent.map(|intent| intent_purpose_label(intent.purpose)),
+                "quantity": order.requested_qty,
+                "requested_qty": order.requested_qty,
+                "limit_price": order.limit_price,
+                "filled_quantity": fill_quantity,
+                "avg_fill_price": avg_fill_price,
+                "status": order_state_label(order.state),
+                "rejection_reason": order.rejection_reason.as_deref(),
+                "last_error": order.last_error.as_deref(),
+                "created_at": intent.map(|intent| intent.created_at),
+            })
+        })
+        .collect();
+
+    let fills: Vec<_> = snapshot
+        .fills
+        .iter()
+        .map(|fill| {
+            let order = orders_by_id.get(fill.order_id.as_str()).copied();
+            let intent =
+                order.and_then(|order| intents_by_id.get(order.intent_id.as_str()).copied());
+            let deployment_id = order
+                .and_then(|order| {
+                    evidence_deployment_id(order.deployment_id.as_str(), fallback_deployment_id)
+                })
+                .or_else(|| {
+                    intent.and_then(|intent| {
+                        evidence_deployment_id(
+                            intent.deployment_id.as_str(),
+                            fallback_deployment_id,
+                        )
+                    })
+                });
+            json!({
+                "deployment_id": deployment_id,
+                "intent_id": order.map(|order| order.intent_id.as_str()),
+                "order_id": fill.order_id.as_str(),
+                "fill_id": fill.fill_id.as_str(),
+                "event_id": intent.map(|intent| intent.market_id.as_str()),
+                "market_id": intent.map(|intent| intent.market_id.as_str()),
+                "token_id": fill.token_id.as_str(),
+                "market_side": None::<String>,
+                "fill_side": trade_side_label(fill.side),
+                "purpose": intent.map(|intent| intent_purpose_label(intent.purpose)),
+                "quantity": fill.quantity,
+                "price": fill.price,
+                "fee": fill.fee,
+                "fill_timestamp": fill.timestamp,
+            })
+        })
+        .collect();
+
+    json!({
+        "schema_version": 1,
+        "basis": "trading_runtime_snapshot",
+        "comparison_contract": "Compare these normalized rows against strategy_runtime_orders and strategy_runtime_fills exported from Tango for the same deployment/config/feed window.",
+        "intents": intents,
+        "orders": orders,
+        "fills": fills,
+    })
+}
+
+fn evidence_deployment_id<'a>(
+    deployment_id: &'a str,
+    fallback_deployment_id: Option<&'a str>,
+) -> Option<&'a str> {
+    if deployment_id.is_empty() {
+        fallback_deployment_id
+    } else {
+        Some(deployment_id)
+    }
+}
+
+fn trade_side_label(side: ploy_trading::TradeSide) -> &'static str {
+    match side {
+        ploy_trading::TradeSide::Buy => "BUY",
+        ploy_trading::TradeSide::Sell => "SELL",
+    }
+}
+
+fn intent_purpose_label(purpose: ploy_trading::IntentPurpose) -> &'static str {
+    match purpose {
+        ploy_trading::IntentPurpose::Entry => "ENTRY",
+        ploy_trading::IntentPurpose::Exit => "EXIT",
+        ploy_trading::IntentPurpose::Reduce => "REDUCE",
+        ploy_trading::IntentPurpose::Hedge => "HEDGE",
+        ploy_trading::IntentPurpose::Cancel => "CANCEL",
+    }
+}
+
+fn order_state_label(state: ploy_trading::OrderState) -> &'static str {
+    match state {
+        ploy_trading::OrderState::Pending => "PENDING",
+        ploy_trading::OrderState::Acknowledged => "ACKNOWLEDGED",
+        ploy_trading::OrderState::PartiallyFilled => "PARTIALLY_FILLED",
+        ploy_trading::OrderState::Filled => "FILLED",
+        ploy_trading::OrderState::Canceled => "CANCELED",
+        ploy_trading::OrderState::Rejected => "REJECTED",
     }
 }
 
