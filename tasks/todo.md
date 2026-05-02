@@ -1,3 +1,32 @@
+# Dry-Run Correction Matrix Research (2026-05-02)
+
+## Files
+
+- `crates/ploy-research/examples/dryrun_correction_matrix.rs`
+  - Owner: snapshot-backed counterfactual matrix for PM5D dry-run correction candidates.
+- `.github/workflows/dryrun-correction-matrix.yml`
+  - Owner: CI entrypoint for running the correction matrix on `ploy-ci-1`.
+- `crates/ploy-research/Cargo.toml`
+  - Owner: example registration.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Start from latest `origin/main` on an isolated research branch.
+- [x] Add a deterministic counterfactual matrix around dry-run failure dimensions.
+- [x] Add a GitHub workflow to run the matrix against immutable research snapshots.
+- [x] Run targeted local compile and workflow syntax checks.
+- [x] Push PR / run the remote research matrix if checks pass.
+
+## Review
+
+- 2026-05-02: Started `research/dryrun-correction-matrix` from `origin/main` after the dry-run UI fix was merged. The current runtime strategy remains a research subject only; this task does not change dry-run or live deployment config.
+- 2026-05-02: Added a matrix runner design that pairs train and validation rows by hypothesis and blocks promotion unless train PnL, validation PnL, sample power, fill rate, EV calibration, day/symbol/time-bucket stability, drawdown, and concentration gates are all reported.
+- 2026-05-02: Local verification passed: `rustfmt --check crates/ploy-research/examples/dryrun_correction_matrix.rs`, `CARGO_TARGET_DIR=/tmp/ploy-dryrun-correction rtk cargo check -p ploy-research --example dryrun_correction_matrix --no-default-features`, Ruby YAML parse for `dryrun-correction-matrix.yml`, and `git diff --check`. The check emitted only pre-existing strategy-bundle dead-code warnings and the vendor profile warning.
+- 2026-05-02: Pushed PR #300 from `research/dryrun-correction-matrix`. PR CI passed commit hygiene, dependency audit, workflow lint, frontend/sidecar, Rust control-plane/core, runner live/default, runner lean replay/backtest, integration regressions, market-data ops, research heavy features, and PR Auto Review. CodeRabbit was still pending at the time of this note.
+- 2026-05-02: Started Aliyun `ploy-ci-1` and verified the GitHub runner returned `online/busy=false`. Direct `workflow_dispatch` for `dryrun-correction-matrix.yml` failed with GitHub `404` because newly added workflow files cannot be dispatched until they exist on the default branch. First post-merge step is to run the workflow on `main` with snapshot `25204438461`, train `2026-04-24 -> 2026-04-28`, validation `2026-04-29 -> 2026-05-01`, symbols `BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT`, and `min_trades=80`.
+
 # Dry-Run Active UI Wiring (2026-05-02)
 
 ## Files

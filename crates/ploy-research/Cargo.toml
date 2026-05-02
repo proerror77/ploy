@@ -111,6 +111,10 @@ name = "three_layer_snapshot_optimize"
 path = "examples/three_layer_snapshot_optimize.rs"
 
 [[example]]
+name = "dryrun_correction_matrix"
+path = "examples/dryrun_correction_matrix.rs"
+
+[[example]]
 name = "collector_data_utilization"
 path = "examples/collector_data_utilization.rs"
 required-features = ["db"]
