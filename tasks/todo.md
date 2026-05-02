@@ -1,3 +1,29 @@
+# AutoFactor Repricing Runner (2026-05-03)
+
+## Files
+
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: report formatting and V2 seed-candidate mining adapter.
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: emit AutoFactor seed reports from the existing snapshot-backed walk-forward workflow.
+- `crates/ploy-research/src/lib.rs`
+  - Owner: public exports for the AutoFactor report runner.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add a text report formatter for AutoFactor seed candidate results.
+- [x] Wire `factor_walk_forward_v2` to emit `reprice_pnl_10s` and `reprice_pnl_30s` AutoFactor seed reports.
+- [x] Run focused local verification.
+- [x] Commit and open PR.
+
+## Review
+
+- 2026-05-03: Wired the existing snapshot-backed `factor_walk_forward_v2` example to build `FactorObservationV2` rows once, run AutoFactor domain seed candidates against `reprice_pnl_10s` and `reprice_pnl_30s`, and print a CSV-style seed candidate gate report after the Repricing IC section.
+- 2026-05-03: Added `format_autofactor_reports` so the workflow output includes decision, reason, IC, ICIR, positive-window ratio, bucket monotonicity, top-bucket executable label, and complexity for each seed formula. Local verification passed: `CARGO_TARGET_DIR=/tmp/ploy-autofactor-runner rtk cargo test -p ploy-research autofactor --lib`, `CARGO_TARGET_DIR=/tmp/ploy-autofactor-runner rtk cargo check -p ploy-research --example factor_walk_forward_v2 --features db --no-default-features`, and `git diff --check`. The example check emitted only pre-existing strategy-bundle dead-code warnings and the vendor profile warning.
+- 2026-05-03: Opened PR `#308` (`Emit AutoFactor repricing seed reports`). This PR reuses the existing factor walk-forward workflow and does not promote any factor to dry-run/live.
+
 # Rust Native AutoFactor Engine (2026-05-03)
 
 ## Files
