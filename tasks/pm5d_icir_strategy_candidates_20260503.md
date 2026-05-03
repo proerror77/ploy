@@ -24,6 +24,25 @@ Both snapshots are scoped PM5D execution evidence:
 - `include_deribit=false`
 - Deribit IV / DVOL is not present in these runs.
 
+Settlement-focused rerun after adding `side_fair_edge`:
+
+- BTC/ETH/SOL settlement gate: GitHub run `25266543999`
+  - Snapshot run `25254380121`
+  - Head SHA `df29ac69fef9e04c06b0246f2a6cde8f8e22e5da`
+  - Local artifact:
+    `/tmp/ploy-settlement-gate-25266543999/factor-walk-forward-v2-25266543999/factor-walk-forward-v2/report.txt`
+  - Health: `snapshot_data_audit_status=critical`, `source_obs=114008`,
+    `v2_rows=228016`, `executable_pnl_rows=50680`, `deribit_rows=0`,
+    `entry_fill_rate=22.23%`, `exit_fill_rate=20.97%`.
+- XRP/DOGE/BNB settlement gate: GitHub run `25266544004`
+  - Snapshot run `25255158983`
+  - Head SHA `df29ac69fef9e04c06b0246f2a6cde8f8e22e5da`
+  - Local artifact:
+    `/tmp/ploy-settlement-gate-25266544004/factor-walk-forward-v2-25266544004/factor-walk-forward-v2/report.txt`
+  - Health: `snapshot_data_audit_status=critical`, `source_obs=108296`,
+    `v2_rows=216592`, `executable_pnl_rows=15828`, `deribit_rows=0`,
+    `entry_fill_rate=7.31%`, `exit_fill_rate=6.50%`.
+
 ## Candidate Lanes
 
 ### 1. Repricing Momentum
@@ -166,12 +185,31 @@ Status:
 - It is closer to a hold-to-expiry strategy than a 10s/30s repricing strategy.
 - It still needs execution/risk filters because wide spreads and poor exits can
   dominate realized results.
+- The direct `side_fair_edge = side_fair_prob - entry_ask - fee` hypothesis did
+  not survive the settlement executable-PnL gate:
+  - BTC/ETH/SOL AutoFactor `settlement_fair_edge -> settlement_executable_pnl`
+    was rejected with Spearman IC `-0.156860`, ICIR `-1.441374`, positive
+    window ratio `0.0593`, and top bucket avg label `-0.955000`.
+  - XRP/DOGE/BNB AutoFactor `settlement_fair_edge -> settlement_executable_pnl`
+    was rejected with Spearman IC `-0.042813`, ICIR `-0.226205`, positive
+    window ratio `0.3874`, and top bucket avg label `-0.661597`.
+- In the same rerun, raw `side_fair_prob` still ranked settlement outcomes and
+  executable settlement PnL strongly:
+  - BTC/ETH/SOL `side_fair_prob -> settlement_executable_pnl`: Spearman IC
+    `0.4624`, ICIR `3.4101`, positive window ratio `1.0000`, top bucket avg
+    PnL `1.1738`.
+  - XRP/DOGE/BNB `side_fair_prob -> settlement_executable_pnl`: Spearman IC
+    `0.5002`, ICIR `3.6109`, positive window ratio `1.0000`, top bucket avg
+    PnL only `0.0403`.
 
 Decision:
 
 - Promote to a settlement-gate research candidate, not directly to dry-run.
-- Required next gate: optimize/edge matrix around
-  `side_fair_prob - executable_price`, time-to-expiry, distance, and liquidity.
+- Do not promote `side_fair_edge` or a naive
+  `side_fair_prob - executable_price` formula.
+- Required next gate: BTC/ETH/SOL-only selector/edge matrix around raw
+  `side_fair_prob`, time-to-expiry, distance, entry ask, spread, depth, and
+  realized executable settlement PnL.
 
 ## Current Ranking
 
@@ -192,15 +230,18 @@ Priority 1: settlement gate around `side_fair_prob`.
 
 - Reason: it has the cleanest IC/ICIR evidence and maps directly to
   hold-to-expiry accounting.
-- Required score: `side_fair_edge = side_fair_prob - entry_ask - fee`.
+- Required score: raw `side_fair_prob` plus explicit execution/risk filters.
+- Rejected score: `side_fair_edge = side_fair_prob - entry_ask - fee`.
 - Required target: `settlement_executable_pnl`.
 - Required filters: time-to-expiry, distance-over-sigma, spread, top-book
   depth, and symbol.
 - Promotion condition: positive OOS executable PnL, powered validation trade
   count, drawdown within risk budget, and no single-symbol/day concentration.
 - Implementation status: the factor review and AutoFactor walk-forward runner
-  now include `side_fair_edge` against `settlement_executable_pnl`; the next
-  step is to run the snapshot-backed workflow and inspect the new IC/ICIR rows.
+  now include `side_fair_edge` against `settlement_executable_pnl`, and the
+  snapshot-backed rerun rejected that formula. The next step is a BTC/ETH/SOL
+  settlement selector that treats price/liquidity as gates and sizing inputs
+  rather than subtracting them into the alpha score.
 
 Priority 2: BTC/ETH/SOL repricing momentum with `spread_adjusted_external_move`.
 
@@ -223,8 +264,8 @@ Priority 3: volatility trigger with `vol_gap`.
 
 Decision rule:
 
-- If settlement gate passes first, build the first small fixed-size dry-run
-  candidate as hold-to-expiry only.
+- If the BTC/ETH/SOL `side_fair_prob` selector passes first, build the first
+  small fixed-size dry-run candidate as hold-to-expiry only.
 - If settlement is too sparse or drawdown-heavy, promote BTC/ETH/SOL repricing
   momentum to strict replay parity.
 - If both fail, keep `vol_gap` as a pre-trade trigger and do not promote it
@@ -232,10 +273,12 @@ Decision rule:
 
 ## Next Engineering Gates
 
-1. Add or run a settlement-focused gate:
-   - score: `side_fair_edge = side_fair_prob - entry_ask - fee`
+1. Add or run a BTC/ETH/SOL settlement selector gate:
+   - score: raw `side_fair_prob`
+   - reject: naive `side_fair_edge = side_fair_prob - entry_ask - fee`
    - target: `settlement_executable_pnl`
-   - regimes: time-to-expiry, distance-over-sigma, liquidity bucket, symbol.
+   - regimes: time-to-expiry, distance-over-sigma, entry ask, spread,
+     liquidity bucket, symbol.
 2. Add or run a volatility-trigger gate:
    - score: `vol_gap` plus near-strike and liquidity state
    - target: `abs_reprice_bid_change_10s/30s` or tradable move

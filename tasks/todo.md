@@ -19,7 +19,7 @@ volatility-triggered repricing.
   `side_fair_prob - executable_entry_price` versus
   `settlement_executable_pnl`, bucketed by time-to-expiry, distance, liquidity,
   and symbol.
-- [ ] Run the snapshot-backed settlement-focused gate on BTC/ETH/SOL and
+- [x] Run the snapshot-backed settlement-focused gate on BTC/ETH/SOL and
   XRP/DOGE/BNB.
 - [ ] If settlement passes, create a hold-to-expiry dry-run handoff packet with
   fixed small sizing and strict no-live default.
@@ -50,6 +50,45 @@ volatility-triggered repricing.
   --no-default-features`, and `git diff --check`. The example check emitted
   only pre-existing strategy-bundle dead-code warnings plus the vendor profile
   warning.
+- 2026-05-03: PR #314 merged to `main` as `df29ac69fef9e04c06b0246f2a6cde8f8e22e5da`.
+  Triggered main snapshot-backed settlement gate runs:
+  BTC/ETH/SOL `25266543999` using snapshot `25254380121`, and XRP/DOGE/BNB
+  `25266544004` using snapshot `25255158983`. Both are blocked before execution
+  because GitHub runner `ploy-ci-1` is offline. Aliyun ECS
+  `i-6we7z44sfbfbnosbeymz` / `ploy-ci-1` is `Stopped`, and
+  `aliyun ecs StartInstance --RegionId ap-northeast-1 --InstanceId
+  i-6we7z44sfbfbnosbeymz` failed with `InstanceExpired`:
+  "The postPaid instance has been expired. Please ensure your account have
+  enough balance." Existing GitHub artifacts for snapshots `25254380121` and
+  `25255158983` contain provenance only, not reusable local parquet snapshot
+  data, so the new settlement gate cannot be rerun locally without violating
+  the repo's no-local-DB research rule. Next action after billing/ECS recovery:
+  verify `ploy-ci-1` runner is online and let/retrigger runs `25266543999` and
+  `25266544004`.
+- 2026-05-03: After billing recovery, Aliyun ECS instance
+  `i-6we7z44sfbfbnosbeymz` was started and GitHub runner `ploy-ci-1` returned
+  online. Main snapshot-backed settlement gate runs completed successfully:
+  BTC/ETH/SOL run `25266543999`
+  (`https://github.com/proerror77/ploy/actions/runs/25266543999`) and
+  XRP/DOGE/BNB run `25266544004`
+  (`https://github.com/proerror77/ploy/actions/runs/25266544004`), both on
+  `main` SHA `df29ac69fef9e04c06b0246f2a6cde8f8e22e5da`.
+- 2026-05-03: The direct settlement edge hypothesis failed. AutoFactor
+  `settlement_fair_edge -> settlement_executable_pnl` was rejected in both
+  batches: BTC/ETH/SOL Spearman IC `-0.156860`, ICIR `-1.441374`, positive
+  window ratio `0.0593`, top bucket avg label `-0.955000`; XRP/DOGE/BNB
+  Spearman IC `-0.042813`, ICIR `-0.226205`, positive window ratio `0.3874`,
+  top bucket avg label `-0.661597`. Do not promote
+  `side_fair_prob - entry_ask - fee` as a hold-to-expiry strategy.
+- 2026-05-03: Raw `side_fair_prob` remains the cleanest settlement predictor,
+  but the tradability differs sharply by symbol group. BTC/ETH/SOL
+  `side_fair_prob -> settlement_executable_pnl` had Spearman IC `0.4624`,
+  ICIR `3.4101`, positive window ratio `1.0000`, and top bucket avg PnL
+  `1.1738`. XRP/DOGE/BNB had Spearman IC `0.5002`, ICIR `3.6109`, positive
+  window ratio `1.0000`, but top bucket avg PnL only `0.0403` and much weaker
+  executable coverage. Next fastest gate should be a BTC/ETH/SOL-only
+  settlement selector around `side_fair_prob` plus entry/liquidity/time filters,
+  not the naive fair-minus-price formula.
 
 # Repricing Momentum Snapshot Optimize Selector (2026-05-03)
 
