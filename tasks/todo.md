@@ -23,7 +23,7 @@ volatility-triggered repricing.
   XRP/DOGE/BNB.
 - [ ] If settlement passes, create a hold-to-expiry dry-run handoff packet with
   fixed small sizing and strict no-live default.
-- [ ] If settlement fails or is too sparse, run strict BTC/ETH/SOL replay/runtime
+- [x] If settlement fails or is too sparse, run strict BTC/ETH/SOL replay/runtime
   parity for `repricing_momentum`.
 - [ ] Keep `vol_gap` as a trigger-only lane until direction confirmation has
   executable IC/PnL evidence.
@@ -89,6 +89,37 @@ volatility-triggered repricing.
   executable coverage. Next fastest gate should be a BTC/ETH/SOL-only
   settlement selector around `side_fair_prob` plus entry/liquidity/time filters,
   not the naive fair-minus-price formula.
+- 2026-05-03: PR #316 merged to `main` as `4993682adf111d1406279266d4f20a1951dc497b`.
+  Main BTC/ETH/SOL full-depth factor gate `25272942927` using snapshot
+  `25254380121` confirmed the same executable health and factor evidence:
+  `full_depth_entry_fill_rate=49.23%`, `full_depth_exit_fill_rate=40.70%`,
+  `full_depth_pnl_rows=112256`, and `spread_adjusted_external_move` passed
+  `full_depth_reprice_pnl_10s` with Spearman IC `0.318021`, ICIR `1.861363`,
+  positive-window ratio `0.9706`, top bucket avg `2.447743`; it also passed
+  `full_depth_reprice_pnl_30s` with IC `0.256958`, ICIR `1.941881`, top bucket
+  avg `2.395292`.
+- 2026-05-03: Snapshot optimize gate `25273204478` on `repricing_momentum`
+  was correctly blocked as underpowered with `min_trades=80` despite positive
+  validation PnL: train `59` trades, validation `9` trades. The follow-up
+  exploratory gate `25273384677` used the same immutable snapshot
+  `762ae7751ad08a21`, BTC/ETH/SOL only, train `2026-04-21..2026-04-26`,
+  validation `2026-04-26..2026-05-02`, `80` trials, `min_trades=20`, and passed
+  without underpower flags. Validation selected `200` trades with full-depth
+  executable fill rate `100%`, PnL `+5814.780670`, Sharpe `8.652444`, max
+  drawdown `$270.005436`, positive-day rate `83.33%`, positive-symbol rate
+  `100%`, and reject rate `0%`. Added a paused paper deployment handoff via
+  `config/strategies/02-pm5d-threelayer.repricing-momentum-dryrun.toml` and
+  `config/deployments/pm5d.threelayer.repricing-momentum.dryrun.json`; this is
+  dry-run evidence only, not live promotion.
+- 2026-05-03: Local handoff verification passed: JSON manifest parse,
+  Python TOML parse with BTC/ETH/SOL and `repricing_momentum` assertions,
+  `rustfmt --edition 2021 --check crates/ploy-strategy-bundles/src/config.rs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-repricing-dryrun-config rtk cargo test -p
+  ploy-strategy-bundles roadmap_config_family_parses --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-repricing-dryrun-check rtk cargo check -p
+  ploy-strategy-bundles --lib`, and `git diff --check`. Cargo emitted only
+  pre-existing warnings from unrelated strategy modules and the vendor profile
+  warning.
 
 # Full-Depth Execution Label Repair (2026-05-03)
 
