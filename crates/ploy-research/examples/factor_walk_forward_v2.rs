@@ -10,8 +10,9 @@ use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
     build_factor_observations_v2_with_deribit_and_pm_books,
     build_factor_observations_with_lob_sampled, build_factor_stability_report,
-    format_autofactor_reports, format_factor_combo_v1_report, format_factor_stability_report,
-    format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
+    build_full_depth_execution_matrix, format_autofactor_reports, format_factor_combo_v1_report,
+    format_factor_stability_report, format_factor_walk_forward_v2_report,
+    format_fillability_review_v1_report, format_full_depth_execution_matrix_report,
     format_liquidity_gate_v1_report, format_liquidity_gated_alpha_v1_report,
     format_meta_label_walk_forward_v1_report, format_repricing_ic_report,
     format_trade_formation_v1_report, liquidity_gate_v1_with_deribit,
@@ -23,9 +24,9 @@ use ploy_research::{
     walk_forward_factors_v2_with_deribit_and_pm_books, walk_forward_meta_label_v1_with_deribit,
     AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options, FactorObservation,
     FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
-    FillabilityReviewOptions, LiquidityGateV1Options, LiquidityGatedAlphaV1Options,
-    MetaLabelWalkForwardOptions, RepricingIcOptions, ResearchSnapshotRequest,
-    TradeFormationReviewOptions,
+    FillabilityReviewOptions, FullDepthExecutionMatrixOptions, LiquidityGateV1Options,
+    LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions, RepricingIcOptions,
+    ResearchSnapshotRequest, TradeFormationReviewOptions,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -345,6 +346,18 @@ async fn main() {
         println!("{snapshot_provenance}");
     }
     println!("{}", format_factor_walk_forward_v2_report(&report));
+    let execution_matrix = build_full_depth_execution_matrix(
+        &observations,
+        &all_pm_book_snapshots,
+        FullDepthExecutionMatrixOptions {
+            min_bucket_observations: options.review.min_observations.max(20),
+            ..Default::default()
+        },
+    );
+    println!(
+        "{}",
+        format_full_depth_execution_matrix_report(&execution_matrix, options.top_n)
+    );
     let repricing_ic_report = review_repricing_ic_with_deribit_and_pm_books(
         &observations,
         &deribit_snapshots,
@@ -370,9 +383,9 @@ async fn main() {
         ..Default::default()
     };
     for target in [
-        AutoFactorV2Target::RepricePnl10s,
-        AutoFactorV2Target::RepricePnl30s,
-        AutoFactorV2Target::SettlementExecutablePnl,
+        AutoFactorV2Target::FullDepthRepricePnl10s,
+        AutoFactorV2Target::FullDepthRepricePnl30s,
+        AutoFactorV2Target::FullDepthSettlementExecutablePnl,
     ] {
         match mine_domain_autofactors_from_v2(&autofactor_rows, target, &autofactor_options) {
             Ok(reports) => {

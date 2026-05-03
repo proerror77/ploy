@@ -240,7 +240,10 @@ pub struct AutoFactorReport {
 pub enum AutoFactorV2Target {
     RepricePnl10s,
     RepricePnl30s,
+    FullDepthRepricePnl10s,
+    FullDepthRepricePnl30s,
     SettlementExecutablePnl,
+    FullDepthSettlementExecutablePnl,
 }
 
 impl AutoFactorV2Target {
@@ -248,7 +251,12 @@ impl AutoFactorV2Target {
         match self {
             AutoFactorV2Target::RepricePnl10s => "reprice_pnl_10s",
             AutoFactorV2Target::RepricePnl30s => "reprice_pnl_30s",
+            AutoFactorV2Target::FullDepthRepricePnl10s => "full_depth_reprice_pnl_10s",
+            AutoFactorV2Target::FullDepthRepricePnl30s => "full_depth_reprice_pnl_30s",
             AutoFactorV2Target::SettlementExecutablePnl => "settlement_executable_pnl",
+            AutoFactorV2Target::FullDepthSettlementExecutablePnl => {
+                "full_depth_settlement_executable_pnl"
+            }
         }
     }
 
@@ -256,7 +264,12 @@ impl AutoFactorV2Target {
         match self {
             AutoFactorV2Target::RepricePnl10s => row.label_future_exit_pnl_10s,
             AutoFactorV2Target::RepricePnl30s => row.label_future_exit_pnl_30s,
+            AutoFactorV2Target::FullDepthRepricePnl10s => row.label_future_exit_full_depth_pnl_10s,
+            AutoFactorV2Target::FullDepthRepricePnl30s => row.label_future_exit_full_depth_pnl_30s,
             AutoFactorV2Target::SettlementExecutablePnl => row.label_executable_pnl_15u,
+            AutoFactorV2Target::FullDepthSettlementExecutablePnl => {
+                row.label_full_depth_executable_pnl_15u
+            }
         }
         .unwrap_or(f64::NAN)
     }
@@ -1210,10 +1223,22 @@ mod tests {
             label_future_exit_pnl_10s: Some(score * 0.10),
             label_future_exit_pnl_30s: Some(score * 0.20),
             label_future_exit_pnl_60s: Some(score * 0.30),
+            label_future_exit_full_depth_pnl_5s: Some(score * 0.04),
+            label_future_exit_full_depth_pnl_10s: Some(score * 0.08),
+            label_future_exit_full_depth_pnl_30s: Some(score * 0.16),
+            label_future_exit_full_depth_pnl_60s: Some(score * 0.24),
+            label_future_exit_full_depth_value_5s: Some(15.0 + score * 0.04),
+            label_future_exit_full_depth_value_10s: Some(15.0 + score * 0.08),
+            label_future_exit_full_depth_value_30s: Some(15.0 + score * 0.16),
+            label_future_exit_full_depth_value_60s: Some(15.0 + score * 0.24),
             label_future_exit_fillable_5s: Some(1.0),
             label_future_exit_fillable_10s: Some(1.0),
             label_future_exit_fillable_30s: Some(1.0),
             label_future_exit_fillable_60s: Some(1.0),
+            label_future_exit_full_depth_fillable_5s: Some(1.0),
+            label_future_exit_full_depth_fillable_10s: Some(1.0),
+            label_future_exit_full_depth_fillable_30s: Some(1.0),
+            label_future_exit_full_depth_fillable_60s: Some(1.0),
         }
     }
 

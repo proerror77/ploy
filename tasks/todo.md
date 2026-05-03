@@ -90,6 +90,56 @@ volatility-triggered repricing.
   settlement selector around `side_fair_prob` plus entry/liquidity/time filters,
   not the naive fair-minus-price formula.
 
+# Full-Depth Execution Label Repair (2026-05-03)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: full CLOB sweep labels, future-exit full-depth repricing labels, and
+    stake-sweep execution matrix.
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: expose full-depth AutoFactor targets without reusing top-book
+    repricing labels.
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: print execution matrix before factor mining and use full-depth
+    targets for the snapshot-backed report.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add explicit full-depth future-exit labels for 5s / 10s / 30s / 60s.
+- [x] Add a full-depth execution matrix over 1U / 3U / 5U / 10U / 15U.
+- [x] Wire the matrix and full-depth AutoFactor targets into
+  `factor_walk_forward_v2`.
+- [x] Add focused sweep/matrix regression tests.
+- [x] Run focused local verification.
+
+## Review
+
+- 2026-05-03: Repaired the PM5D execution-label foundation so snapshot-backed
+  factor reports can stop treating top-book repricing as final executable
+  evidence. `FactorObservationV2` now carries full-depth future-exit labels for
+  5s / 10s / 30s / 60s, computed by sweeping current entry asks and future
+  exit bids with the current entry shares. Added `FullDepthExecutionMatrix`
+  over 1U / 3U / 5U / 10U / 15U, including entry fill, exit fill, roundtrip
+  fill, settlement PnL, repricing PnL, slippage, and level-count buckets.
+- 2026-05-03: `factor_walk_forward_v2` now prints the full-depth execution
+  matrix before IC/AutoFactor output and runs AutoFactor against
+  `full_depth_reprice_pnl_10s`, `full_depth_reprice_pnl_30s`, and
+  `full_depth_settlement_executable_pnl` instead of the legacy top-book
+  repricing targets.
+- 2026-05-03: Focused verification passed:
+  `rustfmt --edition 2021 --config skip_children=true --check` on touched Rust
+  files, `CARGO_TARGET_DIR=/tmp/ploy-full-depth-matrix rtk cargo test -p
+  ploy-research factors_v2 --lib`, `CARGO_TARGET_DIR=/tmp/ploy-full-depth-
+  matrix-autofactor rtk cargo test -p ploy-research autofactor --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-full-depth-matrix-check rtk cargo check -p
+  ploy-research --example factor_walk_forward_v2 --features db
+  --no-default-features`, and `git diff --check`. The example check emitted
+  only pre-existing strategy-bundle dead-code warnings plus the vendor profile
+  warning.
+
 # Repricing Momentum Snapshot Optimize Selector (2026-05-03)
 
 ## Files
