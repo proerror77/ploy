@@ -1,3 +1,56 @@
+# PM5D High ICIR Strategy Discovery Plan (2026-05-03)
+
+## Goal
+
+Find the fastest credible path from high IC/ICIR research evidence to one small,
+tradable PM5D strategy candidate. The candidate must be selected from the
+existing evidence lanes: settlement hold-to-expiry, short-horizon repricing, or
+volatility-triggered repricing.
+
+## Plan
+
+- [x] Preserve the current IC/ICIR shortlist in
+  `tasks/pm5d_icir_strategy_candidates_20260503.md`.
+- [x] Rank the lanes by speed to a tradable candidate:
+  1. `side_fair_prob` settlement gate.
+  2. BTC/ETH/SOL `spread_adjusted_external_move` repricing parity gate.
+  3. `vol_gap` volatility trigger with direction confirmation.
+- [x] Implement the settlement-focused factor gate input:
+  `side_fair_prob - executable_entry_price` versus
+  `settlement_executable_pnl`, bucketed by time-to-expiry, distance, liquidity,
+  and symbol.
+- [ ] Run the snapshot-backed settlement-focused gate on BTC/ETH/SOL and
+  XRP/DOGE/BNB.
+- [ ] If settlement passes, create a hold-to-expiry dry-run handoff packet with
+  fixed small sizing and strict no-live default.
+- [ ] If settlement fails or is too sparse, run strict BTC/ETH/SOL replay/runtime
+  parity for `repricing_momentum`.
+- [ ] Keep `vol_gap` as a trigger-only lane until direction confirmation has
+  executable IC/PnL evidence.
+
+## Review
+
+- 2026-05-03: User clarified the original objective: find high IC/ICIR factors
+  first, then decide whether the tradeable strategy is volatility/repricing or
+  hold-to-settlement. Current evidence makes `side_fair_prob` the fastest
+  high-IC settlement candidate, `spread_adjusted_external_move` the closest
+  runtime-backed repricing candidate, and `vol_gap` a volatility trigger rather
+  than a standalone long-vol trade.
+- 2026-05-03: Added a direct settlement edge research input:
+  `side_fair_edge = side_fair_prob - entry_ask - fee`, plus an AutoFactor
+  `settlement_executable_pnl` target. This makes the next snapshot-backed
+  factor walk-forward report evaluate the actual hold-to-expiry edge instead
+  of only the raw fair probability. Focused verification passed:
+  `rustfmt --edition 2021 --check` on touched Rust files,
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-autofactor rtk cargo test -p
+  ploy-research autofactor --lib`, `CARGO_TARGET_DIR=/tmp/ploy-settlement-factors
+  rtk cargo test -p ploy-research factors_v2 --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-autofactor-check rtk cargo check -p
+  ploy-research --example factor_walk_forward_v2 --features db
+  --no-default-features`, and `git diff --check`. The example check emitted
+  only pre-existing strategy-bundle dead-code warnings plus the vendor profile
+  warning.
+
 # Repricing Momentum Snapshot Optimize Selector (2026-05-03)
 
 ## Files

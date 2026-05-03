@@ -1037,6 +1037,18 @@ pub fn factor_v2_descriptors() -> Vec<FactorV2Descriptor> {
             |r| r.side_fair_prob,
         ),
         descriptor(
+            "side_fair_edge",
+            FactorFamily::Alpha,
+            ThreeLayerArchive::DirectionProbabilityEdge,
+            |r| {
+                if valid_price(r.entry_ask) && r.side_fair_prob.is_finite() {
+                    r.side_fair_prob - r.entry_ask - crypto_fee_cost(r.entry_ask)
+                } else {
+                    f64::NAN
+                }
+            },
+        ),
+        descriptor(
             "side_distance_over_sigma",
             FactorFamily::Alpha,
             ThreeLayerArchive::DirectionProbabilityEdge,
@@ -7420,6 +7432,10 @@ mod tests {
             .reviews
             .iter()
             .any(|review| review.factor == "side_model_edge"));
+        assert!(report
+            .reviews
+            .iter()
+            .any(|review| review.factor == "side_fair_edge"));
     }
 
     #[test]

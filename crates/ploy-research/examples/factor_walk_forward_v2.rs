@@ -5,14 +5,10 @@
 //! scores executable PnL after PM CLOB fillability.
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
-    AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options, FactorObservation,
-    FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
-    FillabilityReviewOptions, LiquidityGateV1Options, LiquidityGatedAlphaV1Options,
-    MetaLabelWalkForwardOptions, RepricingIcOptions, ResearchSnapshotRequest,
-    TradeFormationReviewOptions, build_factor_observations_v2_with_deribit_and_pm_books,
+    build_factor_observations_v2_with_deribit_and_pm_books,
     build_factor_observations_with_lob_sampled, build_factor_stability_report,
     format_autofactor_reports, format_factor_combo_v1_report, format_factor_stability_report,
     format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
@@ -25,6 +21,11 @@ use ploy_research::{
     review_repricing_ic_with_deribit_and_pm_books, review_trade_formation_v1_with_deribit,
     validate_snapshot_request, walk_forward_factor_combo_v1_with_deribit,
     walk_forward_factors_v2_with_deribit_and_pm_books, walk_forward_meta_label_v1_with_deribit,
+    AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options, FactorObservation,
+    FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
+    FillabilityReviewOptions, LiquidityGateV1Options, LiquidityGatedAlphaV1Options,
+    MetaLabelWalkForwardOptions, RepricingIcOptions, ResearchSnapshotRequest,
+    TradeFormationReviewOptions,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -371,6 +372,7 @@ async fn main() {
     for target in [
         AutoFactorV2Target::RepricePnl10s,
         AutoFactorV2Target::RepricePnl30s,
+        AutoFactorV2Target::SettlementExecutablePnl,
     ] {
         match mine_domain_autofactors_from_v2(&autofactor_rows, target, &autofactor_options) {
             Ok(reports) => {
