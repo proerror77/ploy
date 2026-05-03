@@ -91,6 +91,7 @@ numeric ID used as filename prefix.
 | `02-pm5d-threelayer.obi-soft-dryrun.toml` | **UNIFIED** | Snapshot-profile dry-run candidate; profile `obi_soft` |
 | `02-pm5d-threelayer.obi-hard-dryrun.toml` | **UNIFIED** | Snapshot-profile dry-run candidate; profile `obi_hard` with hard OBI confirmation |
 | `02-pm5d-threelayer.continuation-soft-dryrun.toml` | **UNIFIED** | Holistic snapshot-profile dry-run candidate; profile `continuation_soft` |
+| `02-pm5d-threelayer.repricing-momentum-dryrun.toml` | **UNIFIED** | BTC/ETH/SOL-only full-depth dry-run candidate; profile `repricing_momentum` |
 
 ### S03 — Pattern Memory
 | File | Format | Notes |
