@@ -120,6 +120,12 @@ volatility-triggered repricing.
   ploy-strategy-bundles --lib`, and `git diff --check`. Cargo emitted only
   pre-existing warnings from unrelated strategy modules and the vendor profile
   warning.
+- 2026-05-03: After PR #317 merged, found the tango deploy workflow still
+  copied three-layer strategy TOMLs through an explicit allowlist. Added the
+  repricing-momentum dry-run TOML to both the bundle staging copy and the
+  remote install list in `.github/workflows/deploy-tango-1-1.yml`; otherwise
+  the new deployment manifest would arrive on tango without its strategy
+  bundle.
 
 # Full-Depth Execution Label Repair (2026-05-03)
 
