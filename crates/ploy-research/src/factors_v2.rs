@@ -2364,6 +2364,33 @@ pub fn walk_forward_factor_combo_v1_with_deribit(
         deribit,
         &options.walk_forward.review,
     );
+    walk_forward_factor_combo_v1_rows(source_rows, &mut v2_rows, start, end, options)
+}
+
+pub fn walk_forward_factor_combo_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: FactorComboV1Options,
+) -> FactorComboV1Report {
+    let mut v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.walk_forward.review,
+    );
+    walk_forward_factor_combo_v1_rows(source_rows, &mut v2_rows, start, end, options)
+}
+
+fn walk_forward_factor_combo_v1_rows(
+    source_rows: &[FactorObservation],
+    v2_rows: &mut [FactorObservationV2],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: FactorComboV1Options,
+) -> FactorComboV1Report {
     v2_rows.sort_by_key(|row| row.tick_ts);
     let descriptors: Vec<FactorV2Descriptor> = factor_v2_descriptors()
         .into_iter()
@@ -2440,11 +2467,34 @@ pub fn review_fillability_v1_with_deribit(
     options: FillabilityReviewOptions,
 ) -> FillabilityReviewReport {
     let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    build_fillability_review_v1_report(source_rows, &v2_rows, options)
+}
+
+pub fn review_fillability_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    options: FillabilityReviewOptions,
+) -> FillabilityReviewReport {
+    let v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.review,
+    );
+    build_fillability_review_v1_report(source_rows, &v2_rows, options)
+}
+
+fn build_fillability_review_v1_report(
+    source_rows: &[FactorObservation],
+    v2_rows: &[FactorObservationV2],
+    options: FillabilityReviewOptions,
+) -> FillabilityReviewReport {
     let health = build_data_health_report(source_rows, &v2_rows);
     let mut rows = Vec::new();
     for spec in fillability_bucket_specs() {
         let mut buckets: BTreeMap<String, Vec<&FactorObservationV2>> = BTreeMap::new();
-        for row in &v2_rows {
+        for row in v2_rows {
             if let Some(bucket) = (spec.bucket)(row) {
                 buckets.entry(bucket).or_default().push(row);
             }
@@ -2482,6 +2532,21 @@ pub fn liquidity_gate_v1_with_deribit(
     options: LiquidityGateV1Options,
 ) -> LiquidityGateV1Report {
     let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    build_liquidity_gate_v1_report(source_rows, &v2_rows, options)
+}
+
+pub fn liquidity_gate_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    options: LiquidityGateV1Options,
+) -> LiquidityGateV1Report {
+    let v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.review,
+    );
     build_liquidity_gate_v1_report(source_rows, &v2_rows, options)
 }
 
@@ -2582,6 +2647,52 @@ pub fn liquidity_gated_alpha_v1_with_deribit(
     }
 }
 
+pub fn liquidity_gated_alpha_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    mut options: LiquidityGatedAlphaV1Options,
+) -> LiquidityGatedAlphaV1Report {
+    options.gate.review = options.walk_forward.review.clone();
+    let v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.walk_forward.review,
+    );
+    let baseline_health = build_data_health_report(source_rows, &v2_rows);
+    let gate = build_liquidity_gate_v1_report(source_rows, &v2_rows, options.gate.clone());
+    let gated_rows = v2_rows
+        .iter()
+        .filter(|row| liquidity_gate_v1_accepts(row, &options.gate))
+        .cloned()
+        .collect::<Vec<_>>();
+    let review = review_candidate_factor_rows(
+        source_rows,
+        &gated_rows,
+        options.walk_forward.review.clone(),
+    );
+    let mut walk_rows = gated_rows.clone();
+    let walk_forward = walk_forward_factor_rows(
+        source_rows,
+        &mut walk_rows,
+        start,
+        end,
+        options.walk_forward.clone(),
+    );
+    let stability = build_factor_stability_report(&walk_forward, FactorStabilityOptions::default());
+    LiquidityGatedAlphaV1Report {
+        options,
+        baseline_health,
+        gate,
+        review,
+        walk_forward,
+        stability,
+    }
+}
+
 pub fn review_trade_formation_v1_with_deribit(
     source_rows: &[FactorObservation],
     deribit: &[DeribitFeatureSnapshot],
@@ -2590,6 +2701,30 @@ pub fn review_trade_formation_v1_with_deribit(
     options.gate.review = options.review.clone();
     let mut v2_rows =
         build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    build_trade_formation_v1_report(source_rows, &mut v2_rows, options)
+}
+
+pub fn review_trade_formation_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    mut options: TradeFormationReviewOptions,
+) -> TradeFormationReviewReport {
+    options.gate.review = options.review.clone();
+    let mut v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.review,
+    );
+    build_trade_formation_v1_report(source_rows, &mut v2_rows, options)
+}
+
+fn build_trade_formation_v1_report(
+    source_rows: &[FactorObservation],
+    v2_rows: &mut [FactorObservationV2],
+    options: TradeFormationReviewOptions,
+) -> TradeFormationReviewReport {
     v2_rows.sort_by_key(|row| row.tick_ts);
     let health = build_data_health_report(source_rows, &v2_rows);
     let gate = build_liquidity_gate_v1_report(source_rows, &v2_rows, options.gate.clone());
@@ -2655,6 +2790,34 @@ pub fn walk_forward_meta_label_v1_with_deribit(
     options.gate.review = options.review.clone();
     let mut v2_rows =
         build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    walk_forward_meta_label_v1_rows(source_rows, &mut v2_rows, start, end, options)
+}
+
+pub fn walk_forward_meta_label_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    mut options: MetaLabelWalkForwardOptions,
+) -> MetaLabelWalkForwardReport {
+    options.gate.review = options.review.clone();
+    let mut v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.review,
+    );
+    walk_forward_meta_label_v1_rows(source_rows, &mut v2_rows, start, end, options)
+}
+
+fn walk_forward_meta_label_v1_rows(
+    source_rows: &[FactorObservation],
+    v2_rows: &mut [FactorObservationV2],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: MetaLabelWalkForwardOptions,
+) -> MetaLabelWalkForwardReport {
     v2_rows.sort_by_key(|row| row.tick_ts);
     let health = build_data_health_report(source_rows, &v2_rows);
     let gate = build_liquidity_gate_v1_report(source_rows, &v2_rows, options.gate.clone());

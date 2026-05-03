@@ -139,6 +139,17 @@ volatility-triggered repricing.
   --no-default-features`, and `git diff --check`. The example check emitted
   only pre-existing strategy-bundle dead-code warnings plus the vendor profile
   warning.
+- 2026-05-03: The first remote full-depth report exposed one remaining mixed
+  path: later Fillability / Liquidity / Trade Formation / Meta-Label / Combo
+  sections still rebuilt V2 rows without PM books and printed false
+  `full_depth_entry_fill_rate=0.00%`. Added PM-book-backed variants for those
+  report paths and switched `factor_walk_forward_v2` to use them. Focused
+  verification passed again: `rustfmt --edition 2021 --config skip_children=true
+  --check` on touched Rust files, `CARGO_TARGET_DIR=/tmp/ploy-full-depth-paths
+  rtk cargo test -p ploy-research factors_v2 --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-full-depth-paths rtk cargo check -p
+  ploy-research --example factor_walk_forward_v2 --features db
+  --no-default-features`, and `git diff --check`.
 
 # Repricing Momentum Snapshot Optimize Selector (2026-05-03)
 
