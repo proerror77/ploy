@@ -240,6 +240,7 @@ pub struct AutoFactorReport {
 pub enum AutoFactorV2Target {
     RepricePnl10s,
     RepricePnl30s,
+    SettlementExecutablePnl,
 }
 
 impl AutoFactorV2Target {
@@ -247,6 +248,7 @@ impl AutoFactorV2Target {
         match self {
             AutoFactorV2Target::RepricePnl10s => "reprice_pnl_10s",
             AutoFactorV2Target::RepricePnl30s => "reprice_pnl_30s",
+            AutoFactorV2Target::SettlementExecutablePnl => "settlement_executable_pnl",
         }
     }
 
@@ -254,6 +256,7 @@ impl AutoFactorV2Target {
         match self {
             AutoFactorV2Target::RepricePnl10s => row.label_future_exit_pnl_10s,
             AutoFactorV2Target::RepricePnl30s => row.label_future_exit_pnl_30s,
+            AutoFactorV2Target::SettlementExecutablePnl => row.label_executable_pnl_15u,
         }
         .unwrap_or(f64::NAN)
     }
@@ -462,6 +465,16 @@ pub fn autofactor_matrix_from_v2(
     insert_column(&mut columns, "side_model_edge", rows, |row| {
         row.side_model_edge
     });
+    insert_column(&mut columns, "side_fair_prob", rows, |row| {
+        row.side_fair_prob
+    });
+    insert_column(&mut columns, "side_fair_edge", rows, |row| {
+        if valid_pm_price(row.entry_ask) && row.side_fair_prob.is_finite() {
+            row.side_fair_prob - row.entry_ask - pm_fee_cost(row.entry_ask)
+        } else {
+            f64::NAN
+        }
+    });
     insert_column(&mut columns, "repricing_gap_side_10s", rows, |row| {
         row.side_model_edge
     });
@@ -530,6 +543,14 @@ pub fn autofactor_windows_from_v2(rows: &[FactorObservationV2]) -> Vec<String> {
         .collect()
 }
 
+fn valid_pm_price(value: f64) -> bool {
+    value.is_finite() && value > 0.0 && value < 1.0
+}
+
+fn pm_fee_cost(entry_price: f64) -> f64 {
+    0.02 * entry_price * (1.0 - entry_price)
+}
+
 pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactorExpr> {
     let mut out = Vec::new();
     if input_names.contains("repricing_gap_side_10s") {
@@ -538,6 +559,14 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             expr: input("repricing_gap_side_10s"),
             target: Some("reprice_pnl_10s".to_string()),
             notes: vec!["Side-aligned fair-minus-entry gap proxy.".to_string()],
+        });
+    }
+    if input_names.contains("side_fair_edge") {
+        out.push(NamedFactorExpr {
+            name: "settlement_fair_edge".to_string(),
+            expr: input("side_fair_edge"),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec!["Settlement fair probability minus executable ask and fee.".to_string()],
         });
     }
     if has_all(input_names, &["ofi_l5", "depth_top5"]) {
@@ -1076,7 +1105,7 @@ mod tests {
             regime: Regime::Middle,
             side: ReviewSide::Up,
             side_model_prob: 0.5,
-            side_fair_prob: 0.5,
+            side_fair_prob: (0.50 + score * 0.01).clamp(0.01, 0.99),
             side_model_edge: score * 0.01,
             side_distance_over_sigma: 0.25,
             abs_distance_to_beat: 10.0,
@@ -1278,6 +1307,34 @@ mod tests {
         assert!(reports
             .iter()
             .any(|report| report.name == "poly_lag_pressure"));
+    }
+
+    #[test]
+    fn mines_domain_candidates_from_v2_settlement_rows() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let options = AutoFactorOptions {
+            min_observations: 40,
+            min_window_observations: 10,
+            min_icir: 0.1,
+            ..Default::default()
+        };
+        let reports = mine_domain_autofactors_from_v2(
+            &rows,
+            AutoFactorV2Target::SettlementExecutablePnl,
+            &options,
+        )
+        .expect("reports");
+        let fair_edge = reports
+            .iter()
+            .find(|report| report.name == "settlement_fair_edge")
+            .expect("settlement fair-edge report");
+
+        assert_eq!(fair_edge.decision, AutoFactorDecision::Candidate);
+        assert_eq!(
+            fair_edge.target.as_deref(),
+            Some("settlement_executable_pnl")
+        );
+        assert!(fair_edge.spearman_ic > 0.95);
     }
 
     #[test]
