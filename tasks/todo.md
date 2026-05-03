@@ -150,6 +150,25 @@ volatility-triggered repricing.
   `CARGO_TARGET_DIR=/tmp/ploy-full-depth-paths rtk cargo check -p
   ploy-research --example factor_walk_forward_v2 --features db
   --no-default-features`, and `git diff --check`.
+- 2026-05-03: Remote full-depth reruns on PR branch
+  `feat/full-depth-execution-matrix` succeeded. BTC/ETH/SOL run
+  `25272413503` using snapshot `25254380121` reported consistent full-depth
+  health across sections: `full_depth_entry_fill_rate=49.23%`,
+  `full_depth_exit_fill_rate=40.70%`, `full_depth_pnl_rows=112256`.
+  `spread_adjusted_external_move` passed AutoFactor gates on
+  `full_depth_reprice_pnl_10s` with Spearman IC `0.318021`, ICIR `1.861363`,
+  positive window ratio `0.9706`, and top bucket avg label `2.447743`; it also
+  passed `full_depth_reprice_pnl_30s` with IC `0.256958`, ICIR `1.941881`, top
+  bucket avg `2.395292`.
+- 2026-05-03: XRP/DOGE/BNB rerun `25272413955` using snapshot `25255158983`
+  also reported consistent full-depth health
+  (`full_depth_entry_fill_rate=45.22%`, `full_depth_exit_fill_rate=36.27%`,
+  `full_depth_pnl_rows=97939`), but `spread_adjusted_external_move` remained
+  watchlist only because top bucket labels were negative:
+  `full_depth_reprice_pnl_10s` top bucket `-1.147388` and
+  `full_depth_reprice_pnl_30s` top bucket `-1.027182`. Next strategy gate
+  should be BTC/ETH/SOL-only `repricing_momentum`, not all-six-symbol
+  deployment.
 
 # Repricing Momentum Snapshot Optimize Selector (2026-05-03)
 
