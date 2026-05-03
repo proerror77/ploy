@@ -236,10 +236,22 @@ pub struct FactorObservationV2 {
     pub label_future_exit_pnl_10s: Option<f64>,
     pub label_future_exit_pnl_30s: Option<f64>,
     pub label_future_exit_pnl_60s: Option<f64>,
+    pub label_future_exit_full_depth_pnl_5s: Option<f64>,
+    pub label_future_exit_full_depth_pnl_10s: Option<f64>,
+    pub label_future_exit_full_depth_pnl_30s: Option<f64>,
+    pub label_future_exit_full_depth_pnl_60s: Option<f64>,
+    pub label_future_exit_full_depth_value_5s: Option<f64>,
+    pub label_future_exit_full_depth_value_10s: Option<f64>,
+    pub label_future_exit_full_depth_value_30s: Option<f64>,
+    pub label_future_exit_full_depth_value_60s: Option<f64>,
     pub label_future_exit_fillable_5s: Option<f64>,
     pub label_future_exit_fillable_10s: Option<f64>,
     pub label_future_exit_fillable_30s: Option<f64>,
     pub label_future_exit_fillable_60s: Option<f64>,
+    pub label_future_exit_full_depth_fillable_5s: Option<f64>,
+    pub label_future_exit_full_depth_fillable_10s: Option<f64>,
+    pub label_future_exit_full_depth_fillable_30s: Option<f64>,
+    pub label_future_exit_full_depth_fillable_60s: Option<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -293,6 +305,62 @@ impl DataHealthReport {
     pub fn full_depth_exit_fill_rate(&self) -> f64 {
         ratio(self.exit_full_depth_fillable_rows, self.v2_rows)
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FullDepthExecutionMatrixOptions {
+    pub stakes_usd: Vec<f64>,
+    pub visible_depth_haircut: f64,
+    pub max_levels: Option<usize>,
+    pub min_bucket_observations: usize,
+}
+
+impl Default for FullDepthExecutionMatrixOptions {
+    fn default() -> Self {
+        Self {
+            stakes_usd: vec![1.0, 3.0, 5.0, 10.0, 15.0],
+            visible_depth_haircut: 1.0,
+            max_levels: None,
+            min_bucket_observations: 20,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FullDepthExecutionMatrixRow {
+    pub stake_usd: f64,
+    pub symbol: String,
+    pub side: ReviewSide,
+    pub time_bucket: String,
+    pub distance_bucket: String,
+    pub entry_price_bucket: String,
+    pub spread_bucket: String,
+    pub quote_age_bucket: String,
+    pub count: usize,
+    pub entry_fill_rate: f64,
+    pub entry_avg_price_mean: f64,
+    pub entry_avg_slippage_bps: f64,
+    pub entry_p50_slippage_bps: f64,
+    pub entry_p90_slippage_bps: f64,
+    pub entry_avg_levels_used: f64,
+    pub exit_5s_fill_rate: f64,
+    pub exit_10s_fill_rate: f64,
+    pub exit_30s_fill_rate: f64,
+    pub exit_10s_avg_slippage_bps: f64,
+    pub exit_30s_avg_slippage_bps: f64,
+    pub roundtrip_fill_rate_5s: f64,
+    pub roundtrip_fill_rate_10s: f64,
+    pub roundtrip_fill_rate_30s: f64,
+    pub avg_settlement_pnl: f64,
+    pub avg_reprice_pnl_5s: f64,
+    pub avg_reprice_pnl_10s: f64,
+    pub avg_reprice_pnl_30s: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FullDepthExecutionMatrixReport {
+    pub options: FullDepthExecutionMatrixOptions,
+    pub rows: Vec<FullDepthExecutionMatrixRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1012,7 +1080,7 @@ pub fn build_factor_observations_v2_with_deribit_and_pm_books(
         out.push(side_row(row, ReviewSide::Up, stake_usd, up_book));
         out.push(side_row(row, ReviewSide::Down, stake_usd, down_book));
     }
-    enrich_rolling_features(&mut out, deribit);
+    enrich_rolling_features(&mut out, deribit, Some(&book_index));
     out
 }
 
@@ -2165,7 +2233,7 @@ pub fn format_repricing_ic_report(report: &RepricingIcReport, top_n: usize) -> S
         report.options.review.stake_usd,
     ));
     out.push_str(
-        "labels are side-aligned candidate trades: BUY_YES and BUY_NO rows. reprice_pnl_h = future_exit_bid_at_or_after_h * entry_shares - stake - entry_fee.\n",
+        "labels are side-aligned candidate trades: BUY_YES and BUY_NO rows. full_depth_reprice_pnl_h sweeps entry asks now and future bids at h; legacy reprice_pnl_h uses top-book future bids for debug only.\n",
     );
     out.push_str(
         "future_exit_* fields are labels/diagnostics only and are excluded from factor candidates. execution_filter rows explain tradability, not alpha.\n",
@@ -2173,6 +2241,7 @@ pub fn format_repricing_ic_report(report: &RepricingIcReport, top_n: usize) -> S
 
     let top_n = top_n.max(1);
     for group in [
+        "full_depth_reprice_pnl",
         "reprice_pnl",
         "reprice_bid_change",
         "volatility",
@@ -2222,6 +2291,67 @@ pub fn format_repricing_ic_report(report: &RepricingIcReport, top_n: usize) -> S
     out
 }
 
+pub fn format_full_depth_execution_matrix_report(
+    report: &FullDepthExecutionMatrixReport,
+    top_n: usize,
+) -> String {
+    let mut out = String::new();
+    out.push_str("=== Full-Depth Execution Matrix ===\n");
+    out.push_str(&format!(
+        "stakes_usd={} visible_depth_haircut={:.2} max_levels={} min_bucket_obs={} buckets={}\n",
+        report
+            .options
+            .stakes_usd
+            .iter()
+            .map(|stake| format!("{stake:.2}"))
+            .collect::<Vec<_>>()
+            .join("|"),
+        report.options.visible_depth_haircut,
+        report
+            .options
+            .max_levels
+            .map(|levels| levels.to_string())
+            .unwrap_or_else(|| "all".to_string()),
+        report.options.min_bucket_observations,
+        report.rows.len(),
+    ));
+    out.push_str("Full-depth matrix is the execution gate: entry sweeps asks by stake, repricing exits sweep future bids by entry shares, settlement uses entry sweep only.\n");
+    out.push_str("stake,symbol,side,time_bucket,distance_bucket,entry_price_bucket,spread_bucket,quote_age_bucket,count,entry_fill,entry_avg_price,entry_avg_slip_bps,entry_p50_slip_bps,entry_p90_slip_bps,entry_avg_levels,exit_5s_fill,exit_10s_fill,exit_30s_fill,exit_10s_slip_bps,exit_30s_slip_bps,roundtrip_5s,roundtrip_10s,roundtrip_30s,avg_settlement_pnl,avg_reprice_pnl_5s,avg_reprice_pnl_10s,avg_reprice_pnl_30s\n");
+    for row in report.rows.iter().take(top_n.max(1)) {
+        out.push_str(&format!(
+            "{:.2},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.2},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{:.2},{:.2},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            row.stake_usd,
+            row.symbol,
+            row.side.as_str(),
+            row.time_bucket,
+            row.distance_bucket,
+            row.entry_price_bucket,
+            row.spread_bucket,
+            row.quote_age_bucket,
+            row.count,
+            row.entry_fill_rate,
+            row.entry_avg_price_mean,
+            row.entry_avg_slippage_bps,
+            row.entry_p50_slippage_bps,
+            row.entry_p90_slippage_bps,
+            row.entry_avg_levels_used,
+            row.exit_5s_fill_rate,
+            row.exit_10s_fill_rate,
+            row.exit_30s_fill_rate,
+            row.exit_10s_avg_slippage_bps,
+            row.exit_30s_avg_slippage_bps,
+            row.roundtrip_fill_rate_5s,
+            row.roundtrip_fill_rate_10s,
+            row.roundtrip_fill_rate_30s,
+            row.avg_settlement_pnl,
+            row.avg_reprice_pnl_5s,
+            row.avg_reprice_pnl_10s,
+            row.avg_reprice_pnl_30s,
+        ));
+    }
+    out
+}
+
 pub fn walk_forward_factor_combo_v1_with_deribit(
     source_rows: &[FactorObservation],
     deribit: &[DeribitFeatureSnapshot],
@@ -2234,6 +2364,33 @@ pub fn walk_forward_factor_combo_v1_with_deribit(
         deribit,
         &options.walk_forward.review,
     );
+    walk_forward_factor_combo_v1_rows(source_rows, &mut v2_rows, start, end, options)
+}
+
+pub fn walk_forward_factor_combo_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: FactorComboV1Options,
+) -> FactorComboV1Report {
+    let mut v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.walk_forward.review,
+    );
+    walk_forward_factor_combo_v1_rows(source_rows, &mut v2_rows, start, end, options)
+}
+
+fn walk_forward_factor_combo_v1_rows(
+    source_rows: &[FactorObservation],
+    v2_rows: &mut [FactorObservationV2],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: FactorComboV1Options,
+) -> FactorComboV1Report {
     v2_rows.sort_by_key(|row| row.tick_ts);
     let descriptors: Vec<FactorV2Descriptor> = factor_v2_descriptors()
         .into_iter()
@@ -2310,11 +2467,34 @@ pub fn review_fillability_v1_with_deribit(
     options: FillabilityReviewOptions,
 ) -> FillabilityReviewReport {
     let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    build_fillability_review_v1_report(source_rows, &v2_rows, options)
+}
+
+pub fn review_fillability_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    options: FillabilityReviewOptions,
+) -> FillabilityReviewReport {
+    let v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.review,
+    );
+    build_fillability_review_v1_report(source_rows, &v2_rows, options)
+}
+
+fn build_fillability_review_v1_report(
+    source_rows: &[FactorObservation],
+    v2_rows: &[FactorObservationV2],
+    options: FillabilityReviewOptions,
+) -> FillabilityReviewReport {
     let health = build_data_health_report(source_rows, &v2_rows);
     let mut rows = Vec::new();
     for spec in fillability_bucket_specs() {
         let mut buckets: BTreeMap<String, Vec<&FactorObservationV2>> = BTreeMap::new();
-        for row in &v2_rows {
+        for row in v2_rows {
             if let Some(bucket) = (spec.bucket)(row) {
                 buckets.entry(bucket).or_default().push(row);
             }
@@ -2352,6 +2532,21 @@ pub fn liquidity_gate_v1_with_deribit(
     options: LiquidityGateV1Options,
 ) -> LiquidityGateV1Report {
     let v2_rows = build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    build_liquidity_gate_v1_report(source_rows, &v2_rows, options)
+}
+
+pub fn liquidity_gate_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    options: LiquidityGateV1Options,
+) -> LiquidityGateV1Report {
+    let v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.review,
+    );
     build_liquidity_gate_v1_report(source_rows, &v2_rows, options)
 }
 
@@ -2452,6 +2647,52 @@ pub fn liquidity_gated_alpha_v1_with_deribit(
     }
 }
 
+pub fn liquidity_gated_alpha_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    mut options: LiquidityGatedAlphaV1Options,
+) -> LiquidityGatedAlphaV1Report {
+    options.gate.review = options.walk_forward.review.clone();
+    let v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.walk_forward.review,
+    );
+    let baseline_health = build_data_health_report(source_rows, &v2_rows);
+    let gate = build_liquidity_gate_v1_report(source_rows, &v2_rows, options.gate.clone());
+    let gated_rows = v2_rows
+        .iter()
+        .filter(|row| liquidity_gate_v1_accepts(row, &options.gate))
+        .cloned()
+        .collect::<Vec<_>>();
+    let review = review_candidate_factor_rows(
+        source_rows,
+        &gated_rows,
+        options.walk_forward.review.clone(),
+    );
+    let mut walk_rows = gated_rows.clone();
+    let walk_forward = walk_forward_factor_rows(
+        source_rows,
+        &mut walk_rows,
+        start,
+        end,
+        options.walk_forward.clone(),
+    );
+    let stability = build_factor_stability_report(&walk_forward, FactorStabilityOptions::default());
+    LiquidityGatedAlphaV1Report {
+        options,
+        baseline_health,
+        gate,
+        review,
+        walk_forward,
+        stability,
+    }
+}
+
 pub fn review_trade_formation_v1_with_deribit(
     source_rows: &[FactorObservation],
     deribit: &[DeribitFeatureSnapshot],
@@ -2460,6 +2701,30 @@ pub fn review_trade_formation_v1_with_deribit(
     options.gate.review = options.review.clone();
     let mut v2_rows =
         build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    build_trade_formation_v1_report(source_rows, &mut v2_rows, options)
+}
+
+pub fn review_trade_formation_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    mut options: TradeFormationReviewOptions,
+) -> TradeFormationReviewReport {
+    options.gate.review = options.review.clone();
+    let mut v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.review,
+    );
+    build_trade_formation_v1_report(source_rows, &mut v2_rows, options)
+}
+
+fn build_trade_formation_v1_report(
+    source_rows: &[FactorObservation],
+    v2_rows: &mut [FactorObservationV2],
+    options: TradeFormationReviewOptions,
+) -> TradeFormationReviewReport {
     v2_rows.sort_by_key(|row| row.tick_ts);
     let health = build_data_health_report(source_rows, &v2_rows);
     let gate = build_liquidity_gate_v1_report(source_rows, &v2_rows, options.gate.clone());
@@ -2525,6 +2790,34 @@ pub fn walk_forward_meta_label_v1_with_deribit(
     options.gate.review = options.review.clone();
     let mut v2_rows =
         build_factor_observations_v2_with_deribit(source_rows, deribit, &options.review);
+    walk_forward_meta_label_v1_rows(source_rows, &mut v2_rows, start, end, options)
+}
+
+pub fn walk_forward_meta_label_v1_with_deribit_and_pm_books(
+    source_rows: &[FactorObservation],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_books: &[ResearchPmBookSnapshot],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    mut options: MetaLabelWalkForwardOptions,
+) -> MetaLabelWalkForwardReport {
+    options.gate.review = options.review.clone();
+    let mut v2_rows = build_factor_observations_v2_with_deribit_and_pm_books(
+        source_rows,
+        deribit,
+        pm_books,
+        &options.review,
+    );
+    walk_forward_meta_label_v1_rows(source_rows, &mut v2_rows, start, end, options)
+}
+
+fn walk_forward_meta_label_v1_rows(
+    source_rows: &[FactorObservation],
+    v2_rows: &mut [FactorObservationV2],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: MetaLabelWalkForwardOptions,
+) -> MetaLabelWalkForwardReport {
     v2_rows.sort_by_key(|row| row.tick_ts);
     let health = build_data_health_report(source_rows, &v2_rows);
     let gate = build_liquidity_gate_v1_report(source_rows, &v2_rows, options.gate.clone());
@@ -5689,7 +5982,21 @@ fn sweep_buy_to_stake(
     reference_price: f64,
     stake_usd: f64,
 ) -> SweepFill {
+    sweep_buy_to_stake_with_config(levels, reference_price, stake_usd, 1.0, None)
+}
+
+fn sweep_buy_to_stake_with_config(
+    levels: &[crate::factors::ResearchPmBookLevel],
+    reference_price: f64,
+    stake_usd: f64,
+    visible_depth_haircut: f64,
+    max_levels: Option<usize>,
+) -> SweepFill {
     if !valid_price(reference_price) || !stake_usd.is_finite() || stake_usd <= 0.0 {
+        return SweepFill::default();
+    }
+    let haircut = visible_depth_haircut.clamp(0.0, 1.0);
+    if haircut <= EPS {
         return SweepFill::default();
     }
     let mut remaining = stake_usd;
@@ -5698,12 +6005,13 @@ fn sweep_buy_to_stake(
     let mut levels_used = 0.0;
     for level in levels
         .iter()
+        .take(max_levels.unwrap_or(usize::MAX))
         .filter(|level| valid_price(level.price) && level.size.is_finite() && level.size > 0.0)
     {
         if remaining <= EPS {
             break;
         }
-        let level_notional = level.price * level.size;
+        let level_notional = level.price * level.size * haircut;
         let take_notional = remaining.min(level_notional);
         if take_notional <= EPS {
             continue;
@@ -5731,7 +6039,21 @@ fn sweep_sell_shares(
     reference_price: f64,
     shares_to_sell: f64,
 ) -> SweepFill {
+    sweep_sell_shares_with_config(levels, reference_price, shares_to_sell, 1.0, None)
+}
+
+fn sweep_sell_shares_with_config(
+    levels: &[crate::factors::ResearchPmBookLevel],
+    reference_price: f64,
+    shares_to_sell: f64,
+    visible_depth_haircut: f64,
+    max_levels: Option<usize>,
+) -> SweepFill {
     if !valid_price(reference_price) || !shares_to_sell.is_finite() || shares_to_sell <= 0.0 {
+        return SweepFill::default();
+    }
+    let haircut = visible_depth_haircut.clamp(0.0, 1.0);
+    if haircut <= EPS {
         return SweepFill::default();
     }
     let mut remaining = shares_to_sell;
@@ -5740,12 +6062,13 @@ fn sweep_sell_shares(
     let mut levels_used = 0.0;
     for level in levels
         .iter()
+        .take(max_levels.unwrap_or(usize::MAX))
         .filter(|level| valid_price(level.price) && level.size.is_finite() && level.size > 0.0)
     {
         if remaining <= EPS {
             break;
         }
-        let take_shares = remaining.min(level.size);
+        let take_shares = remaining.min(level.size * haircut);
         proceeds += take_shares * level.price;
         sold += take_shares;
         remaining -= take_shares;
@@ -5762,6 +6085,377 @@ fn sweep_sell_shares(
         levels_used,
         slippage_bps: ((reference_price - avg_price).max(0.0) / reference_price) * 10_000.0,
     }
+}
+
+#[derive(Default)]
+struct FullDepthExecutionSample {
+    entry_fillable: bool,
+    entry_avg_price: f64,
+    entry_slippage_bps: f64,
+    entry_levels_used: f64,
+    exit_5s_fillable: bool,
+    exit_10s_fillable: bool,
+    exit_30s_fillable: bool,
+    exit_10s_slippage_bps: f64,
+    exit_30s_slippage_bps: f64,
+    reprice_pnl_5s: Option<f64>,
+    reprice_pnl_10s: Option<f64>,
+    reprice_pnl_30s: Option<f64>,
+    settlement_pnl: Option<f64>,
+}
+
+pub fn build_full_depth_execution_matrix(
+    source_rows: &[FactorObservation],
+    pm_books: &[ResearchPmBookSnapshot],
+    options: FullDepthExecutionMatrixOptions,
+) -> FullDepthExecutionMatrixReport {
+    let book_index = build_pm_book_index(pm_books);
+    let mut by_event: BTreeMap<String, Vec<&FactorObservation>> = BTreeMap::new();
+    for row in source_rows {
+        by_event.entry(row.event_id.clone()).or_default().push(row);
+    }
+    for rows in by_event.values_mut() {
+        rows.sort_by_key(|row| row.tick_ts);
+    }
+
+    let mut groups: BTreeMap<
+        (
+            String,
+            &'static str,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ),
+        Vec<FullDepthExecutionSample>,
+    > = BTreeMap::new();
+    let stakes = if options.stakes_usd.is_empty() {
+        vec![DEFAULT_STAKE_USD]
+    } else {
+        options.stakes_usd.clone()
+    };
+    for source in source_rows {
+        for side in [ReviewSide::Up, ReviewSide::Down] {
+            let (entry_ask, exit_bid, settlement_win) = side_market_values(source, side);
+            let pm_spread_bps = if valid_price(entry_ask) && valid_price(exit_bid) {
+                ((entry_ask - exit_bid).max(0.0) / entry_ask) * 10_000.0
+            } else {
+                f64::NAN
+            };
+            let current_book = latest_pm_book(&book_index, &source.event_id, side, source.tick_ts);
+            let quote_age_secs = current_book
+                .map(|book| (source.tick_ts - book.ts).num_milliseconds() as f64 / 1000.0)
+                .unwrap_or(f64::NAN);
+            for stake_usd in stakes.iter().copied().filter(|stake| *stake > 0.0) {
+                let key = (
+                    format!("{stake_usd:.2}"),
+                    side.as_str(),
+                    source.symbol.clone(),
+                    Regime::from_secs(source.time_remaining_secs)
+                        .as_str()
+                        .to_string(),
+                    matrix_distance_bucket(source.distance_over_sigma * side.multiplier()),
+                    price_bucket(entry_ask).unwrap_or_else(|| "unknown".to_string()),
+                    matrix_spread_bucket(pm_spread_bps),
+                    pm_lag_bucket(quote_age_secs).unwrap_or_else(|| "missing".to_string()),
+                );
+                let sample = build_full_depth_execution_sample(
+                    source,
+                    side,
+                    stake_usd,
+                    entry_ask,
+                    settlement_win,
+                    current_book,
+                    by_event.get(&source.event_id).map(Vec::as_slice),
+                    &book_index,
+                    &options,
+                );
+                groups.entry(key).or_default().push(sample);
+            }
+        }
+    }
+
+    let mut rows = groups
+        .into_iter()
+        .filter_map(|(key, samples)| {
+            if samples.len() < options.min_bucket_observations {
+                return None;
+            }
+            let (
+                stake_key,
+                side_key,
+                symbol,
+                time_bucket,
+                distance_bucket,
+                entry_price_bucket,
+                spread_bucket,
+                quote_age_bucket,
+            ) = key;
+            let stake_usd = stake_key.parse::<f64>().unwrap_or(f64::NAN);
+            Some(summarize_full_depth_execution_group(
+                stake_usd,
+                symbol,
+                if side_key == "up" {
+                    ReviewSide::Up
+                } else {
+                    ReviewSide::Down
+                },
+                time_bucket,
+                distance_bucket,
+                entry_price_bucket,
+                spread_bucket,
+                quote_age_bucket,
+                &samples,
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| {
+        a.stake_usd
+            .total_cmp(&b.stake_usd)
+            .then_with(|| a.symbol.cmp(&b.symbol))
+            .then_with(|| a.side.as_str().cmp(b.side.as_str()))
+            .then_with(|| {
+                b.roundtrip_fill_rate_10s
+                    .total_cmp(&a.roundtrip_fill_rate_10s)
+            })
+            .then_with(|| b.avg_reprice_pnl_10s.total_cmp(&a.avg_reprice_pnl_10s))
+    });
+    FullDepthExecutionMatrixReport { options, rows }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_full_depth_execution_sample(
+    source: &FactorObservation,
+    side: ReviewSide,
+    stake_usd: f64,
+    entry_ask: f64,
+    settlement_win: f64,
+    current_book: Option<&ResearchPmBookSnapshot>,
+    event_rows: Option<&[&FactorObservation]>,
+    book_index: &PmBookIndex<'_>,
+    options: &FullDepthExecutionMatrixOptions,
+) -> FullDepthExecutionSample {
+    let entry_sweep = current_book
+        .map(|book| {
+            sweep_buy_to_stake_with_config(
+                &book.asks,
+                entry_ask,
+                stake_usd,
+                options.visible_depth_haircut,
+                options.max_levels,
+            )
+        })
+        .unwrap_or_default();
+    let entry_fee = if entry_sweep.fillable && valid_price(entry_sweep.avg_price) {
+        entry_sweep.shares * crypto_fee_cost(entry_sweep.avg_price)
+    } else {
+        f64::NAN
+    };
+    let settlement_pnl =
+        if entry_sweep.fillable && settlement_win.is_finite() && entry_fee.is_finite() {
+            let payout = if settlement_win >= 0.5 {
+                entry_sweep.shares
+            } else {
+                0.0
+            };
+            Some(payout - stake_usd - entry_fee)
+        } else {
+            None
+        };
+
+    let mut sample = FullDepthExecutionSample {
+        entry_fillable: entry_sweep.fillable,
+        entry_avg_price: entry_sweep.avg_price,
+        entry_slippage_bps: entry_sweep.slippage_bps,
+        entry_levels_used: entry_sweep.levels_used,
+        settlement_pnl,
+        ..Default::default()
+    };
+
+    if !entry_sweep.fillable || !entry_fee.is_finite() {
+        return sample;
+    }
+
+    for horizon_secs in [5, 10, 30] {
+        let future = event_rows.and_then(|rows| {
+            let target = source.tick_ts + chrono::Duration::seconds(horizon_secs);
+            rows.iter().copied().find(|row| row.tick_ts >= target)
+        });
+        let Some(future) = future else {
+            continue;
+        };
+        let (_, future_bid, _) = side_market_values(future, side);
+        let exit_sweep = latest_pm_book(book_index, &future.event_id, side, future.tick_ts)
+            .map(|book| {
+                sweep_sell_shares_with_config(
+                    &book.bids,
+                    future_bid,
+                    entry_sweep.shares,
+                    options.visible_depth_haircut,
+                    options.max_levels,
+                )
+            })
+            .unwrap_or_default();
+        let reprice_pnl = exit_sweep
+            .fillable
+            .then_some(exit_sweep.shares * exit_sweep.avg_price - stake_usd - entry_fee);
+        match horizon_secs {
+            5 => {
+                sample.exit_5s_fillable = exit_sweep.fillable;
+                sample.reprice_pnl_5s = reprice_pnl;
+            }
+            10 => {
+                sample.exit_10s_fillable = exit_sweep.fillable;
+                sample.exit_10s_slippage_bps = exit_sweep.slippage_bps;
+                sample.reprice_pnl_10s = reprice_pnl;
+            }
+            30 => {
+                sample.exit_30s_fillable = exit_sweep.fillable;
+                sample.exit_30s_slippage_bps = exit_sweep.slippage_bps;
+                sample.reprice_pnl_30s = reprice_pnl;
+            }
+            _ => {}
+        }
+    }
+    sample
+}
+
+#[allow(clippy::too_many_arguments)]
+fn summarize_full_depth_execution_group(
+    stake_usd: f64,
+    symbol: String,
+    side: ReviewSide,
+    time_bucket: String,
+    distance_bucket: String,
+    entry_price_bucket: String,
+    spread_bucket: String,
+    quote_age_bucket: String,
+    samples: &[FullDepthExecutionSample],
+) -> FullDepthExecutionMatrixRow {
+    let entry_slippages = samples
+        .iter()
+        .filter(|sample| sample.entry_fillable)
+        .map(|sample| sample.entry_slippage_bps)
+        .collect::<Vec<_>>();
+    FullDepthExecutionMatrixRow {
+        stake_usd,
+        symbol,
+        side,
+        time_bucket,
+        distance_bucket,
+        entry_price_bucket,
+        spread_bucket,
+        quote_age_bucket,
+        count: samples.len(),
+        entry_fill_rate: ratio(
+            samples
+                .iter()
+                .filter(|sample| sample.entry_fillable)
+                .count(),
+            samples.len(),
+        ),
+        entry_avg_price_mean: mean(
+            samples
+                .iter()
+                .filter(|sample| sample.entry_fillable)
+                .map(|sample| sample.entry_avg_price),
+        ),
+        entry_avg_slippage_bps: mean(entry_slippages.iter().copied()),
+        entry_p50_slippage_bps: percentile(entry_slippages.clone(), 0.50),
+        entry_p90_slippage_bps: percentile(entry_slippages, 0.90),
+        entry_avg_levels_used: mean(
+            samples
+                .iter()
+                .filter(|sample| sample.entry_fillable)
+                .map(|sample| sample.entry_levels_used),
+        ),
+        exit_5s_fill_rate: ratio(
+            samples
+                .iter()
+                .filter(|sample| sample.exit_5s_fillable)
+                .count(),
+            samples.len(),
+        ),
+        exit_10s_fill_rate: ratio(
+            samples
+                .iter()
+                .filter(|sample| sample.exit_10s_fillable)
+                .count(),
+            samples.len(),
+        ),
+        exit_30s_fill_rate: ratio(
+            samples
+                .iter()
+                .filter(|sample| sample.exit_30s_fillable)
+                .count(),
+            samples.len(),
+        ),
+        exit_10s_avg_slippage_bps: mean(
+            samples
+                .iter()
+                .filter(|sample| sample.exit_10s_fillable)
+                .map(|sample| sample.exit_10s_slippage_bps),
+        ),
+        exit_30s_avg_slippage_bps: mean(
+            samples
+                .iter()
+                .filter(|sample| sample.exit_30s_fillable)
+                .map(|sample| sample.exit_30s_slippage_bps),
+        ),
+        roundtrip_fill_rate_5s: ratio(
+            samples
+                .iter()
+                .filter(|sample| sample.entry_fillable && sample.exit_5s_fillable)
+                .count(),
+            samples.len(),
+        ),
+        roundtrip_fill_rate_10s: ratio(
+            samples
+                .iter()
+                .filter(|sample| sample.entry_fillable && sample.exit_10s_fillable)
+                .count(),
+            samples.len(),
+        ),
+        roundtrip_fill_rate_30s: ratio(
+            samples
+                .iter()
+                .filter(|sample| sample.entry_fillable && sample.exit_30s_fillable)
+                .count(),
+            samples.len(),
+        ),
+        avg_settlement_pnl: mean(samples.iter().filter_map(|sample| sample.settlement_pnl)),
+        avg_reprice_pnl_5s: mean(samples.iter().filter_map(|sample| sample.reprice_pnl_5s)),
+        avg_reprice_pnl_10s: mean(samples.iter().filter_map(|sample| sample.reprice_pnl_10s)),
+        avg_reprice_pnl_30s: mean(samples.iter().filter_map(|sample| sample.reprice_pnl_30s)),
+    }
+}
+
+fn side_market_values(row: &FactorObservation, side: ReviewSide) -> (f64, f64, f64) {
+    match side {
+        ReviewSide::Up => (row.pm_up_ask, row.pm_up_bid, row.settlement_up),
+        ReviewSide::Down => (row.pm_down_ask, row.pm_down_bid, 1.0 - row.settlement_up),
+    }
+}
+
+fn matrix_distance_bucket(value: f64) -> String {
+    bucket_value(value, &[-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0])
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn matrix_spread_bucket(value: f64) -> String {
+    finite_bucket(
+        value,
+        &[
+            (100.0, "<100bps"),
+            (300.0, "100..300bps"),
+            (600.0, "300..600bps"),
+            (1_000.0, "600..1000bps"),
+        ],
+        ">=1000bps",
+    )
+    .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn side_row(
@@ -6082,14 +6776,30 @@ fn side_row(
         label_future_exit_pnl_10s: None,
         label_future_exit_pnl_30s: None,
         label_future_exit_pnl_60s: None,
+        label_future_exit_full_depth_pnl_5s: None,
+        label_future_exit_full_depth_pnl_10s: None,
+        label_future_exit_full_depth_pnl_30s: None,
+        label_future_exit_full_depth_pnl_60s: None,
+        label_future_exit_full_depth_value_5s: None,
+        label_future_exit_full_depth_value_10s: None,
+        label_future_exit_full_depth_value_30s: None,
+        label_future_exit_full_depth_value_60s: None,
         label_future_exit_fillable_5s: None,
         label_future_exit_fillable_10s: None,
         label_future_exit_fillable_30s: None,
         label_future_exit_fillable_60s: None,
+        label_future_exit_full_depth_fillable_5s: None,
+        label_future_exit_full_depth_fillable_10s: None,
+        label_future_exit_full_depth_fillable_30s: None,
+        label_future_exit_full_depth_fillable_60s: None,
     }
 }
 
-fn enrich_rolling_features(rows: &mut [FactorObservationV2], deribit: &[DeribitFeatureSnapshot]) {
+fn enrich_rolling_features(
+    rows: &mut [FactorObservationV2],
+    deribit: &[DeribitFeatureSnapshot],
+    pm_book_index: Option<&PmBookIndex<'_>>,
+) {
     rows.sort_by_key(|row| {
         (
             row.event_id.clone(),
@@ -6181,7 +6891,10 @@ fn enrich_rolling_features(rows: &mut [FactorObservationV2], deribit: &[DeribitF
                     ts + chrono::Duration::seconds(horizon_secs),
                 ) {
                     let future = rows[future_idx].clone();
-                    set_future_exit_labels(rows, idx, &future, horizon_secs);
+                    let future_book = pm_book_index.and_then(|index| {
+                        latest_pm_book(index, &future.event_id, future.side, future.tick_ts)
+                    });
+                    set_future_exit_labels(rows, idx, &future, future_book, horizon_secs);
                 }
             }
 
@@ -6220,6 +6933,7 @@ fn set_future_exit_labels(
     rows: &mut [FactorObservationV2],
     idx: usize,
     future: &FactorObservationV2,
+    future_book: Option<&ResearchPmBookSnapshot>,
     horizon_secs: i64,
 ) {
     let bid_change = finite_diff(future.exit_bid, rows[idx].exit_bid);
@@ -6233,26 +6947,64 @@ fn set_future_exit_labels(
     } else {
         None
     };
+    let full_depth_exit = if rows[idx].label_full_depth_entry_fillable {
+        future_book
+            .map(|book| {
+                sweep_sell_shares(
+                    &book.bids,
+                    future.exit_bid,
+                    rows[idx].entry_sweep_shares_15u,
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        SweepFill::default()
+    };
+    let full_depth_value = full_depth_exit
+        .fillable
+        .then_some(full_depth_exit.shares * full_depth_exit.avg_price);
+    let full_depth_pnl = full_depth_value.and_then(|value| {
+        if rows[idx].stake_usd.is_finite() && rows[idx].entry_sweep_avg_price_15u.is_finite() {
+            let fee = rows[idx].entry_sweep_shares_15u
+                * crypto_fee_cost(rows[idx].entry_sweep_avg_price_15u);
+            Some(value - rows[idx].stake_usd - fee)
+        } else {
+            None
+        }
+    });
+    let full_depth_fillable = Some(bool_num(full_depth_exit.fillable));
     match horizon_secs {
         5 => {
             rows[idx].label_future_exit_bid_change_5s = bid_change;
             rows[idx].label_future_exit_fillable_5s = fillable;
             rows[idx].label_future_exit_pnl_5s = pnl;
+            rows[idx].label_future_exit_full_depth_fillable_5s = full_depth_fillable;
+            rows[idx].label_future_exit_full_depth_value_5s = full_depth_value;
+            rows[idx].label_future_exit_full_depth_pnl_5s = full_depth_pnl;
         }
         10 => {
             rows[idx].label_future_exit_bid_change_10s = bid_change;
             rows[idx].label_future_exit_fillable_10s = fillable;
             rows[idx].label_future_exit_pnl_10s = pnl;
+            rows[idx].label_future_exit_full_depth_fillable_10s = full_depth_fillable;
+            rows[idx].label_future_exit_full_depth_value_10s = full_depth_value;
+            rows[idx].label_future_exit_full_depth_pnl_10s = full_depth_pnl;
         }
         30 => {
             rows[idx].label_future_exit_bid_change_30s = bid_change;
             rows[idx].label_future_exit_fillable_30s = fillable;
             rows[idx].label_future_exit_pnl_30s = pnl;
+            rows[idx].label_future_exit_full_depth_fillable_30s = full_depth_fillable;
+            rows[idx].label_future_exit_full_depth_value_30s = full_depth_value;
+            rows[idx].label_future_exit_full_depth_pnl_30s = full_depth_pnl;
         }
         60 => {
             rows[idx].label_future_exit_bid_change_60s = bid_change;
             rows[idx].label_future_exit_fillable_60s = fillable;
             rows[idx].label_future_exit_pnl_60s = pnl;
+            rows[idx].label_future_exit_full_depth_fillable_60s = full_depth_fillable;
+            rows[idx].label_future_exit_full_depth_value_60s = full_depth_value;
+            rows[idx].label_future_exit_full_depth_pnl_60s = full_depth_pnl;
         }
         _ => {}
     }
@@ -6518,6 +7270,26 @@ fn repricing_ic_targets() -> Vec<RepricingIcTargetDescriptor> {
         repricing_target("reprice_pnl_60s", "reprice_pnl", |row| {
             row.label_future_exit_pnl_60s
         }),
+        repricing_target(
+            "full_depth_reprice_pnl_5s",
+            "full_depth_reprice_pnl",
+            |row| row.label_future_exit_full_depth_pnl_5s,
+        ),
+        repricing_target(
+            "full_depth_reprice_pnl_10s",
+            "full_depth_reprice_pnl",
+            |row| row.label_future_exit_full_depth_pnl_10s,
+        ),
+        repricing_target(
+            "full_depth_reprice_pnl_30s",
+            "full_depth_reprice_pnl",
+            |row| row.label_future_exit_full_depth_pnl_30s,
+        ),
+        repricing_target(
+            "full_depth_reprice_pnl_60s",
+            "full_depth_reprice_pnl",
+            |row| row.label_future_exit_full_depth_pnl_60s,
+        ),
         repricing_target("reprice_bid_change_5s", "reprice_bid_change", |row| {
             row.label_future_exit_bid_change_5s
         }),
@@ -6555,6 +7327,11 @@ fn repricing_ic_targets() -> Vec<RepricingIcTargetDescriptor> {
         repricing_target("execution_future_exit_fillable_30s", "execution", |row| {
             row.label_future_exit_fillable_30s
         }),
+        repricing_target(
+            "execution_full_depth_future_exit_fillable_30s",
+            "execution",
+            |row| row.label_future_exit_full_depth_fillable_30s,
+        ),
         repricing_target("execution_pm_spread_bps", "execution", |row| {
             row.pm_spread_bps.is_finite().then_some(row.pm_spread_bps)
         }),
@@ -6792,6 +7569,16 @@ fn mean(values: impl Iterator<Item = f64>) -> f64 {
     } else {
         vals.iter().sum::<f64>() / vals.len() as f64
     }
+}
+
+fn percentile(mut values: Vec<f64>, q: f64) -> f64 {
+    values.retain(|value| value.is_finite());
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    values.sort_by(f64::total_cmp);
+    let idx = ((values.len() - 1) as f64 * q.clamp(0.0, 1.0)).round() as usize;
+    values[idx]
 }
 
 fn finite_min(values: impl Iterator<Item = f64>) -> f64 {
@@ -7125,6 +7912,137 @@ mod tests {
         assert!(up.label_full_depth_executable_pnl_15u.unwrap() > 0.0);
         assert_eq!(up.entry_sweep_levels_15u, 2.0);
         assert!(up.entry_sweep_slippage_bps > 0.0);
+    }
+
+    #[test]
+    fn future_repricing_full_depth_requires_future_bid_depth() {
+        let mut current = base_obs();
+        current.pm_up_ask_size = 10.0;
+        current.pm_up_bid_size = 100.0;
+        let mut future = current.clone();
+        future.tick_ts = current.tick_ts + chrono::Duration::seconds(10);
+        future.pm_up_bid = 0.70;
+        future.pm_up_bid_size = 100.0;
+        let books = vec![
+            ResearchPmBookSnapshot {
+                event_id: "evt".into(),
+                token_id: "up-token".into(),
+                side: "UP".into(),
+                ts: current.tick_ts,
+                bids: vec![crate::factors::ResearchPmBookLevel {
+                    price: 0.49,
+                    size: 40.0,
+                }],
+                asks: vec![crate::factors::ResearchPmBookLevel {
+                    price: 0.50,
+                    size: 40.0,
+                }],
+            },
+            ResearchPmBookSnapshot {
+                event_id: "evt".into(),
+                token_id: "up-token".into(),
+                side: "UP".into(),
+                ts: future.tick_ts,
+                bids: vec![crate::factors::ResearchPmBookLevel {
+                    price: 0.70,
+                    size: 5.0,
+                }],
+                asks: vec![crate::factors::ResearchPmBookLevel {
+                    price: 0.72,
+                    size: 40.0,
+                }],
+            },
+        ];
+
+        let rows = build_factor_observations_v2_with_deribit_and_pm_books(
+            &[current.clone(), future],
+            &[],
+            &books,
+            &FactorReviewOptions::default(),
+        );
+        let up = rows
+            .iter()
+            .find(|row| row.side == ReviewSide::Up && row.tick_ts == current.tick_ts)
+            .unwrap();
+
+        assert!(up.label_full_depth_entry_fillable);
+        assert!(up.label_future_exit_pnl_10s.unwrap() > 0.0);
+        assert_eq!(up.label_future_exit_full_depth_fillable_10s, Some(0.0));
+        assert!(up.label_future_exit_full_depth_pnl_10s.is_none());
+        assert!(up.label_full_depth_executable_pnl_15u.is_some());
+    }
+
+    #[test]
+    fn execution_matrix_separates_stake_size_and_settlement_from_repricing_exit() {
+        let mut current = base_obs();
+        current.pm_up_ask = 0.50;
+        current.pm_up_bid = 0.49;
+        current.pm_up_ask_size = 100.0;
+        current.pm_up_bid_size = 100.0;
+        current.settlement_up = 1.0;
+        let mut future = current.clone();
+        future.tick_ts = current.tick_ts + chrono::Duration::seconds(10);
+        future.pm_up_bid = 0.70;
+        let books = vec![
+            ResearchPmBookSnapshot {
+                event_id: "evt".into(),
+                token_id: "up-token".into(),
+                side: "UP".into(),
+                ts: current.tick_ts,
+                bids: vec![crate::factors::ResearchPmBookLevel {
+                    price: 0.49,
+                    size: 5.0,
+                }],
+                asks: vec![crate::factors::ResearchPmBookLevel {
+                    price: 0.50,
+                    size: 10.0,
+                }],
+            },
+            ResearchPmBookSnapshot {
+                event_id: "evt".into(),
+                token_id: "up-token".into(),
+                side: "UP".into(),
+                ts: future.tick_ts,
+                bids: vec![crate::factors::ResearchPmBookLevel {
+                    price: 0.70,
+                    size: 3.0,
+                }],
+                asks: vec![crate::factors::ResearchPmBookLevel {
+                    price: 0.72,
+                    size: 10.0,
+                }],
+            },
+        ];
+
+        let report = build_full_depth_execution_matrix(
+            &[current, future],
+            &books,
+            FullDepthExecutionMatrixOptions {
+                stakes_usd: vec![1.0, 15.0],
+                min_bucket_observations: 1,
+                ..Default::default()
+            },
+        );
+        let up_1u = report
+            .rows
+            .iter()
+            .find(|row| {
+                row.symbol == "BTCUSDT" && row.side == ReviewSide::Up && row.stake_usd == 1.0
+            })
+            .unwrap();
+        let up_15u = report
+            .rows
+            .iter()
+            .find(|row| {
+                row.symbol == "BTCUSDT" && row.side == ReviewSide::Up && row.stake_usd == 15.0
+            })
+            .unwrap();
+
+        assert!(up_1u.entry_fill_rate > up_15u.entry_fill_rate);
+        assert!(up_1u.avg_settlement_pnl > 0.0);
+        assert!(up_1u.roundtrip_fill_rate_10s > up_15u.roundtrip_fill_rate_10s);
+        assert!(format_full_depth_execution_matrix_report(&report, 5)
+            .contains("Full-depth matrix is the execution gate"));
     }
 
     #[test]

@@ -90,6 +90,86 @@ volatility-triggered repricing.
   settlement selector around `side_fair_prob` plus entry/liquidity/time filters,
   not the naive fair-minus-price formula.
 
+# Full-Depth Execution Label Repair (2026-05-03)
+
+## Files
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: full CLOB sweep labels, future-exit full-depth repricing labels, and
+    stake-sweep execution matrix.
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: expose full-depth AutoFactor targets without reusing top-book
+    repricing labels.
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: print execution matrix before factor mining and use full-depth
+    targets for the snapshot-backed report.
+- `tasks/todo.md`
+  - Owner: plan and verification evidence.
+
+## Tasks
+
+- [x] Add explicit full-depth future-exit labels for 5s / 10s / 30s / 60s.
+- [x] Add a full-depth execution matrix over 1U / 3U / 5U / 10U / 15U.
+- [x] Wire the matrix and full-depth AutoFactor targets into
+  `factor_walk_forward_v2`.
+- [x] Add focused sweep/matrix regression tests.
+- [x] Run focused local verification.
+
+## Review
+
+- 2026-05-03: Repaired the PM5D execution-label foundation so snapshot-backed
+  factor reports can stop treating top-book repricing as final executable
+  evidence. `FactorObservationV2` now carries full-depth future-exit labels for
+  5s / 10s / 30s / 60s, computed by sweeping current entry asks and future
+  exit bids with the current entry shares. Added `FullDepthExecutionMatrix`
+  over 1U / 3U / 5U / 10U / 15U, including entry fill, exit fill, roundtrip
+  fill, settlement PnL, repricing PnL, slippage, and level-count buckets.
+- 2026-05-03: `factor_walk_forward_v2` now prints the full-depth execution
+  matrix before IC/AutoFactor output and runs AutoFactor against
+  `full_depth_reprice_pnl_10s`, `full_depth_reprice_pnl_30s`, and
+  `full_depth_settlement_executable_pnl` instead of the legacy top-book
+  repricing targets.
+- 2026-05-03: Focused verification passed:
+  `rustfmt --edition 2021 --config skip_children=true --check` on touched Rust
+  files, `CARGO_TARGET_DIR=/tmp/ploy-full-depth-matrix rtk cargo test -p
+  ploy-research factors_v2 --lib`, `CARGO_TARGET_DIR=/tmp/ploy-full-depth-
+  matrix-autofactor rtk cargo test -p ploy-research autofactor --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-full-depth-matrix-check rtk cargo check -p
+  ploy-research --example factor_walk_forward_v2 --features db
+  --no-default-features`, and `git diff --check`. The example check emitted
+  only pre-existing strategy-bundle dead-code warnings plus the vendor profile
+  warning.
+- 2026-05-03: The first remote full-depth report exposed one remaining mixed
+  path: later Fillability / Liquidity / Trade Formation / Meta-Label / Combo
+  sections still rebuilt V2 rows without PM books and printed false
+  `full_depth_entry_fill_rate=0.00%`. Added PM-book-backed variants for those
+  report paths and switched `factor_walk_forward_v2` to use them. Focused
+  verification passed again: `rustfmt --edition 2021 --config skip_children=true
+  --check` on touched Rust files, `CARGO_TARGET_DIR=/tmp/ploy-full-depth-paths
+  rtk cargo test -p ploy-research factors_v2 --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-full-depth-paths rtk cargo check -p
+  ploy-research --example factor_walk_forward_v2 --features db
+  --no-default-features`, and `git diff --check`.
+- 2026-05-03: Remote full-depth reruns on PR branch
+  `feat/full-depth-execution-matrix` succeeded. BTC/ETH/SOL run
+  `25272413503` using snapshot `25254380121` reported consistent full-depth
+  health across sections: `full_depth_entry_fill_rate=49.23%`,
+  `full_depth_exit_fill_rate=40.70%`, `full_depth_pnl_rows=112256`.
+  `spread_adjusted_external_move` passed AutoFactor gates on
+  `full_depth_reprice_pnl_10s` with Spearman IC `0.318021`, ICIR `1.861363`,
+  positive window ratio `0.9706`, and top bucket avg label `2.447743`; it also
+  passed `full_depth_reprice_pnl_30s` with IC `0.256958`, ICIR `1.941881`, top
+  bucket avg `2.395292`.
+- 2026-05-03: XRP/DOGE/BNB rerun `25272413955` using snapshot `25255158983`
+  also reported consistent full-depth health
+  (`full_depth_entry_fill_rate=45.22%`, `full_depth_exit_fill_rate=36.27%`,
+  `full_depth_pnl_rows=97939`), but `spread_adjusted_external_move` remained
+  watchlist only because top bucket labels were negative:
+  `full_depth_reprice_pnl_10s` top bucket `-1.147388` and
+  `full_depth_reprice_pnl_30s` top bucket `-1.027182`. Next strategy gate
+  should be BTC/ETH/SOL-only `repricing_momentum`, not all-six-symbol
+  deployment.
+
 # Repricing Momentum Snapshot Optimize Selector (2026-05-03)
 
 ## Files
