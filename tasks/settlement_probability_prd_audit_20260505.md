@@ -199,6 +199,70 @@ Conservative execution surface:
   and conservative settlement edge buckets, but replay parity still needs a
   decision-grade snapshot.
 
+## Short-Window Workflow Smoke
+
+The user explicitly allowed missing history to keep filling while using current
+or prior data for a short test. This smoke is not promotion evidence; it only
+checks that the PRD workflow can run over a portable full snapshot after the
+collectors recovered.
+
+Snapshot smoke:
+
+- Run: `25356726430`
+- Ref: `feat/settlement-probability-prd`
+- Profile: `pm5d-vol`
+- Gate: `critical`
+- Audit lookback: `1h`
+- Window input: `2026-05-05..2026-05-05`, parsed as
+  `2026-05-05 00:00:00 UTC -> 2026-05-06 00:00:00 UTC`
+- Symbols: `BTCUSDT,ETHUSDT,SOLUSDT`
+- Stake: `15u`
+- Artifact: `research-snapshot-25356726430`
+- Result: success
+- Rows: observations `1225`, Deribit snapshots `485`, PM book snapshots `2876`
+- Data audit: `ok` for PM quotes/orderbooks, Deribit IV/Greeks, and
+  BTC/ETH/SOL Binance price/trades/LOB in the one-hour audit window
+- Official settlement required: `true`
+- Deribit included: `true`
+
+Downstream walk-forward smoke:
+
+- First run: `25356886955`
+- Result: failed at snapshot read before reporting
+- Root cause: portable `observations.json` serialized non-finite
+  `flip_age_secs` as JSON `null`, while the loader expected a concrete `f64`
+- Fix: commit `5677f294` makes `flip_age_secs` deserialize nullable f64 values
+  as `NaN` and extends the snapshot-null regression test
+- Verification: local snapshot replay against `research-snapshot-25356726430`
+  completed and printed the settlement probability report
+- Re-run: `25357077864`
+- Result: success
+- Artifact: `factor-walk-forward-v2-25357077864`
+- Rows: source observations `1225`, side rows `2450`, executable settlement
+  PnL rows `1004`, Deribit-enriched rows `1618`
+- Execution: full-depth entry fill `40.98%`, exit fill `39.35%`
+- Baseline highlights:
+  - `q_existing_fair_prob`: ECE `0.101327`, avg full-depth settlement PnL
+    `+1.2079`, avg conservative settlement PnL `+0.6244`, top-edge full-depth
+    settlement PnL `+9.3541`, top-edge conservative PnL `+8.0545`
+  - `q_market_midpoint`: ECE `0.102095`, avg full-depth settlement PnL
+    `+1.2079`, avg conservative settlement PnL `+0.6244`, top-edge full-depth
+    settlement PnL `+5.3665`, top-edge conservative PnL `+3.3891`
+  - `q_distance_lob_vol_phi`: ECE `0.059314`, but average full-depth
+    settlement PnL `-0.9257`, so lower calibration error did not translate
+    into positive executable EV in this smoke
+- Holdout caveat: SOL holdout is negative for `q_existing_fair_prob`
+  (`-0.3116`) and `q_market_midpoint` (`-0.2303`)
+
+Interpretation:
+
+- The short-window workflow chain now works: strict current data audit,
+  portable full snapshot artifact, full-depth execution matrix, Deribit-included
+  settlement probability report, conservative edge columns, and issue-comment
+  evidence.
+- This does not unblock dry-run/live. The sample is tiny and not a retained
+  clean 168h window, and the symbol holdout is not stable.
+
 ## Recovery Checklist
 
 1. Collect or compile a fresh snapshot with `data_gate=critical` and

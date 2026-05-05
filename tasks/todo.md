@@ -269,6 +269,22 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `CARGO_TARGET_DIR=/tmp/ploy-settlement-conservative-edge
   /opt/homebrew/bin/timeout 300 rtk cargo check -p ploy-research --example
   factor_walk_forward_v2 --features db --no-default-features`.
+- 2026-05-05: Ran the user-approved short-window PRD smoke while the missing
+  168h history waits to refill. Snapshot run `25356726430` used PR branch
+  `feat/settlement-probability-prd`, `pm5d-vol`, `data_gate=critical`,
+  `audit_lookback_hours=1`, `upload_full_snapshot=true`, BTC/ETH/SOL, and
+  `15u`. It passed the strict one-hour data gate, included Deribit, uploaded a
+  portable `research-snapshot-25356726430` artifact, and produced rows:
+  observations `1225`, Deribit snapshots `485`, PM book snapshots `2876`.
+  The first downstream walk-forward `25356886955` exposed a portable snapshot
+  parity bug: `observations.json` can serialize non-finite numeric fields as
+  JSON `null`, but `flip_age_secs` did not deserialize nullable values. Commit
+  `5677f294` fixes that schema issue and adds a regression assertion.
+  Re-run `25357077864` passed end-to-end from the same snapshot artifact. It
+  reported `2450` side rows, `1004` executable settlement PnL rows, full-depth
+  entry fill `40.98%`, exit fill `39.35%`, and Deribit-enriched rows `1618`.
+  This is workflow-smoke evidence only: the sample is too short for promotion,
+  and SOL holdout is negative for `q_market_midpoint` / `q_existing_fair_prob`.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
