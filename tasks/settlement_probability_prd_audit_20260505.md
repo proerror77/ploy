@@ -28,6 +28,11 @@ snapshot-backed full-depth execution labels and probability-model validation.
 - PR Auto Review: passed on run `25354110277`
 - CodeRabbit: success
 - Runner blocker issue: #320, closed after `ploy-ci-1` recovery
+- Final pushed head: PR #319 current head after final audit docs
+- Final PR check status: all required PR checks green on run `25354770307`
+  plus PR Auto Review `25354770288`; CodeRabbit success.
+- Final runner status after cancelling the diagnostic snapshot:
+  `ploy-ci-1` is `online` / `busy=false`.
 
 ## Prompt-To-Artifact Checklist
 
@@ -154,8 +159,9 @@ Diagnostic follow-up:
 
 - Run: `25354314443`
 - Difference: `data_gate=never`, `upload_full_snapshot=true`
-- Status: cancelled while still in `Compile snapshot` after the strict
-  decision-grade data gate had already failed
+- Status: completed with conclusion `cancelled`; it was cancelled while still
+  in `Compile snapshot` after the strict decision-grade data gate had already
+  failed
 - Interpretation: useful only to inspect materialized rows and artifact shape;
   it cannot override strict data insufficiency.
 
