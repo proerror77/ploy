@@ -143,6 +143,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   validity, or dry-run readiness until those remote snapshot-backed reports
   complete and pass calibration, edge-bucket, baseline, anti-overfit, and
   holdout gates.
+- 2026-05-05: Opened GitHub issue #320 to track the hard workflow blocker:
+  restoring `ploy-ci-1` so PRD snapshot-backed validation can complete. The
+  issue records the queued/pending research runs, ECS instance id, financial
+  locks, `InstanceExpired` start failure, and the required recovery sequence
+  before any strategy-data sufficiency decision.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
