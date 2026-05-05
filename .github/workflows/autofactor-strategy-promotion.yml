@@ -76,6 +76,8 @@ jobs:
             --report "${REPORT_PATH}"
             --output-json artifacts/autofactor-strategy-promotion/autofactor-strategy-promotion.json
             --output-md artifacts/autofactor-strategy-promotion/autofactor-strategy-promotion.md
+            --output-registry-json artifacts/autofactor-strategy-promotion/autofactor-factor-registry.json
+            --output-handoff-json artifacts/autofactor-strategy-promotion/autofactor-strategy-handoff.json
             --required-strategy-profile "${{ github.event.inputs.required_strategy_profile }}"
             --allowed-target "${{ github.event.inputs.allowed_target }}"
           )
