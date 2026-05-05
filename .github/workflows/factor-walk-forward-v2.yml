@@ -468,6 +468,19 @@ jobs:
           ./target/release/examples/factor_walk_forward_v2 "${args[@]}" \
             | tee artifacts/factor-walk-forward-v2/report.txt
 
+      - name: Evaluate AutoFactor strategy promotion
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f artifacts/factor-walk-forward-v2/report.txt ]; then
+            echo "No factor walk-forward report found; skipping AutoFactor strategy promotion evaluation."
+            exit 0
+          fi
+          python3 scripts/evaluate_autofactor_strategy_promotion.py \
+            --report artifacts/factor-walk-forward-v2/report.txt \
+            --output-json artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json \
+            --output-md artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.md
+
       - name: Publish summary
         if: always()
         run: |
@@ -496,6 +509,10 @@ jobs:
               echo '```'
               sed -n '1,160p' artifacts/factor-walk-forward-v2/report.txt
               echo '```'
+            fi
+            if [ -f artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.md ]; then
+              echo ""
+              cat artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.md
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

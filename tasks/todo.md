@@ -108,6 +108,9 @@ evidence comes from Polymarket full CLOB depth, not top book.
   cannot silently become dry-run strategies unless the surrounding PRD gate is
   ready, the executable target is allowed, and the factor has an explicit
   runtime strategy-profile mapping for the requested lane.
+- [x] Wire the AutoFactor strategy-promotion evaluator into
+  `factor-walk-forward-v2.yml` so every walk-forward artifact carries
+  `autofactor-strategy-promotion.{json,md}`.
 
 ## Review
 
@@ -129,6 +132,13 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `repricing_momentum`, not `settlement_probability`; `settlement_fair_edge`
   remains rejected or lacks a runtime scorer. This converts the prior manual
   explanation into a machine-readable gate.
+- 2026-05-06: Wired the AutoFactor promotion evaluator into
+  `.github/workflows/factor-walk-forward-v2.yml`. Every Factor Walk-Forward V2
+  run now evaluates `report.txt` after generation and uploads
+  `autofactor-strategy-promotion.json` plus `.md` inside the existing artifact.
+  The GitHub step summary also includes the AutoFactor strategy-promotion
+  decision, so future research runs show whether mined factors are deployable
+  or blocked by target/profile/runtime-mapping gates.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable
