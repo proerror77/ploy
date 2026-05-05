@@ -7324,6 +7324,22 @@ fn build_probability_anti_overfit_rows(
         }),
         top_edge_quantile,
     );
+    let permutation_stride = coprime_stride(samples.len());
+    let permutation_offset = samples.len() / 3;
+    let permutation_rank_ic =
+        probability_edge_win_rank_ic(samples.iter().enumerate().map(|(idx, sample)| {
+            let permuted =
+                &samples[(idx * permutation_stride + permutation_offset) % samples.len()];
+            (sample.edge, permuted.win)
+        }));
+    let permutation_top_pnl = top_edge_avg_pnl(
+        samples.iter().enumerate().map(|(idx, sample)| {
+            let permuted =
+                &samples[(idx * permutation_stride + permutation_offset) % samples.len()];
+            (idx, sample.edge, permuted.pnl)
+        }),
+        top_edge_quantile,
+    );
 
     vec![
         SettlementProbabilityAntiOverfitRow {
@@ -7356,7 +7372,39 @@ fn build_probability_anti_overfit_rows(
                 prediction_shift_top_pnl,
             ),
         },
+        SettlementProbabilityAntiOverfitRow {
+            model: model.to_string(),
+            test: "label_deterministic_permutation".to_string(),
+            n: samples.len(),
+            observed_edge_win_rank_ic: observed_rank_ic,
+            perturbed_edge_win_rank_ic: permutation_rank_ic,
+            observed_top_edge_avg_full_depth_settlement_pnl: observed_top_pnl,
+            perturbed_top_edge_avg_full_depth_settlement_pnl: permutation_top_pnl,
+            pass: anti_overfit_pass(
+                observed_rank_ic,
+                permutation_rank_ic,
+                observed_top_pnl,
+                permutation_top_pnl,
+            ),
+        },
     ]
+}
+
+fn coprime_stride(len: usize) -> usize {
+    let mut stride = (len / 3).max(2);
+    while gcd_usize(stride, len) != 1 {
+        stride += 1;
+    }
+    stride
+}
+
+fn gcd_usize(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let next = a % b;
+        a = b;
+        b = next;
+    }
+    a
 }
 
 fn probability_edge_win_rank_ic<I>(rows: I) -> f64
@@ -9095,6 +9143,11 @@ mod tests {
         assert!(report.anti_overfit.iter().any(
             |row| row.model == "q_base_distance_phi" && row.test == "prediction_one_step_shift"
         ));
+        assert!(report
+            .anti_overfit
+            .iter()
+            .any(|row| row.model == "q_base_distance_phi"
+                && row.test == "label_deterministic_permutation"));
         assert!(report
             .symbol_holdouts
             .iter()

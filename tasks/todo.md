@@ -70,9 +70,9 @@ evidence comes from Polymarket full CLOB depth, not top book.
   execution assumption.
 - [ ] Add anti-overfit checks before any dry-run promotion: walk-forward OOS,
   symbol holdout, permutation, time-shift, and feature ablation. Current report
-  covers deterministic label-shift and prediction-shift diagnostics for
-  settlement probability baselines, symbol holdout diagnostics, and baseline
-  ablation deltas.
+  covers deterministic label-shift, deterministic permutation, and
+  prediction-shift diagnostics for settlement probability baselines, symbol
+  holdout diagnostics, and baseline ablation deltas.
 - [x] Add a first EventVolSurface / empirical probability surface so
   `q_final` can compare distance/LOB/vol formulas against a bucketed
   historical similar-state prior without leaking the current event outcome.
@@ -218,6 +218,20 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `top_edge_avg_full_depth_settlement_pnl=4.8409`, but
   `prediction_one_step_shift pass=false`, so the model is report-ready but not
   dry-run/live-ready.
+- 2026-05-05: Added an explicit deterministic permutation anti-overfit
+  diagnostic to the settlement probability report, covering the PRD's
+  permutation-test requirement inside the same report surface. Verification
+  passed: `rustfmt --edition 2021 --check crates/ploy-research/src/factors_v2.rs
+  crates/ploy-research/examples/factor_walk_forward_v2.rs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-permutation-gate /opt/homebrew/bin/timeout 300
+  rtk cargo test -p ploy-research settlement_probability --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-permutation-gate /opt/homebrew/bin/timeout 300
+  rtk cargo check -p ploy-research --example factor_walk_forward_v2 --features
+  db --no-default-features`, and `git diff --check`. The short-window snapshot
+  smoke printed `q_final_logit_blend,label_deterministic_permutation` with
+  observed top-edge full-depth PnL `4.8409`, perturbed top-edge PnL `0.7609`,
+  and `pass=true`; this improves the anti-overfit report but still does not
+  replace clean retained-window walk-forward/OOS evidence.
 - 2026-05-05: Settlement probability PRD gate result: BTC/ETH/SOL has the
   strongest next candidate but is not dry-run-ready. Run `25353780686` reported
   full-depth entry fill rate `49.23%`, exit fill rate `40.70%`, and
