@@ -90,6 +90,18 @@ evidence comes from Polymarket full CLOB depth, not top book.
   240 rtk cargo check -p ploy-research --example factor_walk_forward_v2
   --features db --no-default-features`. The check emitted only pre-existing
   strategy-bundle dead-code warnings plus the vendor profile warning.
+- 2026-05-05: Opened PR #319 from `feat/settlement-probability-prd` and
+  triggered remote snapshot-backed factor walk-forward validation for the new
+  settlement probability report: BTC/ETH/SOL run `25351768149` using snapshot
+  `25254380121`, and XRP/DOGE/BNB run `25351768140` using snapshot
+  `25255158983`. Both are blocked before data execution because `ploy-ci-1`
+  ECS `i-6we7z44sfbfbnosbeymz` is `Stopped` with `financial` /
+  `financial-recycling` operation locks. `aliyun ecs StartInstance --RegionId
+  ap-northeast-1 --InstanceId i-6we7z44sfbfbnosbeymz` failed with
+  `InstanceExpired`: "The postPaid instance has been expired. Please ensure
+  your account have enough balance." Until that runner is restored, the PRD
+  data-sufficiency gate cannot be completed; local tests prove code shape only,
+  not strategy/data sufficiency.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
