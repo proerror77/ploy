@@ -277,6 +277,13 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `/tmp/ploy-snapshot-smoke-25356726430/research-snapshot-25356726430`
   printed `ready_for_dry_run_handoff=false` with `walk_forward_oos=false` and
   `recorded_replay_parity=false`, which is the intended short-window behavior.
+- 2026-05-05: Re-ran the same short-window portable snapshot through GitHub
+  Actions after adding the promotion gate. Factor Walk-Forward V2 run
+  `25359476569` completed successfully from snapshot run `25356726430` and
+  printed `=== Settlement Probability PRD Promotion Gate ===`,
+  `ready_for_dry_run_handoff=false`, `walk_forward_oos=false`, and
+  `recorded_replay_parity=false`. This confirms the PR artifact now carries the
+  same promotion blocker evidence as the local smoke.
 - 2026-05-05: Settlement probability PRD gate result: BTC/ETH/SOL has the
   strongest next candidate but is not dry-run-ready. Run `25353780686` reported
   full-depth entry fill rate `49.23%`, exit fill rate `40.70%`, and
