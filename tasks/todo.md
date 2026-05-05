@@ -12984,3 +12984,16 @@ Issue: https://github.com/proerror77/ploy/issues/256
   `/opt/ploy/data/recordings/pm5d-threelayer-canonical.ndjson` is stale
   (`mtime=2026-05-02T02:15:13+08:00`) and cannot cover the 2026-05-05
   settlement dry-run order window.
+- 2026-05-05: Added and deployed the settlement-specific recording path
+  `/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson`
+  from `main` SHA `b8c927669cf5bb673dde4a9f05d9ccc15b4f8fda`. Tango
+  verification showed the config installed with `record_market_updates_to`,
+  `ployd.service` active with restart/OOM guardrails, no `cargo`/`rustc`
+  process, and the new recording file actively updating. A fresh dry-run
+  window for `2026-05-05T19:33:30+08:00 -> 2026-05-05T19:35:30+08:00`
+  captured event `2154598` with BUY at `19:34:00.170+08:00` and SELL at
+  `19:35:00+08:00`. Recorded replay parity run `25374110073` used the
+  settlement-specific recording and passed runtime strict parity:
+  orders `2/2/2`, fills `2/2/2`, `strict_parity_ready=true`,
+  `blocking_risk_flags=[]`, decision `continue`. Advisory event-level flags
+  remain expected because replay evidence still lacks event-level rows.
