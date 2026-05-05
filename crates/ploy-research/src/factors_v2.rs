@@ -392,6 +392,21 @@ impl Default for SettlementProbabilityReportOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SettlementProbabilityWalkForwardOptions {
+    pub walk_forward: FactorWalkForwardOptions,
+    pub probability: SettlementProbabilityReportOptions,
+}
+
+impl Default for SettlementProbabilityWalkForwardOptions {
+    fn default() -> Self {
+        Self {
+            walk_forward: FactorWalkForwardOptions::default(),
+            probability: SettlementProbabilityReportOptions::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SettlementProbabilityBaselineRow {
     pub model: String,
@@ -485,6 +500,46 @@ pub struct SettlementProbabilityReport {
     pub anti_overfit: Vec<SettlementProbabilityAntiOverfitRow>,
     pub symbol_holdouts: Vec<SettlementProbabilitySymbolHoldoutRow>,
     pub ablations: Vec<SettlementProbabilityAblationRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityWalkForwardWindow {
+    pub window_index: usize,
+    pub model: String,
+    pub train_start: DateTime<Utc>,
+    pub train_end: DateTime<Utc>,
+    pub test_start: DateTime<Utc>,
+    pub test_end: DateTime<Utc>,
+    pub train_n: usize,
+    pub test_n: usize,
+    pub train_brier_score: f64,
+    pub test_brier_score: f64,
+    pub train_expected_calibration_error: f64,
+    pub test_expected_calibration_error: f64,
+    pub train_top_edge_avg_full_depth_settlement_pnl: f64,
+    pub test_top_edge_avg_full_depth_settlement_pnl: f64,
+    pub test_top_edge_avg_conservative_settlement_pnl: f64,
+    pub test_edge_bucket_monotonic_non_decreasing: bool,
+    pub pass: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityWalkForwardAggregate {
+    pub model: String,
+    pub windows: usize,
+    pub positive_window_ratio: f64,
+    pub pass_window_ratio: f64,
+    pub avg_test_brier_score: f64,
+    pub avg_test_expected_calibration_error: f64,
+    pub avg_test_top_edge_avg_full_depth_settlement_pnl: f64,
+    pub min_test_top_edge_avg_full_depth_settlement_pnl: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SettlementProbabilityWalkForwardReport {
+    pub options: SettlementProbabilityWalkForwardOptions,
+    pub windows: Vec<SettlementProbabilityWalkForwardWindow>,
+    pub aggregates: Vec<SettlementProbabilityWalkForwardAggregate>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2480,37 +2535,25 @@ pub fn build_settlement_probability_report(
     rows: &[FactorObservationV2],
     options: SettlementProbabilityReportOptions,
 ) -> SettlementProbabilityReport {
-    let options = SettlementProbabilityReportOptions {
-        bucket_count: options.bucket_count.max(2),
-        min_bucket_observations: options.min_bucket_observations.max(1),
-        top_edge_quantile: options.top_edge_quantile.clamp(0.01, 1.0),
-        event_surface_min_bucket_observations: options.event_surface_min_bucket_observations.max(1),
-        event_surface_shrinkage_observations: options.event_surface_shrinkage_observations.max(1),
-    };
-    let mut by_model: BTreeMap<&'static str, Vec<SettlementProbabilitySample>> = BTreeMap::new();
-    let mut eligible_rows = Vec::new();
-    for row in rows {
-        let Some(win) = row.label_settlement_win.filter(|win| win.is_finite()) else {
-            continue;
-        };
-        let Some(pnl) = row
-            .label_full_depth_executable_pnl_15u
-            .filter(|pnl| pnl.is_finite())
-        else {
-            continue;
-        };
-        if !row.label_full_depth_entry_fillable || !valid_price(row.entry_sweep_avg_price_15u) {
-            continue;
-        }
-        eligible_rows.push((row, win, pnl));
-    }
+    build_settlement_probability_report_with_surface(rows, rows, options)
+}
+
+fn build_settlement_probability_report_with_surface(
+    evaluation_rows: &[FactorObservationV2],
+    surface_rows: &[FactorObservationV2],
+    options: SettlementProbabilityReportOptions,
+) -> SettlementProbabilityReport {
+    let options = normalize_settlement_probability_report_options(options);
+    let surface_eligible_rows = settlement_probability_eligible_rows(surface_rows);
+    let eligible_rows = settlement_probability_eligible_rows(evaluation_rows);
 
     let event_surface = EventVolSurface::fit(
-        &eligible_rows,
+        &surface_eligible_rows,
         options.event_surface_min_bucket_observations,
         options.event_surface_shrinkage_observations,
     );
 
+    let mut by_model: BTreeMap<&'static str, Vec<SettlementProbabilitySample>> = BTreeMap::new();
     for (row, win, pnl) in eligible_rows {
         for (model, q) in settlement_probability_models(row) {
             push_settlement_probability_sample(&mut by_model, model, row, win, pnl, q);
@@ -2538,6 +2581,47 @@ pub fn build_settlement_probability_report(
         }
     }
 
+    settlement_probability_report_from_model_samples(by_model, options)
+}
+
+fn normalize_settlement_probability_report_options(
+    options: SettlementProbabilityReportOptions,
+) -> SettlementProbabilityReportOptions {
+    SettlementProbabilityReportOptions {
+        bucket_count: options.bucket_count.max(2),
+        min_bucket_observations: options.min_bucket_observations.max(1),
+        top_edge_quantile: options.top_edge_quantile.clamp(0.01, 1.0),
+        event_surface_min_bucket_observations: options.event_surface_min_bucket_observations.max(1),
+        event_surface_shrinkage_observations: options.event_surface_shrinkage_observations.max(1),
+    }
+}
+
+fn settlement_probability_eligible_rows(
+    rows: &[FactorObservationV2],
+) -> Vec<(&FactorObservationV2, f64, f64)> {
+    let mut eligible_rows = Vec::new();
+    for row in rows {
+        let Some(win) = row.label_settlement_win.filter(|win| win.is_finite()) else {
+            continue;
+        };
+        let Some(pnl) = row
+            .label_full_depth_executable_pnl_15u
+            .filter(|pnl| pnl.is_finite())
+        else {
+            continue;
+        };
+        if !row.label_full_depth_entry_fillable || !valid_price(row.entry_sweep_avg_price_15u) {
+            continue;
+        }
+        eligible_rows.push((row, win, pnl));
+    }
+    eligible_rows
+}
+
+fn settlement_probability_report_from_model_samples(
+    by_model: BTreeMap<&'static str, Vec<SettlementProbabilitySample>>,
+    options: SettlementProbabilityReportOptions,
+) -> SettlementProbabilityReport {
     let mut baselines = Vec::new();
     let mut calibration = Vec::new();
     let mut edge_buckets = Vec::new();
@@ -2595,6 +2679,156 @@ pub fn build_settlement_probability_report(
         symbol_holdouts,
         ablations,
     }
+}
+
+pub fn walk_forward_settlement_probability_report(
+    rows: &[FactorObservationV2],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    options: SettlementProbabilityWalkForwardOptions,
+) -> SettlementProbabilityWalkForwardReport {
+    let mut rows = rows.to_vec();
+    rows.sort_by_key(|row| row.tick_ts);
+    let train_duration = Duration::days(options.walk_forward.train_window_days.max(1));
+    let test_duration = Duration::days(options.walk_forward.test_window_days.max(1));
+    let step_duration = Duration::days(options.walk_forward.step_days.max(1));
+    let probability_options =
+        normalize_settlement_probability_report_options(options.probability.clone());
+
+    let mut windows = Vec::new();
+    let mut train_start = start;
+    let mut window_index = 0usize;
+    while train_start + train_duration + test_duration <= end + Duration::seconds(1) {
+        let train_end = train_start + train_duration;
+        let test_start = train_end;
+        let test_end = test_start + test_duration;
+        let train_rows = walk_forward_time_slice(&rows, train_start, train_end);
+        let test_rows = walk_forward_time_slice(&rows, test_start, test_end);
+
+        if train_rows.len() >= options.walk_forward.review.min_observations
+            && test_rows.len() >= options.walk_forward.review.min_observations
+        {
+            let train_report =
+                build_settlement_probability_report(train_rows, probability_options.clone());
+            let test_report = build_settlement_probability_report_with_surface(
+                test_rows,
+                train_rows,
+                probability_options.clone(),
+            );
+            windows.extend(settlement_probability_walk_forward_windows(
+                window_index,
+                train_start,
+                train_end,
+                test_start,
+                test_end,
+                &train_report,
+                &test_report,
+            ));
+        }
+
+        window_index += 1;
+        train_start += step_duration;
+    }
+    let aggregates = aggregate_settlement_probability_walk_forward_windows(&windows);
+    SettlementProbabilityWalkForwardReport {
+        options,
+        windows,
+        aggregates,
+    }
+}
+
+fn settlement_probability_walk_forward_windows(
+    window_index: usize,
+    train_start: DateTime<Utc>,
+    train_end: DateTime<Utc>,
+    test_start: DateTime<Utc>,
+    test_end: DateTime<Utc>,
+    train_report: &SettlementProbabilityReport,
+    test_report: &SettlementProbabilityReport,
+) -> Vec<SettlementProbabilityWalkForwardWindow> {
+    let train_by_model: BTreeMap<&str, &SettlementProbabilityBaselineRow> = train_report
+        .baselines
+        .iter()
+        .map(|row| (row.model.as_str(), row))
+        .collect();
+    let mut windows = Vec::new();
+    for test in &test_report.baselines {
+        let Some(train) = train_by_model.get(test.model.as_str()) else {
+            continue;
+        };
+        windows.push(SettlementProbabilityWalkForwardWindow {
+            window_index,
+            model: test.model.clone(),
+            train_start,
+            train_end,
+            test_start,
+            test_end,
+            train_n: train.n,
+            test_n: test.n,
+            train_brier_score: train.brier_score,
+            test_brier_score: test.brier_score,
+            train_expected_calibration_error: train.expected_calibration_error,
+            test_expected_calibration_error: test.expected_calibration_error,
+            train_top_edge_avg_full_depth_settlement_pnl: train
+                .top_edge_avg_full_depth_settlement_pnl,
+            test_top_edge_avg_full_depth_settlement_pnl: test
+                .top_edge_avg_full_depth_settlement_pnl,
+            test_top_edge_avg_conservative_settlement_pnl: test
+                .top_edge_avg_conservative_settlement_pnl,
+            test_edge_bucket_monotonic_non_decreasing: test.edge_bucket_monotonic_non_decreasing,
+            pass: test.top_edge_avg_full_depth_settlement_pnl > 0.0
+                && test.expected_calibration_error.is_finite()
+                && test.brier_score.is_finite(),
+        });
+    }
+    windows
+}
+
+fn aggregate_settlement_probability_walk_forward_windows(
+    windows: &[SettlementProbabilityWalkForwardWindow],
+) -> Vec<SettlementProbabilityWalkForwardAggregate> {
+    let mut grouped: BTreeMap<&str, Vec<&SettlementProbabilityWalkForwardWindow>> = BTreeMap::new();
+    for window in windows {
+        grouped
+            .entry(window.model.as_str())
+            .or_default()
+            .push(window);
+    }
+    let mut aggregates = grouped
+        .into_iter()
+        .map(|(model, rows)| {
+            let windows = rows.len();
+            let positive = rows
+                .iter()
+                .filter(|row| row.test_top_edge_avg_full_depth_settlement_pnl > 0.0)
+                .count();
+            let passed = rows.iter().filter(|row| row.pass).count();
+            SettlementProbabilityWalkForwardAggregate {
+                model: model.to_string(),
+                windows,
+                positive_window_ratio: ratio(positive, windows),
+                pass_window_ratio: ratio(passed, windows),
+                avg_test_brier_score: mean(rows.iter().map(|row| row.test_brier_score)),
+                avg_test_expected_calibration_error: mean(
+                    rows.iter().map(|row| row.test_expected_calibration_error),
+                ),
+                avg_test_top_edge_avg_full_depth_settlement_pnl: mean(
+                    rows.iter()
+                        .map(|row| row.test_top_edge_avg_full_depth_settlement_pnl),
+                ),
+                min_test_top_edge_avg_full_depth_settlement_pnl: rows
+                    .iter()
+                    .map(|row| row.test_top_edge_avg_full_depth_settlement_pnl)
+                    .fold(f64::INFINITY, f64::min),
+            }
+        })
+        .collect::<Vec<_>>();
+    aggregates.sort_by(|a, b| {
+        b.avg_test_top_edge_avg_full_depth_settlement_pnl
+            .total_cmp(&a.avg_test_top_edge_avg_full_depth_settlement_pnl)
+            .then_with(|| b.positive_window_ratio.total_cmp(&a.positive_window_ratio))
+    });
+    aggregates
 }
 
 pub fn format_settlement_probability_report(report: &SettlementProbabilityReport) -> String {
@@ -2709,6 +2943,63 @@ pub fn format_settlement_probability_report(report: &SettlementProbabilityReport
             row.delta_top_edge_avg_full_depth_settlement_pnl,
             row.improves_error,
             row.improves_top_edge_pnl,
+        ));
+    }
+    out
+}
+
+pub fn format_settlement_probability_walk_forward_report(
+    report: &SettlementProbabilityWalkForwardReport,
+) -> String {
+    let mut out = String::new();
+    out.push_str("=== Settlement Probability Walk-Forward Report ===\n");
+    out.push_str(&format!(
+        "train_days={} test_days={} step_days={} min_obs={} probability_min_bucket_obs={} top_edge_quantile={:.2}\n",
+        report.options.walk_forward.train_window_days,
+        report.options.walk_forward.test_window_days,
+        report.options.walk_forward.step_days,
+        report.options.walk_forward.review.min_observations,
+        report.options.probability.min_bucket_observations,
+        report.options.probability.top_edge_quantile,
+    ));
+    out.push_str("Test windows evaluate formula probabilities on future rows; EventVolSurface and q_final use only the train window as empirical prior.\n");
+    out.push_str("\n--- Aggregate ---\n");
+    out.push_str("model,windows,positive_window_ratio,pass_window_ratio,avg_test_brier,avg_test_ece,avg_test_top_edge_full_depth_pnl,min_test_top_edge_full_depth_pnl\n");
+    for row in &report.aggregates {
+        out.push_str(&format!(
+            "{},{},{:.4},{:.4},{:.6},{:.6},{:.4},{:.4}\n",
+            row.model,
+            row.windows,
+            row.positive_window_ratio,
+            row.pass_window_ratio,
+            row.avg_test_brier_score,
+            row.avg_test_expected_calibration_error,
+            row.avg_test_top_edge_avg_full_depth_settlement_pnl,
+            row.min_test_top_edge_avg_full_depth_settlement_pnl,
+        ));
+    }
+    out.push_str("\n--- Windows ---\n");
+    out.push_str("window,model,train_start,train_end,test_start,test_end,train_n,test_n,train_brier,test_brier,train_ece,test_ece,train_top_edge_full_depth_pnl,test_top_edge_full_depth_pnl,test_top_edge_conservative_pnl,test_edge_monotonic,pass\n");
+    for row in &report.windows {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.4},{:.4},{:.4},{},{}\n",
+            row.window_index,
+            row.model,
+            row.train_start,
+            row.train_end,
+            row.test_start,
+            row.test_end,
+            row.train_n,
+            row.test_n,
+            row.train_brier_score,
+            row.test_brier_score,
+            row.train_expected_calibration_error,
+            row.test_expected_calibration_error,
+            row.train_top_edge_avg_full_depth_settlement_pnl,
+            row.test_top_edge_avg_full_depth_settlement_pnl,
+            row.test_top_edge_avg_conservative_settlement_pnl,
+            row.test_edge_bucket_monotonic_non_decreasing,
+            row.pass,
         ));
     }
     out
@@ -9287,6 +9578,71 @@ mod tests {
             .baselines
             .iter()
             .any(|row| row.model == "q_final_logit_blend"));
+    }
+
+    #[test]
+    fn settlement_probability_walk_forward_uses_train_surface_for_test_window() {
+        let start = Utc::now();
+        let source_rows = (0..8)
+            .map(|idx| {
+                let mut obs = base_obs();
+                obs.event_id = format!("wf-evt-{idx}");
+                obs.tick_ts = start + Duration::hours(idx * 12);
+                obs.settlement_up = if idx % 3 == 0 { 0.0 } else { 1.0 };
+                obs.pm_up_bid = 0.42;
+                obs.pm_up_ask = 0.46;
+                obs.pm_down_bid = 0.52;
+                obs.pm_down_ask = 0.56;
+                obs.distance_over_sigma = if idx % 2 == 0 { 0.6 } else { -0.4 };
+                obs
+            })
+            .collect::<Vec<_>>();
+        let mut rows = build_factor_observations_v2(&source_rows, &FactorReviewOptions::default());
+        rows.retain(|row| row.side == ReviewSide::Up);
+        for row in &mut rows {
+            row.label_full_depth_entry_fillable = true;
+            row.entry_sweep_avg_price_15u = row.entry_ask;
+            row.entry_sweep_shares_15u = 15.0 / row.entry_sweep_avg_price_15u;
+            row.label_full_depth_executable_pnl_15u = row
+                .label_settlement_win
+                .map(|win| win * row.entry_sweep_shares_15u - 15.0);
+        }
+
+        let report = walk_forward_settlement_probability_report(
+            &rows,
+            start,
+            start + Duration::days(4),
+            SettlementProbabilityWalkForwardOptions {
+                walk_forward: FactorWalkForwardOptions {
+                    review: FactorReviewOptions {
+                        min_observations: 1,
+                        ..Default::default()
+                    },
+                    train_window_days: 1,
+                    test_window_days: 1,
+                    step_days: 1,
+                    ..Default::default()
+                },
+                probability: SettlementProbabilityReportOptions {
+                    min_bucket_observations: 1,
+                    event_surface_min_bucket_observations: 1,
+                    event_surface_shrinkage_observations: 1,
+                    ..Default::default()
+                },
+            },
+        );
+
+        assert!(report
+            .windows
+            .iter()
+            .any(|row| row.model == "q_final_logit_blend"));
+        assert!(report
+            .aggregates
+            .iter()
+            .any(|row| row.model == "q_final_logit_blend"));
+        let text = format_settlement_probability_walk_forward_report(&report);
+        assert!(text.contains("Settlement Probability Walk-Forward Report"));
+        assert!(text.contains("EventVolSurface and q_final use only the train window"));
     }
 
     #[test]
