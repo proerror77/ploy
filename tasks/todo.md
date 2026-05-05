@@ -130,6 +130,19 @@ evidence comes from Polymarket full CLOB depth, not top book.
   probability report so the next successful Factor Walk-Forward run will also
   print label cyclic-shift, prediction one-step-shift, and per-symbol holdout
   checks plus baseline ablation deltas for each probability baseline.
+- 2026-05-05: Reconfirmed the user-supplied PRD is the active strategy plan:
+  settlement probability trading is the main lane, full-depth Polymarket CLOB
+  sweep labels are the execution truth, and repricing/volatility shock remain
+  secondary diagnostics only. PR #319 ordinary CI passed on run `25352724339`
+  at head `602e09a20b09ef51b7ba23948fe5b6868a3c5e02`. Snapshot-backed
+  validation remains blocked: BTC/ETH/SOL run `25352664353` is queued and
+  XRP/DOGE/BNB run `25352664495` is pending because GitHub runner `ploy-ci-1`
+  is offline. Aliyun ECS `i-6we7z44sfbfbnosbeymz` is still `Stopped` with
+  `financial` / `financial-recycling` locks, and another `StartInstance`
+  attempt returned `InstanceExpired`. Do not claim data sufficiency, edge
+  validity, or dry-run readiness until those remote snapshot-backed reports
+  complete and pass calibration, edge-bucket, baseline, anti-overfit, and
+  holdout gates.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
