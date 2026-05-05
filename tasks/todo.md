@@ -120,6 +120,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   handoff manifest is deliberately `blocked` when no strategy qualifies, so
   downstream automation cannot mistake a report-only candidate for a deployable
   strategy.
+- [x] Add a first constrained settlement-native AutoFactor generator for
+  `full_depth_settlement_executable_pnl`. It expands full-depth and
+  conservative settlement edge primitives into `auto_settlement_*` formula
+  candidates with near-strike, capacity, spread, external-pressure, and
+  short-IV-change interactions. These generated rows remain discovery evidence
+  until the promotion evaluator and runtime mapping gates qualify them.
 
 ## Review
 
@@ -160,6 +166,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   row plus blockers and runtime mapping. The handoff manifest is the downstream
   contract for dry-run automation: it contains only qualified strategy rows, or
   a blocked/do-not-promote status when none qualify.
+- 2026-05-06: Added the first Rust settlement-native AutoFactor generator in
+  `crates/ploy-research/src/autofactor.rs`. `FullDepthSettlementExecutablePnl`
+  now gets target-specific `auto_settlement_*` candidates built from full-depth
+  and conservative settlement edge, near-strike state, entry capacity, spread,
+  external pressure, and IV change. Repricing targets intentionally do not
+  receive these generated settlement candidates.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

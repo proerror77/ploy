@@ -424,7 +424,7 @@ pub fn format_autofactor_reports(reports: &[AutoFactorReport], top_n: usize) -> 
     let mut out = String::new();
     out.push_str("=== AutoFactor Seed Candidate Report ===\n");
     out.push_str(
-        "target labels are side-aligned executable repricing PnL; reports are candidate discovery gates, not deploy decisions.\n",
+        "target labels are side-aligned executable PnL for the requested target; reports are candidate discovery gates, not deploy decisions.\n",
     );
     out.push_str(
         "rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,monotonicity,top_bucket_avg_label,top_bucket_positive_label_rate,complexity\n",
@@ -461,7 +461,7 @@ pub fn mine_domain_autofactors_from_v2(
     let labels = autofactor_labels_from_v2(rows, target);
     let windows = autofactor_windows_from_v2(rows);
     let target_name = target.as_str().to_string();
-    let candidates = domain_seed_candidates(&matrix.input_names())
+    let candidates = domain_candidates_for_target(&matrix.input_names(), target)
         .into_iter()
         .map(|mut factor| {
             factor.target = Some(target_name.clone());
@@ -484,6 +484,22 @@ pub fn autofactor_matrix_from_v2(
     insert_column(&mut columns, "side_fair_edge", rows, |row| {
         if valid_pm_price(row.entry_ask) && row.side_fair_prob.is_finite() {
             row.side_fair_prob - row.entry_ask - pm_fee_cost(row.entry_ask)
+        } else {
+            f64::NAN
+        }
+    });
+    insert_column(&mut columns, "full_depth_settlement_edge", rows, |row| {
+        settlement_edge(row.side_fair_prob, row.entry_sweep_avg_price_15u)
+    });
+    insert_column(&mut columns, "conservative_settlement_edge", rows, |row| {
+        settlement_edge(
+            row.side_fair_prob,
+            row.conservative_entry_sweep_avg_price_15u,
+        )
+    });
+    insert_column(&mut columns, "entry_capacity_score", rows, |row| {
+        if row.entry_capacity_ratio.is_finite() {
+            (row.entry_capacity_ratio / 3.0).clamp(0.0, 1.0)
         } else {
             f64::NAN
         }
@@ -562,6 +578,14 @@ fn valid_pm_price(value: f64) -> bool {
 
 fn pm_fee_cost(entry_price: f64) -> f64 {
     0.02 * entry_price * (1.0 - entry_price)
+}
+
+fn settlement_edge(probability: f64, entry_price: f64) -> f64 {
+    if valid_pm_price(entry_price) && probability.is_finite() {
+        probability - entry_price - pm_fee_cost(entry_price)
+    } else {
+        f64::NAN
+    }
 }
 
 pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactorExpr> {
@@ -679,6 +703,117 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
         });
     }
     out
+}
+
+fn domain_candidates_for_target(
+    input_names: &BTreeSet<String>,
+    target: AutoFactorV2Target,
+) -> Vec<NamedFactorExpr> {
+    let mut out = domain_seed_candidates(input_names);
+    if target == AutoFactorV2Target::FullDepthSettlementExecutablePnl {
+        out.extend(settlement_native_generated_candidates(input_names));
+    }
+    out
+}
+
+fn settlement_native_generated_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactorExpr> {
+    let mut out = Vec::new();
+    let edge_inputs = [
+        (
+            "full_depth_settlement_edge",
+            "Full-depth q minus entry sweep price and fee.",
+        ),
+        (
+            "conservative_settlement_edge",
+            "Conservative q minus entry sweep price and fee.",
+        ),
+    ];
+    for (edge_name, note) in edge_inputs {
+        if !input_names.contains(edge_name) {
+            continue;
+        }
+        push_generated(
+            &mut out,
+            format!("auto_settlement_{edge_name}"),
+            input(edge_name),
+            note,
+        );
+        if input_names.contains("near_strike_score") {
+            push_generated(
+                &mut out,
+                format!("auto_settlement_{edge_name}_x_near_strike"),
+                mul(input(edge_name), input("near_strike_score")),
+                "Settlement edge gated by near-strike sensitivity.",
+            );
+        }
+        if input_names.contains("entry_capacity_score") {
+            push_generated(
+                &mut out,
+                format!("auto_settlement_{edge_name}_x_capacity"),
+                mul(input(edge_name), input("entry_capacity_score")),
+                "Settlement edge gated by full-depth entry capacity.",
+            );
+        }
+        if has_all(input_names, &["near_strike_score", "entry_capacity_score"]) {
+            push_generated(
+                &mut out,
+                format!("auto_settlement_{edge_name}_x_near_strike_x_capacity"),
+                mul(
+                    mul(input(edge_name), input("near_strike_score")),
+                    input("entry_capacity_score"),
+                ),
+                "Settlement edge gated by both near-strike state and executable capacity.",
+            );
+        }
+        if input_names.contains("side_spread") {
+            push_generated(
+                &mut out,
+                format!("auto_settlement_{edge_name}_spread_adjusted"),
+                safe_div_expr(
+                    input(edge_name),
+                    FactorExpr::Add(
+                        Box::new(input("side_spread")),
+                        Box::new(FactorExpr::Const(0.01)),
+                    ),
+                ),
+                "Settlement edge scaled by Polymarket side spread.",
+            );
+        }
+        if input_names.contains("external_pressure") {
+            push_generated(
+                &mut out,
+                format!("auto_settlement_{edge_name}_x_external_pressure"),
+                mul(input(edge_name), input("external_pressure")),
+                "Settlement edge interacted with side-aligned external pressure.",
+            );
+        }
+        if input_names.contains("iv_change_1m") {
+            push_generated(
+                &mut out,
+                format!("auto_settlement_{edge_name}_x_iv_change"),
+                mul(input(edge_name), input("iv_change_1m")),
+                "Settlement edge interacted with short implied-volatility change.",
+            );
+        }
+    }
+    out
+}
+
+fn push_generated(
+    out: &mut Vec<NamedFactorExpr>,
+    name: String,
+    expr: FactorExpr,
+    note: impl Into<String>,
+) {
+    out.push(NamedFactorExpr {
+        name,
+        expr,
+        target: Some("full_depth_settlement_executable_pnl".to_string()),
+        notes: vec![format!(
+            "Auto-generated settlement-native formula. {}",
+            note.into()
+        )],
+    });
 }
 
 fn insert_column(
@@ -1366,6 +1501,60 @@ mod tests {
             Some("settlement_executable_pnl")
         );
         assert!(fair_edge.spearman_ic > 0.95);
+    }
+
+    #[test]
+    fn mines_generated_settlement_native_candidates_from_v2_rows() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let options = AutoFactorOptions {
+            min_observations: 40,
+            min_window_observations: 10,
+            min_icir: 0.1,
+            ..Default::default()
+        };
+
+        let reports = mine_domain_autofactors_from_v2(
+            &rows,
+            AutoFactorV2Target::FullDepthSettlementExecutablePnl,
+            &options,
+        )
+        .expect("reports");
+
+        let full_depth_edge = reports
+            .iter()
+            .find(|report| report.name == "auto_settlement_full_depth_settlement_edge")
+            .expect("generated full-depth settlement edge report");
+        assert_eq!(full_depth_edge.decision, AutoFactorDecision::Candidate);
+        assert_eq!(
+            full_depth_edge.target.as_deref(),
+            Some("full_depth_settlement_executable_pnl")
+        );
+        assert!(full_depth_edge.spearman_ic > 0.95);
+        assert!(reports.iter().any(|report| {
+            report.name == "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity"
+        }));
+    }
+
+    #[test]
+    fn keeps_settlement_native_generated_candidates_out_of_repricing_targets() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let options = AutoFactorOptions {
+            min_observations: 40,
+            min_window_observations: 10,
+            min_icir: 0.1,
+            ..Default::default()
+        };
+
+        let reports = mine_domain_autofactors_from_v2(
+            &rows,
+            AutoFactorV2Target::FullDepthRepricePnl10s,
+            &options,
+        )
+        .expect("reports");
+
+        assert!(reports
+            .iter()
+            .all(|report| !report.name.starts_with("auto_settlement_")));
     }
 
     #[test]
