@@ -12836,3 +12836,37 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - 2026-05-02: Second repair slice added strict order/fill evidence. Replay/backtest output now includes `runtime_evidence.intents/orders/fills` normalized from `TradingRuntimeSnapshot`, including deployment, intent/order/fill ids, event/token ids, side/purpose, quantity, prices, fees, status, and timestamps. `replay_dryrun_parity.py` now compares those rows against Tango exports at order/fill level with numeric and timestamp tolerances, and reports `runtime_evidence_comparison.strict_parity_ready`.
 - 2026-05-02: Semantic row matching fixed the post-deploy parity false negative. The comparator now keys runtime orders/fills by stable semantic identity, led by `deployment_id + intent_id`, and treats replay-generated `order_id` / `fill_id` as diagnostic rather than strict parity fields. Real Tango artifact check passed against `/opt/ploy/data/parity/postdeploy-20260502T022934Z`: orders `10/10` shared, fills `10/10` shared, zero row mismatches, zero missing runtime strict fields, `runtime_evidence_comparison.strict_parity_ready=true`, decision `continue`. Event-level rows are still absent on both sides, so this proves order/fill runtime parity only; dry-run/live restoration remains blocked on the broader promotion gate.
 - 2026-05-02: Factor stability probe `25243415961` used snapshot `25204438461` / hash `fb338e1f202c3bda`, train `2026-04-24 -> 2026-04-29`, validation `2026-04-29 -> 2026-05-02`, six symbols, and `min_observations=80`. Raw single-factor walk-forward was mixed and should not be promoted directly: raw `side_model_prob` and `side_distance_over_sigma` were positive in train but negative in validation. After the liquidity gate, those same alpha factors became strongly positive on validation (`side_model_prob` `+5990.4034`, `side_distance_over_sigma` `+5997.9890`) with `100%` fill, symbol-positive, and time-bucket-positive rates. The workflow still marked them `watchlist` because there is only one validation window (`too_few_windows_positive_pnl`) and the snapshot data audit is `critical`. Durable record: [tasks/pm5d_factor_stability_20260502.md](/Users/proerror/Documents/ploy/tasks/pm5d_factor_stability_20260502.md).
+
+# Settlement Probability PRD Continuation (2026-05-05)
+
+## Files
+
+- `scripts/report_dryrun_summary.py`
+  - Owner: dry-run report must expose top-level row-level `runtime_evidence.orders/fills` from `strategy_runtime_orders` and `strategy_runtime_fills`.
+- `crates/ploy-operator-contracts/src/reports.rs`
+  - Owner: operator report contract must preserve optional runtime evidence for API clients and parity workflows.
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+  - Owner: `backtest.yml` artifact `artifacts/backtest/evaluation.json` must exist and include replay/backtest order/fill evidence.
+- `scripts/replay_dryrun_parity.py`
+  - Owner: strict parity comparator; already consumes `runtime_evidence.orders/fills`.
+- `.github/workflows/backtest.yml`
+  - Owner: uses `run_backtest --output-json`; this now maps to a real artifact writer.
+- `.github/workflows/replay-dryrun-parity.yml`
+  - Owner: next evidence gate once fresh replay and dry-run JSON both contain row-level runtime evidence.
+
+## Tasks
+
+- [x] Add row-level dry-run `runtime_evidence.orders/fills` to `/api/reports/dry-run` payload generation.
+- [x] Add optional `DryRunRuntimeEvidence` to the Rust operator contract and regenerate schema/TypeScript contracts.
+- [x] Make `run_backtest --output-json` write `evaluation.json` with headline metrics and normalized order/fill runtime evidence.
+- [x] Preserve strict replay/dry-run comparator semantics: row matching still uses stable semantic identity, not generated order/fill ids.
+- [ ] Deploy the updated dry-run report script/daemon via CI from `main`, then pull `/api/reports/dry-run` from `tango-1-1` and verify non-empty `runtime_evidence.orders/fills`.
+- [ ] Dispatch a fresh `backtest.yml` or recorded replay run on `main` and verify its artifact has non-empty `runtime_evidence.orders/fills`.
+- [ ] Run `replay-dryrun-parity.yml` against matching replay/dry-run evidence and attach the result to issue #321.
+- [ ] Keep PRD dry-run handoff blocked until clean 168h strict data audit, OOS, and replay parity all pass.
+
+## Review
+
+- 2026-05-05: Fixed the current PRD parity evidence gap instead of mining new factors. The dry-run report now queries `strategy_runtime_orders` and `strategy_runtime_fills` into a top-level `runtime_evidence` object with `schema_version=1`, `basis=strategy_runtime_orders_and_fills`, `orders`, and `fills`. The report contract checker also reports runtime evidence row counts.
+- 2026-05-05: Fixed the backtest workflow artifact path. `run_backtest` now parses `--output-json` and writes `strategy_backtest_evaluation` with headline metrics, risk flags for missing order/fill rows, and normalized `runtime_evidence.orders/fills` from `TradingRuntimeSnapshot`. This is the artifact shape expected by replay/dry-run parity.
+- 2026-05-05: Local verification passed: `python3 -m unittest tests.test_dryrun_report_contracts tests.test_replay_dryrun_parity`; `CARGO_TARGET_DIR=/tmp/ploy-prd-contracts rtk cargo test -p ploy-operator-contracts dry_run_report_roundtrip_preserves_diagnostics_fields --lib`; `CARGO_TARGET_DIR=/tmp/ploy-prd-backtest-example rtk cargo test -p ploy-strategy-bundles --example run_backtest`; `CARGO_TARGET_DIR=/tmp/ploy-prd-contracts rtk cargo run --locked -p ploy-operator-contracts --example export_schemas -- --check`; `node scripts/export_operator_contract_types.mjs --check`; `git diff --check`.

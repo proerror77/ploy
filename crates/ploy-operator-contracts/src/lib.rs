@@ -14,11 +14,11 @@ pub use deployments::{
     DeploymentSummary, DesiredState, ObservedState,
 };
 pub use diagnostics::{
-    compute_oversight_report, AgentRunRecord, DeploymentDiagnosticsMetrics,
-    DeploymentDiagnosticsReport, DiagnosticsEvidence, DiagnosticsFinding,
-    OversightRecommendedAction, OversightReport, OversightSignal, OversightSnapshotEvent,
-    PlatformDiagnosticsReport, ProposalActionKind, ProposalCreateRequest, ProposalDecisionRequest,
-    ProposalSnapshotEvent, ProposalStatus, SafetyProposal,
+    AgentRunRecord, DeploymentDiagnosticsMetrics, DeploymentDiagnosticsReport, DiagnosticsEvidence,
+    DiagnosticsFinding, OversightRecommendedAction, OversightReport, OversightSignal,
+    OversightSnapshotEvent, PlatformDiagnosticsReport, ProposalActionKind, ProposalCreateRequest,
+    ProposalDecisionRequest, ProposalSnapshotEvent, ProposalStatus, SafetyProposal,
+    compute_oversight_report,
 };
 pub use errors::ControlPlaneErrorResponse;
 pub use events::{
@@ -28,8 +28,8 @@ pub use events::{
 pub use reports::{
     DryRunClosedTradeRow, DryRunDailyRow, DryRunDailyWindowRow, DryRunEquityPoint,
     DryRunExecutionDiagnostics, DryRunMetrics, DryRunOpenPositionRow, DryRunPairingReport,
-    DryRunPerformanceReport, DryRunStrategyReport, DryRunSummary, DryRunSymbolRow, DryRunWindowRow,
-    NumberOrText,
+    DryRunPerformanceReport, DryRunRuntimeEvidence, DryRunStrategyReport, DryRunSummary,
+    DryRunSymbolRow, DryRunWindowRow, NumberOrText,
 };
 pub use system::{
     ActiveAlert, AlertKind, AlertSeverity, HeartbeatState, HeartbeatStatus, PlatformMetrics,

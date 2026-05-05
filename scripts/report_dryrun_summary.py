@@ -184,6 +184,59 @@ FROM (
 ) d;
 """
 
+RUNTIME_EVIDENCE_QUERY = f"""
+SELECT jsonb_build_object(
+  'schema_version', 1,
+  'basis', 'strategy_runtime_orders_and_fills',
+  'orders', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'runtime_mode', o.runtime_mode,
+      'strategy_id', o.strategy_id,
+      'deployment_id', o.deployment_id,
+      'intent_id', o.intent_id,
+      'order_id', o.order_id,
+      'venue_order_id', o.venue_order_id,
+      'event_id', o.event_id,
+      'market_id', o.event_id,
+      'token_id', o.token_id,
+      'market_side', o.market_side,
+      'order_side', o.order_side,
+      'quantity', o.quantity,
+      'requested_qty', o.quantity,
+      'limit_price', o.limit_price,
+      'filled_quantity', o.filled_quantity,
+      'avg_fill_price', o.avg_fill_price,
+      'status', o.status,
+      'rejection_reason', o.rejection_reason,
+      'created_at', o.recorded_at
+    ) ORDER BY o.recorded_at, o.order_id)
+    FROM strategy_runtime_orders o
+    WHERE o.runtime_mode IN ({MODE_FILTER})
+  ), '[]'::jsonb),
+  'fills', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'runtime_mode', f.runtime_mode,
+      'strategy_id', f.strategy_id,
+      'deployment_id', f.deployment_id,
+      'intent_id', f.intent_id,
+      'order_id', f.order_id,
+      'fill_id', f.fill_id,
+      'event_id', f.event_id,
+      'market_id', f.event_id,
+      'token_id', f.token_id,
+      'market_side', f.market_side,
+      'fill_side', f.fill_side,
+      'quantity', f.quantity,
+      'price', f.price,
+      'fee', f.fee,
+      'fill_timestamp', f.fill_timestamp
+    ) ORDER BY f.fill_timestamp, f.fill_id)
+    FROM strategy_runtime_fills f
+    WHERE f.runtime_mode IN ({MODE_FILTER})
+  ), '[]'::jsonb)
+)::text;
+"""
+
 
 def run_json_query(query: str, timeout: int = 30):
     result = subprocess.run(
@@ -660,6 +713,12 @@ def empty_payload():
             "side_aware_rows": 0,
         },
         "execution_diagnostics": build_execution_diagnostics([]),
+        "runtime_evidence": {
+            "schema_version": 1,
+            "basis": "strategy_runtime_orders_and_fills",
+            "orders": [],
+            "fills": [],
+        },
     }
 
 
@@ -668,12 +727,14 @@ def main() -> int:
     daily_rows = run_json_query(DAILY_QUERY) or []
     pairing = run_json_query(PAIRING_QUERY) or empty_payload()["pairing"]
     order_diagnostics = run_json_query(ORDER_DIAGNOSTICS_QUERY) or []
+    runtime_evidence = run_json_query(RUNTIME_EVIDENCE_QUERY) or empty_payload()["runtime_evidence"]
 
     payload = empty_payload()
     payload["generated_at"] = datetime.now(timezone.utc).isoformat()
     payload.update(build_report_slice(events, daily_rows))
     payload["pairing"] = pairing
     payload["execution_diagnostics"] = build_execution_diagnostics(order_diagnostics)
+    payload["runtime_evidence"] = runtime_evidence
 
     events_by_strategy = defaultdict(list)
     for event in events:

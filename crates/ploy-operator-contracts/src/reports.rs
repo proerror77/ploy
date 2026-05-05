@@ -170,6 +170,16 @@ pub struct DryRunExecutionDiagnostics {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DryRunRuntimeEvidence {
+    pub schema_version: u32,
+    pub basis: String,
+    #[serde(default)]
+    pub orders: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub fills: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DryRunStrategyReport {
     pub runtime_mode: String,
     pub strategy_id: String,
@@ -209,12 +219,14 @@ pub struct DryRunPerformanceReport {
     pub pairing: DryRunPairingReport,
     #[serde(default)]
     pub execution_diagnostics: Option<DryRunExecutionDiagnostics>,
+    #[serde(default)]
+    pub runtime_evidence: Option<DryRunRuntimeEvidence>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::DryRunPerformanceReport;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     #[test]
     fn dry_run_report_roundtrip_preserves_diagnostics_fields() {
@@ -256,7 +268,8 @@ mod tests {
                 "current_view_rows": 0,
                 "side_aware_rows": 0
             },
-            "execution_diagnostics": diagnostics()
+            "execution_diagnostics": diagnostics(),
+            "runtime_evidence": runtime_evidence()
         });
 
         let report: DryRunPerformanceReport = serde_json::from_value(raw).unwrap();
@@ -281,6 +294,14 @@ mod tests {
         assert_eq!(
             roundtripped["execution_diagnostics"]["summary"]["rejected_buy_orders"],
             2
+        );
+        assert_eq!(
+            roundtripped["runtime_evidence"]["basis"],
+            "strategy_runtime_orders_and_fills"
+        );
+        assert_eq!(
+            roundtripped["runtime_evidence"]["orders"][0]["intent_id"],
+            "intent-1"
         );
     }
 
@@ -333,6 +354,35 @@ mod tests {
                 "deployment_id": "pm5d-dryrun",
                 "buy_orders": 5,
                 "rejected_buy_orders": 2
+            }]
+        })
+    }
+
+    fn runtime_evidence() -> Value {
+        json!({
+            "schema_version": 1,
+            "basis": "strategy_runtime_orders_and_fills",
+            "orders": [{
+                "deployment_id": "pm5d-dryrun",
+                "intent_id": "intent-1",
+                "order_id": "order-1",
+                "token_id": "token-up",
+                "quantity": "10",
+                "limit_price": "0.42",
+                "filled_quantity": "10",
+                "status": "FILLED"
+            }],
+            "fills": [{
+                "deployment_id": "pm5d-dryrun",
+                "intent_id": "intent-1",
+                "order_id": "order-1",
+                "fill_id": "fill-1",
+                "token_id": "token-up",
+                "fill_side": "BUY",
+                "quantity": "10",
+                "price": "0.42",
+                "fee": "0",
+                "fill_timestamp": "2026-05-02T01:02:03Z"
             }]
         })
     }

@@ -57,6 +57,8 @@ export interface DryRunOpenPositionRow { deployment_id?: string | null; entry_pr
 
 export interface DryRunPairingReport { current_view_rows: number; fills_in_mixed_event_groups: number; mixed_event_groups: number; pair_key: string; side_aware_rows: number; }
 
+export interface DryRunRuntimeEvidence { basis: string; fills?: JsonValue[]; orders?: JsonValue[]; schema_version: number; }
+
 export interface DryRunStrategyReport { by_window: DryRunWindowRow[]; closed_trades: DryRunClosedTradeRow[]; daily: DryRunDailyRow[]; daily_by_window: DryRunDailyWindowRow[]; deployment_id: string; equity_curve: DryRunEquityPoint[]; execution_diagnostics?: DryRunExecutionDiagnostics | null; experiment_label?: string | null; label: string; metrics: DryRunMetrics; open_positions: DryRunOpenPositionRow[]; recent_closed: DryRunClosedTradeRow[]; runtime_mode: string; strategy_id: string; summary: DryRunSummary; symbols: DryRunSymbolRow[]; symbols_by_window: DryRunSymbolRow[]; }
 
 export interface DryRunSummary { closed_trades: number; latest_closed_at?: string | null; latest_opened_at?: string | null; losses: number; open_exposure: number; open_positions: number; realized_pnl: number; total_fees: number; total_trades: number; win_rate_pct: number; wins: number; }
@@ -67,7 +69,7 @@ export interface DryRunWindowRow { avg_entry?: number | null; avg_pnl?: number |
 
 export type NumberOrText = number | string;
 
-export interface DryRunPerformanceReport { by_window: DryRunWindowRow[]; closed_trades: DryRunClosedTradeRow[]; daily: DryRunDailyRow[]; daily_by_window: DryRunDailyWindowRow[]; equity_curve: DryRunEquityPoint[]; execution_diagnostics?: DryRunExecutionDiagnostics | null; generated_at: string; metrics: DryRunMetrics; open_positions: DryRunOpenPositionRow[]; pairing: DryRunPairingReport; recent_closed: DryRunClosedTradeRow[]; strategies: DryRunStrategyReport[]; summary: DryRunSummary; symbols: DryRunSymbolRow[]; symbols_by_window: DryRunSymbolRow[]; }
+export interface DryRunPerformanceReport { by_window: DryRunWindowRow[]; closed_trades: DryRunClosedTradeRow[]; daily: DryRunDailyRow[]; daily_by_window: DryRunDailyWindowRow[]; equity_curve: DryRunEquityPoint[]; execution_diagnostics?: DryRunExecutionDiagnostics | null; generated_at: string; metrics: DryRunMetrics; open_positions: DryRunOpenPositionRow[]; pairing: DryRunPairingReport; recent_closed: DryRunClosedTradeRow[]; runtime_evidence?: DryRunRuntimeEvidence | null; strategies: DryRunStrategyReport[]; summary: DryRunSummary; symbols: DryRunSymbolRow[]; symbols_by_window: DryRunSymbolRow[]; }
 
 export interface SystemStatus { active_alert_count?: number; database_connected: boolean; error_count_1h: number; last_live_reconcile_error?: string | null; last_live_reconcile_success_at?: string | null; last_trade_time?: string | null; live_reconcile_failures?: number; next_live_reconcile_at?: string | null; stale_source_count?: number; status: string; strategy: string; uptime_seconds: number; version: string; websocket_connected: boolean; }
 
