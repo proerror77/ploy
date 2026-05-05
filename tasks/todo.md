@@ -1,3 +1,96 @@
+# PM5D Settlement Probability PRD Execution Plan (2026-05-05)
+
+## Goal
+
+Re-anchor PM5D / PM15D crypto strategy research on settlement probability
+trading instead of treating short-horizon repricing as the main lane. The
+strategy target is:
+
+```text
+q_side - full_depth_entry_sweep_avg_price
+  > fee + slippage + latency + model_error + safety_margin
+```
+
+where `q_yes = P(S_expiry > price_to_beat | current_state)` and all executable
+evidence comes from Polymarket full CLOB depth, not top book.
+
+## Current Correction
+
+- Prior `repricing_momentum` dry-run work remains useful only as a sidecar
+  diagnostic for runtime/parity and PM lag behavior.
+- The main promotion lane is now settlement probability trading.
+- The older direct `side_fair_prob - entry_ask` settlement test failed and must
+  not be treated as proof that settlement trading is impossible. It failed the
+  specific old probability/price construction. The PRD requires a stronger
+  chain: `q_base + sigma_eff + event vol surface + market prior calibration +
+  edge bucket + full-depth conservative labels`.
+- Do not promote any dry-run/live candidate from repricing evidence until the
+  settlement probability gate either passes or is explicitly rejected with
+  calibration, baseline, OOS, and anti-overfit evidence.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: full-depth execution labels, settlement probability labels, q/edge
+    calibration reports, edge bucket reports.
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: snapshot-backed report entrypoint; should print execution matrix,
+    probability calibration, baseline comparison, edge bucket, and anti-overfit
+    summaries.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer_model.rs`
+  - Owner: shared runtime/research probability scorer once offline settlement
+    model passes the research gate.
+- `config/strategies/02-pm5d-threelayer.repricing-momentum-dryrun.toml`
+  - Owner: diagnostic only; not a main promotion path under this PRD.
+
+## Milestone Plan
+
+- [x] Confirm full-depth CLOB execution matrix already exists and uses PM book
+  depth for entry/exit sweeps.
+- [x] Confirm `full_depth_settlement_executable_pnl` exists as a research
+  target.
+- [x] Add a dedicated settlement probability report that computes:
+  `q_base = Phi(distance_z)`, `q_market`, `edge_base`, `edge_market`, and
+  full-depth settlement PnL buckets.
+- [x] Add calibration buckets: predicted q, actual win rate, count, calibration
+  error, Brier score, and log loss.
+- [x] Add edge buckets: average edge, actual win rate, average full-depth
+  settlement PnL, conservative PnL where available, and monotonicity.
+- [x] Add initial baseline comparison: 50/50, Polymarket midpoint,
+  `Phi(distance_z)`, existing fair probability, and existing model probability.
+- [ ] Add richer baseline comparison: `Phi(distance_z)` plus currently available
+  volatility / direction primitives, and later event-vol-surface variants.
+- [ ] Add anti-overfit checks before any dry-run promotion: walk-forward OOS,
+  symbol holdout, permutation, time-shift, and feature ablation.
+- [ ] Only after the above gates pass, create a settlement dry-run handoff with
+  fixed small stake, strict kill switch, and shared scorer parity.
+
+## Review
+
+- 2026-05-05: User supplied the canonical PRD for a Polymarket Crypto 5m/15m
+  probability strategy system. The repo direction is corrected to follow that
+  PRD: settlement probability trading is the main lane; repricing, volatility
+  shock, and mean reversion remain secondary research modules. The immediate
+  next implementation slice is not another AutoFactor run or dry-run deploy; it
+  is a settlement probability report over full-depth executable labels.
+- 2026-05-05: Implemented the first settlement-probability research slice in
+  `crates/ploy-research/src/factors_v2.rs` and wired it into
+  `factor_walk_forward_v2`. The new report uses full-depth entry-fillable
+  candidate rows only, computes `q_naive_50_50`, `q_market_midpoint`,
+  `q_base_distance_phi`, existing fair probability, and existing model
+  probability, then prints
+  baseline comparison, calibration buckets, and edge buckets against
+  full-depth settlement PnL, including an edge-bucket monotonicity flag.
+  Verification passed:
+  `rustfmt --edition 2021 --check crates/ploy-research/src/factors_v2.rs
+  crates/ploy-research/examples/factor_walk_forward_v2.rs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-prob-report /opt/homebrew/bin/timeout
+  240 rtk cargo test -p ploy-research settlement_probability_report --lib`, and
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-prob-report /opt/homebrew/bin/timeout
+  240 rtk cargo check -p ploy-research --example factor_walk_forward_v2
+  --features db --no-default-features`. The check emitted only pre-existing
+  strategy-bundle dead-code warnings plus the vendor profile warning.
+
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
 ## Goal
