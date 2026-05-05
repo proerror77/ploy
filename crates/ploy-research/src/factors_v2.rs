@@ -543,6 +543,47 @@ pub struct SettlementProbabilityWalkForwardReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityPromotionGateOptions {
+    pub stake_usd: f64,
+    pub min_entry_fill_rate: f64,
+    pub max_expected_calibration_error: f64,
+    pub min_positive_window_ratio: f64,
+    pub require_deribit: bool,
+    pub include_deribit: bool,
+    pub data_audit_status: Option<String>,
+    pub replay_parity_ready: bool,
+}
+
+impl Default for SettlementProbabilityPromotionGateOptions {
+    fn default() -> Self {
+        Self {
+            stake_usd: DEFAULT_STAKE_USD,
+            min_entry_fill_rate: 0.05,
+            max_expected_calibration_error: 0.05,
+            min_positive_window_ratio: 0.60,
+            require_deribit: true,
+            include_deribit: false,
+            data_audit_status: None,
+            replay_parity_ready: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityPromotionGateRow {
+    pub gate: String,
+    pub passed: bool,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityPromotionGateReport {
+    pub options: SettlementProbabilityPromotionGateOptions,
+    pub ready_for_dry_run_handoff: bool,
+    pub gates: Vec<SettlementProbabilityPromotionGateRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SingleFactorReview {
     pub factor: String,
     pub family: FactorFamily,
@@ -2831,6 +2872,297 @@ fn aggregate_settlement_probability_walk_forward_windows(
     aggregates
 }
 
+pub fn build_settlement_probability_promotion_gate_report(
+    probability: &SettlementProbabilityReport,
+    walk_forward: &SettlementProbabilityWalkForwardReport,
+    execution: &FullDepthExecutionMatrixReport,
+    conservative_execution: &FullDepthExecutionMatrixReport,
+    options: SettlementProbabilityPromotionGateOptions,
+) -> SettlementProbabilityPromotionGateReport {
+    let mut gates = Vec::new();
+
+    let data_status = options
+        .data_audit_status
+        .as_deref()
+        .unwrap_or("<not-recorded>");
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "data_quality".to_string(),
+        passed: data_status.eq_ignore_ascii_case("ok"),
+        evidence: format!("snapshot_data_audit_status={data_status}"),
+    });
+
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "deribit_vol_surface".to_string(),
+        passed: !options.require_deribit || options.include_deribit,
+        evidence: format!(
+            "require_deribit={} include_deribit={}",
+            options.require_deribit, options.include_deribit
+        ),
+    });
+
+    let entry_fill = max_entry_fill_rate(execution, options.stake_usd);
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "full_depth_entry_capacity".to_string(),
+        passed: entry_fill >= options.min_entry_fill_rate,
+        evidence: format!(
+            "stake_usd={:.2} max_entry_fill_rate={:.4} min_required={:.4}",
+            options.stake_usd, entry_fill, options.min_entry_fill_rate
+        ),
+    });
+
+    let conservative_entry_fill = max_entry_fill_rate(conservative_execution, options.stake_usd);
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "conservative_entry_capacity".to_string(),
+        passed: conservative_entry_fill >= options.min_entry_fill_rate,
+        evidence: format!(
+            "stake_usd={:.2} max_conservative_entry_fill_rate={:.4} min_required={:.4}",
+            options.stake_usd, conservative_entry_fill, options.min_entry_fill_rate
+        ),
+    });
+
+    let best_calibrated =
+        best_calibrated_probability_model(probability, options.max_expected_calibration_error);
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "probability_calibration".to_string(),
+        passed: best_calibrated.is_some(),
+        evidence: best_calibrated.map_or_else(
+            || {
+                format!(
+                    "no non-naive model ece <= {:.4}",
+                    options.max_expected_calibration_error
+                )
+            },
+            |row| {
+                format!(
+                    "model={} ece={:.6} max_allowed={:.6}",
+                    row.model,
+                    row.expected_calibration_error,
+                    options.max_expected_calibration_error
+                )
+            },
+        ),
+    });
+
+    let best_full_depth_edge = best_full_depth_edge_model(probability);
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "full_depth_settlement_edge".to_string(),
+        passed: best_full_depth_edge.is_some(),
+        evidence: best_full_depth_edge.map_or_else(
+            || "no non-naive model has positive top-edge full-depth settlement PnL".to_string(),
+            |row| {
+                format!(
+                    "model={} top_edge_full_depth_pnl={:.4}",
+                    row.model, row.top_edge_avg_full_depth_settlement_pnl
+                )
+            },
+        ),
+    });
+
+    let best_conservative_edge = best_conservative_edge_model(probability);
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "conservative_settlement_edge".to_string(),
+        passed: best_conservative_edge.is_some(),
+        evidence: best_conservative_edge.map_or_else(
+            || "no non-naive model has positive top-edge conservative settlement PnL".to_string(),
+            |row| {
+                format!(
+                    "model={} top_edge_conservative_pnl={:.4}",
+                    row.model, row.top_edge_avg_conservative_settlement_pnl
+                )
+            },
+        ),
+    });
+
+    let anti_overfit_model = model_with_all_anti_overfit_tests_passing(probability);
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "anti_overfit_diagnostics".to_string(),
+        passed: anti_overfit_model.is_some(),
+        evidence: anti_overfit_model.map_or_else(
+            || "no non-naive model passes all deterministic anti-overfit diagnostics".to_string(),
+            |(model, passed, total)| format!("model={model} passed_tests={passed}/{total}"),
+        ),
+    });
+
+    let holdout_model = model_with_all_symbol_holdouts_passing(probability);
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "symbol_holdout".to_string(),
+        passed: holdout_model.is_some(),
+        evidence: holdout_model.map_or_else(
+            || "no non-naive model passes all symbol holdouts".to_string(),
+            |(model, passed, total)| format!("model={model} passed_symbols={passed}/{total}"),
+        ),
+    });
+
+    let oos_model = best_walk_forward_oos_model(walk_forward, options.min_positive_window_ratio);
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "walk_forward_oos".to_string(),
+        passed: oos_model.is_some(),
+        evidence: oos_model.map_or_else(
+            || {
+                format!(
+                    "no non-naive model has non-empty OOS windows with positive_window_ratio >= {:.2}",
+                    options.min_positive_window_ratio
+                )
+            },
+            |row| {
+                format!(
+                    "model={} windows={} positive_window_ratio={:.4} min_test_top_edge_pnl={:.4}",
+                    row.model,
+                    row.windows,
+                    row.positive_window_ratio,
+                    row.min_test_top_edge_avg_full_depth_settlement_pnl
+                )
+            },
+        ),
+    });
+
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "recorded_replay_parity".to_string(),
+        passed: options.replay_parity_ready,
+        evidence: if options.replay_parity_ready {
+            "recorded replay parity marked ready by caller".to_string()
+        } else {
+            "blocked: no recorded replay parity artifact was supplied to this report".to_string()
+        },
+    });
+
+    let ready_for_dry_run_handoff = gates.iter().all(|gate| gate.passed);
+    SettlementProbabilityPromotionGateReport {
+        options,
+        ready_for_dry_run_handoff,
+        gates,
+    }
+}
+
+fn is_settlement_probability_candidate_model(model: &str) -> bool {
+    model != "q_naive_50_50"
+}
+
+fn max_entry_fill_rate(report: &FullDepthExecutionMatrixReport, stake_usd: f64) -> f64 {
+    finite_max(report.rows.iter().filter_map(|row| {
+        if (row.stake_usd - stake_usd).abs() < 1e-6 {
+            Some(row.entry_fill_rate)
+        } else {
+            None
+        }
+    }))
+}
+
+fn best_calibrated_probability_model(
+    report: &SettlementProbabilityReport,
+    max_ece: f64,
+) -> Option<&SettlementProbabilityBaselineRow> {
+    report
+        .baselines
+        .iter()
+        .filter(|row| is_settlement_probability_candidate_model(&row.model))
+        .filter(|row| row.expected_calibration_error.is_finite())
+        .filter(|row| row.expected_calibration_error <= max_ece)
+        .min_by(|a, b| {
+            a.expected_calibration_error
+                .total_cmp(&b.expected_calibration_error)
+                .then_with(|| {
+                    b.top_edge_avg_full_depth_settlement_pnl
+                        .total_cmp(&a.top_edge_avg_full_depth_settlement_pnl)
+                })
+        })
+}
+
+fn best_full_depth_edge_model(
+    report: &SettlementProbabilityReport,
+) -> Option<&SettlementProbabilityBaselineRow> {
+    report
+        .baselines
+        .iter()
+        .filter(|row| is_settlement_probability_candidate_model(&row.model))
+        .filter(|row| row.top_edge_avg_full_depth_settlement_pnl > 0.0)
+        .max_by(|a, b| {
+            a.top_edge_avg_full_depth_settlement_pnl
+                .total_cmp(&b.top_edge_avg_full_depth_settlement_pnl)
+        })
+}
+
+fn best_conservative_edge_model(
+    report: &SettlementProbabilityReport,
+) -> Option<&SettlementProbabilityBaselineRow> {
+    report
+        .baselines
+        .iter()
+        .filter(|row| is_settlement_probability_candidate_model(&row.model))
+        .filter(|row| row.top_edge_avg_conservative_settlement_pnl > 0.0)
+        .max_by(|a, b| {
+            a.top_edge_avg_conservative_settlement_pnl
+                .total_cmp(&b.top_edge_avg_conservative_settlement_pnl)
+        })
+}
+
+fn model_with_all_anti_overfit_tests_passing(
+    report: &SettlementProbabilityReport,
+) -> Option<(&str, usize, usize)> {
+    let mut by_model: BTreeMap<&str, Vec<&SettlementProbabilityAntiOverfitRow>> = BTreeMap::new();
+    for row in &report.anti_overfit {
+        if is_settlement_probability_candidate_model(&row.model) {
+            by_model.entry(row.model.as_str()).or_default().push(row);
+        }
+    }
+    by_model
+        .into_iter()
+        .filter_map(|(model, rows)| {
+            let total = rows.len();
+            let passed = rows.iter().filter(|row| row.pass).count();
+            if total > 0 && passed == total {
+                Some((model, passed, total))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|(_, passed, _)| *passed)
+}
+
+fn model_with_all_symbol_holdouts_passing(
+    report: &SettlementProbabilityReport,
+) -> Option<(&str, usize, usize)> {
+    let mut by_model: BTreeMap<&str, Vec<&SettlementProbabilitySymbolHoldoutRow>> = BTreeMap::new();
+    for row in &report.symbol_holdouts {
+        if is_settlement_probability_candidate_model(&row.model) {
+            by_model.entry(row.model.as_str()).or_default().push(row);
+        }
+    }
+    by_model
+        .into_iter()
+        .filter_map(|(model, rows)| {
+            let total = rows.len();
+            let passed = rows.iter().filter(|row| row.pass).count();
+            if total > 0 && passed == total {
+                Some((model, passed, total))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|(_, passed, _)| *passed)
+}
+
+fn best_walk_forward_oos_model(
+    report: &SettlementProbabilityWalkForwardReport,
+    min_positive_window_ratio: f64,
+) -> Option<&SettlementProbabilityWalkForwardAggregate> {
+    report
+        .aggregates
+        .iter()
+        .filter(|row| is_settlement_probability_candidate_model(&row.model))
+        .filter(|row| row.windows > 0)
+        .filter(|row| row.positive_window_ratio >= min_positive_window_ratio)
+        .filter(|row| row.min_test_top_edge_avg_full_depth_settlement_pnl > 0.0)
+        .max_by(|a, b| {
+            a.positive_window_ratio
+                .total_cmp(&b.positive_window_ratio)
+                .then_with(|| {
+                    a.avg_test_top_edge_avg_full_depth_settlement_pnl
+                        .total_cmp(&b.avg_test_top_edge_avg_full_depth_settlement_pnl)
+                })
+        })
+}
+
 pub fn format_settlement_probability_report(report: &SettlementProbabilityReport) -> String {
     let mut out = String::new();
     out.push_str("=== Settlement Probability Report ===\n");
@@ -3000,6 +3332,37 @@ pub fn format_settlement_probability_walk_forward_report(
             row.test_top_edge_avg_conservative_settlement_pnl,
             row.test_edge_bucket_monotonic_non_decreasing,
             row.pass,
+        ));
+    }
+    out
+}
+
+pub fn format_settlement_probability_promotion_gate_report(
+    report: &SettlementProbabilityPromotionGateReport,
+) -> String {
+    let mut out = String::new();
+    out.push_str("=== Settlement Probability PRD Promotion Gate ===\n");
+    out.push_str(&format!(
+        "ready_for_dry_run_handoff={} stake_usd={:.2} min_entry_fill_rate={:.4} max_ece={:.4} min_positive_window_ratio={:.2} require_deribit={} include_deribit={} replay_parity_ready={}\n",
+        report.ready_for_dry_run_handoff,
+        report.options.stake_usd,
+        report.options.min_entry_fill_rate,
+        report.options.max_expected_calibration_error,
+        report.options.min_positive_window_ratio,
+        report.options.require_deribit,
+        report.options.include_deribit,
+        report.options.replay_parity_ready,
+    ));
+    out.push_str(
+        "This is a promotion blocker report. A short-window smoke can validate workflow shape, but dry-run handoff stays blocked until every gate passes.\n",
+    );
+    out.push_str("gate,passed,evidence\n");
+    for row in &report.gates {
+        out.push_str(&format!(
+            "{},{},{}\n",
+            row.gate,
+            row.passed,
+            row.evidence.replace(',', ";")
         ));
     }
     out
@@ -9643,6 +10006,146 @@ mod tests {
         let text = format_settlement_probability_walk_forward_report(&report);
         assert!(text.contains("Settlement Probability Walk-Forward Report"));
         assert!(text.contains("EventVolSurface and q_final use only the train window"));
+    }
+
+    #[test]
+    fn settlement_probability_promotion_gate_blocks_without_replay_parity() {
+        let probability = SettlementProbabilityReport {
+            options: SettlementProbabilityReportOptions::default(),
+            baselines: vec![SettlementProbabilityBaselineRow {
+                model: "q_final_logit_blend".to_string(),
+                n: 100,
+                avg_predicted_q: 0.7,
+                actual_win_rate: 0.7,
+                brier_score: 0.1,
+                log_loss: 0.2,
+                expected_calibration_error: 0.01,
+                avg_edge: 0.05,
+                avg_full_depth_settlement_pnl: 1.0,
+                avg_conservative_settlement_pnl: 0.8,
+                profit_factor: 1.2,
+                edge_bucket_monotonic_non_decreasing: true,
+                top_edge_count: 20,
+                top_edge_avg_edge: 0.1,
+                top_edge_win_rate: 0.8,
+                top_edge_avg_full_depth_settlement_pnl: 2.0,
+                top_edge_avg_conservative_settlement_pnl: 1.5,
+            }],
+            calibration: Vec::new(),
+            edge_buckets: Vec::new(),
+            anti_overfit: vec![
+                SettlementProbabilityAntiOverfitRow {
+                    model: "q_final_logit_blend".to_string(),
+                    test: "label_cyclic_shift".to_string(),
+                    n: 100,
+                    observed_edge_win_rank_ic: 0.1,
+                    perturbed_edge_win_rank_ic: 0.0,
+                    observed_top_edge_avg_full_depth_settlement_pnl: 2.0,
+                    perturbed_top_edge_avg_full_depth_settlement_pnl: -1.0,
+                    pass: true,
+                },
+                SettlementProbabilityAntiOverfitRow {
+                    model: "q_final_logit_blend".to_string(),
+                    test: "prediction_one_step_shift".to_string(),
+                    n: 100,
+                    observed_edge_win_rank_ic: 0.1,
+                    perturbed_edge_win_rank_ic: 0.0,
+                    observed_top_edge_avg_full_depth_settlement_pnl: 2.0,
+                    perturbed_top_edge_avg_full_depth_settlement_pnl: -1.0,
+                    pass: true,
+                },
+            ],
+            symbol_holdouts: vec![SettlementProbabilitySymbolHoldoutRow {
+                model: "q_final_logit_blend".to_string(),
+                symbol: "BTCUSDT".to_string(),
+                n: 100,
+                edge_win_rank_ic: 0.1,
+                top_edge_avg_full_depth_settlement_pnl: 2.0,
+                pass: true,
+            }],
+            ablations: Vec::new(),
+        };
+        let walk_forward = SettlementProbabilityWalkForwardReport {
+            options: SettlementProbabilityWalkForwardOptions::default(),
+            windows: Vec::new(),
+            aggregates: vec![SettlementProbabilityWalkForwardAggregate {
+                model: "q_final_logit_blend".to_string(),
+                windows: 3,
+                positive_window_ratio: 1.0,
+                pass_window_ratio: 1.0,
+                avg_test_brier_score: 0.1,
+                avg_test_expected_calibration_error: 0.01,
+                avg_test_top_edge_avg_full_depth_settlement_pnl: 2.0,
+                min_test_top_edge_avg_full_depth_settlement_pnl: 1.0,
+            }],
+        };
+        let execution = FullDepthExecutionMatrixReport {
+            options: FullDepthExecutionMatrixOptions::default(),
+            rows: vec![FullDepthExecutionMatrixRow {
+                stake_usd: DEFAULT_STAKE_USD,
+                symbol: "BTCUSDT".to_string(),
+                side: ReviewSide::Up,
+                time_bucket: "30-90s".to_string(),
+                distance_bucket: "near".to_string(),
+                entry_price_bucket: "mid".to_string(),
+                spread_bucket: "tight".to_string(),
+                quote_age_bucket: "fresh".to_string(),
+                count: 100,
+                entry_fill_rate: 0.5,
+                entry_avg_price_mean: 0.6,
+                entry_avg_slippage_bps: 10.0,
+                entry_p50_slippage_bps: 5.0,
+                entry_p90_slippage_bps: 20.0,
+                entry_avg_levels_used: 1.0,
+                exit_5s_fill_rate: 0.5,
+                exit_10s_fill_rate: 0.5,
+                exit_30s_fill_rate: 0.5,
+                exit_10s_avg_slippage_bps: 10.0,
+                exit_30s_avg_slippage_bps: 10.0,
+                roundtrip_fill_rate_5s: 0.5,
+                roundtrip_fill_rate_10s: 0.5,
+                roundtrip_fill_rate_30s: 0.5,
+                avg_settlement_pnl: 1.0,
+                avg_reprice_pnl_5s: 0.1,
+                avg_reprice_pnl_10s: 0.1,
+                avg_reprice_pnl_30s: 0.1,
+            }],
+        };
+
+        let blocked = build_settlement_probability_promotion_gate_report(
+            &probability,
+            &walk_forward,
+            &execution,
+            &execution,
+            SettlementProbabilityPromotionGateOptions {
+                include_deribit: true,
+                data_audit_status: Some("ok".to_string()),
+                replay_parity_ready: false,
+                ..Default::default()
+            },
+        );
+        assert!(!blocked.ready_for_dry_run_handoff);
+        assert!(blocked
+            .gates
+            .iter()
+            .any(|gate| gate.gate == "recorded_replay_parity" && !gate.passed));
+
+        let ready = build_settlement_probability_promotion_gate_report(
+            &probability,
+            &walk_forward,
+            &execution,
+            &execution,
+            SettlementProbabilityPromotionGateOptions {
+                include_deribit: true,
+                data_audit_status: Some("ok".to_string()),
+                replay_parity_ready: true,
+                ..Default::default()
+            },
+        );
+        assert!(ready.ready_for_dry_run_handoff);
+        let text = format_settlement_probability_promotion_gate_report(&blocked);
+        assert!(text.contains("Settlement Probability PRD Promotion Gate"));
+        assert!(text.contains("ready_for_dry_run_handoff=false"));
     }
 
     #[test]

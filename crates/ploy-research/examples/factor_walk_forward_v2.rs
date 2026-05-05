@@ -10,11 +10,12 @@ use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
     build_factor_observations_v2_with_deribit_and_pm_books,
     build_factor_observations_with_lob_sampled, build_factor_stability_report,
-    build_full_depth_execution_matrix, format_autofactor_reports, format_factor_combo_v1_report,
-    format_factor_stability_report, format_factor_walk_forward_v2_report,
-    format_fillability_review_v1_report, format_full_depth_execution_matrix_report,
-    format_liquidity_gate_v1_report, format_liquidity_gated_alpha_v1_report,
-    format_meta_label_walk_forward_v1_report, format_repricing_ic_report,
+    build_full_depth_execution_matrix, build_settlement_probability_promotion_gate_report,
+    format_autofactor_reports, format_factor_combo_v1_report, format_factor_stability_report,
+    format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
+    format_full_depth_execution_matrix_report, format_liquidity_gate_v1_report,
+    format_liquidity_gated_alpha_v1_report, format_meta_label_walk_forward_v1_report,
+    format_repricing_ic_report, format_settlement_probability_promotion_gate_report,
     format_settlement_probability_report, format_settlement_probability_walk_forward_report,
     format_trade_formation_v1_report, liquidity_gate_v1_with_deribit_and_pm_books,
     liquidity_gated_alpha_v1_with_deribit_and_pm_books, load_deribit_feature_snapshots,
@@ -28,8 +29,9 @@ use ploy_research::{
     FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
     FactorWalkForwardOptions, FillabilityReviewOptions, FullDepthExecutionMatrixOptions,
     LiquidityGateV1Options, LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions,
-    RepricingIcOptions, ResearchSnapshotRequest, SettlementProbabilityReportOptions,
-    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
+    RepricingIcOptions, ResearchSnapshotRequest, SettlementProbabilityPromotionGateOptions,
+    SettlementProbabilityReportOptions, SettlementProbabilityWalkForwardOptions,
+    TradeFormationReviewOptions,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -150,6 +152,8 @@ async fn main() {
         std::process::exit(2);
     }
     let mut snapshot_provenance: Option<String> = None;
+    let snapshot_data_audit_status: Option<String>;
+    let include_deribit: bool;
     let (observations, deribit_snapshots, all_pm_book_snapshots): (
         Vec<FactorObservation>,
         Vec<_>,
@@ -187,6 +191,8 @@ async fn main() {
             snapshot.pm_book_snapshots.len(),
             started.elapsed().as_millis()
         );
+        snapshot_data_audit_status = snapshot.manifest.data_audit_status.clone();
+        include_deribit = snapshot.manifest.include_deribit;
         snapshot_provenance = Some(format!(
             "# Snapshot\nsnapshot_schema={}\nsnapshot_hash={}\nsnapshot_generated_at={}\nsnapshot_optimizer_data_dir={}\nsnapshot_data_requirements={}\nsnapshot_data_audit_status={}\nsnapshot_data_audit_report={}\nsnapshot_include_deribit={}\n",
             snapshot.manifest.schema_version,
@@ -329,6 +335,8 @@ async fn main() {
             eprintln!("phase {phase:<24} {elapsed_ms:>8} ms rows={rows}");
         }
         eprintln!("factor_observations: {}", observations.len());
+        snapshot_data_audit_status = None;
+        include_deribit = !deribit_snapshots.is_empty();
         (observations, deribit_snapshots, all_pm_book_snapshots)
     };
 
@@ -423,6 +431,22 @@ async fn main() {
         format_settlement_probability_walk_forward_report(
             &settlement_probability_walk_forward_report
         )
+    );
+    let promotion_gate_report = build_settlement_probability_promotion_gate_report(
+        &settlement_probability_report,
+        &settlement_probability_walk_forward_report,
+        &execution_matrix,
+        &conservative_execution_matrix,
+        SettlementProbabilityPromotionGateOptions {
+            stake_usd: options.review.stake_usd,
+            include_deribit,
+            data_audit_status: snapshot_data_audit_status,
+            ..Default::default()
+        },
+    );
+    println!(
+        "{}",
+        format_settlement_probability_promotion_gate_report(&promotion_gate_report)
     );
     let autofactor_options = AutoFactorOptions {
         min_observations: options.review.min_observations.max(50),
