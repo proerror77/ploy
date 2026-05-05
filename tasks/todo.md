@@ -76,6 +76,9 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - [x] Add a first EventVolSurface / empirical probability surface so
   `q_final` can compare distance/LOB/vol formulas against a bucketed
   historical similar-state prior without leaking the current event outcome.
+- [x] Add a first deterministic `q_final` blend baseline that combines
+  Polymarket market prior, distance/LOB/vol probability, and EventVolSurface
+  prior inside the same settlement probability report.
 - [ ] Only after the above gates pass, create a settlement dry-run handoff with
   fixed small stake, strict kill switch, and shared scorer parity.
 
@@ -200,6 +203,21 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `top_edge_avg_full_depth_settlement_pnl=4.8337`, but
   `prediction_one_step_shift pass=false`, so this remains architecture/workflow
   completion evidence, not dry-run promotion evidence.
+- 2026-05-05: Added the first deterministic `q_final_logit_blend` baseline to
+  the same settlement probability report. It blends Polymarket midpoint market
+  prior, distance/LOB/vol probability, and the non-leaky EventVolSurface prior
+  in logit space with missing-component weight normalization. Verification
+  passed: `rustfmt --edition 2021 --check crates/ploy-research/src/factors_v2.rs
+  crates/ploy-research/examples/factor_walk_forward_v2.rs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-q-final-blend /opt/homebrew/bin/timeout 300 rtk
+  cargo test -p ploy-research settlement_probability --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-q-final-blend /opt/homebrew/bin/timeout 300 rtk
+  cargo check -p ploy-research --example factor_walk_forward_v2 --features db
+  --no-default-features`, and `git diff --check`. A local short-window snapshot
+  smoke printed `q_final_logit_blend` with `n=1956`,
+  `top_edge_avg_full_depth_settlement_pnl=4.8409`, but
+  `prediction_one_step_shift pass=false`, so the model is report-ready but not
+  dry-run/live-ready.
 - 2026-05-05: Settlement probability PRD gate result: BTC/ETH/SOL has the
   strongest next candidate but is not dry-run-ready. Run `25353780686` reported
   full-depth entry fill rate `49.23%`, exit fill rate `40.70%`, and

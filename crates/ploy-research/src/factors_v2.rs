@@ -2513,36 +2513,28 @@ pub fn build_settlement_probability_report(
 
     for (row, win, pnl) in eligible_rows {
         for (model, q) in settlement_probability_models(row) {
-            let q = clamp_probability(q);
-            let entry_price = row.entry_sweep_avg_price_15u;
-            by_model
-                .entry(model)
-                .or_default()
-                .push(SettlementProbabilitySample {
-                    symbol: row.symbol.clone(),
-                    q,
-                    win,
-                    entry_price,
-                    edge: q - entry_price,
-                    pnl,
-                    conservative_pnl: row.label_conservative_executable_pnl_15u,
-                });
+            push_settlement_probability_sample(&mut by_model, model, row, win, pnl, q);
         }
-        if let Some(q) = event_surface.predict(row) {
-            let q = clamp_probability(q);
-            let entry_price = row.entry_sweep_avg_price_15u;
-            by_model
-                .entry("q_event_surface_empirical")
-                .or_default()
-                .push(SettlementProbabilitySample {
-                    symbol: row.symbol.clone(),
-                    q,
-                    win,
-                    entry_price,
-                    edge: q - entry_price,
-                    pnl,
-                    conservative_pnl: row.label_conservative_executable_pnl_15u,
-                });
+        let event_q = event_surface.predict(row);
+        if let Some(q) = event_q {
+            push_settlement_probability_sample(
+                &mut by_model,
+                "q_event_surface_empirical",
+                row,
+                win,
+                pnl,
+                q,
+            );
+        }
+        if let Some(q) = settlement_probability_final_blend(row, event_q) {
+            push_settlement_probability_sample(
+                &mut by_model,
+                "q_final_logit_blend",
+                row,
+                win,
+                pnl,
+                q,
+            );
         }
     }
 
@@ -6820,6 +6812,30 @@ struct SettlementProbabilitySample {
     conservative_pnl: Option<f64>,
 }
 
+fn push_settlement_probability_sample(
+    by_model: &mut BTreeMap<&'static str, Vec<SettlementProbabilitySample>>,
+    model: &'static str,
+    row: &FactorObservationV2,
+    win: f64,
+    pnl: f64,
+    q: f64,
+) {
+    let q = clamp_probability(q);
+    let entry_price = row.entry_sweep_avg_price_15u;
+    by_model
+        .entry(model)
+        .or_default()
+        .push(SettlementProbabilitySample {
+            symbol: row.symbol.clone(),
+            q,
+            win,
+            entry_price,
+            edge: q - entry_price,
+            pnl,
+            conservative_pnl: row.label_conservative_executable_pnl_15u,
+        });
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct EventVolSurfaceKey {
     symbol: String,
@@ -6966,8 +6982,8 @@ fn event_surface_distance_bucket(distance_z: f64) -> &'static str {
 fn settlement_probability_models(row: &FactorObservationV2) -> Vec<(&'static str, f64)> {
     let mut models = Vec::with_capacity(8);
     models.push(("q_naive_50_50", 0.5));
-    if valid_price(row.entry_ask) && valid_price(row.exit_bid) {
-        models.push(("q_market_midpoint", (row.entry_ask + row.exit_bid) * 0.5));
+    if let Some(q) = settlement_market_midpoint_probability(row) {
+        models.push(("q_market_midpoint", q));
     }
     if row.side_distance_over_sigma.is_finite() {
         let base_z = row.side_distance_over_sigma;
@@ -6994,6 +7010,87 @@ fn settlement_probability_models(row: &FactorObservationV2) -> Vec<(&'static str
         models.push(("q_existing_model_prob", row.side_model_prob));
     }
     models
+}
+
+fn settlement_probability_final_blend(
+    row: &FactorObservationV2,
+    event_surface_q: Option<f64>,
+) -> Option<f64> {
+    let mut logit_sum = 0.0;
+    let mut total_weight = 0.0;
+    add_probability_component(
+        &mut logit_sum,
+        &mut total_weight,
+        settlement_market_midpoint_probability(row),
+        0.45,
+    );
+    add_probability_component(
+        &mut logit_sum,
+        &mut total_weight,
+        settlement_distance_lob_vol_probability(row),
+        0.35,
+    );
+    add_probability_component(&mut logit_sum, &mut total_weight, event_surface_q, 0.20);
+    if total_weight <= EPS {
+        None
+    } else {
+        Some(inverse_logit(logit_sum / total_weight))
+    }
+}
+
+fn settlement_market_midpoint_probability(row: &FactorObservationV2) -> Option<f64> {
+    if valid_price(row.entry_ask) && valid_price(row.exit_bid) {
+        Some((row.entry_ask + row.exit_bid) * 0.5)
+    } else {
+        None
+    }
+}
+
+fn settlement_distance_lob_vol_probability(row: &FactorObservationV2) -> Option<f64> {
+    if !row.side_distance_over_sigma.is_finite() {
+        return None;
+    }
+    let base_z = row.side_distance_over_sigma;
+    let drift_z = side_lob_drift_z(row);
+    let vol_adjusted_z = volatility_adjusted_distance_z(row);
+    let z = match (drift_z.is_finite(), vol_adjusted_z.is_finite()) {
+        (true, true) => vol_adjusted_z + drift_z,
+        (true, false) => base_z + drift_z,
+        (false, true) => vol_adjusted_z,
+        (false, false) => base_z,
+    };
+    Some(normal_cdf(z))
+}
+
+fn add_probability_component(
+    logit_sum: &mut f64,
+    total_weight: &mut f64,
+    q: Option<f64>,
+    weight: f64,
+) {
+    let Some(q) = q.filter(|value| valid_probability(*value)) else {
+        return;
+    };
+    if weight <= 0.0 {
+        return;
+    }
+    *logit_sum += probability_logit(q) * weight;
+    *total_weight += weight;
+}
+
+fn probability_logit(q: f64) -> f64 {
+    let q = clamp_probability(q);
+    (q / (1.0 - q)).ln()
+}
+
+fn inverse_logit(x: f64) -> f64 {
+    if x >= 0.0 {
+        let z = (-x).exp();
+        1.0 / (1.0 + z)
+    } else {
+        let z = x.exp();
+        z / (1.0 + z)
+    }
 }
 
 fn side_lob_drift_z(row: &FactorObservationV2) -> f64 {
@@ -8955,7 +9052,10 @@ mod tests {
         for row in &mut rows {
             row.label_full_depth_entry_fillable = true;
             row.entry_sweep_avg_price_15u = row.entry_ask;
-            row.label_full_depth_executable_pnl_15u = row.label_executable_pnl_15u;
+            row.entry_sweep_shares_15u = 15.0 / row.entry_sweep_avg_price_15u;
+            row.label_full_depth_executable_pnl_15u = row
+                .label_settlement_win
+                .map(|win| win * row.entry_sweep_shares_15u - 15.0);
         }
         let base_rows = rows.clone();
         rows.extend(base_rows.iter().cloned());
@@ -9007,6 +9107,7 @@ mod tests {
         let text = format_settlement_probability_report(&report);
         assert!(text.contains("Settlement Probability Report"));
         assert!(text.contains("q_base_distance_phi"));
+        assert!(text.contains("q_final_logit_blend"));
         assert!(text.contains("full_depth_settlement_pnl"));
         assert!(text.contains("Anti-Overfit Diagnostics"));
         assert!(text.contains("Symbol Holdout Diagnostics"));
@@ -9035,7 +9136,10 @@ mod tests {
         for row in &mut rows {
             row.label_full_depth_entry_fillable = true;
             row.entry_sweep_avg_price_15u = row.entry_ask;
-            row.label_full_depth_executable_pnl_15u = row.label_executable_pnl_15u;
+            row.entry_sweep_shares_15u = 15.0 / row.entry_sweep_avg_price_15u;
+            row.label_full_depth_executable_pnl_15u = row
+                .label_settlement_win
+                .map(|win| win * row.entry_sweep_shares_15u - 15.0);
         }
 
         let report = build_settlement_probability_report(
@@ -9059,6 +9163,77 @@ mod tests {
         assert!(event_surface.avg_predicted_q < 1.0);
         assert!(event_surface.brier_score.is_finite());
         assert!(format_settlement_probability_report(&report).contains("q_event_surface_empirical"));
+    }
+
+    #[test]
+    fn settlement_probability_final_blend_uses_market_distance_and_event_surface() {
+        let options = FactorReviewOptions::default();
+        let source_rows = (0..4)
+            .map(|idx| {
+                let mut obs = base_obs();
+                obs.event_id = format!("blend-evt-{idx}");
+                obs.tick_ts = Utc::now() + Duration::seconds(idx);
+                obs.settlement_up = if idx < 2 { 0.0 } else { 1.0 };
+                obs.pm_up_bid = 0.18;
+                obs.pm_up_ask = 0.22;
+                obs.pm_down_bid = 0.76;
+                obs.pm_down_ask = 0.80;
+                obs.distance_over_sigma = 1.0;
+                obs.obi_10 = 0.2;
+                obs.depth_imbalance = 0.1;
+                obs
+            })
+            .collect::<Vec<_>>();
+        let mut rows = build_factor_observations_v2(&source_rows, &options);
+        rows.retain(|row| row.side == ReviewSide::Up);
+        for row in &mut rows {
+            row.label_full_depth_entry_fillable = true;
+            row.entry_sweep_avg_price_15u = row.entry_ask;
+            row.entry_sweep_shares_15u = 15.0 / row.entry_sweep_avg_price_15u;
+            row.label_full_depth_executable_pnl_15u = row
+                .label_settlement_win
+                .map(|win| win * row.entry_sweep_shares_15u - 15.0);
+        }
+
+        let event_surface = EventVolSurface::fit(
+            &rows
+                .iter()
+                .map(|row| {
+                    (
+                        row,
+                        row.label_settlement_win.unwrap(),
+                        row.label_full_depth_executable_pnl_15u.unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            1,
+            1,
+        );
+        let first_row = &rows[0];
+        let market_q = settlement_market_midpoint_probability(first_row).unwrap();
+        let distance_q = settlement_distance_lob_vol_probability(first_row).unwrap();
+        let event_q = event_surface.predict(first_row).unwrap();
+        let final_q = settlement_probability_final_blend(first_row, Some(event_q)).unwrap();
+
+        assert!(valid_probability(final_q));
+        assert!((final_q - market_q).abs() > 1e-6);
+        assert!((final_q - distance_q).abs() > 1e-6);
+        assert!((final_q - event_q).abs() > 1e-6);
+
+        let report = build_settlement_probability_report(
+            &rows,
+            SettlementProbabilityReportOptions {
+                bucket_count: 2,
+                min_bucket_observations: 1,
+                top_edge_quantile: 0.5,
+                event_surface_min_bucket_observations: 1,
+                event_surface_shrinkage_observations: 1,
+            },
+        );
+        assert!(report
+            .baselines
+            .iter()
+            .any(|row| row.model == "q_final_logit_blend"));
     }
 
     #[test]
