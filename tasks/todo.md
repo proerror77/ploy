@@ -472,6 +472,16 @@ evidence comes from Polymarket full CLOB depth, not top book.
   workflow, `scripts/run_settlement_probability_prd_gate.py --git-ref main
   --start-date 2026-05-05 --end-date 2026-05-05 --audit-lookback-hours 1
   --dry-run`, and `git diff --check`.
+- 2026-05-05: Verified the merged manual PRD gate entrypoint on `main` with a
+  one-hour short-window smoke. Settlement Probability PRD Gate run
+  `25361728377` dispatched strict snapshot run `25361734673`, which succeeded
+  with `pm5d-vol`, `data_gate=critical`, `audit_lookback_hours=1`, full
+  snapshot upload, and official settlement required. It then dispatched Factor
+  Walk-Forward V2 run `25361999475`, which succeeded and produced a promotion
+  gate result. The parent workflow exited `3` as intended because
+  `ready_for_dry_run_handoff=false`; blocked gates were
+  `anti_overfit_diagnostics`, `walk_forward_oos`, and
+  `recorded_replay_parity`.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 

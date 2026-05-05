@@ -347,6 +347,17 @@ scripts/run_settlement_probability_prd_gate.py \
   It accepts the retained data window, symbols, stake, and optional replay
   parity artifact run id. A failed workflow can be a correct PRD result when
   the downstream promotion gate remains blocked.
+- Merged-entrypoint smoke on `main`:
+  - Settlement Probability PRD Gate run `25361728377` invoked the new manual
+    wrapper with `audit_lookback_hours=1`.
+  - Snapshot run `25361734673` succeeded with `pm5d-vol`,
+    `data_gate=critical`, full snapshot upload, and official settlement
+    required.
+  - Factor Walk-Forward V2 run `25361999475` succeeded from that snapshot.
+  - Parent workflow exited `3` intentionally because
+    `ready_for_dry_run_handoff=false`; blockers remained
+    `anti_overfit_diagnostics`, `walk_forward_oos`, and
+    `recorded_replay_parity`.
 
 Interpretation:
 
