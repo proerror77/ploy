@@ -145,9 +145,15 @@ def wait_for_run(run: WorkflowRun, *, timeout_minutes: int, poll_seconds: int) -
     return current
 
 
-def dispatch_workflow(workflow: str, fields: dict[str, str], *, dry_run: bool) -> WorkflowRun | None:
+def dispatch_workflow(
+    workflow: str,
+    fields: dict[str, str],
+    *,
+    workflow_ref: str,
+    dry_run: bool,
+) -> WorkflowRun | None:
     marker = datetime.now(timezone.utc)
-    args = ["gh", "workflow", "run", workflow]
+    args = ["gh", "workflow", "run", workflow, "--ref", workflow_ref]
     for key, value in fields.items():
         args.extend(["-f", f"{key}={value}"])
     run_command(args, dry_run=dry_run)
@@ -223,6 +229,7 @@ def main() -> int:
     snapshot_run = dispatch_workflow(
         RESEARCH_SNAPSHOT_WORKFLOW,
         snapshot_fields,
+        workflow_ref=git_ref,
         dry_run=args.dry_run,
     )
     if args.dry_run:
@@ -292,7 +299,12 @@ def main() -> int:
     }
 
     print("Dispatching settlement probability promotion gate.", flush=True)
-    walk_run = dispatch_workflow(WALK_FORWARD_WORKFLOW, walk_fields, dry_run=False)
+    walk_run = dispatch_workflow(
+        WALK_FORWARD_WORKFLOW,
+        walk_fields,
+        workflow_ref=git_ref,
+        dry_run=False,
+    )
     if walk_run is None:
         raise RuntimeError("walk-forward dispatch did not return a run")
     print(f"walk_forward_run_id={walk_run.database_id} url={walk_run.url}", flush=True)
