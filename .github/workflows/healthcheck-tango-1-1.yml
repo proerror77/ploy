@@ -146,6 +146,20 @@ jobs:
               echo "binance price collector still reports duplicate-write churn" >&2
               exit 1
             fi
+            if journalctl \
+              -u ploy-binance-price-collector.service \
+              -u ploy-binance-aggtrade-collector.service \
+              -u ploy-binance-lob-collector.service \
+              --since '15 minutes ago' --no-pager \
+              | grep -qE "Main process exited, code=exited, status=1/FAILURE|Failed with result 'exit-code'"; then
+              echo "one or more Binance collectors entered a restart failure loop" >&2
+              exit 1
+            fi
+            if journalctl -u ploy-quote-collector.service --since '15 minutes ago' --no-pager \
+              | grep -qE "quote collector stale|Quote collector failed"; then
+              echo "polymarket quote collector reported stale or failed WebSocket state" >&2
+              exit 1
+            fi
             if journalctl -u ploy-deribit-iv-collector.service --since '15 minutes ago' --no-pager \
               | grep -qE "no partition of relation \"deribit_iv_ticks\""; then
               echo "deribit iv collector still reports missing partitions" >&2

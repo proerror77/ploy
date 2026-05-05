@@ -37,6 +37,7 @@ COMMIT_BATCH_SIZE = max(1, int(os.getenv("BINANCE_LOB_COMMIT_BATCH_SIZE", "25"))
 COMMIT_INTERVAL_SECS = max(
     0.1, float(os.getenv("BINANCE_LOB_COMMIT_INTERVAL_SECS", "1.0"))
 )
+WS_OPEN_TIMEOUT_SECS = max(1.0, float(os.getenv("BINANCE_LOB_WS_OPEN_TIMEOUT_SECS", "15.0")))
 REPORT_INTERVAL_SECS = max(5.0, float(os.getenv("BINANCE_LOB_REPORT_INTERVAL_SECS", "60")))
 RUNNING = True
 
@@ -158,7 +159,11 @@ async def collect_lob():
         while RUNNING:
             try:
                 async with websockets.connect(
-                    WS_URL, ping_interval=20, ping_timeout=20, max_queue=4096
+                    WS_URL,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    open_timeout=WS_OPEN_TIMEOUT_SECS,
+                    max_queue=4096,
                 ) as ws:
                     await ws.send(json.dumps(subscribe_msg))
                     print(
@@ -268,10 +273,15 @@ async def collect_lob():
                             inserted = 0
                             last_report_at = now
 
-            except (websockets.exceptions.WebSocketException, ConnectionError) as exc:
+            except (
+                websockets.exceptions.WebSocketException,
+                ConnectionError,
+                TimeoutError,
+                OSError,
+            ) as exc:
                 if RUNNING:
                     print(
-                        f"[binance-lob] WebSocket error: {exc}, reconnecting in 5s...",
+                        f"[binance-lob] WebSocket connection error: {exc}, reconnecting in 5s...",
                         flush=True,
                     )
                     await asyncio.sleep(5)

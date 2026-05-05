@@ -62,8 +62,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   volatility / direction primitives, and later event-vol-surface variants.
 - [x] Surface a conservative full-depth execution matrix in
   `factor_walk_forward_v2`: 50% visible depth, max 3 CLOB levels, same stake
-  sweep. This is a report-level conservative execution gate, not yet a full
-  conservative settlement edge bucket.
+  sweep. This is the capacity/fillability view that pairs with the conservative
+  settlement edge bucket columns below.
+- [x] Add conservative settlement PnL columns to the settlement probability
+  baseline/calibration/edge-bucket reports using 50% visible depth and max 3
+  CLOB levels, so high-edge buckets can be evaluated under the live-conservative
+  execution assumption.
 - [ ] Add anti-overfit checks before any dry-run promotion: walk-forward OOS,
   symbol holdout, permutation, time-shift, and feature ablation. Current report
   covers deterministic label-shift and prediction-shift diagnostics for
@@ -234,6 +238,37 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - 2026-05-05: Opened follow-up issue #321 for the remaining promotion blockers:
   collect a strict `pm5d-vol` full snapshot, run conservative settlement edge
   buckets, and prove recorded replay parity before any dry-run handoff.
+- 2026-05-05: Investigated why the strict `pm5d-vol` data gate reported
+  insufficient data despite a 168h lookback. The answer is a real continuous
+  hole inside the retained window, not a lack of requested history:
+  PM quotes/orderbooks were absent from about `2026-05-04 05:29/05:30 +0800`
+  to `2026-05-05 09:54/09:55 +0800`, while Binance/Deribit required sources
+  were absent from about `2026-05-04 05:30 +0800` to
+  `2026-05-05 09:50 +0800`. On `tango-1-1`, Binance price / aggTrade / LOB
+  collectors had `NRestarts=6480` with repeated WebSocket opening-handshake
+  timeouts until recovery around 09:50; Deribit IV was active but logged
+  repeated upstream SSL/read-timeout errors and Greeks had no fresh IV
+  instruments (`ok=0/0`) until IV recovered. Current one-hour audit is healthy.
+  Code remediation in this PR catches Binance WebSocket open timeouts inside
+  the collectors instead of letting them crash into a systemd restart storm,
+  and healthcheck now explicitly fails on Binance collector restart loops.
+- 2026-05-05: Continued the PRD implementation beyond the data-gap fix by
+  adding conservative settlement edge evidence directly to the settlement
+  probability report. `FactorObservationV2` now carries conservative entry
+  sweep labels based on 50% visible CLOB depth and max 3 levels, and
+  `SettlementProbabilityReport` prints conservative settlement PnL / profit
+  factor columns for baseline, calibration, and edge buckets. Verification
+  passed:
+  `rustfmt --edition 2021 --check crates/ploy-research/src/factors_v2.rs
+  crates/ploy-research/src/autofactor.rs`,
+  `python3 -m py_compile scripts/binance_price_collector.py
+  scripts/binance_aggtrade_collector.py scripts/binance_lob_collector.py`,
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-conservative-edge
+  /opt/homebrew/bin/timeout 300 rtk cargo test -p ploy-research
+  settlement_probability_report --lib`, and
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-conservative-edge
+  /opt/homebrew/bin/timeout 300 rtk cargo check -p ploy-research --example
+  factor_walk_forward_v2 --features db --no-default-features`.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
