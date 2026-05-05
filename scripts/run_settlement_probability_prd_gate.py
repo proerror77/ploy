@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Orchestrate the settlement-probability PRD evidence gate.
 
-The gate is intentionally strict:
+The default gate is intentionally strict:
 
 1. Build a portable pm5d-vol research snapshot with a critical data audit.
 2. Feed that snapshot into Factor Walk-Forward V2.
 3. Optionally attach a replay/dry-run parity artifact to the promotion gate.
+
+For PM 5m/15m event research, use --data-quality-mode event-complete when a
+global lookback contains known collector outages but enough per-event samples
+are complete. In that mode the snapshot still records the scoped audit status,
+but promotion data quality is judged by complete executable event rows rather
+than continuous wall-clock coverage.
 
 This script is a control-plane helper around existing GitHub Actions workflows;
 it does not run database research locally.
@@ -253,6 +259,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stake-usd", default="15")
     parser.add_argument("--issue-number", default="321")
     parser.add_argument("--audit-lookback-hours", default="168")
+    parser.add_argument(
+        "--data-quality-mode",
+        choices=("strict-continuous", "event-complete"),
+        default="strict-continuous",
+        help="Data gate semantics: strict continuous source audit or event-complete executable samples",
+    )
+    parser.add_argument("--min-event-complete-events", default="20")
+    parser.add_argument("--min-event-complete-rows", default="40")
     parser.add_argument("--lob-sample-secs", default="30")
     parser.add_argument("--observation-sample-secs", default="30")
     parser.add_argument("--max-quote-age-secs", default="30")
@@ -275,6 +289,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     git_ref = args.git_ref or git_branch()
+    rust_data_quality_mode = args.data_quality_mode.replace("-", "_")
+    snapshot_data_gate = "critical" if args.data_quality_mode == "strict-continuous" else "never"
 
     snapshot_options = {
         "lob_sample_secs": int(args.lob_sample_secs),
@@ -284,7 +300,7 @@ def main() -> int:
         "data_profile": "pm5d-vol",
         "custom_required_sources": "",
         "audit_lookback_hours": int(args.audit_lookback_hours),
-        "data_gate": "critical",
+        "data_gate": snapshot_data_gate,
         "snapshot_registry_dir": "",
         "upload_full_snapshot": True,
     }
@@ -297,7 +313,11 @@ def main() -> int:
         "options_json": compact_json(snapshot_options),
     }
 
-    print("Dispatching strict pm5d-vol research snapshot gate.", flush=True)
+    print(
+        f"Dispatching pm5d-vol research snapshot gate data_quality_mode={args.data_quality_mode} "
+        f"snapshot_data_gate={snapshot_data_gate}.",
+        flush=True,
+    )
     snapshot_run = dispatch_workflow(
         RESEARCH_SNAPSHOT_WORKFLOW,
         snapshot_fields,
@@ -327,9 +347,10 @@ def main() -> int:
                     f"- Snapshot run: {snapshot_result.url}",
                     f"- Conclusion: `{snapshot_result.conclusion}`",
                     f"- Data profile: `pm5d-vol`",
-                    f"- Data gate: `critical`",
+                    f"- Data quality mode: `{args.data_quality_mode}`",
+                    f"- Snapshot data gate: `{snapshot_data_gate}`",
                     f"- Lookback: `{args.audit_lookback_hours}h`",
-                    "- Decision: wait for missing retained data / collector coverage before promotion.",
+                    "- Decision: inspect snapshot compilation/data coverage before promotion.",
                 ]
             ),
             dry_run=False,
@@ -353,7 +374,10 @@ def main() -> int:
         "data_profile": "pm5d-vol",
         "custom_required_sources": "",
         "audit_lookback_hours": int(args.audit_lookback_hours),
-        "data_gate": "critical",
+        "data_gate": snapshot_data_gate,
+        "data_quality_mode": rust_data_quality_mode,
+        "min_event_complete_events": int(args.min_event_complete_events),
+        "min_event_complete_rows": int(args.min_event_complete_rows),
         "issue_number": args.issue_number,
         "snapshot_registry_dir": "",
         "replay_parity_json": "",
@@ -418,6 +442,7 @@ def main() -> int:
             f"- Walk-forward run: {walk_result.url}",
             f"- Walk-forward conclusion: `{walk_result.conclusion}`",
             f"- Replay parity run supplied: `{args.replay_parity_run_id or 'none'}`",
+            f"- Data quality mode: `{args.data_quality_mode}`",
             f"- Gate: `{gate.evidence}`",
             f"- Decision: {decision}",
             "",

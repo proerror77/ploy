@@ -97,6 +97,10 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - [x] Add a manual GitHub Actions wrapper for the repeatable PRD gate so the
   strict retained-window evidence chain can run from CI without relying on a
   local terminal session.
+- [x] Add an event-complete PRD data-quality mode for PM5D/PM15D retained
+  evidence. The strict continuous audit remains collector-health evidence, but
+  event strategy promotion can now exclude incomplete outage events and require
+  complete executable event rows instead.
 - [x] Only after the above gates pass, create a settlement dry-run handoff with
   fixed small stake, strict kill switch, and shared scorer parity. BTC/ETH-only
   dry-run handoff candidate is tracked in GitHub issue #332.
@@ -12874,9 +12878,10 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Add a recorded replay parity workflow that runs the deployed `ploy-runner` on `tango-1-1`, downloads replay/dry-run evidence, compares the matching deployment/window, uploads artifacts, and comments on issue #321.
 - [x] Expose `replay_parity_artifact_name` on the settlement PRD gate workflow so recorded parity artifacts named `recorded-replay-parity-*` can be consumed.
 - [ ] Run `replay-dryrun-parity.yml` against matching replay/dry-run evidence and attach the result to issue #321.
-- [ ] Keep all-symbol PRD dry-run handoff blocked until clean 168h strict data
-  audit, OOS, and replay parity all pass. BTC/ETH-only is now split into issue
-  #332 after passing the current available-window promotion gate.
+- [ ] Keep all-symbol PRD dry-run handoff blocked until retained event-complete
+  or clean 168h strict data quality, OOS, and replay parity all pass. BTC/ETH-only
+  is now split into issue #332 after passing the current available-window
+  promotion gate.
 
 ## Review
 
@@ -13061,3 +13066,12 @@ Issue: https://github.com/proerror77/ploy/issues/256
   `recorded-replay-parity-25379165698`; do not rerun it for promotion until the
   gap rolls out of 168h, roughly after `2026-05-12 09:55 +08`, or until a
   validated lossless full-source backfill exists.
+- 2026-05-05: Corrected the retained data gate semantics for PM5D/PM15D event
+  research. A 168h continuous wall-clock gap remains a collector-health finding,
+  but it is not a hard strategy-training blocker when complete settlement
+  events can be isolated. Added `data_quality_mode=event-complete` so the PRD
+  gate can record the global audit as provenance while requiring complete
+  executable event rows, disjoint event-grain walk-forward/OOS evidence, and
+  the existing full-depth/conservative/replay-parity gates. The manual GitHub
+  wrapper keeps the `workflow_dispatch` input count under the GitHub limit by
+  using `audit_lookback_hours=168:event-complete` for event-complete runs.
