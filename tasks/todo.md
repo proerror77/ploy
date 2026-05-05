@@ -94,6 +94,9 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - [x] Add a repeatable PRD gate orchestrator so the remaining strict
   snapshot -> walk-forward -> replay-parity evidence chain can be run without
   manual workflow stitching.
+- [x] Add a manual GitHub Actions wrapper for the repeatable PRD gate so the
+  strict retained-window evidence chain can run from CI without relying on a
+  local terminal session.
 - [ ] Only after the above gates pass, create a settlement dry-run handoff with
   fixed small stake, strict kill switch, and shared scorer parity.
 
@@ -457,6 +460,18 @@ evidence comes from Polymarket full CLOB depth, not top book.
   artifact, found the intended blockers:
   `anti_overfit_diagnostics`, `walk_forward_oos`, and
   `recorded_replay_parity`.
+- 2026-05-05: Added `.github/workflows/settlement-probability-prd-gate.yml` as
+  the manual CI entrypoint for the strict settlement-probability PRD evidence
+  chain. The workflow invokes `scripts/run_settlement_probability_prd_gate.py`,
+  dispatches the `pm5d-vol` / `data_gate=critical` snapshot, then dispatches the
+  snapshot-backed Factor Walk-Forward V2 promotion gate with optional replay
+  parity artifact linkage. It intentionally fails the workflow when
+  `ready_for_dry_run_handoff=false`, so a blocked promotion remains visible in
+  GitHub Actions. Verification passed: `python3 -m py_compile
+  scripts/run_settlement_probability_prd_gate.py`, YAML parse for the new
+  workflow, `scripts/run_settlement_probability_prd_gate.py --git-ref main
+  --start-date 2026-05-05 --end-date 2026-05-05 --audit-lookback-hours 1
+  --dry-run`, and `git diff --check`.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
