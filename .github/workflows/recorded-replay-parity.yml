@@ -183,7 +183,18 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: recorded-replay-parity-${{ github.run_id }}
-          path: artifacts/
+          path: artifacts/parity/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload replay and dry-run inputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: recorded-replay-inputs-${{ github.run_id }}
+          path: |
+            artifacts/replay/
+            artifacts/dryrun/
           if-no-files-found: ignore
           retention-days: 14
 
