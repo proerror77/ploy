@@ -111,6 +111,13 @@ evidence comes from Polymarket full CLOB depth, not top book.
   snapshot-backed validation remains blocked because `ploy-ci-1` is offline and
   Aliyun `StartInstance` still returns `InstanceExpired` while the ECS operation
   locks include `financial` / `financial-recycling`.
+- 2026-05-05: Cancelled stale snapshot-backed Factor Walk-Forward runs
+  `25351768149` and `25351768140` because they were pinned to old SHA
+  `eab15db4`. Re-triggered latest-report validation with checkout ref
+  `99e4f3859df2ae8baecb9bf319f028dc45cc1886`: BTC/ETH/SOL run
+  `25351981303` on snapshot `25254380121`, and XRP/DOGE/BNB run
+  `25351981397` on snapshot `25255158983`. Both are expected to remain queued
+  or pending until `ploy-ci-1` is restored.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
