@@ -447,6 +447,19 @@ pub struct SettlementProbabilitySymbolHoldoutRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityAblationRow {
+    pub model: String,
+    pub reference_model: String,
+    pub n: usize,
+    pub delta_brier_score: f64,
+    pub delta_log_loss: f64,
+    pub delta_expected_calibration_error: f64,
+    pub delta_top_edge_avg_full_depth_settlement_pnl: f64,
+    pub improves_error: bool,
+    pub improves_top_edge_pnl: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SettlementProbabilityReport {
     pub options: SettlementProbabilityReportOptions,
     pub baselines: Vec<SettlementProbabilityBaselineRow>,
@@ -454,6 +467,7 @@ pub struct SettlementProbabilityReport {
     pub edge_buckets: Vec<SettlementProbabilityEdgeBucketRow>,
     pub anti_overfit: Vec<SettlementProbabilityAntiOverfitRow>,
     pub symbol_holdouts: Vec<SettlementProbabilitySymbolHoldoutRow>,
+    pub ablations: Vec<SettlementProbabilityAblationRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2532,6 +2546,7 @@ pub fn build_settlement_probability_report(
             .total_cmp(&a.top_edge_avg_full_depth_settlement_pnl)
             .then_with(|| a.brier_score.total_cmp(&b.brier_score))
     });
+    let ablations = build_settlement_probability_ablation_rows(&baselines);
     SettlementProbabilityReport {
         options,
         baselines,
@@ -2539,6 +2554,7 @@ pub fn build_settlement_probability_report(
         edge_buckets,
         anti_overfit,
         symbol_holdouts,
+        ablations,
     }
 }
 
@@ -2631,6 +2647,22 @@ pub fn format_settlement_probability_report(report: &SettlementProbabilityReport
             row.edge_win_rank_ic,
             row.top_edge_avg_full_depth_settlement_pnl,
             row.pass,
+        ));
+    }
+    out.push_str("\n--- Baseline Ablations ---\n");
+    out.push_str("model,reference_model,n,delta_brier,delta_log_loss,delta_ece,delta_top_edge_avg_full_depth_settlement_pnl,improves_error,improves_top_edge_pnl\n");
+    for row in &report.ablations {
+        out.push_str(&format!(
+            "{},{},{},{:.6},{:.6},{:.6},{:.4},{},{}\n",
+            row.model,
+            row.reference_model,
+            row.n,
+            row.delta_brier_score,
+            row.delta_log_loss,
+            row.delta_expected_calibration_error,
+            row.delta_top_edge_avg_full_depth_settlement_pnl,
+            row.improves_error,
+            row.improves_top_edge_pnl,
         ));
     }
     out
@@ -7109,6 +7141,62 @@ fn build_probability_symbol_holdout_rows(
     rows
 }
 
+fn build_settlement_probability_ablation_rows(
+    baselines: &[SettlementProbabilityBaselineRow],
+) -> Vec<SettlementProbabilityAblationRow> {
+    let by_model: BTreeMap<&str, &SettlementProbabilityBaselineRow> = baselines
+        .iter()
+        .map(|row| (row.model.as_str(), row))
+        .collect();
+    let mut rows = Vec::new();
+    for reference_model in ["q_base_distance_phi", "q_market_midpoint"] {
+        let Some(reference) = by_model.get(reference_model).copied() else {
+            continue;
+        };
+        for candidate in baselines {
+            if candidate.model == reference.model
+                || candidate.n != reference.n
+                || !is_ablation_candidate(&candidate.model, reference_model)
+            {
+                continue;
+            }
+            rows.push(SettlementProbabilityAblationRow {
+                model: candidate.model.clone(),
+                reference_model: reference.model.clone(),
+                n: candidate.n,
+                delta_brier_score: candidate.brier_score - reference.brier_score,
+                delta_log_loss: candidate.log_loss - reference.log_loss,
+                delta_expected_calibration_error: candidate.expected_calibration_error
+                    - reference.expected_calibration_error,
+                delta_top_edge_avg_full_depth_settlement_pnl: candidate
+                    .top_edge_avg_full_depth_settlement_pnl
+                    - reference.top_edge_avg_full_depth_settlement_pnl,
+                improves_error: candidate.brier_score <= reference.brier_score
+                    && candidate.log_loss <= reference.log_loss,
+                improves_top_edge_pnl: candidate.top_edge_avg_full_depth_settlement_pnl
+                    > reference.top_edge_avg_full_depth_settlement_pnl,
+            });
+        }
+    }
+    rows.sort_by(|a, b| {
+        a.reference_model
+            .cmp(&b.reference_model)
+            .then_with(|| a.model.cmp(&b.model))
+    });
+    rows
+}
+
+fn is_ablation_candidate(model: &str, reference_model: &str) -> bool {
+    match reference_model {
+        "q_base_distance_phi" => matches!(
+            model,
+            "q_distance_lob_drift_phi" | "q_distance_vol_adjusted_phi" | "q_distance_lob_vol_phi"
+        ),
+        "q_market_midpoint" => model != "q_naive_50_50",
+        _ => false,
+    }
+}
+
 fn edge_bucket_monotonic(edge_buckets: &[SettlementProbabilityEdgeBucketRow]) -> bool {
     let values = edge_buckets
         .iter()
@@ -8655,6 +8743,10 @@ mod tests {
             .symbol_holdouts
             .iter()
             .any(|row| row.model == "q_base_distance_phi" && row.symbol == "BTCUSDT"));
+        assert!(report
+            .ablations
+            .iter()
+            .any(|row| row.reference_model == "q_base_distance_phi"));
 
         let text = format_settlement_probability_report(&report);
         assert!(text.contains("Settlement Probability Report"));
@@ -8662,6 +8754,7 @@ mod tests {
         assert!(text.contains("full_depth_settlement_pnl"));
         assert!(text.contains("Anti-Overfit Diagnostics"));
         assert!(text.contains("Symbol Holdout Diagnostics"));
+        assert!(text.contains("Baseline Ablations"));
     }
 
     #[test]
