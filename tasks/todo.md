@@ -12972,3 +12972,15 @@ Issue: https://github.com/proerror77/ploy/issues/256
   `CARGO_TARGET_DIR=/tmp/ploy-runtime-audit-check /opt/homebrew/bin/timeout
   300 rtk cargo check -p ploy-strategy-runtime --lib` with only pre-existing
   warnings.
+- 2026-05-05: Deployed the runtime audit slice from `main` and verified
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun` is running on
+  `tango-1-1` while `pm5d.threelayer.repricing-momentum.dryrun` remains
+  paused. New post-deploy BUY orders in `/api/reports/dry-run` include
+  `signal_p_hat`, `signal_edge`, `signal_entry_price`,
+  `runtime_price_basis=top_book_quote`, and
+  `full_depth_runtime_parity=false`. The next recorded replay parity step is
+  blocked until the settlement deployment records its own MarketUpdate stream:
+  the old canonical recording
+  `/opt/ploy/data/recordings/pm5d-threelayer-canonical.ndjson` is stale
+  (`mtime=2026-05-02T02:15:13+08:00`) and cannot cover the 2026-05-05
+  settlement dry-run order window.

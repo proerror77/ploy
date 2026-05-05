@@ -16,6 +16,10 @@ Current examples:
 - `pm5d.threelayer.settlement-probability-btc-eth.dryrun.json`
   - BTC/ETH-only PM5D/PM15D settlement-probability dry-run handoff candidate
   - paper runtime only; not live approval
+  - records its own MarketUpdate stream at
+    `/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson`
+    so recorded replay parity can use the same deployed strategy and time
+    window
 
 Each manifest includes:
 
