@@ -110,6 +110,35 @@ The walk-forward phase writes `walk_forward_report.json` and
 `walk_forward_report.md`. With only one workflow run, the report is expected to
 mark DL/RL readiness as `blocked`; that is a useful gate, not a runner failure.
 
+## AutoFactor Strategy Promotion Gate
+
+AutoFactor candidate rows are discovery evidence, not strategy handoff evidence.
+After a `factor_walk_forward_v2` report is produced, run the strategy-promotion
+evaluator before creating any dry-run handoff:
+
+```bash
+python3 scripts/evaluate_autofactor_strategy_promotion.py \
+  --report /tmp/factor-walk-forward-v2/report.txt \
+  --output-json /tmp/autofactor-strategy-promotion.json \
+  --output-md /tmp/autofactor-strategy-promotion.md
+```
+
+The evaluator requires all of the following:
+
+- the surrounding PRD promotion gate reports `ready_for_dry_run_handoff=true`;
+- the AutoFactor row has `decision=candidate` and `reason=passed`;
+- the target is an allowed executable target, defaulting to
+  `full_depth_settlement_executable_pnl`;
+- the factor has an explicit runtime strategy-profile mapping; and
+- the runtime profile matches the requested promotion lane, defaulting to
+  `settlement_probability`.
+
+This deliberately blocks cases where a factor is statistically good in the
+wrong lane. For example, `spread_adjusted_external_move` can be a valid
+repricing candidate while still being blocked from settlement-probability
+promotion because its runtime mapping is `repricing_momentum`, not
+`settlement_probability`.
+
 Use `--output-dir <dir>` to choose the artifact directory. Without it, the
 runner writes under `<dataset>/workflow_runs/event_ml_<timestamp>`.
 

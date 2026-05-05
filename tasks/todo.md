@@ -104,6 +104,10 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - [x] Only after the above gates pass, create a settlement dry-run handoff with
   fixed small stake, strict kill switch, and shared scorer parity. BTC/ETH-only
   dry-run handoff candidate is tracked in GitHub issue #332.
+- [x] Add an AutoFactor strategy-promotion evaluator so IC/ICIR candidate rows
+  cannot silently become dry-run strategies unless the surrounding PRD gate is
+  ready, the executable target is allowed, and the factor has an explicit
+  runtime strategy-profile mapping for the requested lane.
 
 ## Review
 
@@ -113,6 +117,18 @@ evidence comes from Polymarket full CLOB depth, not top book.
   shock, and mean reversion remain secondary research modules. The immediate
   next implementation slice is not another AutoFactor run or dry-run deploy; it
   is a settlement probability report over full-depth executable labels.
+- 2026-05-06: Added `scripts/evaluate_autofactor_strategy_promotion.py` and
+  `tests/test_autofactor_strategy_promotion.py` as the first automation bridge
+  from AutoFactor discovery to strategy handoff. The evaluator reads a
+  `factor_walk_forward_v2` report, checks
+  `ready_for_dry_run_handoff=true`, requires `decision=candidate` /
+  `reason=passed`, restricts the target to executable labels, and requires an
+  explicit runtime profile mapping. Running it on retained artifact
+  `25386935332` correctly reports `decision=blocked` for settlement promotion:
+  `spread_adjusted_external_move` is a strong AutoFactor candidate but maps to
+  `repricing_momentum`, not `settlement_probability`; `settlement_fair_edge`
+  remains rejected or lacks a runtime scorer. This converts the prior manual
+  explanation into a machine-readable gate.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable
