@@ -12877,7 +12877,10 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Add deployment/time-window filters to replay/dry-run parity so one recorded replay session can be compared against the matching dry-run report slice.
 - [x] Add a recorded replay parity workflow that runs the deployed `ploy-runner` on `tango-1-1`, downloads replay/dry-run evidence, compares the matching deployment/window, uploads artifacts, and comments on issue #321.
 - [x] Expose `replay_parity_artifact_name` on the settlement PRD gate workflow so recorded parity artifacts named `recorded-replay-parity-*` can be consumed.
-- [ ] Run `replay-dryrun-parity.yml` against matching replay/dry-run evidence and attach the result to issue #321.
+- [x] Run recorded replay/dry-run parity against matching replay/dry-run evidence and attach the result to issue #321.
+- [x] Record retained event-complete BTC/ETH PRD promotion evidence and update
+  the completion audit so discrete PM5D/PM15D events are not blocked by an
+  unrelated continuous collector-health gap.
 - [ ] Keep all-symbol PRD dry-run handoff blocked until retained event-complete
   or clean 168h strict data quality, OOS, and replay parity all pass. BTC/ETH-only
   is now split into issue #332 after passing the current available-window
@@ -13075,3 +13078,19 @@ Issue: https://github.com/proerror77/ploy/issues/256
   the existing full-depth/conservative/replay-parity gates. The manual GitHub
   wrapper keeps the `workflow_dispatch` input count under the GitHub limit by
   using `audit_lookback_hours=168:event-complete` for event-complete runs.
+- 2026-05-06: Confirmed PR #345 merged to `main` at
+  `815a3e8d49a3326e42e253dd4449ff7279bf90ed` and recorded the retained
+  event-complete PRD gate evidence. Parent run `25385603748`, snapshot run
+  `25385618701`, and walk-forward run `25386935332` all completed successfully.
+  The promotion artifact `factor-walk-forward-v2-25386935332` reports
+  `ready_for_dry_run_handoff=true` for BTC/ETH with
+  `event_complete_events=2488`, `event_complete_rows=51989`, Deribit included,
+  full-depth and conservative capacity true, calibration ECE `0.001258`,
+  full-depth top-edge settlement PnL `2.9996`, conservative top-edge settlement
+  PnL `2.6070`, anti-overfit diagnostics `3/3`, symbol holdout `2/2`,
+  walk-forward OOS `windows=2` and positive-window ratio `1.0000`, plus
+  recorded replay parity true using `recorded-replay-parity-25379165698`.
+  This completes the PRD for the dry-run-first BTC/ETH settlement-probability
+  handoff. Live trading, all-symbol promotion, strict 168h collector-health
+  signoff, and stronger event-level replay parity remain out of scope or
+  residual follow-up.
