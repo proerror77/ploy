@@ -139,6 +139,21 @@ repricing candidate while still being blocked from settlement-probability
 promotion because its runtime mapping is `repricing_momentum`, not
 `settlement_probability`.
 
+For an existing Factor Walk-Forward V2 artifact, use the hosted GitHub workflow
+instead of waiting for the self-hosted research runner:
+
+```bash
+gh workflow run autofactor-strategy-promotion.yml \
+  -f git_ref=main \
+  -f factor_walk_forward_run_id=<run-id> \
+  -f required_strategy_profile=settlement_probability \
+  -f allowed_target=full_depth_settlement_executable_pnl
+```
+
+This downloads `factor-walk-forward-v2-<run-id>`, runs the same evaluator on
+`report.txt`, uploads `autofactor-strategy-promotion-<run-id>` artifacts, and
+can optionally comment on a research issue.
+
 Use `--output-dir <dir>` to choose the artifact directory. Without it, the
 runner writes under `<dataset>/workflow_runs/event_ml_<timestamp>`.
 
