@@ -91,6 +91,9 @@ evidence comes from Polymarket full CLOB depth, not top book.
   GitHub workflow accepts optional `replay_parity_json`, so
   `scripts/replay_dryrun_parity.py` output can directly drive the
   `recorded_replay_parity` gate instead of relying on a hand-set boolean.
+- [x] Add a repeatable PRD gate orchestrator so the remaining strict
+  snapshot -> walk-forward -> replay-parity evidence chain can be run without
+  manual workflow stitching.
 - [ ] Only after the above gates pass, create a settlement dry-run handoff with
   fixed small stake, strict kill switch, and shared scorer parity.
 
@@ -412,6 +415,21 @@ evidence comes from Polymarket full CLOB depth, not top book.
   entry fill `40.98%`, exit fill `39.35%`, and Deribit-enriched rows `1618`.
   This is workflow-smoke evidence only: the sample is too short for promotion,
   and SOL holdout is negative for `q_market_midpoint` / `q_existing_fair_prob`.
+- 2026-05-05: Added the PRD gate control-plane slice. The
+  `factor-walk-forward-v2.yml` workflow can now download a
+  `replay-dryrun-parity-*` artifact by `replay_parity_run_id` /
+  `replay_parity_artifact_name` and pass `parity-evaluation.json` into
+  `factor_walk_forward_v2`; direct `replay_parity_json` paths still work.
+  Added `scripts/run_settlement_probability_prd_gate.py` to orchestrate the
+  strict `pm5d-vol` snapshot with `data_gate=critical` and
+  `upload_full_snapshot=true`, wait for it, then dispatch the settlement
+  probability walk-forward gate from the snapshot and comment issue evidence.
+  Verification passed: `python3 -m py_compile
+  scripts/run_settlement_probability_prd_gate.py`, YAML parse for
+  `.github/workflows/factor-walk-forward-v2.yml`, and script dry-run for a
+  one-hour smoke command shape. This does not change the current promotion
+  decision: strict retained data and passing replay parity artifacts are still
+  required before dry-run handoff.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 

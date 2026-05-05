@@ -28,9 +28,9 @@ on:
         required: false
         default: ""
       options_json:
-        description: "Advanced options JSON: walk windows, factor filters, snapshot/data/audit settings, local snapshot registry"
+        description: "Advanced options JSON: walk windows, factor filters, snapshot/data/audit settings, local snapshot registry, optional replay parity artifact"
         required: false
-        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","issue_number":"","snapshot_registry_dir":""}'
+        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","issue_number":"","snapshot_registry_dir":"","replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":""}'
 
 concurrency:
   group: factor-walk-forward-v2-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
@@ -106,6 +106,8 @@ jobs:
               "issue_number": "",
               "snapshot_registry_dir": "",
               "replay_parity_json": "",
+              "replay_parity_run_id": "",
+              "replay_parity_artifact_name": "",
           }
           bool_keys = {"compile_snapshot", "allow_direct_db_debug"}
           choices = {
@@ -316,6 +318,26 @@ jobs:
               "${cache_args[@]}"
           fi
 
+      - name: Download replay parity artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${WALK_REPLAY_PARITY_JSON}" ] || [ -z "${WALK_REPLAY_PARITY_RUN_ID}" ]; then
+            echo "No replay parity artifact download requested."
+            exit 0
+          fi
+          rm -rf artifacts/replay-parity
+          artifact_name="${WALK_REPLAY_PARITY_ARTIFACT_NAME}"
+          if [ -z "${artifact_name}" ]; then
+            artifact_name="replay-dryrun-parity-${WALK_REPLAY_PARITY_RUN_ID}"
+          fi
+          python3 scripts/download_github_artifact.py \
+            --run-id "${WALK_REPLAY_PARITY_RUN_ID}" \
+            --name "${artifact_name}" \
+            --output-dir artifacts/replay-parity \
+            --require parity-evaluation.json
+
       - name: Cache cargo build
         if: ${{ github.event.inputs.snapshot_run_id == '' }}
         uses: Swatinem/rust-cache@v2
@@ -429,8 +451,12 @@ jobs:
           if [ -n "${WALK_FACTOR_NAME_FILTER}" ]; then
             args+=(--factor-name-filter "${WALK_FACTOR_NAME_FILTER}")
           fi
-          if [ -n "${WALK_REPLAY_PARITY_JSON}" ]; then
-            args+=(--replay-parity-json "${WALK_REPLAY_PARITY_JSON}")
+          replay_parity_json="${WALK_REPLAY_PARITY_JSON}"
+          if [ -z "${replay_parity_json}" ] && [ -f artifacts/replay-parity/parity-evaluation.json ]; then
+            replay_parity_json="artifacts/replay-parity/parity-evaluation.json"
+          fi
+          if [ -n "${replay_parity_json}" ]; then
+            args+=(--replay-parity-json "${replay_parity_json}")
           fi
           ./target/release/examples/factor_walk_forward_v2 "${args[@]}" \
             | tee artifacts/factor-walk-forward-v2/report.txt
