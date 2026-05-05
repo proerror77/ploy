@@ -1,0 +1,245 @@
+name: Recorded Replay Dry-run Parity
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_id:
+        description: "Dry-run deployment id to replay and compare"
+        required: true
+        default: "pm5d.threelayer.obi-soft.dryrun"
+      config_path:
+        description: "Remote deployed dry-run config path on tango-1-1"
+        required: true
+        default: "/opt/ploy/config/strategies/02-pm5d-threelayer.obi-soft-dryrun.toml"
+      recording_path:
+        description: "Remote recorded MarketUpdate NDJSON path on tango-1-1"
+        required: true
+        default: "/opt/ploy/data/recordings/pm5d-threelayer-canonical.ndjson"
+      since:
+        description: "Inclusive ISO-8601 lower timestamp bound for parity rows"
+        required: true
+      until:
+        description: "Inclusive ISO-8601 upper timestamp bound for parity rows"
+        required: true
+      issue_number:
+        description: "Optional GitHub issue number for posting parity evidence"
+        required: false
+        default: "321"
+
+concurrency:
+  group: recorded-replay-parity-${{ github.event.inputs.deployment_id }}-${{ github.event.inputs.since }}-${{ github.event.inputs.until }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
+
+jobs:
+  parity:
+    name: Replay recorded feed and compare dry-run evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: tango-1-1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Configure SSH
+        env:
+          TANGO_1_1_KNOWN_HOSTS: ${{ secrets.TANGO_1_1_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          if [ -z "${TANGO_1_1_KNOWN_HOSTS}" ]; then
+            echo "TANGO_1_1_KNOWN_HOSTS secret is required for pinned SSH host verification" >&2
+            exit 1
+          fi
+          printf '%s\n' "${TANGO_1_1_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          printf '%s\n' '${{ secrets.TANGO_1_1_SSH_KEY }}' > ~/.ssh/tango_1_1_key
+          chmod 600 ~/.ssh/tango_1_1_key
+          cat > ~/.ssh/config <<EOF
+          Host tango-1-1
+            HostName ${DEPLOY_HOST}
+            User root
+            IdentityFile ~/.ssh/tango_1_1_key
+            HostKeyAlias tango-1-1
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            ServerAliveInterval 30
+            ServerAliveCountMax 20
+            ConnectTimeout 30
+          EOF
+
+      - name: Run recorded replay on tango-1-1
+        env:
+          DEPLOYMENT_ID: ${{ github.event.inputs.deployment_id }}
+          CONFIG_PATH: ${{ github.event.inputs.config_path }}
+          RECORDING_PATH: ${{ github.event.inputs.recording_path }}
+          REMOTE_DIR: /opt/ploy/tmp/recorded-replay-parity-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/replay artifacts/dryrun artifacts/parity
+
+          # shellcheck disable=SC2029
+          ssh tango-1-1 /bin/bash -s -- \
+            "${DEPLOYMENT_ID}" \
+            "${CONFIG_PATH}" \
+            "${RECORDING_PATH}" \
+            "${REMOTE_DIR}" <<'EOF'
+          set -euo pipefail
+          deployment_id="$1"
+          config_path="$2"
+          recording_path="$3"
+          remote_dir="$4"
+
+          mkdir -p "${remote_dir}"
+          test -x /opt/ploy/bin/ploy-runner
+          test -r "${config_path}"
+          test -r "${recording_path}"
+
+          replay_config="${remote_dir}/replay.toml"
+          python3 - "${config_path}" "${recording_path}" "${replay_config}" <<'PY'
+          import sys
+          src, recording, dst = sys.argv[1:]
+          lines = []
+          inserted_replay_path = False
+          with open(src, encoding="utf-8") as handle:
+              for raw in handle.read().splitlines():
+                  stripped = raw.strip()
+                  if stripped.startswith("mode = "):
+                      lines.append('mode = "replay"')
+                      lines.append(f'replay_market_updates_from = "{recording}"')
+                      inserted_replay_path = True
+                      continue
+                  if stripped.startswith("record_market_updates_to"):
+                      continue
+                  if stripped.startswith("record_market_updates_max_"):
+                      continue
+                  lines.append(raw)
+          if not inserted_replay_path:
+              raise SystemExit("runtime mode line not found in source config")
+          with open(dst, "w", encoding="utf-8") as handle:
+              handle.write("\n".join(lines) + "\n")
+          PY
+
+          timeout 600 /opt/ploy/bin/ploy-runner run \
+            --config "${replay_config}" \
+            --deployment-id "${deployment_id}" \
+            --output-json "${remote_dir}/replay-evaluation.json"
+
+          curl -fsS http://127.0.0.1:8081/api/reports/dry-run \
+            -o "${remote_dir}/dryrun-report.json"
+
+          test -s "${remote_dir}/replay-evaluation.json"
+          test -s "${remote_dir}/dryrun-report.json"
+          ls -lh "${remote_dir}/replay-evaluation.json" "${remote_dir}/dryrun-report.json"
+          EOF
+
+          scp tango-1-1:"${REMOTE_DIR}/replay-evaluation.json" artifacts/replay/evaluation.json
+          scp tango-1-1:"${REMOTE_DIR}/dryrun-report.json" artifacts/dryrun/dryrun.json
+
+      - name: Compare replay and dry-run evidence
+        env:
+          DEPLOYMENT_ID: ${{ github.event.inputs.deployment_id }}
+          SINCE: ${{ github.event.inputs.since }}
+          UNTIL: ${{ github.event.inputs.until }}
+        run: |
+          set -euo pipefail
+          python3 scripts/replay_dryrun_parity.py \
+            --replay-json artifacts/replay/evaluation.json \
+            --dryrun-json artifacts/dryrun/dryrun.json \
+            --output-json artifacts/parity/parity-evaluation.json \
+            --deployment-id "${DEPLOYMENT_ID}" \
+            --since "${SINCE}" \
+            --until "${UNTIL}"
+
+      - name: Publish parity summary
+        if: always()
+        run: |
+          {
+            echo "## Recorded Replay vs Dry-run Parity"
+            echo ""
+            echo "- Deployment: \`${{ github.event.inputs.deployment_id }}\`"
+            echo "- Config: \`${{ github.event.inputs.config_path }}\`"
+            echo "- Recording: \`${{ github.event.inputs.recording_path }}\`"
+            echo "- Since: \`${{ github.event.inputs.since }}\`"
+            echo "- Until: \`${{ github.event.inputs.until }}\`"
+            if [ -f artifacts/parity/parity-evaluation.json ]; then
+              echo "- Artifact: \`recorded-replay-parity-${{ github.run_id }}\`"
+              echo ""
+              echo '```json'
+              python3 -c 'import json; data=json.load(open("artifacts/parity/parity-evaluation.json")); runtime=data.get("runtime_evidence_comparison") or {}; orders=runtime.get("orders") or {}; fills=runtime.get("fills") or {}; print(json.dumps({"decision": data.get("decision"), "blocking_risk_flags": data.get("blocking_risk_flags"), "advisory_flags": data.get("advisory_flags"), "strict_parity_ready": runtime.get("strict_parity_ready"), "shared_orders": orders.get("shared_count"), "shared_fills": fills.get("shared_count")}, indent=2, sort_keys=True))'
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload parity artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: recorded-replay-parity-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Comment parity evidence on issue
+        if: ${{ always() && github.event.inputs.issue_number != '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const { applyResearchIssueLabels, labelsForDecision } = require("./.github/scripts/research-issue-labels.js");
+            const issue_number = Number("${{ github.event.inputs.issue_number }}");
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            let decision = "missing parity artifact";
+            let strictReady = false;
+            let blocking = [];
+            let advisory = [];
+            let sharedOrders = null;
+            let sharedFills = null;
+            if (fs.existsSync("artifacts/parity/parity-evaluation.json")) {
+              const data = JSON.parse(fs.readFileSync("artifacts/parity/parity-evaluation.json", "utf8"));
+              const runtime = data.runtime_evidence_comparison || {};
+              decision = data.decision || decision;
+              strictReady = Boolean(runtime.strict_parity_ready);
+              blocking = data.blocking_risk_flags || data.risk_flags || [];
+              advisory = data.advisory_flags || [];
+              sharedOrders = runtime.orders?.shared_count ?? null;
+              sharedFills = runtime.fills?.shared_count ?? null;
+            }
+            const body = [
+              "Recorded replay/dry-run parity evidence:",
+              "",
+              `- Workflow: ${context.workflow}`,
+              `- Run URL: ${runUrl}`,
+              `- Deployment: \`${{ github.event.inputs.deployment_id }}\``,
+              `- Config: \`${{ github.event.inputs.config_path }}\``,
+              `- Recording: \`${{ github.event.inputs.recording_path }}\``,
+              `- Window: \`${{ github.event.inputs.since }} -> ${{ github.event.inputs.until }}\``,
+              `- Artifact: \`recorded-replay-parity-${process.env.GITHUB_RUN_ID}\``,
+              `- Strict parity ready: \`${strictReady}\``,
+              `- Shared orders/fills: \`${sharedOrders ?? "n/a"} / ${sharedFills ?? "n/a"}\``,
+              `- Blocking flags: \`${blocking.join(", ") || "none"}\``,
+              `- Advisory flags: \`${advisory.join(", ") || "none"}\``,
+              `- Decision: ${decision}`
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body
+            });
+            const labels = [
+              "evidence:parity",
+              strictReady && blocking.length === 0 ? "parity:ready" : "parity:blocked",
+              ...labelsForDecision(decision)
+            ];
+            if (decision === "missing parity artifact") {
+              labels.push("evidence:missing-artifact");
+            }
+            await applyResearchIssueLabels({ github, context, core, issue_number, labels });

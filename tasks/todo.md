@@ -12853,6 +12853,10 @@ Issue: https://github.com/proerror77/ploy/issues/256
   - Owner: uses `run_backtest --output-json`; this now maps to a real artifact writer.
 - `.github/workflows/replay-dryrun-parity.yml`
   - Owner: next evidence gate once fresh replay and dry-run JSON both contain row-level runtime evidence.
+- `.github/workflows/recorded-replay-parity.yml`
+  - Owner: repeatable recorded replay parity artifact from the deployed tango binary and matching dry-run report slice.
+- `docs/runbooks/strategy-research-cicd.md`
+  - Owner: workflow map must show the recorded replay parity evidence path.
 
 ## Tasks
 
@@ -12864,6 +12868,7 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Dispatch a fresh `backtest.yml` or recorded replay run on `main` and verify its artifact has non-empty `runtime_evidence.orders/fills`.
 - [x] Treat event-level parity gaps as advisory only when order/fill runtime evidence is strict-ready.
 - [x] Add deployment/time-window filters to replay/dry-run parity so one recorded replay session can be compared against the matching dry-run report slice.
+- [x] Add a recorded replay parity workflow that runs the deployed `ploy-runner` on `tango-1-1`, downloads replay/dry-run evidence, compares the matching deployment/window, uploads artifacts, and comments on issue #321.
 - [ ] Run `replay-dryrun-parity.yml` against matching replay/dry-run evidence and attach the result to issue #321.
 - [ ] Keep PRD dry-run handoff blocked until clean 168h strict data audit, OOS, and replay parity all pass.
 
@@ -12875,3 +12880,4 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - 2026-05-05: PR #325 merged and deployed from `main`. Tango `/api/reports/dry-run` exposed row-level runtime evidence with `runtime_evidence.orders=360` and `runtime_evidence.fills=349`; `ployd.service` was active with required restart/OOM guardrails and no `cargo`/`rustc` process. Backtest workflow run `25363832497` produced `strategy_backtest_evaluation` with `orders=151`, `fills=151`, no risk flags, and `canonical_result=continue`.
 - 2026-05-05: Recorded replay parity is now reproducible for the same dry-run session/window. Using `/opt/ploy/data/recordings/pm5d-threelayer-canonical.ndjson` replay output `/tmp/pm5d-obi-soft-replay-evaluation.json` against the filtered dry-run report slice for `pm5d.threelayer.obi-soft.dryrun` from `2026-05-02T01:35:00+08:00` to `2026-05-02T02:20:00+08:00` produced order/fill runtime strict parity: replay/dry-run/shared orders `10/10/10`, fills `10/10/10`, zero mismatches, zero missing strict runtime fields, `blocking_risk_flags=[]`, decision `continue`. Event-level rows remain advisory because replay still lacks event-level rows.
 - 2026-05-05: Added parity comparator filters for `deployment_id`, `since`, and `until`, including a replay-order timestamp fallback through matching fill intents because current replay order rows can carry `created_at=None` while fill rows carry the session timestamp. This lets the GitHub parity workflow compare a recorded replay artifact to the matching dry-run report window instead of incorrectly comparing against the full report.
+- 2026-05-05: Added `.github/workflows/recorded-replay-parity.yml` as the repeatable evidence path for the manual proof above. The workflow SSHes to `tango-1-1`, generates a temporary replay config from the deployed dry-run TOML, runs the already deployed `/opt/ploy/bin/ploy-runner` in replay mode against the canonical recording, fetches `/api/reports/dry-run`, runs `scripts/replay_dryrun_parity.py` with deployment/time filters, uploads replay/dry-run/parity artifacts, and comments/labels issue #321. It intentionally does not build Rust on `tango-1-1` and does not touch live order paths.
