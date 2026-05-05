@@ -60,6 +60,10 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `Phi(distance_z)`, existing fair probability, and existing model probability.
 - [x] Add richer baseline comparison: `Phi(distance_z)` plus currently available
   volatility / direction primitives, and later event-vol-surface variants.
+- [x] Surface a conservative full-depth execution matrix in
+  `factor_walk_forward_v2`: 50% visible depth, max 3 CLOB levels, same stake
+  sweep. This is a report-level conservative execution gate, not yet a full
+  conservative settlement edge bucket.
 - [ ] Add anti-overfit checks before any dry-run promotion: walk-forward OOS,
   symbol holdout, permutation, time-shift, and feature ablation. Current report
   covers deterministic label-shift and prediction-shift diagnostics for
@@ -192,6 +196,30 @@ evidence comes from Polymarket full CLOB depth, not top book.
   fresh portable full snapshot with strict data gate, Deribit/vol profile for
   BTC/ETH/SOL, conservative-depth haircut labels, and recorded replay parity
   for the BTC/ETH/SOL top-edge settlement candidate.
+- 2026-05-05: Ran the strict `pm5d-vol` full-snapshot gate on PR #319 with
+  `data_gate=critical`, `upload_full_snapshot=true`, symbols
+  `BTCUSDT,ETHUSDT,SOLUSDT`, window `2026-04-21..2026-05-01`, and `15u` stake.
+  Run `25354264444` failed at `Audit required market data`, which is the
+  correct PRD outcome: required sources were
+  `polymarket_quotes`, `polymarket_orderbooks`, `deribit_iv`,
+  `deribit_atm_greeks`, `binance_price`, `binance_agg_trades`, and
+  `binance_lob`; every required source reported critical max gaps around
+  `1700m`. This confirms current data is not sufficient for replay/dry-run
+  promotion.
+- 2026-05-05: Triggered diagnostic non-strict `pm5d-vol` full-snapshot run
+  `25354314443` with `data_gate=never` and `upload_full_snapshot=true`.
+  This can help inspect what the compiler can materialize, but it is diagnostic
+  only and cannot override the strict gate failure.
+- 2026-05-05: Added a second execution-matrix print to
+  `factor_walk_forward_v2` using `visible_depth_haircut=0.5` and
+  `max_levels=3`. Verification passed:
+  `rustfmt --edition 2021 --check
+  crates/ploy-research/examples/factor_walk_forward_v2.rs` and
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-conservative-matrix
+  /opt/homebrew/bin/timeout 240 rtk cargo check -p ploy-research --example
+  factor_walk_forward_v2 --features db --no-default-features`; the check emitted
+  only pre-existing strategy-bundle dead-code warnings plus the vendor profile
+  warning.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 

@@ -361,6 +361,20 @@ async fn main() {
         "{}",
         format_full_depth_execution_matrix_report(&execution_matrix, options.top_n)
     );
+    let conservative_execution_matrix = build_full_depth_execution_matrix(
+        &observations,
+        &all_pm_book_snapshots,
+        FullDepthExecutionMatrixOptions {
+            visible_depth_haircut: 0.5,
+            max_levels: Some(3),
+            min_bucket_observations: options.review.min_observations.max(20),
+            ..Default::default()
+        },
+    );
+    println!(
+        "{}",
+        format_full_depth_execution_matrix_report(&conservative_execution_matrix, options.top_n)
+    );
     let repricing_ic_report = review_repricing_ic_with_deribit_and_pm_books(
         &observations,
         &deribit_snapshots,

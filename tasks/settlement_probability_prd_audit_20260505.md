@@ -22,11 +22,12 @@ snapshot-backed full-depth execution labels and probability-model validation.
 
 - Branch: `feat/settlement-probability-prd`
 - PR: #319
-- Latest reviewed head: `fcadcf730466ec0b9ca339ac211026e25aa17f8e`
+- Latest reviewed head: PR #319 head after the conservative-matrix follow-up
 - PR status: mergeable
-- Ordinary PR CI: passed on run `25353323418`
-- Workflow lint: passed on run `25353323418`
-- Runner blocker issue: #320
+- Ordinary PR CI: passed on run `25354110281`
+- PR Auto Review: passed on run `25354110277`
+- CodeRabbit: success
+- Runner blocker issue: #320, closed after `ploy-ci-1` recovery
 
 ## Prompt-To-Artifact Checklist
 
@@ -42,9 +43,9 @@ snapshot-backed full-depth execution labels and probability-model validation.
 | Anti-overfit diagnostics | label shift, prediction shift, symbol holdout, baseline ablation sections | Present in runs `25353780686` and `25353780673` | Complete |
 | Walk-forward OOS | `factor-walk-forward-v2.yml` | Snapshot-backed runs completed successfully after correcting inclusive end-date input | Complete |
 | Official settlement fidelity | Snapshot manifest `require_official_settlement=true` | Provenance for snapshots `25254380121` and `25255158983` confirms official settlement required | Partial evidence |
-| Data quality / coverage | `data-gap-audit.md` | Both successful runs still report `data_audit_status=critical` and max gaps around 280-410m | Failing / blocks promotion |
-| Deribit / vol inputs | `data_profile=pm5d-vol` or `include_deribit=true` snapshot | Existing snapshots use `pm5d-execution`, `include_deribit=false` | Missing for full PRD vol lane |
-| Portable replay evidence | Full research snapshot artifact | New `upload_full_snapshot` option added to `research-snapshot.yml`; not yet exercised because runner is offline | Code present; runtime blocked |
+| Data quality / coverage | `data-gap-audit.md` | Strict `pm5d-vol` run `25354264444` failed at `Audit required market data`; every required source had critical max gaps around `1700m` | Failing / blocks promotion |
+| Deribit / vol inputs | `data_profile=pm5d-vol` or `include_deribit=true` snapshot | Strict `pm5d-vol` gate requires Deribit IV/Greeks but fails coverage before snapshot compile | Missing for full PRD vol lane |
+| Portable replay evidence | Full research snapshot artifact | `upload_full_snapshot` option exists; strict run did not upload a full snapshot because data audit failed. Diagnostic non-strict run `25354314443` is in progress and is not promotion-grade | Code present; strict data gate failed |
 | Replay parity | `ReplayParityReport` / recorded replay artifacts | Not part of current completed evidence | Missing |
 | Dry-run readiness | Dry-run handoff packet and kill switch evidence | PRD gates have not passed | Not ready |
 
@@ -129,6 +130,49 @@ not enough for dry-run promotion. BTC/ETH/SOL `q_market_midpoint` /
 candidate. Promotion remains blocked by critical data gaps, missing Deribit vol
 inputs, missing conservative haircut report, and missing replay parity.
 
+Fresh strict data-gate attempt:
+
+- Run: `25354264444`
+- Ref: `feat/settlement-probability-prd`
+- Profile: `pm5d-vol`
+- Gate: `critical`
+- Window: `2026-04-21..2026-05-01`
+- Symbols: `BTCUSDT,ETHUSDT,SOLUSDT`
+- Stake: `15u`
+- Result: failed at `Audit required market data`
+- Required sources: `polymarket_quotes`, `polymarket_orderbooks`,
+  `deribit_iv`, `deribit_atm_greeks`, `binance_price`,
+  `binance_agg_trades`, `binance_lob`
+- Gap evidence: PM quotes/orderbooks max gap `1705m`; Deribit and Binance
+  sources max gap around `1700m`
+
+This is a valid negative PRD result, not a code failure. It means the current
+database window cannot prove the settlement-probability system is ready for
+replay or dry-run under the full PRD.
+
+Diagnostic follow-up:
+
+- Run: `25354314443`
+- Difference: `data_gate=never`, `upload_full_snapshot=true`
+- Status at last audit update: in progress at `Compile snapshot`
+- Interpretation: useful only to inspect materialized rows and artifact shape;
+  it cannot override strict data insufficiency.
+
+Conservative execution surface:
+
+- `factor_walk_forward_v2` now prints a second Full-Depth Execution Matrix with
+  `visible_depth_haircut=0.5` and `max_levels=3`.
+- Verification:
+  `rustfmt --edition 2021 --check
+  crates/ploy-research/examples/factor_walk_forward_v2.rs`
+- Verification:
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-conservative-matrix
+  /opt/homebrew/bin/timeout 240 rtk cargo check -p ploy-research --example
+  factor_walk_forward_v2 --features db --no-default-features`
+- Remaining conservative gap: this surfaces conservative capacity/fillability
+  in the matrix, but conservative settlement edge buckets and replay parity
+  still need a decision-grade snapshot.
+
 ## Recovery Checklist
 
 1. Collect or compile a fresh snapshot with `data_gate=critical` and
@@ -136,8 +180,9 @@ inputs, missing conservative haircut report, and missing replay parity.
    runner-local.
 2. Run a `pm5d-vol` / Deribit-included snapshot for BTC/ETH/SOL to satisfy the
    PRD volatility lane.
-3. Add or run conservative-depth labels: visible-depth haircut, max sweep
-   levels, quote-age, latency, and adverse-selection buffers.
+3. Add conservative settlement edge buckets after a strict snapshot passes:
+   visible-depth haircut, max sweep levels, quote-age, latency, and
+   adverse-selection buffers.
 4. Narrow the candidate to BTC/ETH/SOL settlement probability top-edge buckets.
 5. Exclude DOGE from any all-six settlement promotion until its holdout turns
    positive under the same full-depth labels.
