@@ -9,12 +9,14 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 use futures::StreamExt;
-use ploy_market_contracts::{MarketUpdate, l2_updates_from_depth_totals, normalize_token_id};
+use ploy_market_contracts::{
+    l2_updates_from_depth_totals, normalize_token_id, BookLevel, MarketUpdate,
+};
 use polymarket_client_sdk::rtds::{Client as RtdsClient, EquityPriceMessage};
 use polymarket_client_sdk::types::U256;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -23,9 +25,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, warn};
 
 use crate::reference_prices::{
-    ReferenceAssetClass, ReferencePriceKey, ReferencePriceRegistry, ReferencePriceSnapshot,
-    ReferencePriceSource, infer_pyth_asset_class, market_symbol_to_binance_symbol,
-    normalize_reference_symbol, pyth_symbol, upsert_reference_price,
+    infer_pyth_asset_class, market_symbol_to_binance_symbol, normalize_reference_symbol,
+    pyth_symbol, upsert_reference_price, ReferenceAssetClass, ReferencePriceKey,
+    ReferencePriceRegistry, ReferencePriceSnapshot, ReferencePriceSource,
 };
 
 const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
@@ -101,6 +103,20 @@ fn book_quote_from_rest(book: &RestBook) -> BookQuote {
         ask: ask.map(|(price, _)| price),
         ask_size: ask.map(|(_, size)| size),
     }
+}
+
+fn book_levels_from_rest(levels: &[RestBookLevel], ascending: bool) -> Vec<BookLevel> {
+    let mut levels = levels
+        .iter()
+        .filter_map(parse_rest_book_level)
+        .map(|(price, size)| BookLevel { price, size })
+        .collect::<Vec<_>>();
+    if ascending {
+        levels.sort_by(|left, right| left.price.cmp(&right.price));
+    } else {
+        levels.sort_by(|left, right| right.price.cmp(&left.price));
+    }
+    levels
 }
 
 /// Spawn a task that subscribes to Binance spot prices via RTDS WebSocket
@@ -478,6 +494,7 @@ pub fn spawn_db_polymarket_feed(
         let mut discovered_events = HashSet::new();
         let mut expired_events = HashSet::new();
         let mut last_quote_ts: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let mut last_book_ts: HashMap<String, DateTime<Utc>> = HashMap::new();
 
         info!(
             symbols = ?symbols_upper,
@@ -624,6 +641,65 @@ pub fn spawn_db_polymarket_feed(
                             ask,
                             bid_size,
                             ask_size,
+                            bid_levels: Vec::new(),
+                            ask_levels: Vec::new(),
+                            ts,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+
+                let book_rows: Vec<(String, Value, Value, DateTime<Utc>)> = match sqlx::query_as(
+                    r#"
+                    SELECT DISTINCT ON (token_id)
+                        token_id, bids, asks, received_at
+                    FROM clob_orderbook_snapshots
+                    WHERE token_id = ANY($1)
+                      AND received_at > NOW() - INTERVAL '30 seconds'
+                      AND (
+                          jsonb_array_length(bids) > 0
+                          OR jsonb_array_length(asks) > 0
+                      )
+                    ORDER BY token_id, received_at DESC
+                    "#,
+                )
+                .bind(&active_tokens)
+                .fetch_all(&pool)
+                .await
+                {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        warn!(error = %error, "DB Polymarket orderbook query failed");
+                        Vec::new()
+                    }
+                };
+
+                for (token_id, bids, asks, ts) in book_rows {
+                    if last_book_ts
+                        .get(&token_id)
+                        .is_some_and(|last_ts| *last_ts >= ts)
+                    {
+                        continue;
+                    }
+                    let bid_levels = book_levels_from_json(&bids, false);
+                    let ask_levels = book_levels_from_json(&asks, true);
+                    if bid_levels.is_empty() && ask_levels.is_empty() {
+                        continue;
+                    }
+                    let best_bid = bid_levels.first();
+                    let best_ask = ask_levels.first();
+                    last_book_ts.insert(token_id.clone(), ts);
+                    if tx
+                        .send(MarketUpdate::Quote {
+                            token_id: Arc::from(token_id.as_str()),
+                            bid: best_bid.map(|level| level.price),
+                            ask: best_ask.map(|level| level.price),
+                            bid_size: best_bid.map(|level| level.size),
+                            ask_size: best_ask.map(|level| level.size),
+                            bid_levels,
+                            ask_levels,
                             ts,
                         })
                         .is_err()
@@ -774,6 +850,29 @@ fn json_f64(value: &Value) -> Option<f64> {
     }
 }
 
+fn book_levels_from_json(value: &Value, ascending: bool) -> Vec<BookLevel> {
+    let mut levels = value
+        .as_array()
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .filter_map(parse_depth_level)
+        .filter_map(|(price, size)| {
+            let price = Decimal::try_from(price).ok()?;
+            let size = Decimal::try_from(size).ok()?;
+            if size <= Decimal::ZERO || !pm_tradeable_price(price) {
+                return None;
+            }
+            Some(BookLevel { price, size })
+        })
+        .collect::<Vec<_>>();
+    if ascending {
+        levels.sort_by(|left, right| left.price.cmp(&right.price));
+    } else {
+        levels.sort_by(|left, right| right.price.cmp(&left.price));
+    }
+    levels
+}
+
 /// Spawn a task that polls the Polymarket CLOB REST API for orderbook data
 /// and publishes `MarketUpdate::Quote` events with top-of-book sizes.
 ///
@@ -831,6 +930,8 @@ pub fn spawn_quote_feed_until(
                                 ask: quote.ask,
                                 bid_size: quote.bid_size,
                                 ask_size: quote.ask_size,
+                                bid_levels: book_levels_from_rest(&book.bids, false),
+                                ask_levels: book_levels_from_rest(&book.asks, true),
                                 ts: now,
                             };
                             if tx.send(update).is_err() {
@@ -1344,8 +1445,8 @@ fn parse_agg_trade_msg(v: &serde_json::Value) -> Option<AggTradeMsg> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RestBook, book_quote_from_rest, l2_updates_from_book, parse_agg_trade_msg,
-        rtds_market_data_ws_config,
+        book_quote_from_rest, l2_updates_from_book, parse_agg_trade_msg,
+        rtds_market_data_ws_config, RestBook,
     };
     use chrono::Utc;
     use ploy_market_contracts::MarketUpdate;

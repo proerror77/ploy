@@ -200,6 +200,10 @@ pub struct SimExecutionSection {
     pub default_depth_shares: u64,
     #[serde(default)]
     pub require_lob_liquidity: bool,
+    #[serde(default = "default_visible_depth_haircut")]
+    pub visible_depth_haircut: f64,
+    #[serde(default)]
+    pub max_sweep_levels: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -247,6 +251,9 @@ fn default_impact() -> f64 {
 fn default_depth_shares() -> u64 {
     500
 }
+fn default_visible_depth_haircut() -> f64 {
+    1.0
+}
 
 impl Default for SimExecutionSection {
     fn default() -> Self {
@@ -260,6 +267,8 @@ impl Default for SimExecutionSection {
             impact_coefficient: 0.1,
             default_depth_shares: 500,
             require_lob_liquidity: false,
+            visible_depth_haircut: 1.0,
+            max_sweep_levels: 0,
         }
     }
 }
@@ -361,6 +370,9 @@ impl FullConfig {
             impact_coefficient: Decimal::try_from(e.impact_coefficient).unwrap_or_default(),
             default_depth_shares: e.default_depth_shares,
             require_lob_liquidity: e.require_lob_liquidity,
+            visible_depth_haircut: Decimal::try_from(e.visible_depth_haircut)
+                .unwrap_or(Decimal::ONE),
+            max_sweep_levels: e.max_sweep_levels,
         }
     }
 

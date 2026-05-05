@@ -102,6 +102,8 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 ts: window_start + Duration::seconds(5),
                 bid_size: None,
                 ask_size: None,
+            bid_levels: Vec::new(),
+            ask_levels: Vec::new(),
             });
             updates.push(MarketUpdate::Quote {
                 token_id: Arc::clone(&dn_token),
@@ -110,6 +112,8 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 ts: window_start + Duration::seconds(5),
                 bid_size: None,
                 ask_size: None,
+            bid_levels: Vec::new(),
+            ask_levels: Vec::new(),
             });
 
             // Spot ticks showing the drift
@@ -145,6 +149,8 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 ts: window_start + Duration::seconds(55),
                 bid_size: None,
                 ask_size: None,
+            bid_levels: Vec::new(),
+            ask_levels: Vec::new(),
             });
             updates.push(MarketUpdate::Quote {
                 token_id: dn_token,
@@ -153,6 +159,8 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 ts: window_start + Duration::seconds(55),
                 bid_size: None,
                 ask_size: None,
+            bid_levels: Vec::new(),
+            ask_levels: Vec::new(),
             });
 
             // Spot at window midpoint (entry zone: 60-300s remaining)

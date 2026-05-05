@@ -14,8 +14,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -919,6 +919,8 @@ mod tests {
                 ts: now,
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
             },
             &positions,
             &orders,
@@ -971,6 +973,8 @@ mod tests {
                 ts: now,
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
             },
             &positions,
             &orders,
@@ -983,6 +987,8 @@ mod tests {
                 ts: now,
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
             },
             &positions,
             &orders,
@@ -1044,6 +1050,8 @@ mod tests {
                 ts: now,
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
             },
             &positions,
             &orders,
@@ -1094,6 +1102,8 @@ mod tests {
                 ts: now,
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
             },
             &positions,
             &orders,

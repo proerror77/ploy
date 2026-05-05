@@ -64,6 +64,8 @@ enable_market_impact = true
 impact_coefficient = 0.1
 default_depth_shares = 500
 require_lob_liquidity = true
+visible_depth_haircut = 0.5
+max_sweep_levels = 3
 
 [reference_data]
 capture_sports_state = false

@@ -170,6 +170,7 @@ impl RuntimeDbRecorder {
         };
         let filled_quantity = fill.map(|record| record.quantity).unwrap_or(Decimal::ZERO);
         let avg_fill_price = fill.map(|record| record.price);
+        let runtime_price_basis = report.price_basis.unwrap_or("unknown");
         let context_json = json!({
             "runtime_mode": self.mode_label,
             "signal_decision": signal.map(|record| record.decision.as_str()),
@@ -179,8 +180,8 @@ impl RuntimeDbRecorder {
             "signal_p_hat": signal.map(|record| record.p_hat),
             "signal_edge": signal.map(|record| record.edge),
             "signal_entry_price": signal.map(|record| record.entry_price.to_string()),
-            "runtime_price_basis": "top_book_quote",
-            "full_depth_runtime_parity": false,
+            "runtime_price_basis": runtime_price_basis,
+            "full_depth_runtime_parity": runtime_price_basis == "full_depth_sweep",
             "slippage": report.slippage.map(|value| value.to_string()),
             "market_impact": report.market_impact.map(|value| value.to_string()),
         });

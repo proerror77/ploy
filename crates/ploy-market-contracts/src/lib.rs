@@ -7,7 +7,8 @@ pub mod instrument;
 pub mod venue;
 
 pub use events::{
-    MarketUpdate, l2_updates_from_depth_totals, market_update_sort_ts, normalize_token_id,
+    l2_updates_from_depth_totals, market_update_sort_ts, normalize_token_id, BookLevel,
+    MarketUpdate,
 };
 pub use family::PredictionFamily;
 pub use feed::{Feed, HistoricalLoadOptions};

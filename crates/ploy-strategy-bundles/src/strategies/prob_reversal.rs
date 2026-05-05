@@ -5,8 +5,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
@@ -656,6 +656,8 @@ mod tests {
                 ask: Some(dec!(0.25)),
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
                 ts: now - Duration::seconds(1),
             },
             &positions,
@@ -670,6 +672,8 @@ mod tests {
                 ask: Some(dec!(0.65)),
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
                 ts: now,
             },
             &positions,
@@ -723,6 +727,8 @@ mod tests {
                 ask: Some(dec!(0.20)),
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
                 ts: now - Duration::seconds(2),
             },
             &positions,
@@ -737,6 +743,8 @@ mod tests {
                 ask: Some(dec!(0.75)),
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
                 ts: now - Duration::seconds(1),
             },
             &positions,
@@ -751,6 +759,8 @@ mod tests {
                 ask: Some(dec!(0.35)),
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
                 ts: now,
             },
             &positions,
@@ -818,6 +828,8 @@ mod tests {
                 ask: Some(dec!(0.90)),
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
                 ts: now + Duration::seconds(2),
             },
             &positions,
@@ -869,6 +881,8 @@ mod tests {
                 ask: Some(dec!(0.25)),
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
                 ts: now - Duration::seconds(1),
             },
             &positions,
@@ -882,6 +896,8 @@ mod tests {
                 ask: Some(dec!(0.65)),
                 bid_size: None,
                 ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
                 ts: now,
             },
             &positions,
