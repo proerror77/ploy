@@ -436,6 +436,17 @@ evidence comes from Polymarket full CLOB depth, not top book.
   that definition did not yet know `upload_full_snapshot`. Fixed
   `scripts/run_settlement_probability_prd_gate.py` to pass `--ref <git_ref>` on
   workflow dispatch, keeping the workflow definition and checkout ref aligned.
+- 2026-05-05: Re-ran the real short-window orchestrator smoke after the
+  dispatch-ref fix. Snapshot run `25360564148` succeeded with
+  `pm5d-vol`, `data_gate=critical`, `audit_lookback_hours=1`,
+  `upload_full_snapshot=true`, `data_audit_status=ok`, Deribit included,
+  observations `2857`, Deribit rows `1038`, PM book rows `6490`, and official
+  settlement required. The orchestrator then triggered Factor Walk-Forward V2
+  run `25360794716`, which succeeded from the snapshot and printed
+  `ready_for_dry_run_handoff=false`. This proves the strict snapshot ->
+  walk-forward control chain works on a current short smoke, while correctly
+  keeping promotion blocked on anti-overfit diagnostics, non-empty OOS windows,
+  and recorded replay parity.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 

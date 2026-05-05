@@ -322,6 +322,20 @@ scripts/run_settlement_probability_prd_gate.py \
   `research-snapshot.yml` did not yet know `upload_full_snapshot`. The
   orchestrator now passes `--ref <git_ref>` to `gh workflow run`, so the
   workflow definition and checkout ref stay aligned.
+- Second live dispatch after the `--ref` fix completed the full short-window
+  chain:
+  - Snapshot run `25360564148`: success, `data_audit_status=ok`,
+    `include_deribit=true`, `upload_full_snapshot=true`, rows
+    observations `2857`, Deribit `1038`, PM books `6490`, official settlement
+    required.
+  - Walk-forward run `25360794716`: success from snapshot run `25360564148`,
+    source observations `2857`, side rows `5714`, full-depth PnL rows `4712`,
+    Deribit-enriched rows `3894`.
+  - Promotion gate remained blocked as intended:
+    `ready_for_dry_run_handoff=false`,
+    `anti_overfit_diagnostics=false`,
+    `walk_forward_oos=false`,
+    `recorded_replay_parity=false`.
 
 Interpretation:
 
