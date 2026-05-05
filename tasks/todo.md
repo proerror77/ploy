@@ -148,6 +148,14 @@ evidence comes from Polymarket full CLOB depth, not top book.
   issue records the queued/pending research runs, ECS instance id, financial
   locks, `InstanceExpired` start failure, and the required recovery sequence
   before any strategy-data sufficiency decision.
+- 2026-05-05: Checked whether the existing snapshot artifacts could bypass the
+  offline runner. They cannot: snapshot runs `25254380121` and `25255158983`
+  uploaded only small provenance artifacts with `full_snapshot_embedded=false`
+  and `registry=runner-local`, not the full observations / PM book JSON data.
+  The provenance also shows `data_audit_status=critical` with roughly
+  280-410 minute max gaps across Polymarket and Binance sources. This means the
+  current artifact set is useful as provenance, but not enough to complete the
+  PRD gate locally or to claim data sufficiency.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
