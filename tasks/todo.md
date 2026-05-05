@@ -81,6 +81,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - [x] Add a first deterministic `q_final` blend baseline that combines
   Polymarket market prior, distance/LOB/vol probability, and EventVolSurface
   prior inside the same settlement probability report.
+- [x] Add an explicit PRD promotion gate report so short-window smoke evidence
+  cannot be mistaken for dry-run readiness. The gate checks data audit status,
+  Deribit inclusion, full-depth/conservative capacity, calibration, settlement
+  edge, anti-overfit, symbol holdout, walk-forward OOS, and recorded replay
+  parity.
 - [ ] Only after the above gates pass, create a settlement dry-run handoff with
   fixed small stake, strict kill switch, and shared scorer parity.
 
@@ -251,6 +256,27 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `train_window_days=1` plus `test_window_days=1` requires more than the
   short-window snapshot; the synthetic regression test covers non-empty
   walk-forward windows.
+- 2026-05-05: Added a dedicated Settlement Probability PRD Promotion Gate
+  report to `factor_walk_forward_v2`. It reports pass/block status for data
+  quality, Deribit vol inclusion, full-depth and conservative entry capacity,
+  probability calibration, full-depth and conservative settlement edge,
+  deterministic anti-overfit checks, symbol holdout, walk-forward OOS, and
+  recorded replay parity. The report intentionally defaults replay parity to
+  blocked unless a caller supplies a parity-ready artifact, so short-window
+  workflow smoke cannot become an accidental dry-run handoff. Verification
+  passed: `rustfmt --edition 2021 --check
+  crates/ploy-research/src/factors_v2.rs
+  crates/ploy-research/examples/factor_walk_forward_v2.rs`,
+  `rustfmt --edition 2021 --config skip_children=true --check
+  crates/ploy-research/src/lib.rs`, `git diff --check`,
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-gate /opt/homebrew/bin/timeout 300 rtk
+  cargo test -p ploy-research settlement_probability --lib`, and
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-gate /opt/homebrew/bin/timeout 300 rtk
+  cargo check -p ploy-research --example factor_walk_forward_v2 --features db
+  --no-default-features`. A local run against
+  `/tmp/ploy-snapshot-smoke-25356726430/research-snapshot-25356726430`
+  printed `ready_for_dry_run_handoff=false` with `walk_forward_oos=false` and
+  `recorded_replay_parity=false`, which is the intended short-window behavior.
 - 2026-05-05: Settlement probability PRD gate result: BTC/ETH/SOL has the
   strongest next candidate but is not dry-run-ready. Run `25353780686` reported
   full-depth entry fill rate `49.23%`, exit fill rate `40.70%`, and
