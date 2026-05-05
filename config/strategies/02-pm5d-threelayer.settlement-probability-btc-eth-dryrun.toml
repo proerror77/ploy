@@ -8,6 +8,12 @@
 strategy_variant = "three_layer"
 mode = "dryrun"
 throttle_hz = 10
+# Dedicated capture for the settlement-probability dry-run handoff. The
+# replay-parity gate must compare against the same deployed strategy/window,
+# not the older OBI-soft canonical recording.
+record_market_updates_to = "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson"
+record_market_updates_max_records = 300000
+record_market_updates_max_bytes = 268435456
 
 [strategy]
 symbols = ["BTCUSDT", "ETHUSDT"]
