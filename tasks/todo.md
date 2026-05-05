@@ -12956,3 +12956,19 @@ Issue: https://github.com/proerror77/ploy/issues/256
   passed: `python3 -m json.tool` on the new manifest, `python3 -m py_compile
   scripts/report_dryrun_summary.py`, a manifest-to-config/workflow path
   consistency check, report-label smoke import, and `git diff --check`.
+- 2026-05-05: Implemented the first runtime audit slice for PRD dry-run
+  evidence. `strategy_runtime_orders.context` now records the signal
+  probability, edge, entry price, signal strategy/symbol/direction, and the
+  explicit runtime price basis `top_book_quote` with
+  `full_depth_runtime_parity=false`. `report_dryrun_summary.py` now exports
+  order `context` under `runtime_evidence.orders`, so dry-run/replay evidence
+  can inspect probability-edge decisions directly while still flagging the
+  remaining full-depth runtime parity blocker. Verification passed:
+  `python3 -m unittest tests.test_dryrun_report_contracts
+  tests.test_replay_dryrun_parity`, `python3 -m py_compile
+  scripts/report_dryrun_summary.py scripts/replay_dryrun_parity.py`,
+  `rustfmt --edition 2021 --check
+  crates/ploy-strategy-runtime/src/recording.rs`, and
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-audit-check /opt/homebrew/bin/timeout
+  300 rtk cargo check -p ploy-strategy-runtime --lib` with only pre-existing
+  warnings.
