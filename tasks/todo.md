@@ -97,8 +97,9 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - [x] Add a manual GitHub Actions wrapper for the repeatable PRD gate so the
   strict retained-window evidence chain can run from CI without relying on a
   local terminal session.
-- [ ] Only after the above gates pass, create a settlement dry-run handoff with
-  fixed small stake, strict kill switch, and shared scorer parity.
+- [x] Only after the above gates pass, create a settlement dry-run handoff with
+  fixed small stake, strict kill switch, and shared scorer parity. BTC/ETH-only
+  dry-run handoff candidate is tracked in GitHub issue #332.
 
 ## Review
 
@@ -12873,7 +12874,9 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - [x] Add a recorded replay parity workflow that runs the deployed `ploy-runner` on `tango-1-1`, downloads replay/dry-run evidence, compares the matching deployment/window, uploads artifacts, and comments on issue #321.
 - [x] Expose `replay_parity_artifact_name` on the settlement PRD gate workflow so recorded parity artifacts named `recorded-replay-parity-*` can be consumed.
 - [ ] Run `replay-dryrun-parity.yml` against matching replay/dry-run evidence and attach the result to issue #321.
-- [ ] Keep PRD dry-run handoff blocked until clean 168h strict data audit, OOS, and replay parity all pass.
+- [ ] Keep all-symbol PRD dry-run handoff blocked until clean 168h strict data
+  audit, OOS, and replay parity all pass. BTC/ETH-only is now split into issue
+  #332 after passing the current available-window promotion gate.
 
 ## Review
 
@@ -12912,3 +12915,20 @@ Issue: https://github.com/proerror77/ploy/issues/256
   probability. The next code correction is to align prediction one-step
   time-shift with the PRD rule "should not become better" while preserving the
   stricter decay requirement for label shift/permutation tests.
+- 2026-05-05: PR #330 fixed the anti-overfit semantics split and PR #331 fixed
+  snapshot reuse for narrower symbol subsets. Re-running the existing strict
+  available-window snapshot `25367212009` as BTC/ETH-only produced
+  walk-forward run `25369614389`, which filtered the broad snapshot down to
+  `observations=44202`, `deribit=28019`, and `pm_books=86982`. The BTC/ETH
+  PRD promotion gate passed every current dry-run handoff blocker:
+  `ready_for_dry_run_handoff=true`, data quality `ok`, Deribit included,
+  full-depth and conservative capacity true, probability calibration true
+  (`q_event_surface_empirical` ECE `0.000807`), full-depth settlement edge true
+  (`q_market_midpoint` top-edge PnL `3.4674`), conservative settlement edge
+  true (`2.9003`), anti-overfit diagnostics true (`3/3`), symbol holdout true
+  (`2/2`), walk-forward OOS true (`4` windows, positive window ratio `1.0000`,
+  min test top-edge PnL `2.6610`), and recorded replay parity true using run
+  `25366831381` with no blocking flags. Created GitHub issue #332 as the
+  BTC/ETH settlement probability dry-run handoff candidate. This is not live
+  approval; next work is a dedicated BTC/ETH settlement dry-run config/scorer
+  parity slice with kill switches and audit logging.
