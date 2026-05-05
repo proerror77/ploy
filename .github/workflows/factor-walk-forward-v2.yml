@@ -481,7 +481,8 @@ jobs:
             --output-json artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json \
             --output-md artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.md \
             --output-registry-json artifacts/factor-walk-forward-v2/autofactor-factor-registry.json \
-            --output-handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json
+            --output-handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json \
+            --output-handoff-md artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.md
 
       - name: Publish summary
         if: always()

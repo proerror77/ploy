@@ -328,6 +328,89 @@ def build_strategy_handoff(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def render_handoff_markdown(handoff: dict[str, Any]) -> str:
+    lines = [
+        "# AutoFactor Dry-Run Strategy Handoff",
+        "",
+        f"Status: `{handoff['status']}`",
+        f"Recommended action: `{handoff['recommended_action']}`",
+        f"Required strategy profile: `{handoff['required_strategy_profile']}`",
+        f"Allowed targets: `{', '.join(handoff['allowed_targets'])}`",
+        "",
+    ]
+    if handoff["status"] != "ready":
+        lines.extend(
+            [
+                "No dry-run handoff issue or config should be created from this artifact.",
+                "",
+                f"Blocked factor count: `{handoff['blocked_factor_count']}`",
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "## Draft Issue",
+            "",
+            "Title: Promote AutoFactor strategy handoff to dry-run",
+            "",
+            "## Qualified Strategies",
+            "",
+            "| factor | target | strategy profile | runtime score | icir | top bucket pnl |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for strategy in handoff["strategies"]:
+        metrics = strategy["metrics"]
+        lines.append(
+            "| {name} | {target} | {profile} | {runtime_score} | {icir:.6f} | {pnl:.6f} |".format(
+                name=strategy["name"],
+                target=strategy["target"],
+                profile=strategy["strategy_profile"],
+                runtime_score=strategy["runtime_score"],
+                icir=metrics["icir"],
+                pnl=metrics["top_bucket_avg_label"],
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Dry-Run Config Contract",
+            "",
+            "```toml",
+        ]
+    )
+    for idx, strategy in enumerate(handoff["strategies"], start=1):
+        lines.extend(
+            [
+                f"[[autofactor_strategy_handoff]] # {idx}",
+                f'name = "{strategy["name"]}"',
+                f'target = "{strategy["target"]}"',
+                f'strategy_profile = "{strategy["strategy_profile"]}"',
+                f'strategy_family = "{strategy["strategy_family"]}"',
+                f'runtime_score = "{strategy["runtime_score"]}"',
+                'promotion_status = "ready_for_dry_run_handoff"',
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "```",
+            "",
+            "## Acceptance Criteria",
+            "",
+            "- Confirm the runtime score is implemented in the shared scorer.",
+            "- Confirm the dry-run config uses the same full-depth execution gates as research.",
+            "- Confirm replay parity remains ready for the source report.",
+            "- Start with small fixed stake and the existing kill switch.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def render_markdown(result: dict[str, Any]) -> str:
     lines = [
         "# AutoFactor Strategy Promotion Report",
@@ -382,6 +465,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-md", default="")
     parser.add_argument("--output-registry-json", default="")
     parser.add_argument("--output-handoff-json", default="")
+    parser.add_argument("--output-handoff-md", default="")
     parser.add_argument("--runtime-mapping-json", default="")
     parser.add_argument(
         "--allowed-target",
@@ -413,6 +497,7 @@ def main() -> int:
         output = Path(args.output_md)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(render_markdown(result), encoding="utf-8")
+    handoff = build_strategy_handoff(result)
     if args.output_registry_json:
         output = Path(args.output_registry_json)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -424,9 +509,13 @@ def main() -> int:
         output = Path(args.output_handoff_json)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(
-            json.dumps(build_strategy_handoff(result), indent=2, sort_keys=True) + "\n",
+            json.dumps(handoff, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+    if args.output_handoff_md:
+        output = Path(args.output_handoff_md)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(render_handoff_markdown(handoff), encoding="utf-8")
 
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["decision"] == "qualified" or not args.fail_if_blocked else 3
