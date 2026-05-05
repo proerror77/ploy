@@ -30,6 +30,9 @@ COMMIT_BATCH_SIZE = max(1, int(os.getenv("BINANCE_AGGTRADE_COMMIT_BATCH_SIZE", "
 COMMIT_INTERVAL_SECS = max(
     0.1, float(os.getenv("BINANCE_AGGTRADE_COMMIT_INTERVAL_SECS", "1.0"))
 )
+WS_OPEN_TIMEOUT_SECS = max(
+    1.0, float(os.getenv("BINANCE_AGGTRADE_WS_OPEN_TIMEOUT_SECS", "15.0"))
+)
 REPORT_INTERVAL_SECS = max(
     5.0, float(os.getenv("BINANCE_AGGTRADE_REPORT_INTERVAL_SECS", "60"))
 )
@@ -96,7 +99,7 @@ async def collect_aggtrades():
     try:
         while RUNNING:
             try:
-                async with websockets.connect(WS_URL) as ws:
+                async with websockets.connect(WS_URL, open_timeout=WS_OPEN_TIMEOUT_SECS) as ws:
                     await ws.send(json.dumps(subscribe_msg))
                     print(
                         f"[binance-aggtrade] WebSocket connected, subscribed to {len(streams)} streams",
@@ -174,10 +177,15 @@ async def collect_aggtrades():
                             last_commit_at = time.monotonic()
                             conn = await _reconnect_db(conn)
 
-            except (websockets.exceptions.WebSocketException, ConnectionError) as exc:
+            except (
+                websockets.exceptions.WebSocketException,
+                ConnectionError,
+                TimeoutError,
+                OSError,
+            ) as exc:
                 if RUNNING:
                     print(
-                        f"[binance-aggtrade] WebSocket error: {exc}, reconnecting in 5s...",
+                        f"[binance-aggtrade] WebSocket connection error: {exc}, reconnecting in 5s...",
                         flush=True,
                     )
                     await asyncio.sleep(5)

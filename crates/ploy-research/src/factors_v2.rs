@@ -8,6 +8,8 @@ use crate::factors::{pearson_ic, spearman_ic, FactorObservation, ResearchPmBookS
 
 const DEFAULT_STAKE_USD: f64 = 15.0;
 const DEFAULT_TOP_QUANTILE: f64 = 0.2;
+const CONSERVATIVE_VISIBLE_DEPTH_HAIRCUT: f64 = 0.5;
+const CONSERVATIVE_MAX_SWEEP_LEVELS: usize = 3;
 const PM_BOOK_MAX_AGE_SECS: i64 = 30;
 const EPS: f64 = 1e-9;
 
@@ -211,6 +213,10 @@ pub struct FactorObservationV2 {
     pub exit_sweep_levels_15u: f64,
     pub entry_sweep_slippage_bps: f64,
     pub exit_sweep_slippage_bps: f64,
+    pub conservative_entry_sweep_avg_price_15u: f64,
+    pub conservative_entry_sweep_shares_15u: f64,
+    pub conservative_entry_sweep_levels_15u: f64,
+    pub conservative_entry_sweep_slippage_bps: f64,
     pub roundtrip_cost_usd: f64,
     pub roundtrip_pnl_now_15u: Option<f64>,
     pub roundtrip_pnl_now_full_depth_15u: Option<f64>,
@@ -224,10 +230,12 @@ pub struct FactorObservationV2 {
     pub label_settlement_win: Option<f64>,
     pub label_executable_pnl_15u: Option<f64>,
     pub label_full_depth_executable_pnl_15u: Option<f64>,
+    pub label_conservative_executable_pnl_15u: Option<f64>,
     pub label_executable_fillable: bool,
     pub label_exit_fillable: bool,
     pub label_full_depth_entry_fillable: bool,
     pub label_full_depth_exit_fillable: bool,
+    pub label_conservative_entry_fillable: bool,
     pub label_future_exit_bid_change_5s: Option<f64>,
     pub label_future_exit_bid_change_10s: Option<f64>,
     pub label_future_exit_bid_change_30s: Option<f64>,
@@ -391,12 +399,14 @@ pub struct SettlementProbabilityBaselineRow {
     pub expected_calibration_error: f64,
     pub avg_edge: f64,
     pub avg_full_depth_settlement_pnl: f64,
+    pub avg_conservative_settlement_pnl: f64,
     pub profit_factor: f64,
     pub edge_bucket_monotonic_non_decreasing: bool,
     pub top_edge_count: usize,
     pub top_edge_avg_edge: f64,
     pub top_edge_win_rate: f64,
     pub top_edge_avg_full_depth_settlement_pnl: f64,
+    pub top_edge_avg_conservative_settlement_pnl: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -409,6 +419,7 @@ pub struct SettlementProbabilityCalibrationRow {
     pub calibration_error: f64,
     pub avg_edge: f64,
     pub avg_full_depth_settlement_pnl: f64,
+    pub avg_conservative_settlement_pnl: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -421,7 +432,9 @@ pub struct SettlementProbabilityEdgeBucketRow {
     pub actual_win_rate: f64,
     pub avg_full_depth_entry_price: f64,
     pub avg_full_depth_settlement_pnl: f64,
+    pub avg_conservative_settlement_pnl: f64,
     pub profit_factor: f64,
+    pub conservative_profit_factor: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2495,6 +2508,7 @@ pub fn build_settlement_probability_report(
                     entry_price,
                     edge: q - entry_price,
                     pnl,
+                    conservative_pnl: row.label_conservative_executable_pnl_15u,
                 });
         }
     }
@@ -2567,12 +2581,12 @@ pub fn format_settlement_probability_report(report: &SettlementProbabilityReport
         report.options.min_bucket_observations,
         report.options.top_edge_quantile,
     ));
-    out.push_str("Population is full-depth entry-fillable candidate rows with settled labels. Edge is q_side - full_depth_entry_sweep_avg_price; PnL is full-depth settlement PnL after crypto fee.\n");
+    out.push_str("Population is full-depth entry-fillable candidate rows with settled labels. Edge is q_side - full_depth_entry_sweep_avg_price; PnL is full-depth settlement PnL after crypto fee. Conservative PnL uses 50% visible depth and max 3 CLOB levels.\n");
     out.push_str("\n--- Baseline Comparison ---\n");
-    out.push_str("model,n,avg_q,actual_win,brier,log_loss,ece,avg_edge,avg_full_depth_settlement_pnl,profit_factor,edge_bucket_monotonic,top_edge_count,top_edge_avg_edge,top_edge_win,top_edge_avg_full_depth_settlement_pnl\n");
+    out.push_str("model,n,avg_q,actual_win,brier,log_loss,ece,avg_edge,avg_full_depth_settlement_pnl,avg_conservative_settlement_pnl,profit_factor,edge_bucket_monotonic,top_edge_count,top_edge_avg_edge,top_edge_win,top_edge_avg_full_depth_settlement_pnl,top_edge_avg_conservative_settlement_pnl\n");
     for row in &report.baselines {
         out.push_str(&format!(
-            "{},{},{:.4},{:.4},{:.6},{:.6},{:.6},{:.4},{:.4},{:.4},{},{},{:.4},{:.4},{:.4}\n",
+            "{},{},{:.4},{:.4},{:.6},{:.6},{:.6},{:.4},{:.4},{:.4},{:.4},{},{},{:.4},{:.4},{:.4},{:.4}\n",
             row.model,
             row.n,
             row.avg_predicted_q,
@@ -2582,19 +2596,21 @@ pub fn format_settlement_probability_report(report: &SettlementProbabilityReport
             row.expected_calibration_error,
             row.avg_edge,
             row.avg_full_depth_settlement_pnl,
+            row.avg_conservative_settlement_pnl,
             row.profit_factor,
             row.edge_bucket_monotonic_non_decreasing,
             row.top_edge_count,
             row.top_edge_avg_edge,
             row.top_edge_win_rate,
             row.top_edge_avg_full_depth_settlement_pnl,
+            row.top_edge_avg_conservative_settlement_pnl,
         ));
     }
     out.push_str("\n--- Calibration Buckets ---\n");
-    out.push_str("model,q_bucket,count,avg_q,actual_win,calibration_error,avg_edge,avg_full_depth_settlement_pnl\n");
+    out.push_str("model,q_bucket,count,avg_q,actual_win,calibration_error,avg_edge,avg_full_depth_settlement_pnl,avg_conservative_settlement_pnl\n");
     for row in &report.calibration {
         out.push_str(&format!(
-            "{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            "{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
             row.model,
             row.q_bucket,
             row.count,
@@ -2603,13 +2619,14 @@ pub fn format_settlement_probability_report(report: &SettlementProbabilityReport
             row.calibration_error,
             row.avg_edge,
             row.avg_full_depth_settlement_pnl,
+            row.avg_conservative_settlement_pnl,
         ));
     }
     out.push_str("\n--- Edge Buckets ---\n");
-    out.push_str("model,edge_bucket,count,avg_edge,avg_q,actual_win,avg_entry_price,avg_full_depth_settlement_pnl,profit_factor\n");
+    out.push_str("model,edge_bucket,count,avg_edge,avg_q,actual_win,avg_entry_price,avg_full_depth_settlement_pnl,avg_conservative_settlement_pnl,profit_factor,conservative_profit_factor\n");
     for row in &report.edge_buckets {
         out.push_str(&format!(
-            "{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            "{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
             row.model,
             row.edge_bucket,
             row.count,
@@ -2618,7 +2635,9 @@ pub fn format_settlement_probability_report(report: &SettlementProbabilityReport
             row.actual_win_rate,
             row.avg_full_depth_entry_price,
             row.avg_full_depth_settlement_pnl,
+            row.avg_conservative_settlement_pnl,
             row.profit_factor,
+            row.conservative_profit_factor,
         ));
     }
     out.push_str("\n--- Anti-Overfit Diagnostics ---\n");
@@ -6763,6 +6782,7 @@ struct SettlementProbabilitySample {
     entry_price: f64,
     edge: f64,
     pnl: f64,
+    conservative_pnl: Option<f64>,
 }
 
 fn settlement_probability_models(row: &FactorObservationV2) -> Vec<(&'static str, f64)> {
@@ -6889,12 +6909,18 @@ fn build_probability_baseline_row(
         expected_calibration_error: expected_calibration_error(calibration, n),
         avg_edge: mean(samples.iter().map(|sample| sample.edge)),
         avg_full_depth_settlement_pnl: mean(samples.iter().map(|sample| sample.pnl)),
+        avg_conservative_settlement_pnl: mean(
+            samples.iter().filter_map(|sample| sample.conservative_pnl),
+        ),
         profit_factor: profit_factor(samples.iter().map(|sample| sample.pnl)),
         edge_bucket_monotonic_non_decreasing: edge_bucket_monotonic(edge_buckets),
         top_edge_count: top.len(),
         top_edge_avg_edge: mean(top.iter().map(|sample| sample.edge)),
         top_edge_win_rate: mean(top.iter().map(|sample| sample.win)),
         top_edge_avg_full_depth_settlement_pnl: mean(top.iter().map(|sample| sample.pnl)),
+        top_edge_avg_conservative_settlement_pnl: mean(
+            top.iter().filter_map(|sample| sample.conservative_pnl),
+        ),
     }
 }
 
@@ -6924,6 +6950,11 @@ fn build_probability_calibration_rows(
                 calibration_error: (avg_q - win_rate).abs(),
                 avg_edge: mean(bucket_samples.iter().map(|sample| sample.edge)),
                 avg_full_depth_settlement_pnl: mean(bucket_samples.iter().map(|sample| sample.pnl)),
+                avg_conservative_settlement_pnl: mean(
+                    bucket_samples
+                        .iter()
+                        .filter_map(|sample| sample.conservative_pnl),
+                ),
             }
         })
         .collect()
@@ -6960,7 +6991,17 @@ fn build_probability_edge_bucket_rows(
                 bucket_samples.iter().map(|sample| sample.entry_price),
             ),
             avg_full_depth_settlement_pnl: mean(bucket_samples.iter().map(|sample| sample.pnl)),
+            avg_conservative_settlement_pnl: mean(
+                bucket_samples
+                    .iter()
+                    .filter_map(|sample| sample.conservative_pnl),
+            ),
             profit_factor: profit_factor(bucket_samples.iter().map(|sample| sample.pnl)),
+            conservative_profit_factor: profit_factor(
+                bucket_samples
+                    .iter()
+                    .filter_map(|sample| sample.conservative_pnl),
+            ),
         });
     }
     rows
@@ -7384,6 +7425,17 @@ fn side_row(
     let entry_sweep = pm_book
         .map(|book| sweep_buy_to_stake(&book.asks, entry_ask, stake_usd))
         .unwrap_or_default();
+    let conservative_entry_sweep = pm_book
+        .map(|book| {
+            sweep_buy_to_stake_with_config(
+                &book.asks,
+                entry_ask,
+                stake_usd,
+                CONSERVATIVE_VISIBLE_DEPTH_HAIRCUT,
+                Some(CONSERVATIVE_MAX_SWEEP_LEVELS),
+            )
+        })
+        .unwrap_or_default();
     let exit_sweep = if entry_sweep.fillable {
         pm_book
             .map(|book| sweep_sell_shares(&book.bids, exit_bid, entry_sweep.shares))
@@ -7438,6 +7490,24 @@ fn side_row(
             entry_sweep.shares - stake_usd - full_depth_entry_fee_usd
         } else {
             -stake_usd - full_depth_entry_fee_usd
+        })
+    } else {
+        None
+    };
+    let conservative_entry_fee_usd =
+        if conservative_entry_sweep.fillable && valid_price(conservative_entry_sweep.avg_price) {
+            conservative_entry_sweep.shares * crypto_fee_cost(conservative_entry_sweep.avg_price)
+        } else {
+            f64::NAN
+        };
+    let conservative_executable_pnl = if conservative_entry_sweep.fillable
+        && settlement_win.is_finite()
+        && conservative_entry_fee_usd.is_finite()
+    {
+        Some(if settlement_win >= 0.5 {
+            conservative_entry_sweep.shares - stake_usd - conservative_entry_fee_usd
+        } else {
+            -stake_usd - conservative_entry_fee_usd
         })
     } else {
         None
@@ -7570,6 +7640,10 @@ fn side_row(
         exit_sweep_levels_15u: exit_sweep.levels_used,
         entry_sweep_slippage_bps: entry_sweep.slippage_bps,
         exit_sweep_slippage_bps: exit_sweep.slippage_bps,
+        conservative_entry_sweep_avg_price_15u: conservative_entry_sweep.avg_price,
+        conservative_entry_sweep_shares_15u: conservative_entry_sweep.shares,
+        conservative_entry_sweep_levels_15u: conservative_entry_sweep.levels_used,
+        conservative_entry_sweep_slippage_bps: conservative_entry_sweep.slippage_bps,
         roundtrip_cost_usd,
         roundtrip_pnl_now_15u,
         roundtrip_pnl_now_full_depth_15u,
@@ -7581,10 +7655,12 @@ fn side_row(
         label_settlement_win: settlement_win.is_finite().then_some(settlement_win),
         label_executable_pnl_15u: executable_pnl,
         label_full_depth_executable_pnl_15u: full_depth_executable_pnl,
+        label_conservative_executable_pnl_15u: conservative_executable_pnl,
         label_executable_fillable: entry_fillable,
         label_exit_fillable: exit_fillable,
         label_full_depth_entry_fillable: entry_sweep.fillable,
         label_full_depth_exit_fillable: exit_sweep.fillable,
+        label_conservative_entry_fillable: conservative_entry_sweep.fillable,
         label_future_exit_bid_change_5s: None,
         label_future_exit_bid_change_10s: None,
         label_future_exit_bid_change_30s: None,

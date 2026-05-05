@@ -23,6 +23,7 @@ WS_URL = "wss://stream.binance.com:9443/stream"
 DB_URL = os.getenv("PLOY_DATABASE__URL") or os.getenv("DATABASE_URL") or "postgresql://postgres:postgres@localhost:5432/ploy"
 COMMIT_BATCH_SIZE = max(1, int(os.getenv("BINANCE_PRICE_COMMIT_BATCH_SIZE", "25")))
 COMMIT_INTERVAL_SECS = max(0.1, float(os.getenv("BINANCE_PRICE_COMMIT_INTERVAL_SECS", "1.0")))
+WS_OPEN_TIMEOUT_SECS = max(1.0, float(os.getenv("BINANCE_PRICE_WS_OPEN_TIMEOUT_SECS", "15.0")))
 
 RUNNING = True
 
@@ -81,7 +82,7 @@ async def collect_prices():
     try:
         while RUNNING:
             try:
-                async with websockets.connect(WS_URL) as ws:
+                async with websockets.connect(WS_URL, open_timeout=WS_OPEN_TIMEOUT_SECS) as ws:
                     # Subscribe to trade streams
                     await ws.send(json.dumps(subscribe_msg))
                     print(f"[binance-price] WebSocket connected, subscribed to {len(streams)} streams", flush=True)
@@ -158,9 +159,17 @@ async def collect_prices():
                             print(f"[binance-price] Error parsing message: {e}", flush=True)
                             continue
 
-            except (websockets.exceptions.WebSocketException, ConnectionError) as e:
+            except (
+                websockets.exceptions.WebSocketException,
+                ConnectionError,
+                TimeoutError,
+                OSError,
+            ) as e:
                 if RUNNING:
-                    print(f"[binance-price] WebSocket error: {e}, reconnecting in 5s...", flush=True)
+                    print(
+                        f"[binance-price] WebSocket connection error: {e}, reconnecting in 5s...",
+                        flush=True,
+                    )
                     await asyncio.sleep(5)
                 else:
                     break

@@ -151,6 +151,21 @@ Fresh strict data-gate attempt:
   `binance_agg_trades`, `binance_lob`
 - Gap evidence: PM quotes/orderbooks max gap `1705m`; Deribit and Binance
   sources max gap around `1700m`
+- Root-cause follow-up on `tango-1-1` found this was a real continuous
+  collection hole, not a missing "7 days" misunderstanding:
+  - strict audit gap: PM quotes/orderbooks from about
+    `2026-05-04 05:29/05:30 +0800` to
+    `2026-05-05 09:54/09:55 +0800`;
+  - Deribit/Binance sources from about `2026-05-04 05:30 +0800` to
+    `2026-05-05 09:50 +0800`;
+  - Binance price / aggTrade / LOB services had `NRestarts=6480`, and journals
+    showed repeated `timed out during opening handshake` failures until around
+    `2026-05-05 09:50 +0800`;
+  - Deribit IV stayed active but logged repeated upstream SSL/read-timeout
+    errors, and ATM Greeks cycles returned `ok=0/0` while no fresh IV
+    instruments were available;
+  - current one-hour audit after recovery is `ok` for PM quotes/orderbooks,
+    Deribit IV/Greeks, and BTC/ETH/SOL Binance price/trades/LOB.
 
 This is a valid negative PRD result, not a code failure. It means the current
 database window cannot prove the settlement-probability system is ready for
@@ -170,6 +185,9 @@ Conservative execution surface:
 
 - `factor_walk_forward_v2` now prints a second Full-Depth Execution Matrix with
   `visible_depth_haircut=0.5` and `max_levels=3`.
+- The settlement probability report now also prints conservative settlement PnL
+  and conservative profit-factor columns for baseline, calibration, and edge
+  buckets using the same `50% visible depth / max 3 CLOB levels` assumption.
 - Verification:
   `rustfmt --edition 2021 --check
   crates/ploy-research/examples/factor_walk_forward_v2.rs`
@@ -178,8 +196,8 @@ Conservative execution surface:
   /opt/homebrew/bin/timeout 240 rtk cargo check -p ploy-research --example
   factor_walk_forward_v2 --features db --no-default-features`
 - Remaining conservative gap: this surfaces conservative capacity/fillability
-  in the matrix, but conservative settlement edge buckets and replay parity
-  still need a decision-grade snapshot.
+  and conservative settlement edge buckets, but replay parity still needs a
+  decision-grade snapshot.
 
 ## Recovery Checklist
 
@@ -188,9 +206,9 @@ Conservative execution surface:
    runner-local.
 2. Run a `pm5d-vol` / Deribit-included snapshot for BTC/ETH/SOL to satisfy the
    PRD volatility lane.
-3. Add conservative settlement edge buckets after a strict snapshot passes:
-   visible-depth haircut, max sweep levels, quote-age, latency, and
-   adverse-selection buffers.
+3. Run the conservative settlement edge buckets against the next strict
+   snapshot and add any remaining quote-age, latency, and adverse-selection
+   buffers needed for live handoff.
 4. Narrow the candidate to BTC/ETH/SOL settlement probability top-edge buckets.
 5. Exclude DOGE from any all-six settlement promotion until its holdout turns
    positive under the same full-depth labels.
