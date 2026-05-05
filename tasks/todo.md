@@ -13017,3 +13017,27 @@ Issue: https://github.com/proerror77/ploy/issues/256
   recorded replay/dry-run evidence showing live orders actually carry
   `runtime_price_basis=full_depth_sweep` before the PRD runtime parity blocker
   can be closed.
+- 2026-05-05: PR #341 was merged to `main` at
+  `8f0bb71718832299dfe9780d6f73aba868d05b99` and deployed by workflow run
+  `25377605431`. Tango verification showed
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun` running, `ployd`
+  active with restart/OOM guardrails, no `cargo`/`rustc` process on host, and
+  live post-deploy Polymarket CLOB ingestion. A post-deploy settlement
+  probability dry-run order at `2026-05-05 21:23:43.833643+08` carried
+  `runtime_price_basis=full_depth_sweep` and
+  `full_depth_runtime_parity=true`, proving the runtime entry path can use
+  full CLOB depth. Dispatched recorded replay parity run `25379165698` for
+  `2026-05-05T21:22:30+08:00 -> 2026-05-05T21:25:30+08:00`; the PRD runtime
+  parity blocker remains open until that post-deploy replay artifact passes
+  with no blocking flags.
+- 2026-05-05: Recorded replay parity run `25379165698` completed successfully
+  for the post-PR341 full-depth runtime window. The artifact
+  `recorded-replay-parity-25379165698` reported `strict_parity_ready=true`,
+  shared orders/fills `2/2`, `blocking_risk_flags=[]`, and decision
+  `continue`. Advisory event-level flags remain
+  (`replay_has_no_event_level_rows`,
+  `events_present_in_dryrun_missing_from_replay`), but they are not blockers for
+  current order/fill runtime strict parity. This closes the runtime full-depth
+  dry-run/replay parity blocker; the PRD remains incomplete because issue #339
+  still blocks the retained 168h strict data gate and retained walk-forward
+  promotion evidence.
