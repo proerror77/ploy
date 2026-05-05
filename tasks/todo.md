@@ -116,11 +116,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   locks include `financial` / `financial-recycling`.
 - 2026-05-05: Cancelled stale snapshot-backed Factor Walk-Forward runs
   `25351768149` / `25351768140` and later `25351981303` / `25351981397`
+  / `25352258776` / `25352258774` / `25352486438` / `25352486423`
   because they were pinned to older report-code SHAs. Re-triggered
   latest-report validation with checkout ref
-  `b643142f3ee83facd534356b2584bbec08a7f2f9`: BTC/ETH/SOL run
-  `25352258776` on snapshot `25254380121`, and XRP/DOGE/BNB run
-  `25352258774` on snapshot `25255158983`. Both are expected to remain queued
+  `37f72186128956b523d43667f206341900fd7a28`: BTC/ETH/SOL run
+  `25352664353` on snapshot `25254380121`, and XRP/DOGE/BNB run
+  `25352664495` on snapshot `25255158983`. Both are expected to remain queued
   or pending until `ploy-ci-1` is restored.
 - 2026-05-05: `ploy-ci-1` remained offline after another check. Aliyun still
   reports ECS `i-6we7z44sfbfbnosbeymz` as `Stopped` with `financial` /
