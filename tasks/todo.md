@@ -430,6 +430,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   one-hour smoke command shape. This does not change the current promotion
   decision: strict retained data and passing replay parity artifacts are still
   required before dry-run handoff.
+- 2026-05-05: The first real orchestrator smoke found a dispatch-ref bug rather
+  than a data bug. `gh workflow run` used the default-branch workflow
+  definition, so snapshot run `25360488853` failed at options parsing because
+  that definition did not yet know `upload_full_snapshot`. Fixed
+  `scripts/run_settlement_probability_prd_gate.py` to pass `--ref <git_ref>` on
+  workflow dispatch, keeping the workflow definition and checkout ref aligned.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 

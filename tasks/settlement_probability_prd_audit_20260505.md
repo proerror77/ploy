@@ -315,6 +315,13 @@ scripts/run_settlement_probability_prd_gate.py \
   --audit-lookback-hours 1 \
   --dry-run
 ```
+- First live dispatch exposed a workflow-definition ref bug: `gh workflow run`
+  used the repository default branch workflow definition even though the
+  workflow input `git_ref` checked out the PR branch inside the job. Run
+  `25360488853` therefore failed before data audit because the default-branch
+  `research-snapshot.yml` did not yet know `upload_full_snapshot`. The
+  orchestrator now passes `--ref <git_ref>` to `gh workflow run`, so the
+  workflow definition and checkout ref stay aligned.
 
 Interpretation:
 
