@@ -24,9 +24,9 @@ on:
         required: true
         default: "15"
       options_json:
-        description: "Advanced options JSON: sampling, optimizer_data_dir, data_profile, audit gate, local snapshot registry"
+        description: "Advanced options JSON: sampling, optimizer_data_dir, data_profile, audit gate, local snapshot registry, optional full snapshot upload"
         required: false
-        default: '{"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":""}'
+        default: '{"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_full_snapshot":false}'
 
 concurrency:
   group: research-snapshot-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}-${{ github.event.inputs.symbols }}
@@ -64,6 +64,7 @@ jobs:
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Parse advanced options
+        id: snapshot_options
         env:
           OPTIONS_JSON: ${{ github.event.inputs.options_json }}
         run: |
@@ -82,7 +83,9 @@ jobs:
               "audit_lookback_hours": "168",
               "data_gate": "never",
               "snapshot_registry_dir": "",
+              "upload_full_snapshot": "false",
           }
+          bool_keys = {"upload_full_snapshot"}
           choices = {
               "data_profile": {"pm5d-execution", "pm5d-vol", "all", "custom"},
               "data_gate": {"critical", "warn", "never"},
@@ -96,7 +99,16 @@ jobs:
               raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
 
           values = dict(defaults)
-          values.update({key: str(value) for key, value in data.items()})
+          for key, value in data.items():
+              if key in bool_keys:
+                  if isinstance(value, bool):
+                      values[key] = "true" if value else "false"
+                  elif str(value).lower() in {"true", "false"}:
+                      values[key] = str(value).lower()
+                  else:
+                      raise SystemExit(f"options_json value for {key} must be boolean")
+              else:
+                  values[key] = str(value)
           for key, allowed in choices.items():
               if values[key] not in allowed:
                   choices_text = ", ".join(sorted(allowed))
@@ -107,6 +119,8 @@ jobs:
                   if "\n" in value:
                       raise SystemExit(f"options_json value for {key} must be single-line")
                   handle.write(f"SNAPSHOT_{key.upper()}={value}\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"upload_full_snapshot={values['upload_full_snapshot']}\n")
           PY
 
       - name: Ensure psql client
@@ -316,9 +330,18 @@ jobs:
           done
           {
             echo "run_id=${GITHUB_RUN_ID}"
-            echo "full_snapshot_embedded=false"
+            echo "full_snapshot_embedded=${SNAPSHOT_UPLOAD_FULL_SNAPSHOT}"
             echo "registry=runner-local"
           } > artifacts/research-snapshot-provenance/source.txt
+
+      - name: Upload full snapshot artifact
+        if: ${{ steps.snapshot_options.outputs.upload_full_snapshot == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: research-snapshot-${{ github.run_id }}
+          path: artifacts/research-snapshot/
+          compression-level: 0
+          retention-days: 3
 
       - name: Upload snapshot provenance artifact
         if: always()
