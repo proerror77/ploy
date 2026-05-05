@@ -22,17 +22,19 @@ snapshot-backed full-depth execution labels and probability-model validation.
 
 - Branch: `feat/settlement-probability-prd`
 - PR: #319
-- Latest reviewed head: `b25ccad9` after the settlement walk-forward report,
-  PRD promotion gate, and remote short-window promotion-gate smoke
+- Latest reviewed head: `046291b8` after the settlement walk-forward report,
+  PRD promotion gate, replay-parity artifact wiring, and repeatable gate
+  orchestrator
 - PR status: mergeable
 - Ordinary PR CI: passed on run `25354110281`
 - PR Auto Review: passed on run `25354110277`
 - CodeRabbit: success
 - Runner blocker issue: #320, closed after `ploy-ci-1` recovery
 - Follow-up issue for remaining PRD promotion blockers: #321
-- Final pushed head: PR #319 current head after final audit docs
-- Final PR check status: all required PR checks green on run `25359533557`
-  plus PR Auto Review `25359533551`; CodeRabbit success.
+- Final pushed head: `046291b8`
+- Final PR check status: all required PR checks green on run `25360108368`
+  after rerunning the flaky control-plane/core job; PR Auto Review
+  `25360108349`; CodeRabbit success.
 - Latest short-window promotion-gate smoke: Factor Walk-Forward V2 run
   `25359476569`, source snapshot `25356726430`, completed successfully and
   printed `ready_for_dry_run_handoff=false`.
@@ -55,7 +57,8 @@ snapshot-backed full-depth execution labels and probability-model validation.
 | Final probability blend | `q_final_logit_blend` in settlement probability report | Combines market midpoint, distance/LOB/vol probability, and EventVolSurface prior in logit space | Complete |
 | Walk-forward OOS | `=== Settlement Probability Walk-Forward Report ===` | Implemented train-window-only EventVolSurface OOS report; short-window smoke intentionally has no non-empty OOS windows | Code complete; decision-grade evidence pending |
 | PRD promotion gate | `=== Settlement Probability PRD Promotion Gate ===` | Run `25359476569` prints `ready_for_dry_run_handoff=false`, `walk_forward_oos=false`, and `recorded_replay_parity=false` | Complete as a blocker gate |
-| Replay parity artifact input | `factor_walk_forward_v2 --replay-parity-json`, workflow `options_json.replay_parity_json` | The report can now consume `scripts/replay_dryrun_parity.py` JSON and drive the recorded replay parity gate from runtime/event strict parity fields | Code complete; no passing parity artifact yet |
+| Replay parity artifact input | `factor_walk_forward_v2 --replay-parity-json`, workflow `options_json.replay_parity_json`, `options_json.replay_parity_run_id` | The report can now consume `scripts/replay_dryrun_parity.py` JSON either from a runner path or from a downloaded `replay-dryrun-parity-*` artifact | Code complete; no passing parity artifact yet |
+| Repeatable PRD gate runner | `scripts/run_settlement_probability_prd_gate.py` | Script dispatches strict `pm5d-vol` snapshot with `data_gate=critical` / `upload_full_snapshot=true`, waits, then dispatches snapshot-backed `factor-walk-forward-v2` with optional replay parity artifact linkage | Complete as orchestration; decision-grade data still pending |
 | Official settlement fidelity | Snapshot manifest `require_official_settlement=true` | Provenance for snapshots `25254380121` and `25255158983` confirms official settlement required | Partial evidence |
 | Data quality / coverage | `data-gap-audit.md` | Strict `pm5d-vol` run `25354264444` failed at `Audit required market data`; every required source had critical max gaps around `1700m` | Failing / blocks promotion |
 | Deribit / vol inputs | `data_profile=pm5d-vol` or `include_deribit=true` snapshot | Short-window snapshot `25356726430` includes Deribit; strict retained 168h snapshot still fails coverage | Partial; full retained evidence missing |
@@ -281,11 +284,37 @@ Replay-parity input integration after latest changes:
 - `factor_walk_forward_v2` accepts optional `--replay-parity-json <path>`.
 - `.github/workflows/factor-walk-forward-v2.yml` accepts optional
   `options_json.replay_parity_json` and forwards it to the example.
+- `.github/workflows/factor-walk-forward-v2.yml` also accepts optional
+  `options_json.replay_parity_run_id` and
+  `options_json.replay_parity_artifact_name`; when supplied, it downloads the
+  `replay-dryrun-parity-*` artifact and forwards
+  `artifacts/replay-parity/parity-evaluation.json` to the example.
 - The parser reads `runtime_evidence_comparison.strict_parity_ready`,
   `event_comparison.strict_parity_ready`, `risk_flags`, and `decision` from
   `scripts/replay_dryrun_parity.py` output. The promotion gate passes recorded
   replay parity only when runtime parity and event parity are true and risk
   flags are empty.
+
+Repeatable gate orchestration after latest changes:
+
+- `scripts/run_settlement_probability_prd_gate.py` is the canonical local
+  control-plane helper for the remaining PRD evidence chain.
+- It dispatches `research-snapshot.yml` with `data_profile=pm5d-vol`,
+  `data_gate=critical`, `upload_full_snapshot=true`, and the requested
+  symbols/stake/window.
+- It waits for the strict snapshot; if the data gate fails, it comments issue
+  #321 and exits blocked instead of running downstream reports on invalid data.
+- If the snapshot succeeds, it dispatches `factor-walk-forward-v2.yml` with the
+  produced `snapshot_run_id` and optional replay parity artifact linkage.
+- Dry-run validation of the dispatch shape passed for a one-hour smoke command:
+
+```bash
+scripts/run_settlement_probability_prd_gate.py \
+  --start-date 2026-05-05 \
+  --end-date 2026-05-05 \
+  --audit-lookback-hours 1 \
+  --dry-run
+```
 
 Interpretation:
 
@@ -311,3 +340,29 @@ Interpretation:
 5. Exclude DOGE from any all-six settlement promotion until its holdout turns
    positive under the same full-depth labels.
 6. Run recorded replay parity with the same scorer before any dry-run handoff.
+
+## Completion Decision
+
+The PRD is not complete as a tradable strategy system yet.
+
+Completed as code/report architecture:
+
+- full-depth execution truth;
+- settlement probability baselines and q-final blend;
+- calibration, edge-bucket, baseline, anti-overfit, symbol-holdout, and
+  walk-forward report surfaces;
+- conservative CLOB haircut labels and conservative settlement PnL columns;
+- explicit PRD promotion gate;
+- replay parity artifact input path;
+- repeatable strict snapshot -> walk-forward gate orchestration.
+
+Still blocking strategy completion:
+
+- no clean retained `pm5d-vol` snapshot with `data_gate=critical`;
+- no decision-grade non-empty OOS window from that clean snapshot;
+- no passing recorded replay/dry-run parity artifact;
+- no dry-run handoff packet with fixed stake, strict kill switch, and shared
+  scorer parity.
+
+Therefore the current correct state is: PR #319 is mergeable as PRD
+infrastructure, but the strategy is not yet approved for dry-run/live.
