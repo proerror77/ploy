@@ -7,7 +7,7 @@ as a dry-run-first strategy system. The system is not live-approved.
 
 ## Current Verdict
 
-Status: **not complete**
+Status: **complete for dry-run-first BTC/ETH settlement-probability handoff**
 
 The runtime/dry-run evidence path is now working, including settlement-specific
 recorded replay parity. Runtime full-depth sweep support has been implemented
@@ -17,16 +17,17 @@ now shown `runtime_price_basis=full_depth_sweep` with
 
 The strict 168h market-data continuity gate is still blocked by a historical
 collector outage, tracked in issue #339. That strict gate remains useful as
-collector-health evidence, but it is no longer the only valid PRD promotion
-path for PM 5m / 15m event research. These markets are discrete settlement
-events, so the strategy gate may use event-complete evidence: exclude outage
+collector-health evidence, but it is not the strategy-promotion gate for PM
+5m / 15m settlement research. These markets are discrete settlement events, so
+the decision-grade PRD gate now uses event-complete evidence: exclude outage
 events, require complete executable rows for the retained train/OOS events, and
-keep train/validation/test event IDs disjoint. Post-deploy recorded replay
-parity for the new full-depth runtime path has passed.
+keep train/validation/test event IDs disjoint.
 
-Do not mark the PRD complete until either the strict continuous gate passes or
-the new event-complete gate passes with the same or newer settlement-specific
-replay parity artifact.
+The retained event-complete gate has now passed on `main` with the newer
+post-deploy full-depth replay parity artifact. Therefore the PRD is complete
+for the stated dry-run-first BTC/ETH settlement-probability strategy system.
+It is not live approval, not all-symbol promotion, and not a clean 168h
+collector-health signoff.
 
 ## Deliverable Checklist
 
@@ -48,10 +49,11 @@ replay parity artifact.
 | Runtime strict replay parity passes for a fresh settlement window | Run `25374110073`: orders `2/2/2`, fills `2/2/2`, `strict_parity_ready=true`, `blocking_risk_flags=[]`, decision `continue` | Complete |
 | Short-window PRD smoke consumes the new replay parity artifact | Gate run `25374918500`, snapshot `25374930653`, walk-forward `25375300501`; `recorded_replay_parity=true` | Complete as smoke only |
 | Short-window smoke shows current data health | Snapshot `25374930653` passed `data_quality=true` with `audit_lookback_hours=1` | Complete as smoke only |
-| Strict 168h continuous PRD gate passes | Gate run `25374406705` failed before snapshot compilation; audit max gaps `1695-1705m` | Collector-health blocker #339 |
-| Event-complete retained PRD gate exists | `data_quality_mode=event-complete` added to the orchestrator/workflow/promotion gate so outage events can be excluded rather than blocking the whole wall-clock range | Complete in current branch |
-| Non-empty retained walk-forward OOS passes | Needs a fresh event-complete retained run or a later strict continuous run | Blocked |
-| PRD promotion gate is decision-grade | Latest retained gate failed at strict data audit; latest short smoke has `walk_forward_oos=false` due no non-empty OOS windows | Blocked |
+| Strict 168h continuous PRD gate passes | Gate run `25374406705` failed before snapshot compilation; audit max gaps `1695-1705m` | Collector-health blocker #339; not a strategy blocker under event-complete semantics |
+| Event-complete retained PRD gate exists | PR #345 / merge `815a3e8d49a3326e42e253dd4449ff7279bf90ed`; `data_quality_mode=event-complete` added to the orchestrator/workflow/promotion gate | Complete on `main` |
+| Event-complete retained PRD gate passes | Parent run `25385603748`, snapshot run `25385618701`, walk-forward run `25386935332` | Complete |
+| Non-empty retained walk-forward OOS passes | Walk-forward run `25386935332`: `windows=2`, `positive_window_ratio=1.0000`, `min_test_top_edge_pnl=2.7080` | Complete |
+| PRD promotion gate is decision-grade | Walk-forward artifact `factor-walk-forward-v2-25386935332` reports `ready_for_dry_run_handoff=true` | Complete |
 | Live approval / live trading | No live approval requested or granted | Not in scope |
 
 ## Evidence Details
@@ -224,7 +226,49 @@ Interpretation: the updated full-depth replay parity artifact is consumable by
 the PRD gate. The short-window smoke remains intentionally blocked as promotion
 evidence because it has no non-empty OOS window.
 
-### Retained-Window Blocker
+### Retained Event-Complete Promotion Gate
+
+PR #345 added event-complete strategy-promotion semantics and merged to `main`.
+
+- PR: `https://github.com/proerror77/ploy/pull/345`
+- Merge SHA: `815a3e8d49a3326e42e253dd4449ff7279bf90ed`
+- Parent gate run: `25385603748`
+- Snapshot run: `25385618701`
+- Walk-forward run: `25386935332`
+- Artifact: `factor-walk-forward-v2-25386935332`
+- Replay parity artifact consumed:
+  `recorded-replay-parity-25379165698`
+
+Promotion gate excerpt:
+
+```text
+ready_for_dry_run_handoff=true
+data_quality=true, mode=event_complete, snapshot_data_audit_status=critical,
+  event_complete_events=2488, event_complete_rows=51989
+deribit_vol_surface=true
+full_depth_entry_capacity=true
+conservative_entry_capacity=true
+probability_calibration=true, model=q_event_surface_empirical, ece=0.001258
+full_depth_settlement_edge=true, model=q_market_midpoint,
+  top_edge_full_depth_pnl=2.9996
+conservative_settlement_edge=true, model=q_market_midpoint,
+  top_edge_conservative_pnl=2.6070
+anti_overfit_diagnostics=true, model=q_final_logit_blend, passed_tests=3/3
+symbol_holdout=true, model=q_market_midpoint, passed_symbols=2/2
+walk_forward_oos=true, model=q_market_midpoint, windows=2,
+  positive_window_ratio=1.0000, min_test_top_edge_pnl=2.7080
+recorded_replay_parity=true, runtime_ready=true, event_ready=false,
+  blocking_flags=<none>, advisory_flags=replay_has_no_event_level_rows|
+  events_present_in_dryrun_missing_from_replay, decision=continue
+```
+
+Interpretation: the PRD strategy-promotion gate is now decision-grade for the
+BTC/ETH dry-run-first settlement-probability handoff. The retained global
+snapshot audit still records `critical` because of the historical outage, but
+the strategy gate passes because there are enough complete executable events
+after excluding incomplete event rows.
+
+### Retained Strict-Continuous Collector-Health Blocker
 
 Retained PRD gate:
 
@@ -292,9 +336,9 @@ This confirms current ingestion is healthy. The historical gap blocks the strict
 continuous collector-health gate, but it should not automatically discard
 complete PM5D/PM15D events before or after the outage.
 
-## Open Blockers
+## Residual Gaps
 
-### Blocker 1: Retained Event-Complete Promotion Evidence
+### Gap 1: Strict Continuous Collector-Health Evidence
 
 Issue: `https://github.com/proerror77/ploy/issues/339`
 
@@ -302,25 +346,33 @@ The older retained strict PRD gate cannot pass until every required `pm5d-vol`
 source has continuous coverage over the audit window. That is a valid
 collector-health check, not the only valid event-strategy promotion check.
 
-Current practical path:
+Current practical interpretation:
 
-1. Run the new `event-complete` PRD gate over a retained window. It keeps the
-   `pm5d-vol` audit as provenance, but does not fail only because an unrelated
-   outage exists elsewhere in the wall-clock lookback.
-2. Require the promotion gate to prove complete executable event rows,
-   non-empty walk-forward OOS, full-depth/conservative settlement edge,
-   calibration, anti-overfit diagnostics, symbol holdout, Deribit inclusion,
-   and recorded replay parity.
-3. Keep the strict continuous gate as a separate collector-health retry after
-   the 2026-05-04/2026-05-05 collection outage rolls out of the 168h lookback,
+1. Strategy promotion can use event-complete retained evidence and has passed.
+2. Strict continuous audit remains a separate collector-health retry after the
+   2026-05-04/2026-05-05 collection outage rolls out of the 168h lookback,
    roughly after `2026-05-12 09:55 +08:00`, or after validated lossless
    full-source backfill.
+3. Do not substitute candles or synthetic LOB rows for missing event features.
+   Exclude incomplete events for strategy research.
 
 The runbook exposes historical PM orderbook and Deribit IV backfill paths, but
 there is no current repo evidence of a lossless historical Binance LOB backfill
 for the missing WebSocket partial-depth interval. Do not substitute candles or
 synthetic LOB rows for missing event features. Exclude incomplete events
 instead.
+
+### Gap 2: Event-Level Replay Parity Advisory Flags
+
+Recorded replay parity has no blocking order/fill runtime flags, but still
+reports advisory event-level flags:
+
+- `replay_has_no_event_level_rows`
+- `events_present_in_dryrun_missing_from_replay`
+
+These do not block the current dry-run handoff because order/fill strict parity
+passed and the PRD gate treats them as advisory. They should be closed before
+making stronger event-level replay claims or any future live-readiness claim.
 
 ### Resolved: Post-Deploy Full-Depth Runtime Parity
 
@@ -342,30 +394,10 @@ authorize live trading.
 
 1. Keep the settlement dry-run collecting paper evidence.
 2. Keep monitoring quick data audit; current 1h audit is healthy.
-3. Run the event-complete retained PRD gate now, using the newer post-deploy
-   full-depth replay parity artifact.
-4. Re-run the strict continuous collector-health gate after the 168h data hole
+3. Re-run the strict continuous collector-health gate after the 168h data hole
    rolls out, or after a validated full-source backfill.
-5. Only if an event-complete or strict retained gate passes with the newer
-   post-deploy full-depth replay parity artifact, promote the next engineering
-   slice toward dry-run handoff hardening.
-
-Recommended event-complete retained-gate command:
-
-```bash
-gh workflow run settlement-probability-prd-gate.yml \
-  --ref main \
-  -f git_ref=main \
-  -f start_date=2026-05-01 \
-  -f end_date=2026-05-05 \
-  -f symbols=BTCUSDT,ETHUSDT \
-  -f stake_usd=15 \
-  -f issue_number=332 \
-  -f audit_lookback_hours=168:event-complete \
-  -f replay_parity_run_id=25379165698 \
-  -f replay_parity_artifact_name=recorded-replay-parity-25379165698 \
-  -f no_wait=false
-```
+4. Keep live trading disabled until separately approved, risk-gated, and
+   supported by additional dry-run evidence.
 
 Recommended strict collector-health retry command after the hole rolls out of
 the 168h lookback:
@@ -389,14 +421,22 @@ Run the strict command only after about `2026-05-12 09:55 +08`, or after a
 validated lossless full-source backfill. Before that time, the strict data audit
 is expected to fail for the same retained-window gap.
 
-## Completion Criteria Not Yet Met
+## Completion Criteria
 
-The PRD is complete only when:
+Met for dry-run-first BTC/ETH settlement-probability handoff:
 
-1. Either event-complete retained data quality passes, or strict continuous
-   `pm5d-vol` data audit passes.
+1. Event-complete retained data quality passed with enough complete events and
+   rows.
 2. Retained snapshot-backed walk-forward has non-empty OOS windows.
 3. Promotion gate reports `ready_for_dry_run_handoff=true` using the
-   settlement-specific replay parity artifact or a newer equivalent artifact.
-4. Live trading remains explicitly out of scope until separately approved and
-   risk-gated.
+   settlement-specific replay parity artifact.
+4. Full-depth and conservative settlement edge gates passed.
+5. Probability calibration, anti-overfit diagnostics, symbol holdout, Deribit
+   inclusion, and recorded replay parity passed.
+
+Not met, and intentionally outside this completion claim:
+
+1. Live trading approval.
+2. All-symbol strategy promotion.
+3. Clean strict 168h continuous collector-health signoff.
+4. Strong event-level replay parity without advisory flags.
