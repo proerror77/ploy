@@ -369,6 +369,31 @@ Interpretation:
   clean 168h window, the symbol holdout is not stable, walk-forward OOS is
   empty, and recorded replay parity is still missing.
 
+## Current Continuation State
+
+Checked again on 2026-05-05 14:59 CST after the PRD gate wrapper landed on
+`main`.
+
+- The correct next retained-data gate is still the strict `168h` gate, but it
+  should not be rerun immediately. The collector recovery evidence above places
+  the relevant data hole at roughly 2026-05-04 05:30 CST to 2026-05-05
+  09:50/09:55 CST, so any 168-hour audit run before roughly 2026-05-12
+  09:55 CST still includes the known outage and is expected to fail for data
+  quality rather than model quality.
+- The short-window PRD gate has already proven the control-plane shape on
+  `main`: strict `pm5d-vol` snapshot, full snapshot upload, Factor
+  Walk-Forward V2, full-depth/conservative labels, promotion-gate parsing, and
+  issue evidence all work.
+- The remaining non-data blocker that can be worked before the clean 168-hour
+  window is recorded replay/dry-run parity. The current
+  `replay-dryrun-parity.yml` workflow requires both a replay/backtest artifact
+  and a real dry-run JSON report URL with strict comparable order/fill/event
+  fields. No passing parity artifact exists yet, so this gate must remain
+  blocked instead of being hand-filled.
+- Do not create the settlement dry-run handoff packet until the promotion gate
+  returns `ready_for_dry_run_handoff=true`; the next handoff would otherwise be
+  based on short-window smoke rather than PRD-grade evidence.
+
 ## Recovery Checklist
 
 1. Collect or compile a fresh snapshot with `data_gate=critical` and
