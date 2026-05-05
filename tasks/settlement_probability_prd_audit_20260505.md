@@ -45,7 +45,7 @@ snapshot-backed full-depth execution labels and probability-model validation.
 | Official settlement fidelity | Snapshot manifest `require_official_settlement=true` | Provenance for snapshots `25254380121` and `25255158983` confirms official settlement required | Partial evidence |
 | Data quality / coverage | `data-gap-audit.md` | Strict `pm5d-vol` run `25354264444` failed at `Audit required market data`; every required source had critical max gaps around `1700m` | Failing / blocks promotion |
 | Deribit / vol inputs | `data_profile=pm5d-vol` or `include_deribit=true` snapshot | Strict `pm5d-vol` gate requires Deribit IV/Greeks but fails coverage before snapshot compile | Missing for full PRD vol lane |
-| Portable replay evidence | Full research snapshot artifact | `upload_full_snapshot` option exists; strict run did not upload a full snapshot because data audit failed. Diagnostic non-strict run `25354314443` is in progress and is not promotion-grade | Code present; strict data gate failed |
+| Portable replay evidence | Full research snapshot artifact | `upload_full_snapshot` option exists; strict run did not upload a full snapshot because data audit failed. Diagnostic non-strict run `25354314443` was cancelled during snapshot compile and produced no full snapshot artifact | Code present; strict data gate failed |
 | Replay parity | `ReplayParityReport` / recorded replay artifacts | Not part of current completed evidence | Missing |
 | Dry-run readiness | Dry-run handoff packet and kill switch evidence | PRD gates have not passed | Not ready |
 
@@ -154,7 +154,8 @@ Diagnostic follow-up:
 
 - Run: `25354314443`
 - Difference: `data_gate=never`, `upload_full_snapshot=true`
-- Status at last audit update: in progress at `Compile snapshot`
+- Status: cancelled while still in `Compile snapshot` after the strict
+  decision-grade data gate had already failed
 - Interpretation: useful only to inspect materialized rows and artifact shape;
   it cannot override strict data insufficiency.
 

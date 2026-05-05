@@ -207,9 +207,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `1700m`. This confirms current data is not sufficient for replay/dry-run
   promotion.
 - 2026-05-05: Triggered diagnostic non-strict `pm5d-vol` full-snapshot run
-  `25354314443` with `data_gate=never` and `upload_full_snapshot=true`.
-  This can help inspect what the compiler can materialize, but it is diagnostic
-  only and cannot override the strict gate failure.
+  `25354314443` with `data_gate=never` and `upload_full_snapshot=true`, then
+  cancelled it while it was still in `Compile snapshot` because strict run
+  `25354264444` had already failed the decision-grade data gate and the
+  diagnostic run was occupying `ploy-ci-1`. No full snapshot artifact was
+  produced.
 - 2026-05-05: Added a second execution-matrix print to
   `factor_walk_forward_v2` using `visible_depth_haircut=0.5` and
   `max_levels=3`. Verification passed:
@@ -219,7 +221,7 @@ evidence comes from Polymarket full CLOB depth, not top book.
   /opt/homebrew/bin/timeout 240 rtk cargo check -p ploy-research --example
   factor_walk_forward_v2 --features db --no-default-features`; the check emitted
   only pre-existing strategy-bundle dead-code warnings plus the vendor profile
-  warning.
+  warning. Pushed the follow-up to PR #319.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
