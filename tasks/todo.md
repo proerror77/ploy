@@ -460,6 +460,15 @@ evidence comes from Polymarket full CLOB depth, not top book.
   artifact, found the intended blockers:
   `anti_overfit_diagnostics`, `walk_forward_oos`, and
   `recorded_replay_parity`.
+- 2026-05-05 14:59 CST: Continued after the merged PRD gate wrapper smoke and
+  confirmed the next action is evidence collection, not new factor mining. Do
+  not rerun the strict `168h` promotion gate until the known collector outage
+  from roughly 2026-05-04 05:30 CST to 2026-05-05 09:50/09:55 CST has rolled
+  out of the lookback window; before roughly 2026-05-12 09:55 CST it is
+  expected to fail for data quality. The only PRD gate that can be progressed
+  before then is recorded replay/dry-run parity, which still needs a real
+  replay artifact plus a dry-run JSON report with comparable order/fill/event
+  fields.
 - 2026-05-05: Added `.github/workflows/settlement-probability-prd-gate.yml` as
   the manual CI entrypoint for the strict settlement-probability PRD evidence
   chain. The workflow invokes `scripts/run_settlement_probability_prd_gate.py`,
