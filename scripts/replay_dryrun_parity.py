@@ -88,6 +88,28 @@ FILL_KEY_CANDIDATES = (
     ("deployment_id", "token_id", "fill_side", "quantity", "price", "fee", "fill_timestamp"),
 )
 
+EVENT_ONLY_RISK_FLAGS = {
+    "replay_has_no_event_level_rows",
+    "dryrun_has_no_event_level_rows",
+    "events_present_in_replay_missing_from_dryrun",
+    "events_present_in_dryrun_missing_from_replay",
+    "strict_field_mismatches",
+    "missing_strict_parity_fields",
+}
+
+
+def filter_summary(
+    *,
+    deployment_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> dict[str, str | None]:
+    return {
+        "deployment_id": deployment_id,
+        "since": since.isoformat().replace("+00:00", "Z") if since else None,
+        "until": until.isoformat().replace("+00:00", "Z") if until else None,
+    }
+
 
 def load_json(path: Path) -> Any:
     with path.open() as handle:
@@ -266,6 +288,96 @@ def normalize_timestamp(value: Any) -> str | None:
     if parsed is None:
         return normalize_text(value)
     return parsed.isoformat().replace("+00:00", "Z")
+
+
+def row_timestamp(row: dict[str, Any], *keys: str) -> datetime | None:
+    for key in keys:
+        parsed = parse_timestamp(row.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def row_passes_filters(
+    row: dict[str, Any],
+    *,
+    deployment_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+    timestamp_keys: tuple[str, ...],
+) -> bool:
+    if deployment_id and normalize_text(row.get("deployment_id")) != deployment_id:
+        return False
+    if since is None and until is None:
+        return True
+    ts = row_timestamp(row, *timestamp_keys)
+    if ts is None:
+        return False
+    if since is not None and ts < since:
+        return False
+    if until is not None and ts > until:
+        return False
+    return True
+
+
+def filter_rows(
+    rows: list[dict[str, Any]],
+    *,
+    deployment_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+    timestamp_keys: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if row_passes_filters(
+            row,
+            deployment_id=deployment_id,
+            since=since,
+            until=until,
+            timestamp_keys=timestamp_keys,
+        )
+    ]
+
+
+def filter_orders_with_fill_window_fallback(
+    orders: list[dict[str, Any]],
+    filtered_fills: list[dict[str, Any]],
+    *,
+    deployment_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> list[dict[str, Any]]:
+    if since is None and until is None:
+        return filter_rows(
+            orders,
+            deployment_id=deployment_id,
+            since=since,
+            until=until,
+            timestamp_keys=("created_at",),
+        )
+    fill_intents = {
+        (row.get("deployment_id"), row.get("intent_id"))
+        for row in filtered_fills
+        if row.get("intent_id")
+    }
+    filtered: list[dict[str, Any]] = []
+    for row in orders:
+        if row_passes_filters(
+            row,
+            deployment_id=deployment_id,
+            since=since,
+            until=until,
+            timestamp_keys=("created_at",),
+        ):
+            filtered.append(row)
+            continue
+        if deployment_id and row.get("deployment_id") != deployment_id:
+            continue
+        if (row.get("deployment_id"), row.get("intent_id")) in fill_intents:
+            filtered.append(row)
+    return filtered
 
 
 def normalize_status(value: Any) -> str | None:
@@ -457,17 +569,52 @@ def compare_normalized_rows(
     }
 
 
-def compare_runtime_evidence(replay: Any, dryrun: Any) -> dict[str, Any]:
-    order_comparison = compare_normalized_rows(
+def compare_runtime_evidence(
+    replay: Any,
+    dryrun: Any,
+    *,
+    deployment_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> dict[str, Any]:
+    replay_fills = filter_rows(
+        extract_runtime_fills(replay),
+        deployment_id=deployment_id,
+        since=since,
+        until=until,
+        timestamp_keys=("fill_timestamp",),
+    )
+    replay_orders = filter_orders_with_fill_window_fallback(
         extract_runtime_orders(replay),
+        replay_fills,
+        deployment_id=deployment_id,
+        since=since,
+        until=until,
+    )
+    dryrun_fills = filter_rows(
+        extract_runtime_fills(dryrun),
+        deployment_id=deployment_id,
+        since=since,
+        until=until,
+        timestamp_keys=("fill_timestamp",),
+    )
+    dryrun_orders = filter_orders_with_fill_window_fallback(
         extract_runtime_orders(dryrun),
+        dryrun_fills,
+        deployment_id=deployment_id,
+        since=since,
+        until=until,
+    )
+    order_comparison = compare_normalized_rows(
+        replay_orders,
+        dryrun_orders,
         row_type="order",
         key_candidates=ORDER_KEY_CANDIDATES,
         strict_fields=ORDER_STRICT_FIELDS,
     )
     fill_comparison = compare_normalized_rows(
-        extract_runtime_fills(replay),
-        extract_runtime_fills(dryrun),
+        replay_fills,
+        dryrun_fills,
         row_type="fill",
         key_candidates=FILL_KEY_CANDIDATES,
         strict_fields=FILL_STRICT_FIELDS,
@@ -535,11 +682,38 @@ def compare_events(
     }
 
 
-def build_result(replay: Any, dryrun: Any, replay_path: Path, dryrun_path: Path) -> dict[str, Any]:
-    replay_events = extract_events(replay)
-    dryrun_events = extract_events(dryrun)
+def build_result(
+    replay: Any,
+    dryrun: Any,
+    replay_path: Path,
+    dryrun_path: Path,
+    *,
+    deployment_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> dict[str, Any]:
+    replay_events = filter_rows(
+        extract_events(replay),
+        deployment_id=deployment_id,
+        since=since,
+        until=until,
+        timestamp_keys=("decision_ts", "opened_at", "timestamp", "created_at", "fill_timestamp"),
+    )
+    dryrun_events = filter_rows(
+        extract_events(dryrun),
+        deployment_id=deployment_id,
+        since=since,
+        until=until,
+        timestamp_keys=("decision_ts", "opened_at", "timestamp", "created_at", "fill_timestamp"),
+    )
     event_comparison = compare_events(replay_events, dryrun_events)
-    runtime_evidence_comparison = compare_runtime_evidence(replay, dryrun)
+    runtime_evidence_comparison = compare_runtime_evidence(
+        replay,
+        dryrun,
+        deployment_id=deployment_id,
+        since=since,
+        until=until,
+    )
     risk_flags: list[str] = []
 
     if runtime_evidence_comparison["orders"]["replay_count"] == 0:
@@ -579,6 +753,22 @@ def build_result(replay: Any, dryrun: Any, replay_path: Path, dryrun_path: Path)
     decision = "continue"
     if not runtime_evidence_comparison["strict_parity_ready"]:
         decision = "fix-data-or-runtime-mismatch"
+    blocking_risk_flags = [
+        flag
+        for flag in risk_flags
+        if not (
+            runtime_evidence_comparison["strict_parity_ready"]
+            and flag in EVENT_ONLY_RISK_FLAGS
+        )
+    ]
+    advisory_flags = [
+        flag
+        for flag in risk_flags
+        if (
+            runtime_evidence_comparison["strict_parity_ready"]
+            and flag in EVENT_ONLY_RISK_FLAGS
+        )
+    ]
 
     return {
         "schema_version": 1,
@@ -587,11 +777,14 @@ def build_result(replay: Any, dryrun: Any, replay_path: Path, dryrun_path: Path)
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "replay_source": str(replay_path),
         "dryrun_source": str(dryrun_path),
+        "filters": filter_summary(deployment_id=deployment_id, since=since, until=until),
         "replay_metrics": extract_metrics(replay),
         "dryrun_metrics": extract_metrics(dryrun),
         "event_comparison": event_comparison,
         "runtime_evidence_comparison": runtime_evidence_comparison,
         "risk_flags": risk_flags,
+        "blocking_risk_flags": blocking_risk_flags,
+        "advisory_flags": advisory_flags,
         "decision": decision,
     }
 
@@ -601,15 +794,27 @@ def main() -> None:
     parser.add_argument("--replay-json", required=True)
     parser.add_argument("--dryrun-json", required=True)
     parser.add_argument("--output-json", required=True)
+    parser.add_argument("--deployment-id")
+    parser.add_argument("--since", help="Inclusive ISO-8601 lower timestamp bound")
+    parser.add_argument("--until", help="Inclusive ISO-8601 upper timestamp bound")
     args = parser.parse_args()
 
     replay_path = find_first_json(Path(args.replay_json))
     dryrun_path = find_first_json(Path(args.dryrun_json))
+    since = parse_timestamp(args.since) if args.since else None
+    until = parse_timestamp(args.until) if args.until else None
+    if args.since and since is None:
+        raise SystemExit(f"invalid --since timestamp: {args.since}")
+    if args.until and until is None:
+        raise SystemExit(f"invalid --until timestamp: {args.until}")
     result = build_result(
         load_json(replay_path),
         load_json(dryrun_path),
         replay_path,
         dryrun_path,
+        deployment_id=args.deployment_id,
+        since=since,
+        until=until,
     )
 
     output_path = Path(args.output_json)

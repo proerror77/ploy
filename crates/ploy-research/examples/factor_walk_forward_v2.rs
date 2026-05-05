@@ -80,7 +80,8 @@ fn replay_parity_evidence(path: &str) -> (bool, String) {
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let risk_flags = json
-        .get("risk_flags")
+        .get("blocking_risk_flags")
+        .or_else(|| json.get("risk_flags"))
         .and_then(serde_json::Value::as_array)
         .map(|values| {
             values
@@ -90,13 +91,24 @@ fn replay_parity_evidence(path: &str) -> (bool, String) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let ready = runtime_ready && event_ready && risk_flags.is_empty();
+    let advisory_flags = json
+        .get("advisory_flags")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let decision = json
         .get("decision")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("<missing>");
+    let ready = runtime_ready && risk_flags.is_empty() && decision == "continue";
     let evidence = format!(
-        "replay_parity_json={} runtime_ready={} event_ready={} risk_flags={} decision={}",
+        "replay_parity_json={} runtime_ready={} event_ready={} blocking_flags={} advisory_flags={} decision={}",
         path,
         runtime_ready,
         event_ready,
@@ -104,6 +116,11 @@ fn replay_parity_evidence(path: &str) -> (bool, String) {
             "<none>".to_string()
         } else {
             risk_flags.join("|")
+        },
+        if advisory_flags.is_empty() {
+            "<none>".to_string()
+        } else {
+            advisory_flags.join("|")
         },
         decision,
     );
