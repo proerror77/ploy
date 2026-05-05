@@ -114,11 +114,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   Aliyun `StartInstance` still returns `InstanceExpired` while the ECS operation
   locks include `financial` / `financial-recycling`.
 - 2026-05-05: Cancelled stale snapshot-backed Factor Walk-Forward runs
-  `25351768149` and `25351768140` because they were pinned to old SHA
-  `eab15db4`. Re-triggered latest-report validation with checkout ref
-  `99e4f3859df2ae8baecb9bf319f028dc45cc1886`: BTC/ETH/SOL run
-  `25351981303` on snapshot `25254380121`, and XRP/DOGE/BNB run
-  `25351981397` on snapshot `25255158983`. Both are expected to remain queued
+  `25351768149` / `25351768140` and later `25351981303` / `25351981397`
+  because they were pinned to older report-code SHAs. Re-triggered
+  latest-report validation with checkout ref
+  `b643142f3ee83facd534356b2584bbec08a7f2f9`: BTC/ETH/SOL run
+  `25352258776` on snapshot `25254380121`, and XRP/DOGE/BNB run
+  `25352258774` on snapshot `25255158983`. Both are expected to remain queued
   or pending until `ploy-ci-1` is restored.
 - 2026-05-05: `ploy-ci-1` remained offline after another check. Aliyun still
   reports ECS `i-6we7z44sfbfbnosbeymz` as `Stopped` with `financial` /
