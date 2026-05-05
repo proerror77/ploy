@@ -76,6 +76,25 @@ class DryRunReportContractTests(unittest.TestCase):
         self.assertEqual(diagnostics["summary"]["rejected_buy_orders"], 1)
         self.assertEqual(diagnostics["summary"]["buy_fill_rate_pct"], 50)
 
+    def test_empty_payload_exposes_runtime_evidence_contract(self) -> None:
+        summary = load_summary_module()
+        payload = summary.empty_payload()
+
+        self.assertEqual(payload["runtime_evidence"]["schema_version"], 1)
+        self.assertEqual(payload["runtime_evidence"]["basis"], "strategy_runtime_orders_and_fills")
+        self.assertEqual(payload["runtime_evidence"]["orders"], [])
+        self.assertEqual(payload["runtime_evidence"]["fills"], [])
+
+    def test_runtime_evidence_query_exports_order_and_fill_rows(self) -> None:
+        script = SUMMARY_SCRIPT.read_text()
+
+        self.assertIn("RUNTIME_EVIDENCE_QUERY", script)
+        self.assertIn('"runtime_evidence"', script)
+        self.assertIn("FROM strategy_runtime_orders o", script)
+        self.assertIn("FROM strategy_runtime_fills f", script)
+        self.assertIn("'orders'", script)
+        self.assertIn("'fills'", script)
+
     def test_report_contract_checker_accepts_clean_empty_dryrun(self) -> None:
         payload = {
             "summary": {"total_trades": 0},
@@ -84,6 +103,12 @@ class DryRunReportContractTests(unittest.TestCase):
                 "daily_sharpe_basis": "daily_net_pnl_sqrt_365",
             },
             "execution_diagnostics": {"basis": "strategy_runtime_orders"},
+            "runtime_evidence": {
+                "schema_version": 1,
+                "basis": "strategy_runtime_orders_and_fills",
+                "orders": [],
+                "fills": [],
+            },
             "strategies": [],
         }
 

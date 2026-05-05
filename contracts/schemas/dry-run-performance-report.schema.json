@@ -81,6 +81,17 @@
         "$ref": "#/definitions/DryRunClosedTradeRow"
       }
     },
+    "runtime_evidence": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DryRunRuntimeEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "strategies": {
       "type": "array",
       "items": {
@@ -625,6 +636,33 @@
         "side_aware_rows": {
           "type": "integer",
           "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "DryRunRuntimeEvidence": {
+      "type": "object",
+      "required": [
+        "basis",
+        "schema_version"
+      ],
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "fills": {
+          "default": [],
+          "type": "array",
+          "items": true
+        },
+        "orders": {
+          "default": [],
+          "type": "array",
+          "items": true
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
           "minimum": 0.0
         }
       }

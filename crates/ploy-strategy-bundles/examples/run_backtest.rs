@@ -13,12 +13,12 @@
 //! If no --db-url is given, uses synthetic market data.
 
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    config::FullConfig, DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder,
-    ReversalStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
-    StrategyLogic, StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy,
+    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
+    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
+    StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy, config::FullConfig,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -206,6 +206,59 @@ mod tests {
         assert_eq!(config.max_updates, Some(123));
         assert!(!config.skip_settlement_exits);
     }
+
+    #[test]
+    fn normalized_runtime_evidence_exposes_order_and_fill_rows() {
+        let timestamp = Utc::now();
+        let snapshot = ploy_trading::TradingRuntimeSnapshot {
+            intents: vec![ploy_trading::TradingIntent {
+                intent_id: "intent-1".to_string(),
+                deployment_id: "pm5d-test".to_string(),
+                market_id: "event-1".to_string(),
+                token_id: "token-up".to_string(),
+                side: ploy_trading::TradeSide::Buy,
+                quantity: dec!(10),
+                limit_price: Some(dec!(0.42)),
+                purpose: ploy_trading::IntentPurpose::Entry,
+                created_at: timestamp,
+            }],
+            orders: vec![ploy_trading::OrderRecord {
+                order_id: "order-1".to_string(),
+                intent_id: "intent-1".to_string(),
+                deployment_id: "pm5d-test".to_string(),
+                token_id: "token-up".to_string(),
+                requested_qty: dec!(10),
+                limit_price: Some(dec!(0.42)),
+                venue_order_id: Some("venue-1".to_string()),
+                venue_order_history: vec![],
+                revision: 0,
+                state: ploy_trading::OrderState::Filled,
+                filled_qty: dec!(10),
+                rejection_reason: None,
+                last_error: None,
+            }],
+            fills: vec![ploy_trading::FillRecord {
+                fill_id: "fill-1".to_string(),
+                order_id: "order-1".to_string(),
+                token_id: "token-up".to_string(),
+                side: ploy_trading::TradeSide::Buy,
+                quantity: dec!(10),
+                price: dec!(0.41),
+                fee: Decimal::ZERO,
+                timestamp,
+            }],
+            ..Default::default()
+        };
+
+        let evidence = normalized_runtime_evidence(&snapshot);
+
+        assert_eq!(evidence["basis"], "trading_runtime_snapshot");
+        assert_eq!(evidence["orders"][0]["deployment_id"], "pm5d-test");
+        assert_eq!(evidence["orders"][0]["intent_id"], "intent-1");
+        assert_eq!(evidence["orders"][0]["status"], "FILLED");
+        assert_eq!(evidence["fills"][0]["fill_id"], "fill-1");
+        assert_eq!(evidence["fills"][0]["fill_side"], "BUY");
+    }
 }
 
 fn main() {
@@ -219,6 +272,7 @@ fn main() {
     let start_date = flag_value(&args, "--start-date");
     let end_date = flag_value(&args, "--end-date");
     let timing_json = flag_value(&args, "--timing-json");
+    let output_json = flag_value(&args, "--output-json");
 
     let (strategy_variant, strategy_config, sim_config, runtime_config, backtest_options) =
         if let Some(ref path) = config_path {
@@ -413,6 +467,15 @@ fn main() {
                 }),
             );
             print_results(&result, &snapshot, stake_usd);
+            write_backtest_evaluation_json(
+                output_json.as_deref(),
+                &strategy_variant,
+                config_path.as_deref(),
+                start_date.as_deref(),
+                end_date.as_deref(),
+                &result,
+                &snapshot,
+            );
         }
     } else {
         let eager_source_load_secs;
@@ -496,6 +559,241 @@ fn main() {
             }),
         );
         print_results(&result, &snapshot, stake_usd);
+        write_backtest_evaluation_json(
+            output_json.as_deref(),
+            &strategy_variant,
+            config_path.as_deref(),
+            start_date.as_deref(),
+            end_date.as_deref(),
+            &result,
+            &snapshot,
+        );
+    }
+}
+
+fn write_backtest_evaluation_json(
+    path: Option<&str>,
+    strategy_variant: &str,
+    config_path: Option<&str>,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    result: &ploy_strategy_bundles::RuntimeResult,
+    snapshot: &ploy_trading::TradingRuntimeSnapshot,
+) {
+    let Some(path) = path else {
+        return;
+    };
+    let artifact = build_backtest_evaluation_artifact(
+        strategy_variant,
+        config_path,
+        start_date,
+        end_date,
+        result,
+        snapshot,
+    );
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!(
+                "warning: failed to create output json dir {}: {error}",
+                parent.display()
+            );
+            return;
+        }
+    }
+    match serde_json::to_string_pretty(&artifact) {
+        Ok(body) => {
+            if let Err(error) = fs::write(path, format!("{body}\n")) {
+                eprintln!("warning: failed to write output json {path}: {error}");
+            }
+        }
+        Err(error) => eprintln!("warning: failed to encode output json {path}: {error}"),
+    }
+}
+
+fn build_backtest_evaluation_artifact(
+    strategy_variant: &str,
+    config_path: Option<&str>,
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+    result: &ploy_strategy_bundles::RuntimeResult,
+    snapshot: &ploy_trading::TradingRuntimeSnapshot,
+) -> serde_json::Value {
+    let cashflow = snapshot.fill_cashflow_summary();
+    let mut risk_flags = Vec::new();
+    if snapshot.orders.is_empty() {
+        risk_flags.push("no_order_level_rows");
+    }
+    if snapshot.fills.is_empty() {
+        risk_flags.push("no_fill_level_rows");
+    }
+
+    json!({
+        "schema_version": 1,
+        "artifact_type": "strategy_backtest_evaluation",
+        "producer": "run_backtest",
+        "generated_at": Utc::now().to_rfc3339(),
+        "replay_mode": "backtest",
+        "canonical_result": if risk_flags.is_empty() { "continue" } else { "fix-workflow-or-data-source" },
+        "strategy_variant": strategy_variant,
+        "config_path": config_path,
+        "window": {
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "metrics": {
+            "updates_processed": result.updates_processed,
+            "intents_submitted": result.intents_submitted,
+            "orders": snapshot.orders.len(),
+            "fills_recorded": result.fills_recorded,
+            "fills": snapshot.fills.len(),
+            "realized_pnl": result.pnl.realized_pnl,
+            "unrealized_pnl": result.pnl.unrealized_pnl,
+            "total_fees": result.pnl.total_fees,
+            "net_pnl": result.pnl.net_pnl(),
+            "deployed_capital": cashflow.deployed_capital(),
+            "gross_sell_proceeds": cashflow.gross_sell_proceeds,
+            "elapsed_secs": result.elapsed_secs,
+        },
+        "risk_flags": risk_flags,
+        "runtime_evidence": normalized_runtime_evidence(snapshot),
+    })
+}
+
+fn normalized_runtime_evidence(
+    snapshot: &ploy_trading::TradingRuntimeSnapshot,
+) -> serde_json::Value {
+    let intents_by_id: BTreeMap<&str, &ploy_trading::TradingIntent> = snapshot
+        .intents
+        .iter()
+        .map(|intent| (intent.intent_id.as_str(), intent))
+        .collect();
+    let orders_by_id: BTreeMap<&str, &ploy_trading::OrderRecord> = snapshot
+        .orders
+        .iter()
+        .map(|order| (order.order_id.as_str(), order))
+        .collect();
+
+    let mut fill_quantity_by_order: BTreeMap<&str, Decimal> = BTreeMap::new();
+    let mut fill_notional_by_order: BTreeMap<&str, Decimal> = BTreeMap::new();
+    for fill in &snapshot.fills {
+        *fill_quantity_by_order
+            .entry(fill.order_id.as_str())
+            .or_default() += fill.quantity;
+        *fill_notional_by_order
+            .entry(fill.order_id.as_str())
+            .or_default() += fill.quantity * fill.price;
+    }
+
+    let orders: Vec<_> = snapshot
+        .orders
+        .iter()
+        .map(|order| {
+            let intent = intents_by_id.get(order.intent_id.as_str()).copied();
+            let fill_quantity = fill_quantity_by_order
+                .get(order.order_id.as_str())
+                .copied()
+                .unwrap_or(order.filled_qty);
+            let avg_fill_price = if fill_quantity == Decimal::ZERO {
+                None
+            } else {
+                fill_notional_by_order
+                    .get(order.order_id.as_str())
+                    .map(|notional| *notional / fill_quantity)
+            };
+
+            json!({
+                "deployment_id": empty_to_none(order.deployment_id.as_str())
+                    .or_else(|| intent.and_then(|intent| empty_to_none(intent.deployment_id.as_str()))),
+                "intent_id": order.intent_id.as_str(),
+                "order_id": order.order_id.as_str(),
+                "venue_order_id": order.venue_order_id.as_deref(),
+                "event_id": intent.map(|intent| intent.market_id.as_str()),
+                "market_id": intent.map(|intent| intent.market_id.as_str()),
+                "token_id": order.token_id.as_str(),
+                "market_side": None::<String>,
+                "order_side": intent
+                    .map(|intent| trade_side_label(intent.side))
+                    .unwrap_or("UNKNOWN"),
+                "purpose": intent.map(|intent| intent_purpose_label(intent.purpose)),
+                "quantity": order.requested_qty,
+                "requested_qty": order.requested_qty,
+                "limit_price": order.limit_price,
+                "filled_quantity": fill_quantity,
+                "avg_fill_price": avg_fill_price,
+                "status": order_state_label(order.state),
+                "rejection_reason": order.rejection_reason.as_deref(),
+                "last_error": order.last_error.as_deref(),
+                "created_at": intent.map(|intent| intent.created_at),
+            })
+        })
+        .collect();
+
+    let fills: Vec<_> = snapshot
+        .fills
+        .iter()
+        .map(|fill| {
+            let order = orders_by_id.get(fill.order_id.as_str()).copied();
+            let intent =
+                order.and_then(|order| intents_by_id.get(order.intent_id.as_str()).copied());
+            json!({
+                "deployment_id": order
+                    .and_then(|order| empty_to_none(order.deployment_id.as_str()))
+                    .or_else(|| intent.and_then(|intent| empty_to_none(intent.deployment_id.as_str()))),
+                "intent_id": order.map(|order| order.intent_id.as_str()),
+                "order_id": fill.order_id.as_str(),
+                "fill_id": fill.fill_id.as_str(),
+                "event_id": intent.map(|intent| intent.market_id.as_str()),
+                "market_id": intent.map(|intent| intent.market_id.as_str()),
+                "token_id": fill.token_id.as_str(),
+                "market_side": None::<String>,
+                "fill_side": trade_side_label(fill.side),
+                "purpose": intent.map(|intent| intent_purpose_label(intent.purpose)),
+                "quantity": fill.quantity,
+                "price": fill.price,
+                "fee": fill.fee,
+                "fill_timestamp": fill.timestamp,
+            })
+        })
+        .collect();
+
+    json!({
+        "schema_version": 1,
+        "basis": "trading_runtime_snapshot",
+        "comparison_contract": "Compare these normalized rows against strategy_runtime_orders and strategy_runtime_fills exported from Tango for the same deployment/config/feed window.",
+        "orders": orders,
+        "fills": fills,
+    })
+}
+
+fn empty_to_none(value: &str) -> Option<&str> {
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn trade_side_label(side: ploy_trading::TradeSide) -> &'static str {
+    match side {
+        ploy_trading::TradeSide::Buy => "BUY",
+        ploy_trading::TradeSide::Sell => "SELL",
+    }
+}
+
+fn intent_purpose_label(purpose: ploy_trading::IntentPurpose) -> &'static str {
+    match purpose {
+        ploy_trading::IntentPurpose::Entry => "ENTRY",
+        ploy_trading::IntentPurpose::Exit => "EXIT",
+        ploy_trading::IntentPurpose::Reduce => "REDUCE",
+        ploy_trading::IntentPurpose::Hedge => "HEDGE",
+        ploy_trading::IntentPurpose::Cancel => "CANCEL",
+    }
+}
+
+fn order_state_label(state: ploy_trading::OrderState) -> &'static str {
+    match state {
+        ploy_trading::OrderState::Pending => "PENDING",
+        ploy_trading::OrderState::Acknowledged => "ACKNOWLEDGED",
+        ploy_trading::OrderState::PartiallyFilled => "PARTIALLY_FILLED",
+        ploy_trading::OrderState::Filled => "FILLED",
+        ploy_trading::OrderState::Canceled => "CANCELED",
+        ploy_trading::OrderState::Rejected => "REJECTED",
     }
 }
 
