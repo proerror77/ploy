@@ -12940,3 +12940,19 @@ Issue: https://github.com/proerror77/ploy/issues/256
   dry-run handoff config only; runtime still uses top-of-book quote size for
   live fillability, so full-depth runtime parity remains a blocker before any
   live promotion.
+- 2026-05-05: Continuing the PRD handoff after BTC/ETH-only gates passed and
+  PR #334 added the `settlement_probability` strategy profile/config. Current
+  slice: add deployment support only. Planned files are
+  `.github/workflows/deploy-tango-1-1.yml`,
+  `config/deployments/pm5d.threelayer.settlement-probability-btc-eth.dryrun.json`,
+  `config/deployments/README.md`, and `scripts/report_dryrun_summary.py`.
+  Acceptance for this slice: the new BTC/ETH dry-run config is bundled and
+  installed by the tango deploy workflow, has a paper-mode deployment manifest,
+  and appears with an explicit settlement-probability label in dry-run reports.
+- 2026-05-05: Implemented the BTC/ETH settlement dry-run deployment support
+  slice. Added the paper deployment manifest, wired the tango deploy bundle to
+  copy/install the settlement-probability strategy TOML, documented the
+  manifest as dry-run-only, and added an explicit report label. Verification
+  passed: `python3 -m json.tool` on the new manifest, `python3 -m py_compile
+  scripts/report_dryrun_summary.py`, a manifest-to-config/workflow path
+  consistency check, report-label smoke import, and `git diff --check`.
