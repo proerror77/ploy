@@ -286,7 +286,7 @@ pub fn profile_confirmation_score(
                 ((inputs.signed_trade_imbalance / 50.0) * inputs.direction_sign).clamp(-1.0, 1.0);
             0.50 * drift_continuation + 0.30 * microprice + 0.20 * trade_imbalance
         }
-        ThreeLayerProfile::RepricingMomentum => 0.0,
+        ThreeLayerProfile::RepricingMomentum | ThreeLayerProfile::SettlementProbability => 0.0,
     }
 }
 
@@ -399,6 +399,12 @@ pub fn evaluate_entry_score(config: &ThreeLayerModelConfig, inputs: EntryScoreIn
                 + 0.30 * repricing_score
                 + 0.10 * inputs.pm_momentum_score
                 + 0.08 * inputs.liquidity_score
+        }
+        ThreeLayerProfile::SettlementProbability => {
+            0.35 * inputs.direction_score
+                + 0.15 * distance_score
+                + 0.40 * edge_score
+                + 0.10 * inputs.liquidity_score
         }
         ThreeLayerProfile::Mixed => unreachable!("mixed profile returned above"),
     }

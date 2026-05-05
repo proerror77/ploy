@@ -12932,3 +12932,11 @@ Issue: https://github.com/proerror77/ploy/issues/256
   BTC/ETH settlement probability dry-run handoff candidate. This is not live
   approval; next work is a dedicated BTC/ETH settlement dry-run config/scorer
   parity slice with kill switches and audit logging.
+- 2026-05-05: Started the first BTC/ETH settlement dry-run implementation
+  slice from issue #332. Added a dedicated `settlement_probability`
+  three-layer profile that weights probability edge instead of repricing
+  pressure, plus a BTC/ETH-only dry-run config
+  `02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml`. This is a
+  dry-run handoff config only; runtime still uses top-of-book quote size for
+  live fillability, so full-depth runtime parity remains a blocker before any
+  live promotion.

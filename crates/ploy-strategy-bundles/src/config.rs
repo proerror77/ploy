@@ -739,6 +739,7 @@ venue = "sportsbook"
         for file in [
             "02-pm5d-threelayer.unified.toml",
             "02-pm5d-threelayer.live.toml",
+            "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
         ] {
             let path = config_dir.join(file);
             let config = FullConfig::from_file(path.to_str().unwrap()).unwrap();
