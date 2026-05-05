@@ -437,12 +437,23 @@ pub struct SettlementProbabilityAntiOverfitRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilitySymbolHoldoutRow {
+    pub model: String,
+    pub symbol: String,
+    pub n: usize,
+    pub edge_win_rank_ic: f64,
+    pub top_edge_avg_full_depth_settlement_pnl: f64,
+    pub pass: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SettlementProbabilityReport {
     pub options: SettlementProbabilityReportOptions,
     pub baselines: Vec<SettlementProbabilityBaselineRow>,
     pub calibration: Vec<SettlementProbabilityCalibrationRow>,
     pub edge_buckets: Vec<SettlementProbabilityEdgeBucketRow>,
     pub anti_overfit: Vec<SettlementProbabilityAntiOverfitRow>,
+    pub symbol_holdouts: Vec<SettlementProbabilitySymbolHoldoutRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2464,6 +2475,7 @@ pub fn build_settlement_probability_report(
                 .entry(model)
                 .or_default()
                 .push(SettlementProbabilitySample {
+                    symbol: row.symbol.clone(),
                     q,
                     win,
                     entry_price,
@@ -2477,6 +2489,7 @@ pub fn build_settlement_probability_report(
     let mut calibration = Vec::new();
     let mut edge_buckets = Vec::new();
     let mut anti_overfit = Vec::new();
+    let mut symbol_holdouts = Vec::new();
     for (model, samples) in by_model {
         if samples.len() < options.min_bucket_observations {
             continue;
@@ -2506,6 +2519,12 @@ pub fn build_settlement_probability_report(
             &samples,
             options.top_edge_quantile,
         ));
+        symbol_holdouts.extend(build_probability_symbol_holdout_rows(
+            model,
+            &samples,
+            options.top_edge_quantile,
+            options.min_bucket_observations,
+        ));
         edge_buckets.extend(model_edge_buckets);
     }
     baselines.sort_by(|a, b| {
@@ -2519,6 +2538,7 @@ pub fn build_settlement_probability_report(
         calibration,
         edge_buckets,
         anti_overfit,
+        symbol_holdouts,
     }
 }
 
@@ -2597,6 +2617,19 @@ pub fn format_settlement_probability_report(report: &SettlementProbabilityReport
             row.perturbed_edge_win_rank_ic,
             row.observed_top_edge_avg_full_depth_settlement_pnl,
             row.perturbed_top_edge_avg_full_depth_settlement_pnl,
+            row.pass,
+        ));
+    }
+    out.push_str("\n--- Symbol Holdout Diagnostics ---\n");
+    out.push_str("model,symbol,n,edge_win_rank_ic,top_edge_avg_full_depth_settlement_pnl,pass\n");
+    for row in &report.symbol_holdouts {
+        out.push_str(&format!(
+            "{},{},{},{:.6},{:.4},{}\n",
+            row.model,
+            row.symbol,
+            row.n,
+            row.edge_win_rank_ic,
+            row.top_edge_avg_full_depth_settlement_pnl,
             row.pass,
         ));
     }
@@ -6690,8 +6723,9 @@ fn side_market_values(row: &FactorObservation, side: ReviewSide) -> (f64, f64, f
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct SettlementProbabilitySample {
+    symbol: String,
     q: f64,
     win: f64,
     entry_price: f64,
@@ -6842,7 +6876,7 @@ fn build_probability_calibration_rows(
         buckets
             .entry(probability_bucket_index(sample.q, bucket_count))
             .or_default()
-            .push(*sample);
+            .push(sample.clone());
     }
     buckets
         .into_iter()
@@ -6920,24 +6954,24 @@ fn build_probability_anti_overfit_rows(
     let half_shift = (samples.len() / 2).max(1);
     let label_shift_rank_ic =
         probability_edge_win_rank_ic(samples.iter().enumerate().map(|(idx, sample)| {
-            let shifted = samples[(idx + half_shift) % samples.len()];
+            let shifted = &samples[(idx + half_shift) % samples.len()];
             (sample.edge, shifted.win)
         }));
     let label_shift_top_pnl = top_edge_avg_pnl(
         samples.iter().enumerate().map(|(idx, sample)| {
-            let shifted = samples[(idx + half_shift) % samples.len()];
+            let shifted = &samples[(idx + half_shift) % samples.len()];
             (idx, sample.edge, shifted.pnl)
         }),
         top_edge_quantile,
     );
     let prediction_shift_rank_ic =
         probability_edge_win_rank_ic(samples.iter().enumerate().map(|(idx, sample)| {
-            let shifted_prediction = samples[(idx + 1) % samples.len()];
+            let shifted_prediction = &samples[(idx + 1) % samples.len()];
             (shifted_prediction.edge, sample.win)
         }));
     let prediction_shift_top_pnl = top_edge_avg_pnl(
         samples.iter().enumerate().map(|(idx, sample)| {
-            let shifted_prediction = samples[(idx + 1) % samples.len()];
+            let shifted_prediction = &samples[(idx + 1) % samples.len()];
             (idx, shifted_prediction.edge, sample.pnl)
         }),
         top_edge_quantile,
@@ -7026,6 +7060,53 @@ fn anti_overfit_pass(
         || observed_top_pnl <= 0.0
         || perturbed_top_pnl <= observed_top_pnl * 0.5;
     ic_ok && pnl_ok
+}
+
+fn build_probability_symbol_holdout_rows(
+    model: &str,
+    samples: &[SettlementProbabilitySample],
+    top_edge_quantile: f64,
+    min_observations: usize,
+) -> Vec<SettlementProbabilitySymbolHoldoutRow> {
+    let mut by_symbol: BTreeMap<&str, Vec<&SettlementProbabilitySample>> = BTreeMap::new();
+    for sample in samples {
+        by_symbol
+            .entry(sample.symbol.as_str())
+            .or_default()
+            .push(sample);
+    }
+
+    let mut rows = Vec::new();
+    for (symbol, symbol_samples) in by_symbol {
+        if symbol_samples.len() < min_observations {
+            continue;
+        }
+        let edge_win_rank_ic = probability_edge_win_rank_ic(
+            symbol_samples
+                .iter()
+                .map(|sample| (sample.edge, sample.win)),
+        );
+        let top_edge_avg_pnl = top_edge_avg_pnl(
+            symbol_samples
+                .iter()
+                .enumerate()
+                .map(|(idx, sample)| (idx, sample.edge, sample.pnl)),
+            top_edge_quantile,
+        );
+        rows.push(SettlementProbabilitySymbolHoldoutRow {
+            model: model.to_string(),
+            symbol: symbol.to_string(),
+            n: symbol_samples.len(),
+            edge_win_rank_ic,
+            top_edge_avg_full_depth_settlement_pnl: top_edge_avg_pnl,
+            pass: edge_win_rank_ic.is_finite()
+                && edge_win_rank_ic >= 0.0
+                && top_edge_avg_pnl.is_finite()
+                && top_edge_avg_pnl > 0.0,
+        });
+    }
+    rows.sort_by(|a, b| a.model.cmp(&b.model).then_with(|| a.symbol.cmp(&b.symbol)));
+    rows
 }
 
 fn edge_bucket_monotonic(edge_buckets: &[SettlementProbabilityEdgeBucketRow]) -> bool {
@@ -8570,12 +8651,17 @@ mod tests {
         assert!(report.anti_overfit.iter().any(
             |row| row.model == "q_base_distance_phi" && row.test == "prediction_one_step_shift"
         ));
+        assert!(report
+            .symbol_holdouts
+            .iter()
+            .any(|row| row.model == "q_base_distance_phi" && row.symbol == "BTCUSDT"));
 
         let text = format_settlement_probability_report(&report);
         assert!(text.contains("Settlement Probability Report"));
         assert!(text.contains("q_base_distance_phi"));
         assert!(text.contains("full_depth_settlement_pnl"));
         assert!(text.contains("Anti-Overfit Diagnostics"));
+        assert!(text.contains("Symbol Holdout Diagnostics"));
     }
 
     #[test]
