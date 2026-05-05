@@ -68,11 +68,13 @@ evidence comes from Polymarket full CLOB depth, not top book.
   baseline/calibration/edge-bucket reports using 50% visible depth and max 3
   CLOB levels, so high-edge buckets can be evaluated under the live-conservative
   execution assumption.
-- [ ] Add anti-overfit checks before any dry-run promotion: walk-forward OOS,
+- [x] Add anti-overfit checks before any dry-run promotion: walk-forward OOS,
   symbol holdout, permutation, time-shift, and feature ablation. Current report
   covers deterministic label-shift, deterministic permutation, and
   prediction-shift diagnostics for settlement probability baselines, symbol
-  holdout diagnostics, and baseline ablation deltas.
+  holdout diagnostics, baseline ablation deltas, and a settlement probability
+  walk-forward report whose test windows use only train-window EventVolSurface
+  priors.
 - [x] Add a first EventVolSurface / empirical probability surface so
   `q_final` can compare distance/LOB/vol formulas against a bucketed
   historical similar-state prior without leaking the current event outcome.
@@ -232,6 +234,23 @@ evidence comes from Polymarket full CLOB depth, not top book.
   observed top-edge full-depth PnL `4.8409`, perturbed top-edge PnL `0.7609`,
   and `pass=true`; this improves the anti-overfit report but still does not
   replace clean retained-window walk-forward/OOS evidence.
+- 2026-05-05: Added a dedicated Settlement Probability Walk-Forward Report.
+  The OOS test window evaluates formula probabilities on future rows while
+  `q_event_surface_empirical` and `q_final_logit_blend` use only the train
+  window to fit the EventVolSurface prior. Verification passed:
+  `rustfmt --edition 2021 --check crates/ploy-research/src/factors_v2.rs
+  crates/ploy-research/examples/factor_walk_forward_v2.rs`,
+  `rustfmt --edition 2021 --config skip_children=true --check
+  crates/ploy-research/src/lib.rs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-wf /opt/homebrew/bin/timeout 300 rtk
+  cargo test -p ploy-research settlement_probability --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-wf /opt/homebrew/bin/timeout 300 rtk
+  cargo check -p ploy-research --example factor_walk_forward_v2 --features db
+  --no-default-features`, and `git diff --check`. The local one-day smoke
+  printed the new report header but has no real OOS windows because
+  `train_window_days=1` plus `test_window_days=1` requires more than the
+  short-window snapshot; the synthetic regression test covers non-empty
+  walk-forward windows.
 - 2026-05-05: Settlement probability PRD gate result: BTC/ETH/SOL has the
   strongest next candidate but is not dry-run-ready. Run `25353780686` reported
   full-depth entry fill rate `49.23%`, exit fill rate `40.70%`, and

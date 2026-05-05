@@ -15,8 +15,8 @@ use ploy_research::{
     format_fillability_review_v1_report, format_full_depth_execution_matrix_report,
     format_liquidity_gate_v1_report, format_liquidity_gated_alpha_v1_report,
     format_meta_label_walk_forward_v1_report, format_repricing_ic_report,
-    format_settlement_probability_report, format_trade_formation_v1_report,
-    liquidity_gate_v1_with_deribit_and_pm_books,
+    format_settlement_probability_report, format_settlement_probability_walk_forward_report,
+    format_trade_formation_v1_report, liquidity_gate_v1_with_deribit_and_pm_books,
     liquidity_gated_alpha_v1_with_deribit_and_pm_books, load_deribit_feature_snapshots,
     load_research_lob_snapshots_sampled, load_research_pm_book_snapshots_sampled,
     load_research_snapshot, mine_domain_autofactors_from_v2,
@@ -29,7 +29,7 @@ use ploy_research::{
     FactorWalkForwardOptions, FillabilityReviewOptions, FullDepthExecutionMatrixOptions,
     LiquidityGateV1Options, LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions,
     RepricingIcOptions, ResearchSnapshotRequest, SettlementProbabilityReportOptions,
-    TradeFormationReviewOptions,
+    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -404,6 +404,25 @@ async fn main() {
     println!(
         "{}",
         format_settlement_probability_report(&settlement_probability_report)
+    );
+    let settlement_probability_walk_forward_report =
+        ploy_research::walk_forward_settlement_probability_report(
+            &autofactor_rows,
+            start,
+            end,
+            SettlementProbabilityWalkForwardOptions {
+                walk_forward: options.clone(),
+                probability: SettlementProbabilityReportOptions {
+                    min_bucket_observations: options.review.min_observations.max(20),
+                    ..Default::default()
+                },
+            },
+        );
+    println!(
+        "{}",
+        format_settlement_probability_walk_forward_report(
+            &settlement_probability_walk_forward_report
+        )
     );
     let autofactor_options = AutoFactorOptions {
         min_observations: options.review.min_observations.max(50),
