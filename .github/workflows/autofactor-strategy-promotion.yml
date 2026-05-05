@@ -26,6 +26,10 @@ on:
         description: "Optional issue number for the promotion summary"
         required: false
         default: ""
+      create_handoff_issue:
+        description: "Create a dry-run handoff issue when autofactor-strategy-handoff.json is ready"
+        required: false
+        default: "false"
       fail_if_blocked:
         description: "Fail workflow when no AutoFactor strategy qualifies"
         required: false
@@ -148,3 +152,35 @@ jobs:
               issue_number,
               body
             });
+
+      - name: Create ready handoff issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATE_HANDOFF_ISSUE: ${{ github.event.inputs.create_handoff_issue }}
+        run: |
+          set -euo pipefail
+          if [ "${CREATE_HANDOFF_ISSUE}" != "true" ]; then
+            echo "create_handoff_issue is not true; skipping handoff issue creation."
+            exit 0
+          fi
+          handoff_json="artifacts/autofactor-strategy-promotion/autofactor-strategy-handoff.json"
+          handoff_md="artifacts/autofactor-strategy-promotion/autofactor-strategy-handoff.md"
+          if [ ! -f "${handoff_json}" ] || [ ! -f "${handoff_md}" ]; then
+            echo "Handoff artifacts missing; skipping issue creation."
+            exit 0
+          fi
+          status="$(python3 - <<'PY'
+          import json
+          with open("artifacts/autofactor-strategy-promotion/autofactor-strategy-handoff.json", encoding="utf-8") as handle:
+              print(json.load(handle).get("status", "blocked"))
+          PY
+          )"
+          if [ "${status}" != "ready" ]; then
+            echo "Handoff status is ${status}; no dry-run issue will be created."
+            exit 0
+          fi
+          title="Promote AutoFactor strategy handoff to dry-run"
+          gh issue create \
+            --title "${title}" \
+            --body-file "${handoff_md}"
