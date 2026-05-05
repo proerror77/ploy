@@ -209,6 +209,7 @@ SELECT jsonb_build_object(
       'avg_fill_price', o.avg_fill_price,
       'status', o.status,
       'rejection_reason', o.rejection_reason,
+      'context', o.context,
       'created_at', o.recorded_at
     ) ORDER BY o.recorded_at, o.order_id)
     FROM strategy_runtime_orders o

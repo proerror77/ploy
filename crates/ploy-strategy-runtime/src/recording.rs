@@ -173,6 +173,14 @@ impl RuntimeDbRecorder {
         let context_json = json!({
             "runtime_mode": self.mode_label,
             "signal_decision": signal.map(|record| record.decision.as_str()),
+            "signal_strategy": signal.map(|record| record.strategy.as_str()),
+            "signal_symbol": signal.map(|record| record.symbol.as_str()),
+            "signal_direction": signal.map(|record| record.direction.as_str()),
+            "signal_p_hat": signal.map(|record| record.p_hat),
+            "signal_edge": signal.map(|record| record.edge),
+            "signal_entry_price": signal.map(|record| record.entry_price.to_string()),
+            "runtime_price_basis": "top_book_quote",
+            "full_depth_runtime_parity": false,
             "slippage": report.slippage.map(|value| value.to_string()),
             "market_impact": report.market_impact.map(|value| value.to_string()),
         });

@@ -94,6 +94,7 @@ class DryRunReportContractTests(unittest.TestCase):
         self.assertIn("FROM strategy_runtime_fills f", script)
         self.assertIn("'orders'", script)
         self.assertIn("'fills'", script)
+        self.assertIn("'context', o.context", script)
 
     def test_report_contract_checker_accepts_clean_empty_dryrun(self) -> None:
         payload = {
