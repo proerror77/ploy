@@ -73,6 +73,9 @@ evidence comes from Polymarket full CLOB depth, not top book.
   covers deterministic label-shift and prediction-shift diagnostics for
   settlement probability baselines, symbol holdout diagnostics, and baseline
   ablation deltas.
+- [x] Add a first EventVolSurface / empirical probability surface so
+  `q_final` can compare distance/LOB/vol formulas against a bucketed
+  historical similar-state prior without leaking the current event outcome.
 - [ ] Only after the above gates pass, create a settlement dry-run handoff with
   fixed small stake, strict kill switch, and shared scorer parity.
 
@@ -179,6 +182,24 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `2026-05-03`, while the immutable snapshots end `2026-05-02`. Reruns with
   `end_date=2026-05-01` completed successfully: XRP/DOGE/BNB run
   `25353780673` and BTC/ETH/SOL run `25353780686`.
+- 2026-05-05: Added the first non-leaky EventVolSurface / empirical probability
+  baseline to the settlement probability report. The new
+  `q_event_surface_empirical` model is fit on full-depth entry-fillable settled
+  candidate rows, buckets by symbol, time-to-expiry, and side-aligned distance
+  over sigma, and subtracts all rows with the current `event_id` from both the
+  bucket and global prior before predicting. Verification passed:
+  `rustfmt --edition 2021 --check crates/ploy-research/src/factors_v2.rs
+  crates/ploy-research/examples/factor_walk_forward_v2.rs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-event-vol-surface /opt/homebrew/bin/timeout 300
+  rtk cargo test -p ploy-research settlement_probability --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-event-vol-surface /opt/homebrew/bin/timeout 300
+  rtk cargo check -p ploy-research --example factor_walk_forward_v2 --features
+  db --no-default-features`, and `git diff --check`. A local short-window
+  snapshot smoke on `/tmp/ploy-snapshot-smoke-25356726430/...` completed and
+  printed `q_event_surface_empirical` with `n=1956`,
+  `top_edge_avg_full_depth_settlement_pnl=4.8337`, but
+  `prediction_one_step_shift pass=false`, so this remains architecture/workflow
+  completion evidence, not dry-run promotion evidence.
 - 2026-05-05: Settlement probability PRD gate result: BTC/ETH/SOL has the
   strongest next candidate but is not dry-run-ready. Run `25353780686` reported
   full-depth entry fill rate `49.23%`, exit fill rate `40.70%`, and

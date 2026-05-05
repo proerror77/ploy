@@ -376,6 +376,8 @@ pub struct SettlementProbabilityReportOptions {
     pub bucket_count: usize,
     pub min_bucket_observations: usize,
     pub top_edge_quantile: f64,
+    pub event_surface_min_bucket_observations: usize,
+    pub event_surface_shrinkage_observations: usize,
 }
 
 impl Default for SettlementProbabilityReportOptions {
@@ -384,6 +386,8 @@ impl Default for SettlementProbabilityReportOptions {
             bucket_count: 10,
             min_bucket_observations: 20,
             top_edge_quantile: 0.2,
+            event_surface_min_bucket_observations: 10,
+            event_surface_shrinkage_observations: 20,
         }
     }
 }
@@ -2480,8 +2484,11 @@ pub fn build_settlement_probability_report(
         bucket_count: options.bucket_count.max(2),
         min_bucket_observations: options.min_bucket_observations.max(1),
         top_edge_quantile: options.top_edge_quantile.clamp(0.01, 1.0),
+        event_surface_min_bucket_observations: options.event_surface_min_bucket_observations.max(1),
+        event_surface_shrinkage_observations: options.event_surface_shrinkage_observations.max(1),
     };
     let mut by_model: BTreeMap<&'static str, Vec<SettlementProbabilitySample>> = BTreeMap::new();
+    let mut eligible_rows = Vec::new();
     for row in rows {
         let Some(win) = row.label_settlement_win.filter(|win| win.is_finite()) else {
             continue;
@@ -2495,11 +2502,37 @@ pub fn build_settlement_probability_report(
         if !row.label_full_depth_entry_fillable || !valid_price(row.entry_sweep_avg_price_15u) {
             continue;
         }
+        eligible_rows.push((row, win, pnl));
+    }
+
+    let event_surface = EventVolSurface::fit(
+        &eligible_rows,
+        options.event_surface_min_bucket_observations,
+        options.event_surface_shrinkage_observations,
+    );
+
+    for (row, win, pnl) in eligible_rows {
         for (model, q) in settlement_probability_models(row) {
             let q = clamp_probability(q);
             let entry_price = row.entry_sweep_avg_price_15u;
             by_model
                 .entry(model)
+                .or_default()
+                .push(SettlementProbabilitySample {
+                    symbol: row.symbol.clone(),
+                    q,
+                    win,
+                    entry_price,
+                    edge: q - entry_price,
+                    pnl,
+                    conservative_pnl: row.label_conservative_executable_pnl_15u,
+                });
+        }
+        if let Some(q) = event_surface.predict(row) {
+            let q = clamp_probability(q);
+            let entry_price = row.entry_sweep_avg_price_15u;
+            by_model
+                .entry("q_event_surface_empirical")
                 .or_default()
                 .push(SettlementProbabilitySample {
                     symbol: row.symbol.clone(),
@@ -2576,10 +2609,12 @@ pub fn format_settlement_probability_report(report: &SettlementProbabilityReport
     let mut out = String::new();
     out.push_str("=== Settlement Probability Report ===\n");
     out.push_str(&format!(
-        "bucket_count={} min_bucket_obs={} top_edge_quantile={:.2}\n",
+        "bucket_count={} min_bucket_obs={} top_edge_quantile={:.2} event_surface_min_bucket_obs={} event_surface_shrinkage_obs={}\n",
         report.options.bucket_count,
         report.options.min_bucket_observations,
         report.options.top_edge_quantile,
+        report.options.event_surface_min_bucket_observations,
+        report.options.event_surface_shrinkage_observations,
     ));
     out.push_str("Population is full-depth entry-fillable candidate rows with settled labels. Edge is q_side - full_depth_entry_sweep_avg_price; PnL is full-depth settlement PnL after crypto fee. Conservative PnL uses 50% visible depth and max 3 CLOB levels.\n");
     out.push_str("\n--- Baseline Comparison ---\n");
@@ -6785,6 +6820,149 @@ struct SettlementProbabilitySample {
     conservative_pnl: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EventVolSurfaceKey {
+    symbol: String,
+    time_bucket: &'static str,
+    distance_bucket: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct EventVolSurfaceStats {
+    count: usize,
+    wins: f64,
+}
+
+impl EventVolSurfaceStats {
+    fn add(&mut self, win: f64) {
+        self.count += 1;
+        self.wins += win;
+    }
+
+    fn subtract(self, other: Option<Self>) -> Self {
+        let Some(other) = other else {
+            return self;
+        };
+        Self {
+            count: self.count.saturating_sub(other.count),
+            wins: self.wins - other.wins,
+        }
+    }
+
+    fn mean(self) -> Option<f64> {
+        if self.count == 0 {
+            None
+        } else {
+            Some(self.wins / self.count as f64)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct EventVolSurfaceEventStats {
+    global: EventVolSurfaceStats,
+    buckets: HashMap<EventVolSurfaceKey, EventVolSurfaceStats>,
+}
+
+#[derive(Debug, Clone)]
+struct EventVolSurface {
+    min_bucket_observations: usize,
+    shrinkage_observations: usize,
+    global: EventVolSurfaceStats,
+    buckets: HashMap<EventVolSurfaceKey, EventVolSurfaceStats>,
+    events: HashMap<String, EventVolSurfaceEventStats>,
+}
+
+impl EventVolSurface {
+    fn fit(
+        rows: &[(&FactorObservationV2, f64, f64)],
+        min_bucket_observations: usize,
+        shrinkage_observations: usize,
+    ) -> Self {
+        let mut surface = Self {
+            min_bucket_observations,
+            shrinkage_observations,
+            global: EventVolSurfaceStats::default(),
+            buckets: HashMap::new(),
+            events: HashMap::new(),
+        };
+        for (row, win, _) in rows {
+            if !win.is_finite() {
+                continue;
+            }
+            surface.global.add(*win);
+            let event_stats = surface.events.entry(row.event_id.clone()).or_default();
+            event_stats.global.add(*win);
+            if let Some(key) = event_vol_surface_key(row) {
+                surface.buckets.entry(key.clone()).or_default().add(*win);
+                event_stats.buckets.entry(key).or_default().add(*win);
+            }
+        }
+        surface
+    }
+
+    fn predict(&self, row: &FactorObservationV2) -> Option<f64> {
+        let event_stats = self.events.get(&row.event_id);
+        let global = self.global.subtract(event_stats.map(|stats| stats.global));
+        let global_mean = global.mean()?;
+        let Some(key) = event_vol_surface_key(row) else {
+            return Some(global_mean);
+        };
+        let bucket = self
+            .buckets
+            .get(&key)
+            .copied()
+            .unwrap_or_default()
+            .subtract(event_stats.and_then(|stats| stats.buckets.get(&key).copied()));
+        let Some(bucket_mean) = bucket.mean() else {
+            return Some(global_mean);
+        };
+        let mut bucket_weight =
+            bucket.count as f64 / (bucket.count + self.shrinkage_observations) as f64;
+        if bucket.count < self.min_bucket_observations {
+            bucket_weight *= bucket.count as f64 / self.min_bucket_observations as f64;
+        }
+        Some(bucket_weight * bucket_mean + (1.0 - bucket_weight) * global_mean)
+    }
+}
+
+fn event_vol_surface_key(row: &FactorObservationV2) -> Option<EventVolSurfaceKey> {
+    if !row.side_distance_over_sigma.is_finite() {
+        return None;
+    }
+    Some(EventVolSurfaceKey {
+        symbol: row.symbol.clone(),
+        time_bucket: event_surface_time_bucket(row.time_remaining_secs),
+        distance_bucket: event_surface_distance_bucket(row.side_distance_over_sigma),
+    })
+}
+
+fn event_surface_time_bucket(time_remaining_secs: i64) -> &'static str {
+    if time_remaining_secs < 60 {
+        "<60s"
+    } else if time_remaining_secs < 180 {
+        "60..180s"
+    } else if time_remaining_secs < 300 {
+        "180..300s"
+    } else {
+        ">=300s"
+    }
+}
+
+fn event_surface_distance_bucket(distance_z: f64) -> &'static str {
+    if distance_z < -1.5 {
+        "<-1.5z"
+    } else if distance_z < -0.5 {
+        "-1.5..-0.5z"
+    } else if distance_z <= 0.5 {
+        "-0.5..0.5z"
+    } else if distance_z <= 1.5 {
+        "0.5..1.5z"
+    } else {
+        ">1.5z"
+    }
+}
+
 fn settlement_probability_models(row: &FactorObservationV2) -> Vec<(&'static str, f64)> {
     let mut models = Vec::with_capacity(8);
     models.push(("q_naive_50_50", 0.5));
@@ -8789,6 +8967,8 @@ mod tests {
                 bucket_count: 2,
                 min_bucket_observations: 1,
                 top_edge_quantile: 0.5,
+                event_surface_min_bucket_observations: 1,
+                event_surface_shrinkage_observations: 1,
             },
         );
 
@@ -8831,6 +9011,54 @@ mod tests {
         assert!(text.contains("Anti-Overfit Diagnostics"));
         assert!(text.contains("Symbol Holdout Diagnostics"));
         assert!(text.contains("Baseline Ablations"));
+    }
+
+    #[test]
+    fn settlement_probability_event_surface_excludes_current_event() {
+        let options = FactorReviewOptions::default();
+        let source_rows = (0..3)
+            .map(|idx| {
+                let mut obs = base_obs();
+                obs.event_id = format!("evt-{idx}");
+                obs.tick_ts = Utc::now() + Duration::seconds(idx);
+                obs.settlement_up = if idx == 0 { 0.0 } else { 1.0 };
+                obs.pm_up_ask = 0.50;
+                obs.pm_up_bid = 0.48;
+                obs.pm_down_ask = 0.50;
+                obs.pm_down_bid = 0.48;
+                obs.distance_over_sigma = 1.0;
+                obs
+            })
+            .collect::<Vec<_>>();
+        let mut rows = build_factor_observations_v2(&source_rows, &options);
+        rows.retain(|row| row.side == ReviewSide::Up);
+        for row in &mut rows {
+            row.label_full_depth_entry_fillable = true;
+            row.entry_sweep_avg_price_15u = row.entry_ask;
+            row.label_full_depth_executable_pnl_15u = row.label_executable_pnl_15u;
+        }
+
+        let report = build_settlement_probability_report(
+            &rows,
+            SettlementProbabilityReportOptions {
+                bucket_count: 2,
+                min_bucket_observations: 1,
+                top_edge_quantile: 0.5,
+                event_surface_min_bucket_observations: 1,
+                event_surface_shrinkage_observations: 1,
+            },
+        );
+
+        let event_surface = report
+            .baselines
+            .iter()
+            .find(|row| row.model == "q_event_surface_empirical")
+            .expect("event surface baseline");
+        assert_eq!(event_surface.n, 3);
+        assert!(event_surface.avg_predicted_q > 0.0);
+        assert!(event_surface.avg_predicted_q < 1.0);
+        assert!(event_surface.brier_score.is_finite());
+        assert!(format_settlement_probability_report(&report).contains("q_event_surface_empirical"));
     }
 
     #[test]
