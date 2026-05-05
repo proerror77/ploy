@@ -222,6 +222,15 @@ evidence comes from Polymarket full CLOB depth, not top book.
   factor_walk_forward_v2 --features db --no-default-features`; the check emitted
   only pre-existing strategy-bundle dead-code warnings plus the vendor profile
   warning. Pushed the follow-up to PR #319.
+- 2026-05-05: Final audit status for this PRD slice: PR #319 is mergeable and
+  all PR checks are green, including CodeRabbit, PR Auto Review, workflow lint,
+  dependency audit, Rust research heavy features, Rust runner lanes,
+  integration regressions, market-data ops, frontend/sidecar, and commit
+  hygiene.
+  Diagnostic snapshot run `25354314443` is completed with conclusion
+  `cancelled`; strict data-gate run `25354264444` is completed with conclusion
+  `failure` at `Audit required market data`. `ploy-ci-1` recovered to
+  `online` / `busy=false`.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
