@@ -13041,3 +13041,11 @@ Issue: https://github.com/proerror77/ploy/issues/256
   dry-run/replay parity blocker; the PRD remains incomplete because issue #339
   still blocks the retained 168h strict data gate and retained walk-forward
   promotion evidence.
+- 2026-05-05: Re-ran the short-window settlement PRD gate with the post-PR341
+  full-depth replay parity artifact. Parent gate run `25379648867` dispatched
+  snapshot run `25379659918` and walk-forward run `25380143546`; snapshot and
+  walk-forward both completed successfully, and the gate consumed replay parity
+  run `25379165698` with `replay_parity_ready=true`. The final decision remains
+  correctly blocked with `ready_for_dry_run_handoff=false` because
+  `walk_forward_oos` has no non-naive model with non-empty OOS windows in the
+  one-hour smoke. This confirms workflow wiring, not promotion readiness.
