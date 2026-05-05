@@ -33,6 +33,10 @@ on:
         description: "Optional Replay Dry-run Parity run id"
         required: false
         default: ""
+      replay_parity_artifact_name:
+        description: "Optional replay parity artifact name; defaults to replay-dryrun-parity-<run-id>"
+        required: false
+        default: ""
       no_wait:
         description: "Dispatch the strict snapshot only and return"
         required: true
@@ -69,6 +73,7 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
           AUDIT_LOOKBACK_HOURS: ${{ github.event.inputs.audit_lookback_hours }}
           REPLAY_PARITY_RUN_ID: ${{ github.event.inputs.replay_parity_run_id }}
+          REPLAY_PARITY_ARTIFACT_NAME: ${{ github.event.inputs.replay_parity_artifact_name }}
           NO_WAIT: ${{ github.event.inputs.no_wait }}
         run: |
           set -euo pipefail
@@ -84,6 +89,9 @@ jobs:
           )
           if [ -n "${REPLAY_PARITY_RUN_ID}" ]; then
             args+=(--replay-parity-run-id "${REPLAY_PARITY_RUN_ID}")
+          fi
+          if [ -n "${REPLAY_PARITY_ARTIFACT_NAME}" ]; then
+            args+=(--replay-parity-artifact-name "${REPLAY_PARITY_ARTIFACT_NAME}")
           fi
           if [ "${NO_WAIT}" = "true" ]; then
             args+=(--no-wait)
@@ -104,6 +112,7 @@ jobs:
             echo "- Data profile: \`pm5d-vol\`"
             echo "- Audit lookback: \`${{ github.event.inputs.audit_lookback_hours }}h\`"
             echo "- Replay parity run: \`${{ github.event.inputs.replay_parity_run_id || 'none' }}\`"
+            echo "- Replay parity artifact: \`${{ github.event.inputs.replay_parity_artifact_name || 'default' }}\`"
             echo ""
             echo "A failed workflow can be the correct outcome: the orchestrator exits non-zero when the PRD promotion gate is blocked."
           } >> "$GITHUB_STEP_SUMMARY"
