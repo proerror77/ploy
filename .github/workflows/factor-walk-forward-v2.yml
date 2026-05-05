@@ -105,6 +105,7 @@ jobs:
               "data_gate": "never",
               "issue_number": "",
               "snapshot_registry_dir": "",
+              "replay_parity_json": "",
           }
           bool_keys = {"compile_snapshot", "allow_direct_db_debug"}
           choices = {
@@ -427,6 +428,9 @@ jobs:
           )
           if [ -n "${WALK_FACTOR_NAME_FILTER}" ]; then
             args+=(--factor-name-filter "${WALK_FACTOR_NAME_FILTER}")
+          fi
+          if [ -n "${WALK_REPLAY_PARITY_JSON}" ]; then
+            args+=(--replay-parity-json "${WALK_REPLAY_PARITY_JSON}")
           fi
           ./target/release/examples/factor_walk_forward_v2 "${args[@]}" \
             | tee artifacts/factor-walk-forward-v2/report.txt

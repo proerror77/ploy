@@ -86,6 +86,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   Deribit inclusion, full-depth/conservative capacity, calibration, settlement
   edge, anti-overfit, symbol holdout, walk-forward OOS, and recorded replay
   parity.
+- [x] Wire recorded replay parity evidence into the promotion gate. The
+  `factor_walk_forward_v2` example now accepts `--replay-parity-json` and the
+  GitHub workflow accepts optional `replay_parity_json`, so
+  `scripts/replay_dryrun_parity.py` output can directly drive the
+  `recorded_replay_parity` gate instead of relying on a hand-set boolean.
 - [ ] Only after the above gates pass, create a settlement dry-run handoff with
   fixed small stake, strict kill switch, and shared scorer parity.
 
@@ -284,6 +289,23 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `ready_for_dry_run_handoff=false`, `walk_forward_oos=false`, and
   `recorded_replay_parity=false`. This confirms the PR artifact now carries the
   same promotion blocker evidence as the local smoke.
+- 2026-05-05: Wired the replay parity artifact into the PRD gate path.
+  `factor_walk_forward_v2 --replay-parity-json <path>` reads
+  `runtime_evidence_comparison.strict_parity_ready`,
+  `event_comparison.strict_parity_ready`, `risk_flags`, and `decision` from the
+  JSON produced by `scripts/replay_dryrun_parity.py`; the workflow exposes this
+  as optional `options_json.replay_parity_json`. Verification passed:
+  `rustfmt --edition 2021 --check crates/ploy-research/src/factors_v2.rs
+  crates/ploy-research/examples/factor_walk_forward_v2.rs`,
+  `rustfmt --edition 2021 --config skip_children=true --check
+  crates/ploy-research/src/lib.rs`, `python3` YAML parse for
+  `.github/workflows/factor-walk-forward-v2.yml`, `git diff --check`,
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-parity /opt/homebrew/bin/timeout 300
+  rtk cargo check -p ploy-research --example factor_walk_forward_v2 --features
+  db --no-default-features`, and rerun
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-parity /opt/homebrew/bin/timeout 180
+  rtk cargo test -p ploy-research settlement_probability --lib` after the first
+  300s attempt timed out during initial dependency compilation.
 - 2026-05-05: Settlement probability PRD gate result: BTC/ETH/SOL has the
   strongest next candidate but is not dry-run-ready. Run `25353780686` reported
   full-depth entry fill rate `49.23%`, exit fill rate `40.70%`, and
