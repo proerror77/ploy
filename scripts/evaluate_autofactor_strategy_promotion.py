@@ -78,6 +78,22 @@ class EvaluatedFactor:
     runtime_mapping: dict[str, str] | None
 
 
+def factor_metrics(row: AutoFactorRow) -> dict[str, Any]:
+    return {
+        "rank": row.rank,
+        "n": row.n,
+        "spearman_ic": row.spearman_ic,
+        "pearson_ic": row.pearson_ic,
+        "window_count": row.window_count,
+        "icir": row.icir,
+        "positive_window_ratio": row.positive_window_ratio,
+        "monotonicity": row.monotonicity,
+        "top_bucket_avg_label": row.top_bucket_avg_label,
+        "top_bucket_positive_label_rate": row.top_bucket_positive_label_rate,
+        "complexity": row.complexity,
+    }
+
+
 def parse_float(raw: str) -> float:
     try:
         return float(raw)
@@ -252,6 +268,66 @@ def evaluate(
     }
 
 
+def build_factor_registry(result: dict[str, Any]) -> dict[str, Any]:
+    entries = []
+    for item in result["evaluated_factors"]:
+        factor = item["factor"]
+        mapping = item["runtime_mapping"] or {}
+        entries.append(
+            {
+                "name": factor["name"],
+                "target": factor["target"],
+                "status": "qualified" if item["qualified"] else "blocked",
+                "autofactor_decision": factor["decision"],
+                "autofactor_reason": factor["reason"],
+                "blockers": item["blockers"],
+                "runtime_mapping": mapping,
+                "metrics": factor_metrics(AutoFactorRow(**factor)),
+            }
+        )
+    return {
+        "schema_version": 1,
+        "kind": "autofactor_strategy_registry",
+        "decision": result["decision"],
+        "required_strategy_profile": result["required_strategy_profile"],
+        "allowed_targets": result["allowed_targets"],
+        "promotion_gate": result["promotion_gate"],
+        "entries": entries,
+    }
+
+
+def build_strategy_handoff(result: dict[str, Any]) -> dict[str, Any]:
+    strategies = []
+    for item in result["qualified_strategies"]:
+        factor = item["factor"]
+        mapping = item["runtime_mapping"] or {}
+        strategies.append(
+            {
+                "name": factor["name"],
+                "target": factor["target"],
+                "strategy_profile": mapping.get("strategy_profile", ""),
+                "strategy_family": mapping.get("strategy_family", ""),
+                "runtime_score": mapping.get("runtime_score", ""),
+                "promotion_status": "ready_for_dry_run_handoff",
+                "metrics": factor_metrics(AutoFactorRow(**factor)),
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "kind": "autofactor_strategy_handoff",
+        "status": "ready" if strategies else "blocked",
+        "recommended_action": "create_dry_run_handoff" if strategies else "do_not_promote",
+        "required_strategy_profile": result["required_strategy_profile"],
+        "allowed_targets": result["allowed_targets"],
+        "promotion_gate": result["promotion_gate"],
+        "strategies": strategies,
+        "blocked_factor_count": sum(
+            1 for item in result["evaluated_factors"] if not item["qualified"]
+        ),
+    }
+
+
 def render_markdown(result: dict[str, Any]) -> str:
     lines = [
         "# AutoFactor Strategy Promotion Report",
@@ -304,6 +380,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report", required=True, help="factor_walk_forward_v2 report.txt")
     parser.add_argument("--output-json", default="")
     parser.add_argument("--output-md", default="")
+    parser.add_argument("--output-registry-json", default="")
+    parser.add_argument("--output-handoff-json", default="")
     parser.add_argument("--runtime-mapping-json", default="")
     parser.add_argument(
         "--allowed-target",
@@ -335,6 +413,20 @@ def main() -> int:
         output = Path(args.output_md)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(render_markdown(result), encoding="utf-8")
+    if args.output_registry_json:
+        output = Path(args.output_registry_json)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(build_factor_registry(result), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    if args.output_handoff_json:
+        output = Path(args.output_handoff_json)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(build_strategy_handoff(result), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["decision"] == "qualified" or not args.fail_if_blocked else 3

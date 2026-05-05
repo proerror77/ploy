@@ -114,6 +114,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - [x] Add a hosted `autofactor-strategy-promotion.yml` workflow that can
   evaluate existing Factor Walk-Forward V2 artifacts without waiting for
   `ploy-ci-1`.
+- [x] Add machine-readable AutoFactor downstream artifacts:
+  `autofactor-factor-registry.json` for evaluated factor rows and
+  `autofactor-strategy-handoff.json` for qualified dry-run handoff rows. The
+  handoff manifest is deliberately `blocked` when no strategy qualifies, so
+  downstream automation cannot mistake a report-only candidate for a deployable
+  strategy.
 
 ## Review
 
@@ -149,6 +155,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   research runner is offline. It downloads `report.txt`, emits
   `autofactor-strategy-promotion.json` / `.md`, uploads them as a workflow
   artifact, and can comment the result back to a GitHub issue.
+- 2026-05-06: Extended AutoFactor strategy-promotion artifacts with a registry
+  and handoff manifest. The registry preserves every evaluated factor/target
+  row plus blockers and runtime mapping. The handoff manifest is the downstream
+  contract for dry-run automation: it contains only qualified strategy rows, or
+  a blocked/do-not-promote status when none qualify.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

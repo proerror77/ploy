@@ -45,6 +45,8 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             report_path = Path(tmp) / "report.txt"
             output_json = Path(tmp) / "promotion.json"
+            output_registry = Path(tmp) / "registry.json"
+            output_handoff = Path(tmp) / "handoff.json"
             report_path.write_text(report, encoding="utf-8")
             result = subprocess.run(
                 [
@@ -54,6 +56,10 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     str(report_path),
                     "--output-json",
                     str(output_json),
+                    "--output-registry-json",
+                    str(output_registry),
+                    "--output-handoff-json",
+                    str(output_handoff),
                     *extra_args,
                 ],
                 cwd=ROOT,
@@ -62,12 +68,17 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                 check=check,
             )
             payload = json.loads(output_json.read_text(encoding="utf-8"))
-            return result, payload
+            registry = json.loads(output_registry.read_text(encoding="utf-8"))
+            handoff = json.loads(output_handoff.read_text(encoding="utf-8"))
+            return result, payload, registry, handoff
 
     def test_blocks_candidate_when_runtime_profile_is_not_required_profile(self):
-        _, payload = self.run_script(READY_GATE + AUTOFACTOR_REPORT)
+        _, payload, registry, handoff = self.run_script(READY_GATE + AUTOFACTOR_REPORT)
 
         self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(registry["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        self.assertEqual(handoff["recommended_action"], "do_not_promote")
         spread = next(
             item
             for item in payload["evaluated_factors"]
@@ -80,7 +91,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
 
     def test_qualifies_when_allowed_target_and_runtime_profile_match(self):
-        _, payload = self.run_script(
+        _, payload, registry, handoff = self.run_script(
             READY_GATE + AUTOFACTOR_REPORT,
             "--allowed-target",
             "full_depth_reprice_pnl_10s",
@@ -89,13 +100,20 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(registry["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(handoff["recommended_action"], "create_dry_run_handoff")
+        self.assertEqual(
+            handoff["strategies"][0]["runtime_score"],
+            "spread_adjusted_external_move_score",
+        )
         self.assertEqual(
             payload["qualified_strategies"][0]["factor"]["name"],
             "spread_adjusted_external_move",
         )
 
     def test_blocks_when_promotion_gate_is_not_ready(self):
-        result, payload = self.run_script(
+        result, payload, _, handoff = self.run_script(
             BLOCKED_GATE + AUTOFACTOR_REPORT,
             "--allowed-target",
             "full_depth_reprice_pnl_10s",
@@ -107,6 +125,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 3)
         self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
         self.assertIn("promotion_gate_not_ready", payload["evaluated_factors"][0]["blockers"])
 
 

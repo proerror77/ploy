@@ -479,7 +479,9 @@ jobs:
           python3 scripts/evaluate_autofactor_strategy_promotion.py \
             --report artifacts/factor-walk-forward-v2/report.txt \
             --output-json artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json \
-            --output-md artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.md
+            --output-md artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.md \
+            --output-registry-json artifacts/factor-walk-forward-v2/autofactor-factor-registry.json \
+            --output-handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json
 
       - name: Publish summary
         if: always()

@@ -120,7 +120,9 @@ evaluator before creating any dry-run handoff:
 python3 scripts/evaluate_autofactor_strategy_promotion.py \
   --report /tmp/factor-walk-forward-v2/report.txt \
   --output-json /tmp/autofactor-strategy-promotion.json \
-  --output-md /tmp/autofactor-strategy-promotion.md
+  --output-md /tmp/autofactor-strategy-promotion.md \
+  --output-registry-json /tmp/autofactor-factor-registry.json \
+  --output-handoff-json /tmp/autofactor-strategy-handoff.json
 ```
 
 The evaluator requires all of the following:
@@ -138,6 +140,15 @@ wrong lane. For example, `spread_adjusted_external_move` can be a valid
 repricing candidate while still being blocked from settlement-probability
 promotion because its runtime mapping is `repricing_momentum`, not
 `settlement_probability`.
+
+The evaluator also emits two machine-readable downstream artifacts when the
+corresponding output paths are provided:
+
+- `autofactor-factor-registry.json`: every evaluated factor/target row, its
+  AutoFactor status, blockers, runtime mapping, and metrics.
+- `autofactor-strategy-handoff.json`: only qualified strategy rows. When no
+  row qualifies, this manifest is intentionally `status=blocked` and
+  `recommended_action=do_not_promote`.
 
 For an existing Factor Walk-Forward V2 artifact, use the hosted GitHub workflow
 instead of waiting for the self-hosted research runner:
