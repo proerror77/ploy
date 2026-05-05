@@ -231,6 +231,9 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `cancelled`; strict data-gate run `25354264444` is completed with conclusion
   `failure` at `Audit required market data`. `ploy-ci-1` recovered to
   `online` / `busy=false`.
+- 2026-05-05: Opened follow-up issue #321 for the remaining promotion blockers:
+  collect a strict `pm5d-vol` full snapshot, run conservative settlement edge
+  buckets, and prove recorded replay parity before any dry-run handoff.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 

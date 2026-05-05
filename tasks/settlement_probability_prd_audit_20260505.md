@@ -28,6 +28,7 @@ snapshot-backed full-depth execution labels and probability-model validation.
 - PR Auto Review: passed on run `25354110277`
 - CodeRabbit: success
 - Runner blocker issue: #320, closed after `ploy-ci-1` recovery
+- Follow-up issue for remaining PRD promotion blockers: #321
 - Final pushed head: PR #319 current head after final audit docs
 - Final PR check status: all required PR checks green on run `25354770307`
   plus PR Auto Review `25354770288`; CodeRabbit success.
