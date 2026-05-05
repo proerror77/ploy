@@ -150,6 +150,14 @@ corresponding output paths are provided:
   row qualifies, this manifest is intentionally `status=blocked` and
   `recommended_action=do_not_promote`.
 
+Factor Walk-Forward V2 also includes a constrained settlement-native generator
+for the `full_depth_settlement_executable_pnl` target. It automatically expands
+full-depth and conservative settlement edge primitives into `auto_settlement_*`
+formula candidates with near-strike, capacity, spread, external-pressure, and
+short-IV-change interactions. These rows are still discovery evidence only:
+they must pass the same promotion evaluator and runtime mapping gates before
+becoming a dry-run handoff.
+
 For an existing Factor Walk-Forward V2 artifact, use the hosted GitHub workflow
 instead of waiting for the self-hosted research runner:
 
