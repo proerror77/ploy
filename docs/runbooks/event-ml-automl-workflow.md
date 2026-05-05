@@ -177,6 +177,11 @@ This downloads `factor-walk-forward-v2-<run-id>`, runs the same evaluator on
 `report.txt`, uploads `autofactor-strategy-promotion-<run-id>` artifacts, and
 can optionally comment on a research issue.
 
+The hosted workflow also has a fail-closed `create_handoff_issue` input. Leave
+it `false` for diagnostics. When set to `true`, the workflow creates a dry-run
+handoff issue only if `autofactor-strategy-handoff.json` reports
+`status=ready`; blocked handoffs are logged and skipped.
+
 Use `--output-dir <dir>` to choose the artifact directory. Without it, the
 runner writes under `<dataset>/workflow_runs/event_ml_<timestamp>`.
 

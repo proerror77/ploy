@@ -130,6 +130,10 @@ evidence comes from Polymarket full CLOB depth, not top book.
   with the machine-readable handoff JSON. Ready handoffs include a dry-run issue
   and config-contract draft; blocked handoffs explicitly say no dry-run handoff
   issue/config should be created.
+- [x] Add optional ready-only dry-run handoff issue creation to the hosted
+  AutoFactor promotion workflow. The `create_handoff_issue` input defaults to
+  `false`; when enabled, it creates an issue only if the handoff JSON is
+  `status=ready`.
 
 ## Review
 
@@ -181,6 +185,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   fail-closed handoff artifact: blocked runs produce a no-handoff message,
   while qualified runs produce a dry-run issue/config-contract draft from the
   same strategy rows as `autofactor-strategy-handoff.json`.
+- 2026-05-06: Extended the hosted `autofactor-strategy-promotion.yml` workflow
+  with optional ready-only handoff issue creation. Diagnostics remain the
+  default; when `create_handoff_issue=true`, the workflow reads
+  `autofactor-strategy-handoff.json` and creates a dry-run handoff issue only
+  for `status=ready`, skipping blocked reports.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable
