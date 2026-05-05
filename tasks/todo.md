@@ -58,7 +58,7 @@ evidence comes from Polymarket full CLOB depth, not top book.
   settlement PnL, conservative PnL where available, and monotonicity.
 - [x] Add initial baseline comparison: 50/50, Polymarket midpoint,
   `Phi(distance_z)`, existing fair probability, and existing model probability.
-- [ ] Add richer baseline comparison: `Phi(distance_z)` plus currently available
+- [x] Add richer baseline comparison: `Phi(distance_z)` plus currently available
   volatility / direction primitives, and later event-vol-surface variants.
 - [ ] Add anti-overfit checks before any dry-run promotion: walk-forward OOS,
   symbol holdout, permutation, time-shift, and feature ablation.
@@ -102,6 +102,15 @@ evidence comes from Polymarket full CLOB depth, not top book.
   your account have enough balance." Until that runner is restored, the PRD
   data-sufficiency gate cannot be completed; local tests prove code shape only,
   not strategy/data sufficiency.
+- 2026-05-05: Confirmed the PRD direction remains the active plan and extended
+  the settlement probability report with non-training richer baselines:
+  `q_distance_lob_drift_phi`, `q_distance_vol_adjusted_phi`, and
+  `q_distance_lob_vol_phi`. These compare pure distance probability against
+  available LOB direction pressure and volatility-regime adjustments while still
+  evaluating only full-depth entry-fillable, settled candidate rows. Remote
+  snapshot-backed validation remains blocked because `ploy-ci-1` is offline and
+  Aliyun `StartInstance` still returns `InstanceExpired` while the ECS operation
+  locks include `financial` / `financial-recycling`.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 

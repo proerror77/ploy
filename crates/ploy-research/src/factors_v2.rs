@@ -6665,16 +6665,28 @@ struct SettlementProbabilitySample {
 }
 
 fn settlement_probability_models(row: &FactorObservationV2) -> Vec<(&'static str, f64)> {
-    let mut models = Vec::with_capacity(5);
+    let mut models = Vec::with_capacity(8);
     models.push(("q_naive_50_50", 0.5));
     if valid_price(row.entry_ask) && valid_price(row.exit_bid) {
         models.push(("q_market_midpoint", (row.entry_ask + row.exit_bid) * 0.5));
     }
     if row.side_distance_over_sigma.is_finite() {
-        models.push((
-            "q_base_distance_phi",
-            normal_cdf(row.side_distance_over_sigma),
-        ));
+        let base_z = row.side_distance_over_sigma;
+        models.push(("q_base_distance_phi", normal_cdf(base_z)));
+        let drift_z = side_lob_drift_z(row);
+        if drift_z.is_finite() {
+            models.push(("q_distance_lob_drift_phi", normal_cdf(base_z + drift_z)));
+        }
+        let vol_adjusted_z = volatility_adjusted_distance_z(row);
+        if vol_adjusted_z.is_finite() {
+            models.push(("q_distance_vol_adjusted_phi", normal_cdf(vol_adjusted_z)));
+        }
+        if drift_z.is_finite() && vol_adjusted_z.is_finite() {
+            models.push((
+                "q_distance_lob_vol_phi",
+                normal_cdf(vol_adjusted_z + drift_z),
+            ));
+        }
     }
     if valid_probability(row.side_fair_prob) {
         models.push(("q_existing_fair_prob", row.side_fair_prob));
@@ -6683,6 +6695,72 @@ fn settlement_probability_models(row: &FactorObservationV2) -> Vec<(&'static str
         models.push(("q_existing_model_prob", row.side_model_prob));
     }
     models
+}
+
+fn side_lob_drift_z(row: &FactorObservationV2) -> f64 {
+    let mut score = 0.0;
+    let mut weight = 0.0;
+    add_finite_component(
+        &mut score,
+        &mut weight,
+        row.obi_10 * row.side.multiplier(),
+        0.20,
+    );
+    add_finite_component(
+        &mut score,
+        &mut weight,
+        row.depth_imbalance * row.side.multiplier(),
+        0.15,
+    );
+    add_finite_component(
+        &mut score,
+        &mut weight,
+        row.microprice_offset_bps * row.side.multiplier() / 5.0,
+        0.15,
+    );
+    add_finite_component(&mut score, &mut weight, row.obi_persistence_30s_side, 0.20);
+    add_finite_component(
+        &mut score,
+        &mut weight,
+        row.microprice_momentum_30s_side / 5.0,
+        0.10,
+    );
+    add_finite_component(
+        &mut score,
+        &mut weight,
+        row.cex_signed_volume_ratio_30s * row.side.multiplier(),
+        0.20,
+    );
+    add_finite_component(&mut score, &mut weight, row.cex_breakout_volume_side, 0.15);
+    if weight <= EPS {
+        return f64::NAN;
+    }
+    (score / weight).tanh() * 0.35
+}
+
+fn volatility_adjusted_distance_z(row: &FactorObservationV2) -> f64 {
+    if !row.side_distance_over_sigma.is_finite() {
+        return f64::NAN;
+    }
+    let mut vol_shock = 0.0f64;
+    if row.vol_gap.is_finite() {
+        vol_shock = vol_shock.max(row.vol_gap);
+    }
+    if row.deribit_iv_gap_horizon.is_finite() {
+        vol_shock = vol_shock.max(row.deribit_iv_gap_horizon);
+    }
+    if row.deribit_iv_change_60s.is_finite() {
+        vol_shock = vol_shock.max(row.deribit_iv_change_60s.abs() * 0.5);
+    }
+    let denominator = 1.0 + vol_shock.max(0.0).clamp(0.0, 2.0);
+    row.side_distance_over_sigma / denominator
+}
+
+fn add_finite_component(score: &mut f64, weight: &mut f64, value: f64, component_weight: f64) {
+    if value.is_finite() && component_weight > 0.0 {
+        *score += value.clamp(-5.0, 5.0) * component_weight;
+        *weight += component_weight;
+    }
 }
 
 fn build_probability_baseline_row(
