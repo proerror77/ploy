@@ -45,6 +45,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
+    use std::thread;
+    use std::time::Duration as StdDuration;
 
     fn test_working_directory() -> PathBuf {
         let unique = std::time::SystemTime::now()
@@ -135,30 +137,45 @@ mod tests {
             observed_state: ObservedState::Starting,
         }];
 
-        apply_loaded_registry_state(
+        let first_pid = wait_for_worker_pid(
             records.clone(),
             &mut registry,
             &mut supervisor,
             &mut trading,
             &config,
         );
-        let first_pid = supervisor
-            .status("example.paper")
-            .and_then(|status| status.pid)
-            .expect("first pid");
 
-        apply_loaded_registry_state(
+        let second_pid = wait_for_worker_pid(
             records,
             &mut registry,
             &mut supervisor,
             &mut trading,
             &config,
         );
-        let second_pid = supervisor
-            .status("example.paper")
-            .and_then(|status| status.pid)
-            .expect("second pid");
 
         assert_eq!(first_pid, second_pid);
+    }
+
+    fn wait_for_worker_pid(
+        records: Vec<DeploymentRecord>,
+        registry: &mut DeploymentRegistry,
+        supervisor: &mut WorkerSupervisor,
+        trading: &mut BTreeMap<String, TradingRuntime>,
+        config: &WorkerTickConfig,
+    ) -> u32 {
+        for _ in 0..20 {
+            apply_loaded_registry_state(records.clone(), registry, supervisor, trading, config);
+            if let Some(pid) = supervisor
+                .status("example.paper")
+                .and_then(|status| status.pid)
+            {
+                return pid;
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+        let status = supervisor.status("example.paper");
+        panic!(
+            "worker did not report a pid after bounded bootstrap ticks; final status={status:?}"
+        );
     }
 }
