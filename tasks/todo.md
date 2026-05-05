@@ -13049,3 +13049,15 @@ Issue: https://github.com/proerror77/ploy/issues/256
   correctly blocked with `ready_for_dry_run_handoff=false` because
   `walk_forward_oos` has no non-naive model with non-empty OOS windows in the
   one-hour smoke. This confirms workflow wiring, not promotion readiness.
+- 2026-05-05: Re-ran direct Tango data-gap audits after closing the runtime
+  full-depth parity blocker. The 1h `pm5d-vol` audit for BTC/ETH was
+  `overall_status=ok` with 100% coverage and fresh rows across PM, Deribit, and
+  Binance sources. The 168h `pm5d-vol` audit remained
+  `overall_status=critical`: PM coverage was about 72.4-72.5%, Deribit and
+  Binance coverage about 78.2%, with max gaps around `1700-1705m` spanning
+  roughly `2026-05-04 05:29/05:30 +08` to
+  `2026-05-05 09:49/09:54 +08`. Updated issue #339 and the PRD completion
+  audit with the exact retained-gate retry command using
+  `recorded-replay-parity-25379165698`; do not rerun it for promotion until the
+  gap rolls out of 168h, roughly after `2026-05-12 09:55 +08`, or until a
+  validated lossless full-source backfill exists.

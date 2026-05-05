@@ -265,6 +265,25 @@ Direct Tango audit after the failed gate:
 Interpretation: current ingestion is healthy. The retained gate is blocked by a
 historical hole inside the 168h lookback, not by current live capture.
 
+Fresh direct Tango audit after PR #341 full-depth parity closure:
+
+- Run time: `2026-05-05 21:54-21:55 +08`
+- Command shape:
+  `scripts/audit_market_data_gaps.py --symbols BTCUSDT,ETHUSDT --required-sources pm5d-vol`
+- `lookback_hours=1`: `overall_status=ok`
+  - all required PM, Deribit, and Binance sources had `100%` coverage
+  - latest rows were within seconds
+- `lookback_hours=168`: `overall_status=critical`
+  - PM quotes/orderbooks coverage: about `72.4-72.5%`
+  - Deribit IV/ATM greeks coverage: about `78.2%`
+  - Binance BTC/ETH price, agg trades, and LOB coverage: about `78.2%`
+  - max gap: about `1700-1705m`
+  - gap window: roughly `2026-05-04 05:29/05:30 +08` to
+    `2026-05-05 09:49/09:54 +08`
+
+This confirms the current blocker after runtime parity closure is still
+retained-window historical continuity, not live ingestion or replay parity.
+
 ## Open Blockers
 
 ### Blocker 1: Retained Data Continuity
@@ -310,6 +329,28 @@ authorize live trading.
 4. Only if the retained gate passes with the newer post-deploy full-depth replay
    parity artifact, promote the next engineering slice toward dry-run handoff
    hardening.
+
+Recommended retained-gate retry command after the hole rolls out of the 168h
+lookback:
+
+```bash
+gh workflow run settlement-probability-prd-gate.yml \
+  --ref main \
+  -f git_ref=main \
+  -f start_date=2026-05-05 \
+  -f end_date=2026-05-12 \
+  -f symbols=BTCUSDT,ETHUSDT \
+  -f stake_usd=15 \
+  -f issue_number=332 \
+  -f audit_lookback_hours=168 \
+  -f replay_parity_run_id=25379165698 \
+  -f replay_parity_artifact_name=recorded-replay-parity-25379165698 \
+  -f no_wait=false
+```
+
+Run this only after about `2026-05-12 09:55 +08`, or after a validated lossless
+full-source backfill. Before that time, the strict data audit is expected to
+fail for the same retained-window gap.
 
 ## Completion Criteria Not Yet Met
 
