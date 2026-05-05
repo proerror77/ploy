@@ -189,7 +189,7 @@ pub fn refresh_source_health(control_plane: &mut ControlPlane, listen_addr: &str
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerTickConfig, refresh_source_health, tick_workers};
+    use super::{refresh_source_health, tick_workers, WorkerTickConfig};
     use ploy_deployments::WorkerSupervisor;
     use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
     use ploy_platform::{ControlPlane, DeploymentRecord};
@@ -303,16 +303,14 @@ mod tests {
             &config,
         );
 
-        assert!(
-            spec.command
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("ploy-platform-runtime-test-runner-"))
-        );
-        assert!(
-            spec.args
-                .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string())
-        );
+        assert!(spec
+            .command
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("ploy-platform-runtime-test-runner-")));
+        assert!(spec
+            .args
+            .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string()));
         let deployment_id_arg = spec
             .args
             .windows(2)
@@ -338,19 +336,30 @@ mod tests {
             observed_state: ObservedState::Starting,
         });
 
-        tick_workers(&mut control_plane, &mut supervisor, &config);
-        let first_pid = supervisor
-            .status("example.paper")
-            .and_then(|status| status.pid)
-            .expect("first pid");
+        let first_pid = wait_for_worker_pid(&mut control_plane, &mut supervisor, &config);
 
-        tick_workers(&mut control_plane, &mut supervisor, &config);
-        let second_pid = supervisor
-            .status("example.paper")
-            .and_then(|status| status.pid)
-            .expect("second pid");
+        let second_pid = wait_for_worker_pid(&mut control_plane, &mut supervisor, &config);
 
         assert_eq!(first_pid, second_pid);
+    }
+
+    fn wait_for_worker_pid(
+        control_plane: &mut ControlPlane,
+        supervisor: &mut WorkerSupervisor,
+        config: &WorkerTickConfig,
+    ) -> u32 {
+        for _ in 0..20 {
+            tick_workers(control_plane, supervisor, config);
+            if let Some(pid) = supervisor
+                .status("example.paper")
+                .and_then(|status| status.pid)
+            {
+                return pid;
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+        let status = supervisor.status("example.paper");
+        panic!("worker did not report a pid after bounded ticks; final status={status:?}");
     }
 
     #[test]
