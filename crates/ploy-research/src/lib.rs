@@ -124,9 +124,10 @@ pub use factors_v2::{
     MetaLabelWalkForwardWindow, RepricingIcOptions, RepricingIcReport, RepricingIcRow, ReviewSide,
     SettlementProbabilityAntiOverfitRow, SettlementProbabilityBaselineRow,
     SettlementProbabilityCalibrationRow, SettlementProbabilityEdgeBucketRow,
-    SettlementProbabilityReport, SettlementProbabilityReportOptions, SingleFactorReview,
-    ThreeLayerArchive, TradeFormationPathRow, TradeFormationReviewOptions,
-    TradeFormationReviewReport, TradeFormationRuleRow,
+    SettlementProbabilityReport, SettlementProbabilityReportOptions,
+    SettlementProbabilitySymbolHoldoutRow, SingleFactorReview, ThreeLayerArchive,
+    TradeFormationPathRow, TradeFormationReviewOptions, TradeFormationReviewReport,
+    TradeFormationRuleRow,
 };
 #[cfg(feature = "rl")]
 pub use model::rl::{BinaryEventEnv, DqnAgent, Environment, ReplayBuffer};

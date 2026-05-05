@@ -63,7 +63,8 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - [ ] Add anti-overfit checks before any dry-run promotion: walk-forward OOS,
   symbol holdout, permutation, time-shift, and feature ablation. Current report
   covers deterministic label-shift and prediction-shift diagnostics for
-  settlement probability baselines; symbol holdout and feature ablation remain.
+  settlement probability baselines plus symbol holdout diagnostics; feature
+  ablation remains.
 - [ ] Only after the above gates pass, create a settlement dry-run handoff with
   fixed small stake, strict kill switch, and shared scorer parity.
 
@@ -126,8 +127,8 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `financial-recycling` operation locks, and `StartInstance` still fails with
   `InstanceExpired`. Added local anti-overfit diagnostics to the settlement
   probability report so the next successful Factor Walk-Forward run will also
-  print label cyclic-shift and prediction one-step-shift checks for each
-  probability baseline.
+  print label cyclic-shift, prediction one-step-shift, and per-symbol holdout
+  checks for each probability baseline.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
