@@ -12893,3 +12893,22 @@ Issue: https://github.com/proerror77/ploy/issues/256
   preserves raw replay/dry-run inputs in a separate
   `recorded-replay-inputs-*` artifact, so the PRD gate can consume recorded
   replay parity without special casing nested paths.
+- 2026-05-05: PR #329 fixed the recorded parity artifact layout and main run
+  `25366831381` proved the artifact contract: `parity-evaluation.json` is now
+  at the artifact root, runtime order/fill strict parity is ready
+  (`10/10/10` shared orders and fills), and blocking flags are empty. The
+  one-day PRD gate `25366891903` then passed data quality, Deribit, full-depth
+  capacity, conservative capacity, probability calibration, settlement edge,
+  conservative edge, and recorded replay parity, but correctly blocked dry-run
+  handoff because walk-forward OOS had no non-empty windows and deterministic
+  anti-overfit still failed.
+- 2026-05-05: A wider available-window PRD gate `25367205869`
+  (`2026-04-29..2026-05-05`, BTC/ETH/SOL, 15u) produced snapshot
+  `25367212009` and walk-forward `25368373695`. Walk-forward OOS now passes
+  for `q_market_midpoint` with 4 windows, positive window ratio `1.0000`, and
+  min test top-edge full-depth PnL `1.3664`, while dry-run handoff remains
+  blocked by anti-overfit semantics and symbol holdout: SOLUSDT top-edge PnL is
+  still slightly negative for both market midpoint and existing fair
+  probability. The next code correction is to align prediction one-step
+  time-shift with the PRD rule "should not become better" while preserving the
+  stricter decay requirement for label shift/permutation tests.

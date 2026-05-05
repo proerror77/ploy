@@ -8024,7 +8024,7 @@ fn build_probability_anti_overfit_rows(
             perturbed_edge_win_rank_ic: prediction_shift_rank_ic,
             observed_top_edge_avg_full_depth_settlement_pnl: observed_top_pnl,
             perturbed_top_edge_avg_full_depth_settlement_pnl: prediction_shift_top_pnl,
-            pass: anti_overfit_pass(
+            pass: anti_overfit_no_improvement_pass(
                 observed_rank_ic,
                 prediction_shift_rank_ic,
                 observed_top_pnl,
@@ -8114,6 +8114,22 @@ fn anti_overfit_pass(
         || !perturbed_top_pnl.is_finite()
         || observed_top_pnl <= 0.0
         || perturbed_top_pnl <= observed_top_pnl * 0.5;
+    ic_ok && pnl_ok
+}
+
+fn anti_overfit_no_improvement_pass(
+    observed_rank_ic: f64,
+    perturbed_rank_ic: f64,
+    observed_top_pnl: f64,
+    perturbed_top_pnl: f64,
+) -> bool {
+    let eps = 1e-9;
+    let ic_ok = !observed_rank_ic.is_finite()
+        || !perturbed_rank_ic.is_finite()
+        || perturbed_rank_ic.abs() <= observed_rank_ic.abs() + eps;
+    let pnl_ok = !observed_top_pnl.is_finite()
+        || !perturbed_top_pnl.is_finite()
+        || perturbed_top_pnl <= observed_top_pnl + eps;
     ic_ok && pnl_ok
 }
 
@@ -9558,6 +9574,19 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
+
+    #[test]
+    fn prediction_shift_anti_overfit_passes_when_not_better() {
+        assert!(anti_overfit_no_improvement_pass(0.18, 0.16, 2.12, 2.05));
+        assert!(!anti_overfit_no_improvement_pass(0.18, 0.20, 2.12, 2.05));
+        assert!(!anti_overfit_no_improvement_pass(0.18, 0.16, 2.12, 2.20));
+    }
+
+    #[test]
+    fn label_perturbation_anti_overfit_still_requires_decay() {
+        assert!(anti_overfit_pass(0.18, 0.03, 2.12, 0.90));
+        assert!(!anti_overfit_pass(0.18, 0.16, 2.12, 2.05));
+    }
 
     fn base_obs() -> FactorObservation {
         FactorObservation {
