@@ -91,6 +91,10 @@ pub struct FactorObservation {
     pub abs_distance_to_beat: f64,
     pub drift_10s: f64,
     pub drift_30s: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub flip_age_secs: f64,
     pub post_flip_drift: f64,
     pub sigma_horizon: f64,
@@ -1894,7 +1898,11 @@ pub fn aggregate_factor_metrics(windows: &[Vec<FactorMetric>]) -> Vec<Aggregated
                     let std = (vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
                         / vals.len() as f64)
                         .sqrt();
-                    if std <= 1e-9 { None } else { Some(mean / std) }
+                    if std <= 1e-9 {
+                        None
+                    } else {
+                        Some(mean / std)
+                    }
                 }
             };
             AggregatedFactorMetric {
@@ -2361,7 +2369,11 @@ pub(crate) fn bucket_icir(bucketed: &[(i64, f64, f64)], min_points: usize) -> Op
                 return None;
             }
             let ic = spearman_ic(&xs, &ys);
-            if ic.is_finite() { Some(ic) } else { None }
+            if ic.is_finite() {
+                Some(ic)
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -2504,6 +2516,7 @@ mod tests {
     #[test]
     fn factor_observation_deserializes_snapshot_nulls_as_nan() {
         let mut observation = test_factor_observation("evt", "BTCUSDT", 100, 1.0, None);
+        observation.flip_age_secs = f64::NAN;
         observation.fair_prob_up = f64::NAN;
         observation.fair_prob_up_clean = f64::NAN;
         observation.prob_disagreement = f64::NAN;
@@ -2526,11 +2539,13 @@ mod tests {
         observation.future_up_ask_change_60s = None;
 
         let json = serde_json::to_string(&observation).expect("serialize observation");
+        assert!(json.contains("\"flip_age_secs\":null"));
         assert!(json.contains("\"depth_acceleration\":null"));
         assert!(json.contains("\"pm_up_bid_size\":null"));
 
         let decoded: FactorObservation =
             serde_json::from_str(&json).expect("deserialize snapshot observation");
+        assert!(decoded.flip_age_secs.is_nan());
         assert!(decoded.fair_prob_up.is_nan());
         assert!(decoded.fair_prob_up_clean.is_nan());
         assert!(decoded.prob_disagreement.is_nan());
