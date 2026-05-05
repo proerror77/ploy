@@ -2589,6 +2589,8 @@ mod tests {
                 ask: Some(Decimal::new(46, 2)),
                 bid_size: Some(Decimal::new(100, 0)),
                 ask_size: Some(Decimal::new(100, 0)),
+                bid_levels: vec![],
+                ask_levels: vec![],
                 ts: Utc.timestamp_opt(649, 0).unwrap(),
             },
             MarketUpdate::SpotPrice {
@@ -2602,6 +2604,8 @@ mod tests {
                 ask: Some(Decimal::new(46, 2)),
                 bid_size: Some(Decimal::new(100, 0)),
                 ask_size: Some(Decimal::new(100, 0)),
+                bid_levels: vec![],
+                ask_levels: vec![],
                 ts: Utc.timestamp_opt(709, 0).unwrap(),
             },
             MarketUpdate::SpotPrice {
@@ -2643,6 +2647,8 @@ mod tests {
                 ask: Some(Decimal::new(46, 2)),
                 bid_size: Some(Decimal::new(100, 0)),
                 ask_size: Some(Decimal::new(100, 0)),
+                bid_levels: vec![],
+                ask_levels: vec![],
                 ts: Utc.timestamp_opt(700, 0).unwrap(),
             },
             MarketUpdate::Quote {
@@ -2651,6 +2657,8 @@ mod tests {
                 ask: Some(Decimal::new(54, 2)),
                 bid_size: Some(Decimal::new(100, 0)),
                 ask_size: Some(Decimal::new(100, 0)),
+                bid_levels: vec![],
+                ask_levels: vec![],
                 ts: Utc.timestamp_opt(749, 0).unwrap(),
             },
             MarketUpdate::SpotPrice {
@@ -2693,6 +2701,8 @@ mod tests {
                 ask: Some(Decimal::new(46, 2)),
                 bid_size: Some(Decimal::new(100, 0)),
                 ask_size: Some(Decimal::new(100, 0)),
+                bid_levels: vec![],
+                ask_levels: vec![],
                 ts: Utc.timestamp_opt(709, 0).unwrap(),
             },
             MarketUpdate::AggTrade {
@@ -2722,6 +2732,8 @@ mod tests {
                 ask: Some(Decimal::new(46, 2)),
                 bid_size: Some(Decimal::new(100, 0)),
                 ask_size: Some(Decimal::new(100, 0)),
+                bid_levels: vec![],
+                ask_levels: vec![],
                 ts: Utc.timestamp_opt(748, 0).unwrap(),
             },
             MarketUpdate::SpotPrice {
@@ -2743,6 +2755,8 @@ mod tests {
                 ask: Some(Decimal::new(46, 2)),
                 bid_size: Some(Decimal::new(100, 0)),
                 ask_size: Some(Decimal::new(100, 0)),
+                bid_levels: vec![],
+                ask_levels: vec![],
                 ts: Utc.timestamp_opt(778, 0).unwrap(),
             },
             MarketUpdate::SpotPrice {

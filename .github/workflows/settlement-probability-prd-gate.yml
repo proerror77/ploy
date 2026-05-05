@@ -26,7 +26,7 @@ on:
         required: false
         default: "321"
       audit_lookback_hours:
-        description: "Strict data-audit lookback hours"
+        description: "Data-audit lookback hours, optionally suffixed with :event-complete"
         required: true
         default: "168"
       replay_parity_run_id:
@@ -71,12 +71,23 @@ jobs:
           SYMBOLS: ${{ github.event.inputs.symbols }}
           STAKE_USD: ${{ github.event.inputs.stake_usd }}
           ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
-          AUDIT_LOOKBACK_HOURS: ${{ github.event.inputs.audit_lookback_hours }}
           REPLAY_PARITY_RUN_ID: ${{ github.event.inputs.replay_parity_run_id }}
           REPLAY_PARITY_ARTIFACT_NAME: ${{ github.event.inputs.replay_parity_artifact_name }}
           NO_WAIT: ${{ github.event.inputs.no_wait }}
         run: |
           set -euo pipefail
+          audit_lookback_hours="${{ github.event.inputs.audit_lookback_hours }}"
+          data_quality_mode="strict-continuous"
+          case "${audit_lookback_hours}" in
+            *:event-complete)
+              audit_lookback_hours="${audit_lookback_hours%:event-complete}"
+              data_quality_mode="event-complete"
+              ;;
+            *:strict-continuous)
+              audit_lookback_hours="${audit_lookback_hours%:strict-continuous}"
+              data_quality_mode="strict-continuous"
+              ;;
+          esac
           args=(
             scripts/run_settlement_probability_prd_gate.py
             --git-ref "${GIT_REF}"
@@ -85,7 +96,8 @@ jobs:
             --symbols "${SYMBOLS}"
             --stake-usd "${STAKE_USD}"
             --issue-number "${ISSUE_NUMBER}"
-            --audit-lookback-hours "${AUDIT_LOOKBACK_HOURS}"
+            --audit-lookback-hours "${audit_lookback_hours}"
+            --data-quality-mode "${data_quality_mode}"
           )
           if [ -n "${REPLAY_PARITY_RUN_ID}" ]; then
             args+=(--replay-parity-run-id "${REPLAY_PARITY_RUN_ID}")
@@ -108,9 +120,28 @@ jobs:
             echo "- Window: \`${{ github.event.inputs.start_date }}..${{ github.event.inputs.end_date }}\`"
             echo "- Symbols: \`${{ github.event.inputs.symbols }}\`"
             echo "- Stake: \`${{ github.event.inputs.stake_usd }}u\`"
-            echo "- Data gate: \`critical\`"
+            audit_lookback_hours="${{ github.event.inputs.audit_lookback_hours }}"
+            data_quality_mode="strict-continuous"
+            case "${audit_lookback_hours}" in
+              *:event-complete)
+                audit_lookback_hours="${audit_lookback_hours%:event-complete}"
+                data_quality_mode="event-complete"
+                ;;
+              *:strict-continuous)
+                audit_lookback_hours="${audit_lookback_hours%:strict-continuous}"
+                data_quality_mode="strict-continuous"
+                ;;
+            esac
+            if [ "${data_quality_mode}" = "event-complete" ]; then
+              echo "- Snapshot data gate: \`never\`"
+            else
+              echo "- Snapshot data gate: \`critical\`"
+            fi
+            echo "- Data quality mode: \`${data_quality_mode}\`"
+            echo "- Min event-complete events: \`20\`"
+            echo "- Min event-complete rows: \`40\`"
             echo "- Data profile: \`pm5d-vol\`"
-            echo "- Audit lookback: \`${{ github.event.inputs.audit_lookback_hours }}h\`"
+            echo "- Audit lookback: \`${audit_lookback_hours}h\`"
             echo "- Replay parity run: \`${{ github.event.inputs.replay_parity_run_id || 'none' }}\`"
             echo "- Replay parity artifact: \`${{ github.event.inputs.replay_parity_artifact_name || 'default' }}\`"
             echo ""

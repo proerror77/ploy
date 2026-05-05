@@ -15,12 +15,18 @@ and deployed, and the first post-deploy settlement-probability dry-run order has
 now shown `runtime_price_basis=full_depth_sweep` with
 `full_depth_runtime_parity=true`.
 
-The retained 168h research promotion gate is still blocked by strict
-market-data continuity, tracked in issue #339. Post-deploy recorded replay
+The strict 168h market-data continuity gate is still blocked by a historical
+collector outage, tracked in issue #339. That strict gate remains useful as
+collector-health evidence, but it is no longer the only valid PRD promotion
+path for PM 5m / 15m event research. These markets are discrete settlement
+events, so the strategy gate may use event-complete evidence: exclude outage
+events, require complete executable rows for the retained train/OOS events, and
+keep train/validation/test event IDs disjoint. Post-deploy recorded replay
 parity for the new full-depth runtime path has passed.
 
-Do not mark the PRD complete until the retained-window gate passes with the
-same or newer settlement-specific replay parity artifact.
+Do not mark the PRD complete until either the strict continuous gate passes or
+the new event-complete gate passes with the same or newer settlement-specific
+replay parity artifact.
 
 ## Deliverable Checklist
 
@@ -42,8 +48,9 @@ same or newer settlement-specific replay parity artifact.
 | Runtime strict replay parity passes for a fresh settlement window | Run `25374110073`: orders `2/2/2`, fills `2/2/2`, `strict_parity_ready=true`, `blocking_risk_flags=[]`, decision `continue` | Complete |
 | Short-window PRD smoke consumes the new replay parity artifact | Gate run `25374918500`, snapshot `25374930653`, walk-forward `25375300501`; `recorded_replay_parity=true` | Complete as smoke only |
 | Short-window smoke shows current data health | Snapshot `25374930653` passed `data_quality=true` with `audit_lookback_hours=1` | Complete as smoke only |
-| Retained 168h strict PRD gate passes | Gate run `25374406705` failed before snapshot compilation; audit max gaps `1695-1705m` | Blocked by #339 |
-| Non-empty retained walk-forward OOS passes | Retained gate did not reach walk-forward because strict data audit failed | Blocked by #339 |
+| Strict 168h continuous PRD gate passes | Gate run `25374406705` failed before snapshot compilation; audit max gaps `1695-1705m` | Collector-health blocker #339 |
+| Event-complete retained PRD gate exists | `data_quality_mode=event-complete` added to the orchestrator/workflow/promotion gate so outage events can be excluded rather than blocking the whole wall-clock range | Complete in current branch |
+| Non-empty retained walk-forward OOS passes | Needs a fresh event-complete retained run or a later strict continuous run | Blocked |
 | PRD promotion gate is decision-grade | Latest retained gate failed at strict data audit; latest short smoke has `walk_forward_oos=false` due no non-empty OOS windows | Blocked |
 | Live approval / live trading | No live approval requested or granted | Not in scope |
 
@@ -281,28 +288,39 @@ Fresh direct Tango audit after PR #341 full-depth parity closure:
   - gap window: roughly `2026-05-04 05:29/05:30 +08` to
     `2026-05-05 09:49/09:54 +08`
 
-This confirms the current blocker after runtime parity closure is still
-retained-window historical continuity, not live ingestion or replay parity.
+This confirms current ingestion is healthy. The historical gap blocks the strict
+continuous collector-health gate, but it should not automatically discard
+complete PM5D/PM15D events before or after the outage.
 
 ## Open Blockers
 
-### Blocker 1: Retained Data Continuity
+### Blocker 1: Retained Event-Complete Promotion Evidence
 
 Issue: `https://github.com/proerror77/ploy/issues/339`
 
-The retained strict PRD gate cannot pass until every required `pm5d-vol` source
-has continuous coverage over the audit window.
+The older retained strict PRD gate cannot pass until every required `pm5d-vol`
+source has continuous coverage over the audit window. That is a valid
+collector-health check, not the only valid event-strategy promotion check.
 
 Current practical path:
 
-1. Wait until the 2026-05-04/2026-05-05 collection outage rolls out of the
-   168h lookback, roughly after `2026-05-12 09:55 +08:00`.
-2. Or implement and verify lossless backfill for every required source.
+1. Run the new `event-complete` PRD gate over a retained window. It keeps the
+   `pm5d-vol` audit as provenance, but does not fail only because an unrelated
+   outage exists elsewhere in the wall-clock lookback.
+2. Require the promotion gate to prove complete executable event rows,
+   non-empty walk-forward OOS, full-depth/conservative settlement edge,
+   calibration, anti-overfit diagnostics, symbol holdout, Deribit inclusion,
+   and recorded replay parity.
+3. Keep the strict continuous gate as a separate collector-health retry after
+   the 2026-05-04/2026-05-05 collection outage rolls out of the 168h lookback,
+   roughly after `2026-05-12 09:55 +08:00`, or after validated lossless
+   full-source backfill.
 
 The runbook exposes historical PM orderbook and Deribit IV backfill paths, but
 there is no current repo evidence of a lossless historical Binance LOB backfill
-for the missing WebSocket partial-depth interval. Do not bypass the strict gate
-by substituting candles or synthetic LOB rows.
+for the missing WebSocket partial-depth interval. Do not substitute candles or
+synthetic LOB rows for missing event features. Exclude incomplete events
+instead.
 
 ### Resolved: Post-Deploy Full-Depth Runtime Parity
 
@@ -324,14 +342,33 @@ authorize live trading.
 
 1. Keep the settlement dry-run collecting paper evidence.
 2. Keep monitoring quick data audit; current 1h audit is healthy.
-3. Re-run the retained PRD gate after the 168h data hole rolls out, or after a
-   validated full-source backfill.
-4. Only if the retained gate passes with the newer post-deploy full-depth replay
-   parity artifact, promote the next engineering slice toward dry-run handoff
-   hardening.
+3. Run the event-complete retained PRD gate now, using the newer post-deploy
+   full-depth replay parity artifact.
+4. Re-run the strict continuous collector-health gate after the 168h data hole
+   rolls out, or after a validated full-source backfill.
+5. Only if an event-complete or strict retained gate passes with the newer
+   post-deploy full-depth replay parity artifact, promote the next engineering
+   slice toward dry-run handoff hardening.
 
-Recommended retained-gate retry command after the hole rolls out of the 168h
-lookback:
+Recommended event-complete retained-gate command:
+
+```bash
+gh workflow run settlement-probability-prd-gate.yml \
+  --ref main \
+  -f git_ref=main \
+  -f start_date=2026-05-01 \
+  -f end_date=2026-05-05 \
+  -f symbols=BTCUSDT,ETHUSDT \
+  -f stake_usd=15 \
+  -f issue_number=332 \
+  -f audit_lookback_hours=168:event-complete \
+  -f replay_parity_run_id=25379165698 \
+  -f replay_parity_artifact_name=recorded-replay-parity-25379165698 \
+  -f no_wait=false
+```
+
+Recommended strict collector-health retry command after the hole rolls out of
+the 168h lookback:
 
 ```bash
 gh workflow run settlement-probability-prd-gate.yml \
@@ -348,15 +385,16 @@ gh workflow run settlement-probability-prd-gate.yml \
   -f no_wait=false
 ```
 
-Run this only after about `2026-05-12 09:55 +08`, or after a validated lossless
-full-source backfill. Before that time, the strict data audit is expected to
-fail for the same retained-window gap.
+Run the strict command only after about `2026-05-12 09:55 +08`, or after a
+validated lossless full-source backfill. Before that time, the strict data audit
+is expected to fail for the same retained-window gap.
 
 ## Completion Criteria Not Yet Met
 
 The PRD is complete only when:
 
-1. Retained strict `pm5d-vol` data audit passes.
+1. Either event-complete retained data quality passes, or strict continuous
+   `pm5d-vol` data audit passes.
 2. Retained snapshot-backed walk-forward has non-empty OOS windows.
 3. Promotion gate reports `ready_for_dry_run_handoff=true` using the
    settlement-specific replay parity artifact or a newer equivalent artifact.

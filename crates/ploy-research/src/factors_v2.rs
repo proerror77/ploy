@@ -543,6 +543,28 @@ pub struct SettlementProbabilityWalkForwardReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementProbabilityDataQualityMode {
+    StrictContinuous,
+    EventComplete,
+}
+
+impl SettlementProbabilityDataQualityMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StrictContinuous => "strict_continuous",
+            Self::EventComplete => "event_complete",
+        }
+    }
+}
+
+impl Default for SettlementProbabilityDataQualityMode {
+    fn default() -> Self {
+        Self::StrictContinuous
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SettlementProbabilityPromotionGateOptions {
     pub stake_usd: f64,
     pub min_entry_fill_rate: f64,
@@ -551,6 +573,11 @@ pub struct SettlementProbabilityPromotionGateOptions {
     pub require_deribit: bool,
     pub include_deribit: bool,
     pub data_audit_status: Option<String>,
+    pub data_quality_mode: SettlementProbabilityDataQualityMode,
+    pub event_complete_events: usize,
+    pub event_complete_rows: usize,
+    pub min_event_complete_events: usize,
+    pub min_event_complete_rows: usize,
     pub replay_parity_ready: bool,
     pub replay_parity_evidence: Option<String>,
 }
@@ -565,6 +592,11 @@ impl Default for SettlementProbabilityPromotionGateOptions {
             require_deribit: true,
             include_deribit: false,
             data_audit_status: None,
+            data_quality_mode: SettlementProbabilityDataQualityMode::StrictContinuous,
+            event_complete_events: 0,
+            event_complete_rows: 0,
+            min_event_complete_events: 20,
+            min_event_complete_rows: 40,
             replay_parity_ready: false,
             replay_parity_evidence: None,
         }
@@ -2887,10 +2919,35 @@ pub fn build_settlement_probability_promotion_gate_report(
         .data_audit_status
         .as_deref()
         .unwrap_or("<not-recorded>");
+    let (data_quality_passed, data_quality_evidence) = match options.data_quality_mode {
+        SettlementProbabilityDataQualityMode::StrictContinuous => (
+            data_status.eq_ignore_ascii_case("ok"),
+            format!(
+                "mode={} snapshot_data_audit_status={data_status}",
+                options.data_quality_mode.as_str()
+            ),
+        ),
+        SettlementProbabilityDataQualityMode::EventComplete => {
+            let passed = options.event_complete_events >= options.min_event_complete_events
+                && options.event_complete_rows >= options.min_event_complete_rows;
+            (
+                passed,
+                format!(
+                    "mode={} snapshot_data_audit_status={} event_complete_events={} min_events={} event_complete_rows={} min_rows={}",
+                    options.data_quality_mode.as_str(),
+                    data_status,
+                    options.event_complete_events,
+                    options.min_event_complete_events,
+                    options.event_complete_rows,
+                    options.min_event_complete_rows
+                ),
+            )
+        }
+    };
     gates.push(SettlementProbabilityPromotionGateRow {
         gate: "data_quality".to_string(),
-        passed: data_status.eq_ignore_ascii_case("ok"),
-        evidence: format!("snapshot_data_audit_status={data_status}"),
+        passed: data_quality_passed,
+        evidence: data_quality_evidence,
     });
 
     gates.push(SettlementProbabilityPromotionGateRow {
@@ -3348,7 +3405,7 @@ pub fn format_settlement_probability_promotion_gate_report(
     let mut out = String::new();
     out.push_str("=== Settlement Probability PRD Promotion Gate ===\n");
     out.push_str(&format!(
-        "ready_for_dry_run_handoff={} stake_usd={:.2} min_entry_fill_rate={:.4} max_ece={:.4} min_positive_window_ratio={:.2} require_deribit={} include_deribit={} replay_parity_ready={}\n",
+        "ready_for_dry_run_handoff={} stake_usd={:.2} min_entry_fill_rate={:.4} max_ece={:.4} min_positive_window_ratio={:.2} require_deribit={} include_deribit={} data_quality_mode={} event_complete_events={} event_complete_rows={} replay_parity_ready={}\n",
         report.ready_for_dry_run_handoff,
         report.options.stake_usd,
         report.options.min_entry_fill_rate,
@@ -3356,6 +3413,9 @@ pub fn format_settlement_probability_promotion_gate_report(
         report.options.min_positive_window_ratio,
         report.options.require_deribit,
         report.options.include_deribit,
+        report.options.data_quality_mode.as_str(),
+        report.options.event_complete_events,
+        report.options.event_complete_rows,
         report.options.replay_parity_ready,
     ));
     out.push_str(
@@ -10180,6 +10240,55 @@ mod tests {
         let text = format_settlement_probability_promotion_gate_report(&blocked);
         assert!(text.contains("Settlement Probability PRD Promotion Gate"));
         assert!(text.contains("ready_for_dry_run_handoff=false"));
+    }
+
+    #[test]
+    fn settlement_probability_event_complete_data_quality_allows_critical_global_audit() {
+        let probability = SettlementProbabilityReport {
+            options: SettlementProbabilityReportOptions::default(),
+            baselines: Vec::new(),
+            calibration: Vec::new(),
+            edge_buckets: Vec::new(),
+            anti_overfit: Vec::new(),
+            symbol_holdouts: Vec::new(),
+            ablations: Vec::new(),
+        };
+        let walk_forward = SettlementProbabilityWalkForwardReport {
+            options: SettlementProbabilityWalkForwardOptions::default(),
+            windows: Vec::new(),
+            aggregates: Vec::new(),
+        };
+        let execution = FullDepthExecutionMatrixReport {
+            options: FullDepthExecutionMatrixOptions::default(),
+            rows: Vec::new(),
+        };
+
+        let report = build_settlement_probability_promotion_gate_report(
+            &probability,
+            &walk_forward,
+            &execution,
+            &execution,
+            SettlementProbabilityPromotionGateOptions {
+                include_deribit: true,
+                data_audit_status: Some("critical".to_string()),
+                data_quality_mode: SettlementProbabilityDataQualityMode::EventComplete,
+                event_complete_events: 20,
+                event_complete_rows: 40,
+                replay_parity_ready: true,
+                ..Default::default()
+            },
+        );
+
+        let data_gate = report
+            .gates
+            .iter()
+            .find(|gate| gate.gate == "data_quality")
+            .expect("data_quality gate");
+        assert!(data_gate.passed);
+        assert!(data_gate.evidence.contains("mode=event_complete"));
+        assert!(data_gate
+            .evidence
+            .contains("snapshot_data_audit_status=critical"));
     }
 
     #[test]

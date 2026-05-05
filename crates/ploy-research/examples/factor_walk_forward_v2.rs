@@ -29,9 +29,9 @@ use ploy_research::{
     FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
     FactorWalkForwardOptions, FillabilityReviewOptions, FullDepthExecutionMatrixOptions,
     LiquidityGateV1Options, LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions,
-    RepricingIcOptions, ResearchSnapshotRequest, SettlementProbabilityPromotionGateOptions,
-    SettlementProbabilityReportOptions, SettlementProbabilityWalkForwardOptions,
-    TradeFormationReviewOptions,
+    RepricingIcOptions, ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
+    SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
+    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashSet;
@@ -65,6 +65,16 @@ fn parse_date_end(raw: &str) -> DateTime<Utc> {
 fn parse_timestamp(raw: &str) -> DateTime<Utc> {
     raw.parse::<DateTime<Utc>>()
         .unwrap_or_else(|_| panic!("invalid timestamp: {raw}"))
+}
+
+fn parse_data_quality_mode(raw: Option<String>) -> SettlementProbabilityDataQualityMode {
+    match raw.as_deref().unwrap_or("strict_continuous") {
+        "strict_continuous" | "strict-continuous" => {
+            SettlementProbabilityDataQualityMode::StrictContinuous
+        }
+        "event_complete" | "event-complete" => SettlementProbabilityDataQualityMode::EventComplete,
+        value => panic!("invalid --data-quality-mode: {value}"),
+    }
 }
 
 fn replay_parity_evidence(path: &str) -> (bool, String) {
@@ -210,6 +220,13 @@ async fn main() {
     let snapshot_dir = flag_value(&args, "--snapshot-dir");
     let replay_parity_json = flag_value(&args, "--replay-parity-json");
     let allow_direct_db_debug = flag_present(&args, "--allow-direct-db-debug");
+    let data_quality_mode = parse_data_quality_mode(flag_value(&args, "--data-quality-mode"));
+    let min_event_complete_events = flag_value(&args, "--min-event-complete-events")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(20);
+    let min_event_complete_rows = flag_value(&args, "--min-event-complete-rows")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(40);
     if snapshot_dir.is_some() && db_url.is_some() {
         eprintln!("ERROR: --snapshot-dir cannot be combined with --db-url");
         std::process::exit(2);
@@ -538,6 +555,22 @@ async fn main() {
             &settlement_probability_walk_forward_report
         )
     );
+    let event_complete_rows = autofactor_rows
+        .iter()
+        .filter(|row| {
+            row.label_full_depth_entry_fillable
+                && row.label_conservative_entry_fillable
+                && row.label_settlement_win.is_some()
+                && row.label_full_depth_executable_pnl_15u.is_some()
+                && row.label_conservative_executable_pnl_15u.is_some()
+                && (!include_deribit || row.deribit_mark_iv.is_finite())
+        })
+        .collect::<Vec<_>>();
+    let event_complete_events = event_complete_rows
+        .iter()
+        .map(|row| row.event_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
     let replay_parity_status = replay_parity_json.as_deref().map(replay_parity_evidence);
     let promotion_gate_report = build_settlement_probability_promotion_gate_report(
         &settlement_probability_report,
@@ -548,6 +581,11 @@ async fn main() {
             stake_usd: options.review.stake_usd,
             include_deribit,
             data_audit_status: snapshot_data_audit_status,
+            data_quality_mode,
+            event_complete_events,
+            event_complete_rows: event_complete_rows.len(),
+            min_event_complete_events,
+            min_event_complete_rows,
             replay_parity_ready: replay_parity_status
                 .as_ref()
                 .map(|(ready, _)| *ready)
