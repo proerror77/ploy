@@ -336,6 +336,11 @@ scripts/run_settlement_probability_prd_gate.py \
     `anti_overfit_diagnostics=false`,
     `walk_forward_oos=false`,
     `recorded_replay_parity=false`.
+- The orchestrator now downloads the `factor-walk-forward-v2-*` artifact after
+  a successful walk-forward run, parses the `Settlement Probability PRD
+  Promotion Gate`, comments the exact blocked gates, and exits blocked when
+  `ready_for_dry_run_handoff=false`. A successful workflow run is no longer
+  treated as a successful promotion gate by itself.
 
 Interpretation:
 

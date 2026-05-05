@@ -17,9 +17,11 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -34,6 +36,13 @@ class WorkflowRun:
     conclusion: str | None
     url: str
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class PromotionGateEvaluation:
+    ready: bool
+    evidence: str
+    blocked_gates: tuple[str, ...]
 
 
 def run_command(args: list[str], *, dry_run: bool = False) -> str:
@@ -170,6 +179,69 @@ def issue_comment(issue_number: str, body: str, *, dry_run: bool) -> None:
 
 def compact_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def parse_promotion_gate(report_text: str) -> PromotionGateEvaluation:
+    ready: bool | None = None
+    blocked_gates: list[str] = []
+    evidence_lines: list[str] = []
+    in_gate_table = False
+
+    for line in report_text.splitlines():
+        if line.startswith("ready_for_dry_run_handoff="):
+            ready = line.split("=", 1)[1].split(maxsplit=1)[0].lower() == "true"
+            evidence_lines.append(line)
+            continue
+        if line == "gate,passed,evidence":
+            in_gate_table = True
+            continue
+        if in_gate_table:
+            if not line.strip():
+                break
+            parts = line.split(",", 2)
+            if len(parts) != 3:
+                continue
+            gate, passed, evidence = parts
+            if passed.lower() != "true":
+                blocked_gates.append(f"{gate}: {evidence}")
+
+    if ready is None:
+        return PromotionGateEvaluation(
+            ready=False,
+            evidence="missing Settlement Probability PRD Promotion Gate ready line",
+            blocked_gates=("missing_promotion_gate",),
+        )
+
+    return PromotionGateEvaluation(
+        ready=ready,
+        evidence=evidence_lines[0],
+        blocked_gates=tuple(blocked_gates),
+    )
+
+
+def download_and_evaluate_promotion_gate(walk_run_id: int) -> PromotionGateEvaluation:
+    with tempfile.TemporaryDirectory(prefix=f"settlement-prd-gate-{walk_run_id}-") as tmp:
+        output_dir = Path(tmp)
+        run_command(
+            [
+                "gh",
+                "run",
+                "download",
+                str(walk_run_id),
+                "--name",
+                f"factor-walk-forward-v2-{walk_run_id}",
+                "--dir",
+                str(output_dir),
+            ]
+        )
+        report_path = output_dir / "factor-walk-forward-v2" / "report.txt"
+        if not report_path.is_file():
+            return PromotionGateEvaluation(
+                ready=False,
+                evidence=f"missing report artifact file: {report_path}",
+                blocked_gates=("missing_report_artifact",),
+            )
+        return parse_promotion_gate(report_path.read_text(encoding="utf-8"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -313,6 +385,30 @@ def main() -> int:
         timeout_minutes=args.walk_timeout_minutes,
         poll_seconds=args.poll_seconds,
     )
+    if walk_result.conclusion != "success":
+        issue_comment(
+            args.issue_number,
+            "\n".join(
+                [
+                    "Settlement probability PRD gate orchestration failed at walk-forward:",
+                    "",
+                    f"- Snapshot run: {snapshot_result.url}",
+                    f"- Walk-forward run: {walk_result.url}",
+                    f"- Walk-forward conclusion: `{walk_result.conclusion}`",
+                    "- Decision: inspect the workflow failure before any dry-run handoff.",
+                ]
+            ),
+            dry_run=False,
+        )
+        return 1
+
+    gate = download_and_evaluate_promotion_gate(walk_result.database_id)
+    blocker_text = "\n".join(f"  - {item}" for item in gate.blocked_gates) or "  - none"
+    decision = (
+        "ready for dry-run handoff review"
+        if gate.ready
+        else "blocked: do not create dry-run handoff"
+    )
 
     body = "\n".join(
         [
@@ -322,11 +418,15 @@ def main() -> int:
             f"- Walk-forward run: {walk_result.url}",
             f"- Walk-forward conclusion: `{walk_result.conclusion}`",
             f"- Replay parity run supplied: `{args.replay_parity_run_id or 'none'}`",
-            "- Decision: inspect the `Settlement Probability PRD Promotion Gate` section before any dry-run handoff.",
+            f"- Gate: `{gate.evidence}`",
+            f"- Decision: {decision}",
+            "",
+            "Blocked gates:",
+            blocker_text,
         ]
     )
     issue_comment(args.issue_number, body, dry_run=False)
-    return 0 if walk_result.conclusion == "success" else 1
+    return 0 if gate.ready else 3
 
 
 if __name__ == "__main__":

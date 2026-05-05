@@ -447,6 +447,16 @@ evidence comes from Polymarket full CLOB depth, not top book.
   walk-forward control chain works on a current short smoke, while correctly
   keeping promotion blocked on anti-overfit diagnostics, non-empty OOS windows,
   and recorded replay parity.
+- 2026-05-05: Hardened the orchestrator to fail closed on the actual promotion
+  gate, not just the GitHub workflow conclusion. After a walk-forward run
+  succeeds, `scripts/run_settlement_probability_prd_gate.py` now downloads the
+  `factor-walk-forward-v2-*` artifact, parses the `Settlement Probability PRD
+  Promotion Gate`, comments the blocked gates, and exits blocked when
+  `ready_for_dry_run_handoff=false`. Local parser verification against
+  artifact `25360794716`, plus a real `gh run download` evaluation of the same
+  artifact, found the intended blockers:
+  `anti_overfit_diagnostics`, `walk_forward_oos`, and
+  `recorded_replay_parity`.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
