@@ -111,6 +111,9 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - [x] Wire the AutoFactor strategy-promotion evaluator into
   `factor-walk-forward-v2.yml` so every walk-forward artifact carries
   `autofactor-strategy-promotion.{json,md}`.
+- [x] Add a hosted `autofactor-strategy-promotion.yml` workflow that can
+  evaluate existing Factor Walk-Forward V2 artifacts without waiting for
+  `ploy-ci-1`.
 
 ## Review
 
@@ -139,6 +142,13 @@ evidence comes from Polymarket full CLOB depth, not top book.
   The GitHub step summary also includes the AutoFactor strategy-promotion
   decision, so future research runs show whether mined factors are deployable
   or blocked by target/profile/runtime-mapping gates.
+- 2026-05-06: Added `.github/workflows/autofactor-strategy-promotion.yml` as a
+  hosted follow-up evaluator for existing `factor-walk-forward-v2-*` artifacts.
+  This lets research issue owners rerun AutoFactor strategy-promotion checks
+  from a prior walk-forward artifact even when the self-hosted `ploy-ci-1`
+  research runner is offline. It downloads `report.txt`, emits
+  `autofactor-strategy-promotion.json` / `.md`, uploads them as a workflow
+  artifact, and can comment the result back to a GitHub issue.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

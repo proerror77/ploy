@@ -1,0 +1,147 @@
+name: AutoFactor Strategy Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Repository ref that contains the evaluator script"
+        required: false
+        default: "main"
+      factor_walk_forward_run_id:
+        description: "Run id that uploaded factor-walk-forward-v2-*"
+        required: true
+      artifact_name:
+        description: "Artifact name; defaults to factor-walk-forward-v2-<run_id>"
+        required: false
+        default: ""
+      required_strategy_profile:
+        description: "Runtime strategy profile required for promotion"
+        required: false
+        default: "settlement_probability"
+      allowed_target:
+        description: "Allowed AutoFactor executable target"
+        required: false
+        default: "full_depth_settlement_executable_pnl"
+      issue_number:
+        description: "Optional issue number for the promotion summary"
+        required: false
+        default: ""
+      fail_if_blocked:
+        description: "Fail workflow when no AutoFactor strategy qualifies"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Download factor walk-forward artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id="${{ github.event.inputs.factor_walk_forward_run_id }}"
+          artifact_name="${{ github.event.inputs.artifact_name }}"
+          if [ -z "${artifact_name}" ]; then
+            artifact_name="factor-walk-forward-v2-${run_id}"
+          fi
+          mkdir -p artifacts/source
+          gh run download "${run_id}" \
+            --name "${artifact_name}" \
+            --dir artifacts/source
+          report_path="$(find artifacts/source -path '*/factor-walk-forward-v2/report.txt' -print -quit)"
+          if [ -z "${report_path}" ]; then
+            echo "Unable to find factor-walk-forward-v2/report.txt in ${artifact_name}" >&2
+            find artifacts/source -maxdepth 4 -type f -print >&2
+            exit 2
+          fi
+          echo "REPORT_PATH=${report_path}" >> "$GITHUB_ENV"
+          echo "ARTIFACT_NAME=${artifact_name}" >> "$GITHUB_ENV"
+
+      - name: Evaluate AutoFactor strategy promotion
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/autofactor-strategy-promotion
+          args=(
+            --report "${REPORT_PATH}"
+            --output-json artifacts/autofactor-strategy-promotion/autofactor-strategy-promotion.json
+            --output-md artifacts/autofactor-strategy-promotion/autofactor-strategy-promotion.md
+            --required-strategy-profile "${{ github.event.inputs.required_strategy_profile }}"
+            --allowed-target "${{ github.event.inputs.allowed_target }}"
+          )
+          if [ "${{ github.event.inputs.fail_if_blocked }}" = "true" ]; then
+            args+=(--fail-if-blocked)
+          fi
+          python3 scripts/evaluate_autofactor_strategy_promotion.py "${args[@]}" \
+            | tee artifacts/autofactor-strategy-promotion/evaluator-output.json
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## AutoFactor Strategy Promotion"
+            echo ""
+            echo "- Source run: \`${{ github.event.inputs.factor_walk_forward_run_id }}\`"
+            echo "- Source artifact: \`${ARTIFACT_NAME:-unknown}\`"
+            echo "- Required strategy profile: \`${{ github.event.inputs.required_strategy_profile }}\`"
+            echo "- Allowed target: \`${{ github.event.inputs.allowed_target }}\`"
+            echo ""
+            if [ -f artifacts/autofactor-strategy-promotion/autofactor-strategy-promotion.md ]; then
+              cat artifacts/autofactor-strategy-promotion/autofactor-strategy-promotion.md
+            else
+              echo "Promotion report was not generated."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload promotion artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: autofactor-strategy-promotion-${{ github.run_id }}
+          path: artifacts/autofactor-strategy-promotion/
+          compression-level: 0
+          retention-days: 14
+
+      - name: Comment issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const issueNumberRaw = "${{ github.event.inputs.issue_number }}";
+            if (!issueNumberRaw) {
+              core.info("No issue_number provided; skipping issue comment.");
+              return;
+            }
+            const issue_number = Number(issueNumberRaw);
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            let report = "Promotion report was not generated.";
+            const reportPath = "artifacts/autofactor-strategy-promotion/autofactor-strategy-promotion.md";
+            if (fs.existsSync(reportPath)) {
+              report = fs.readFileSync(reportPath, "utf8");
+            }
+            const body = [
+              "AutoFactor strategy-promotion evaluation:",
+              "",
+              `- Workflow run: ${runUrl}`,
+              `- Source factor walk-forward run: \`${{ github.event.inputs.factor_walk_forward_run_id }}\``,
+              `- Artifact: \`autofactor-strategy-promotion-${process.env.GITHUB_RUN_ID}\``,
+              "",
+              report
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body
+            });
