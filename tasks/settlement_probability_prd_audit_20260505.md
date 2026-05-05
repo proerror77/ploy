@@ -59,6 +59,7 @@ snapshot-backed full-depth execution labels and probability-model validation.
 | PRD promotion gate | `=== Settlement Probability PRD Promotion Gate ===` | Run `25359476569` prints `ready_for_dry_run_handoff=false`, `walk_forward_oos=false`, and `recorded_replay_parity=false` | Complete as a blocker gate |
 | Replay parity artifact input | `factor_walk_forward_v2 --replay-parity-json`, workflow `options_json.replay_parity_json`, `options_json.replay_parity_run_id` | The report can now consume `scripts/replay_dryrun_parity.py` JSON either from a runner path or from a downloaded `replay-dryrun-parity-*` artifact | Code complete; no passing parity artifact yet |
 | Repeatable PRD gate runner | `scripts/run_settlement_probability_prd_gate.py` | Script dispatches strict `pm5d-vol` snapshot with `data_gate=critical` / `upload_full_snapshot=true`, waits, then dispatches snapshot-backed `factor-walk-forward-v2` with optional replay parity artifact linkage | Complete as orchestration; decision-grade data still pending |
+| Manual CI PRD gate entrypoint | `.github/workflows/settlement-probability-prd-gate.yml` | Workflow-dispatch wrapper runs the same strict orchestrator from GitHub Actions and fails closed when the promotion gate is blocked | Complete as orchestration; decision-grade data still pending |
 | Official settlement fidelity | Snapshot manifest `require_official_settlement=true` | Provenance for snapshots `25254380121` and `25255158983` confirms official settlement required | Partial evidence |
 | Data quality / coverage | `data-gap-audit.md` | Strict `pm5d-vol` run `25354264444` failed at `Audit required market data`; every required source had critical max gaps around `1700m` | Failing / blocks promotion |
 | Deribit / vol inputs | `data_profile=pm5d-vol` or `include_deribit=true` snapshot | Short-window snapshot `25356726430` includes Deribit; strict retained 168h snapshot still fails coverage | Partial; full retained evidence missing |
@@ -341,6 +342,11 @@ scripts/run_settlement_probability_prd_gate.py \
   Promotion Gate`, comments the exact blocked gates, and exits blocked when
   `ready_for_dry_run_handoff=false`. A successful workflow run is no longer
   treated as a successful promotion gate by itself.
+- `.github/workflows/settlement-probability-prd-gate.yml` is now the canonical
+  manual GitHub Actions entrypoint for running the same strict gate from CI.
+  It accepts the retained data window, symbols, stake, and optional replay
+  parity artifact run id. A failed workflow can be a correct PRD result when
+  the downstream promotion gate remains blocked.
 
 Interpretation:
 
