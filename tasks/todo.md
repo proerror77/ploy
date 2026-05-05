@@ -61,7 +61,9 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - [x] Add richer baseline comparison: `Phi(distance_z)` plus currently available
   volatility / direction primitives, and later event-vol-surface variants.
 - [ ] Add anti-overfit checks before any dry-run promotion: walk-forward OOS,
-  symbol holdout, permutation, time-shift, and feature ablation.
+  symbol holdout, permutation, time-shift, and feature ablation. Current report
+  covers deterministic label-shift and prediction-shift diagnostics for
+  settlement probability baselines; symbol holdout and feature ablation remain.
 - [ ] Only after the above gates pass, create a settlement dry-run handoff with
   fixed small stake, strict kill switch, and shared scorer parity.
 
@@ -118,6 +120,13 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `25351981303` on snapshot `25254380121`, and XRP/DOGE/BNB run
   `25351981397` on snapshot `25255158983`. Both are expected to remain queued
   or pending until `ploy-ci-1` is restored.
+- 2026-05-05: `ploy-ci-1` remained offline after another check. Aliyun still
+  reports ECS `i-6we7z44sfbfbnosbeymz` as `Stopped` with `financial` /
+  `financial-recycling` operation locks, and `StartInstance` still fails with
+  `InstanceExpired`. Added local anti-overfit diagnostics to the settlement
+  probability report so the next successful Factor Walk-Forward run will also
+  print label cyclic-shift and prediction one-step-shift checks for each
+  probability baseline.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 

@@ -425,11 +425,24 @@ pub struct SettlementProbabilityEdgeBucketRow {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityAntiOverfitRow {
+    pub model: String,
+    pub test: String,
+    pub n: usize,
+    pub observed_edge_win_rank_ic: f64,
+    pub perturbed_edge_win_rank_ic: f64,
+    pub observed_top_edge_avg_full_depth_settlement_pnl: f64,
+    pub perturbed_top_edge_avg_full_depth_settlement_pnl: f64,
+    pub pass: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SettlementProbabilityReport {
     pub options: SettlementProbabilityReportOptions,
     pub baselines: Vec<SettlementProbabilityBaselineRow>,
     pub calibration: Vec<SettlementProbabilityCalibrationRow>,
     pub edge_buckets: Vec<SettlementProbabilityEdgeBucketRow>,
+    pub anti_overfit: Vec<SettlementProbabilityAntiOverfitRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2463,6 +2476,7 @@ pub fn build_settlement_probability_report(
     let mut baselines = Vec::new();
     let mut calibration = Vec::new();
     let mut edge_buckets = Vec::new();
+    let mut anti_overfit = Vec::new();
     for (model, samples) in by_model {
         if samples.len() < options.min_bucket_observations {
             continue;
@@ -2487,6 +2501,11 @@ pub fn build_settlement_probability_report(
                 .into_iter()
                 .filter(|row| row.count >= options.min_bucket_observations),
         );
+        anti_overfit.extend(build_probability_anti_overfit_rows(
+            model,
+            &samples,
+            options.top_edge_quantile,
+        ));
         edge_buckets.extend(model_edge_buckets);
     }
     baselines.sort_by(|a, b| {
@@ -2499,6 +2518,7 @@ pub fn build_settlement_probability_report(
         baselines,
         calibration,
         edge_buckets,
+        anti_overfit,
     }
 }
 
@@ -2563,6 +2583,21 @@ pub fn format_settlement_probability_report(report: &SettlementProbabilityReport
             row.avg_full_depth_entry_price,
             row.avg_full_depth_settlement_pnl,
             row.profit_factor,
+        ));
+    }
+    out.push_str("\n--- Anti-Overfit Diagnostics ---\n");
+    out.push_str("model,test,n,observed_edge_win_rank_ic,perturbed_edge_win_rank_ic,observed_top_edge_avg_full_depth_settlement_pnl,perturbed_top_edge_avg_full_depth_settlement_pnl,pass\n");
+    for row in &report.anti_overfit {
+        out.push_str(&format!(
+            "{},{},{},{:.6},{:.6},{:.4},{:.4},{}\n",
+            row.model,
+            row.test,
+            row.n,
+            row.observed_edge_win_rank_ic,
+            row.perturbed_edge_win_rank_ic,
+            row.observed_top_edge_avg_full_depth_settlement_pnl,
+            row.perturbed_top_edge_avg_full_depth_settlement_pnl,
+            row.pass,
         ));
     }
     out
@@ -6865,6 +6900,134 @@ fn build_probability_edge_bucket_rows(
     rows
 }
 
+fn build_probability_anti_overfit_rows(
+    model: &str,
+    samples: &[SettlementProbabilitySample],
+    top_edge_quantile: f64,
+) -> Vec<SettlementProbabilityAntiOverfitRow> {
+    if samples.len() < 3 {
+        return Vec::new();
+    }
+    let observed_rank_ic =
+        probability_edge_win_rank_ic(samples.iter().map(|sample| (sample.edge, sample.win)));
+    let observed_top_pnl = top_edge_avg_pnl(
+        samples
+            .iter()
+            .enumerate()
+            .map(|(idx, sample)| (idx, sample.edge, sample.pnl)),
+        top_edge_quantile,
+    );
+    let half_shift = (samples.len() / 2).max(1);
+    let label_shift_rank_ic =
+        probability_edge_win_rank_ic(samples.iter().enumerate().map(|(idx, sample)| {
+            let shifted = samples[(idx + half_shift) % samples.len()];
+            (sample.edge, shifted.win)
+        }));
+    let label_shift_top_pnl = top_edge_avg_pnl(
+        samples.iter().enumerate().map(|(idx, sample)| {
+            let shifted = samples[(idx + half_shift) % samples.len()];
+            (idx, sample.edge, shifted.pnl)
+        }),
+        top_edge_quantile,
+    );
+    let prediction_shift_rank_ic =
+        probability_edge_win_rank_ic(samples.iter().enumerate().map(|(idx, sample)| {
+            let shifted_prediction = samples[(idx + 1) % samples.len()];
+            (shifted_prediction.edge, sample.win)
+        }));
+    let prediction_shift_top_pnl = top_edge_avg_pnl(
+        samples.iter().enumerate().map(|(idx, sample)| {
+            let shifted_prediction = samples[(idx + 1) % samples.len()];
+            (idx, shifted_prediction.edge, sample.pnl)
+        }),
+        top_edge_quantile,
+    );
+
+    vec![
+        SettlementProbabilityAntiOverfitRow {
+            model: model.to_string(),
+            test: "label_cyclic_shift_half".to_string(),
+            n: samples.len(),
+            observed_edge_win_rank_ic: observed_rank_ic,
+            perturbed_edge_win_rank_ic: label_shift_rank_ic,
+            observed_top_edge_avg_full_depth_settlement_pnl: observed_top_pnl,
+            perturbed_top_edge_avg_full_depth_settlement_pnl: label_shift_top_pnl,
+            pass: anti_overfit_pass(
+                observed_rank_ic,
+                label_shift_rank_ic,
+                observed_top_pnl,
+                label_shift_top_pnl,
+            ),
+        },
+        SettlementProbabilityAntiOverfitRow {
+            model: model.to_string(),
+            test: "prediction_one_step_shift".to_string(),
+            n: samples.len(),
+            observed_edge_win_rank_ic: observed_rank_ic,
+            perturbed_edge_win_rank_ic: prediction_shift_rank_ic,
+            observed_top_edge_avg_full_depth_settlement_pnl: observed_top_pnl,
+            perturbed_top_edge_avg_full_depth_settlement_pnl: prediction_shift_top_pnl,
+            pass: anti_overfit_pass(
+                observed_rank_ic,
+                prediction_shift_rank_ic,
+                observed_top_pnl,
+                prediction_shift_top_pnl,
+            ),
+        },
+    ]
+}
+
+fn probability_edge_win_rank_ic<I>(rows: I) -> f64
+where
+    I: IntoIterator<Item = (f64, f64)>,
+{
+    let pairs: Vec<(f64, f64)> = rows
+        .into_iter()
+        .filter_map(|(edge, win)| {
+            if edge.is_finite() && win.is_finite() {
+                Some((edge, win))
+            } else {
+                None
+            }
+        })
+        .collect();
+    pair_spearman(&pairs)
+}
+
+fn top_edge_avg_pnl<I>(rows: I, top_edge_quantile: f64) -> f64
+where
+    I: IntoIterator<Item = (usize, f64, f64)>,
+{
+    let mut scored: Vec<(usize, f64, f64)> = rows
+        .into_iter()
+        .filter(|(_, edge, pnl)| edge.is_finite() && pnl.is_finite())
+        .collect();
+    if scored.is_empty() {
+        return f64::NAN;
+    }
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let top_n = ((scored.len() as f64) * top_edge_quantile.clamp(0.01, 1.0))
+        .ceil()
+        .max(1.0) as usize;
+    mean(scored.into_iter().take(top_n).map(|(_, _, pnl)| pnl))
+}
+
+fn anti_overfit_pass(
+    observed_rank_ic: f64,
+    perturbed_rank_ic: f64,
+    observed_top_pnl: f64,
+    perturbed_top_pnl: f64,
+) -> bool {
+    let ic_ok = !observed_rank_ic.is_finite()
+        || !perturbed_rank_ic.is_finite()
+        || perturbed_rank_ic.abs() <= (observed_rank_ic.abs() * 0.75).max(0.05);
+    let pnl_ok = !observed_top_pnl.is_finite()
+        || !perturbed_top_pnl.is_finite()
+        || observed_top_pnl <= 0.0
+        || perturbed_top_pnl <= observed_top_pnl * 0.5;
+    ic_ok && pnl_ok
+}
+
 fn edge_bucket_monotonic(edge_buckets: &[SettlementProbabilityEdgeBucketRow]) -> bool {
     let values = edge_buckets
         .iter()
@@ -8371,6 +8534,9 @@ mod tests {
             row.entry_sweep_avg_price_15u = row.entry_ask;
             row.label_full_depth_executable_pnl_15u = row.label_executable_pnl_15u;
         }
+        let base_rows = rows.clone();
+        rows.extend(base_rows.iter().cloned());
+        rows.extend(base_rows.iter().cloned());
 
         let report = build_settlement_probability_report(
             &rows,
@@ -8386,7 +8552,7 @@ mod tests {
             .iter()
             .find(|row| row.model == "q_base_distance_phi")
             .expect("q_base baseline");
-        assert_eq!(base.n, 2);
+        assert_eq!(base.n, 6);
         assert!(base.brier_score.is_finite());
         assert!(base.log_loss.is_finite());
         assert!(base.expected_calibration_error.is_finite());
@@ -8394,11 +8560,22 @@ mod tests {
             .edge_buckets
             .iter()
             .any(|row| row.model == "q_base_distance_phi" && row.edge_bucket == "Q2"));
+        assert!(
+            report
+                .anti_overfit
+                .iter()
+                .any(|row| row.model == "q_base_distance_phi"
+                    && row.test == "label_cyclic_shift_half")
+        );
+        assert!(report.anti_overfit.iter().any(
+            |row| row.model == "q_base_distance_phi" && row.test == "prediction_one_step_shift"
+        ));
 
         let text = format_settlement_probability_report(&report);
         assert!(text.contains("Settlement Probability Report"));
         assert!(text.contains("q_base_distance_phi"));
         assert!(text.contains("full_depth_settlement_pnl"));
+        assert!(text.contains("Anti-Overfit Diagnostics"));
     }
 
     #[test]
