@@ -12885,3 +12885,11 @@ Issue: https://github.com/proerror77/ploy/issues/256
 - 2026-05-05: Added parity comparator filters for `deployment_id`, `since`, and `until`, including a replay-order timestamp fallback through matching fill intents because current replay order rows can carry `created_at=None` while fill rows carry the session timestamp. This lets the GitHub parity workflow compare a recorded replay artifact to the matching dry-run report window instead of incorrectly comparing against the full report.
 - 2026-05-05: Added `.github/workflows/recorded-replay-parity.yml` as the repeatable evidence path for the manual proof above. The workflow SSHes to `tango-1-1`, generates a temporary replay config from the deployed dry-run TOML, runs the already deployed `/opt/ploy/bin/ploy-runner` in replay mode against the canonical recording, fetches `/api/reports/dry-run`, runs `scripts/replay_dryrun_parity.py` with deployment/time filters, uploads replay/dry-run/parity artifacts, and comments/labels issue #321. It intentionally does not build Rust on `tango-1-1` and does not touch live order paths.
 - 2026-05-05: First attempt to feed recorded parity run `25365401498` into `settlement-probability-prd-gate.yml` failed at walk-forward artifact download because the gate wrapper only forwarded the run id and the downstream workflow defaulted to artifact name `replay-dryrun-parity-25365401498`. The recorded workflow correctly uploaded `recorded-replay-parity-25365401498`, so the wrapper now exposes and forwards `replay_parity_artifact_name`.
+- 2026-05-05: The next PRD gate attempt `25366348996` reached the
+  walk-forward parity download but failed because the recorded parity artifact
+  contained `parity/parity-evaluation.json` while the downstream gate requires
+  `parity-evaluation.json` at the artifact root. The workflow now uploads
+  `artifacts/parity/` as the primary `recorded-replay-parity-*` artifact and
+  preserves raw replay/dry-run inputs in a separate
+  `recorded-replay-inputs-*` artifact, so the PRD gate can consume recorded
+  replay parity without special casing nested paths.
