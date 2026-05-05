@@ -191,6 +191,32 @@ walk_forward_oos=false
 Interpretation: workflow shape and parity linkage are correct. This is not
 promotion evidence because the short window has no non-empty OOS windows.
 
+Post-PR #341 short-window PRD gate:
+
+- Parent gate run: `25379648867`
+- Snapshot run: `25379659918`
+- Walk-forward run: `25380143546`
+- Inputs:
+  - `symbols=BTCUSDT,ETHUSDT`
+  - `stake_usd=15`
+  - `audit_lookback_hours=1`
+  - `replay_parity_run_id=25379165698`
+  - `replay_parity_artifact_name=recorded-replay-parity-25379165698`
+
+Promotion gate result:
+
+```text
+ready_for_dry_run_handoff=false
+replay_parity_ready=true
+walk-forward conclusion=success
+blocked gate: walk_forward_oos
+reason: no non-naive model has non-empty OOS windows with positive_window_ratio >= 0.60
+```
+
+Interpretation: the updated full-depth replay parity artifact is consumable by
+the PRD gate. The short-window smoke remains intentionally blocked as promotion
+evidence because it has no non-empty OOS window.
+
 ### Retained-Window Blocker
 
 Retained PRD gate:
