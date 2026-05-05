@@ -41,7 +41,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
 use ploy_feed_loaders::{
-    HistoricalLoadOptions as DbHistoricalLoadOptions, load_from_database_with_options,
+    load_from_database_with_options, HistoricalLoadOptions as DbHistoricalLoadOptions,
 };
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
@@ -226,6 +226,8 @@ fn legacy_executor_config(require_lob_liquidity: bool) -> SimulatedExecutorConfi
         impact_coefficient: dec!(0.1),
         default_depth_shares: 500,
         require_lob_liquidity,
+        visible_depth_haircut: dec!(1.0),
+        max_sweep_levels: 0,
     }
 }
 

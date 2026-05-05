@@ -29,6 +29,8 @@ pub struct ExecutionReport {
     pub slippage: Option<Decimal>,
     /// Simulated market impact (simulator only).
     pub market_impact: Option<Decimal>,
+    /// Execution price source used by the simulator or venue adapter.
+    pub price_basis: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

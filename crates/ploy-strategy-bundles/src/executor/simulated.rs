@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::traits::{ExecutionReport, Executor, MarketUpdate};
+use ploy_market_contracts::BookLevel;
 
 const MIN_BINARY_PRICE: Decimal = dec!(0.01);
 const MAX_BINARY_PRICE: Decimal = dec!(0.99);
@@ -48,6 +49,10 @@ pub struct SimulatedExecutorConfig {
     /// consume `bid_size` at `bid`. This mirrors FAK-style top-of-book
     /// execution more closely than synthetic fixed-depth fills.
     pub require_lob_liquidity: bool,
+    /// Haircut applied to observed full-depth book levels before sweep.
+    pub visible_depth_haircut: Decimal,
+    /// Maximum number of full-depth levels to sweep. Zero means unlimited.
+    pub max_sweep_levels: usize,
 }
 
 impl Default for SimulatedExecutorConfig {
@@ -62,16 +67,20 @@ impl Default for SimulatedExecutorConfig {
             impact_coefficient: dec!(0.1),
             default_depth_shares: 500,
             require_lob_liquidity: false,
+            visible_depth_haircut: Decimal::ONE,
+            max_sweep_levels: 0,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct QuoteLiquidity {
     bid: Option<Decimal>,
     ask: Option<Decimal>,
     bid_size: Option<Decimal>,
     ask_size: Option<Decimal>,
+    bid_levels: Vec<BookLevel>,
+    ask_levels: Vec<BookLevel>,
 }
 
 /// Simulated executor that models realistic fills.
@@ -167,11 +176,56 @@ impl SimulatedExecutor {
         (fill_price, filled_qty, slippage, impact)
     }
 
+    fn sweep_levels(
+        levels: &[BookLevel],
+        shares: Decimal,
+        side: TradeSide,
+        limit: Decimal,
+        visible_depth_haircut: Decimal,
+        max_sweep_levels: usize,
+    ) -> Result<(Decimal, Decimal), String> {
+        let mut remaining = shares.max(Decimal::ZERO);
+        let mut filled = Decimal::ZERO;
+        let mut notional = Decimal::ZERO;
+        let level_limit = if max_sweep_levels == 0 {
+            usize::MAX
+        } else {
+            max_sweep_levels
+        };
+
+        for level in levels.iter().take(level_limit) {
+            if remaining <= Decimal::ZERO {
+                break;
+            }
+            let price = Self::clamp_price(level.price);
+            match side {
+                TradeSide::Buy if price > limit => break,
+                TradeSide::Sell if price < limit => break,
+                _ => {}
+            }
+
+            let usable_size = level.size * visible_depth_haircut;
+            if usable_size <= Decimal::ZERO {
+                continue;
+            }
+            let take = remaining.min(usable_size);
+            remaining -= take;
+            filled += take;
+            notional += take * price;
+        }
+
+        if filled <= Decimal::ZERO {
+            return Err("No full-depth liquidity".into());
+        }
+
+        Ok((notional / filled, filled))
+    }
+
     fn simulate_lob_fill(
         &self,
         intent: &TradingIntent,
         signal_price: Decimal,
-    ) -> Result<(Decimal, Decimal, Decimal, Decimal), String> {
+    ) -> Result<(Decimal, Decimal, Decimal, Decimal, &'static str), String> {
         let quote = self
             .quotes
             .get(&intent.token_id)
@@ -180,6 +234,29 @@ impl SimulatedExecutor {
 
         match intent.side {
             TradeSide::Buy => {
+                let limit = intent
+                    .limit_price
+                    .map(Self::clamp_price)
+                    .unwrap_or_else(|| quote.ask.map(Self::clamp_price).unwrap_or(dec!(0.99)));
+                if !quote.ask_levels.is_empty() {
+                    let (avg_price, filled_qty) = Self::sweep_levels(
+                        &quote.ask_levels,
+                        requested,
+                        TradeSide::Buy,
+                        limit,
+                        self.config.visible_depth_haircut,
+                        self.config.max_sweep_levels,
+                    )?;
+                    let reference = Self::clamp_price(signal_price);
+                    return Ok((
+                        avg_price,
+                        filled_qty,
+                        avg_price - reference,
+                        Decimal::ZERO,
+                        "full_depth_sweep",
+                    ));
+                }
+
                 let ask = quote
                     .ask
                     .map(Self::clamp_price)
@@ -201,9 +278,38 @@ impl SimulatedExecutor {
                     return Err("No liquidity".into());
                 }
                 let reference = Self::clamp_price(signal_price);
-                Ok((ask, filled_qty, ask - reference, Decimal::ZERO))
+                Ok((
+                    ask,
+                    filled_qty,
+                    ask - reference,
+                    Decimal::ZERO,
+                    "top_book_quote",
+                ))
             }
             TradeSide::Sell => {
+                let limit = intent
+                    .limit_price
+                    .map(Self::clamp_price)
+                    .unwrap_or_else(|| quote.bid.map(Self::clamp_price).unwrap_or(dec!(0.01)));
+                if !quote.bid_levels.is_empty() {
+                    let (avg_price, filled_qty) = Self::sweep_levels(
+                        &quote.bid_levels,
+                        requested,
+                        TradeSide::Sell,
+                        limit,
+                        self.config.visible_depth_haircut,
+                        self.config.max_sweep_levels,
+                    )?;
+                    let reference = Self::clamp_price(signal_price);
+                    return Ok((
+                        avg_price,
+                        filled_qty,
+                        reference - avg_price,
+                        Decimal::ZERO,
+                        "full_depth_sweep",
+                    ));
+                }
+
                 let bid = quote
                     .bid
                     .map(Self::clamp_price)
@@ -225,7 +331,13 @@ impl SimulatedExecutor {
                     return Err("No liquidity".into());
                 }
                 let reference = Self::clamp_price(signal_price);
-                Ok((bid, filled_qty, reference - bid, Decimal::ZERO))
+                Ok((
+                    bid,
+                    filled_qty,
+                    reference - bid,
+                    Decimal::ZERO,
+                    "top_book_quote",
+                ))
             }
         }
     }
@@ -263,13 +375,15 @@ impl Executor for SimulatedExecutor {
             ask,
             bid_size,
             ask_size,
+            bid_levels,
+            ask_levels,
             ..
         } = update
         {
             let previous = self
                 .quotes
                 .get(token_id.as_ref())
-                .copied()
+                .cloned()
                 .unwrap_or_default();
             self.quotes.insert(
                 token_id.to_string(),
@@ -278,6 +392,16 @@ impl Executor for SimulatedExecutor {
                     ask: *ask,
                     bid_size: bid_size.or(previous.bid_size),
                     ask_size: ask_size.or(previous.ask_size),
+                    bid_levels: if bid_levels.is_empty() {
+                        previous.bid_levels
+                    } else {
+                        bid_levels.clone()
+                    },
+                    ask_levels: if ask_levels.is_empty() {
+                        previous.ask_levels
+                    } else {
+                        ask_levels.clone()
+                    },
                 },
             );
         }
@@ -292,17 +416,34 @@ impl Executor for SimulatedExecutor {
             && (signal_price == Decimal::ZERO || signal_price == Decimal::ONE);
 
         let simulated = if is_settlement {
-            Ok((signal_price, intent.quantity, Decimal::ZERO, Decimal::ZERO))
+            Ok((
+                signal_price,
+                intent.quantity,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                "settlement",
+            ))
         } else if self.config.require_lob_liquidity {
             self.simulate_lob_fill(intent, signal_price)
         } else {
-            Ok(match intent.side {
+            let (fill_price, filled_qty, slippage, impact) = match intent.side {
                 TradeSide::Buy => self.simulate_buy(signal_price, intent.quantity, synthetic_mid),
                 TradeSide::Sell => self.simulate_sell(signal_price, intent.quantity, synthetic_mid),
-            })
+            };
+            Ok((
+                fill_price,
+                filled_qty,
+                slippage,
+                impact,
+                if synthetic_mid {
+                    "synthetic_mid"
+                } else {
+                    "signal_limit"
+                },
+            ))
         };
 
-        let (fill_price, filled_qty, slippage, impact) = match simulated {
+        let (fill_price, filled_qty, slippage, impact, price_basis) = match simulated {
             Ok(fill) => fill,
             Err(reason) => {
                 return ExecutionReport {
@@ -312,6 +453,7 @@ impl Executor for SimulatedExecutor {
                     rejection_reason: Some(reason),
                     slippage: None,
                     market_impact: None,
+                    price_basis: None,
                 };
             }
         };
@@ -324,6 +466,7 @@ impl Executor for SimulatedExecutor {
                 rejection_reason: Some("No liquidity".into()),
                 slippage: None,
                 market_impact: None,
+                price_basis: None,
             };
         }
 
@@ -351,6 +494,7 @@ impl Executor for SimulatedExecutor {
             rejection_reason: None,
             slippage: Some(slippage),
             market_impact: Some(impact),
+            price_basis: Some(price_basis),
         }
     }
 
@@ -391,8 +535,34 @@ mod tests {
             ask,
             bid_size,
             ask_size,
+            bid_levels: Vec::new(),
+            ask_levels: Vec::new(),
             ts: Utc::now(),
         }
+    }
+
+    fn quote_update_with_levels(
+        bid_levels: Vec<BookLevel>,
+        ask_levels: Vec<BookLevel>,
+    ) -> MarketUpdate {
+        let bid = bid_levels.first().map(|level| level.price);
+        let ask = ask_levels.first().map(|level| level.price);
+        let bid_size = bid_levels.first().map(|level| level.size);
+        let ask_size = ask_levels.first().map(|level| level.size);
+        MarketUpdate::Quote {
+            token_id: "token-1".into(),
+            bid,
+            ask,
+            bid_size,
+            ask_size,
+            bid_levels,
+            ask_levels,
+            ts: Utc::now(),
+        }
+    }
+
+    fn level(price: Decimal, size: Decimal) -> BookLevel {
+        BookLevel { price, size }
     }
 
     #[tokio::test]
@@ -522,6 +692,51 @@ mod tests {
             report.rejection_reason.as_deref(),
             Some("No executable ask liquidity")
         );
+    }
+
+    #[tokio::test]
+    async fn full_depth_buy_sweeps_multiple_ask_levels() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update_with_levels(
+            vec![level(dec!(0.49), dec!(20))],
+            vec![level(dec!(0.50), dec!(5)), level(dec!(0.52), dec!(10))],
+        ));
+        let intent = test_intent(TradeSide::Buy, dec!(0.53), dec!(12));
+
+        let report = exec.submit(&intent, "test-order-full-depth-buy").await;
+        assert!(!report.rejected);
+        assert_eq!(report.price_basis, Some("full_depth_sweep"));
+        let fill = report.fill.expect("full-depth fill");
+        assert_eq!(fill.quantity, dec!(12));
+        assert_eq!(fill.price.round_dp(6), dec!(0.511667));
+        assert_eq!(report.slippage.unwrap().round_dp(6), dec!(-0.018333));
+    }
+
+    #[tokio::test]
+    async fn full_depth_buy_respects_haircut_and_max_levels() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            visible_depth_haircut: dec!(0.5),
+            max_sweep_levels: 1,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update_with_levels(
+            Vec::new(),
+            vec![level(dec!(0.50), dec!(10)), level(dec!(0.51), dec!(10))],
+        ));
+        let intent = test_intent(TradeSide::Buy, dec!(0.55), dec!(12));
+
+        let report = exec.submit(&intent, "test-order-full-depth-haircut").await;
+        assert!(!report.rejected);
+        assert_eq!(report.price_basis, Some("full_depth_sweep"));
+        let fill = report.fill.expect("haircut-limited fill");
+        assert_eq!(fill.quantity, dec!(5.0));
+        assert_eq!(fill.price, dec!(0.50));
     }
 
     #[tokio::test]

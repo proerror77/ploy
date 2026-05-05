@@ -12997,3 +12997,23 @@ Issue: https://github.com/proerror77/ploy/issues/256
   orders `2/2/2`, fills `2/2/2`, `strict_parity_ready=true`,
   `blocking_risk_flags=[]`, decision `continue`. Advisory event-level flags
   remain expected because replay evidence still lacks event-level rows.
+- 2026-05-05: Implemented the runtime full-depth parity slice on
+  `feat/runtime-full-depth-parity`. `MarketUpdate::Quote` now carries optional
+  full-depth bid/ask levels, DB/REST Polymarket feeds populate levels from
+  `clob_orderbook_snapshots` or `/book`, and `SimulatedExecutor` uses a
+  full-depth sweep when levels are present. Runtime order context now records
+  the actual `runtime_price_basis` and sets `full_depth_runtime_parity=true`
+  only when the simulator used `full_depth_sweep`; the BTC/ETH settlement
+  dry-run config uses conservative `visible_depth_haircut=0.5` and
+  `max_sweep_levels=3`. Verification passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-full-depth /opt/homebrew/bin/timeout
+  300 rtk cargo test -p ploy-strategy-bundles simulated --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-full-depth /opt/homebrew/bin/timeout
+  300 rtk cargo test -p ploy-strategy-bundles --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-full-depth /opt/homebrew/bin/timeout
+  300 rtk cargo check -p ploy-market-contracts -p ploy-feed-loaders
+  -p ploy-market-data -p ploy-strategy-bundles -p ploy-strategy-runtime`,
+  focused `rustfmt --check`, and `git diff --check`. This still needs
+  recorded replay/dry-run evidence showing live orders actually carry
+  `runtime_price_basis=full_depth_sweep` before the PRD runtime parity blocker
+  can be closed.

@@ -1183,6 +1183,7 @@ impl StrategyLogic for ThreeLayerStrategy {
                 bid_size,
                 ask_size,
                 ts,
+                ..
             } => {
                 self.feed_time = Some(*ts);
                 self.quotes.insert(
@@ -1635,6 +1636,8 @@ mod tests {
             ask: Some(dec!(0.75)),
             bid_size: Some(dec!(100)),
             ask_size: Some(dec!(100)),
+            bid_levels: Vec::new(),
+            ask_levels: Vec::new(),
             ts,
         }
     }
@@ -1646,6 +1649,8 @@ mod tests {
             ask: Some(dec!(0.20)),
             bid_size: Some(dec!(100)),
             ask_size,
+            bid_levels: Vec::new(),
+            ask_levels: Vec::new(),
             ts,
         }
     }
@@ -1854,6 +1859,8 @@ mod tests {
                 ask: Some(dec!(0.75)),
                 bid_size: Some(dec!(100)),
                 ask_size: Some(dec!(100)),
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
                 ts: now,
             },
             &positions,
@@ -1883,6 +1890,8 @@ mod tests {
                 ask: Some(dec!(0.75)),
                 bid_size: Some(dec!(5)),
                 ask_size: Some(dec!(100)),
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
                 ts: now,
             },
             &positions,

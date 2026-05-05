@@ -1,9 +1,15 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BookLevel {
+    pub price: Decimal,
+    pub size: Decimal,
+}
 
 /// Unified market update consumed by market data, strategy, and research code.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,6 +39,10 @@ pub enum MarketUpdate {
         ask: Option<Decimal>,
         bid_size: Option<Decimal>,
         ask_size: Option<Decimal>,
+        #[serde(default)]
+        bid_levels: Vec<BookLevel>,
+        #[serde(default)]
+        ask_levels: Vec<BookLevel>,
         ts: DateTime<Utc>,
     },
 
@@ -252,7 +262,7 @@ fn hex_to_decimal_string(hex: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MarketUpdate, market_update_sort_ts, normalize_token_id};
+    use super::{market_update_sort_ts, normalize_token_id, MarketUpdate};
     use crate::{InstrumentKind, PredictionFamily, VenueKind};
     use chrono::{DateTime, Utc};
     use rust_decimal::Decimal;
@@ -281,6 +291,8 @@ mod tests {
                     ask: Some(Decimal::new(55, 2)),
                     bid_size: None,
                     ask_size: None,
+                    bid_levels: Vec::new(),
+                    ask_levels: Vec::new(),
                     ts: ts(),
                 },
             ),

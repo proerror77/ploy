@@ -14,7 +14,7 @@ use ploy_trading::{
     TradingRuntime, TradingRuntimeSnapshot,
 };
 use rust_decimal::Decimal;
-use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
+use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
 use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -151,6 +151,7 @@ mod execution {
                             rejection_reason: None,
                             slippage: None,
                             market_impact: None,
+                            price_basis: None,
                         }
                     }
                     ExecutionOutcome::Rejected { reason } => {
@@ -162,6 +163,7 @@ mod execution {
                             rejection_reason: Some(reason),
                             slippage: None,
                             market_impact: None,
+                            price_basis: None,
                         }
                     }
                 },
@@ -174,6 +176,7 @@ mod execution {
                         rejection_reason: Some(error.to_string()),
                         slippage: None,
                         market_impact: None,
+                        price_basis: None,
                     }
                 }
                 Err(error) => {
@@ -185,6 +188,7 @@ mod execution {
                         rejection_reason: Some(format!("internal: {error}")),
                         slippage: None,
                         market_impact: None,
+                        price_basis: None,
                     }
                 }
             }
@@ -318,7 +322,7 @@ mod execution {
 }
 
 use crate::recording::build_signal_recorder;
-use crate::{RuntimeModeConfig, database_unavailable_is_fatal};
+use crate::{database_unavailable_is_fatal, RuntimeModeConfig};
 
 #[derive(Debug, FromRow)]
 struct LiveOrderRestoreRow {

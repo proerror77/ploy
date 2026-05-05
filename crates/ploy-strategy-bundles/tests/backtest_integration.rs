@@ -49,6 +49,8 @@ fn build_scenario() -> Vec<MarketUpdate> {
         ts: now,
         bid_size: None,
         ask_size: None,
+    bid_levels: Vec::new(),
+    ask_levels: Vec::new(),
     });
     updates.push(MarketUpdate::Quote {
         token_id: "dn-btc-001".into(),
@@ -57,6 +59,8 @@ fn build_scenario() -> Vec<MarketUpdate> {
         ts: now,
         bid_size: None,
         ask_size: None,
+    bid_levels: Vec::new(),
+    ask_levels: Vec::new(),
     });
 
     // 4. BTC trends up over several updates so realized vol has a usable estimate.

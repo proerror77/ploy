@@ -354,6 +354,7 @@ where
                             rejection_reason: None,
                             slippage: None,
                             market_impact: None,
+                            price_basis: None,
                         };
 
                         self.recorder
@@ -543,6 +544,7 @@ where
                     rejection_reason: Some(terminal_reason.clone()),
                     slippage: None,
                     market_impact: None,
+                    price_basis: None,
                 };
                 self.recorder
                     .record_order(
@@ -580,6 +582,7 @@ where
                 rejection_reason: Some(terminal_reason.clone()),
                 slippage: None,
                 market_impact: None,
+                price_basis: None,
             };
             self.recorder
                 .record_order(
@@ -694,8 +697,8 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{
-        RuntimeConfig, RuntimeMode, StrategyRuntime, retry_attempt_from_intent_id,
-        retry_root_intent_id,
+        retry_attempt_from_intent_id, retry_root_intent_id, RuntimeConfig, RuntimeMode,
+        StrategyRuntime,
     };
     use crate::traits::{
         ExecutionPolicy, ExecutionReport, Executor, Feed, MarketUpdate, Recorder, SignalRecord,
@@ -740,6 +743,7 @@ mod tests {
                 rejection_reason: Some("simulated rejection".into()),
                 slippage: None,
                 market_impact: None,
+                price_basis: None,
             }
         }
 
@@ -963,6 +967,7 @@ mod tests {
                 rejection_reason: None,
                 slippage: Some(Decimal::ZERO),
                 market_impact: Some(Decimal::ZERO),
+                price_basis: None,
             }
         }
 
@@ -989,6 +994,7 @@ mod tests {
                 rejection_reason: None,
                 slippage: None,
                 market_impact: None,
+                price_basis: None,
             }
         }
 
@@ -1030,6 +1036,7 @@ mod tests {
                 rejection_reason: None,
                 slippage: None,
                 market_impact: None,
+                price_basis: None,
             }
         }
 
@@ -1061,6 +1068,7 @@ mod tests {
                 rejection_reason: None,
                 slippage: None,
                 market_impact: None,
+                price_basis: None,
             }
         }
 
@@ -1093,6 +1101,7 @@ mod tests {
                 rejection_reason: None,
                 slippage: None,
                 market_impact: None,
+                price_basis: None,
             }
         }
 
@@ -1731,13 +1740,11 @@ mod tests {
             ["pm5d_BTCUSDT_UP_retry3"]
         );
         assert_eq!(snapshot.orders.len(), 2);
-        assert!(
-            snapshot
-                .orders
-                .iter()
-                .any(|order| order.intent_id == "pm5d_BTCUSDT_UP_retry3"
-                    && order.state == ploy_trading::OrderState::Acknowledged)
-        );
+        assert!(snapshot
+            .orders
+            .iter()
+            .any(|order| order.intent_id == "pm5d_BTCUSDT_UP_retry3"
+                && order.state == ploy_trading::OrderState::Acknowledged));
     }
 
     #[tokio::test]
