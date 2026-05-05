@@ -26,6 +26,7 @@ EXPERIMENT_LABELS = {
     "pm5d.threelayer.obi-soft.dryrun": "TL v3 OBI-soft EVCal",
     "pm5d.threelayer.obi-hard.dryrun": "TL v4 OBI-hard EVCal",
     "pm5d.threelayer.continuation-soft.dryrun": "TL v5 Continuation-soft EVCal",
+    "pm5d.threelayer.settlement-probability-btc-eth.dryrun": "TL Settlement Probability BTC/ETH",
 }
 
 

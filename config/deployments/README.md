@@ -13,6 +13,9 @@ Current examples:
 - `example.live.dry-run.json`
   - remote live-host readiness drill
   - still uses `runtime_mode: "paper"` so the drill never touches real funds
+- `pm5d.threelayer.settlement-probability-btc-eth.dryrun.json`
+  - BTC/ETH-only PM5D/PM15D settlement-probability dry-run handoff candidate
+  - paper runtime only; not live approval
 
 Each manifest includes:
 

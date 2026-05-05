@@ -170,6 +170,7 @@ jobs:
           cp config/strategies/02-pm5d-threelayer.champion-dryrun.toml dist/config/strategies/02-pm5d-threelayer.champion-dryrun.toml
           cp config/strategies/02-pm5d-threelayer.continuation-soft-dryrun.toml dist/config/strategies/02-pm5d-threelayer.continuation-soft-dryrun.toml
           cp config/strategies/02-pm5d-threelayer.repricing-momentum-dryrun.toml dist/config/strategies/02-pm5d-threelayer.repricing-momentum-dryrun.toml
+          cp config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml dist/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml
           cp config/deployments/*.json dist/config/deployments/
           cp scripts/binance_aggtrade_collector.py dist/scripts/binance_aggtrade_collector.py
           cp scripts/binance_price_collector.py dist/scripts/binance_price_collector.py
@@ -418,6 +419,7 @@ jobs:
             install -m 0644 ./config/strategies/02-pm5d-threelayer.champion-dryrun.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.champion-dryrun.toml
             install -m 0644 ./config/strategies/02-pm5d-threelayer.continuation-soft-dryrun.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.continuation-soft-dryrun.toml
             install -m 0644 ./config/strategies/02-pm5d-threelayer.repricing-momentum-dryrun.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.repricing-momentum-dryrun.toml
+            install -m 0644 ./config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml
             install -m 0644 ./config/deployments/*.json ${DEPLOY_ROOT}/config/deployments/
             install -m 0755 ./scripts/binance_aggtrade_collector.py ${DEPLOY_ROOT}/scripts/binance_aggtrade_collector.py
             install -m 0755 ./scripts/binance_price_collector.py ${DEPLOY_ROOT}/scripts/binance_price_collector.py
