@@ -22,7 +22,8 @@ snapshot-backed full-depth execution labels and probability-model validation.
 
 - Branch: `feat/settlement-probability-prd`
 - PR: #319
-- Latest reviewed head: PR #319 head after the conservative-matrix follow-up
+- Latest reviewed head: `b25ccad9` after the settlement walk-forward report,
+  PRD promotion gate, and remote short-window promotion-gate smoke
 - PR status: mergeable
 - Ordinary PR CI: passed on run `25354110281`
 - PR Auto Review: passed on run `25354110277`
@@ -30,8 +31,11 @@ snapshot-backed full-depth execution labels and probability-model validation.
 - Runner blocker issue: #320, closed after `ploy-ci-1` recovery
 - Follow-up issue for remaining PRD promotion blockers: #321
 - Final pushed head: PR #319 current head after final audit docs
-- Final PR check status: all required PR checks green on run `25354770307`
-  plus PR Auto Review `25354770288`; CodeRabbit success.
+- Final PR check status: all required PR checks green on run `25359533557`
+  plus PR Auto Review `25359533551`; CodeRabbit success.
+- Latest short-window promotion-gate smoke: Factor Walk-Forward V2 run
+  `25359476569`, source snapshot `25356726430`, completed successfully and
+  printed `ready_for_dry_run_handoff=false`.
 - Final runner status after cancelling the diagnostic snapshot:
   `ploy-ci-1` is `online` / `busy=false`.
 
@@ -47,12 +51,16 @@ snapshot-backed full-depth execution labels and probability-model validation.
 | Edge bucket report | Factor walk-forward artifact `report.txt` | Present in runs `25353780686` and `25353780673` | Complete |
 | Baseline comparison | Settlement probability report baseline section | Present in runs `25353780686` and `25353780673` | Complete |
 | Anti-overfit diagnostics | label shift, prediction shift, symbol holdout, baseline ablation sections | Present in runs `25353780686` and `25353780673` | Complete |
-| Walk-forward OOS | `factor-walk-forward-v2.yml` | Snapshot-backed runs completed successfully after correcting inclusive end-date input | Complete |
+| EventVolSurface / empirical prior | `q_event_surface_empirical` in settlement probability report | Implemented non-leaky event-surface prior; current event is excluded from bucket/global priors | Complete |
+| Final probability blend | `q_final_logit_blend` in settlement probability report | Combines market midpoint, distance/LOB/vol probability, and EventVolSurface prior in logit space | Complete |
+| Walk-forward OOS | `=== Settlement Probability Walk-Forward Report ===` | Implemented train-window-only EventVolSurface OOS report; short-window smoke intentionally has no non-empty OOS windows | Code complete; decision-grade evidence pending |
+| PRD promotion gate | `=== Settlement Probability PRD Promotion Gate ===` | Run `25359476569` prints `ready_for_dry_run_handoff=false`, `walk_forward_oos=false`, and `recorded_replay_parity=false` | Complete as a blocker gate |
+| Replay parity artifact input | `factor_walk_forward_v2 --replay-parity-json`, workflow `options_json.replay_parity_json` | The report can now consume `scripts/replay_dryrun_parity.py` JSON and drive the recorded replay parity gate from runtime/event strict parity fields | Code complete; no passing parity artifact yet |
 | Official settlement fidelity | Snapshot manifest `require_official_settlement=true` | Provenance for snapshots `25254380121` and `25255158983` confirms official settlement required | Partial evidence |
 | Data quality / coverage | `data-gap-audit.md` | Strict `pm5d-vol` run `25354264444` failed at `Audit required market data`; every required source had critical max gaps around `1700m` | Failing / blocks promotion |
-| Deribit / vol inputs | `data_profile=pm5d-vol` or `include_deribit=true` snapshot | Strict `pm5d-vol` gate requires Deribit IV/Greeks but fails coverage before snapshot compile | Missing for full PRD vol lane |
-| Portable replay evidence | Full research snapshot artifact | `upload_full_snapshot` option exists; strict run did not upload a full snapshot because data audit failed. Diagnostic non-strict run `25354314443` was cancelled during snapshot compile and produced no full snapshot artifact | Code present; strict data gate failed |
-| Replay parity | `ReplayParityReport` / recorded replay artifacts | Not part of current completed evidence | Missing |
+| Deribit / vol inputs | `data_profile=pm5d-vol` or `include_deribit=true` snapshot | Short-window snapshot `25356726430` includes Deribit; strict retained 168h snapshot still fails coverage | Partial; full retained evidence missing |
+| Portable replay evidence | Full research snapshot artifact | Short-window artifact `research-snapshot-25356726430` is portable and replayable; strict retained full snapshot is still missing | Partial; full retained evidence missing |
+| Replay parity | `ReplayParityReport` / recorded replay artifacts | Promotion gate now exposes `recorded_replay_parity=false`; no parity artifact has passed | Missing / blocks promotion |
 | Dry-run readiness | Dry-run handoff packet and kill switch evidence | PRD gates have not passed | Not ready |
 
 ## Remote Validation Evidence
@@ -134,7 +142,8 @@ Therefore current evidence is enough to identify the next candidate lane, but
 not enough for dry-run promotion. BTC/ETH/SOL `q_market_midpoint` /
 `q_existing_fair_prob` top-edge settlement probability is the strongest
 candidate. Promotion remains blocked by critical data gaps, missing Deribit vol
-inputs, missing conservative haircut report, and missing replay parity.
+inputs in a retained strict window, missing non-empty settlement-probability OOS
+windows, and missing recorded replay parity.
 
 Fresh strict data-gate attempt:
 
@@ -195,9 +204,9 @@ Conservative execution surface:
   `CARGO_TARGET_DIR=/tmp/ploy-settlement-conservative-matrix
   /opt/homebrew/bin/timeout 240 rtk cargo check -p ploy-research --example
   factor_walk_forward_v2 --features db --no-default-features`
-- Remaining conservative gap: this surfaces conservative capacity/fillability
-  and conservative settlement edge buckets, but replay parity still needs a
-  decision-grade snapshot.
+- Remaining conservative gap: conservative capacity/fillability and conservative
+  settlement edge buckets now exist, but they still need a decision-grade
+  retained snapshot plus recorded replay parity before dry-run handoff.
 
 ## Short-Window Workflow Smoke
 
@@ -254,14 +263,39 @@ Downstream walk-forward smoke:
 - Holdout caveat: SOL holdout is negative for `q_existing_fair_prob`
   (`-0.3116`) and `q_market_midpoint` (`-0.2303`)
 
+Promotion-gate smoke after the latest report changes:
+
+- Run: `25359476569`
+- Source snapshot: `research-snapshot-25356726430`
+- Result: success
+- Report confirms `=== Settlement Probability PRD Promotion Gate ===`
+- Gate output: `ready_for_dry_run_handoff=false`
+- Blocking rows visible in the artifact:
+  - `walk_forward_oos=false`, because the one-day smoke cannot form non-empty
+    train+test OOS windows
+  - `recorded_replay_parity=false`, because no recorded replay parity artifact
+    was supplied
+
+Replay-parity input integration after latest changes:
+
+- `factor_walk_forward_v2` accepts optional `--replay-parity-json <path>`.
+- `.github/workflows/factor-walk-forward-v2.yml` accepts optional
+  `options_json.replay_parity_json` and forwards it to the example.
+- The parser reads `runtime_evidence_comparison.strict_parity_ready`,
+  `event_comparison.strict_parity_ready`, `risk_flags`, and `decision` from
+  `scripts/replay_dryrun_parity.py` output. The promotion gate passes recorded
+  replay parity only when runtime parity and event parity are true and risk
+  flags are empty.
+
 Interpretation:
 
 - The short-window workflow chain now works: strict current data audit,
   portable full snapshot artifact, full-depth execution matrix, Deribit-included
-  settlement probability report, conservative edge columns, and issue-comment
-  evidence.
+  settlement probability report, conservative edge columns, promotion blocker
+  gate, and issue-comment evidence.
 - This does not unblock dry-run/live. The sample is tiny and not a retained
-  clean 168h window, and the symbol holdout is not stable.
+  clean 168h window, the symbol holdout is not stable, walk-forward OOS is
+  empty, and recorded replay parity is still missing.
 
 ## Recovery Checklist
 

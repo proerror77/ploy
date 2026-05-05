@@ -552,6 +552,7 @@ pub struct SettlementProbabilityPromotionGateOptions {
     pub include_deribit: bool,
     pub data_audit_status: Option<String>,
     pub replay_parity_ready: bool,
+    pub replay_parity_evidence: Option<String>,
 }
 
 impl Default for SettlementProbabilityPromotionGateOptions {
@@ -565,6 +566,7 @@ impl Default for SettlementProbabilityPromotionGateOptions {
             include_deribit: false,
             data_audit_status: None,
             replay_parity_ready: false,
+            replay_parity_evidence: None,
         }
     }
 }
@@ -3019,11 +3021,14 @@ pub fn build_settlement_probability_promotion_gate_report(
     gates.push(SettlementProbabilityPromotionGateRow {
         gate: "recorded_replay_parity".to_string(),
         passed: options.replay_parity_ready,
-        evidence: if options.replay_parity_ready {
-            "recorded replay parity marked ready by caller".to_string()
-        } else {
-            "blocked: no recorded replay parity artifact was supplied to this report".to_string()
-        },
+        evidence: options.replay_parity_evidence.clone().unwrap_or_else(|| {
+            if options.replay_parity_ready {
+                "recorded replay parity marked ready by caller".to_string()
+            } else {
+                "blocked: no recorded replay parity artifact was supplied to this report"
+                    .to_string()
+            }
+        }),
     });
 
     let ready_for_dry_run_handoff = gates.iter().all(|gate| gate.passed);

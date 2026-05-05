@@ -66,6 +66,50 @@ fn parse_timestamp(raw: &str) -> DateTime<Utc> {
         .unwrap_or_else(|_| panic!("invalid timestamp: {raw}"))
 }
 
+fn replay_parity_evidence(path: &str) -> (bool, String) {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("read replay parity JSON {path} failed: {err}"));
+    let json: serde_json::Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|err| panic!("parse replay parity JSON {path} failed: {err}"));
+    let runtime_ready = json
+        .pointer("/runtime_evidence_comparison/strict_parity_ready")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let event_ready = json
+        .pointer("/event_comparison/strict_parity_ready")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let risk_flags = json
+        .get("risk_flags")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let ready = runtime_ready && event_ready && risk_flags.is_empty();
+    let decision = json
+        .get("decision")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<missing>");
+    let evidence = format!(
+        "replay_parity_json={} runtime_ready={} event_ready={} risk_flags={} decision={}",
+        path,
+        runtime_ready,
+        event_ready,
+        if risk_flags.is_empty() {
+            "<none>".to_string()
+        } else {
+            risk_flags.join("|")
+        },
+        decision,
+    );
+    (ready, evidence)
+}
+
 fn slice_by_time<T, F>(items: &[T], start: DateTime<Utc>, end: DateTime<Utc>, ts_fn: F) -> &[T]
 where
     F: Fn(&T) -> DateTime<Utc>,
@@ -146,6 +190,7 @@ async fn main() {
     );
 
     let snapshot_dir = flag_value(&args, "--snapshot-dir");
+    let replay_parity_json = flag_value(&args, "--replay-parity-json");
     let allow_direct_db_debug = flag_present(&args, "--allow-direct-db-debug");
     if snapshot_dir.is_some() && db_url.is_some() {
         eprintln!("ERROR: --snapshot-dir cannot be combined with --db-url");
@@ -432,6 +477,7 @@ async fn main() {
             &settlement_probability_walk_forward_report
         )
     );
+    let replay_parity_status = replay_parity_json.as_deref().map(replay_parity_evidence);
     let promotion_gate_report = build_settlement_probability_promotion_gate_report(
         &settlement_probability_report,
         &settlement_probability_walk_forward_report,
@@ -441,6 +487,11 @@ async fn main() {
             stake_usd: options.review.stake_usd,
             include_deribit,
             data_audit_status: snapshot_data_audit_status,
+            replay_parity_ready: replay_parity_status
+                .as_ref()
+                .map(|(ready, _)| *ready)
+                .unwrap_or(false),
+            replay_parity_evidence: replay_parity_status.map(|(_, evidence)| evidence),
             ..Default::default()
         },
     );
