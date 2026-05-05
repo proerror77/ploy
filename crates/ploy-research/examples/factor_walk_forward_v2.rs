@@ -34,6 +34,7 @@ use ploy_research::{
     TradeFormationReviewOptions,
 };
 use sqlx::postgres::PgPoolOptions;
+use std::collections::HashSet;
 use std::time::Duration;
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
@@ -224,10 +225,29 @@ async fn main() {
         let started = std::time::Instant::now();
         let snapshot =
             load_research_snapshot(&snapshot_dir).expect("load research snapshot failed");
+        let snapshot_symbol_set: HashSet<&str> = snapshot
+            .manifest
+            .symbols
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let missing_symbols: Vec<&str> = symbols
+            .iter()
+            .map(String::as_str)
+            .filter(|symbol| !snapshot_symbol_set.contains(symbol))
+            .collect();
+        if !missing_symbols.is_empty() {
+            eprintln!(
+                "ERROR: requested symbols {:?} are not present in snapshot symbols {:?}",
+                missing_symbols, snapshot.manifest.symbols
+            );
+            std::process::exit(2);
+        }
+        let validation_symbols = snapshot.manifest.symbols.clone();
         validate_snapshot_request(
             &snapshot.manifest,
             ResearchSnapshotRequest {
-                symbols: &symbols,
+                symbols: &validation_symbols,
                 start,
                 end,
                 lob_sample_secs,
@@ -282,11 +302,35 @@ async fn main() {
                 .unwrap_or("<not-recorded>"),
             snapshot.manifest.include_deribit
         ));
-        (
-            snapshot.observations,
-            snapshot.deribit_snapshots,
-            snapshot.pm_book_snapshots,
-        )
+        let requested_symbol_set: HashSet<&str> = symbols.iter().map(String::as_str).collect();
+        let mut observations: Vec<FactorObservation> = snapshot
+            .observations
+            .into_iter()
+            .filter(|row| requested_symbol_set.contains(row.symbol.as_str()))
+            .collect();
+        let event_ids: HashSet<String> = observations
+            .iter()
+            .map(|row| row.event_id.clone())
+            .collect();
+        let deribit_snapshots: Vec<_> = snapshot
+            .deribit_snapshots
+            .into_iter()
+            .filter(|row| requested_symbol_set.contains(row.symbol.as_str()))
+            .collect();
+        let pm_book_snapshots: Vec<_> = snapshot
+            .pm_book_snapshots
+            .into_iter()
+            .filter(|row| event_ids.contains(&row.event_id))
+            .collect();
+        observations.shrink_to_fit();
+        eprintln!(
+            "snapshot filtered: requested_symbols={:?} observations={} deribit={} pm_books={}",
+            symbols,
+            observations.len(),
+            deribit_snapshots.len(),
+            pm_book_snapshots.len()
+        );
+        (observations, deribit_snapshots, pm_book_snapshots)
     } else {
         if !allow_direct_db_debug {
             eprintln!(
