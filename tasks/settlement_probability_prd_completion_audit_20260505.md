@@ -10,8 +10,14 @@ as a dry-run-first strategy system. The system is not live-approved.
 Status: **not complete**
 
 The runtime/dry-run evidence path is now working, including settlement-specific
-recorded replay parity. The retained 168h research promotion gate is still
-blocked by strict market-data continuity, tracked in issue #339.
+recorded replay parity. Runtime full-depth sweep support has been implemented
+and deployed, and the first post-deploy settlement-probability dry-run order has
+now shown `runtime_price_basis=full_depth_sweep` with
+`full_depth_runtime_parity=true`.
+
+The retained 168h research promotion gate is still blocked by strict
+market-data continuity, tracked in issue #339. Post-deploy recorded replay
+parity for the new full-depth runtime path has passed.
 
 Do not mark the PRD complete until the retained-window gate passes with the
 same or newer settlement-specific replay parity artifact.
@@ -27,7 +33,10 @@ same or newer settlement-specific replay parity artifact.
 | Old repricing dry-run is paused while settlement dry-run runs | Remote `ployctl deployments inspect`: settlement desired/observed `Running`, repricing `Paused` | Complete |
 | Dry-run report exposes the strategy label | `scripts/report_dryrun_summary.py`; dry-run label `TL Settlement Probability BTC/ETH` | Complete |
 | Runtime order evidence includes q/edge audit context | PR #336; deployed SHA `d87261d0cc153babc68ae799a424b294d6a0e154`; post-deploy orders show `signal_p_hat`, `signal_edge`, `signal_entry_price` | Complete |
-| Runtime explicitly does not claim full-depth parity | Runtime order context records `runtime_price_basis=top_book_quote` and `full_depth_runtime_parity=false` | Complete |
+| Runtime full-depth sweep mechanism is implemented | PR #341; merge SHA `8f0bb71718832299dfe9780d6f73aba868d05b99`; `MarketUpdate::Quote` carries full-depth levels and `SimulatedExecutor` sweeps them when present | Complete |
+| Runtime full-depth sweep mechanism is deployed | Deploy run `25377605431`; settlement dry-run config deployed with `visible_depth_haircut=0.5` and `max_sweep_levels=3` | Complete |
+| Runtime full-depth parity is proven by post-deploy order context | Tango DB order at `2026-05-05 21:23:43.833643+08` records `runtime_price_basis=full_depth_sweep` and `full_depth_runtime_parity=true` | Complete |
+| Post-deploy full-depth replay parity passes | Recorded replay parity run `25379165698`: orders `2/2/2`, fills `2/2/2`, `strict_parity_ready=true`, `blocking_risk_flags=[]`, decision `continue` | Complete |
 | Settlement dry-run records its own MarketUpdate stream | PR #337; deployed SHA `b8c927669cf5bb673dde4a9f05d9ccc15b4f8fda`; `/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson` actively updates | Complete |
 | Recorded replay parity uses the settlement-specific recording | Recorded replay parity run `25374110073`, artifact `recorded-replay-parity-25374110073` | Complete |
 | Runtime strict replay parity passes for a fresh settlement window | Run `25374110073`: orders `2/2/2`, fills `2/2/2`, `strict_parity_ready=true`, `blocking_risk_flags=[]`, decision `continue` | Complete |
@@ -51,6 +60,14 @@ same or newer settlement-specific replay parity artifact.
 - PR #338: `https://github.com/proerror77/ploy/pull/338`
   - Merge SHA: `cd52ea18dc4df7e19a4d5f88ad6987fd2efe4fb2`
   - Records parity evidence in `tasks/todo.md`.
+- PR #341: `https://github.com/proerror77/ploy/pull/341`
+  - Merge SHA: `8f0bb71718832299dfe9780d6f73aba868d05b99`
+  - Adds full-depth levels to runtime quote updates, populates them from
+    Polymarket DB/REST feeds, and makes the simulated dry-run executor sweep
+    full CLOB depth when levels are available.
+  - Adds conservative runtime sweep controls:
+    `visible_depth_haircut=0.5` and `max_sweep_levels=3` for the BTC/ETH
+    settlement dry-run config.
 
 Remote verification after deployment:
 
@@ -61,6 +78,38 @@ ployd.service ActiveState=active SubState=running Restart=always OOMPolicy=kill
 MemoryHigh=1342177280 MemoryMax=1610612736
 no cargo/rustc process on tango-1-1
 ```
+
+Runtime full-depth deployment:
+
+- Deploy run: `25377605431`
+- Deployed SHA: `8f0bb71718832299dfe9780d6f73aba868d05b99`
+- Remote verification after deployment:
+
+```text
+pm5d.threelayer.settlement-probability-btc-eth.dryrun desired=Running observed=Running
+ployd.service ActiveState=active SubState=running Restart=always OOMPolicy=kill
+MemoryMax=1610612736
+no cargo/rustc process on tango-1-1
+post-deploy CLOB ingestion live after 2026-05-05 21:14:00+08
+```
+
+Post-deploy order evidence:
+
+```text
+orders since 2026-05-05 21:14:00+08: 2
+latest order: 2026-05-05 21:25:00.795843+08
+full_depth_sweep orders: 1
+top_book_quote orders: 0
+full_depth_runtime_parity=true orders: 1
+
+2026-05-05 21:23:43.833643+08 FILLED runtime_price_basis=full_depth_sweep full_depth_runtime_parity=true signal_edge=0.7339111626093238 signal_symbol=BTCUSDT signal_direction=DOWN
+2026-05-05 21:25:00.795843+08 FILLED runtime_price_basis=settlement full_depth_runtime_parity=false
+```
+
+Interpretation: the runtime full-depth entry path is now proven by a
+post-deploy order context. The `settlement` basis row is a settlement-side
+runtime record and does not invalidate the full-depth entry evidence. The next
+required evidence is a post-deploy recorded replay parity run over this window.
 
 ### Replay Parity
 
@@ -85,6 +134,28 @@ Advisory flags remain:
 
 These are not blocking for current runtime order/fill strict parity, but they
 remain a quality gap before any future stronger event-level parity claim.
+
+Post-PR #341 full-depth replay parity:
+
+- Run: `25379165698`
+- Window: `2026-05-05T21:22:30+08:00 -> 2026-05-05T21:25:30+08:00`
+- Deployment: `pm5d.threelayer.settlement-probability-btc-eth.dryrun`
+- Recording:
+  `/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson`
+- Result:
+  - `strict_parity_ready=true`
+  - orders `2/2/2`
+  - fills `2/2/2`
+  - `blocking_risk_flags=[]`
+  - decision `continue`
+
+Advisory event-level flags remain:
+
+- `replay_has_no_event_level_rows`
+- `events_present_in_dryrun_missing_from_replay`
+
+These are still a quality gap before stronger event-level parity claims, but
+they are not blocking for current order/fill runtime strict parity.
 
 ### Short-Window Smoke
 
@@ -188,17 +259,21 @@ there is no current repo evidence of a lossless historical Binance LOB backfill
 for the missing WebSocket partial-depth interval. Do not bypass the strict gate
 by substituting candles or synthetic LOB rows.
 
-### Blocker 2: Full-Depth Runtime Parity
+### Resolved: Post-Deploy Full-Depth Runtime Parity
 
-Runtime evidence intentionally records:
+PR #341 implemented and deployed runtime full-depth sweep support, and one
+post-deploy settlement-probability dry-run order has proven the full-depth entry
+path in runtime order context:
 
 ```text
-runtime_price_basis=top_book_quote
-full_depth_runtime_parity=false
+runtime_price_basis=full_depth_sweep
+full_depth_runtime_parity=true
 ```
 
-This is acceptable for dry-run audit visibility. It is not acceptable as a live
-or full-depth runtime-readiness claim.
+Recorded replay parity over the same post-deploy window also passed with no
+blocking risk flags. This closes the runtime full-depth parity blocker for the
+dry-run/replay path. It does not close the retained 168h data-continuity gate or
+authorize live trading.
 
 ## Next Valid Actions
 
@@ -206,9 +281,9 @@ or full-depth runtime-readiness claim.
 2. Keep monitoring quick data audit; current 1h audit is healthy.
 3. Re-run the retained PRD gate after the 168h data hole rolls out, or after a
    validated full-source backfill.
-4. Only if the retained gate passes, promote the next engineering slice:
-   runtime full-depth/conservative execution approximation or true CLOB sweep
-   parity.
+4. Only if the retained gate passes with the newer post-deploy full-depth replay
+   parity artifact, promote the next engineering slice toward dry-run handoff
+   hardening.
 
 ## Completion Criteria Not Yet Met
 
@@ -218,6 +293,5 @@ The PRD is complete only when:
 2. Retained snapshot-backed walk-forward has non-empty OOS windows.
 3. Promotion gate reports `ready_for_dry_run_handoff=true` using the
    settlement-specific replay parity artifact or a newer equivalent artifact.
-4. Remaining live/full-depth runtime parity limitations are either implemented
-   or explicitly kept as dry-run-only blockers.
-
+4. Live trading remains explicitly out of scope until separately approved and
+   risk-gated.
