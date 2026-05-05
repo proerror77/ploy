@@ -156,6 +156,13 @@ evidence comes from Polymarket full CLOB depth, not top book.
   280-410 minute max gaps across Polymarket and Binance sources. This means the
   current artifact set is useful as provenance, but not enough to complete the
   PRD gate locally or to claim data sufficiency.
+- 2026-05-05: Added a controlled `upload_full_snapshot` option to
+  `research-snapshot.yml`. It defaults to `false`, but when enabled on a future
+  restored runner it uploads `research-snapshot-${run_id}` with the full
+  snapshot payload for short retention, matching the downstream
+  `factor-walk-forward-v2.yml` download path. This does not remove the current
+  `ploy-ci-1` blocker, but it prevents future PRD validation from depending
+  only on runner-local registry state.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
