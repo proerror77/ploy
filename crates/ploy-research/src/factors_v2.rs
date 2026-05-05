@@ -364,6 +364,75 @@ pub struct FullDepthExecutionMatrixReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityReportOptions {
+    pub bucket_count: usize,
+    pub min_bucket_observations: usize,
+    pub top_edge_quantile: f64,
+}
+
+impl Default for SettlementProbabilityReportOptions {
+    fn default() -> Self {
+        Self {
+            bucket_count: 10,
+            min_bucket_observations: 20,
+            top_edge_quantile: 0.2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityBaselineRow {
+    pub model: String,
+    pub n: usize,
+    pub avg_predicted_q: f64,
+    pub actual_win_rate: f64,
+    pub brier_score: f64,
+    pub log_loss: f64,
+    pub expected_calibration_error: f64,
+    pub avg_edge: f64,
+    pub avg_full_depth_settlement_pnl: f64,
+    pub profit_factor: f64,
+    pub edge_bucket_monotonic_non_decreasing: bool,
+    pub top_edge_count: usize,
+    pub top_edge_avg_edge: f64,
+    pub top_edge_win_rate: f64,
+    pub top_edge_avg_full_depth_settlement_pnl: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityCalibrationRow {
+    pub model: String,
+    pub q_bucket: String,
+    pub count: usize,
+    pub avg_predicted_q: f64,
+    pub actual_win_rate: f64,
+    pub calibration_error: f64,
+    pub avg_edge: f64,
+    pub avg_full_depth_settlement_pnl: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityEdgeBucketRow {
+    pub model: String,
+    pub edge_bucket: String,
+    pub count: usize,
+    pub avg_edge: f64,
+    pub avg_predicted_q: f64,
+    pub actual_win_rate: f64,
+    pub avg_full_depth_entry_price: f64,
+    pub avg_full_depth_settlement_pnl: f64,
+    pub profit_factor: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettlementProbabilityReport {
+    pub options: SettlementProbabilityReportOptions,
+    pub baselines: Vec<SettlementProbabilityBaselineRow>,
+    pub calibration: Vec<SettlementProbabilityCalibrationRow>,
+    pub edge_buckets: Vec<SettlementProbabilityEdgeBucketRow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SingleFactorReview {
     pub factor: String,
     pub family: FactorFamily,
@@ -2347,6 +2416,153 @@ pub fn format_full_depth_execution_matrix_report(
             row.avg_reprice_pnl_5s,
             row.avg_reprice_pnl_10s,
             row.avg_reprice_pnl_30s,
+        ));
+    }
+    out
+}
+
+pub fn build_settlement_probability_report(
+    rows: &[FactorObservationV2],
+    options: SettlementProbabilityReportOptions,
+) -> SettlementProbabilityReport {
+    let options = SettlementProbabilityReportOptions {
+        bucket_count: options.bucket_count.max(2),
+        min_bucket_observations: options.min_bucket_observations.max(1),
+        top_edge_quantile: options.top_edge_quantile.clamp(0.01, 1.0),
+    };
+    let mut by_model: BTreeMap<&'static str, Vec<SettlementProbabilitySample>> = BTreeMap::new();
+    for row in rows {
+        let Some(win) = row.label_settlement_win.filter(|win| win.is_finite()) else {
+            continue;
+        };
+        let Some(pnl) = row
+            .label_full_depth_executable_pnl_15u
+            .filter(|pnl| pnl.is_finite())
+        else {
+            continue;
+        };
+        if !row.label_full_depth_entry_fillable || !valid_price(row.entry_sweep_avg_price_15u) {
+            continue;
+        }
+        for (model, q) in settlement_probability_models(row) {
+            let q = clamp_probability(q);
+            let entry_price = row.entry_sweep_avg_price_15u;
+            by_model
+                .entry(model)
+                .or_default()
+                .push(SettlementProbabilitySample {
+                    q,
+                    win,
+                    entry_price,
+                    edge: q - entry_price,
+                    pnl,
+                });
+        }
+    }
+
+    let mut baselines = Vec::new();
+    let mut calibration = Vec::new();
+    let mut edge_buckets = Vec::new();
+    for (model, samples) in by_model {
+        if samples.len() < options.min_bucket_observations {
+            continue;
+        }
+        let model_calibration =
+            build_probability_calibration_rows(model, &samples, options.bucket_count);
+        let model_edge_buckets = build_probability_edge_bucket_rows(
+            model,
+            &samples,
+            options.bucket_count,
+            options.min_bucket_observations,
+        );
+        baselines.push(build_probability_baseline_row(
+            model,
+            &samples,
+            &model_calibration,
+            &model_edge_buckets,
+            options.top_edge_quantile,
+        ));
+        calibration.extend(
+            model_calibration
+                .into_iter()
+                .filter(|row| row.count >= options.min_bucket_observations),
+        );
+        edge_buckets.extend(model_edge_buckets);
+    }
+    baselines.sort_by(|a, b| {
+        b.top_edge_avg_full_depth_settlement_pnl
+            .total_cmp(&a.top_edge_avg_full_depth_settlement_pnl)
+            .then_with(|| a.brier_score.total_cmp(&b.brier_score))
+    });
+    SettlementProbabilityReport {
+        options,
+        baselines,
+        calibration,
+        edge_buckets,
+    }
+}
+
+pub fn format_settlement_probability_report(report: &SettlementProbabilityReport) -> String {
+    let mut out = String::new();
+    out.push_str("=== Settlement Probability Report ===\n");
+    out.push_str(&format!(
+        "bucket_count={} min_bucket_obs={} top_edge_quantile={:.2}\n",
+        report.options.bucket_count,
+        report.options.min_bucket_observations,
+        report.options.top_edge_quantile,
+    ));
+    out.push_str("Population is full-depth entry-fillable candidate rows with settled labels. Edge is q_side - full_depth_entry_sweep_avg_price; PnL is full-depth settlement PnL after crypto fee.\n");
+    out.push_str("\n--- Baseline Comparison ---\n");
+    out.push_str("model,n,avg_q,actual_win,brier,log_loss,ece,avg_edge,avg_full_depth_settlement_pnl,profit_factor,edge_bucket_monotonic,top_edge_count,top_edge_avg_edge,top_edge_win,top_edge_avg_full_depth_settlement_pnl\n");
+    for row in &report.baselines {
+        out.push_str(&format!(
+            "{},{},{:.4},{:.4},{:.6},{:.6},{:.6},{:.4},{:.4},{:.4},{},{},{:.4},{:.4},{:.4}\n",
+            row.model,
+            row.n,
+            row.avg_predicted_q,
+            row.actual_win_rate,
+            row.brier_score,
+            row.log_loss,
+            row.expected_calibration_error,
+            row.avg_edge,
+            row.avg_full_depth_settlement_pnl,
+            row.profit_factor,
+            row.edge_bucket_monotonic_non_decreasing,
+            row.top_edge_count,
+            row.top_edge_avg_edge,
+            row.top_edge_win_rate,
+            row.top_edge_avg_full_depth_settlement_pnl,
+        ));
+    }
+    out.push_str("\n--- Calibration Buckets ---\n");
+    out.push_str("model,q_bucket,count,avg_q,actual_win,calibration_error,avg_edge,avg_full_depth_settlement_pnl\n");
+    for row in &report.calibration {
+        out.push_str(&format!(
+            "{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            row.model,
+            row.q_bucket,
+            row.count,
+            row.avg_predicted_q,
+            row.actual_win_rate,
+            row.calibration_error,
+            row.avg_edge,
+            row.avg_full_depth_settlement_pnl,
+        ));
+    }
+    out.push_str("\n--- Edge Buckets ---\n");
+    out.push_str("model,edge_bucket,count,avg_edge,avg_q,actual_win,avg_entry_price,avg_full_depth_settlement_pnl,profit_factor\n");
+    for row in &report.edge_buckets {
+        out.push_str(&format!(
+            "{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+            row.model,
+            row.edge_bucket,
+            row.count,
+            row.avg_edge,
+            row.avg_predicted_q,
+            row.actual_win_rate,
+            row.avg_full_depth_entry_price,
+            row.avg_full_depth_settlement_pnl,
+            row.profit_factor,
         ));
     }
     out
@@ -6439,6 +6655,197 @@ fn side_market_values(row: &FactorObservation, side: ReviewSide) -> (f64, f64, f
     }
 }
 
+#[derive(Clone, Copy)]
+struct SettlementProbabilitySample {
+    q: f64,
+    win: f64,
+    entry_price: f64,
+    edge: f64,
+    pnl: f64,
+}
+
+fn settlement_probability_models(row: &FactorObservationV2) -> Vec<(&'static str, f64)> {
+    let mut models = Vec::with_capacity(5);
+    models.push(("q_naive_50_50", 0.5));
+    if valid_price(row.entry_ask) && valid_price(row.exit_bid) {
+        models.push(("q_market_midpoint", (row.entry_ask + row.exit_bid) * 0.5));
+    }
+    if row.side_distance_over_sigma.is_finite() {
+        models.push((
+            "q_base_distance_phi",
+            normal_cdf(row.side_distance_over_sigma),
+        ));
+    }
+    if valid_probability(row.side_fair_prob) {
+        models.push(("q_existing_fair_prob", row.side_fair_prob));
+    }
+    if valid_probability(row.side_model_prob) {
+        models.push(("q_existing_model_prob", row.side_model_prob));
+    }
+    models
+}
+
+fn build_probability_baseline_row(
+    model: &str,
+    samples: &[SettlementProbabilitySample],
+    calibration: &[SettlementProbabilityCalibrationRow],
+    edge_buckets: &[SettlementProbabilityEdgeBucketRow],
+    top_edge_quantile: f64,
+) -> SettlementProbabilityBaselineRow {
+    let n = samples.len();
+    let top_n = ((n as f64) * top_edge_quantile).ceil().max(1.0) as usize;
+    let mut by_edge = samples.to_vec();
+    by_edge.sort_by(|a, b| b.edge.total_cmp(&a.edge));
+    let top = by_edge.into_iter().take(top_n).collect::<Vec<_>>();
+    SettlementProbabilityBaselineRow {
+        model: model.to_string(),
+        n,
+        avg_predicted_q: mean(samples.iter().map(|sample| sample.q)),
+        actual_win_rate: mean(samples.iter().map(|sample| sample.win)),
+        brier_score: mean(samples.iter().map(|sample| (sample.q - sample.win).powi(2))),
+        log_loss: mean(samples.iter().map(|sample| {
+            let q = clamp_probability(sample.q);
+            -(sample.win * q.ln() + (1.0 - sample.win) * (1.0 - q).ln())
+        })),
+        expected_calibration_error: expected_calibration_error(calibration, n),
+        avg_edge: mean(samples.iter().map(|sample| sample.edge)),
+        avg_full_depth_settlement_pnl: mean(samples.iter().map(|sample| sample.pnl)),
+        profit_factor: profit_factor(samples.iter().map(|sample| sample.pnl)),
+        edge_bucket_monotonic_non_decreasing: edge_bucket_monotonic(edge_buckets),
+        top_edge_count: top.len(),
+        top_edge_avg_edge: mean(top.iter().map(|sample| sample.edge)),
+        top_edge_win_rate: mean(top.iter().map(|sample| sample.win)),
+        top_edge_avg_full_depth_settlement_pnl: mean(top.iter().map(|sample| sample.pnl)),
+    }
+}
+
+fn build_probability_calibration_rows(
+    model: &str,
+    samples: &[SettlementProbabilitySample],
+    bucket_count: usize,
+) -> Vec<SettlementProbabilityCalibrationRow> {
+    let mut buckets: BTreeMap<usize, Vec<SettlementProbabilitySample>> = BTreeMap::new();
+    for sample in samples {
+        buckets
+            .entry(probability_bucket_index(sample.q, bucket_count))
+            .or_default()
+            .push(*sample);
+    }
+    buckets
+        .into_iter()
+        .map(|(idx, bucket_samples)| {
+            let avg_q = mean(bucket_samples.iter().map(|sample| sample.q));
+            let win_rate = mean(bucket_samples.iter().map(|sample| sample.win));
+            SettlementProbabilityCalibrationRow {
+                model: model.to_string(),
+                q_bucket: probability_bucket_label(idx, bucket_count),
+                count: bucket_samples.len(),
+                avg_predicted_q: avg_q,
+                actual_win_rate: win_rate,
+                calibration_error: (avg_q - win_rate).abs(),
+                avg_edge: mean(bucket_samples.iter().map(|sample| sample.edge)),
+                avg_full_depth_settlement_pnl: mean(bucket_samples.iter().map(|sample| sample.pnl)),
+            }
+        })
+        .collect()
+}
+
+fn build_probability_edge_bucket_rows(
+    model: &str,
+    samples: &[SettlementProbabilitySample],
+    bucket_count: usize,
+    min_bucket_observations: usize,
+) -> Vec<SettlementProbabilityEdgeBucketRow> {
+    let mut by_edge = samples.to_vec();
+    by_edge.sort_by(|a, b| a.edge.total_cmp(&b.edge));
+    let n = by_edge.len();
+    let mut rows = Vec::new();
+    for bucket_idx in 0..bucket_count {
+        let start = bucket_idx * n / bucket_count;
+        let end = ((bucket_idx + 1) * n / bucket_count).min(n);
+        if end <= start {
+            continue;
+        }
+        let bucket_samples = &by_edge[start..end];
+        if bucket_samples.len() < min_bucket_observations {
+            continue;
+        }
+        rows.push(SettlementProbabilityEdgeBucketRow {
+            model: model.to_string(),
+            edge_bucket: format!("Q{}", bucket_idx + 1),
+            count: bucket_samples.len(),
+            avg_edge: mean(bucket_samples.iter().map(|sample| sample.edge)),
+            avg_predicted_q: mean(bucket_samples.iter().map(|sample| sample.q)),
+            actual_win_rate: mean(bucket_samples.iter().map(|sample| sample.win)),
+            avg_full_depth_entry_price: mean(
+                bucket_samples.iter().map(|sample| sample.entry_price),
+            ),
+            avg_full_depth_settlement_pnl: mean(bucket_samples.iter().map(|sample| sample.pnl)),
+            profit_factor: profit_factor(bucket_samples.iter().map(|sample| sample.pnl)),
+        });
+    }
+    rows
+}
+
+fn edge_bucket_monotonic(edge_buckets: &[SettlementProbabilityEdgeBucketRow]) -> bool {
+    let values = edge_buckets
+        .iter()
+        .map(|row| row.avg_full_depth_settlement_pnl)
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if values.len() < 2 {
+        return false;
+    }
+    values.windows(2).all(|pair| pair[1] + EPS >= pair[0])
+}
+
+fn expected_calibration_error(
+    calibration: &[SettlementProbabilityCalibrationRow],
+    total_count: usize,
+) -> f64 {
+    if total_count == 0 {
+        return f64::NAN;
+    }
+    calibration
+        .iter()
+        .map(|row| row.calibration_error * row.count as f64 / total_count as f64)
+        .sum()
+}
+
+fn probability_bucket_index(q: f64, bucket_count: usize) -> usize {
+    let q = clamp_probability(q);
+    ((q * bucket_count as f64).floor() as usize).min(bucket_count.saturating_sub(1))
+}
+
+fn probability_bucket_label(idx: usize, bucket_count: usize) -> String {
+    let lo = idx as f64 / bucket_count as f64;
+    let hi = (idx + 1) as f64 / bucket_count as f64;
+    format!("{lo:.1}..{hi:.1}")
+}
+
+fn valid_probability(value: f64) -> bool {
+    value.is_finite() && (0.0..=1.0).contains(&value)
+}
+
+fn clamp_probability(value: f64) -> f64 {
+    value.clamp(1e-6, 1.0 - 1e-6)
+}
+
+fn normal_cdf(x: f64) -> f64 {
+    // Abramowitz-Stegun style approximation, sufficient for bucketed research
+    // diagnostics without introducing a stats dependency.
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let z = x.abs() / std::f64::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.3275911 * z);
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let erf = sign * (1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp());
+    0.5 * (1.0 + erf)
+}
+
 fn matrix_distance_bucket(value: f64) -> String {
     bucket_value(value, &[-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0])
         .unwrap_or_else(|| "unknown".to_string())
@@ -7529,6 +7936,27 @@ fn trade_sharpe(pnls: &[f64]) -> f64 {
     }
 }
 
+fn profit_factor(values: impl Iterator<Item = f64>) -> f64 {
+    let mut gains = 0.0;
+    let mut losses = 0.0;
+    for value in values.filter(|value| value.is_finite()) {
+        if value > 0.0 {
+            gains += value;
+        } else if value < 0.0 {
+            losses += value.abs();
+        }
+    }
+    if losses <= EPS {
+        if gains > 0.0 {
+            f64::INFINITY
+        } else {
+            f64::NAN
+        }
+    } else {
+        gains / losses
+    }
+}
+
 fn trade_t_stat(pnls: &[f64]) -> f64 {
     if pnls.len() < 2 {
         return f64::NAN;
@@ -7854,6 +8282,45 @@ mod tests {
             .unwrap();
         assert_eq!(down.label_settlement_win, Some(0.0));
         assert!(down.label_executable_pnl_15u.unwrap() < 0.0);
+    }
+
+    #[test]
+    fn settlement_probability_report_uses_full_depth_entry_population() {
+        let options = FactorReviewOptions::default();
+        let mut rows = build_factor_observations_v2(&[base_obs()], &options);
+        for row in &mut rows {
+            row.label_full_depth_entry_fillable = true;
+            row.entry_sweep_avg_price_15u = row.entry_ask;
+            row.label_full_depth_executable_pnl_15u = row.label_executable_pnl_15u;
+        }
+
+        let report = build_settlement_probability_report(
+            &rows,
+            SettlementProbabilityReportOptions {
+                bucket_count: 2,
+                min_bucket_observations: 1,
+                top_edge_quantile: 0.5,
+            },
+        );
+
+        let base = report
+            .baselines
+            .iter()
+            .find(|row| row.model == "q_base_distance_phi")
+            .expect("q_base baseline");
+        assert_eq!(base.n, 2);
+        assert!(base.brier_score.is_finite());
+        assert!(base.log_loss.is_finite());
+        assert!(base.expected_calibration_error.is_finite());
+        assert!(report
+            .edge_buckets
+            .iter()
+            .any(|row| row.model == "q_base_distance_phi" && row.edge_bucket == "Q2"));
+
+        let text = format_settlement_probability_report(&report);
+        assert!(text.contains("Settlement Probability Report"));
+        assert!(text.contains("q_base_distance_phi"));
+        assert!(text.contains("full_depth_settlement_pnl"));
     }
 
     #[test]
