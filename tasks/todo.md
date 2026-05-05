@@ -163,6 +163,35 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `factor-walk-forward-v2.yml` download path. This does not remove the current
   `ploy-ci-1` blocker, but it prevents future PRD validation from depending
   only on runner-local registry state.
+- 2026-05-05: After billing/ECS recovery, `ploy-ci-1` came back online and the
+  runner-local snapshots were still restorable. The old validation runs
+  `25352664353` / `25352664495` had failed at checkout due to an unreachable
+  SHA, and first retriggers `25353703768` / `25353703769` failed because
+  `end_date=2026-05-02` expands to a requested snapshot window ending
+  `2026-05-03`, while the immutable snapshots end `2026-05-02`. Reruns with
+  `end_date=2026-05-01` completed successfully: XRP/DOGE/BNB run
+  `25353780673` and BTC/ETH/SOL run `25353780686`.
+- 2026-05-05: Settlement probability PRD gate result: BTC/ETH/SOL has the
+  strongest next candidate but is not dry-run-ready. Run `25353780686` reported
+  full-depth entry fill rate `49.23%`, exit fill rate `40.70%`, and
+  `112256` full-depth settlement PnL rows. `q_market_midpoint` had ECE
+  `0.004096` and top-edge full-depth settlement PnL `+4.9364`; symbol holdouts
+  passed for BTC `+7.5521`, ETH `+4.8017`, and SOL `+1.6634`.
+  `q_existing_fair_prob` was similar with ECE `0.003891` and top-edge PnL
+  `+4.7994`. Distance-only Phi baselines were anti-signaled and must not be
+  promoted.
+- 2026-05-05: XRP/DOGE/BNB run `25353780673` reported full-depth entry fill
+  rate `45.22%`, exit fill rate `36.27%`, and `97939` full-depth settlement
+  PnL rows. `q_existing_fair_prob` and `q_market_midpoint` both had positive
+  top-edge settlement PnL (`+0.5916` and `+0.5490`), but DOGE holdout failed
+  (`-0.2531` / `-0.1951`). Do not promote the all-symbol group; at most run a
+  narrowed XRP/BNB follow-up.
+- 2026-05-05: Both successful snapshot-backed reports still have
+  `data_audit_status=critical`, max gaps around 280-410 minutes, and
+  `include_deribit=false`. Next decision-grade step is not dry-run; it is a
+  fresh portable full snapshot with strict data gate, Deribit/vol profile for
+  BTC/ETH/SOL, conservative-depth haircut labels, and recorded replay parity
+  for the BTC/ETH/SOL top-edge settlement candidate.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
