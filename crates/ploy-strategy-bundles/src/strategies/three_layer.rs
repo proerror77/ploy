@@ -1490,6 +1490,11 @@ mod tests {
             serde_json::from_str(r#"{"strategy_profile":"repricing_momentum"}"#).unwrap();
         let tlc: ThreeLayerConfig = dc.into();
         assert_eq!(tlc.profile, ThreeLayerProfile::RepricingMomentum);
+
+        let dc: DirectionalConfig =
+            serde_json::from_str(r#"{"strategy_profile":"settlement_probability"}"#).unwrap();
+        let tlc: ThreeLayerConfig = dc.into();
+        assert_eq!(tlc.profile, ThreeLayerProfile::SettlementProbability);
     }
 
     #[test]
@@ -2395,6 +2400,47 @@ mod tests {
 
         assert!(strong > weak);
         assert!(strong > config.min_entry_score);
+    }
+
+    #[test]
+    fn settlement_probability_profile_rewards_probability_edge_not_repricing() {
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::SettlementProbability;
+        config.min_entry_score = 0.25;
+
+        let weak_edge = evaluate_entry_score(
+            &config,
+            EntryScoreInputs {
+                direction_score: 0.45,
+                distance_over_sigma: 0.35,
+                direction_sign: 1.0,
+                edge: 0.01,
+                edge_score: 0.05,
+                confirmation: 1.0,
+                repricing_score: 1.0,
+                drift_30s: 0.0,
+                pm_momentum_score: 1.0,
+                liquidity_score: 1.0,
+            },
+        );
+        let strong_edge = evaluate_entry_score(
+            &config,
+            EntryScoreInputs {
+                direction_score: 0.45,
+                distance_over_sigma: 0.35,
+                direction_sign: 1.0,
+                edge: 0.08,
+                edge_score: 0.90,
+                confirmation: -1.0,
+                repricing_score: -1.0,
+                drift_30s: 0.0,
+                pm_momentum_score: -1.0,
+                liquidity_score: 1.0,
+            },
+        );
+
+        assert!(strong_edge > weak_edge);
+        assert!(strong_edge > config.min_entry_score);
     }
 
     #[test]

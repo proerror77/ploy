@@ -19,6 +19,8 @@ pub enum ThreeLayerProfile {
     ContinuationSoft,
     /// Candidate Strategy D: external CEX repricing pressure adjusted by PM spread.
     RepricingMomentum,
+    /// PRD settlement-probability lane: probability edge first, no repricing alpha gate.
+    SettlementProbability,
 }
 
 impl Default for ThreeLayerProfile {
@@ -36,6 +38,7 @@ impl ThreeLayerProfile {
             Self::ObiHard => "obi_hard",
             Self::ContinuationSoft => "continuation_soft",
             Self::RepricingMomentum => "repricing_momentum",
+            Self::SettlementProbability => "settlement_probability",
         }
     }
 
@@ -62,8 +65,11 @@ impl FromStr for ThreeLayerProfile {
             | "repricing_momentum"
             | "reprice_momentum"
             | "spread_adjusted_external_move" => Ok(Self::RepricingMomentum),
+            "settlement" | "settlement_probability" | "settlement_prob" | "probability_edge" => {
+                Ok(Self::SettlementProbability)
+            }
             other => Err(format!(
-                "unknown three_layer_strategy_profile {other:?}; expected mixed, champion, obi_soft, obi_hard, continuation_soft, or repricing_momentum"
+                "unknown three_layer_strategy_profile {other:?}; expected mixed, champion, obi_soft, obi_hard, continuation_soft, repricing_momentum, or settlement_probability"
             )),
         }
     }
@@ -116,6 +122,22 @@ mod tests {
         assert_eq!(
             ThreeLayerProfile::RepricingMomentum.as_str(),
             "repricing_momentum"
+        );
+    }
+
+    #[test]
+    fn parses_settlement_probability_aliases() {
+        assert_eq!(
+            ThreeLayerProfile::from_str("settlement_probability").unwrap(),
+            ThreeLayerProfile::SettlementProbability
+        );
+        assert_eq!(
+            ThreeLayerProfile::from_str("probability_edge").unwrap(),
+            ThreeLayerProfile::SettlementProbability
+        );
+        assert_eq!(
+            ThreeLayerProfile::SettlementProbability.as_str(),
+            "settlement_probability"
         );
     }
 }
