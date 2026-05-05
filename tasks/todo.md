@@ -126,6 +126,10 @@ evidence comes from Polymarket full CLOB depth, not top book.
   candidates with near-strike, capacity, spread, external-pressure, and
   short-IV-change interactions. These generated rows remain discovery evidence
   until the promotion evaluator and runtime mapping gates qualify them.
+- [x] Add `autofactor-strategy-handoff.md` as the human handoff draft paired
+  with the machine-readable handoff JSON. Ready handoffs include a dry-run issue
+  and config-contract draft; blocked handoffs explicitly say no dry-run handoff
+  issue/config should be created.
 
 ## Review
 
@@ -172,6 +176,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   and conservative settlement edge, near-strike state, entry capacity, spread,
   external pressure, and IV change. Repricing targets intentionally do not
   receive these generated settlement candidates.
+- 2026-05-06: Extended the AutoFactor promotion evaluator with
+  `autofactor-strategy-handoff.md`. This gives downstream automation a
+  fail-closed handoff artifact: blocked runs produce a no-handoff message,
+  while qualified runs produce a dry-run issue/config-contract draft from the
+  same strategy rows as `autofactor-strategy-handoff.json`.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

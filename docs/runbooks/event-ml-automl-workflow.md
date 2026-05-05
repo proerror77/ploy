@@ -122,7 +122,8 @@ python3 scripts/evaluate_autofactor_strategy_promotion.py \
   --output-json /tmp/autofactor-strategy-promotion.json \
   --output-md /tmp/autofactor-strategy-promotion.md \
   --output-registry-json /tmp/autofactor-factor-registry.json \
-  --output-handoff-json /tmp/autofactor-strategy-handoff.json
+  --output-handoff-json /tmp/autofactor-strategy-handoff.json \
+  --output-handoff-md /tmp/autofactor-strategy-handoff.md
 ```
 
 The evaluator requires all of the following:
@@ -149,6 +150,9 @@ corresponding output paths are provided:
 - `autofactor-strategy-handoff.json`: only qualified strategy rows. When no
   row qualifies, this manifest is intentionally `status=blocked` and
   `recommended_action=do_not_promote`.
+- `autofactor-strategy-handoff.md`: a dry-run handoff issue/config draft only
+  when the handoff is ready. In blocked runs it explicitly says no dry-run
+  handoff issue or config should be created.
 
 Factor Walk-Forward V2 also includes a constrained settlement-native generator
 for the `full_depth_settlement_executable_pnl` target. It automatically expands
