@@ -207,6 +207,15 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `baseline_metrics.json` model contract, validates kind/version/target,
   enforces schema-order parity across weights and train-fitted standardizer
   rows, and scores ordered or map-based feature inputs fail-closed.
+- [x] Wire `event_ml_model:*` into the three-layer dry-run/runtime scorer path.
+  Runtime config should require an explicit baseline artifact path, reject
+  unsupported feature schemas before trading, score UP/DOWN settlement
+  probability from the shared model contract, and continue to block Event ML
+  config promotion until replay/runtime parity is proven.
+- [x] Route legacy snapshot-backed Factor Review V2 / Factor Walk-Forward V2
+  workflow dispatches to GitHub-hosted artifact workflows. Direct
+  `snapshot_run_id` requests now skip `ploy-ci-1`; the self-hosted branch is
+  retained only for fresh DB/private-network snapshot export.
 
 ## Review
 
@@ -325,6 +334,15 @@ evidence comes from Polymarket full CLOB depth, not top book.
   issue creation from `event-ml-rolling-evidence.yml`. This deliberately stops
   short of config PR automation because the checked-in dry-run config currently
   supports AutoFactor runtime scores, not a live Event ML runtime scorer.
+- 2026-05-06: Wired `event_ml_model:*` into the three-layer runtime path. The
+  runtime now requires `three_layer_event_ml_model_path`, parses the shared
+  baseline model artifact, rejects unsupported Event ML feature schemas before
+  strategy construction, and scores the best UP/DOWN settlement-probability
+  edge through the normal three-layer intent path. Config promotion remains
+  blocked until replay/runtime parity is proven. Also routed snapshot-backed
+  legacy Factor Review V2 and Factor Walk-Forward V2 dispatches to the
+  GitHub-hosted artifact workflows so existing full snapshot artifacts no
+  longer wait on `ploy-ci-1`.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

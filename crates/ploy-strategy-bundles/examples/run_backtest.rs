@@ -13,12 +13,12 @@
 //! If no --db-url is given, uses synthetic market data.
 
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
-    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
-    StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy, config::FullConfig,
+    config::FullConfig, DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder,
+    ReversalStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
+    StrategyLogic, StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -359,6 +359,7 @@ fn main() {
                     three_layer_max_pm_lag_secs: 15,
                     three_layer_min_entry_score: 0.30,
                     three_layer_autofactor_runtime_score: None,
+                    three_layer_event_ml_model_path: None,
                 },
                 SimulatedExecutorConfig {
                     use_spread: true,
@@ -775,7 +776,11 @@ fn normalized_runtime_evidence(
 }
 
 fn empty_to_none(value: &str) -> Option<&str> {
-    if value.is_empty() { None } else { Some(value) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn trade_side_label(side: ploy_trading::TradeSide) -> &'static str {

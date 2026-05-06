@@ -7,14 +7,15 @@
 //! for backtest, dry-run, and live modes identically.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -213,6 +214,11 @@ pub struct DirectionalConfig {
     /// Optional AutoFactor formula score promoted from the research handoff.
     #[serde(default)]
     pub three_layer_autofactor_runtime_score: Option<String>,
+
+    /// Event ML baseline artifact used when `three_layer_autofactor_runtime_score`
+    /// starts with `event_ml_model:`.
+    #[serde(default)]
+    pub three_layer_event_ml_model_path: Option<PathBuf>,
 
     // Timing
     #[serde(default = "default_min_time")]
@@ -1837,6 +1843,7 @@ mod tests {
             three_layer_max_pm_lag_secs: 15,
             three_layer_min_entry_score: 0.30,
             three_layer_autofactor_runtime_score: None,
+            three_layer_event_ml_model_path: None,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
             cooldown_secs: 0,

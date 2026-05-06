@@ -113,6 +113,13 @@ standardizer) so a future runtime scorer can replay the same model instead of
 scraping report text. The pure scorer contract lives in
 `ploy_strategy_bundles::strategies::event_ml_model`; promotion work should
 reuse that parser/scorer before wiring any Event ML config PR.
+Runtime configs that set
+`three_layer_autofactor_runtime_score = "event_ml_model:<name>"` must also set
+`three_layer_event_ml_model_path` to the corresponding `baseline_metrics.json`
+artifact. The three-layer runtime parses that artifact with the shared Event ML
+scorer, validates it before strategy construction, and rejects unsupported
+runtime feature schemas fail-closed instead of silently substituting missing
+features.
 The walk-forward phase writes `walk_forward_report.json` and
 `walk_forward_report.md`. It also writes a fail-closed
 `event_ml_strategy_handoff.json` / `.md`. The handoff stays `blocked` unless
@@ -253,6 +260,14 @@ default, with downstream embedded snapshot fallbacks from
 artifact only has provenance files and is missing the full payload required by
 `load_research_snapshot`: observations, Deribit rows, and Polymarket full-book
 rows.
+
+The legacy `factor-walk-forward-v2.yml` entrypoint now follows the same rule:
+when `snapshot_run_id` is supplied it does not run the self-hosted job, and
+instead dispatches `factor-walk-forward-v2-hosted-artifact.yml` from
+`ubuntu-latest`. The self-hosted `ploy-ci-1` branch remains only for fresh
+DB/private-network snapshot compilation when no full snapshot artifact exists.
+`factor-review-v2.yml` has the same routing behavior for snapshot-backed factor
+diagnostics.
 
 Advanced promotion and issue-handoff controls live in `options_json` to stay
 within the GitHub Actions 10-input limit. Defaults are

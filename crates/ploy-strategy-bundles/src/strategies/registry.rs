@@ -153,9 +153,15 @@ pub fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
                 canonical_variant = canonical_variant.as_str(),
                 "Using three-layer directional strategy variant",
             );
-            Box::new(ThreeLayerStrategy::new(
-                crate::strategies::three_layer::ThreeLayerConfig::from(config.strategy.clone()),
-            ))
+            let three_layer_config =
+                crate::strategies::three_layer::ThreeLayerConfig::from_directional_runtime(
+                    config.strategy.clone(),
+                )
+                .unwrap_or_else(|err| {
+                    eprintln!("Invalid three-layer strategy config: {err}");
+                    std::process::exit(2);
+                });
+            Box::new(ThreeLayerStrategy::new(three_layer_config))
         }
         "diff_enhanced" => {
             info!(
@@ -219,7 +225,7 @@ pub fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StrategyKind, build_strategy, canonical_strategy_variant};
+    use super::{build_strategy, canonical_strategy_variant, StrategyKind};
     use crate::FullConfig;
 
     #[test]
