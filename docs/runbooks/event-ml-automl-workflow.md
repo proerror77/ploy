@@ -454,6 +454,25 @@ evidence artifact by design. The `create_handoff_issue` option is also
 fail-closed: it creates an issue only when the generated handoff JSON reports
 `status=ready`.
 
+For the final PR-only dry-run config handoff, keep the same hosted artifact
+path and add `create_config_pr=true` plus the reviewed runtime model path:
+
+```bash
+gh workflow run event-ml-rolling-evidence.yml \
+  -f git_ref=main \
+  -f source_dataset_run_id=<run-id-with-event-ml-rolling-datasets-artifact> \
+  -f options_json='{"runtime_score":"event_ml_model:baseline_v1","replay_parity_ready":"true","create_config_pr":"true","model_artifact_path":"/opt/ploy/models/event_ml/baseline_metrics.json","strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"}'
+```
+
+`create_config_pr=true` is supported only on the GitHub-hosted artifact branch.
+The legacy `ploy-ci-1` branch may still export fresh private-DB datasets, but it
+will not open config PRs. The generated PR updates only
+`three_layer_autofactor_runtime_score` and `three_layer_event_ml_model_path` in
+the dry-run strategy config; it does not deploy and does not enable live
+trading. The config step fails closed unless the handoff is `ready`, replay
+parity is marked ready, the runtime score starts with `event_ml_model:`, and
+`model_artifact_path` is supplied.
+
 The legacy self-hosted phase performs:
 
 1. `factor_research --export-event-dataset`
