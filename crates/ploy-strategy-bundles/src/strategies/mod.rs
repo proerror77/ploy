@@ -5,6 +5,7 @@ pub mod diff_enhanced;
 pub mod diff_regular;
 pub mod directional;
 pub mod directional_bayes;
+pub mod event_ml_model;
 pub mod mean_reversion;
 pub mod prob_chase;
 pub mod prob_reversal;

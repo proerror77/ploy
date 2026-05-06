@@ -202,6 +202,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   contract with feature schema, intercept, full weights, and train-only z-score
   standardizer; this keeps walk-forward compatibility while making
   `event_ml_model:*` runtime support implementable without scraping reports.
+- [x] Add the pure Event ML runtime scorer core in `ploy-strategy-bundles`.
+  The new `strategies::event_ml_model` module parses the embedded
+  `baseline_metrics.json` model contract, validates kind/version/target,
+  enforces schema-order parity across weights and train-fitted standardizer
+  rows, and scores ordered or map-based feature inputs fail-closed.
 
 ## Review
 

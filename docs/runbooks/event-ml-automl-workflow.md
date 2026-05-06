@@ -110,7 +110,9 @@ plus `hyperparameter_search.json` and `hyperparameter_search.md`. Each
 `baseline_metrics.json` includes the complete logistic model contract
 (`model.kind`, feature schema, intercept, weights, and train-only
 standardizer) so a future runtime scorer can replay the same model instead of
-scraping report text.
+scraping report text. The pure scorer contract lives in
+`ploy_strategy_bundles::strategies::event_ml_model`; promotion work should
+reuse that parser/scorer before wiring any Event ML config PR.
 The walk-forward phase writes `walk_forward_report.json` and
 `walk_forward_report.md`. It also writes a fail-closed
 `event_ml_strategy_handoff.json` / `.md`. The handoff stays `blocked` unless
