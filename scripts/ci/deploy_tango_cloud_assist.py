@@ -12,10 +12,12 @@ from __future__ import annotations
 import base64
 import json
 import os
+from pathlib import Path
 import shlex
 import subprocess
 import sys
 import time
+import tempfile
 
 
 def require_env(name: str) -> str:
@@ -25,9 +27,25 @@ def require_env(name: str) -> str:
     return value
 
 
+def run_text(args: list[str]) -> str:
+    completed = subprocess.run(args, text=True, capture_output=True)
+    if completed.returncode != 0:
+        if completed.stdout:
+            print(completed.stdout, file=sys.stderr)
+        if completed.stderr:
+            print(completed.stderr, file=sys.stderr)
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            args[0],
+            output=completed.stdout,
+            stderr=completed.stderr,
+        )
+    return completed.stdout
+
+
 def run_json(args: list[str]) -> dict:
-    completed = subprocess.run(args, check=True, text=True, capture_output=True)
-    return json.loads(completed.stdout)
+    completed = run_text(args)
+    return json.loads(completed)
 
 
 def shell_quote(value: str) -> str:
@@ -290,11 +308,86 @@ fi
 """
 
 
+def bootstrap_script(script_object: str) -> str:
+    deploy_root = require_env("DEPLOY_ROOT")
+    github_sha = require_env("GITHUB_SHA")
+    oss_region = require_env("DEPLOY_OSS_REGION")
+    oss_bucket = require_env("ALIYUN_OSS_BUCKET")
+    oss_key_id = require_env("ALIYUN_OSS_ACCESS_KEY_ID")
+    oss_key_secret = require_env("ALIYUN_OSS_ACCESS_KEY_SECRET")
+
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+DEPLOY_ROOT={shell_quote(deploy_root)}
+GITHUB_SHA={shell_quote(github_sha)}
+WORKDIR="${{DEPLOY_ROOT}}/tmp/deploy-${{GITHUB_SHA}}-cloud-assist-bootstrap"
+
+ensure_ossutil() {{
+  export PATH="/usr/local/bin:/usr/bin:/bin:${{PATH}}"
+  if command -v ossutil >/dev/null 2>&1; then
+    return 0
+  fi
+  curl -fsSL https://gosspublic.alicdn.com/ossutil/install.sh | bash
+  export PATH="/usr/local/bin:/usr/bin:/bin:${{PATH}}"
+  command -v ossutil >/dev/null 2>&1
+}}
+
+mkdir -p "${{WORKDIR}}"
+ensure_ossutil
+export OSS_ACCESS_KEY_ID={shell_quote(oss_key_id)}
+export OSS_ACCESS_KEY_SECRET={shell_quote(oss_key_secret)}
+export OSS_REGION={shell_quote(oss_region)}
+export OSS_ENDPOINT="https://oss-{oss_region}-internal.aliyuncs.com"
+OSS_BUCKET={shell_quote(oss_bucket)}
+SCRIPT_OBJECT={shell_quote(script_object)}
+
+ossutil cp "oss://${{OSS_BUCKET}}/${{SCRIPT_OBJECT}}" "${{WORKDIR}}/cloud-assist-deploy.sh" \\
+  -i "${{OSS_ACCESS_KEY_ID}}" -k "${{OSS_ACCESS_KEY_SECRET}}" -e "${{OSS_ENDPOINT}}"
+chmod 0700 "${{WORKDIR}}/cloud-assist-deploy.sh"
+exec /bin/bash "${{WORKDIR}}/cloud-assist-deploy.sh"
+"""
+
+
+def upload_remote_script(script: str) -> str:
+    region = require_env("DEPLOY_OSS_REGION")
+    bucket = require_env("ALIYUN_OSS_BUCKET")
+    prefix = require_env("DEPLOY_OSS_PREFIX")
+    github_sha = require_env("GITHUB_SHA")
+    key_id = require_env("ALIYUN_OSS_ACCESS_KEY_ID")
+    key_secret = require_env("ALIYUN_OSS_ACCESS_KEY_SECRET")
+
+    script_object = f"{prefix}/{github_sha}/cloud-assist-deploy.sh"
+    script_path = Path(tempfile.gettempdir()) / f"ploy-cloud-assist-deploy-{github_sha[:12]}.sh"
+    script_path.write_text(script, encoding="utf-8")
+    run_text(
+        [
+            "ossutil",
+            "cp",
+            str(script_path),
+            f"oss://{bucket}/{script_object}",
+            "-i",
+            key_id,
+            "-k",
+            key_secret,
+            "-e",
+            f"https://oss-{region}.aliyuncs.com",
+        ]
+    )
+    return script_object
+
+
 def main() -> int:
     region = require_env("DEPLOY_OSS_REGION")
     instance_id = require_env("TANGO_1_1_INSTANCE_ID")
     command_name = f"ploy-cloud-assist-deploy-{os.environ.get('GITHUB_SHA', 'unknown')[:12]}"
-    command_content = f"/bin/bash -lc {shell_quote(remote_script())}"
+    script = remote_script()
+    script_object = upload_remote_script(script)
+    command_content = f"/bin/bash -lc {shell_quote(bootstrap_script(script_object))}"
+    print(
+        f"Uploaded Cloud Assistant deploy script oss://{require_env('ALIYUN_OSS_BUCKET')}/{script_object} "
+        f"({len(script.encode('utf-8'))} bytes); bootstrap is {len(command_content.encode('utf-8'))} bytes"
+    )
 
     run_result = run_json(
         [
