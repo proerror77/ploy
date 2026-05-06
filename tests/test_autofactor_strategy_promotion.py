@@ -39,6 +39,16 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
 1,spread_adjusted_external_move,full_depth_reprice_pnl_10s,candidate,passed,49789,0.327294,0.123771,40,3.301626,1.0000,0.5000,1.625037,0.5354,5
 """
 
+AUTOFACTOR_SETTLEMENT_AUTO_REPORT = """
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,monotonicity,top_bucket_avg_label,top_bucket_positive_label_rate,complexity
+1,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,49831,0.110842,0.150273,43,1.064178,0.9535,1.0000,2.666226,0.6836,1
+2,auto_settlement_conservative_settlement_edge_x_near_strike,full_depth_settlement_executable_pnl,candidate,passed,49831,0.107526,0.157904,43,1.044245,0.9302,1.0000,2.631575,0.6790,3
+3,auto_settlement_full_depth_settlement_edge_x_external_pressure,full_depth_settlement_executable_pnl,reject,nonpositive_rank_ic,57777,-0.021993,0.069182,45,0.217558,0.4667,0.5000,-0.301991,0.4785,3
+"""
+
 
 class AutoFactorStrategyPromotionTests(unittest.TestCase):
     def run_script(self, report, *extra_args, check=True):
@@ -96,6 +106,44 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "runtime_profile_mismatch:repricing_momentum!=settlement_probability",
             spread["blockers"],
         )
+        fair_edge = next(
+            item
+            for item in payload["evaluated_factors"]
+            if item["factor"]["name"] == "settlement_fair_edge"
+            and item["factor"]["target"] == "full_depth_settlement_executable_pnl"
+        )
+        self.assertIn("autofactor_not_candidate:reject:nonpositive_rank_ic", fair_edge["blockers"])
+        self.assertIn("empty_runtime_strategy_profile", fair_edge["blockers"])
+
+    def test_qualifies_settlement_native_auto_factors_when_gate_is_ready(self):
+        _, payload, registry, handoff, handoff_md = self.run_script(
+            READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(registry["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(handoff["blocked_factor_count"], 1)
+        self.assertEqual(len(handoff["strategies"]), 2)
+        self.assertEqual(
+            handoff["strategies"][0]["runtime_score"],
+            "autofactor_formula:auto_settlement_conservative_settlement_edge",
+        )
+        self.assertEqual(
+            handoff["strategies"][0]["strategy_profile"],
+            "settlement_probability",
+        )
+        self.assertIn(
+            "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike",
+            handoff_md,
+        )
+        rejected = next(
+            item
+            for item in payload["evaluated_factors"]
+            if item["factor"]["name"] == "auto_settlement_full_depth_settlement_edge_x_external_pressure"
+        )
+        self.assertFalse(rejected["qualified"])
+        self.assertIn("autofactor_not_candidate:reject:nonpositive_rank_ic", rejected["blockers"])
 
     def test_qualifies_when_allowed_target_and_runtime_profile_match(self):
         _, payload, registry, handoff, handoff_md = self.run_script(

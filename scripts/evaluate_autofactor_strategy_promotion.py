@@ -25,6 +25,11 @@ from typing import Any
 
 DEFAULT_ALLOWED_TARGETS = ("full_depth_settlement_executable_pnl",)
 
+SETTLEMENT_RUNTIME_MAPPING = {
+    "strategy_profile": "settlement_probability",
+    "strategy_family": "settlement_probability",
+}
+
 BUILTIN_RUNTIME_MAPPINGS: dict[str, dict[str, str]] = {
     "spread_adjusted_external_move": {
         "strategy_profile": "repricing_momentum",
@@ -40,6 +45,62 @@ BUILTIN_RUNTIME_MAPPINGS: dict[str, dict[str, str]] = {
         "strategy_profile": "",
         "strategy_family": "settlement_probability",
         "runtime_score": "",
+    },
+    "auto_settlement_full_depth_settlement_edge": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge",
+    },
+    "auto_settlement_full_depth_settlement_edge_x_near_strike": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike",
+    },
+    "auto_settlement_full_depth_settlement_edge_x_capacity": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_capacity",
+    },
+    "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity",
+    },
+    "auto_settlement_full_depth_settlement_edge_spread_adjusted": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_spread_adjusted",
+    },
+    "auto_settlement_full_depth_settlement_edge_x_external_pressure": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_external_pressure",
+    },
+    "auto_settlement_full_depth_settlement_edge_x_iv_change": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_iv_change",
+    },
+    "auto_settlement_conservative_settlement_edge": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge",
+    },
+    "auto_settlement_conservative_settlement_edge_x_near_strike": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike",
+    },
+    "auto_settlement_conservative_settlement_edge_x_capacity": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_capacity",
+    },
+    "auto_settlement_conservative_settlement_edge_x_near_strike_x_capacity": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike_x_capacity",
+    },
+    "auto_settlement_conservative_settlement_edge_spread_adjusted": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_spread_adjusted",
+    },
+    "auto_settlement_conservative_settlement_edge_x_external_pressure": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_external_pressure",
+    },
+    "auto_settlement_conservative_settlement_edge_x_iv_change": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_iv_change",
     },
 }
 

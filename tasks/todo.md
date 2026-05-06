@@ -140,6 +140,10 @@ evidence comes from Polymarket full CLOB depth, not top book.
   it does not access the DB, does not compile a fresh snapshot, and fails fast
   when the artifact contains only provenance instead of the full snapshot
   payload.
+- [x] Add built-in runtime strategy-profile mappings for the settlement-native
+  `auto_settlement_*` formula factors so candidates that pass the
+  `full_depth_settlement_executable_pnl` target can reach the handoff contract
+  once the surrounding PRD gate, including recorded replay parity, is ready.
 
 ## Review
 
@@ -202,6 +206,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   the manifest plus full payload files, builds only `factor_walk_forward_v2`,
   runs the same snapshot-backed report and AutoFactor promotion evaluator, and
   preserves the ready-only dry-run handoff issue guard.
+- 2026-05-06: Added runtime mapping coverage for the generated
+  `auto_settlement_*` factors in the AutoFactor promotion evaluator. Re-running
+  the evaluator locally on hosted run `25409441265` now shows the qualifying
+  settlement-native candidates are blocked only by `promotion_gate_not_ready`
+  instead of missing runtime mappings; the remaining hard blocker is recorded
+  replay parity evidence.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable
