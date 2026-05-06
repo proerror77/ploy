@@ -29,6 +29,7 @@ env:
   LANG: C
   PLATFORM_TARGET: x86_64-unknown-linux-gnu
   DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
+  TANGO_1_1_INSTANCE_ID: ${{ vars.TANGO_1_1_INSTANCE_ID || 'i-6we8940uojnsory3ihfw' }}
   DEPLOY_ROOT: ${{ vars.PLOY_DEPLOY_ROOT || '/opt/ploy' }}
   DEPLOY_OSS_REGION: ${{ vars.ALIYUN_REGION || 'ap-northeast-1' }}
   DEPLOY_OSS_PREFIX: deploy/tango-1-1
@@ -287,13 +288,17 @@ jobs:
           EOF
 
       - name: Prepare remote directories
+        id: prepare_remote_ssh
         if: ${{ inputs.deploy }}
+        continue-on-error: true
         run: |
           # shellcheck disable=SC2029
           ssh tango-1-1 "mkdir -p ${DEPLOY_ROOT}/bin ${DEPLOY_ROOT}/config/strategies ${DEPLOY_ROOT}/config/deployments ${DEPLOY_ROOT}/migrations ${DEPLOY_ROOT}/scripts ${DEPLOY_ROOT}/scripts/drills ${DEPLOY_ROOT}/tmp"
 
       - name: Pull bundle from OSS and restart services
-        if: ${{ inputs.deploy }}
+        id: deploy_ssh
+        if: ${{ inputs.deploy && steps.prepare_remote_ssh.outcome == 'success' }}
+        continue-on-error: true
         run: |
           # shellcheck disable=SC2087
           ssh tango-1-1 /bin/bash <<EOF
@@ -650,6 +655,39 @@ jobs:
             journalctl -u ploy-pm-trade-collector.service -n 20 --no-pager
           EOF
 
+      - name: Install Aliyun CLI for Cloud Assistant fallback
+        if: ${{ inputs.deploy && (steps.prepare_remote_ssh.outcome != 'success' || steps.deploy_ssh.outcome != 'success') }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz -o aliyun-cli.tgz
+          tar -xzf aliyun-cli.tgz
+          sudo install -m 0755 aliyun /usr/local/bin/aliyun
+          aliyun version
+
+      - name: Configure Aliyun CLI for Cloud Assistant fallback
+        if: ${{ inputs.deploy && (steps.prepare_remote_ssh.outcome != 'success' || steps.deploy_ssh.outcome != 'success') }}
+        env:
+          ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ECS_ACCESS_KEY_ID || secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ECS_ACCESS_KEY_SECRET || secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "${ALIYUN_ACCESS_KEY_ID}"
+          test -n "${ALIYUN_ACCESS_KEY_SECRET}"
+          aliyun configure set \
+            --profile default \
+            --mode AK \
+            --region "${DEPLOY_OSS_REGION}" \
+            --access-key-id "${ALIYUN_ACCESS_KEY_ID}" \
+            --access-key-secret "${ALIYUN_ACCESS_KEY_SECRET}"
+
+      - name: Deploy via Cloud Assistant fallback
+        if: ${{ inputs.deploy && (steps.prepare_remote_ssh.outcome != 'success' || steps.deploy_ssh.outcome != 'success') }}
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+        run: python3 scripts/ci/deploy_tango_cloud_assist.py
+
       - name: Deployment summary
         if: ${{ inputs.deploy }}
         run: |
@@ -657,7 +695,7 @@ jobs:
             echo "## Deployment to tango-1-1"
             echo "- Binary: \`ploy-runner\`"
             echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`"
-            echo "- Transport: \`GitHub Actions -> OSS -> ECS\`"
+            echo "- Transport: \`GitHub Actions -> OSS -> SSH, fallback Cloud Assistant\`"
             echo "- OSS object: \`${{ steps.upload_bundle_to_oss.outputs.bundle_object }}\`"
             echo "- Services: \`ployd\` (if installed), \`ploy-binance-aggtrade-collector\`, \`ploy-binance-price-collector\`, \`ploy-binance-lob-collector\`, \`ploy-deribit-iv-collector\`, \`ploy-market-discovery\`, \`ploy-quote-collector\`, \`ploy-pm-trade-collector\`"
             echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`"

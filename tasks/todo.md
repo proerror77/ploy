@@ -1,5 +1,16 @@
 # PM5D Settlement Probability PRD Execution Plan (2026-05-05)
 
+## Tango Deploy Transport Repair (2026-05-06)
+
+- [x] Diagnose repeated GitHub deploy failure at SSH banner exchange.
+- [x] Verify `tango-1-1` remains internally healthy through Cloud Assistant:
+  `ployd` local health and dry-run report contract pass.
+- [x] Add `deploy-tango-1-1.yml` fallback transport through Aliyun Cloud
+  Assistant when public SSH fails.
+- [x] Keep SSH as the preferred fast path and use the same CI-built OSS bundle
+  for fallback deployment.
+- [ ] Verify the fallback path from GitHub Actions after merging this repair.
+
 ## Goal
 
 Re-anchor PM5D / PM15D crypto strategy research on settlement probability
