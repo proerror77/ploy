@@ -158,6 +158,10 @@ evidence comes from Polymarket full CLOB depth, not top book.
   dry-run handoff gates should use GitHub-hosted artifact workflows when a
   full research snapshot artifact exists; keep `ploy-ci-1` only as the legacy
   DB-adjacent fallback until fresh snapshot/export work is artifactized.
+- [x] Add an automated config-promotion step so a ready
+  `autofactor-strategy-handoff.json` can update the dry-run config and open a
+  reviewable PR without a manual TOML edit. This should be PR-only, not deploy
+  or live trading.
 
 ## Review
 
@@ -241,6 +245,16 @@ evidence comes from Polymarket full CLOB depth, not top book.
   three-layer model. The dry-run config now uses the top ready handoff score,
   while full-depth/conservative execution gating remains enforced by the
   existing fixed-stake quote-size and execution settings.
+- 2026-05-06: Started the next AutoResearch-factory slice after #360 merged:
+  automate the final handoff-to-config step. The current missing link is no
+  longer promotion evaluation or runtime scoring; it is turning a ready
+  handoff artifact into a CI-gated dry-run config PR without manually editing
+  TOML.
+- 2026-05-06: Added `scripts/apply_autofactor_handoff_to_config.py` and wired
+  `autofactor-strategy-promotion.yml` with optional `create_config_pr=true`.
+  A ready handoff can now update only
+  `three_layer_autofactor_runtime_score` in the dry-run config and open a
+  normal CI-gated PR; blocked handoffs or unchanged configs do not create PRs.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable
