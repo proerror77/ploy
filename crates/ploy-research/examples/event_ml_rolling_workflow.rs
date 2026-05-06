@@ -76,6 +76,15 @@ fn main() -> Result<()> {
                     .to_string()
             })
             .unwrap_or_default(),
+        final_strategy_handoff_report: prior_run_dirs
+            .last()
+            .map(|dir| {
+                dir.join("walk_forward")
+                    .join("event_ml_strategy_handoff.json")
+                    .display()
+                    .to_string()
+            })
+            .unwrap_or_default(),
     };
     write_report(&config.output_root, &report)?;
 
@@ -109,6 +118,9 @@ struct Config {
     search_epochs: usize,
     walk_forward_min_windows: usize,
     walk_forward_min_test_trades: usize,
+    required_strategy_profile: String,
+    runtime_score: Option<String>,
+    replay_parity_ready: bool,
     dry_run: bool,
 }
 
@@ -134,6 +146,10 @@ impl Config {
         let walk_forward_min_windows = parse_usize_flag(args, "--walk-forward-min-windows", 3)?;
         let walk_forward_min_test_trades =
             parse_usize_flag(args, "--walk-forward-min-test-trades", 1)?;
+        let required_strategy_profile = flag_value(args, "--required-strategy-profile")
+            .unwrap_or_else(|| "event_ml_supervised_tabular".to_string());
+        let runtime_score = flag_value(args, "--runtime-score");
+        let replay_parity_ready = has_flag(args, "--replay-parity-ready");
         let dry_run = has_flag(args, "--dry-run");
 
         if entry_secs < 0 {
@@ -147,6 +163,9 @@ impl Config {
         }
         if walk_forward_min_windows == 0 {
             bail!("--walk-forward-min-windows must be positive");
+        }
+        if required_strategy_profile.trim().is_empty() {
+            bail!("--required-strategy-profile must not be empty");
         }
 
         Ok(Config {
@@ -163,6 +182,9 @@ impl Config {
             search_epochs,
             walk_forward_min_windows,
             walk_forward_min_test_trades,
+            required_strategy_profile,
+            runtime_score,
+            replay_parity_ready,
             dry_run,
         })
     }
@@ -176,6 +198,7 @@ struct RollingWorkflowReport {
     dry_run: bool,
     windows: Vec<RollingWindowRecord>,
     final_walk_forward_report: String,
+    final_strategy_handoff_report: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,6 +273,15 @@ fn event_ml_workflow_args(
         args.push("--features".to_string());
         args.push(features.clone());
     }
+    args.push("--required-strategy-profile".to_string());
+    args.push(config.required_strategy_profile.clone());
+    if let Some(runtime_score) = &config.runtime_score {
+        args.push("--runtime-score".to_string());
+        args.push(runtime_score.clone());
+    }
+    if config.replay_parity_ready {
+        args.push("--replay-parity-ready".to_string());
+    }
     for run_dir in prior_run_dirs {
         args.push("--walk-forward-run-dir".to_string());
         args.push(run_dir.display().to_string());
@@ -278,6 +310,12 @@ fn write_report(output_root: &Path, report: &RollingWorkflowReport) -> Result<()
         markdown.push_str(&format!(
             "- final_walk_forward_report: `{}`\n",
             report.final_walk_forward_report
+        ));
+    }
+    if !report.final_strategy_handoff_report.is_empty() {
+        markdown.push_str(&format!(
+            "- final_strategy_handoff_report: `{}`\n",
+            report.final_strategy_handoff_report
         ));
     }
     markdown.push_str("\n## Windows\n\n");
@@ -463,6 +501,9 @@ Options:
   --search-epochs <n>                Epochs for candidates. Default: 500.
   --walk-forward-min-windows <n>     Minimum windows required before DL/RL readiness. Default: 3.
   --walk-forward-min-test-trades <n> Minimum test trades per window. Default: 1.
+  --required-strategy-profile <id>   Dry-run handoff profile. Default: event_ml_supervised_tabular.
+  --runtime-score <id>               Runtime scorer identifier. Required for ready handoff.
+  --replay-parity-ready              Mark recorded replay/runtime parity as passed for handoff.
   --dry-run                          Print and record commands without running windows.
   -h, --help                         Show this help.
 "#
@@ -525,6 +566,9 @@ mod tests {
             "/tmp/rolling",
             "--search-l2",
             "0",
+            "--runtime-score",
+            "event_ml_model:baseline_v1",
+            "--replay-parity-ready",
         ]))
         .unwrap();
         let prior = vec![PathBuf::from("/tmp/rolling/window_001_event_ml")];
@@ -539,5 +583,9 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--walk-forward-run-dir", "/tmp/rolling/window_001_event_ml"]));
         assert!(args.windows(2).any(|pair| pair == ["--search-l2", "0"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--runtime-score", "event_ml_model:baseline_v1"]));
+        assert!(args.iter().any(|arg| arg == "--replay-parity-ready"));
     }
 }

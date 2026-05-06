@@ -67,6 +67,9 @@ struct Config {
     walk_forward_min_windows: usize,
     walk_forward_min_test_trades: usize,
     walk_forward_extra_run_dirs: Vec<PathBuf>,
+    required_strategy_profile: String,
+    runtime_score: Option<String>,
+    replay_parity_ready: bool,
     phases: Vec<Phase>,
     dry_run: bool,
 }
@@ -208,6 +211,10 @@ fn parse_config(args: &[String]) -> Result<Config> {
     let walk_forward_min_windows = parse_usize_flag(args, "--walk-forward-min-windows", 3)?;
     let walk_forward_min_test_trades = parse_usize_flag(args, "--walk-forward-min-test-trades", 1)?;
     let walk_forward_extra_run_dirs = parse_walk_forward_extra_run_dirs(args);
+    let required_strategy_profile = flag_value(args, "--required-strategy-profile")
+        .unwrap_or_else(|| "event_ml_supervised_tabular".to_string());
+    let runtime_score = flag_value(args, "--runtime-score");
+    let replay_parity_ready = has_flag(args, "--replay-parity-ready");
 
     if entry_secs < 0 {
         bail!("--entry-secs must be non-negative");
@@ -233,6 +240,9 @@ fn parse_config(args: &[String]) -> Result<Config> {
     if walk_forward_min_windows == 0 {
         bail!("--walk-forward-min-windows must be positive");
     }
+    if required_strategy_profile.trim().is_empty() {
+        bail!("--required-strategy-profile must not be empty");
+    }
 
     Ok(Config {
         dataset,
@@ -249,6 +259,9 @@ fn parse_config(args: &[String]) -> Result<Config> {
         walk_forward_min_windows,
         walk_forward_min_test_trades,
         walk_forward_extra_run_dirs,
+        required_strategy_profile,
+        runtime_score,
+        replay_parity_ready,
         phases,
         dry_run,
     })
@@ -462,20 +475,7 @@ fn run_walk_forward_phase(config: &Config, state: &mut WorkflowState) -> Result<
         write_workflow_report(config, state)?;
     }
     let output_dir = state.run_dir.join("walk_forward");
-    let mut args = vec![
-        "--run-dir".to_string(),
-        state.run_dir.display().to_string(),
-        "--output-dir".to_string(),
-        output_dir.display().to_string(),
-        "--min-windows".to_string(),
-        config.walk_forward_min_windows.to_string(),
-        "--min-test-trades-per-window".to_string(),
-        config.walk_forward_min_test_trades.to_string(),
-    ];
-    for run_dir in &config.walk_forward_extra_run_dirs {
-        args.push("--run-dir".to_string());
-        args.push(run_dir.display().to_string());
-    }
+    let args = walk_forward_phase_args(config, state, &output_dir);
     let command = shell_command_without_features("event_ml_walk_forward", &args);
     eprintln!();
     eprintln!(
@@ -527,6 +527,37 @@ fn run_walk_forward_phase(config: &Config, state: &mut WorkflowState) -> Result<
         status: report.readiness.status,
     });
     Ok(())
+}
+
+fn walk_forward_phase_args(
+    config: &Config,
+    state: &WorkflowState,
+    output_dir: &Path,
+) -> Vec<String> {
+    let mut args = vec![
+        "--run-dir".to_string(),
+        state.run_dir.display().to_string(),
+        "--output-dir".to_string(),
+        output_dir.display().to_string(),
+        "--min-windows".to_string(),
+        config.walk_forward_min_windows.to_string(),
+        "--min-test-trades-per-window".to_string(),
+        config.walk_forward_min_test_trades.to_string(),
+    ];
+    for run_dir in &config.walk_forward_extra_run_dirs {
+        args.push("--run-dir".to_string());
+        args.push(run_dir.display().to_string());
+    }
+    args.push("--required-strategy-profile".to_string());
+    args.push(config.required_strategy_profile.clone());
+    if let Some(runtime_score) = &config.runtime_score {
+        args.push("--runtime-score".to_string());
+        args.push(runtime_score.clone());
+    }
+    if config.replay_parity_ready {
+        args.push("--replay-parity-ready".to_string());
+    }
+    args
 }
 
 fn run_hyperparameter_phase(config: &Config, state: &mut WorkflowState) -> Result<()> {
@@ -1009,6 +1040,10 @@ Options:
                            Repeat for rolling windows from prior datasets.
   --walk-forward-run-dirs <csv>
                            Add comma-separated completed workflow run dirs.
+  --required-strategy-profile <id>
+                           Dry-run handoff profile. Default: event_ml_supervised_tabular.
+  --runtime-score <id>     Runtime scorer identifier. Required for ready dry-run handoff.
+  --replay-parity-ready    Mark recorded replay/runtime parity as passed for handoff.
   --dry-run                Print commands without running phases.
 "
     );
@@ -1053,6 +1088,9 @@ mod tests {
             "/tmp/run-a",
             "--walk-forward-run-dirs",
             "/tmp/run-b,/tmp/run-c",
+            "--runtime-score",
+            "event_ml_model:baseline_v1",
+            "--replay-parity-ready",
             "--dry-run",
         ]))
         .unwrap();
@@ -1076,6 +1114,11 @@ mod tests {
                 PathBuf::from("/tmp/run-c")
             ]
         );
+        assert_eq!(
+            config.runtime_score.as_deref(),
+            Some("event_ml_model:baseline_v1")
+        );
+        assert!(config.replay_parity_ready);
     }
 
     #[test]
@@ -1134,5 +1177,29 @@ mod tests {
         assert!(phase_args
             .windows(2)
             .any(|pair| pair == ["--features", "fair_prob_up,model_edge_up"]));
+    }
+
+    #[test]
+    fn walk_forward_phase_receives_handoff_gates() {
+        let config = parse_config(&args(&[
+            "--dataset",
+            "/tmp/events",
+            "--runtime-score",
+            "event_ml_model:baseline_v1",
+            "--replay-parity-ready",
+        ]))
+        .unwrap();
+        let state = WorkflowState {
+            run_dir: PathBuf::from("/tmp/run"),
+            governed_features: None,
+            records: Vec::new(),
+        };
+
+        let args = walk_forward_phase_args(&config, &state, Path::new("/tmp/run/walk_forward"));
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--runtime-score", "event_ml_model:baseline_v1"]));
+        assert!(args.iter().any(|arg| arg == "--replay-parity-ready"));
     }
 }

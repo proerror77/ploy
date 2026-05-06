@@ -40,9 +40,9 @@ on:
         required: false
         default: ""
       options_json:
-        description: "Advanced options JSON: sampling, entry/tolerance, logistic search grid, source_dataset_artifact_name"
+        description: "Advanced options JSON: sampling, entry/tolerance, logistic search grid, source_dataset_artifact_name, handoff runtime/parity gates"
         required: false
-        default: '{"lob_sample_secs":30,"max_quote_age_secs":30,"entry_secs":60,"tolerance_secs":30,"search_l2":"0,0.001,0.01","search_min_edge":"0,0.02,0.05","search_learning_rate":"0.03,0.05","search_epochs":500,"source_dataset_artifact_name":""}'
+        default: '{"lob_sample_secs":30,"max_quote_age_secs":30,"entry_secs":60,"tolerance_secs":30,"search_l2":"0,0.001,0.01","search_min_edge":"0,0.02,0.05","search_learning_rate":"0.03,0.05","search_epochs":500,"source_dataset_artifact_name":"","required_strategy_profile":"event_ml_supervised_tabular","runtime_score":"","replay_parity_ready":"false"}'
 
 concurrency:
   group: event-ml-rolling-evidence-${{ github.ref }}
@@ -170,6 +170,9 @@ jobs:
               "search_learning_rate": "0.03,0.05",
               "search_epochs": "500",
               "source_dataset_artifact_name": "",
+              "required_strategy_profile": "event_ml_supervised_tabular",
+              "runtime_score": "",
+              "replay_parity_ready": "false",
           }
           raw = os.environ.get("OPTIONS_JSON", "").strip()
           data = json.loads(raw) if raw else {}
@@ -222,6 +225,15 @@ jobs:
           set -euo pipefail
 
           DATASETS="$(paste -sd, artifacts/event-ml/rolling_datasets/rolling_datasets.txt)"
+          handoff_args=(
+            --required-strategy-profile "${EVENT_ML_REQUIRED_STRATEGY_PROFILE}"
+          )
+          if [ -n "${EVENT_ML_RUNTIME_SCORE}" ]; then
+            handoff_args+=(--runtime-score "${EVENT_ML_RUNTIME_SCORE}")
+          fi
+          case "${EVENT_ML_REPLAY_PARITY_READY}" in
+            true|True|1|yes|YES) handoff_args+=(--replay-parity-ready) ;;
+          esac
           artifacts/event-ml-bin/event_ml_rolling_workflow \
             --datasets "${DATASETS}" \
             --output-root artifacts/event-ml/rolling_workflow \
@@ -231,6 +243,7 @@ jobs:
             --search-min-edge "${EVENT_ML_SEARCH_MIN_EDGE}" \
             --search-learning-rate "${EVENT_ML_SEARCH_LEARNING_RATE}" \
             --search-epochs "${EVENT_ML_SEARCH_EPOCHS}" \
+            "${handoff_args[@]}" \
             | tee artifacts/event-ml/reports/rolling_workflow.txt
 
       - name: Collect compact reports
@@ -281,7 +294,7 @@ jobs:
             if [ -f artifacts/event-ml/rolling_workflow/rolling_workflow_report.json ]; then
               echo "### Rolling workflow"
               echo '```json'
-              jq '{dataset_count, min_windows, final_walk_forward_report, windows: [.windows[] | {id, status, prior_run_dirs: (.prior_run_dirs | length)}]}' artifacts/event-ml/rolling_workflow/rolling_workflow_report.json || true
+              jq '{dataset_count, min_windows, final_walk_forward_report, final_strategy_handoff_report, windows: [.windows[] | {id, status, prior_run_dirs: (.prior_run_dirs | length)}]}' artifacts/event-ml/rolling_workflow/rolling_workflow_report.json || true
               echo '```'
             fi
 
@@ -290,6 +303,14 @@ jobs:
               echo "### Final walk-forward readiness"
               echo '```json'
               jq '.readiness' "${FINAL_WALK_FORWARD_REPORT}" || true
+              echo '```'
+            fi
+
+            FINAL_HANDOFF_REPORT="$(find artifacts/event-ml/rolling_workflow -path '*/walk_forward/event_ml_strategy_handoff.json' 2>/dev/null | sort | tail -1 || true)"
+            if [ -n "${FINAL_HANDOFF_REPORT}" ] && [ -f "${FINAL_HANDOFF_REPORT}" ]; then
+              echo "### Final strategy handoff"
+              echo '```json'
+              jq '{status, recommended_action, blocked_gate_ids, runtime_score, replay_parity_ready}' "${FINAL_HANDOFF_REPORT}" || true
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -353,6 +374,9 @@ jobs:
               "search_learning_rate": "0.03,0.05",
               "search_epochs": "500",
               "source_dataset_artifact_name": "",
+              "required_strategy_profile": "event_ml_supervised_tabular",
+              "runtime_score": "",
+              "replay_parity_ready": "false",
           }
           raw = os.environ.get("OPTIONS_JSON", "").strip()
           data = json.loads(raw) if raw else {}
@@ -420,6 +444,15 @@ jobs:
           set -euo pipefail
 
           DATASETS="$(paste -sd, artifacts/event-ml/rolling_datasets/rolling_datasets.txt)"
+          handoff_args=(
+            --required-strategy-profile "${EVENT_ML_REQUIRED_STRATEGY_PROFILE}"
+          )
+          if [ -n "${EVENT_ML_RUNTIME_SCORE}" ]; then
+            handoff_args+=(--runtime-score "${EVENT_ML_RUNTIME_SCORE}")
+          fi
+          case "${EVENT_ML_REPLAY_PARITY_READY}" in
+            true|True|1|yes|YES) handoff_args+=(--replay-parity-ready) ;;
+          esac
           artifacts/event-ml-bin/event_ml_rolling_workflow \
             --datasets "${DATASETS}" \
             --output-root artifacts/event-ml/rolling_workflow \
@@ -429,6 +462,7 @@ jobs:
             --search-min-edge "${EVENT_ML_SEARCH_MIN_EDGE}" \
             --search-learning-rate "${EVENT_ML_SEARCH_LEARNING_RATE}" \
             --search-epochs "${EVENT_ML_SEARCH_EPOCHS}" \
+            "${handoff_args[@]}" \
             | tee artifacts/event-ml/reports/rolling_workflow.txt
 
       - name: Collect compact reports
@@ -481,7 +515,7 @@ jobs:
             if [ -f artifacts/event-ml/rolling_workflow/rolling_workflow_report.json ]; then
               echo "### Rolling workflow"
               echo '```json'
-              jq '{dataset_count, min_windows, final_walk_forward_report, windows: [.windows[] | {id, status, prior_run_dirs: (.prior_run_dirs | length)}]}' artifacts/event-ml/rolling_workflow/rolling_workflow_report.json || true
+              jq '{dataset_count, min_windows, final_walk_forward_report, final_strategy_handoff_report, windows: [.windows[] | {id, status, prior_run_dirs: (.prior_run_dirs | length)}]}' artifacts/event-ml/rolling_workflow/rolling_workflow_report.json || true
               echo '```'
             fi
 
@@ -490,6 +524,14 @@ jobs:
               echo "### Final walk-forward readiness"
               echo '```json'
               jq '.readiness' "${FINAL_WALK_FORWARD_REPORT}" || true
+              echo '```'
+            fi
+
+            FINAL_HANDOFF_REPORT="$(find artifacts/event-ml/rolling_workflow -path '*/walk_forward/event_ml_strategy_handoff.json' 2>/dev/null | sort | tail -1 || true)"
+            if [ -n "${FINAL_HANDOFF_REPORT}" ] && [ -f "${FINAL_HANDOFF_REPORT}" ]; then
+              echo "### Final strategy handoff"
+              echo '```json'
+              jq '{status, recommended_action, blocked_gate_ids, runtime_score, replay_parity_ready}' "${FINAL_HANDOFF_REPORT}" || true
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"

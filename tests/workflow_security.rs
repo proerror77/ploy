@@ -116,6 +116,8 @@ fn event_ml_rolling_evidence_has_hosted_artifact_lane() {
         "github.event.inputs.source_dataset_run_id != ''",
         "scripts/download_github_artifact.py",
         "event-ml-rolling-datasets-${SOURCE_DATASET_RUN_ID}",
+        "--runtime-score",
+        "--replay-parity-ready",
     ] {
         if !workflow.contains(needle) {
             offenders.push(format!("event-ml-rolling-evidence.yml: missing `{needle}`"));
@@ -134,6 +136,8 @@ fn event_ml_rolling_evidence_has_hosted_artifact_lane() {
     for needle in [
         "Prefer the hosted artifact path",
         "source_dataset_artifact_name",
+        "runtime_score",
+        "replay_parity_ready",
         "workflow stays within GitHub's 10-input dispatch limit",
     ] {
         if !runbook.contains(needle) {
@@ -520,9 +524,7 @@ fn research_workflows_require_private_tango_db_endpoint() {
     ) {
         offenders.push("backtest.yml: missing private Tango DB endpoint guard".to_string());
     }
-    if !backtest.contains(
-        "urlparse(os.environ[\"PLOY_RESEARCH_DATABASE_URL\"]).hostname",
-    ) {
+    if !backtest.contains("urlparse(os.environ[\"PLOY_RESEARCH_DATABASE_URL\"]).hostname") {
         offenders.push("backtest.yml: must parse the research DB URL host before use".to_string());
     }
 
@@ -550,7 +552,9 @@ fn optimize_workflow_builds_and_runs_in_one_job() {
     let content = workflow_contents(".github/workflows/optimize.yml");
     let mut offenders = Vec::new();
 
-    if content.contains("download-artifact") || content.contains("optimize_backtest-${{ github.sha }}") {
+    if content.contains("download-artifact")
+        || content.contains("optimize_backtest-${{ github.sha }}")
+    {
         offenders.push(
             "optimize.yml: must not pass optimize_backtest through a binary artifact".to_string(),
         );
