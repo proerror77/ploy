@@ -5,9 +5,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 pub use walk_forward::{
-    build_walk_forward_report, walk_forward_report_markdown, WalkForwardAggregate,
-    WalkForwardConfig, WalkForwardGate, WalkForwardGateStatus, WalkForwardMetric,
-    WalkForwardReadiness, WalkForwardReport, WalkForwardWindow, WALK_FORWARD_REPORT_VERSION,
+    build_event_ml_strategy_handoff, build_walk_forward_report, event_ml_strategy_handoff_markdown,
+    walk_forward_report_markdown, EventMlStrategyCandidate, EventMlStrategyHandoff,
+    EventMlStrategyHandoffConfig, EventMlStrategyHandoffStatus, EventMlStrategyPromotionGate,
+    WalkForwardAggregate, WalkForwardConfig, WalkForwardGate, WalkForwardGateStatus,
+    WalkForwardMetric, WalkForwardReadiness, WalkForwardReport, WalkForwardWindow,
+    EVENT_ML_STRATEGY_HANDOFF_VERSION, WALK_FORWARD_REPORT_VERSION,
 };
 
 pub const EVENT_ML_ARCHITECTURE_VERSION: &str = "event-ml-architecture.v1";
@@ -344,7 +347,11 @@ fn canonical_phases() -> Vec<WorkflowPhase> {
             "Walk-forward and executable-price backtest",
             "Prove the result is not one lucky split and report bankroll risk.",
             &["selected model config", "multi-day event-root data"],
-            &["walk_forward_report.json", "backtest_report.json"],
+            &[
+                "walk_forward_report.json",
+                "event_ml_strategy_handoff.json",
+                "backtest_report.json",
+            ],
             "Stop if validation improvement does not survive rolling windows or executable accounting.",
         ),
         phase(
@@ -371,7 +378,11 @@ fn canonical_phases() -> Vec<WorkflowPhase> {
             "Dry-run strategy handoff",
             "Package the model and evidence for dry-run without changing live behavior.",
             &["research artifacts", "backtest evidence"],
-            &["strategy_handoff.md", "model version metadata"],
+            &[
+                "event_ml_strategy_handoff.json",
+                "event_ml_strategy_handoff.md",
+                "model version metadata",
+            ],
             "Stop if model version, feature schema, entry window, and monitoring requirements are absent.",
         ),
     ]
@@ -520,7 +531,7 @@ fn canonical_artifacts() -> Vec<ArchitectureArtifact> {
         ),
         artifact(
             "strategy_handoff",
-            "strategy_handoff.md",
+            "event_ml_strategy_handoff.{json,md}",
             PhaseId::DryRunHandoff,
             &[],
             "Research-to-dry-run packet with model version, schema, entry window, and monitoring requirements.",
@@ -686,7 +697,8 @@ fn canonical_readiness_gates() -> Vec<ReadinessGate> {
             "Dry-run handoff packet contains model, schema, entry, evidence, and monitoring.",
             &[LearningLaneId::DryRunStrategy],
             &[
-                "strategy_handoff.md",
+                "event_ml_strategy_handoff.json",
+                "event_ml_strategy_handoff.md",
                 "model metadata",
                 "monitoring checklist",
             ],

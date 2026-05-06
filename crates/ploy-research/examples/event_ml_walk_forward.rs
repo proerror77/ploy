@@ -3,7 +3,10 @@ use std::fs::{self, File};
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use ploy_research::{build_walk_forward_report, walk_forward_report_markdown, WalkForwardConfig};
+use ploy_research::{
+    build_event_ml_strategy_handoff, build_walk_forward_report, event_ml_strategy_handoff_markdown,
+    walk_forward_report_markdown, EventMlStrategyHandoffConfig, WalkForwardConfig,
+};
 
 fn main() -> Result<()> {
     let config = Config::parse(env::args().skip(1))?;
@@ -33,6 +36,27 @@ fn main() -> Result<()> {
     fs::write(&markdown_path, markdown)
         .with_context(|| format!("write {}", markdown_path.display()))?;
 
+    let handoff = build_event_ml_strategy_handoff(
+        &report,
+        &EventMlStrategyHandoffConfig {
+            required_strategy_profile: config.required_strategy_profile.clone(),
+            runtime_score: config.runtime_score.clone(),
+            replay_parity_ready: config.replay_parity_ready,
+            source_report_path: Some(json_path.display().to_string()),
+        },
+    );
+    let handoff_json_path = output_dir.join("event_ml_strategy_handoff.json");
+    let handoff_md_path = output_dir.join("event_ml_strategy_handoff.md");
+    let handoff_file = File::create(&handoff_json_path)
+        .with_context(|| format!("create {}", handoff_json_path.display()))?;
+    serde_json::to_writer_pretty(handoff_file, &handoff)
+        .with_context(|| format!("write {}", handoff_json_path.display()))?;
+    fs::write(
+        &handoff_md_path,
+        event_ml_strategy_handoff_markdown(&handoff),
+    )
+    .with_context(|| format!("write {}", handoff_md_path.display()))?;
+
     eprintln!("artifact_walk_forward_report={}", json_path.display());
     eprintln!(
         "artifact_walk_forward_report_md={}",
@@ -43,6 +67,20 @@ fn main() -> Result<()> {
         "walk_forward_ready_for_dl_rl={}",
         report.readiness.ready_for_dl_rl
     );
+    eprintln!(
+        "artifact_event_ml_strategy_handoff={}",
+        handoff_json_path.display()
+    );
+    eprintln!(
+        "event_ml_strategy_handoff_status={}",
+        handoff.status.as_str()
+    );
+    if !handoff.blocked_gate_ids.is_empty() {
+        eprintln!(
+            "event_ml_strategy_handoff_blockers={}",
+            handoff.blocked_gate_ids.join(",")
+        );
+    }
     if !report.readiness.missing_gate_ids.is_empty() {
         eprintln!(
             "walk_forward_missing_gates={}",
@@ -58,6 +96,9 @@ struct Config {
     output_dir: Option<PathBuf>,
     min_windows: usize,
     min_test_trades_per_window: usize,
+    required_strategy_profile: String,
+    runtime_score: Option<String>,
+    replay_parity_ready: bool,
 }
 
 impl Config {
@@ -91,8 +132,15 @@ impl Config {
         let min_windows = parse_usize_flag(&args, "--min-windows", 3)?;
         let min_test_trades_per_window =
             parse_usize_flag(&args, "--min-test-trades-per-window", 1)?;
+        let required_strategy_profile = flag_value(&args, "--required-strategy-profile")
+            .unwrap_or_else(|| "event_ml_supervised_tabular".to_string());
+        let runtime_score = flag_value(&args, "--runtime-score");
+        let replay_parity_ready = has_flag(&args, "--replay-parity-ready");
         if min_windows == 0 {
             bail!("--min-windows must be positive");
+        }
+        if required_strategy_profile.trim().is_empty() {
+            bail!("--required-strategy-profile must not be empty");
         }
 
         Ok(Config {
@@ -100,6 +148,9 @@ impl Config {
             output_dir,
             min_windows,
             min_test_trades_per_window,
+            required_strategy_profile,
+            runtime_score,
+            replay_parity_ready,
         })
     }
 }
@@ -146,6 +197,9 @@ Options:
   --output-dir <dir>                 Output artifact directory. Default: <first-run-dir>/walk_forward.
   --min-windows <n>                  Minimum windows required for DL/RL readiness. Default: 3.
   --min-test-trades-per-window <n>   Minimum test trades per window. Default: 1.
+  --required-strategy-profile <id>   Dry-run handoff profile. Default: event_ml_supervised_tabular.
+  --runtime-score <id>               Runtime scorer identifier. Required for a ready handoff.
+  --replay-parity-ready              Mark replay/runtime parity as ready for dry-run handoff.
   -h, --help                         Show this help.
 "#
     );

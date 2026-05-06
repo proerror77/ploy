@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const WALK_FORWARD_REPORT_VERSION: &str = "event-ml-walk-forward.v1";
+pub const EVENT_ML_STRATEGY_HANDOFF_VERSION: &str = "event-ml-strategy-handoff.v1";
 
 #[derive(Debug, Clone)]
 pub struct WalkForwardConfig {
@@ -96,6 +97,75 @@ pub struct WalkForwardMetric {
     pub avg_entry: f64,
     pub logloss: f64,
     pub auc: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EventMlStrategyHandoffStatus {
+    Ready,
+    Blocked,
+}
+
+impl EventMlStrategyHandoffStatus {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            EventMlStrategyHandoffStatus::Ready => "ready",
+            EventMlStrategyHandoffStatus::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EventMlStrategyHandoffConfig {
+    pub required_strategy_profile: String,
+    pub runtime_score: Option<String>,
+    pub replay_parity_ready: bool,
+    pub source_report_path: Option<String>,
+}
+
+impl Default for EventMlStrategyHandoffConfig {
+    fn default() -> Self {
+        Self {
+            required_strategy_profile: "event_ml_supervised_tabular".to_string(),
+            runtime_score: None,
+            replay_parity_ready: false,
+            source_report_path: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EventMlStrategyHandoff {
+    pub version: String,
+    pub status: EventMlStrategyHandoffStatus,
+    pub recommended_action: String,
+    pub required_strategy_profile: String,
+    pub runtime_score: Option<String>,
+    pub replay_parity_ready: bool,
+    pub blocked_gate_ids: Vec<String>,
+    pub promotion_gate: EventMlStrategyPromotionGate,
+    pub strategy: Option<EventMlStrategyCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EventMlStrategyPromotionGate {
+    pub walk_forward_status: WalkForwardGateStatus,
+    pub source_report_path: Option<String>,
+    pub aggregate: WalkForwardAggregate,
+    pub missing_walk_forward_gate_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EventMlStrategyCandidate {
+    pub strategy_profile: String,
+    pub runtime_score: String,
+    pub selection_rule: String,
+    pub window_count: usize,
+    pub test_trades: usize,
+    pub test_pnl: f64,
+    pub test_roi: f64,
+    pub weighted_avg_entry: f64,
+    pub max_window_drawdown: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,6 +329,157 @@ pub fn walk_forward_report_markdown(report: &WalkForwardReport) -> String {
     out.push_str("\n## Notes\n\n");
     for note in &report.notes {
         out.push_str(&format!("- {note}\n"));
+    }
+
+    out
+}
+
+pub fn build_event_ml_strategy_handoff(
+    report: &WalkForwardReport,
+    config: &EventMlStrategyHandoffConfig,
+) -> EventMlStrategyHandoff {
+    let runtime_score = config
+        .runtime_score
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut blocked_gate_ids = report.readiness.missing_gate_ids.clone();
+    if report.aggregate.total_test_pnl <= 0.0 {
+        blocked_gate_ids.push("positive_total_test_pnl_missing".to_string());
+    }
+    if report.aggregate.positive_test_windows * 2 < report.aggregate.window_count {
+        blocked_gate_ids.push("positive_test_window_majority_missing".to_string());
+    }
+    if runtime_score.is_none() {
+        blocked_gate_ids.push("runtime_score_missing".to_string());
+    }
+    if !config.replay_parity_ready {
+        blocked_gate_ids.push("replay_parity_missing".to_string());
+    }
+
+    let status = if blocked_gate_ids.is_empty() {
+        EventMlStrategyHandoffStatus::Ready
+    } else {
+        EventMlStrategyHandoffStatus::Blocked
+    };
+    let strategy = match (&status, &runtime_score) {
+        (EventMlStrategyHandoffStatus::Ready, Some(runtime_score)) => {
+            Some(EventMlStrategyCandidate {
+                strategy_profile: config.required_strategy_profile.clone(),
+                runtime_score: runtime_score.clone(),
+                selection_rule: report.selection_rule.clone(),
+                window_count: report.aggregate.window_count,
+                test_trades: report.aggregate.total_test_trades,
+                test_pnl: report.aggregate.total_test_pnl,
+                test_roi: report.aggregate.total_test_roi,
+                weighted_avg_entry: report.aggregate.weighted_avg_entry,
+                max_window_drawdown: report.aggregate.max_window_drawdown,
+            })
+        }
+        _ => None,
+    };
+
+    EventMlStrategyHandoff {
+        version: EVENT_ML_STRATEGY_HANDOFF_VERSION.to_string(),
+        recommended_action: if status == EventMlStrategyHandoffStatus::Ready {
+            "create_dry_run_handoff".to_string()
+        } else {
+            "do_not_promote".to_string()
+        },
+        required_strategy_profile: config.required_strategy_profile.clone(),
+        runtime_score,
+        replay_parity_ready: config.replay_parity_ready,
+        blocked_gate_ids,
+        promotion_gate: EventMlStrategyPromotionGate {
+            walk_forward_status: report.readiness.status,
+            source_report_path: config.source_report_path.clone(),
+            aggregate: report.aggregate.clone(),
+            missing_walk_forward_gate_ids: report.readiness.missing_gate_ids.clone(),
+        },
+        status,
+        strategy,
+    }
+}
+
+pub fn event_ml_strategy_handoff_markdown(handoff: &EventMlStrategyHandoff) -> String {
+    let mut out = String::new();
+    out.push_str("# Event ML Dry-Run Strategy Handoff\n\n");
+    out.push_str(&format!("Version: `{}`\n\n", handoff.version));
+    out.push_str(&format!("Status: `{}`\n\n", handoff.status.as_str()));
+    out.push_str(&format!(
+        "Recommended action: `{}`\n\n",
+        handoff.recommended_action
+    ));
+    out.push_str(&format!(
+        "- Required strategy profile: `{}`\n",
+        handoff.required_strategy_profile
+    ));
+    out.push_str(&format!(
+        "- Runtime score: `{}`\n",
+        handoff.runtime_score.as_deref().unwrap_or("missing")
+    ));
+    out.push_str(&format!(
+        "- Replay parity ready: `{}`\n",
+        handoff.replay_parity_ready
+    ));
+    out.push_str(&format!(
+        "- Walk-forward status: `{}`\n\n",
+        handoff.promotion_gate.walk_forward_status.as_str()
+    ));
+
+    if handoff.status != EventMlStrategyHandoffStatus::Ready {
+        out.push_str(
+            "No dry-run handoff issue or config should be created from this artifact.\n\n",
+        );
+        out.push_str("## Blockers\n\n");
+        for gate_id in &handoff.blocked_gate_ids {
+            out.push_str(&format!("- `{gate_id}`\n"));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Evidence\n\n");
+    out.push_str(&format!(
+        "- windows: `{}`\n",
+        handoff.promotion_gate.aggregate.window_count
+    ));
+    out.push_str(&format!(
+        "- test trades: `{}`\n",
+        handoff.promotion_gate.aggregate.total_test_trades
+    ));
+    out.push_str(&format!(
+        "- test PnL: `{:.4}`\n",
+        handoff.promotion_gate.aggregate.total_test_pnl
+    ));
+    out.push_str(&format!(
+        "- test ROI: `{:.4}`\n",
+        handoff.promotion_gate.aggregate.total_test_roi
+    ));
+    out.push_str(&format!(
+        "- weighted avg entry: `{:.4}`\n",
+        handoff.promotion_gate.aggregate.weighted_avg_entry
+    ));
+    out.push_str(&format!(
+        "- max window drawdown: `{:.4}`\n\n",
+        handoff.promotion_gate.aggregate.max_window_drawdown
+    ));
+
+    if let Some(strategy) = &handoff.strategy {
+        out.push_str("## Dry-Run Config Contract\n\n");
+        out.push_str("```toml\n");
+        out.push_str("[event_ml_strategy_handoff]\n");
+        out.push_str(&format!(
+            "strategy_profile = \"{}\"\n",
+            strategy.strategy_profile
+        ));
+        out.push_str(&format!("runtime_score = \"{}\"\n", strategy.runtime_score));
+        out.push_str("promotion_status = \"ready_for_dry_run_handoff\"\n");
+        out.push_str("```\n\n");
+        out.push_str("## Monitoring Requirements\n\n");
+        out.push_str("- Confirm runtime/replay scorer parity before deployment.\n");
+        out.push_str("- Confirm live dry-run quote availability matches research assumptions.\n");
+        out.push_str("- Keep live trading disabled until a separate operator approval gate.\n");
     }
 
     out
@@ -622,5 +843,113 @@ mod tests {
                 .to_string();
 
         assert!(error.contains("duplicate walk-forward run dir"));
+    }
+
+    #[test]
+    fn event_ml_handoff_is_blocked_without_runtime_and_replay_parity() {
+        let windows = vec![
+            window(1, 1.0, 2.0, 10, 0.4),
+            window(2, 1.0, 2.0, 10, 0.4),
+            window(3, 1.0, 2.0, 10, 0.4),
+        ];
+        let report = WalkForwardReport {
+            version: WALK_FORWARD_REPORT_VERSION.to_string(),
+            selection_rule: "test rule".to_string(),
+            readiness: WalkForwardReadiness {
+                ready_for_dl_rl: true,
+                status: WalkForwardGateStatus::Ready,
+                missing_gate_ids: vec![],
+            },
+            gates: vec![],
+            aggregate: aggregate_windows(&windows),
+            windows,
+            notes: vec![],
+        };
+
+        let handoff =
+            build_event_ml_strategy_handoff(&report, &EventMlStrategyHandoffConfig::default());
+
+        assert_eq!(handoff.status, EventMlStrategyHandoffStatus::Blocked);
+        assert_eq!(handoff.recommended_action, "do_not_promote");
+        assert!(handoff.strategy.is_none());
+        assert!(handoff
+            .blocked_gate_ids
+            .contains(&"runtime_score_missing".to_string()));
+        assert!(handoff
+            .blocked_gate_ids
+            .contains(&"replay_parity_missing".to_string()));
+    }
+
+    #[test]
+    fn event_ml_handoff_treats_blank_runtime_score_as_missing() {
+        let windows = vec![
+            window(1, 1.0, 2.0, 10, 0.4),
+            window(2, 1.0, 1.0, 10, 0.4),
+            window(3, 1.0, 1.0, 10, 0.4),
+        ];
+        let report = WalkForwardReport {
+            version: WALK_FORWARD_REPORT_VERSION.to_string(),
+            selection_rule: "validation pnl".to_string(),
+            readiness: WalkForwardReadiness {
+                ready_for_dl_rl: true,
+                status: WalkForwardGateStatus::Ready,
+                missing_gate_ids: vec![],
+            },
+            gates: vec![],
+            aggregate: aggregate_windows(&windows),
+            windows,
+            notes: vec![],
+        };
+        let config = EventMlStrategyHandoffConfig {
+            runtime_score: Some("   ".to_string()),
+            replay_parity_ready: true,
+            ..EventMlStrategyHandoffConfig::default()
+        };
+
+        let handoff = build_event_ml_strategy_handoff(&report, &config);
+
+        assert_eq!(handoff.status, EventMlStrategyHandoffStatus::Blocked);
+        assert!(handoff.runtime_score.is_none());
+        assert!(handoff
+            .blocked_gate_ids
+            .contains(&"runtime_score_missing".to_string()));
+    }
+
+    #[test]
+    fn event_ml_handoff_is_ready_only_after_all_strategy_gates() {
+        let windows = vec![
+            window(1, 1.0, 2.0, 10, 0.4),
+            window(2, 1.0, 1.0, 10, 0.4),
+            window(3, 1.0, 1.0, 10, 0.4),
+        ];
+        let report = WalkForwardReport {
+            version: WALK_FORWARD_REPORT_VERSION.to_string(),
+            selection_rule: "validation pnl".to_string(),
+            readiness: WalkForwardReadiness {
+                ready_for_dl_rl: true,
+                status: WalkForwardGateStatus::Ready,
+                missing_gate_ids: vec![],
+            },
+            gates: vec![],
+            aggregate: aggregate_windows(&windows),
+            windows,
+            notes: vec![],
+        };
+        let config = EventMlStrategyHandoffConfig {
+            runtime_score: Some("event_ml_model:baseline_v1".to_string()),
+            replay_parity_ready: true,
+            source_report_path: Some("walk_forward_report.json".to_string()),
+            ..EventMlStrategyHandoffConfig::default()
+        };
+
+        let handoff = build_event_ml_strategy_handoff(&report, &config);
+
+        assert_eq!(handoff.status, EventMlStrategyHandoffStatus::Ready);
+        assert_eq!(handoff.recommended_action, "create_dry_run_handoff");
+        assert!(handoff.blocked_gate_ids.is_empty());
+        let strategy = handoff.strategy.expect("ready handoff has strategy");
+        assert_eq!(strategy.runtime_score, "event_ml_model:baseline_v1");
+        assert_eq!(strategy.window_count, 3);
+        assert_eq!(strategy.test_trades, 30);
     }
 }
