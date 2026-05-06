@@ -21,6 +21,10 @@ on:
         description: "Fixed notional used by executable labels"
         required: true
         default: "15"
+      snapshot_run_id:
+        description: "Existing run id with a full research-snapshot artifact; skips legacy ploy-ci-1 snapshot build"
+        required: false
+        default: ""
       issue_number:
         description: "Issue number for posting gate evidence; leave empty to skip comments"
         required: false
@@ -33,12 +37,8 @@ on:
         description: "Optional Replay Dry-run Parity run id"
         required: false
         default: ""
-      replay_parity_artifact_name:
-        description: "Optional replay parity artifact name; defaults to replay-dryrun-parity-<run-id>"
-        required: false
-        default: ""
       no_wait:
-        description: "Dispatch the strict snapshot only and return"
+        description: "Dispatch the next evidence workflow and return"
         required: true
         default: "false"
         type: boolean
@@ -70,9 +70,9 @@ jobs:
           END_DATE: ${{ github.event.inputs.end_date }}
           SYMBOLS: ${{ github.event.inputs.symbols }}
           STAKE_USD: ${{ github.event.inputs.stake_usd }}
+          SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
           ISSUE_NUMBER: ${{ github.event.inputs.issue_number }}
           REPLAY_PARITY_RUN_ID: ${{ github.event.inputs.replay_parity_run_id }}
-          REPLAY_PARITY_ARTIFACT_NAME: ${{ github.event.inputs.replay_parity_artifact_name }}
           NO_WAIT: ${{ github.event.inputs.no_wait }}
         run: |
           set -euo pipefail
@@ -99,11 +99,11 @@ jobs:
             --audit-lookback-hours "${audit_lookback_hours}"
             --data-quality-mode "${data_quality_mode}"
           )
+          if [ -n "${SNAPSHOT_RUN_ID}" ]; then
+            args+=(--snapshot-run-id "${SNAPSHOT_RUN_ID}")
+          fi
           if [ -n "${REPLAY_PARITY_RUN_ID}" ]; then
             args+=(--replay-parity-run-id "${REPLAY_PARITY_RUN_ID}")
-          fi
-          if [ -n "${REPLAY_PARITY_ARTIFACT_NAME}" ]; then
-            args+=(--replay-parity-artifact-name "${REPLAY_PARITY_ARTIFACT_NAME}")
           fi
           if [ "${NO_WAIT}" = "true" ]; then
             args+=(--no-wait)
@@ -120,6 +120,8 @@ jobs:
             echo "- Window: \`${{ github.event.inputs.start_date }}..${{ github.event.inputs.end_date }}\`"
             echo "- Symbols: \`${{ github.event.inputs.symbols }}\`"
             echo "- Stake: \`${{ github.event.inputs.stake_usd }}u\`"
+            echo "- Snapshot source run: \`${{ github.event.inputs.snapshot_run_id || 'legacy-build' }}\`"
+            echo "- Walk-forward runner: \`ubuntu-latest\` via \`factor-walk-forward-v2-hosted-artifact.yml\`"
             audit_lookback_hours="${{ github.event.inputs.audit_lookback_hours }}"
             data_quality_mode="strict-continuous"
             case "${audit_lookback_hours}" in
@@ -143,7 +145,7 @@ jobs:
             echo "- Data profile: \`pm5d-vol\`"
             echo "- Audit lookback: \`${audit_lookback_hours}h\`"
             echo "- Replay parity run: \`${{ github.event.inputs.replay_parity_run_id || 'none' }}\`"
-            echo "- Replay parity artifact: \`${{ github.event.inputs.replay_parity_artifact_name || 'default' }}\`"
+            echo "- Replay parity artifact: \`default\`"
             echo ""
             echo "A failed workflow can be the correct outcome: the orchestrator exits non-zero when the PRD promotion gate is blocked."
           } >> "$GITHUB_STEP_SUMMARY"

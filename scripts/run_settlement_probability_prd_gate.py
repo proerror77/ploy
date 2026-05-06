@@ -3,8 +3,11 @@
 
 The default gate is intentionally strict:
 
-1. Build a portable pm5d-vol research snapshot with a critical data audit.
-2. Feed that snapshot into Factor Walk-Forward V2.
+1. Reuse a retained full research snapshot artifact when --snapshot-run-id is
+   supplied, or build a portable pm5d-vol research snapshot as a legacy
+   fallback.
+2. Feed that snapshot artifact into the GitHub-hosted Factor Walk-Forward V2
+   artifact workflow.
 3. Optionally attach a replay/dry-run parity artifact to the promotion gate.
 
 For PM 5m/15m event research, use --data-quality-mode event-complete when a
@@ -32,7 +35,7 @@ from typing import Any
 
 
 RESEARCH_SNAPSHOT_WORKFLOW = "research-snapshot.yml"
-WALK_FORWARD_WORKFLOW = "factor-walk-forward-v2.yml"
+HOSTED_WALK_FORWARD_WORKFLOW = "factor-walk-forward-v2-hosted-artifact.yml"
 
 
 @dataclass(frozen=True)
@@ -257,6 +260,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-date", required=True, help="Research window end date, YYYY-MM-DD")
     parser.add_argument("--symbols", default="BTCUSDT,ETHUSDT,SOLUSDT")
     parser.add_argument("--stake-usd", default="15")
+    parser.add_argument(
+        "--snapshot-run-id",
+        default="",
+        help=(
+            "Existing workflow run id that owns a full research-snapshot artifact. "
+            "When supplied, skip the legacy ploy-ci-1 snapshot workflow and run "
+            "the hosted artifact-only walk-forward path."
+        ),
+    )
+    parser.add_argument(
+        "--snapshot-artifact-name",
+        default="",
+        help="Optional snapshot artifact name; defaults to research-snapshot-<snapshot-run-id>",
+    )
     parser.add_argument("--issue-number", default="321")
     parser.add_argument("--audit-lookback-hours", default="168")
     parser.add_argument(
@@ -292,70 +309,79 @@ def main() -> int:
     rust_data_quality_mode = args.data_quality_mode.replace("-", "_")
     snapshot_data_gate = "critical" if args.data_quality_mode == "strict-continuous" else "never"
 
-    snapshot_options = {
-        "lob_sample_secs": int(args.lob_sample_secs),
-        "observation_sample_secs": int(args.observation_sample_secs),
-        "max_quote_age_secs": int(args.max_quote_age_secs),
-        "optimizer_data_dir": "/tmp/ploy-parquet",
-        "data_profile": "pm5d-vol",
-        "custom_required_sources": "",
-        "audit_lookback_hours": int(args.audit_lookback_hours),
-        "data_gate": snapshot_data_gate,
-        "snapshot_registry_dir": "",
-        "upload_full_snapshot": True,
-    }
-    snapshot_fields = {
-        "git_ref": git_ref,
-        "start_date": args.start_date,
-        "end_date": args.end_date,
-        "symbols": args.symbols,
-        "stake_usd": args.stake_usd,
-        "options_json": compact_json(snapshot_options),
-    }
-
-    print(
-        f"Dispatching pm5d-vol research snapshot gate data_quality_mode={args.data_quality_mode} "
-        f"snapshot_data_gate={snapshot_data_gate}.",
-        flush=True,
-    )
-    snapshot_run = dispatch_workflow(
-        RESEARCH_SNAPSHOT_WORKFLOW,
-        snapshot_fields,
-        workflow_ref=git_ref,
-        dry_run=args.dry_run,
-    )
-    if args.dry_run:
-        return 0
-    if snapshot_run is None:
-        raise RuntimeError("snapshot dispatch did not return a run")
-    print(f"snapshot_run_id={snapshot_run.database_id} url={snapshot_run.url}", flush=True)
-    if args.no_wait:
-        return 0
-
-    snapshot_result = wait_for_run(
-        snapshot_run,
-        timeout_minutes=args.snapshot_timeout_minutes,
-        poll_seconds=args.poll_seconds,
-    )
-    if snapshot_result.conclusion != "success":
-        issue_comment(
-            args.issue_number,
-            "\n".join(
-                [
-                    "Settlement probability PRD gate blocked at strict snapshot:",
-                    "",
-                    f"- Snapshot run: {snapshot_result.url}",
-                    f"- Conclusion: `{snapshot_result.conclusion}`",
-                    f"- Data profile: `pm5d-vol`",
-                    f"- Data quality mode: `{args.data_quality_mode}`",
-                    f"- Snapshot data gate: `{snapshot_data_gate}`",
-                    f"- Lookback: `{args.audit_lookback_hours}h`",
-                    "- Decision: inspect snapshot compilation/data coverage before promotion.",
-                ]
-            ),
-            dry_run=False,
+    if args.snapshot_run_id:
+        snapshot_result = refresh_run(int(args.snapshot_run_id))
+        print(
+            "Using existing full research snapshot artifact "
+            f"snapshot_run_id={snapshot_result.database_id} url={snapshot_result.url}.",
+            flush=True,
         )
-        return 1
+    else:
+        snapshot_options = {
+            "lob_sample_secs": int(args.lob_sample_secs),
+            "observation_sample_secs": int(args.observation_sample_secs),
+            "max_quote_age_secs": int(args.max_quote_age_secs),
+            "optimizer_data_dir": "/tmp/ploy-parquet",
+            "data_profile": "pm5d-vol",
+            "custom_required_sources": "",
+            "audit_lookback_hours": int(args.audit_lookback_hours),
+            "data_gate": snapshot_data_gate,
+            "snapshot_registry_dir": "",
+            "upload_full_snapshot": True,
+        }
+        snapshot_fields = {
+            "git_ref": git_ref,
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "symbols": args.symbols,
+            "stake_usd": args.stake_usd,
+            "options_json": compact_json(snapshot_options),
+        }
+
+        print(
+            "No snapshot_run_id supplied; dispatching legacy pm5d-vol research "
+            f"snapshot gate data_quality_mode={args.data_quality_mode} "
+            f"snapshot_data_gate={snapshot_data_gate}.",
+            flush=True,
+        )
+        snapshot_run = dispatch_workflow(
+            RESEARCH_SNAPSHOT_WORKFLOW,
+            snapshot_fields,
+            workflow_ref=git_ref,
+            dry_run=args.dry_run,
+        )
+        if args.dry_run:
+            return 0
+        if snapshot_run is None:
+            raise RuntimeError("snapshot dispatch did not return a run")
+        print(f"snapshot_run_id={snapshot_run.database_id} url={snapshot_run.url}", flush=True)
+        if args.no_wait:
+            return 0
+
+        snapshot_result = wait_for_run(
+            snapshot_run,
+            timeout_minutes=args.snapshot_timeout_minutes,
+            poll_seconds=args.poll_seconds,
+        )
+        if snapshot_result.conclusion != "success":
+            issue_comment(
+                args.issue_number,
+                "\n".join(
+                    [
+                        "Settlement probability PRD gate blocked at legacy snapshot build:",
+                        "",
+                        f"- Snapshot run: {snapshot_result.url}",
+                        f"- Conclusion: `{snapshot_result.conclusion}`",
+                        f"- Data profile: `pm5d-vol`",
+                        f"- Data quality mode: `{args.data_quality_mode}`",
+                        f"- Snapshot data gate: `{snapshot_data_gate}`",
+                        f"- Lookback: `{args.audit_lookback_hours}h`",
+                        "- Decision: provide an existing full snapshot artifact or inspect snapshot compilation/data coverage before promotion.",
+                    ]
+                ),
+                dry_run=False,
+            )
+            return 1
 
     walk_options = {
         "train_window_days": int(args.train_window_days),
@@ -368,42 +394,43 @@ def main() -> int:
         "min_observations": int(args.min_observations),
         "top_quantile": float(args.top_quantile),
         "factor_name_filter": "",
-        "compile_snapshot": False,
-        "allow_direct_db_debug": False,
-        "optimizer_data_dir": "/tmp/ploy-parquet",
-        "data_profile": "pm5d-vol",
-        "custom_required_sources": "",
-        "audit_lookback_hours": int(args.audit_lookback_hours),
-        "data_gate": snapshot_data_gate,
         "data_quality_mode": rust_data_quality_mode,
         "min_event_complete_events": int(args.min_event_complete_events),
         "min_event_complete_rows": int(args.min_event_complete_rows),
-        "issue_number": args.issue_number,
-        "snapshot_registry_dir": "",
         "replay_parity_json": "",
         "replay_parity_run_id": args.replay_parity_run_id,
         "replay_parity_artifact_name": args.replay_parity_artifact_name,
+        "required_strategy_profile": "settlement_probability",
+        "allowed_target": "full_depth_settlement_executable_pnl",
+        "issue_number": args.issue_number,
+        "create_handoff_issue": False,
+        "fail_if_blocked": False,
     }
     walk_fields = {
         "git_ref": git_ref,
+        "snapshot_run_id": str(snapshot_result.database_id),
+        "snapshot_artifact_name": args.snapshot_artifact_name,
         "start_date": args.start_date,
         "end_date": args.end_date,
         "symbols": args.symbols,
         "stake_usd": args.stake_usd,
-        "snapshot_run_id": str(snapshot_result.database_id),
         "options_json": compact_json(walk_options),
     }
 
-    print("Dispatching settlement probability promotion gate.", flush=True)
+    print("Dispatching hosted settlement probability promotion gate.", flush=True)
     walk_run = dispatch_workflow(
-        WALK_FORWARD_WORKFLOW,
+        HOSTED_WALK_FORWARD_WORKFLOW,
         walk_fields,
         workflow_ref=git_ref,
-        dry_run=False,
+        dry_run=args.dry_run,
     )
+    if args.dry_run:
+        return 0
     if walk_run is None:
         raise RuntimeError("walk-forward dispatch did not return a run")
     print(f"walk_forward_run_id={walk_run.database_id} url={walk_run.url}", flush=True)
+    if args.no_wait:
+        return 0
     walk_result = wait_for_run(
         walk_run,
         timeout_minutes=args.walk_timeout_minutes,
