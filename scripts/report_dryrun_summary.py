@@ -56,25 +56,39 @@ WITH events AS (
     t.is_closed,
     t.open_quantity,
     CASE
-      WHEN m.market_slug IS NOT NULL THEN 'token_settlement_market_metadata'
+      WHEN ms.market_slug IS NOT NULL THEN 'token_settlement_market_metadata'
       WHEN s.market_slug IS NOT NULL THEN 'token_settlement_without_metadata'
-      ELSE 'missing_token_settlement'
+      WHEN me.market_slug IS NOT NULL THEN 'event_track_market_metadata'
+      WHEN mt.market_slug IS NOT NULL THEN 'trade_key_market_metadata'
+      ELSE 'missing_market_metadata'
     END AS metadata_join_status,
+    COALESCE(ms.market_slug, me.market_slug, mt.market_slug, s.market_slug) AS metadata_market_slug,
     CASE
-      WHEN m.end_time IS NOT NULL AND m.start_time IS NOT NULL
-        THEN ROUND(EXTRACT(EPOCH FROM (m.end_time - m.start_time)))::int
-      WHEN m.market_slug ILIKE '%15m%' OR m.market_slug ILIKE '%15-minute%' THEN 900
-      WHEN m.market_slug ILIKE '%5m%' OR m.market_slug ILIKE '%5-minute%' THEN 300
+      WHEN COALESCE(ms.end_time, me.end_time, mt.end_time) IS NOT NULL
+        AND COALESCE(ms.start_time, me.start_time, mt.start_time) IS NOT NULL
+        THEN ROUND(EXTRACT(EPOCH FROM (
+          COALESCE(ms.end_time, me.end_time, mt.end_time)
+          - COALESCE(ms.start_time, me.start_time, mt.start_time)
+        )))::int
+      WHEN COALESCE(ms.market_slug, me.market_slug, mt.market_slug, s.market_slug) ILIKE '%15m%'
+        OR COALESCE(ms.market_slug, me.market_slug, mt.market_slug, s.market_slug) ILIKE '%15-minute%'
+        THEN 900
+      WHEN COALESCE(ms.market_slug, me.market_slug, mt.market_slug, s.market_slug) ILIKE '%5m%'
+        OR COALESCE(ms.market_slug, me.market_slug, mt.market_slug, s.market_slug) ILIKE '%5-minute%'
+        THEN 300
       ELSE NULL
     END AS window_secs,
     CASE
-      WHEN m.end_time IS NOT NULL AND t.opened_at IS NOT NULL
-        THEN ROUND(EXTRACT(EPOCH FROM (m.end_time - t.opened_at)))::int
+      WHEN COALESCE(ms.end_time, me.end_time, mt.end_time) IS NOT NULL
+        AND t.opened_at IS NOT NULL
+        THEN ROUND(EXTRACT(EPOCH FROM (COALESCE(ms.end_time, me.end_time, mt.end_time) - t.opened_at)))::int
       ELSE NULL
     END AS entry_time_remaining_secs
   FROM strategy_runtime_event_track_record t
   LEFT JOIN pm_token_settlements s ON s.token_id = t.token_id
-  LEFT JOIN pm_market_metadata m ON m.market_slug = s.market_slug
+  LEFT JOIN pm_market_metadata ms ON ms.market_slug = s.market_slug
+  LEFT JOIN pm_market_metadata me ON me.market_slug = t.event_id
+  LEFT JOIN pm_market_metadata mt ON mt.market_slug = t.trade_key
   WHERE t.runtime_mode IN ({MODE_FILTER})
 )
 SELECT COALESCE(json_agg(row_to_json(e) ORDER BY e.opened_at, e.trade_key), '[]'::json)::text
@@ -341,6 +355,20 @@ def day_from_event(row) -> str | None:
     return parsed.astimezone(timezone(timedelta(hours=8))).date().isoformat()
 
 
+def hour_from_event(row) -> str | None:
+    timestamp = row.get("closed_at") or row.get("last_fill_at") or row.get("opened_at")
+    if not timestamp:
+        return None
+    parsed = parse_timestamp(timestamp)
+    if parsed is None:
+        return str(timestamp)[:13] + ":00"
+    if parsed.tzinfo is None:
+        hour = parsed.replace(minute=0, second=0, microsecond=0)
+    else:
+        hour = parsed.astimezone(timezone(timedelta(hours=8))).replace(minute=0, second=0, microsecond=0)
+    return hour.isoformat()
+
+
 def parse_timestamp(value):
     if not value:
         return None
@@ -527,6 +555,61 @@ def build_daily_by_window(events):
     return sorted(rows, key=lambda row: (row["trading_day_cst"], row["window_secs"] or 0), reverse=True)
 
 
+def build_hourly_rows(events):
+    grouped = defaultdict(list)
+    for event in events:
+        hour = hour_from_event(event)
+        if hour is not None:
+            grouped[hour].append(event)
+
+    cumulative = 0.0
+    peak = 0.0
+    rows = []
+    for hour in sorted(grouped.keys()):
+        hour_events = grouped[hour]
+        closed = [event for event in hour_events if event.get("is_closed")]
+        net_pnl = sum(number(event.get("net_pnl")) for event in closed)
+        cumulative += net_pnl
+        peak = max(peak, cumulative)
+        rows.append(
+            {
+                "trading_hour_cst": hour,
+                "trade_count": len(hour_events),
+                "closed_trade_count": len(closed),
+                "wins": sum(1 for event in closed if number(event.get("net_pnl")) > 0),
+                "losses": sum(1 for event in closed if number(event.get("net_pnl")) <= 0),
+                "net_pnl": rounded(net_pnl),
+                "cumulative_pnl": round(cumulative, 4),
+                "drawdown": round(cumulative - peak, 4),
+            }
+        )
+    return list(reversed(rows))
+
+
+def build_hourly_by_window(events):
+    grouped = defaultdict(list)
+    for event in events:
+        hour = hour_from_event(event)
+        if hour is not None:
+            grouped[(hour, event.get("window_secs"))].append(event)
+    rows = []
+    for (hour, window_secs), window_events in grouped.items():
+        closed = [event for event in window_events if event.get("is_closed")]
+        rows.append(
+            {
+                "trading_hour_cst": hour,
+                "window_secs": window_secs,
+                "window_label": window_label(window_secs),
+                "trade_count": len(window_events),
+                "closed_trade_count": len(closed),
+                "wins": sum(1 for event in closed if number(event.get("net_pnl")) > 0),
+                "losses": sum(1 for event in closed if number(event.get("net_pnl")) <= 0),
+                "net_pnl": rounded(sum(number(event.get("net_pnl")) for event in closed)),
+            }
+        )
+    return sorted(rows, key=lambda row: (row["trading_hour_cst"], row["window_secs"] or 0), reverse=True)
+
+
 def build_symbol_rows(events, include_window=False):
     grouped = defaultdict(list)
     for event in events:
@@ -648,6 +731,8 @@ def build_report_slice(events, daily_rows):
         "by_window": build_window_rows(events),
         "daily": build_daily_rows(daily_rows),
         "daily_by_window": build_daily_by_window(events),
+        "hourly": build_hourly_rows(events),
+        "hourly_by_window": build_hourly_by_window(events),
         "symbols": build_symbol_rows(events),
         "symbols_by_window": build_symbol_rows(events, include_window=True),
         "closed_trades": closed_trades[:250],
@@ -701,6 +786,8 @@ def empty_payload():
         "by_window": [],
         "daily": [],
         "daily_by_window": [],
+        "hourly": [],
+        "hourly_by_window": [],
         "symbols": [],
         "symbols_by_window": [],
         "closed_trades": [],

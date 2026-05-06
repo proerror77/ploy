@@ -99,6 +99,30 @@ pub struct DryRunDailyWindowRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DryRunHourlyRow {
+    pub trading_hour_cst: String,
+    pub trade_count: usize,
+    pub closed_trade_count: usize,
+    pub wins: usize,
+    pub losses: usize,
+    pub net_pnl: f64,
+    pub cumulative_pnl: f64,
+    pub drawdown: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DryRunHourlyWindowRow {
+    pub trading_hour_cst: String,
+    pub window_secs: Option<i64>,
+    pub window_label: String,
+    pub trade_count: usize,
+    pub closed_trade_count: usize,
+    pub wins: usize,
+    pub losses: usize,
+    pub net_pnl: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DryRunSymbolRow {
     pub symbol: String,
     pub trades: usize,
@@ -192,6 +216,10 @@ pub struct DryRunStrategyReport {
     pub by_window: Vec<DryRunWindowRow>,
     pub daily: Vec<DryRunDailyRow>,
     pub daily_by_window: Vec<DryRunDailyWindowRow>,
+    #[serde(default)]
+    pub hourly: Vec<DryRunHourlyRow>,
+    #[serde(default)]
+    pub hourly_by_window: Vec<DryRunHourlyWindowRow>,
     pub symbols: Vec<DryRunSymbolRow>,
     pub symbols_by_window: Vec<DryRunSymbolRow>,
     pub closed_trades: Vec<DryRunClosedTradeRow>,
@@ -210,6 +238,10 @@ pub struct DryRunPerformanceReport {
     pub by_window: Vec<DryRunWindowRow>,
     pub daily: Vec<DryRunDailyRow>,
     pub daily_by_window: Vec<DryRunDailyWindowRow>,
+    #[serde(default)]
+    pub hourly: Vec<DryRunHourlyRow>,
+    #[serde(default)]
+    pub hourly_by_window: Vec<DryRunHourlyWindowRow>,
     pub symbols: Vec<DryRunSymbolRow>,
     pub symbols_by_window: Vec<DryRunSymbolRow>,
     pub closed_trades: Vec<DryRunClosedTradeRow>,
@@ -226,7 +258,7 @@ pub struct DryRunPerformanceReport {
 #[cfg(test)]
 mod tests {
     use super::DryRunPerformanceReport;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     #[test]
     fn dry_run_report_roundtrip_preserves_diagnostics_fields() {
@@ -238,6 +270,26 @@ mod tests {
             "by_window": [],
             "daily": [],
             "daily_by_window": [],
+            "hourly": [{
+                "trading_hour_cst": "2026-04-29T08:00:00+08:00",
+                "trade_count": 2,
+                "closed_trade_count": 1,
+                "wins": 1,
+                "losses": 0,
+                "net_pnl": 1.25,
+                "cumulative_pnl": 1.25,
+                "drawdown": 0.0
+            }],
+            "hourly_by_window": [{
+                "trading_hour_cst": "2026-04-29T08:00:00+08:00",
+                "window_secs": 300,
+                "window_label": "5m",
+                "trade_count": 2,
+                "closed_trade_count": 1,
+                "wins": 1,
+                "losses": 0,
+                "net_pnl": 1.25
+            }],
             "symbols": [],
             "symbols_by_window": [],
             "closed_trades": [],
@@ -254,6 +306,8 @@ mod tests {
                 "by_window": [],
                 "daily": [],
                 "daily_by_window": [],
+                "hourly": [],
+                "hourly_by_window": [],
                 "symbols": [],
                 "symbols_by_window": [],
                 "closed_trades": [],
@@ -303,6 +357,8 @@ mod tests {
             roundtripped["runtime_evidence"]["orders"][0]["intent_id"],
             "intent-1"
         );
+        assert_eq!(roundtripped["hourly"][0]["trade_count"], 2);
+        assert_eq!(roundtripped["hourly_by_window"][0]["window_label"], "5m");
     }
 
     fn summary() -> Value {
