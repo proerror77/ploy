@@ -166,6 +166,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   a single GitHub-hosted run can go from retained snapshot artifact to
   AutoFactor walk-forward, promotion gate, handoff artifact, and config PR
   when `options_json.create_config_pr=true`.
+- [x] Add a GitHub-hosted artifact path for Event ML rolling evidence. When
+  `event-ml-rolling-evidence.yml` receives `source_dataset_run_id`, it now
+  downloads the retained event-root dataset artifact and runs dataset splitting
+  plus the canonical rolling ML workflow on `ubuntu-latest`; `ploy-ci-1`
+  remains only for the fresh DB export branch.
 
 ## Review
 
@@ -263,6 +268,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   same optional config-PR promotion path, controlled through `options_json`.
   This makes the artifact-backed hosted AutoFactor path a single workflow from
   snapshot consumption through ready-handoff config PR creation.
+- 2026-05-06: Extended `event-ml-rolling-evidence.yml` with
+  `source_dataset_run_id` so retained event-root dataset artifacts can be
+  processed on GitHub-hosted runners. This gives the Event ML workflow the same
+  migration shape as AutoFactor: use `ploy-ci-1` only for private DB export,
+  then run artifact-backed coverage/attribution/baseline/walk-forward evidence
+  on `ubuntu-latest`.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

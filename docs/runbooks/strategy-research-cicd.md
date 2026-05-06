@@ -51,7 +51,7 @@ mismatch is understood and tracked as a follow-up issue.
 | Replay/backtest accounting | `.github/workflows/backtest.yml` | Build and run replay/backtest accounting in one job on `ploy-ci-1` |
 | Replay/dry-run parity | `.github/workflows/replay-dryrun-parity.yml` | Compare replay/backtest evidence against a dry-run JSON report |
 | Recorded replay/dry-run parity | `.github/workflows/recorded-replay-parity.yml` | Replay a canonical MarketUpdate recording on `tango-1-1` with the deployed binary, then compare against the matching dry-run report slice |
-| Event ML rolling evidence | `.github/workflows/event-ml-rolling-evidence.yml` | Produce event-root rolling ML datasets and compact reports |
+| Event ML rolling evidence | `.github/workflows/event-ml-rolling-evidence.yml` | Produce event-root rolling ML datasets and compact reports; use `source_dataset_run_id` for the GitHub-hosted artifact path |
 | Market data audit | `.github/workflows/market-data-gap-audit.yml` | Scheduled/manual Tango data freshness and gap gate |
 | Image build | `.github/workflows/build-push-acr.yml` | Build ACK images; push only immutable checked-out SHA tags |
 | ACK deploy | `.github/workflows/deploy-ack.yml` | Deploy immutable SHA image tags through the protected `ack` environment |
@@ -189,6 +189,10 @@ different.
   Use `factor-walk-forward-v2-hosted-artifact.yml` directly, or
   `settlement-probability-prd-gate.yml` with `snapshot_run_id`, when a retained
   full research snapshot artifact already exists.
+- Event ML rolling evidence should also default to GitHub-hosted runners after
+  the source event-root dataset is artifactized. Pass `source_dataset_run_id`
+  to `event-ml-rolling-evidence.yml`; only the fresh DB export branch should
+  touch `ploy-ci-1`.
 - `ploy-ci-1` is now a legacy DB-adjacent fallback for compiling fresh research
   snapshots from Tango PostgreSQL. Do not route AutoFactor mining,
   walk-forward promotion, or dry-run handoff checks to `ploy-ci-1` when a full

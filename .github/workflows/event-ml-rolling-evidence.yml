@@ -35,10 +35,14 @@ on:
         description: "Upload raw event-root Parquet datasets as artifacts"
         required: false
         default: "false"
-      options_json:
-        description: "Advanced options JSON: sampling, entry/tolerance, logistic search grid"
+      source_dataset_run_id:
+        description: "Existing event-ml-rolling-datasets artifact run id; skips ploy-ci-1 export and runs artifact-backed evidence on GitHub-hosted runner"
         required: false
-        default: '{"lob_sample_secs":30,"max_quote_age_secs":30,"entry_secs":60,"tolerance_secs":30,"search_l2":"0,0.001,0.01","search_min_edge":"0,0.02,0.05","search_learning_rate":"0.03,0.05","search_epochs":500}'
+        default: ""
+      options_json:
+        description: "Advanced options JSON: sampling, entry/tolerance, logistic search grid, source_dataset_artifact_name"
+        required: false
+        default: '{"lob_sample_secs":30,"max_quote_age_secs":30,"entry_secs":60,"tolerance_secs":30,"search_l2":"0,0.001,0.01","search_min_edge":"0,0.02,0.05","search_learning_rate":"0.03,0.05","search_epochs":500,"source_dataset_artifact_name":""}'
 
 concurrency:
   group: event-ml-rolling-evidence-${{ github.ref }}
@@ -46,6 +50,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -117,7 +122,8 @@ jobs:
           retention-days: 3
 
   event-ml:
-    name: Generate event ML rolling evidence on ploy-ci-1
+    name: Generate event ML rolling evidence from DB on ploy-ci-1
+    if: ${{ github.event.inputs.source_dataset_run_id == '' }}
     runs-on: [self-hosted, ploy-ci-1]
     needs: build-event-ml-examples
     timeout-minutes: 150
@@ -163,6 +169,7 @@ jobs:
               "search_min_edge": "0,0.02,0.05",
               "search_learning_rate": "0.03,0.05",
               "search_epochs": "500",
+              "source_dataset_artifact_name": "",
           }
           raw = os.environ.get("OPTIONS_JSON", "").strip()
           data = json.loads(raw) if raw else {}
@@ -304,3 +311,193 @@ jobs:
             artifacts/event-ml/source_event_root/
             artifacts/event-ml/rolling_datasets/
           retention-days: 3
+
+  hosted-event-ml-from-artifact:
+    name: Generate event ML rolling evidence from artifact on GitHub-hosted runner
+    if: ${{ github.event.inputs.source_dataset_run_id != '' }}
+    runs-on: ubuntu-latest
+    needs: build-event-ml-examples
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Download event ML binaries
+        uses: actions/download-artifact@v7
+        with:
+          name: event-ml-example-binaries-${{ github.run_id }}
+          path: artifacts/event-ml-bin
+
+      - name: Prepare event ML binaries
+        run: chmod +x artifacts/event-ml-bin/*
+
+      - name: Parse advanced options
+        env:
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          defaults = {
+              "lob_sample_secs": "30",
+              "max_quote_age_secs": "30",
+              "entry_secs": "60",
+              "tolerance_secs": "30",
+              "search_l2": "0,0.001,0.01",
+              "search_min_edge": "0,0.02,0.05",
+              "search_learning_rate": "0.03,0.05",
+              "search_epochs": "500",
+              "source_dataset_artifact_name": "",
+          }
+          raw = os.environ.get("OPTIONS_JSON", "").strip()
+          data = json.loads(raw) if raw else {}
+          if not isinstance(data, dict):
+              raise SystemExit("options_json must be a JSON object")
+          unknown = sorted(set(data) - set(defaults))
+          if unknown:
+              raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+          values = dict(defaults)
+          values.update({key: str(value) for key, value in data.items()})
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              for key, value in values.items():
+                  if "\n" in value:
+                      raise SystemExit(f"options_json value for {key} must be single-line")
+                  handle.write(f"EVENT_ML_{key.upper()}={value}\n")
+          PY
+
+      - name: Download source event-root dataset artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_DATASET_RUN_ID: ${{ github.event.inputs.source_dataset_run_id }}
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/event-ml artifacts/event-ml-source
+          mkdir -p artifacts/event-ml
+
+          artifact_name="${EVENT_ML_SOURCE_DATASET_ARTIFACT_NAME}"
+          if [ -z "${artifact_name}" ]; then
+            artifact_name="event-ml-rolling-datasets-${SOURCE_DATASET_RUN_ID}"
+          fi
+
+          python3 scripts/download_github_artifact.py \
+            --run-id "${SOURCE_DATASET_RUN_ID}" \
+            --name "${artifact_name}" \
+            --output-dir artifacts/event-ml-source
+
+          if [ -d artifacts/event-ml-source/source_event_root ]; then
+            cp -a artifacts/event-ml-source/. artifacts/event-ml/
+          elif [ -d artifacts/event-ml-source/artifacts/event-ml/source_event_root ]; then
+            cp -a artifacts/event-ml-source/artifacts/event-ml/. artifacts/event-ml/
+          else
+            echo "Dataset artifact must contain source_event_root/event_manifest.json" >&2
+            find artifacts/event-ml-source -maxdepth 4 -type f -print >&2
+            exit 2
+          fi
+
+          test -f artifacts/event-ml/source_event_root/event_manifest.json
+
+      - name: Split source dataset into rolling windows
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/event-ml/rolling_datasets
+          mkdir -p artifacts/event-ml/reports
+
+          artifacts/event-ml-bin/event_dataset_rolling_windows \
+            --dataset artifacts/event-ml/source_event_root \
+            --window-events "${{ github.event.inputs.child_window_events }}" \
+            --output-root artifacts/event-ml/rolling_datasets \
+            | tee artifacts/event-ml/reports/rolling_dataset_split.txt
+
+      - name: Run canonical rolling ML workflow
+        if: ${{ github.event.inputs.run_workflow == 'true' }}
+        run: |
+          set -euo pipefail
+
+          DATASETS="$(paste -sd, artifacts/event-ml/rolling_datasets/rolling_datasets.txt)"
+          artifacts/event-ml-bin/event_ml_rolling_workflow \
+            --datasets "${DATASETS}" \
+            --output-root artifacts/event-ml/rolling_workflow \
+            --entry-secs "${EVENT_ML_ENTRY_SECS}" \
+            --tolerance-secs "${EVENT_ML_TOLERANCE_SECS}" \
+            --search-l2 "${EVENT_ML_SEARCH_L2}" \
+            --search-min-edge "${EVENT_ML_SEARCH_MIN_EDGE}" \
+            --search-learning-rate "${EVENT_ML_SEARCH_LEARNING_RATE}" \
+            --search-epochs "${EVENT_ML_SEARCH_EPOCHS}" \
+            | tee artifacts/event-ml/reports/rolling_workflow.txt
+
+      - name: Collect compact reports
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/event-ml artifacts/event-ml-report-bundle
+          find artifacts/event-ml -type f \
+            \( -name '*.json' -o -name '*.md' -o -name '*.txt' \) \
+            ! -path '*/observations_*.parquet' \
+            ! -path '*/event_summaries_*.parquet' \
+            ! -path '*/event_index.parquet' \
+            ! -path '*/split_assignments.parquet' \
+            -print0 > /tmp/event-ml-report-files
+          if [ -s /tmp/event-ml-report-files ]; then
+            tar --null -T /tmp/event-ml-report-files -czf artifacts/event-ml-report-bundle/event-ml-reports.tar.gz
+          else
+            echo "No event ML reports were produced." > artifacts/event-ml-report-bundle/NO_REPORTS.txt
+          fi
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## Event ML rolling evidence"
+            echo ""
+            echo "- Runner: \`ubuntu-latest\`"
+            echo "- Source dataset run: \`${{ github.event.inputs.source_dataset_run_id }}\`"
+            echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
+            echo "- Symbols: ${{ github.event.inputs.symbols }}"
+            echo "- Source windows: artifact-backed"
+            echo "- Child window events: ${{ github.event.inputs.child_window_events }}"
+            echo "- Run workflow: ${{ github.event.inputs.run_workflow }}"
+            echo ""
+
+            if [ -f artifacts/event-ml/source_event_root/event_manifest.json ]; then
+              echo "### Source dataset"
+              echo '```json'
+              jq '.stats' artifacts/event-ml/source_event_root/event_manifest.json || true
+              echo '```'
+            fi
+
+            if [ -f artifacts/event-ml/rolling_datasets/rolling_datasets_report.json ]; then
+              echo "### Rolling dataset split"
+              echo '```json'
+              jq '{exported_windows, skipped_events, windows: [.windows[] | {id, events, events_per_split}]}' artifacts/event-ml/rolling_datasets/rolling_datasets_report.json || true
+              echo '```'
+            fi
+
+            if [ -f artifacts/event-ml/rolling_workflow/rolling_workflow_report.json ]; then
+              echo "### Rolling workflow"
+              echo '```json'
+              jq '{dataset_count, min_windows, final_walk_forward_report, windows: [.windows[] | {id, status, prior_run_dirs: (.prior_run_dirs | length)}]}' artifacts/event-ml/rolling_workflow/rolling_workflow_report.json || true
+              echo '```'
+            fi
+
+            FINAL_WALK_FORWARD_REPORT="$(find artifacts/event-ml/rolling_workflow -path '*/walk_forward/walk_forward_report.json' 2>/dev/null | sort | tail -1 || true)"
+            if [ -n "${FINAL_WALK_FORWARD_REPORT}" ] && [ -f "${FINAL_WALK_FORWARD_REPORT}" ]; then
+              echo "### Final walk-forward readiness"
+              echo '```json'
+              jq '.readiness' "${FINAL_WALK_FORWARD_REPORT}" || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload compact report bundle
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: event-ml-rolling-reports-${{ github.run_id }}
+          path: artifacts/event-ml-report-bundle/
+          retention-days: 14
