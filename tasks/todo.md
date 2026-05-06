@@ -134,6 +134,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   AutoFactor promotion workflow. The `create_handoff_issue` input defaults to
   `false`; when enabled, it creates an issue only if the handoff JSON is
   `status=ready`.
+- [x] Add a GitHub-hosted artifact-only Factor Walk-Forward V2 workflow so
+  AutoFactor mining evidence can run from a retained full research snapshot
+  without waiting for `ploy-ci-1`. This path is intentionally snapshot-only:
+  it does not access the DB, does not compile a fresh snapshot, and fails fast
+  when the artifact contains only provenance instead of the full snapshot
+  payload.
 
 ## Review
 
@@ -190,6 +196,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   default; when `create_handoff_issue=true`, the workflow reads
   `autofactor-strategy-handoff.json` and creates a dry-run handoff issue only
   for `status=ready`, skipping blocked reports.
+- 2026-05-06: Added `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`
+  as the GitHub-hosted replacement path for artifact-backed AutoFactor
+  validation. The workflow consumes a full research snapshot artifact, validates
+  the manifest plus full payload files, builds only `factor_walk_forward_v2`,
+  runs the same snapshot-backed report and AutoFactor promotion evaluator, and
+  preserves the ready-only dry-run handoff issue guard.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable
