@@ -94,6 +94,13 @@
   - After boot, use Cloud Assistant if needed to run `systemctl enable --now actions.runner.proerror77-ploy.ploy-ci-1.service`.
   - Confirm queued workflow runs move to `in_progress` before assuming ploy-ci work has actually started.
 
+- Pattern: AutoFactor / settlement-probability PRD downstream evidence does not need a live self-hosted runner once a full research snapshot artifact exists.
+- Rule: Prefer GitHub-hosted `ubuntu-latest` artifact workflows for AutoFactor mining, promotion, and dry-run handoff gates. Treat `ploy-ci-1` as a legacy DB-adjacent fallback only for fresh snapshot/export work that still requires Tango private-network database access.
+- Migration guardrail:
+  - Use `factor-walk-forward-v2-hosted-artifact.yml` or `settlement-probability-prd-gate.yml` with `snapshot_run_id` before dispatching legacy `factor-walk-forward-v2.yml`.
+  - Do not move a DB/private-endpoint workflow to GitHub-hosted runners by changing only `runs-on`; first replace the data source with a portable artifact or a hosted-safe export path.
+  - When a full snapshot artifact exists, do not block strategy promotion on `ploy-ci-1` availability.
+
 ## 2026-03-06
 
 - Pattern: Managed strategy bootstrap can silently drift from the checked-in live strategy template and override production sizing without touching host config files.

@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -14,7 +14,8 @@ use super::common::event::EventWindow;
 use super::common::quote::QuoteState;
 use super::common::settlement;
 use super::three_layer_model::{
-    self, BookConfirmationInputs, EntryScoreInputs, ThreeLayerModelConfig,
+    self, AutoSettlementFactorInputs, BookConfirmationInputs, EntryScoreInputs,
+    ThreeLayerModelConfig,
 };
 use super::three_layer_profile::ThreeLayerProfile;
 use crate::strategies::directional::DirectionalConfig;
@@ -50,6 +51,7 @@ pub struct ThreeLayerConfig {
     pub min_entry_price: f64,
     pub max_entry_price: f64,
     pub min_entry_score: f64,
+    pub autofactor_runtime_score: Option<String>,
 }
 
 impl From<DirectionalConfig> for ThreeLayerConfig {
@@ -81,6 +83,7 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             min_entry_price: c.min_entry_price,
             max_entry_price: c.max_entry_price,
             min_entry_score: c.three_layer_min_entry_score,
+            autofactor_runtime_score: c.three_layer_autofactor_runtime_score,
         }
     }
 }
@@ -450,6 +453,17 @@ fn spread_adjusted_external_move_score(side_external_move_30s: f64, side_spread:
     three_layer_model::spread_adjusted_external_move_score(side_external_move_30s, side_spread)
 }
 
+fn autofactor_formula_entry_score(
+    runtime_score: &str,
+    inputs: AutoSettlementFactorInputs,
+    min_edge: f64,
+) -> Option<(f64, f64)> {
+    let raw = three_layer_model::auto_settlement_formula_score(runtime_score, inputs)?;
+    let normalized =
+        three_layer_model::threshold_score(raw, min_edge.max(0.0), 0.08, false).clamp(-0.50, 1.0);
+    Some((raw, normalized))
+}
+
 // ── ThreeLayerStrategy ─────────────────────────────────────────────
 
 pub struct ThreeLayerStrategy {
@@ -798,22 +812,60 @@ impl ThreeLayerStrategy {
                 continue;
             }
 
+            let entry_capacity_ratio = self
+                .quote_depth
+                .get(token_id)
+                .and_then(|depth| depth.ask_size)
+                .and_then(|ask_size| {
+                    let ask_size_f = ask_size.to_f64()?;
+                    let stake_usd = self.config.stake_usd.to_f64()?;
+                    if entry_price_f > 0.0 && stake_usd.is_finite() {
+                        let entry_shares = stake_usd / entry_price_f;
+                        (entry_shares > 0.0).then_some(ask_size_f / entry_shares)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(f64::NAN);
             let pm_momentum_score = self.pm_momentum_score(token_id, ask, now);
-            let total_score = evaluate_entry_score(
-                &self.config,
-                EntryScoreInputs {
-                    direction_score,
-                    distance_over_sigma,
-                    direction_sign,
-                    edge,
-                    edge_score,
-                    confirmation: confirmation_score,
-                    repricing_score,
-                    drift_30s,
-                    pm_momentum_score,
-                    liquidity_score: 1.0,
-                },
-            );
+            let (autofactor_raw_score, total_score) =
+                if let Some(runtime_score) = self.config.autofactor_runtime_score.as_deref() {
+                    let inputs = AutoSettlementFactorInputs {
+                        settlement_edge: edge,
+                        distance_over_sigma,
+                        direction_sign,
+                        entry_capacity_ratio,
+                        side_spread,
+                        external_pressure: confirmation_score,
+                        iv_change_1m: 0.0,
+                    };
+                    let Some((raw, normalized)) =
+                        autofactor_formula_entry_score(runtime_score, inputs, self.config.min_edge)
+                    else {
+                        self.bump("skip_autofactor_score_unavailable");
+                        continue;
+                    };
+                    (Some(raw), normalized)
+                } else {
+                    (
+                        None,
+                        evaluate_entry_score(
+                            &self.config,
+                            EntryScoreInputs {
+                                direction_score,
+                                distance_over_sigma,
+                                direction_sign,
+                                edge,
+                                edge_score,
+                                confirmation: confirmation_score,
+                                repricing_score,
+                                drift_30s,
+                                pm_momentum_score,
+                                liquidity_score: 1.0,
+                            },
+                        ),
+                    )
+                };
 
             if total_score < self.config.min_entry_score {
                 self.bump("skip_entry_score");
@@ -827,6 +879,8 @@ impl ThreeLayerStrategy {
                     confirmation_score = format!("{:.3}", confirmation_score),
                     repricing_score = format!("{:.3}", repricing_score),
                     pm_momentum_score = format!("{:.3}", pm_momentum_score),
+                    autofactor_runtime_score = self.config.autofactor_runtime_score.as_deref().unwrap_or(""),
+                    autofactor_raw_score = autofactor_raw_score.map(|score| format!("{score:.4}")).unwrap_or_default(),
                     min_entry_score = self.config.min_entry_score,
                     profile = %self.config.profile,
                     regime = regime.as_str(),
@@ -918,6 +972,8 @@ impl ThreeLayerStrategy {
                 confirmation_score = format!("{:.3}", confirmation_score),
                 repricing_score = format!("{:.3}", repricing_score),
                 pm_momentum_score = format!("{:.3}", pm_momentum_score),
+                autofactor_runtime_score = self.config.autofactor_runtime_score.as_deref().unwrap_or(""),
+                autofactor_raw_score = autofactor_raw_score.map(|score| format!("{score:.4}")).unwrap_or_default(),
                 p_hat = effective_p,
                 edge,
                 entry_price = %entry_price,
@@ -1574,6 +1630,7 @@ mod tests {
             min_entry_price: 0.15,
             max_entry_price: 0.85,
             min_entry_score: 0.30,
+            autofactor_runtime_score: None,
         }
     }
 
@@ -2450,6 +2507,32 @@ mod tests {
 
         assert!(strong_edge > weak_edge);
         assert!(strong_edge > config.min_entry_score);
+    }
+
+    #[test]
+    fn autofactor_settlement_formula_can_override_entry_score() {
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::SettlementProbability;
+        config.min_edge = 0.02;
+
+        let inputs = AutoSettlementFactorInputs {
+            settlement_edge: 0.06,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            entry_capacity_ratio: 3.0,
+            side_spread: 0.03,
+            external_pressure: 0.0,
+            iv_change_1m: 0.0,
+        };
+        let (raw, score) = autofactor_formula_entry_score(
+            "autofactor_formula:auto_settlement_conservative_settlement_edge",
+            inputs,
+            config.min_edge,
+        )
+        .expect("settlement formula score");
+
+        assert!((raw - 0.06).abs() < 1e-9);
+        assert!(score > config.min_entry_score);
     }
 
     #[test]
