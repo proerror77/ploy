@@ -49,6 +49,17 @@ pub struct EntryScoreInputs {
     pub liquidity_score: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AutoSettlementFactorInputs {
+    pub settlement_edge: f64,
+    pub distance_over_sigma: f64,
+    pub direction_sign: f64,
+    pub entry_capacity_ratio: f64,
+    pub side_spread: f64,
+    pub external_pressure: f64,
+    pub iv_change_1m: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DirectionScore {
     pub direction_sign: f64,
@@ -83,17 +94,89 @@ pub fn spread_adjusted_external_move_score(side_external_move_30s: f64, side_spr
     side_external_move_30s / (side_spread + 0.01)
 }
 
+pub fn auto_settlement_near_strike_score(distance_over_sigma: f64, direction_sign: f64) -> f64 {
+    if !distance_over_sigma.is_finite() || !direction_sign.is_finite() {
+        return f64::NAN;
+    }
+    let side_distance_over_sigma = distance_over_sigma * direction_sign;
+    (1.0 - side_distance_over_sigma.abs()).clamp(0.0, 1.0)
+}
+
+pub fn auto_settlement_entry_capacity_score(entry_capacity_ratio: f64) -> f64 {
+    if entry_capacity_ratio.is_finite() {
+        (entry_capacity_ratio / 3.0).clamp(0.0, 1.0)
+    } else {
+        f64::NAN
+    }
+}
+
+pub fn auto_settlement_formula_score(
+    runtime_score: &str,
+    inputs: AutoSettlementFactorInputs,
+) -> Option<f64> {
+    let name = runtime_score
+        .strip_prefix("autofactor_formula:")
+        .unwrap_or(runtime_score);
+    let is_full_depth = name.starts_with("auto_settlement_full_depth_settlement_edge");
+    let is_conservative = name.starts_with("auto_settlement_conservative_settlement_edge");
+    if !is_full_depth && !is_conservative {
+        return None;
+    }
+
+    if !inputs.settlement_edge.is_finite() {
+        return None;
+    }
+    let mut score = inputs.settlement_edge;
+    let suffix = if is_full_depth {
+        name.strip_prefix("auto_settlement_full_depth_settlement_edge")
+    } else {
+        name.strip_prefix("auto_settlement_conservative_settlement_edge")
+    }?;
+
+    match suffix {
+        "" => {}
+        "_x_near_strike" => {
+            score *=
+                auto_settlement_near_strike_score(inputs.distance_over_sigma, inputs.direction_sign)
+        }
+        "_x_capacity" => score *= auto_settlement_entry_capacity_score(inputs.entry_capacity_ratio),
+        "_x_near_strike_x_capacity" => {
+            score *= auto_settlement_near_strike_score(
+                inputs.distance_over_sigma,
+                inputs.direction_sign,
+            );
+            score *= auto_settlement_entry_capacity_score(inputs.entry_capacity_ratio);
+        }
+        "_spread_adjusted" => {
+            if !inputs.side_spread.is_finite() || inputs.side_spread < 0.0 {
+                return None;
+            }
+            score /= inputs.side_spread + 0.01;
+        }
+        "_x_external_pressure" => {
+            if !inputs.external_pressure.is_finite() {
+                return None;
+            }
+            score *= inputs.external_pressure;
+        }
+        "_x_iv_change" => {
+            if !inputs.iv_change_1m.is_finite() {
+                return None;
+            }
+            score *= inputs.iv_change_1m;
+        }
+        _ => return None,
+    }
+    score.is_finite().then_some(score)
+}
+
 /// Normal CDF approximation (Abramowitz & Stegun).
 pub fn norm_cdf(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.2316419 * x.abs());
     let d = 0.3989422804014327 * (-x * x / 2.0).exp();
     let p =
         d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-    if x >= 0.0 {
-        1.0 - p
-    } else {
-        p
-    }
+    if x >= 0.0 { 1.0 - p } else { p }
 }
 
 pub fn calibrate_direction_probability(
@@ -160,11 +243,7 @@ pub fn reward_risk_ratio(entry_price: f64) -> f64 {
     let fee = crypto_fee_cost(entry_price);
     let reward = 1.0 - entry_price - fee;
     let risk = entry_price + fee;
-    if risk <= 0.0 {
-        f64::NAN
-    } else {
-        reward / risk
-    }
+    if risk <= 0.0 { f64::NAN } else { reward / risk }
 }
 
 pub fn evaluate_direction_score(

@@ -149,6 +149,15 @@ evidence comes from Polymarket full CLOB depth, not top book.
   the legacy `ploy-ci-1` snapshot build and dispatches the hosted
   `factor-walk-forward-v2-hosted-artifact.yml` path for AutoFactor mining and
   promotion.
+- [x] Wire the first promoted AutoFactor settlement formula into the dry-run
+  runtime config and shared three-layer scorer. The BTC/ETH settlement
+  probability dry-run config now points at
+  `autofactor_formula:auto_settlement_conservative_settlement_edge`, matching
+  the top ready handoff strategy from issue #359.
+- [x] Record the runner migration rule: AutoFactor mining, promotion, and
+  dry-run handoff gates should use GitHub-hosted artifact workflows when a
+  full research snapshot artifact exists; keep `ploy-ci-1` only as the legacy
+  DB-adjacent fallback until fresh snapshot/export work is artifactized.
 
 ## Review
 
@@ -227,6 +236,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `run_id:artifact_name`, so recorded replay parity artifacts with names like
   `recorded-replay-parity-<run_id>` can still be consumed without adding an
   eleventh GitHub workflow input.
+- 2026-05-06: Began issue #359 implementation by adding runtime support for
+  settlement-native `autofactor_formula:auto_settlement_*` scores in the shared
+  three-layer model. The dry-run config now uses the top ready handoff score,
+  while full-depth/conservative execution gating remains enforced by the
+  existing fixed-stake quote-size and execution settings.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

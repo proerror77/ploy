@@ -5,8 +5,8 @@
 
 use chrono::{DateTime, Utc};
 use ploy_market_contracts::{InstrumentKind, PredictionFamily, VenueKind};
-use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use serde::Deserialize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -760,6 +760,21 @@ venue = "sportsbook"
                 "{file} must not optimize against spot-fallback settlement"
             );
         }
+    }
+
+    #[test]
+    fn settlement_probability_config_carries_autofactor_handoff_score() {
+        let path = strategy_config_dir()
+            .join("02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml");
+        let config = FullConfig::from_file(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            config
+                .strategy
+                .three_layer_autofactor_runtime_score
+                .as_deref(),
+            Some("autofactor_formula:auto_settlement_conservative_settlement_edge")
+        );
     }
 
     fn strategy_config_dir() -> PathBuf {

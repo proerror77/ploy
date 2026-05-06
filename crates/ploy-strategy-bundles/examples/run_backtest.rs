@@ -102,8 +102,8 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 ts: window_start + Duration::seconds(5),
                 bid_size: None,
                 ask_size: None,
-            bid_levels: Vec::new(),
-            ask_levels: Vec::new(),
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
             });
             updates.push(MarketUpdate::Quote {
                 token_id: Arc::clone(&dn_token),
@@ -112,8 +112,8 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 ts: window_start + Duration::seconds(5),
                 bid_size: None,
                 ask_size: None,
-            bid_levels: Vec::new(),
-            ask_levels: Vec::new(),
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
             });
 
             // Spot ticks showing the drift
@@ -149,8 +149,8 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 ts: window_start + Duration::seconds(55),
                 bid_size: None,
                 ask_size: None,
-            bid_levels: Vec::new(),
-            ask_levels: Vec::new(),
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
             });
             updates.push(MarketUpdate::Quote {
                 token_id: dn_token,
@@ -159,8 +159,8 @@ fn generate_synthetic_data(symbols: &[&str], duration_mins: u64) -> Vec<MarketUp
                 ts: window_start + Duration::seconds(55),
                 bid_size: None,
                 ask_size: None,
-            bid_levels: Vec::new(),
-            ask_levels: Vec::new(),
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
             });
 
             // Spot at window midpoint (entry zone: 60-300s remaining)
@@ -358,6 +358,7 @@ fn main() {
                     three_layer_stop_distance_pct: 0.020,
                     three_layer_max_pm_lag_secs: 15,
                     three_layer_min_entry_score: 0.30,
+                    three_layer_autofactor_runtime_score: None,
                 },
                 SimulatedExecutorConfig {
                     use_spread: true,

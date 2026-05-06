@@ -41,7 +41,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use optimizer::prelude::*;
 use ploy_feed_loaders::{
-    load_from_database_with_options, HistoricalLoadOptions as DbHistoricalLoadOptions,
+    HistoricalLoadOptions as DbHistoricalLoadOptions, load_from_database_with_options,
 };
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
@@ -1266,6 +1266,7 @@ fn make_directional_config(
         three_layer_stop_distance_pct: 0.020,
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
+        three_layer_autofactor_runtime_score: None,
     }
 }
 
@@ -1337,6 +1338,7 @@ fn make_reversal_config(symbols: &[String], params: &ReversalSearchParams) -> Di
         three_layer_stop_distance_pct: 0.020,
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
+        three_layer_autofactor_runtime_score: None,
     }
 }
 

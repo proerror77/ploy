@@ -13,8 +13,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -209,6 +209,10 @@ pub struct DirectionalConfig {
     /// Scoring model: minimum total score to enter (0.0-1.0).
     #[serde(default = "default_tl_min_entry_score")]
     pub three_layer_min_entry_score: f64,
+
+    /// Optional AutoFactor formula score promoted from the research handoff.
+    #[serde(default)]
+    pub three_layer_autofactor_runtime_score: Option<String>,
 
     // Timing
     #[serde(default = "default_min_time")]
@@ -1832,6 +1836,7 @@ mod tests {
             three_layer_stop_distance_pct: 0.020,
             three_layer_max_pm_lag_secs: 15,
             three_layer_min_entry_score: 0.30,
+            three_layer_autofactor_runtime_score: None,
             min_time_remaining_secs: 60,
             max_time_remaining_secs: 300,
             cooldown_secs: 0,
