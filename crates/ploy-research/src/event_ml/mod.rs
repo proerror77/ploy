@@ -324,7 +324,7 @@ fn canonical_phases() -> Vec<WorkflowPhase> {
             "Fixed supervised baseline",
             "Establish a train-only normalized logistic baseline with executable entry accounting.",
             &["feature whitelist", "event-held-out splits"],
-            &["baseline_metrics.json"],
+            &["baseline_metrics.json", "embedded model contract"],
             "Stop if the fixed baseline cannot report split metrics and simple PnL.",
         ),
         phase(

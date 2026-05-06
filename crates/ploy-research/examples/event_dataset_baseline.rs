@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use ploy_research::DatasetBuildManifest;
 use polars::io::parquet::read::ParquetReader;
 use polars::prelude::*;
@@ -36,6 +36,9 @@ const DEFAULT_FEATURES: &[&str] = &[
     "obi_10",
     "pm_lag_secs",
 ];
+const BASELINE_MODEL_ARTIFACT_KIND: &str = "event_ml_logistic_baseline_model";
+const BASELINE_MODEL_ARTIFACT_VERSION: u32 = 1;
+const BASELINE_TARGET_LABEL: &str = "settlement_up";
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -109,8 +112,35 @@ struct BaselineArtifact<'a> {
     learning_rate: f64,
     l2: f64,
     features: &'a [String],
+    model: BaselineModelArtifact<'a>,
     metrics: Vec<MetricArtifact>,
     top_weights: Vec<ModelWeight<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct BaselineModelArtifact<'a> {
+    kind: &'static str,
+    version: u32,
+    family: &'static str,
+    target_label: &'static str,
+    feature_schema: &'a [String],
+    intercept: f64,
+    weights: Vec<ModelWeight<'a>>,
+    standardizer: StandardizerArtifact<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct StandardizerArtifact<'a> {
+    method: &'static str,
+    fit_split: &'static str,
+    features: Vec<FeatureStandardizer<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct FeatureStandardizer<'a> {
+    feature: &'a str,
+    mean: f64,
+    std: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -813,6 +843,7 @@ fn write_artifact(
         learning_rate: config.learning_rate,
         l2: config.l2,
         features: &config.features,
+        model: baseline_model_artifact(&config.features, model),
         metrics: metrics.into_iter().map(metric_artifact).collect(),
         top_weights: top_weights(&config.features, model, 12),
     };
@@ -821,6 +852,42 @@ fn write_artifact(
         .with_context(|| format!("write {}", path.display()))?;
     eprintln!("artifact_baseline_metrics={}", path.display());
     Ok(())
+}
+
+fn baseline_model_artifact<'a>(
+    features: &'a [String],
+    model: &LogisticModel,
+) -> BaselineModelArtifact<'a> {
+    BaselineModelArtifact {
+        kind: BASELINE_MODEL_ARTIFACT_KIND,
+        version: BASELINE_MODEL_ARTIFACT_VERSION,
+        family: "logistic_regression",
+        target_label: BASELINE_TARGET_LABEL,
+        feature_schema: features,
+        intercept: model.intercept,
+        weights: features
+            .iter()
+            .zip(&model.weights)
+            .map(|(feature, weight)| ModelWeight {
+                feature,
+                weight: *weight,
+            })
+            .collect(),
+        standardizer: StandardizerArtifact {
+            method: "zscore",
+            fit_split: "train",
+            features: features
+                .iter()
+                .zip(&model.standardizer.means)
+                .zip(&model.standardizer.stds)
+                .map(|((feature, mean), std)| FeatureStandardizer {
+                    feature,
+                    mean: *mean,
+                    std: *std,
+                })
+                .collect(),
+        },
+    }
 }
 
 fn metric_artifact(metric: &Metrics) -> MetricArtifact {
@@ -909,6 +976,38 @@ mod tests {
         assert!(metrics.accuracy > 0.95);
         assert!(metrics.auc > 0.95);
         assert!(metrics.pnl > 0.0);
+    }
+
+    #[test]
+    fn baseline_artifact_contains_full_runtime_model_contract() {
+        let features = vec!["distance".to_string(), "edge".to_string()];
+        let model = LogisticModel {
+            intercept: 0.25,
+            weights: vec![0.5, -0.75],
+            standardizer: Standardizer {
+                means: vec![1.0, 2.0],
+                stds: vec![3.0, 4.0],
+            },
+        };
+
+        let artifact = baseline_model_artifact(&features, &model);
+
+        assert_eq!(artifact.kind, BASELINE_MODEL_ARTIFACT_KIND);
+        assert_eq!(artifact.version, BASELINE_MODEL_ARTIFACT_VERSION);
+        assert_eq!(artifact.family, "logistic_regression");
+        assert_eq!(artifact.target_label, BASELINE_TARGET_LABEL);
+        assert_eq!(artifact.feature_schema, &features);
+        assert_eq!(artifact.intercept, 0.25);
+        assert_eq!(artifact.weights.len(), 2);
+        assert_eq!(artifact.weights[0].feature, "distance");
+        assert_eq!(artifact.weights[0].weight, 0.5);
+        assert_eq!(artifact.weights[1].feature, "edge");
+        assert_eq!(artifact.weights[1].weight, -0.75);
+        assert_eq!(artifact.standardizer.method, "zscore");
+        assert_eq!(artifact.standardizer.fit_split, "train");
+        assert_eq!(artifact.standardizer.features[0].feature, "distance");
+        assert_eq!(artifact.standardizer.features[0].mean, 1.0);
+        assert_eq!(artifact.standardizer.features[0].std, 3.0);
     }
 
     #[test]
