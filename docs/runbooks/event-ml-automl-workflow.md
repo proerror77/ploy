@@ -100,7 +100,8 @@ The runner executes:
 5. `event_ml_walk_forward`
 
 It stops on the first failed phase. The attribution phase writes
-`factor_attributions.json`, `feature_whitelist.txt`, and
+`factor_attributions.json`, `event_ml_factor_registry.json`,
+`event_ml_factor_registry.md`, `feature_whitelist.txt`, and
 `feature_whitelist.md`; if the user did not pass `--features`, the baseline
 phase consumes that whitelist automatically. The runner also writes
 `workflow_report.json` and `workflow_report.md` into the run directory.
@@ -556,6 +557,10 @@ The current executable artifact path is:
 - `feature_whitelist.txt`: newline-delimited baseline feature schema
 - `feature_whitelist.md`: reviewable feature governance summary
 - `factor_attributions.json`: full train/validation/test attribution table
+- `event_ml_factor_registry.json`: durable machine-readable registry of
+  AutoML-ranked factors, train-derived direction, target label, status, and
+  blockers
+- `event_ml_factor_registry.md`: reviewable registry summary
 
 Stop gate:
 

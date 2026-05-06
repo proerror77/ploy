@@ -1,13 +1,13 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use ploy_research::{
-    AutomlFactorAttribution, DatasetBuildManifest, FactorRegistry, Regime,
-    register_automl_attributions,
+    register_automl_attributions, AutomlFactorAttribution, DatasetBuildManifest, FactorRegistry,
+    Regime,
 };
 use polars::io::parquet::read::ParquetReader;
 use polars::prelude::*;
@@ -40,6 +40,9 @@ const DEFAULT_FEATURES: &[&str] = &[
     "obi_10",
     "pm_lag_secs",
 ];
+const ATTRIBUTION_TARGET_LABEL: &str = "settlement_up";
+const FACTOR_REGISTRY_ARTIFACT_KIND: &str = "event_ml_factor_registry";
+const FACTOR_REGISTRY_ARTIFACT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -114,6 +117,42 @@ struct AttributionRow<'a> {
     test_corr: Option<f64>,
 }
 
+#[derive(Debug, Serialize)]
+struct EventMlFactorRegistryArtifact {
+    kind: &'static str,
+    version: u32,
+    dataset: String,
+    entry_secs: i64,
+    tolerance_secs: i64,
+    regime: String,
+    target_label: &'static str,
+    selected_events: Vec<SplitCount>,
+    whitelist_features: Vec<String>,
+    factors: Vec<EventMlFactorRegistryRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct EventMlFactorRegistryRow {
+    factor_name: String,
+    source_feature: String,
+    target_label: String,
+    regime: String,
+    direction: i8,
+    train_derived_direction: i8,
+    registry_score: Option<f64>,
+    importance: Option<f64>,
+    stability: Option<f64>,
+    train_auc_lift: Option<f64>,
+    val_auc_lift: Option<f64>,
+    test_auc_lift: Option<f64>,
+    train_corr: Option<f64>,
+    val_corr: Option<f64>,
+    test_corr: Option<f64>,
+    whitelist_included: bool,
+    status: &'static str,
+    blockers: Vec<&'static str>,
+}
+
 fn main() -> Result<()> {
     let config = parse_config()?;
     let manifest = read_manifest(&config.dataset_root)?;
@@ -163,7 +202,12 @@ fn main() -> Result<()> {
             stability: item.stability,
         })
         .collect::<Vec<_>>();
-    register_automl_attributions(&mut registry, regime, "settlement_up", &registry_items);
+    register_automl_attributions(
+        &mut registry,
+        regime,
+        ATTRIBUTION_TARGET_LABEL,
+        &registry_items,
+    );
 
     print_report(
         &manifest,
@@ -179,6 +223,7 @@ fn main() -> Result<()> {
             &config,
             [&train, &val, &test],
             &attributions,
+            &registry,
             regime,
         )?;
     }
@@ -445,7 +490,11 @@ fn signed_auc_lift(split: &SplitDataset, feature_idx: usize) -> f64 {
         .map(|sample| (sample.x[feature_idx], sample.y))
         .collect::<Vec<_>>();
     let auc = auc_pairwise(&scored);
-    if auc.is_finite() { auc - 0.5 } else { f64::NAN }
+    if auc.is_finite() {
+        auc - 0.5
+    } else {
+        f64::NAN
+    }
 }
 
 fn stability_score(train: f64, val: f64, test: f64) -> f64 {
@@ -606,6 +655,7 @@ fn write_artifacts(
     config: &Config,
     splits: [&SplitDataset; 3],
     attributions: &[FactorAttribution],
+    registry: &FactorRegistry,
     regime: Regime,
 ) -> Result<()> {
     fs::create_dir_all(output_dir)
@@ -636,6 +686,14 @@ fn write_artifacts(
         File::create(&json_path).with_context(|| format!("create {}", json_path.display()))?;
     serde_json::to_writer_pretty(json_file, &artifact)
         .with_context(|| format!("write {}", json_path.display()))?;
+
+    let registry_artifact =
+        build_factor_registry_artifact(config, splits, attributions, registry, regime, &whitelist);
+    let registry_json_path = output_dir.join("event_ml_factor_registry.json");
+    let registry_json_file = File::create(&registry_json_path)
+        .with_context(|| format!("create {}", registry_json_path.display()))?;
+    serde_json::to_writer_pretty(registry_json_file, &registry_artifact)
+        .with_context(|| format!("write {}", registry_json_path.display()))?;
 
     let whitelist_path = output_dir.join("feature_whitelist.txt");
     let mut whitelist_file = File::create(&whitelist_path)
@@ -689,14 +747,140 @@ fn write_artifacts(
         )?;
     }
 
+    let registry_markdown_path = output_dir.join("event_ml_factor_registry.md");
+    let mut registry_markdown_file = File::create(&registry_markdown_path)
+        .with_context(|| format!("create {}", registry_markdown_path.display()))?;
+    writeln!(registry_markdown_file, "# Event ML Factor Registry")?;
+    writeln!(registry_markdown_file)?;
+    writeln!(
+        registry_markdown_file,
+        "- dataset: `{}`",
+        config.dataset_root.display()
+    )?;
+    writeln!(
+        registry_markdown_file,
+        "- target_label: `{}`",
+        ATTRIBUTION_TARGET_LABEL
+    )?;
+    writeln!(registry_markdown_file, "- regime: `{:?}`", regime)?;
+    writeln!(registry_markdown_file)?;
+    writeln!(
+        registry_markdown_file,
+        "| factor | source_feature | dir | score | importance | stability | status | blockers |"
+    )?;
+    writeln!(
+        registry_markdown_file,
+        "| --- | --- | ---: | ---: | ---: | ---: | --- | --- |"
+    )?;
+    for row in &registry_artifact.factors {
+        writeln!(
+            registry_markdown_file,
+            "| `{}` | `{}` | {} | {} | {} | {} | `{}` | {} |",
+            row.factor_name,
+            row.source_feature,
+            if row.direction >= 0 { "+" } else { "-" },
+            fmt_optional(row.registry_score),
+            fmt_optional(row.importance),
+            fmt_optional(row.stability),
+            row.status,
+            if row.blockers.is_empty() {
+                "-".to_string()
+            } else {
+                row.blockers.join(", ")
+            }
+        )?;
+    }
+
     eprintln!(
         "artifacts_dir={} whitelist_features={}",
         output_dir.display(),
         whitelist.len()
     );
     eprintln!("artifact_factor_attributions={}", json_path.display());
+    eprintln!(
+        "artifact_event_ml_factor_registry={}",
+        registry_json_path.display()
+    );
     eprintln!("artifact_feature_whitelist={}", whitelist_path.display());
     Ok(())
+}
+
+fn build_factor_registry_artifact(
+    config: &Config,
+    splits: [&SplitDataset; 3],
+    attributions: &[FactorAttribution],
+    registry: &FactorRegistry,
+    regime: Regime,
+    whitelist: &[&FactorAttribution],
+) -> EventMlFactorRegistryArtifact {
+    let attribution_by_feature = attributions
+        .iter()
+        .map(|item| (item.feature.as_str(), item))
+        .collect::<BTreeMap<_, _>>();
+    let whitelist_features = whitelist
+        .iter()
+        .map(|item| item.feature.clone())
+        .collect::<BTreeSet<_>>();
+    let factors = registry
+        .all()
+        .iter()
+        .filter(|meta| meta.regime == regime && meta.label == ATTRIBUTION_TARGET_LABEL)
+        .map(|meta| {
+            let source_feature = meta
+                .name
+                .strip_prefix("automl:")
+                .unwrap_or(meta.name.as_str());
+            let attribution = attribution_by_feature.get(source_feature).copied();
+            let whitelist_included = whitelist_features.contains(source_feature);
+            EventMlFactorRegistryRow {
+                factor_name: meta.name.clone(),
+                source_feature: source_feature.to_string(),
+                target_label: meta.label.clone(),
+                regime: format!("{:?}", meta.regime),
+                direction: meta.direction,
+                train_derived_direction: meta.direction,
+                registry_score: finite(meta.ic),
+                importance: attribution.and_then(|item| finite(item.importance)),
+                stability: attribution.and_then(|item| finite(item.stability)),
+                train_auc_lift: attribution.and_then(|item| finite(item.train_auc_lift)),
+                val_auc_lift: attribution.and_then(|item| finite(item.val_auc_lift)),
+                test_auc_lift: attribution.and_then(|item| finite(item.test_auc_lift)),
+                train_corr: attribution.and_then(|item| finite(item.train_corr)),
+                val_corr: attribution.and_then(|item| finite(item.val_corr)),
+                test_corr: attribution.and_then(|item| finite(item.test_corr)),
+                whitelist_included,
+                status: if whitelist_included {
+                    "governed_feature"
+                } else {
+                    "report_only"
+                },
+                blockers: if whitelist_included {
+                    Vec::new()
+                } else {
+                    vec!["not_in_governed_whitelist"]
+                },
+            }
+        })
+        .collect();
+
+    EventMlFactorRegistryArtifact {
+        kind: FACTOR_REGISTRY_ARTIFACT_KIND,
+        version: FACTOR_REGISTRY_ARTIFACT_VERSION,
+        dataset: config.dataset_root.display().to_string(),
+        entry_secs: config.entry_secs,
+        tolerance_secs: config.tolerance_secs,
+        regime: format!("{regime:?}"),
+        target_label: ATTRIBUTION_TARGET_LABEL,
+        selected_events: splits
+            .iter()
+            .map(|split| SplitCount {
+                split: split.name,
+                selected_events: split.samples.len(),
+            })
+            .collect(),
+        whitelist_features: whitelist_features.into_iter().collect(),
+        factors,
+    }
 }
 
 fn governed_feature_whitelist<'a>(
@@ -713,6 +897,12 @@ fn governed_feature_whitelist<'a>(
         })
         .take(config.whitelist_max_features)
         .collect()
+}
+
+fn fmt_optional(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.4}"))
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn attribution_row(item: &FactorAttribution) -> AttributionRow<'_> {
@@ -833,5 +1023,96 @@ mod tests {
 
         assert_eq!(whitelist.len(), 1);
         assert_eq!(whitelist[0].feature, "stable");
+    }
+
+    #[test]
+    fn factor_registry_artifact_preserves_governed_status_and_direction() {
+        let config = Config {
+            dataset_root: PathBuf::from("/tmp/events"),
+            entry_secs: 60,
+            tolerance_secs: 30,
+            top_n: 12,
+            output_dir: None,
+            whitelist_min_importance: 0.05,
+            whitelist_min_stability: 0.0,
+            whitelist_max_features: 10,
+            features: vec![],
+        };
+        let attributions = vec![
+            FactorAttribution {
+                feature: "stable".to_string(),
+                direction: -1,
+                train_auc_lift: -0.2,
+                val_auc_lift: -0.1,
+                test_auc_lift: -0.1,
+                importance: 0.1,
+                stability: 0.5,
+                train_corr: -0.3,
+                val_corr: -0.2,
+                test_corr: -0.1,
+            },
+            FactorAttribution {
+                feature: "thin".to_string(),
+                direction: 1,
+                train_auc_lift: 0.2,
+                val_auc_lift: 0.2,
+                test_auc_lift: -0.2,
+                importance: 0.2,
+                stability: 0.0,
+                train_corr: 0.3,
+                val_corr: 0.2,
+                test_corr: -0.1,
+            },
+        ];
+        let regime = Regime::from_secs(config.entry_secs);
+        let mut registry = FactorRegistry::new();
+        let registry_items = attributions
+            .iter()
+            .map(|item| AutomlFactorAttribution {
+                name: item.feature.clone(),
+                importance: item.importance,
+                direction: item.direction,
+                stability: item.stability,
+            })
+            .collect::<Vec<_>>();
+        register_automl_attributions(
+            &mut registry,
+            regime,
+            ATTRIBUTION_TARGET_LABEL,
+            &registry_items,
+        );
+        let whitelist = governed_feature_whitelist(&attributions, &config);
+
+        let artifact = build_factor_registry_artifact(
+            &config,
+            [&split(&[]), &split(&[]), &split(&[])],
+            &attributions,
+            &registry,
+            regime,
+            &whitelist,
+        );
+
+        assert_eq!(artifact.kind, FACTOR_REGISTRY_ARTIFACT_KIND);
+        assert_eq!(artifact.target_label, ATTRIBUTION_TARGET_LABEL);
+        assert_eq!(artifact.factors.len(), 2);
+        let stable = artifact
+            .factors
+            .iter()
+            .find(|row| row.source_feature == "stable")
+            .expect("stable registry row");
+        assert_eq!(stable.factor_name, "automl:stable");
+        assert_eq!(stable.train_derived_direction, -1);
+        assert!(stable.whitelist_included);
+        assert_eq!(stable.status, "governed_feature");
+        assert!(stable.blockers.is_empty());
+
+        let thin = artifact
+            .factors
+            .iter()
+            .find(|row| row.source_feature == "thin")
+            .expect("thin registry row");
+        assert!(!thin.whitelist_included);
+        assert_eq!(thin.status, "report_only");
+        assert_eq!(thin.blockers, vec!["not_in_governed_whitelist"]);
     }
 }
