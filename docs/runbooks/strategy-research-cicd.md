@@ -45,7 +45,8 @@ mismatch is understood and tracked as a follow-up issue.
 | --- | --- | --- |
 | PR validation | `.github/workflows/test.yml` | Required Platform CI gate for code, contracts, frontend, integration, dependency audit, and workflow lint |
 | Research snapshot | `.github/workflows/research-snapshot.yml` | Compile reusable research evidence from remote data |
-| Factor diagnostics | `.github/workflows/factor-review-v2.yml` | Snapshot-backed factor review on `ploy-ci-1` |
+| Factor diagnostics | `.github/workflows/factor-review-v2-hosted-artifact.yml` | GitHub-hosted factor review from a retained full research snapshot artifact |
+| Legacy factor diagnostics | `.github/workflows/factor-review-v2.yml` | Fresh DB/snapshot fallback on `ploy-ci-1`; avoid when a full snapshot artifact already exists |
 | Walk-forward diagnostics | `.github/workflows/factor-walk-forward-v2.yml` | Rolling factor validation across train/test windows |
 | Parameter optimization | `.github/workflows/optimize.yml` | Bounded train/validation optimization from a snapshot or explicit debug data source |
 | Replay/backtest accounting | `.github/workflows/backtest.yml` | Build and run replay/backtest accounting in one job on `ploy-ci-1` |
@@ -186,7 +187,8 @@ different.
   keyed by the workflow aliases `tango-1-1` and `ploy-trade-1` because the deploy
   SSH config sets `HostKeyAlias`.
 - Artifact-backed PM5D/PM15D research should default to GitHub-hosted runners.
-  Use `factor-walk-forward-v2-hosted-artifact.yml` directly, or
+  Use `factor-review-v2-hosted-artifact.yml`,
+  `factor-walk-forward-v2-hosted-artifact.yml`, or
   `settlement-probability-prd-gate.yml` with `snapshot_run_id`, when a retained
   full research snapshot artifact already exists.
 - Event ML rolling evidence should also default to GitHub-hosted runners after

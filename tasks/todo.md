@@ -187,6 +187,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   switch defaults to false and creates an issue only when
   `event_ml_strategy_handoff.json` is `status=ready`; blocked artifacts still
   produce no promotion issue.
+- [x] Add a GitHub-hosted artifact-only Factor Review V2 workflow. When a full
+  research snapshot artifact exists, factor diagnostics can now run on
+  `ubuntu-latest` via `factor-review-v2-hosted-artifact.yml`; the legacy
+  `factor-review-v2.yml` path remains only for fresh DB/snapshot fallback work
+  that still needs `ploy-ci-1`.
 
 ## Review
 
