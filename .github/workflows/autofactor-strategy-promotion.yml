@@ -30,15 +30,24 @@ on:
         description: "Create a dry-run handoff issue when autofactor-strategy-handoff.json is ready"
         required: false
         default: "false"
+      create_config_pr:
+        description: "Create a dry-run config PR from a ready handoff"
+        required: false
+        default: "false"
+      strategy_config:
+        description: "Strategy config path updated by create_config_pr"
+        required: false
+        default: "config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"
       fail_if_blocked:
         description: "Fail workflow when no AutoFactor strategy qualifies"
         required: false
         default: "false"
 
 permissions:
-  contents: read
+  contents: write
   actions: read
   issues: write
+  pull-requests: write
 
 jobs:
   evaluate:
@@ -184,3 +193,87 @@ jobs:
           gh issue create \
             --title "${title}" \
             --body-file "${handoff_md}"
+
+      - name: Create config PR from ready handoff
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATE_CONFIG_PR: ${{ github.event.inputs.create_config_pr }}
+          STRATEGY_CONFIG: ${{ github.event.inputs.strategy_config }}
+          BASE_REF: ${{ github.event.inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          if [ "${CREATE_CONFIG_PR}" != "true" ]; then
+            echo "create_config_pr is not true; skipping config PR creation."
+            exit 0
+          fi
+          handoff_json="artifacts/autofactor-strategy-promotion/autofactor-strategy-handoff.json"
+          case "${STRATEGY_CONFIG}" in
+            config/strategies/*.toml) ;;
+            *)
+              echo "strategy_config must be a config/strategies/*.toml path" >&2
+              exit 2
+              ;;
+          esac
+          if [ ! -f "${handoff_json}" ]; then
+            echo "Handoff JSON missing; skipping config PR creation."
+            exit 0
+          fi
+          status="$(python3 - <<'PY'
+          import json
+          with open("artifacts/autofactor-strategy-promotion/autofactor-strategy-handoff.json", encoding="utf-8") as handle:
+              print(json.load(handle).get("status", "blocked"))
+          PY
+          )"
+          if [ "${status}" != "ready" ]; then
+            echo "Handoff status is ${status}; no config PR will be created."
+            exit 0
+          fi
+          mkdir -p artifacts/autofactor-config-handoff
+          python3 scripts/apply_autofactor_handoff_to_config.py \
+            --handoff-json "${handoff_json}" \
+            --config "${STRATEGY_CONFIG}" \
+            --output-json artifacts/autofactor-config-handoff/config-handoff.json \
+            --output-md artifacts/autofactor-config-handoff/config-handoff.md
+          changed="$(python3 - <<'PY'
+          import json
+          with open("artifacts/autofactor-config-handoff/config-handoff.json", encoding="utf-8") as handle:
+              print("true" if json.load(handle).get("changed") else "false")
+          PY
+          )"
+          if [ "${changed}" != "true" ]; then
+            echo "Config already matches selected handoff; no PR will be created."
+            exit 0
+          fi
+
+          branch="autofactor/handoff-${GITHUB_RUN_ID}"
+          git switch -c "${branch}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${STRATEGY_CONFIG}"
+          git commit \
+            -m "Promote AutoFactor handoff into dry-run config" \
+            -m "A ready AutoFactor strategy handoff selected a runtime score that differs from the checked-in dry-run config. This applies only the promoted runtime score and leaves execution, risk, and kill-switch settings under the existing config." \
+            -m "Constraint: Generated from autofactor-strategy-handoff.json status=ready" \
+            -m "Constraint: Dry-run config only; no deploy or live order path" \
+            -m "Rejected: Direct deployment from promotion workflow | config changes must pass PR review and CI first" \
+            -m "Confidence: medium" \
+            -m "Scope-risk: narrow" \
+            -m "Tested: python3 scripts/apply_autofactor_handoff_to_config.py --handoff-json <artifact> --config ${STRATEGY_CONFIG}" \
+            -m "Not-tested: dry-run deployment/replay after config change"
+          git push origin "${branch}"
+
+          title="Promote AutoFactor handoff into dry-run config"
+          {
+            cat artifacts/autofactor-config-handoff/config-handoff.md
+            echo ""
+            echo "Source promotion run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "Source factor walk-forward run: ${{ github.event.inputs.factor_walk_forward_run_id }}"
+            echo ""
+            echo "This PR is generated from a ready handoff artifact. It does not deploy and does not enable live trading."
+          } > artifacts/autofactor-config-handoff/pr-body.md
+          gh pr create \
+            --base "${BASE_REF}" \
+            --head "${branch}" \
+            --title "${title}" \
+            --body-file artifacts/autofactor-config-handoff/pr-body.md

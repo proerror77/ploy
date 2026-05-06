@@ -188,6 +188,26 @@ it `false` for diagnostics. When set to `true`, the workflow creates a dry-run
 handoff issue only if `autofactor-strategy-handoff.json` reports
 `status=ready`; blocked handoffs are logged and skipped.
 
+For the final config-promotion step, the same hosted workflow can create a
+reviewable PR instead of requiring a manual TOML edit:
+
+```bash
+gh workflow run autofactor-strategy-promotion.yml \
+  -f git_ref=main \
+  -f factor_walk_forward_run_id=<run-id> \
+  -f required_strategy_profile=settlement_probability \
+  -f allowed_target=full_depth_settlement_executable_pnl \
+  -f create_config_pr=true \
+  -f strategy_config=config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml
+```
+
+`create_config_pr=true` is intentionally PR-only. It reads the ready handoff
+artifact, updates only `three_layer_autofactor_runtime_score` in the target
+dry-run config, and opens a normal CI-gated pull request. It does not deploy,
+does not change execution/risk settings, and does not enable live trading.
+If the handoff is blocked or the config already uses the selected score, no PR
+is created.
+
 When the missing piece is a fresh Factor Walk-Forward V2 report and a full
 research snapshot artifact already exists, use the GitHub-hosted artifact-only
 workflow instead of `ploy-ci-1`:
