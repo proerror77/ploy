@@ -235,7 +235,28 @@ Advanced promotion and issue-handoff controls live in `options_json` to stay
 within the GitHub Actions 10-input limit. Defaults are
 `required_strategy_profile=settlement_probability`,
 `allowed_target=full_depth_settlement_executable_pnl`,
-`create_handoff_issue=false`, and `fail_if_blocked=false`.
+`create_handoff_issue=false`, `create_config_pr=false`, and
+`fail_if_blocked=false`.
+
+To make the hosted walk-forward workflow run the final PR-only config promotion
+step in the same run, pass `create_config_pr=true` inside `options_json`:
+
+```bash
+gh workflow run factor-walk-forward-v2-hosted-artifact.yml \
+  -f git_ref=main \
+  -f snapshot_run_id=<snapshot-run-id> \
+  -f start_date=2026-04-21 \
+  -f end_date=2026-04-25 \
+  -f symbols=BTCUSDT,ETHUSDT \
+  -f stake_usd=15 \
+  -f options_json='{"create_config_pr":true,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"}'
+```
+
+This keeps the full chain on GitHub-hosted runners after snapshot creation:
+snapshot artifact -> hosted walk-forward -> promotion evaluator -> ready
+handoff -> CI-gated config PR. The generated PR updates only
+`three_layer_autofactor_runtime_score`; deployment remains a separate explicit
+dry-run step from `main`.
 
 For the full settlement-probability PRD gate, prefer passing an existing full
 snapshot artifact into the orchestrator so downstream AutoFactor mining and
