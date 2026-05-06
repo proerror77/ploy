@@ -27,8 +27,11 @@ class DryRunReportContractTests(unittest.TestCase):
         script = SUMMARY_SCRIPT.read_text()
 
         self.assertIn("LEFT JOIN pm_token_settlements s ON s.token_id = t.token_id", script)
-        self.assertIn("LEFT JOIN pm_market_metadata m ON m.market_slug = s.market_slug", script)
-        self.assertNotIn("m.market_slug = t.event_id", script)
+        self.assertIn("LEFT JOIN pm_market_metadata ms ON ms.market_slug = s.market_slug", script)
+        self.assertIn("LEFT JOIN pm_market_metadata me ON me.market_slug = t.event_id", script)
+        self.assertIn("LEFT JOIN pm_market_metadata mt ON mt.market_slug = t.trade_key", script)
+        self.assertIn("COALESCE(ms.market_slug, me.market_slug, mt.market_slug, s.market_slug)", script)
+        self.assertLess(script.index("LEFT JOIN pm_market_metadata ms"), script.index("LEFT JOIN pm_market_metadata me"))
 
     def test_summary_metrics_expose_explicit_sharpe_basis(self) -> None:
         summary = load_summary_module()
@@ -53,6 +56,33 @@ class DryRunReportContractTests(unittest.TestCase):
             summary.day_from_event({"closed_at": "2026-04-28T17:30:00+00:00"}),
             "2026-04-29",
         )
+
+    def test_summary_hourly_rows_include_pnl_and_drawdown(self) -> None:
+        summary = load_summary_module()
+        events = [
+            {
+                "is_closed": True,
+                "net_pnl": 5.0,
+                "closed_at": "2026-04-28T17:30:00+00:00",
+                "window_secs": 300,
+            },
+            {
+                "is_closed": True,
+                "net_pnl": -8.0,
+                "closed_at": "2026-04-28T18:15:00+00:00",
+                "window_secs": 900,
+            },
+        ]
+
+        hourly = summary.build_hourly_rows(events)
+        hourly_by_window = summary.build_hourly_by_window(events)
+
+        self.assertEqual(hourly[0]["trading_hour_cst"], "2026-04-29T02:00:00+08:00")
+        self.assertEqual(hourly[0]["trade_count"], 1)
+        self.assertEqual(hourly[0]["net_pnl"], -8.0)
+        self.assertEqual(hourly[0]["drawdown"], -8.0)
+        self.assertEqual(hourly[1]["trading_hour_cst"], "2026-04-29T01:00:00+08:00")
+        self.assertEqual(hourly_by_window[0]["window_label"], "15m")
 
     def test_execution_diagnostics_contract(self) -> None:
         summary = load_summary_module()

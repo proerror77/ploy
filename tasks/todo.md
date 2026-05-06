@@ -13330,3 +13330,10 @@ Issue: https://github.com/proerror77/ploy/issues/256
   handoff. Live trading, all-symbol promotion, strict 168h collector-health
   signoff, and stronger event-level replay parity remain out of scope or
   residual follow-up.
+- 2026-05-06: Fixed the dry-run report metadata path for the settlement
+  probability 24h/48h soak. `report_dryrun_summary.py` now prefers the
+  token-settlement bridge but falls back to event-track and trade-key
+  `pm_market_metadata` joins, so orphaned token-settlement rows should not show
+  as `unknown` windows when event metadata exists. The report also emits hourly
+  and hourly-by-window rows with trade count, PnL, cumulative PnL, and drawdown
+  so the soak can be reviewed directly by hour and by 5m/15m window.
