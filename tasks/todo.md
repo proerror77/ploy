@@ -319,6 +319,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   migration shape as AutoFactor: use `ploy-ci-1` only for private DB export,
   then run artifact-backed coverage/attribution/baseline/walk-forward evidence
   on `ubuntu-latest`.
+- 2026-05-06: Added PR-only Event ML config promotion on the hosted artifact
+  branch. `options_json.create_config_pr=true` now opens a dry-run config PR
+  from a ready `event_ml_strategy_handoff.json`, but only when
+  `source_dataset_run_id` is used on GitHub-hosted runners and an explicit
+  `model_artifact_path` is supplied. The legacy `ploy-ci-1` branch now skips
+  config promotion and remains only a fresh private-DB export fallback.
 - 2026-05-06: Added the Event ML dry-run handoff contract in Rust. The handoff
   artifact is intentionally blocked unless walk-forward readiness passes,
   aggregate test PnL is positive, at least half of test windows are positive, a

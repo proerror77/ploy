@@ -40,18 +40,19 @@ on:
         required: false
         default: ""
       options_json:
-        description: "Advanced options JSON: sampling, entry/tolerance, logistic search grid, source_dataset_artifact_name, handoff runtime/parity gates"
+        description: "Advanced options JSON: sampling, entry/tolerance, logistic search grid, source_dataset_artifact_name, handoff runtime/parity gates, PR-only config promotion"
         required: false
-        default: '{"lob_sample_secs":30,"max_quote_age_secs":30,"entry_secs":60,"tolerance_secs":30,"search_l2":"0,0.001,0.01","search_min_edge":"0,0.02,0.05","search_learning_rate":"0.03,0.05","search_epochs":500,"source_dataset_artifact_name":"","required_strategy_profile":"event_ml_supervised_tabular","runtime_score":"","replay_parity_ready":"false","create_handoff_issue":"false"}'
+        default: '{"lob_sample_secs":30,"max_quote_age_secs":30,"entry_secs":60,"tolerance_secs":30,"search_l2":"0,0.001,0.01","search_min_edge":"0,0.02,0.05","search_learning_rate":"0.03,0.05","search_epochs":500,"source_dataset_artifact_name":"","required_strategy_profile":"event_ml_supervised_tabular","runtime_score":"","replay_parity_ready":"false","create_handoff_issue":"false","create_config_pr":"false","strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","model_artifact_path":""}'
 
 concurrency:
   group: event-ml-rolling-evidence-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
   actions: read
   issues: write
+  pull-requests: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -175,6 +176,9 @@ jobs:
               "runtime_score": "",
               "replay_parity_ready": "false",
               "create_handoff_issue": "false",
+              "create_config_pr": "false",
+              "strategy_config": "config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+              "model_artifact_path": "",
           }
           raw = os.environ.get("OPTIONS_JSON", "").strip()
           data = json.loads(raw) if raw else {}
@@ -247,6 +251,20 @@ jobs:
             --search-epochs "${EVENT_ML_SEARCH_EPOCHS}" \
             "${handoff_args[@]}" \
             | tee artifacts/event-ml/reports/rolling_workflow.txt
+
+      - name: Skip config PR on legacy DB branch
+        if: always()
+        run: |
+          set -euo pipefail
+          case "${EVENT_ML_CREATE_CONFIG_PR:-false}" in
+            true|True|1|yes|YES)
+              echo "create_config_pr is only supported by the GitHub-hosted artifact branch."
+              echo "Upload the dataset artifact, then rerun with source_dataset_run_id so promotion does not run on ploy-ci-1."
+              ;;
+            *)
+              echo "create_config_pr is not true; skipping config PR creation."
+              ;;
+          esac
 
       - name: Collect compact reports
         if: always()
@@ -424,6 +442,9 @@ jobs:
               "runtime_score": "",
               "replay_parity_ready": "false",
               "create_handoff_issue": "false",
+              "create_config_pr": "false",
+              "strategy_config": "config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+              "model_artifact_path": "",
           }
           raw = os.environ.get("OPTIONS_JSON", "").strip()
           data = json.loads(raw) if raw else {}
@@ -511,6 +532,97 @@ jobs:
             --search-epochs "${EVENT_ML_SEARCH_EPOCHS}" \
             "${handoff_args[@]}" \
             | tee artifacts/event-ml/reports/rolling_workflow.txt
+
+      - name: Create config PR from ready Event ML handoff
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.event.inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          case "${EVENT_ML_CREATE_CONFIG_PR:-false}" in
+            true|True|1|yes|YES) ;;
+            *)
+              echo "create_config_pr is not true; skipping config PR creation."
+              exit 0
+              ;;
+          esac
+          handoff_json="$(find artifacts/event-ml/rolling_workflow -path '*/walk_forward/event_ml_strategy_handoff.json' 2>/dev/null | sort | tail -1 || true)"
+          if [ -z "${handoff_json}" ] || [ ! -f "${handoff_json}" ]; then
+            echo "Event ML handoff JSON missing; skipping config PR creation."
+            exit 0
+          fi
+          status="$(HANDOFF_JSON="${handoff_json}" python3 - <<'PY'
+          import json
+          import os
+          with open(os.environ["HANDOFF_JSON"], encoding="utf-8") as handle:
+              print(json.load(handle).get("status", "blocked"))
+          PY
+          )"
+          if [ "${status}" != "ready" ]; then
+            echo "Event ML handoff status is ${status}; no config PR will be created."
+            exit 0
+          fi
+          case "${EVENT_ML_STRATEGY_CONFIG}" in
+            config/strategies/*.toml) ;;
+            *)
+              echo "strategy_config must be a config/strategies/*.toml path" >&2
+              exit 2
+              ;;
+          esac
+          if [ -z "${EVENT_ML_MODEL_ARTIFACT_PATH}" ]; then
+            echo "options_json.model_artifact_path is required when create_config_pr=true and handoff is ready" >&2
+            exit 2
+          fi
+
+          mkdir -p artifacts/event-ml/reports/event-ml-config-handoff
+          python3 scripts/apply_event_ml_handoff_to_config.py \
+            --handoff-json "${handoff_json}" \
+            --config "${EVENT_ML_STRATEGY_CONFIG}" \
+            --model-path "${EVENT_ML_MODEL_ARTIFACT_PATH}" \
+            --output-json artifacts/event-ml/reports/event-ml-config-handoff/config-handoff.json \
+            --output-md artifacts/event-ml/reports/event-ml-config-handoff/config-handoff.md
+          changed="$(python3 - <<'PY'
+          import json
+          with open("artifacts/event-ml/reports/event-ml-config-handoff/config-handoff.json", encoding="utf-8") as handle:
+              print("true" if json.load(handle).get("changed") else "false")
+          PY
+          )"
+          if [ "${changed}" != "true" ]; then
+            echo "Config already matches selected Event ML handoff; no PR will be created."
+            exit 0
+          fi
+
+          branch="event-ml/hosted-handoff-${GITHUB_RUN_ID}"
+          git switch -c "${branch}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${EVENT_ML_STRATEGY_CONFIG}"
+          git commit \
+            -m "Promote hosted Event ML handoff into dry-run config" \
+            -m "A hosted Event ML rolling evidence run produced a ready dry-run handoff whose runtime model differs from the checked-in dry-run config. This applies only the runtime score and reviewed model artifact path, leaving execution, risk, and kill-switch settings unchanged." \
+            -m "Constraint: Generated from hosted Event ML artifact status=ready" \
+            -m "Constraint: Dry-run config only; no deploy or live order path" \
+            -m "Rejected: Direct deployment from Event ML research workflow | config changes must pass PR review and CI first" \
+            -m "Confidence: medium" \
+            -m "Scope-risk: narrow" \
+            -m "Tested: event-ml-rolling-evidence.yml create_config_pr path" \
+            -m "Not-tested: dry-run deployment/replay after config change"
+          git push origin "${branch}"
+
+          {
+            cat artifacts/event-ml/reports/event-ml-config-handoff/config-handoff.md
+            echo ""
+            echo "Source hosted Event ML run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "Source dataset run: ${{ github.event.inputs.source_dataset_run_id }}"
+            echo ""
+            echo "This PR is generated from a ready hosted Event ML handoff artifact. It does not deploy and does not enable live trading."
+          } > artifacts/event-ml/reports/event-ml-config-handoff/pr-body.md
+          gh pr create \
+            --base "${BASE_REF}" \
+            --head "${branch}" \
+            --title "Promote hosted Event ML handoff into dry-run config" \
+            --body-file artifacts/event-ml/reports/event-ml-config-handoff/pr-body.md
 
       - name: Collect compact reports
         if: always()

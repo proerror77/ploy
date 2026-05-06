@@ -119,7 +119,12 @@ fn event_ml_rolling_evidence_has_hosted_artifact_lane() {
         "--runtime-score",
         "--replay-parity-ready",
         "create_handoff_issue",
+        "create_config_pr",
+        "model_artifact_path",
+        "Skip config PR on legacy DB branch",
+        "Create config PR from ready Event ML handoff",
         "issues: write",
+        "pull-requests: write",
         "Event ML handoff status is ${status}; no dry-run issue will be created.",
     ] {
         if !workflow.contains(needle) {
@@ -142,6 +147,8 @@ fn event_ml_rolling_evidence_has_hosted_artifact_lane() {
         "runtime_score",
         "replay_parity_ready",
         "create_handoff_issue",
+        "create_config_pr",
+        "model_artifact_path",
         "workflow stays within GitHub's 10-input dispatch limit",
     ] {
         if !runbook.contains(needle) {
