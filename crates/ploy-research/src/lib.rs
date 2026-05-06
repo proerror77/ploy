@@ -37,12 +37,15 @@ pub use deribit::{
     DeribitFeatureLoadResult,
 };
 pub use event_ml::{
-    build_walk_forward_report, canonical_event_ml_architecture, event_ml_architecture_markdown,
-    gate_matrix, walk_forward_report_markdown, ArchitectureArtifact, EventMlArchitecture,
-    LaneReadiness, LaneStatus, LearningLane, LearningLaneId, PhaseId, ReadinessGate,
-    WalkForwardAggregate, WalkForwardConfig, WalkForwardGate, WalkForwardGateStatus,
-    WalkForwardMetric, WalkForwardReadiness, WalkForwardReport, WalkForwardWindow, WorkflowPhase,
-    EVENT_ML_ARCHITECTURE_VERSION, WALK_FORWARD_REPORT_VERSION,
+    build_event_ml_strategy_handoff, build_walk_forward_report, canonical_event_ml_architecture,
+    event_ml_architecture_markdown, event_ml_strategy_handoff_markdown, gate_matrix,
+    walk_forward_report_markdown, ArchitectureArtifact, EventMlArchitecture,
+    EventMlStrategyCandidate, EventMlStrategyHandoff, EventMlStrategyHandoffConfig,
+    EventMlStrategyHandoffStatus, EventMlStrategyPromotionGate, LaneReadiness, LaneStatus,
+    LearningLane, LearningLaneId, PhaseId, ReadinessGate, WalkForwardAggregate, WalkForwardConfig,
+    WalkForwardGate, WalkForwardGateStatus, WalkForwardMetric, WalkForwardReadiness,
+    WalkForwardReport, WalkForwardWindow, WorkflowPhase, EVENT_ML_ARCHITECTURE_VERSION,
+    EVENT_ML_STRATEGY_HANDOFF_VERSION, WALK_FORWARD_REPORT_VERSION,
 };
 pub use factors::{
     aggregate_factor_metrics, build_event_summaries, build_factor_observations,

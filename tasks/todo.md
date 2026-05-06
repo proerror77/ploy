@@ -171,6 +171,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   downloads the retained event-root dataset artifact and runs dataset splitting
   plus the canonical rolling ML workflow on `ubuntu-latest`; `ploy-ci-1`
   remains only for the fresh DB export branch.
+- [x] Add a fail-closed Event ML dry-run strategy handoff artifact so rolling
+  Event ML evidence cannot become a dry-run strategy unless walk-forward,
+  positive executable PnL, runtime scorer mapping, and replay parity gates all
+  pass. `event_ml_walk_forward` now writes
+  `event_ml_strategy_handoff.{json,md}` alongside the walk-forward report.
 
 ## Review
 
@@ -274,6 +279,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   migration shape as AutoFactor: use `ploy-ci-1` only for private DB export,
   then run artifact-backed coverage/attribution/baseline/walk-forward evidence
   on `ubuntu-latest`.
+- 2026-05-06: Added the Event ML dry-run handoff contract in Rust. The handoff
+  artifact is intentionally blocked unless walk-forward readiness passes,
+  aggregate test PnL is positive, at least half of test windows are positive, a
+  runtime score is supplied, and recorded replay/runtime parity is marked
+  ready. Verification passed with targeted rustfmt, `event_ml_handoff` unit
+  tests, `event_ml_walk_forward` cargo check, and `git diff --check`.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

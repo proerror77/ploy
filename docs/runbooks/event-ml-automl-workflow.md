@@ -107,8 +107,13 @@ phase consumes that whitelist automatically. The runner also writes
 The hyperparameter phase writes candidate-level `baseline_metrics.json` files
 plus `hyperparameter_search.json` and `hyperparameter_search.md`.
 The walk-forward phase writes `walk_forward_report.json` and
-`walk_forward_report.md`. With only one workflow run, the report is expected to
-mark DL/RL readiness as `blocked`; that is a useful gate, not a runner failure.
+`walk_forward_report.md`. It also writes a fail-closed
+`event_ml_strategy_handoff.json` / `.md`. The handoff stays `blocked` unless
+walk-forward gates pass, total test PnL is positive, a majority of test windows
+are positive, a runtime score is explicitly supplied, and replay parity is
+marked ready. With only one workflow run, the report is expected to mark DL/RL
+and dry-run handoff readiness as `blocked`; that is a useful gate, not a runner
+failure.
 
 ## AutoFactor Strategy Promotion Gate
 
@@ -688,6 +693,8 @@ The gate writes:
 
 - `walk_forward_report.json`
 - `walk_forward_report.md`
+- `event_ml_strategy_handoff.json`
+- `event_ml_strategy_handoff.md`
 
 Default readiness gates:
 
@@ -697,6 +704,18 @@ Default readiness gates:
 - executable entry accounting is present: cost, ROI, and average entry
 - window-level drawdown is reported
 - validation/test direction agreement is reported
+
+Dry-run handoff gates:
+
+- walk-forward readiness is `ready`
+- total test PnL is positive
+- at least half of test windows are positive
+- `--runtime-score` is supplied by a runtime-integrated scorer
+- `--replay-parity-ready` is supplied only after recorded replay/runtime parity
+  evidence has passed
+
+Without those handoff gates, the generated handoff artifact is still useful,
+but it must say `status=blocked` and `recommended_action=do_not_promote`.
 
 The workflow runner calls this gate automatically for its current run. A
 single-run report should remain `blocked` for DL/RL because it lacks rolling
