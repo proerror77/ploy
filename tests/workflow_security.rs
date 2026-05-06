@@ -103,6 +103,52 @@ fn workflow_dispatch_inputs_stay_lintable() {
 }
 
 #[test]
+fn event_ml_rolling_evidence_has_hosted_artifact_lane() {
+    let workflow = workflow_contents(".github/workflows/event-ml-rolling-evidence.yml");
+    let runbook = workflow_contents("docs/runbooks/event-ml-automl-workflow.md");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "source_dataset_run_id:",
+        "actions: read",
+        "Generate event ML rolling evidence from artifact on GitHub-hosted runner",
+        "runs-on: ubuntu-latest",
+        "github.event.inputs.source_dataset_run_id != ''",
+        "scripts/download_github_artifact.py",
+        "event-ml-rolling-datasets-${SOURCE_DATASET_RUN_ID}",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!("event-ml-rolling-evidence.yml: missing `{needle}`"));
+        }
+    }
+
+    if !workflow.contains("github.event.inputs.source_dataset_run_id == ''")
+        || !workflow.contains("Generate event ML rolling evidence from DB on ploy-ci-1")
+    {
+        offenders.push(
+            "event-ml-rolling-evidence.yml: legacy DB export must be explicitly isolated"
+                .to_string(),
+        );
+    }
+
+    for needle in [
+        "Prefer the hosted artifact path",
+        "source_dataset_artifact_name",
+        "workflow stays within GitHub's 10-input dispatch limit",
+    ] {
+        if !runbook.contains(needle) {
+            offenders.push(format!("event-ml-automl-workflow.md: missing `{needle}`"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "event ML hosted artifact lane guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn ack_images_use_immutable_sha_tags() {
     let build = workflow_contents(".github/workflows/build-push-acr.yml");
     let deploy = workflow_contents(".github/workflows/deploy-ack.yml");
