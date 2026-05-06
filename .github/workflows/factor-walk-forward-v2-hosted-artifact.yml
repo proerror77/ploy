@@ -1,0 +1,421 @@
+name: Factor Walk-Forward V2 Hosted Artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref"
+        required: true
+        default: "main"
+      snapshot_run_id:
+        description: "Research Snapshot or downstream run id that owns a full research snapshot artifact"
+        required: true
+      snapshot_artifact_name:
+        description: "Snapshot artifact name; defaults to research-snapshot-<snapshot_run_id>"
+        required: false
+        default: ""
+      start_date:
+        description: "Review start date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-21"
+      end_date:
+        description: "Review end date (YYYY-MM-DD)"
+        required: true
+        default: "2026-04-25"
+      symbols:
+        description: "Comma-separated Binance symbols"
+        required: true
+        default: "BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,BNBUSDT,XRPUSDT"
+      stake_usd:
+        description: "Fixed notional per candidate"
+        required: true
+        default: "15"
+      options_json:
+        description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, optional issue handoff"
+        required: false
+        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"fail_if_blocked":false}'
+
+concurrency:
+  group: factor-walk-forward-v2-hosted-artifact-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.snapshot_run_id }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  walk-forward:
+    name: Run factor walk-forward from snapshot artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Parse advanced options
+        env:
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          defaults = {
+              "train_window_days": "2",
+              "test_window_days": "1",
+              "step_days": "1",
+              "lob_sample_secs": "30",
+              "observation_sample_secs": "30",
+              "max_quote_age_secs": "30",
+              "top_n": "20",
+              "min_observations": "20",
+              "top_quantile": "0.2",
+              "factor_name_filter": "",
+              "data_quality_mode": "event_complete",
+              "min_event_complete_events": "20",
+              "min_event_complete_rows": "40",
+              "replay_parity_json": "",
+              "replay_parity_run_id": "",
+              "replay_parity_artifact_name": "",
+              "required_strategy_profile": "settlement_probability",
+              "allowed_target": "full_depth_settlement_executable_pnl",
+              "issue_number": "",
+              "create_handoff_issue": "false",
+              "fail_if_blocked": "false",
+          }
+          bool_keys = {"create_handoff_issue", "fail_if_blocked"}
+          choices = {
+              "data_quality_mode": {"strict_continuous", "event_complete"},
+          }
+          raw = os.environ.get("OPTIONS_JSON", "").strip()
+          data = json.loads(raw) if raw else {}
+          if not isinstance(data, dict):
+              raise SystemExit("options_json must be a JSON object")
+          unknown = sorted(set(data) - set(defaults))
+          if unknown:
+              raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+
+          values = dict(defaults)
+          for key, value in data.items():
+              if key in bool_keys:
+                  if isinstance(value, bool):
+                      values[key] = "true" if value else "false"
+                  elif str(value).lower() in {"true", "false"}:
+                      values[key] = str(value).lower()
+                  else:
+                      raise SystemExit(f"options_json value for {key} must be boolean")
+              else:
+                  values[key] = str(value)
+              if key in choices and values[key] not in choices[key]:
+                  allowed = ", ".join(sorted(choices[key]))
+                  raise SystemExit(f"options_json value for {key} must be one of: {allowed}")
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              for key, value in values.items():
+                  if "\n" in value:
+                      raise SystemExit(f"options_json value for {key} must be single-line")
+                  handle.write(f"WALK_{key.upper()}={value}\n")
+          PY
+
+      - name: Download research snapshot artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
+          SNAPSHOT_ARTIFACT_NAME: ${{ github.event.inputs.snapshot_artifact_name }}
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/research-snapshot
+          artifact_name="${SNAPSHOT_ARTIFACT_NAME}"
+          if [ -z "${artifact_name}" ]; then
+            artifact_name="research-snapshot-${SNAPSHOT_RUN_ID}"
+          fi
+          if python3 scripts/download_github_artifact.py \
+            --run-id "${SNAPSHOT_RUN_ID}" \
+            --name "${artifact_name}" \
+            --output-dir artifacts/research-snapshot \
+            --require manifest.json \
+            --require quality.md; then
+            echo "Downloaded research snapshot artifact ${artifact_name}."
+          else
+            echo "Standalone snapshot artifact ${artifact_name} not found or incomplete; trying embedded downstream artifacts."
+            python3 scripts/download_github_artifact.py \
+              --run-id "${SNAPSHOT_RUN_ID}" \
+              --name "factor-walk-forward-v2-${SNAPSHOT_RUN_ID}" \
+              --strip-prefix research-snapshot \
+              --output-dir artifacts/research-snapshot \
+              --require manifest.json \
+              --require quality.md \
+            || python3 scripts/download_github_artifact.py \
+              --run-id "${SNAPSHOT_RUN_ID}" \
+              --name "factor-review-v2-${SNAPSHOT_RUN_ID}" \
+              --strip-prefix research-snapshot \
+              --output-dir artifacts/research-snapshot \
+              --require manifest.json \
+              --require quality.md
+          fi
+
+      - name: Validate full snapshot payload
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("artifacts/research-snapshot")
+          manifest_path = root / "manifest.json"
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          artifacts = manifest.get("artifacts") or {}
+          required = [
+              artifacts.get("observations_json", "observations.json"),
+              artifacts.get("deribit_snapshots_json", "deribit_snapshots.json"),
+              artifacts.get("pm_book_snapshots_json", "pm_book_snapshots.json"),
+              artifacts.get("quality_markdown", "quality.md"),
+          ]
+          missing = [path for path in required if not path or not (root / path).exists()]
+          if missing:
+              raise SystemExit(
+                  "research snapshot artifact has manifest/quality but is missing full payload: "
+                  + ", ".join(missing)
+              )
+          print("full research snapshot payload present: " + ", ".join(required))
+          PY
+
+      - name: Download replay parity artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${WALK_REPLAY_PARITY_JSON}" ] || [ -z "${WALK_REPLAY_PARITY_RUN_ID}" ]; then
+            echo "No replay parity artifact download requested."
+            exit 0
+          fi
+          rm -rf artifacts/replay-parity
+          artifact_name="${WALK_REPLAY_PARITY_ARTIFACT_NAME}"
+          if [ -z "${artifact_name}" ]; then
+            artifact_name="replay-dryrun-parity-${WALK_REPLAY_PARITY_RUN_ID}"
+          fi
+          python3 scripts/download_github_artifact.py \
+            --run-id "${WALK_REPLAY_PARITY_RUN_ID}" \
+            --name "${artifact_name}" \
+            --output-dir artifacts/replay-parity \
+            --require parity-evaluation.json
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-targets: "true"
+          key: factor-walk-forward-v2-hosted-artifact-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
+
+      - name: Build factor walk-forward
+        run: |
+          set -euo pipefail
+          cargo build --release --locked \
+            -p ploy-research \
+            --features db \
+            --example factor_walk_forward_v2
+
+      - name: Run factor walk-forward
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/factor-walk-forward-v2
+          args=(
+            --snapshot-dir artifacts/research-snapshot
+            --symbols "${{ github.event.inputs.symbols }}"
+            --start-date "${{ github.event.inputs.start_date }}"
+            --end-date "${{ github.event.inputs.end_date }}"
+            --stake-usd "${{ github.event.inputs.stake_usd }}"
+            --train-window-days "${WALK_TRAIN_WINDOW_DAYS}"
+            --test-window-days "${WALK_TEST_WINDOW_DAYS}"
+            --step-days "${WALK_STEP_DAYS}"
+            --lob-sample-secs "${WALK_LOB_SAMPLE_SECS}"
+            --observation-sample-secs "${WALK_OBSERVATION_SAMPLE_SECS}"
+            --max-quote-age-secs "${WALK_MAX_QUOTE_AGE_SECS}"
+            --min-observations "${WALK_MIN_OBSERVATIONS}"
+            --top-quantile "${WALK_TOP_QUANTILE}"
+            --top-n "${WALK_TOP_N}"
+            --data-quality-mode "${WALK_DATA_QUALITY_MODE}"
+            --min-event-complete-events "${WALK_MIN_EVENT_COMPLETE_EVENTS}"
+            --min-event-complete-rows "${WALK_MIN_EVENT_COMPLETE_ROWS}"
+          )
+          if [ -n "${WALK_FACTOR_NAME_FILTER}" ]; then
+            args+=(--factor-name-filter "${WALK_FACTOR_NAME_FILTER}")
+          fi
+          replay_parity_json="${WALK_REPLAY_PARITY_JSON}"
+          if [ -z "${replay_parity_json}" ] && [ -f artifacts/replay-parity/parity-evaluation.json ]; then
+            replay_parity_json="artifacts/replay-parity/parity-evaluation.json"
+          fi
+          if [ -n "${replay_parity_json}" ]; then
+            args+=(--replay-parity-json "${replay_parity_json}")
+          fi
+          ./target/release/examples/factor_walk_forward_v2 "${args[@]}" \
+            | tee artifacts/factor-walk-forward-v2/report.txt
+          echo "canonical_result=snapshot_artifact" | tee artifacts/factor-walk-forward-v2/source.txt
+
+      - name: Evaluate AutoFactor strategy promotion
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f artifacts/factor-walk-forward-v2/report.txt ]; then
+            echo "No factor walk-forward report found; skipping AutoFactor strategy promotion evaluation."
+            exit 0
+          fi
+          args=(
+            --report artifacts/factor-walk-forward-v2/report.txt
+            --output-json artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json
+            --output-md artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.md
+            --output-registry-json artifacts/factor-walk-forward-v2/autofactor-factor-registry.json
+            --output-handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json
+            --output-handoff-md artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.md
+            --required-strategy-profile "${WALK_REQUIRED_STRATEGY_PROFILE}"
+            --allowed-target "${WALK_ALLOWED_TARGET}"
+          )
+          if [ "${WALK_FAIL_IF_BLOCKED}" = "true" ]; then
+            args+=(--fail-if-blocked)
+          fi
+          python3 scripts/evaluate_autofactor_strategy_promotion.py "${args[@]}" \
+            | tee artifacts/factor-walk-forward-v2/evaluator-output.json
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## Factor Walk-Forward V2 Hosted Artifact"
+            echo ""
+            echo "- Snapshot run: \`${{ github.event.inputs.snapshot_run_id }}\`"
+            echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
+            echo "- Train/Test: ${WALK_TRAIN_WINDOW_DAYS}d / ${WALK_TEST_WINDOW_DAYS}d"
+            echo "- Symbols: ${{ github.event.inputs.symbols }}"
+            echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
+            echo "- Data quality mode: ${WALK_DATA_QUALITY_MODE}"
+            echo "- Required strategy profile: ${WALK_REQUIRED_STRATEGY_PROFILE}"
+            echo "- Allowed target: ${WALK_ALLOWED_TARGET}"
+            echo "- Factor filter: ${WALK_FACTOR_NAME_FILTER:-<none>}"
+            if [ -f artifacts/research-snapshot/quality.md ]; then
+              echo ""
+              echo "### Snapshot Quality"
+              cat artifacts/research-snapshot/quality.md
+            fi
+            if [ -f artifacts/factor-walk-forward-v2/report.txt ]; then
+              echo ""
+              echo "### Walk-Forward Report"
+              echo '```'
+              sed -n '1,160p' artifacts/factor-walk-forward-v2/report.txt
+              echo '```'
+            fi
+            if [ -f artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.md ]; then
+              echo ""
+              cat artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.md
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stage report artifact
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/factor-walk-forward-v2-upload
+          mkdir -p artifacts/factor-walk-forward-v2-upload
+          if [ -d artifacts/factor-walk-forward-v2 ]; then
+            cp -R artifacts/factor-walk-forward-v2 artifacts/factor-walk-forward-v2-upload/
+          fi
+          mkdir -p artifacts/factor-walk-forward-v2-upload/snapshot-provenance
+          {
+            echo "source_snapshot_run_id=${{ github.event.inputs.snapshot_run_id }}"
+            echo "producer_run_id=${GITHUB_RUN_ID}"
+            echo "full_snapshot_embedded=false"
+            echo "runner=ubuntu-latest"
+            echo "source=snapshot_artifact"
+          } > artifacts/factor-walk-forward-v2-upload/snapshot-provenance/source.txt
+          for file in manifest.json quality.md data-gap-audit.md data-gap-audit.json; do
+            if [ -f "artifacts/research-snapshot/${file}" ]; then
+              cp "artifacts/research-snapshot/${file}" \
+                "artifacts/factor-walk-forward-v2-upload/snapshot-provenance/${file}"
+            fi
+          done
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: factor-walk-forward-v2-${{ github.run_id }}
+          path: artifacts/factor-walk-forward-v2-upload/
+          compression-level: 0
+          retention-days: 14
+
+      - name: Comment walk-forward evidence on issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { applyResearchIssueLabels } = require("./.github/scripts/research-issue-labels.js");
+            const issueNumberRaw = process.env.WALK_ISSUE_NUMBER || "";
+            if (!issueNumberRaw) {
+              core.info("No issue_number configured; skipping issue comment.");
+              return;
+            }
+            const issue_number = Number(issueNumberRaw);
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const body = [
+              "Hosted factor walk-forward evidence:",
+              "",
+              `- Workflow: ${context.workflow}`,
+              `- Run URL: ${runUrl}`,
+              `- Git ref: ${{ github.event.inputs.git_ref }}`,
+              `- Source snapshot run: \`${{ github.event.inputs.snapshot_run_id }}\``,
+              `- Dataset/window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}`,
+              `- Symbols: ${{ github.event.inputs.symbols }}`,
+              `- Artifact: \`factor-walk-forward-v2-${process.env.GITHUB_RUN_ID}\``,
+              "- Decision: pending"
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              body
+            });
+            await applyResearchIssueLabels({
+              github,
+              context,
+              core,
+              issue_number,
+              labels: ["evidence:walk-forward", "runner:hosted", "decision:pending"]
+            });
+
+      - name: Create ready handoff issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${WALK_CREATE_HANDOFF_ISSUE}" != "true" ]; then
+            echo "create_handoff_issue is not true; skipping handoff issue creation."
+            exit 0
+          fi
+          handoff_json="artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json"
+          handoff_md="artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.md"
+          if [ ! -f "${handoff_json}" ] || [ ! -f "${handoff_md}" ]; then
+            echo "Handoff artifacts missing; skipping issue creation."
+            exit 0
+          fi
+          status="$(python3 - <<'PY'
+          import json
+          with open("artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json", encoding="utf-8") as handle:
+              print(json.load(handle).get("status", "blocked"))
+          PY
+          )"
+          if [ "${status}" != "ready" ]; then
+            echo "Handoff status is ${status}; no dry-run issue will be created."
+            exit 0
+          fi
+          gh issue create \
+            --title "Promote AutoFactor strategy handoff to dry-run" \
+            --body-file "${handoff_md}"
