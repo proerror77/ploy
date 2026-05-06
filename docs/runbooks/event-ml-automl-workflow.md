@@ -106,7 +106,11 @@ It stops on the first failed phase. The attribution phase writes
 phase consumes that whitelist automatically. The runner also writes
 `workflow_report.json` and `workflow_report.md` into the run directory.
 The hyperparameter phase writes candidate-level `baseline_metrics.json` files
-plus `hyperparameter_search.json` and `hyperparameter_search.md`.
+plus `hyperparameter_search.json` and `hyperparameter_search.md`. Each
+`baseline_metrics.json` includes the complete logistic model contract
+(`model.kind`, feature schema, intercept, weights, and train-only
+standardizer) so a future runtime scorer can replay the same model instead of
+scraping report text.
 The walk-forward phase writes `walk_forward_report.json` and
 `walk_forward_report.md`. It also writes a fail-closed
 `event_ml_strategy_handoff.json` / `.md`. The handoff stays `blocked` unless
@@ -688,6 +692,8 @@ Artifacts:
 - `hyperparameter/candidate_*/baseline_metrics.json`
 - `hyperparameter/hyperparameter_search.json`
 - `hyperparameter/hyperparameter_search.md`
+- embedded baseline `model` contract with feature schema, train-only
+  standardizer, intercept, and full logistic weights
 
 Examples to avoid early:
 

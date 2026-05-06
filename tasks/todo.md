@@ -197,6 +197,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `event_ml_factor_registry.json` / `.md` beside attribution and whitelist
   artifacts, preserving target label, regime, train-derived direction,
   whitelist status, and blockers for downstream promotion gates.
+- [x] Add the first Event ML runtime-scorer prerequisite to the baseline
+  artifact. `baseline_metrics.json` now embeds a complete logistic model
+  contract with feature schema, intercept, full weights, and train-only z-score
+  standardizer; this keeps walk-forward compatibility while making
+  `event_ml_model:*` runtime support implementable without scraping reports.
 
 ## Review
 
