@@ -47,13 +47,13 @@ export interface DryRunDailyRow { closed_trade_count: number; confirmed_pnl: num
 
 export interface DryRunDailyWindowRow { closed_trade_count: number; losses: number; net_pnl: number; trade_count: number; trading_day_cst: string; window_label: string; window_secs?: number | null; wins: number; }
 
-export interface DryRunHourlyRow { closed_trade_count: number; cumulative_pnl: number; drawdown: number; losses: number; net_pnl: number; trade_count: number; trading_hour_cst: string; wins: number; }
-
-export interface DryRunHourlyWindowRow { closed_trade_count: number; losses: number; net_pnl: number; trade_count: number; trading_hour_cst: string; window_label: string; window_secs?: number | null; wins: number; }
-
 export interface DryRunEquityPoint { cumulative: number; drawdown: number; index: number; label: string; pnl: number; symbol?: string | null; timestamp?: string | null; }
 
 export interface DryRunExecutionDiagnostics { basis: string; partial_buy_threshold_pct: number; strategies: JsonValue[]; summary: { [key: string]: JsonValue }; }
+
+export interface DryRunHourlyRow { closed_trade_count: number; cumulative_pnl: number; drawdown: number; losses: number; net_pnl: number; trade_count: number; trading_hour_cst: string; wins: number; }
+
+export interface DryRunHourlyWindowRow { closed_trade_count: number; losses: number; net_pnl: number; trade_count: number; trading_hour_cst: string; window_label: string; window_secs?: number | null; wins: number; }
 
 export interface DryRunMetrics { avg_trade?: number | null; closed_trade_count_for_sharpe?: number | null; daily_sharpe_basis?: string | null; equity_points: number; gross_loss: number; gross_profit: number; max_drawdown: number; profit_factor?: NumberOrText | null; sharpe?: number | null; sharpe_basis?: string | null; sharpe_daily_ann?: number | null; sharpe_per_trade?: number | null; }
 

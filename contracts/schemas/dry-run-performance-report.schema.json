@@ -63,6 +63,20 @@
     "generated_at": {
       "type": "string"
     },
+    "hourly": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DryRunHourlyRow"
+      }
+    },
+    "hourly_by_window": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DryRunHourlyWindowRow"
+      }
+    },
     "metrics": {
       "$ref": "#/definitions/DryRunMetrics"
     },
@@ -418,6 +432,107 @@
         }
       }
     },
+    "DryRunHourlyRow": {
+      "type": "object",
+      "required": [
+        "closed_trade_count",
+        "cumulative_pnl",
+        "drawdown",
+        "losses",
+        "net_pnl",
+        "trade_count",
+        "trading_hour_cst",
+        "wins"
+      ],
+      "properties": {
+        "closed_trade_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "cumulative_pnl": {
+          "type": "number",
+          "format": "double"
+        },
+        "drawdown": {
+          "type": "number",
+          "format": "double"
+        },
+        "losses": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "net_pnl": {
+          "type": "number",
+          "format": "double"
+        },
+        "trade_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "trading_hour_cst": {
+          "type": "string"
+        },
+        "wins": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "DryRunHourlyWindowRow": {
+      "type": "object",
+      "required": [
+        "closed_trade_count",
+        "losses",
+        "net_pnl",
+        "trade_count",
+        "trading_hour_cst",
+        "window_label",
+        "wins"
+      ],
+      "properties": {
+        "closed_trade_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "losses": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "net_pnl": {
+          "type": "number",
+          "format": "double"
+        },
+        "trade_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "trading_hour_cst": {
+          "type": "string"
+        },
+        "window_label": {
+          "type": "string"
+        },
+        "window_secs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "wins": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
     "DryRunMetrics": {
       "type": "object",
       "required": [
@@ -736,6 +851,20 @@
             "string",
             "null"
           ]
+        },
+        "hourly": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DryRunHourlyRow"
+          }
+        },
+        "hourly_by_window": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DryRunHourlyWindowRow"
+          }
         },
         "label": {
           "type": "string"

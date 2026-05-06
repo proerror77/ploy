@@ -115,7 +115,7 @@ for (const fileName of schemaFiles) {
   emitDefinition(schema.title, schema);
 }
 
-const output = `${lines.join("\n").replace(/[ \t]+$/gm, "")}\n`;
+const output = `${lines.join("\n").replace(/[ \t]+$/gm, "").trimEnd()}\n`;
 const stale = [];
 
 for (const target of targets) {
