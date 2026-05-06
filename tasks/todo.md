@@ -176,6 +176,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   positive executable PnL, runtime scorer mapping, and replay parity gates all
   pass. `event_ml_walk_forward` now writes
   `event_ml_strategy_handoff.{json,md}` alongside the walk-forward report.
+- [x] Wire Event ML handoff gate inputs through the workflow stack. The local
+  `event_ml_workflow`, `event_ml_rolling_workflow`, and
+  `event-ml-rolling-evidence.yml` GitHub workflow now pass runtime-score and
+  replay-parity evidence into the final walk-forward phase, so hosted artifact
+  runs can produce a ready handoff only when those gates are explicitly
+  supplied.
 
 ## Review
 
@@ -285,6 +291,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   runtime score is supplied, and recorded replay/runtime parity is marked
   ready. Verification passed with targeted rustfmt, `event_ml_handoff` unit
   tests, `event_ml_walk_forward` cargo check, and `git diff --check`.
+- 2026-05-06: Continued the Event ML promotion automation by wiring handoff
+  gate inputs through both local workflow runners and the hosted rolling
+  evidence workflow. This keeps the default fail-closed behavior, but lets a
+  later replay-verified run carry `runtime_score` and `replay_parity_ready`
+  into `event_ml_strategy_handoff.json` without manual artifact edits.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

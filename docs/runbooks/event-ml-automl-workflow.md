@@ -115,6 +115,17 @@ marked ready. With only one workflow run, the report is expected to mark DL/RL
 and dry-run handoff readiness as `blocked`; that is a useful gate, not a runner
 failure.
 
+When replay/runtime parity evidence exists, pass it explicitly through the
+workflow runner so the same walk-forward phase can produce a ready handoff:
+
+```bash
+rtk cargo run -p ploy-research --example event_ml_workflow \
+  --features polars-export -- \
+  --dataset /tmp/ploy-event-root-5sym-150-20260424 \
+  --runtime-score event_ml_model:baseline_v1 \
+  --replay-parity-ready
+```
+
 ## AutoFactor Strategy Promotion Gate
 
 AutoFactor candidate rows are discovery evidence, not strategy handoff evidence.
@@ -404,6 +415,20 @@ gh workflow run event-ml-rolling-evidence.yml \
 If the dataset artifact has a non-default name, pass it through
 `options_json.source_dataset_artifact_name`. Keep it inside `options_json` so
 the workflow stays within GitHub's 10-input dispatch limit.
+
+To let the hosted rolling workflow produce a ready Event ML strategy handoff
+after replay/runtime parity has passed, include the handoff gates in
+`options_json`:
+
+```bash
+gh workflow run event-ml-rolling-evidence.yml \
+  -f git_ref=main \
+  -f source_dataset_run_id=<run-id-with-event-ml-rolling-datasets-artifact> \
+  -f options_json='{"runtime_score":"event_ml_model:baseline_v1","replay_parity_ready":"true"}'
+```
+
+Without those options, `event_ml_strategy_handoff.json` remains a blocked
+evidence artifact by design.
 
 The legacy self-hosted phase performs:
 
