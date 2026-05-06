@@ -190,6 +190,23 @@ def compact_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
+def split_replay_parity_input(value: str, artifact_name: str) -> tuple[str, str]:
+    """Parse workflow-friendly replay parity input.
+
+    GitHub workflow_dispatch is limited to 10 inputs, so the workflow accepts a
+    compact replay input of either "<run_id>" or "<run_id>:<artifact_name>".
+    Direct CLI callers can still use --replay-parity-artifact-name.
+    """
+
+    stripped = value.strip()
+    if not stripped or artifact_name:
+        return stripped, artifact_name
+    if ":" not in stripped:
+        return stripped, artifact_name
+    run_id, artifact = stripped.split(":", 1)
+    return run_id.strip(), artifact.strip()
+
+
 def parse_promotion_gate(report_text: str) -> PromotionGateEvaluation:
     ready: bool | None = None
     blocked_gates: list[str] = []
@@ -308,6 +325,10 @@ def main() -> int:
     git_ref = args.git_ref or git_branch()
     rust_data_quality_mode = args.data_quality_mode.replace("-", "_")
     snapshot_data_gate = "critical" if args.data_quality_mode == "strict-continuous" else "never"
+    replay_parity_run_id, replay_parity_artifact_name = split_replay_parity_input(
+        args.replay_parity_run_id,
+        args.replay_parity_artifact_name,
+    )
 
     if args.snapshot_run_id:
         snapshot_result = refresh_run(int(args.snapshot_run_id))
@@ -398,8 +419,8 @@ def main() -> int:
         "min_event_complete_events": int(args.min_event_complete_events),
         "min_event_complete_rows": int(args.min_event_complete_rows),
         "replay_parity_json": "",
-        "replay_parity_run_id": args.replay_parity_run_id,
-        "replay_parity_artifact_name": args.replay_parity_artifact_name,
+        "replay_parity_run_id": replay_parity_run_id,
+        "replay_parity_artifact_name": replay_parity_artifact_name,
         "required_strategy_profile": "settlement_probability",
         "allowed_target": "full_depth_settlement_executable_pnl",
         "issue_number": args.issue_number,
@@ -468,7 +489,8 @@ def main() -> int:
             f"- Snapshot run: {snapshot_result.url}",
             f"- Walk-forward run: {walk_result.url}",
             f"- Walk-forward conclusion: `{walk_result.conclusion}`",
-            f"- Replay parity run supplied: `{args.replay_parity_run_id or 'none'}`",
+            f"- Replay parity run supplied: `{replay_parity_run_id or 'none'}`",
+            f"- Replay parity artifact supplied: `{replay_parity_artifact_name or 'default'}`",
             f"- Data quality mode: `{args.data_quality_mode}`",
             f"- Gate: `{gate.evidence}`",
             f"- Decision: {decision}",
