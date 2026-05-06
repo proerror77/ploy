@@ -185,11 +185,17 @@ different.
   (`TANGO_1_1_KNOWN_HOSTS` and `PLOY_TRADE_1_KNOWN_HOSTS`). Entries should be
   keyed by the workflow aliases `tango-1-1` and `ploy-trade-1` because the deploy
   SSH config sets `HostKeyAlias`.
-- Remote data and heavy research belong on `ploy-ci-1`, `tango-1-1`, ACK, or
-  CI-built artifacts, not local PostgreSQL assumptions.
-- `ploy-ci-1` research workflows read Tango PostgreSQL through GitHub Actions
-  secrets `PLOY_RESEARCH_DATABASE_URL` and `PLOY_DB_URL`; verify the private
-  endpoint with Aliyun CLI before changing those secrets.
+- Artifact-backed PM5D/PM15D research should default to GitHub-hosted runners.
+  Use `factor-walk-forward-v2-hosted-artifact.yml` directly, or
+  `settlement-probability-prd-gate.yml` with `snapshot_run_id`, when a retained
+  full research snapshot artifact already exists.
+- `ploy-ci-1` is now a legacy DB-adjacent fallback for compiling fresh research
+  snapshots from Tango PostgreSQL. Do not route AutoFactor mining,
+  walk-forward promotion, or dry-run handoff checks to `ploy-ci-1` when a full
+  snapshot artifact can be reused on `ubuntu-latest`.
+- Legacy `ploy-ci-1` research workflows read Tango PostgreSQL through GitHub
+  Actions secrets `PLOY_RESEARCH_DATABASE_URL` and `PLOY_DB_URL`; verify the
+  private endpoint with Aliyun CLI before changing those secrets.
 - DB-mode research workflows must fail closed unless the research database URL
   targets Tango's private VPC endpoint `172.16.0.204`. A public Tango endpoint
   can turn large backtest query results into billable公网出流量.

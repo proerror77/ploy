@@ -144,6 +144,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `auto_settlement_*` formula factors so candidates that pass the
   `full_depth_settlement_executable_pnl` target can reach the handoff contract
   once the surrounding PRD gate, including recorded replay parity, is ready.
+- [x] Make the settlement PRD gate prefer GitHub-hosted artifact execution when
+  a retained full snapshot artifact is available. `snapshot_run_id` now skips
+  the legacy `ploy-ci-1` snapshot build and dispatches the hosted
+  `factor-walk-forward-v2-hosted-artifact.yml` path for AutoFactor mining and
+  promotion.
 
 ## Review
 
@@ -212,6 +217,12 @@ evidence comes from Polymarket full CLOB depth, not top book.
   settlement-native candidates are blocked only by `promotion_gate_not_ready`
   instead of missing runtime mappings; the remaining hard blocker is recorded
   replay parity evidence.
+- 2026-05-06: Updated the PRD gate orchestration so future settlement
+  probability / AutoFactor runs can avoid `ploy-ci-1` when a full snapshot
+  artifact already exists. The workflow now stays within the 10-input GitHub
+  Actions limit by adding `snapshot_run_id` and relying on default replay
+  artifact naming, then calls the hosted artifact-only walk-forward workflow on
+  `ubuntu-latest`.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

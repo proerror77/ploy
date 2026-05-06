@@ -217,6 +217,28 @@ within the GitHub Actions 10-input limit. Defaults are
 `allowed_target=full_depth_settlement_executable_pnl`,
 `create_handoff_issue=false`, and `fail_if_blocked=false`.
 
+For the full settlement-probability PRD gate, prefer passing an existing full
+snapshot artifact into the orchestrator so downstream AutoFactor mining and
+promotion run on GitHub-hosted runners:
+
+```bash
+gh workflow run settlement-probability-prd-gate.yml \
+  -f git_ref=main \
+  -f snapshot_run_id=<full-snapshot-run-id> \
+  -f start_date=2026-05-01 \
+  -f end_date=2026-05-05 \
+  -f symbols=BTCUSDT,ETHUSDT \
+  -f stake_usd=15 \
+  -f audit_lookback_hours=168:event-complete \
+  -f replay_parity_run_id=<optional-replay-parity-run-id>
+```
+
+With `snapshot_run_id` set, the gate skips the legacy `ploy-ci-1` snapshot
+build and dispatches `factor-walk-forward-v2-hosted-artifact.yml` on
+`ubuntu-latest`. If `snapshot_run_id` is omitted, the orchestrator still falls
+back to `research-snapshot.yml`; that path remains a legacy DB-adjacent path
+until snapshot export is moved to a hosted-safe data source.
+
 Use `--output-dir <dir>` to choose the artifact directory. Without it, the
 runner writes under `<dataset>/workflow_runs/event_ml_<timestamp>`.
 
