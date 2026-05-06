@@ -162,6 +162,10 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `autofactor-strategy-handoff.json` can update the dry-run config and open a
   reviewable PR without a manual TOML edit. This should be PR-only, not deploy
   or live trading.
+- [x] Wire config promotion into the hosted artifact walk-forward workflow so
+  a single GitHub-hosted run can go from retained snapshot artifact to
+  AutoFactor walk-forward, promotion gate, handoff artifact, and config PR
+  when `options_json.create_config_pr=true`.
 
 ## Review
 
@@ -255,6 +259,10 @@ evidence comes from Polymarket full CLOB depth, not top book.
   A ready handoff can now update only
   `three_layer_autofactor_runtime_score` in the dry-run config and open a
   normal CI-gated PR; blocked handoffs or unchanged configs do not create PRs.
+- 2026-05-06: Extended `factor-walk-forward-v2-hosted-artifact.yml` with the
+  same optional config-PR promotion path, controlled through `options_json`.
+  This makes the artifact-backed hosted AutoFactor path a single workflow from
+  snapshot consumption through ready-handoff config PR creation.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

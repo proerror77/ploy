@@ -31,18 +31,19 @@ on:
         required: true
         default: "15"
       options_json:
-        description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, optional issue handoff"
+        description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, optional issue/config handoff"
         required: false
-        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"fail_if_blocked":false}'
+        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
 
 concurrency:
   group: factor-walk-forward-v2-hosted-artifact-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.snapshot_run_id }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
   actions: read
   issues: write
+  pull-requests: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -90,9 +91,11 @@ jobs:
               "allowed_target": "full_depth_settlement_executable_pnl",
               "issue_number": "",
               "create_handoff_issue": "false",
+              "create_config_pr": "false",
+              "strategy_config": "config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
               "fail_if_blocked": "false",
           }
-          bool_keys = {"create_handoff_issue", "fail_if_blocked"}
+          bool_keys = {"create_handoff_issue", "create_config_pr", "fail_if_blocked"}
           choices = {
               "data_quality_mode": {"strict_continuous", "event_complete"},
           }
@@ -284,6 +287,88 @@ jobs:
           fi
           python3 scripts/evaluate_autofactor_strategy_promotion.py "${args[@]}" \
             | tee artifacts/factor-walk-forward-v2/evaluator-output.json
+
+      - name: Create config PR from ready handoff
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.event.inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          if [ "${WALK_CREATE_CONFIG_PR}" != "true" ]; then
+            echo "create_config_pr is not true; skipping config PR creation."
+            exit 0
+          fi
+          handoff_json="artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json"
+          if [ ! -f "${handoff_json}" ]; then
+            echo "Handoff JSON missing; skipping config PR creation."
+            exit 0
+          fi
+          case "${WALK_STRATEGY_CONFIG}" in
+            config/strategies/*.toml) ;;
+            *)
+              echo "strategy_config must be a config/strategies/*.toml path" >&2
+              exit 2
+              ;;
+          esac
+          status="$(python3 - <<'PY'
+          import json
+          with open("artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json", encoding="utf-8") as handle:
+              print(json.load(handle).get("status", "blocked"))
+          PY
+          )"
+          if [ "${status}" != "ready" ]; then
+            echo "Handoff status is ${status}; no config PR will be created."
+            exit 0
+          fi
+          mkdir -p artifacts/factor-walk-forward-v2/autofactor-config-handoff
+          python3 scripts/apply_autofactor_handoff_to_config.py \
+            --handoff-json "${handoff_json}" \
+            --config "${WALK_STRATEGY_CONFIG}" \
+            --output-json artifacts/factor-walk-forward-v2/autofactor-config-handoff/config-handoff.json \
+            --output-md artifacts/factor-walk-forward-v2/autofactor-config-handoff/config-handoff.md
+          changed="$(python3 - <<'PY'
+          import json
+          with open("artifacts/factor-walk-forward-v2/autofactor-config-handoff/config-handoff.json", encoding="utf-8") as handle:
+              print("true" if json.load(handle).get("changed") else "false")
+          PY
+          )"
+          if [ "${changed}" != "true" ]; then
+            echo "Config already matches selected handoff; no PR will be created."
+            exit 0
+          fi
+
+          branch="autofactor/hosted-walk-forward-handoff-${GITHUB_RUN_ID}"
+          git switch -c "${branch}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${WALK_STRATEGY_CONFIG}"
+          git commit \
+            -m "Promote hosted AutoFactor handoff into dry-run config" \
+            -m "A hosted factor walk-forward run produced a ready AutoFactor strategy handoff whose selected runtime score differs from the checked-in dry-run config. This applies only that runtime score and leaves execution, risk, and kill-switch settings unchanged." \
+            -m "Constraint: Generated from hosted factor walk-forward artifact status=ready" \
+            -m "Constraint: Dry-run config only; no deploy or live order path" \
+            -m "Rejected: Direct deployment from hosted research workflow | config changes must pass PR review and CI first" \
+            -m "Confidence: medium" \
+            -m "Scope-risk: narrow" \
+            -m "Tested: factor-walk-forward-v2-hosted-artifact.yml create_config_pr path" \
+            -m "Not-tested: dry-run deployment/replay after config change"
+          git push origin "${branch}"
+
+          title="Promote hosted AutoFactor handoff into dry-run config"
+          {
+            cat artifacts/factor-walk-forward-v2/autofactor-config-handoff/config-handoff.md
+            echo ""
+            echo "Source hosted walk-forward run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "Source snapshot run: ${{ github.event.inputs.snapshot_run_id }}"
+            echo ""
+            echo "This PR is generated from a ready hosted handoff artifact. It does not deploy and does not enable live trading."
+          } > artifacts/factor-walk-forward-v2/autofactor-config-handoff/pr-body.md
+          gh pr create \
+            --base "${BASE_REF}" \
+            --head "${branch}" \
+            --title "${title}" \
+            --body-file artifacts/factor-walk-forward-v2/autofactor-config-handoff/pr-body.md
 
       - name: Publish summary
         if: always()
