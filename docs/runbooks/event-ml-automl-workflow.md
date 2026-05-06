@@ -424,11 +424,13 @@ after replay/runtime parity has passed, include the handoff gates in
 gh workflow run event-ml-rolling-evidence.yml \
   -f git_ref=main \
   -f source_dataset_run_id=<run-id-with-event-ml-rolling-datasets-artifact> \
-  -f options_json='{"runtime_score":"event_ml_model:baseline_v1","replay_parity_ready":"true"}'
+  -f options_json='{"runtime_score":"event_ml_model:baseline_v1","replay_parity_ready":"true","create_handoff_issue":"true"}'
 ```
 
 Without those options, `event_ml_strategy_handoff.json` remains a blocked
-evidence artifact by design.
+evidence artifact by design. The `create_handoff_issue` option is also
+fail-closed: it creates an issue only when the generated handoff JSON reports
+`status=ready`.
 
 The legacy self-hosted phase performs:
 
