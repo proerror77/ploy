@@ -38,7 +38,7 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read
+  actions: write
   issues: write
 
 env:
@@ -47,8 +47,88 @@ env:
   PLOY_DB_URL: ${{ secrets.PLOY_DB_URL }}
 
 jobs:
+  route-hosted-artifact:
+    name: Route snapshot-backed walk-forward to GitHub-hosted runner
+    if: ${{ github.event.inputs.snapshot_run_id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout orchestration code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Dispatch hosted artifact workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_REF: ${{ github.event.inputs.git_ref }}
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+        run: |
+          set -euo pipefail
+          hosted_options="$(python3 - <<'PY'
+          import json
+          import os
+
+          allowed = {
+              "train_window_days",
+              "test_window_days",
+              "step_days",
+              "lob_sample_secs",
+              "observation_sample_secs",
+              "max_quote_age_secs",
+              "top_n",
+              "min_observations",
+              "top_quantile",
+              "factor_name_filter",
+              "data_quality_mode",
+              "min_event_complete_events",
+              "min_event_complete_rows",
+              "replay_parity_json",
+              "replay_parity_run_id",
+              "replay_parity_artifact_name",
+              "required_strategy_profile",
+              "allowed_target",
+              "issue_number",
+              "create_handoff_issue",
+              "create_config_pr",
+              "strategy_config",
+              "fail_if_blocked",
+          }
+          raw = os.environ.get("OPTIONS_JSON", "").strip()
+          data = json.loads(raw) if raw else {}
+          if not isinstance(data, dict):
+              raise SystemExit("options_json must be a JSON object")
+          filtered = {key: value for key, value in data.items() if key in allowed}
+          if filtered.get("data_quality_mode") == "strict_continuous":
+              filtered["data_quality_mode"] = "strict_continuous"
+          print(json.dumps(filtered, separators=(",", ":"), sort_keys=True))
+          PY
+          )"
+          gh workflow run factor-walk-forward-v2-hosted-artifact.yml \
+            --ref "${GIT_REF}" \
+            -f git_ref="${GIT_REF}" \
+            -f snapshot_run_id="${{ github.event.inputs.snapshot_run_id }}" \
+            -f start_date="${{ github.event.inputs.start_date }}" \
+            -f end_date="${{ github.event.inputs.end_date }}" \
+            -f symbols="${{ github.event.inputs.symbols }}" \
+            -f stake_usd="${{ github.event.inputs.stake_usd }}" \
+            -f options_json="${hosted_options}"
+
+      - name: Write routing summary
+        run: |
+          {
+            echo "## Factor Walk-Forward V2"
+            echo ""
+            echo "Snapshot-backed requests are routed to \`factor-walk-forward-v2-hosted-artifact.yml\` on \`ubuntu-latest\`."
+            echo ""
+            echo "- Source snapshot run: \`${{ github.event.inputs.snapshot_run_id }}\`"
+            echo "- Legacy \`ploy-ci-1\` job: skipped"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   walk-forward:
-    name: Run factor walk-forward on ploy-ci-1
+    name: Run factor walk-forward from DB on ploy-ci-1
+    if: ${{ github.event.inputs.snapshot_run_id == '' }}
     runs-on: [self-hosted, ploy-ci-1]
     timeout-minutes: 60
     environment: ploy-ci-1

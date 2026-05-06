@@ -219,6 +219,7 @@ async fn backtest_full_loop_produces_entry() {
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
         three_layer_autofactor_runtime_score: None,
+        three_layer_event_ml_model_path: None,
     };
 
     let strategy = DirectionalStrategy::new(config);
@@ -359,6 +360,7 @@ async fn empty_feed_produces_zero_trades() {
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
         three_layer_autofactor_runtime_score: None,
+        three_layer_event_ml_model_path: None,
     };
 
     let strategy = DirectionalStrategy::new(config);
@@ -437,6 +439,7 @@ async fn recorded_updates_replay_to_the_same_runtime_result() {
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
         three_layer_autofactor_runtime_score: None,
+        three_layer_event_ml_model_path: None,
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,
@@ -565,6 +568,7 @@ async fn sports_updates_round_trip_without_changing_crypto_runtime_behavior() {
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
         three_layer_autofactor_runtime_score: None,
+        three_layer_event_ml_model_path: None,
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,
@@ -686,6 +690,7 @@ async fn reference_updates_round_trip_without_changing_crypto_runtime_behavior()
         three_layer_max_pm_lag_secs: 15,
         three_layer_min_entry_score: 0.30,
         three_layer_autofactor_runtime_score: None,
+        three_layer_event_ml_model_path: None,
     };
     let sim_config = SimulatedExecutorConfig {
         use_spread: true,

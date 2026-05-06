@@ -7,6 +7,7 @@ const SUPPORTED_MODEL_KIND: &str = "event_ml_logistic_baseline_model";
 const SUPPORTED_MODEL_VERSION: u32 = 1;
 const SUPPORTED_MODEL_FAMILY: &str = "logistic_regression";
 const SUPPORTED_TARGET_LABEL: &str = "settlement_up";
+pub const EVENT_ML_RUNTIME_SCORE_PREFIX: &str = "event_ml_model:";
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct EventMlBaselineArtifact {
@@ -167,6 +168,13 @@ pub fn parse_event_ml_baseline_model(
     json: &str,
 ) -> Result<EventMlModelContract, serde_json::Error> {
     serde_json::from_str::<EventMlBaselineArtifact>(json).map(|artifact| artifact.model)
+}
+
+#[must_use]
+pub fn is_event_ml_runtime_score(runtime_score: &str) -> bool {
+    runtime_score
+        .trim()
+        .starts_with(EVENT_ML_RUNTIME_SCORE_PREFIX)
 }
 
 fn sigmoid(value: f64) -> f64 {

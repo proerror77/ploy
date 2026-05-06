@@ -50,7 +50,7 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read
+  actions: write
   issues: write
 
 env:
@@ -59,8 +59,77 @@ env:
   PLOY_DB_URL: ${{ secrets.PLOY_DB_URL }}
 
 jobs:
+  route-hosted-artifact:
+    name: Route snapshot-backed factor review to GitHub-hosted runner
+    if: ${{ github.event.inputs.snapshot_run_id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout orchestration code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Dispatch hosted artifact workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_REF: ${{ github.event.inputs.git_ref }}
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+          LOB_SAMPLE_SECS: ${{ github.event.inputs.lob_sample_secs }}
+          OBSERVATION_SAMPLE_SECS: ${{ github.event.inputs.observation_sample_secs }}
+          MAX_QUOTE_AGE_SECS: ${{ github.event.inputs.max_quote_age_secs }}
+        run: |
+          set -euo pipefail
+          hosted_options="$(python3 - <<'PY'
+          import json
+          import os
+
+          allowed = {
+              "lob_sample_secs",
+              "observation_sample_secs",
+              "max_quote_age_secs",
+              "top_n",
+              "min_observations",
+              "top_quantile",
+              "factor_name_filter",
+              "issue_number",
+          }
+          raw = os.environ.get("OPTIONS_JSON", "").strip()
+          data = json.loads(raw) if raw else {}
+          if not isinstance(data, dict):
+              raise SystemExit("options_json must be a JSON object")
+          filtered = {key: value for key, value in data.items() if key in allowed}
+          filtered["lob_sample_secs"] = os.environ["LOB_SAMPLE_SECS"]
+          filtered["observation_sample_secs"] = os.environ["OBSERVATION_SAMPLE_SECS"]
+          filtered["max_quote_age_secs"] = os.environ["MAX_QUOTE_AGE_SECS"]
+          print(json.dumps(filtered, separators=(",", ":"), sort_keys=True))
+          PY
+          )"
+          gh workflow run factor-review-v2-hosted-artifact.yml \
+            --ref "${GIT_REF}" \
+            -f git_ref="${GIT_REF}" \
+            -f snapshot_run_id="${{ github.event.inputs.snapshot_run_id }}" \
+            -f start_date="${{ github.event.inputs.start_date }}" \
+            -f end_date="${{ github.event.inputs.end_date }}" \
+            -f symbols="${{ github.event.inputs.symbols }}" \
+            -f stake_usd="${{ github.event.inputs.stake_usd }}" \
+            -f options_json="${hosted_options}"
+
+      - name: Write routing summary
+        run: |
+          {
+            echo "## Factor Review V2"
+            echo ""
+            echo "Snapshot-backed requests are routed to \`factor-review-v2-hosted-artifact.yml\` on \`ubuntu-latest\`."
+            echo ""
+            echo "- Source snapshot run: \`${{ github.event.inputs.snapshot_run_id }}\`"
+            echo "- Legacy \`ploy-ci-1\` job: skipped"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   review:
-    name: Run factor review on ploy-ci-1
+    name: Run factor review from DB on ploy-ci-1
+    if: ${{ github.event.inputs.snapshot_run_id == '' }}
     runs-on: [self-hosted, ploy-ci-1]
     timeout-minutes: 60
     environment: ploy-ci-1

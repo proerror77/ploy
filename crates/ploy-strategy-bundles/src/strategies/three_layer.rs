@@ -4,15 +4,20 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
-use std::collections::{HashMap, VecDeque};
+use rust_decimal::Decimal;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fs;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use super::common::event::EventWindow;
+use super::common::fees::crypto_fee_cost;
 use super::common::quote::QuoteState;
 use super::common::settlement;
+use super::event_ml_model::{
+    self, is_event_ml_runtime_score, EventMlModelContract, EventMlModelError,
+};
 use super::three_layer_model::{
     self, AutoSettlementFactorInputs, BookConfirmationInputs, EntryScoreInputs,
     ThreeLayerModelConfig,
@@ -52,6 +57,7 @@ pub struct ThreeLayerConfig {
     pub max_entry_price: f64,
     pub min_entry_score: f64,
     pub autofactor_runtime_score: Option<String>,
+    pub event_ml_model: Option<EventMlModelContract>,
 }
 
 impl From<DirectionalConfig> for ThreeLayerConfig {
@@ -84,11 +90,43 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             max_entry_price: c.max_entry_price,
             min_entry_score: c.three_layer_min_entry_score,
             autofactor_runtime_score: c.three_layer_autofactor_runtime_score,
+            event_ml_model: None,
         }
     }
 }
 
 impl ThreeLayerConfig {
+    pub fn from_directional_runtime(c: DirectionalConfig) -> Result<Self, String> {
+        let mut config = Self::from(c.clone());
+        let runtime_score = config.autofactor_runtime_score.as_deref().unwrap_or("");
+        if !is_event_ml_runtime_score(runtime_score) {
+            return Ok(config);
+        }
+
+        let path = c.three_layer_event_ml_model_path.as_ref().ok_or_else(|| {
+            "three_layer_event_ml_model_path is required when runtime score starts with event_ml_model:"
+                .to_string()
+        })?;
+        let raw = fs::read_to_string(path)
+            .map_err(|err| format!("read Event ML model artifact {}: {err}", path.display()))?;
+        let model = event_ml_model::parse_event_ml_baseline_model(&raw)
+            .map_err(|err| format!("parse Event ML model artifact {}: {err}", path.display()))?;
+        model
+            .validate()
+            .map_err(|err| format!("invalid Event ML model artifact {}: {err}", path.display()))?;
+        validate_event_ml_runtime_schema(&model)
+            .map_err(|err| format!("unsupported Event ML runtime feature schema: {err}"))?;
+        config.event_ml_model = Some(model);
+        Ok(config)
+    }
+
+    fn uses_event_ml_model(&self) -> bool {
+        self.autofactor_runtime_score
+            .as_deref()
+            .map(is_event_ml_runtime_score)
+            .unwrap_or(false)
+    }
+
     fn model_config(&self) -> ThreeLayerModelConfig {
         ThreeLayerModelConfig {
             profile: self.profile,
@@ -142,17 +180,40 @@ impl DriftTracker {
     }
 
     fn drift_30s(&self) -> f64 {
+        self.drift_since_secs(30)
+    }
+
+    fn drift_since_secs(&self, secs: i64) -> f64 {
         if self.history.len() < 2 {
             return 0.0;
         }
         let now = self.history.back().unwrap();
-        let cutoff = now.0 - chrono::Duration::seconds(30);
+        let cutoff = now.0 - chrono::Duration::seconds(secs);
         let anchor = self
             .history
             .iter()
             .find(|(ts, _)| *ts >= cutoff)
             .unwrap_or(self.history.front().unwrap());
         now.1 - anchor.1
+    }
+
+    fn drift_speed_since_secs(&self, secs: i64) -> f64 {
+        if self.history.len() < 2 {
+            return 0.0;
+        }
+        let now = self.history.back().unwrap();
+        let cutoff = now.0 - chrono::Duration::seconds(secs);
+        let anchor = self
+            .history
+            .iter()
+            .find(|(ts, _)| *ts >= cutoff)
+            .unwrap_or(self.history.front().unwrap());
+        let dt = (now.0 - anchor.0).num_milliseconds() as f64 / 1000.0;
+        if dt <= 0.0 {
+            0.0
+        } else {
+            (now.1 - anchor.1) / dt
+        }
     }
 
     fn sigma_horizon(&mut self, horizon_secs: f64) -> f64 {
@@ -177,6 +238,31 @@ impl DriftTracker {
         }
         let var_per_sec = var / avg_dt;
         (var_per_sec * horizon_secs).sqrt()
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct DirectionDriftState {
+    prev_drift_30s: f64,
+    flip_ts: Option<DateTime<Utc>>,
+    post_flip_drift: f64,
+}
+
+impl DirectionDriftState {
+    fn update(&mut self, drift_30s: f64, ts: DateTime<Utc>) {
+        let old_sign = signum(self.prev_drift_30s);
+        let new_sign = signum(drift_30s);
+        if old_sign != 0.0 && new_sign != 0.0 && old_sign != new_sign {
+            self.flip_ts = Some(ts);
+        }
+        self.prev_drift_30s = drift_30s;
+        self.post_flip_drift = drift_30s.abs();
+    }
+
+    fn flip_age_secs(&self, now: DateTime<Utc>) -> f64 {
+        self.flip_ts
+            .map(|ts| (now - ts).num_milliseconds() as f64 / 1000.0)
+            .unwrap_or(f64::NAN)
     }
 }
 
@@ -464,11 +550,191 @@ fn autofactor_formula_entry_score(
     Some((raw, normalized))
 }
 
+fn signum(value: f64) -> f64 {
+    if value > 1e-12 {
+        1.0
+    } else if value < -1e-12 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+fn validate_event_ml_runtime_schema(model: &EventMlModelContract) -> Result<(), EventMlModelError> {
+    model.validate()?;
+    for feature in &model.feature_schema {
+        if !is_supported_event_ml_runtime_feature(feature) {
+            return Err(EventMlModelError::MissingFeature(feature.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn is_supported_event_ml_runtime_feature(feature: &str) -> bool {
+    matches!(
+        feature,
+        "signed_distance_to_beat"
+            | "abs_distance_to_beat"
+            | "drift_10s"
+            | "drift_30s"
+            | "flip_age_secs"
+            | "post_flip_drift"
+            | "sigma_horizon"
+            | "fair_prob_up"
+            | "fair_prob_up_clean"
+            | "prob_disagreement"
+            | "implied_sigma_horizon"
+            | "vol_gap"
+            | "distance_over_sigma"
+            | "model_prob_up"
+            | "model_edge_up"
+            | "reward_risk_up"
+            | "reward_risk_down"
+            | "obi"
+            | "spread_bps"
+            | "bid_depth_near"
+            | "ask_depth_near"
+            | "depth_ratio"
+            | "depth_imbalance"
+            | "pm_up_ask"
+            | "pm_down_ask"
+            | "pm_lag_secs"
+            | "cum_mprice_drift_5m"
+            | "cum_trade_imbalance_5m"
+    )
+}
+
+fn quote_mid(bid: f64, ask: f64) -> f64 {
+    if bid.is_finite() && ask.is_finite() && bid > 0.0 && ask > 0.0 && bid <= ask {
+        0.5 * (bid + ask)
+    } else if ask.is_finite() && ask > 0.0 {
+        ask
+    } else if bid.is_finite() && bid > 0.0 {
+        bid
+    } else {
+        f64::NAN
+    }
+}
+
+fn fair_market_prob_up(up_bid: f64, up_ask: f64, down_bid: f64, down_ask: f64) -> f64 {
+    let up_mid = quote_mid(up_bid, up_ask);
+    let down_mid = quote_mid(down_bid, down_ask);
+    if !up_mid.is_finite() || !down_mid.is_finite() || up_mid <= 0.0 || down_mid <= 0.0 {
+        return f64::NAN;
+    }
+    let total = up_mid + down_mid;
+    if total <= 0.0 {
+        return f64::NAN;
+    }
+    (up_mid / total).clamp(1e-4, 1.0 - 1e-4)
+}
+
+fn clean_market_prob_up(
+    up_bid: f64,
+    up_ask: f64,
+    down_bid: f64,
+    down_ask: f64,
+    up_break_even_prob: f64,
+    down_break_even_prob: f64,
+) -> f64 {
+    if !up_break_even_prob.is_finite() || !down_break_even_prob.is_finite() {
+        return f64::NAN;
+    }
+    let down_implied_up = 1.0 - down_break_even_prob;
+    let ask_clean = 0.5 * (up_break_even_prob + down_implied_up);
+    let mid_fair = fair_market_prob_up(up_bid, up_ask, down_bid, down_ask);
+    if mid_fair.is_finite() {
+        (0.5 * ask_clean + 0.5 * mid_fair).clamp(1e-4, 1.0 - 1e-4)
+    } else {
+        ask_clean.clamp(1e-4, 1.0 - 1e-4)
+    }
+}
+
+fn implied_prob_disagreement(up_break_even_prob: f64, down_break_even_prob: f64) -> f64 {
+    if !up_break_even_prob.is_finite() || !down_break_even_prob.is_finite() {
+        return f64::NAN;
+    }
+    up_break_even_prob - (1.0 - down_break_even_prob)
+}
+
+fn inv_normal_cdf(p: f64) -> f64 {
+    if !p.is_finite() {
+        return f64::NAN;
+    }
+    let p = p.clamp(1e-12, 1.0 - 1e-12);
+    const A: [f64; 6] = [
+        -3.969_683_028_665_376e1,
+        2.209_460_984_245_205e2,
+        -2.759_285_104_469_687e2,
+        1.383_577_518_672_69e2,
+        -3.066_479_806_614_716e1,
+        2.506_628_277_459_239,
+    ];
+    const B: [f64; 5] = [
+        -5.447_609_879_822_406e1,
+        1.615_858_368_580_409e2,
+        -1.556_989_798_598_866e2,
+        6.680_131_188_771_972e1,
+        -1.328_068_155_288_572e1,
+    ];
+    const C: [f64; 6] = [
+        -7.784_894_002_430_293e-3,
+        -3.223_964_580_411_365e-1,
+        -2.400_758_277_161_838,
+        -2.549_732_539_343_734,
+        4.374_664_141_464_968,
+        2.938_163_982_698_783,
+    ];
+    const D: [f64; 4] = [
+        7.784_695_709_041_462e-3,
+        3.224_671_290_700_398e-1,
+        2.445_134_137_142_996,
+        3.754_408_661_907_416,
+    ];
+    const P_LOW: f64 = 0.02425;
+    const P_HIGH: f64 = 1.0 - P_LOW;
+    if p < P_LOW {
+        let q = (-2.0 * p.ln()).sqrt();
+        return (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0);
+    }
+    if p > P_HIGH {
+        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        return -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0);
+    }
+    let q = p - 0.5;
+    let r = q * q;
+    (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+        / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+}
+
+fn implied_sigma_horizon(price_to_beat: f64, spot: f64, fair_prob_up: f64) -> f64 {
+    if !price_to_beat.is_finite()
+        || !spot.is_finite()
+        || price_to_beat <= 0.0
+        || spot <= 0.0
+        || !fair_prob_up.is_finite()
+    {
+        return f64::NAN;
+    }
+    let log_ratio = (spot / price_to_beat).ln().abs();
+    if log_ratio <= 1e-12 {
+        return 0.0;
+    }
+    let z = inv_normal_cdf(fair_prob_up);
+    if !z.is_finite() || z.abs() <= 1e-9 {
+        return f64::NAN;
+    }
+    log_ratio / z.abs()
+}
+
 // ── ThreeLayerStrategy ─────────────────────────────────────────────
 
 pub struct ThreeLayerStrategy {
     config: ThreeLayerConfig,
     drift: HashMap<Arc<str>, DriftTracker>,
+    drift_state: HashMap<Arc<str>, DirectionDriftState>,
     lob: HashMap<Arc<str>, LobState>,
     mprice_acc: HashMap<Arc<str>, MpriceDriftAccumulator>,
     spot: HashMap<Arc<str>, Decimal>,
@@ -492,6 +758,7 @@ impl ThreeLayerStrategy {
         Self {
             config,
             drift: HashMap::new(),
+            drift_state: HashMap::new(),
             lob: HashMap::new(),
             mprice_acc: HashMap::new(),
             spot: HashMap::new(),
@@ -635,6 +902,280 @@ impl ThreeLayerStrategy {
         })
     }
 
+    fn event_ml_quote(&self, token_id: &str, now: DateTime<Utc>) -> Option<(f64, f64, f64)> {
+        let quote = self.quotes.get(token_id)?;
+        let bid = quote
+            .bid
+            .and_then(|price| price.to_f64())
+            .unwrap_or(f64::NAN);
+        let ask = quote.ask.and_then(|price| price.to_f64())?;
+        let lag_secs = (now - quote.ts).num_seconds() as f64;
+        if ask.is_finite()
+            && ask > 0.0
+            && ask < 1.0
+            && lag_secs.is_finite()
+            && lag_secs >= 0.0
+            && lag_secs <= self.config.max_pm_lag_secs as f64
+        {
+            Some((bid, ask, lag_secs))
+        } else {
+            None
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn event_ml_feature_values(
+        &self,
+        symbol: &str,
+        now: DateTime<Utc>,
+        spot_price: f64,
+        price_to_beat: f64,
+        time_remaining: i64,
+        up_quote: (f64, f64, f64),
+        down_quote: (f64, f64, f64),
+        sigma_horizon: f64,
+        distance_over_sigma: f64,
+    ) -> BTreeMap<String, f64> {
+        let (up_bid, up_ask, up_lag) = up_quote;
+        let (down_bid, down_ask, down_lag) = down_quote;
+        let signed_distance = (spot_price - price_to_beat) / price_to_beat;
+        let up_break_even_prob = (up_ask + crypto_fee_cost(up_ask)).clamp(1e-4, 1.0 - 1e-4);
+        let down_break_even_prob = (down_ask + crypto_fee_cost(down_ask)).clamp(1e-4, 1.0 - 1e-4);
+        let fair_prob_up = fair_market_prob_up(up_bid, up_ask, down_bid, down_ask);
+        let fair_prob_up_clean = clean_market_prob_up(
+            up_bid,
+            up_ask,
+            down_bid,
+            down_ask,
+            up_break_even_prob,
+            down_break_even_prob,
+        );
+        let implied_sigma = implied_sigma_horizon(price_to_beat, spot_price, fair_prob_up_clean);
+        let model_prob_up = three_layer_model::norm_cdf(
+            (spot_price / price_to_beat).ln() / sigma_horizon.max(1e-12),
+        );
+        let lob = self.lob.get(symbol).copied().unwrap_or_default();
+        let depth_ratio = if lob.ask_depth_near > 0.0 {
+            lob.bid_depth_near / lob.ask_depth_near
+        } else {
+            f64::NAN
+        };
+        let drift = self.drift.get(symbol);
+        let drift_state = self.drift_state.get(symbol).copied().unwrap_or_default();
+        let mut values = BTreeMap::new();
+        values.insert("signed_distance_to_beat".to_string(), signed_distance);
+        values.insert("abs_distance_to_beat".to_string(), signed_distance.abs());
+        values.insert(
+            "drift_10s".to_string(),
+            drift
+                .map(|tracker| tracker.drift_speed_since_secs(10))
+                .unwrap_or(0.0),
+        );
+        values.insert(
+            "drift_30s".to_string(),
+            drift
+                .map(|tracker| tracker.drift_speed_since_secs(30))
+                .unwrap_or(0.0),
+        );
+        values.insert("flip_age_secs".to_string(), drift_state.flip_age_secs(now));
+        values.insert("post_flip_drift".to_string(), drift_state.post_flip_drift);
+        values.insert("sigma_horizon".to_string(), sigma_horizon);
+        values.insert("fair_prob_up".to_string(), fair_prob_up);
+        values.insert("fair_prob_up_clean".to_string(), fair_prob_up_clean);
+        values.insert(
+            "prob_disagreement".to_string(),
+            implied_prob_disagreement(up_break_even_prob, down_break_even_prob),
+        );
+        values.insert("implied_sigma_horizon".to_string(), implied_sigma);
+        values.insert("vol_gap".to_string(), implied_sigma - sigma_horizon);
+        values.insert("distance_over_sigma".to_string(), distance_over_sigma);
+        values.insert("model_prob_up".to_string(), model_prob_up);
+        values.insert(
+            "model_edge_up".to_string(),
+            model_prob_up - up_ask - crypto_fee_cost(up_ask),
+        );
+        values.insert(
+            "reward_risk_up".to_string(),
+            three_layer_model::reward_risk_ratio(up_ask),
+        );
+        values.insert(
+            "reward_risk_down".to_string(),
+            three_layer_model::reward_risk_ratio(down_ask),
+        );
+        values.insert("obi".to_string(), lob.obi);
+        values.insert("spread_bps".to_string(), lob.spread_bps as f64);
+        values.insert("bid_depth_near".to_string(), lob.bid_depth_near);
+        values.insert("ask_depth_near".to_string(), lob.ask_depth_near);
+        values.insert("depth_ratio".to_string(), depth_ratio);
+        values.insert("depth_imbalance".to_string(), lob.depth_imbalance());
+        values.insert("pm_up_ask".to_string(), up_ask);
+        values.insert("pm_down_ask".to_string(), down_ask);
+        values.insert("pm_lag_secs".to_string(), up_lag.min(down_lag));
+        values.insert(
+            "cum_mprice_drift_5m".to_string(),
+            self.mprice_acc
+                .get(symbol)
+                .map(MpriceDriftAccumulator::cum_drift)
+                .unwrap_or(0.0),
+        );
+        values.insert(
+            "cum_trade_imbalance_5m".to_string(),
+            lob.signed_trade_imbalance,
+        );
+        values.insert("time_remaining_secs".to_string(), time_remaining as f64);
+        values
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_event_ml_entry_for_event(
+        &mut self,
+        symbol: &str,
+        now: DateTime<Utc>,
+        event: &EventWindow,
+        spot_price: f64,
+        price_to_beat: f64,
+        time_remaining: i64,
+        sigma_horizon: f64,
+        distance_over_sigma: f64,
+        positions: &PositionLedger,
+        orders: &OrderLedger,
+    ) -> Option<StrategyDecision> {
+        let Some(model) = self.config.event_ml_model.as_ref() else {
+            self.bump("skip_event_ml_model_unavailable");
+            return None;
+        };
+        let Some(up_quote) = self.event_ml_quote(&event.up_token, now) else {
+            self.bump("skip_event_ml_up_quote_unavailable");
+            return None;
+        };
+        let Some(down_quote) = self.event_ml_quote(&event.down_token, now) else {
+            self.bump("skip_event_ml_down_quote_unavailable");
+            return None;
+        };
+        let values = self.event_ml_feature_values(
+            symbol,
+            now,
+            spot_price,
+            price_to_beat,
+            time_remaining,
+            up_quote,
+            down_quote,
+            sigma_horizon,
+            distance_over_sigma,
+        );
+        let score = match model.score_map(&values) {
+            Ok(score) => score,
+            Err(err) => {
+                self.bump("skip_event_ml_score_unavailable");
+                debug!(strategy = "three_layer", symbol, error = %err, "Event ML score unavailable");
+                return None;
+            }
+        };
+        let q_up = score.probability;
+        let up_edge = q_up - up_quote.1 - crypto_fee_cost(up_quote.1);
+        let q_down = 1.0 - q_up;
+        let down_edge = q_down - down_quote.1 - crypto_fee_cost(down_quote.1);
+        let (token_id, direction, side_probability, entry_price_f, edge) = if up_edge >= down_edge {
+            (&event.up_token, "UP", q_up, up_quote.1, up_edge)
+        } else {
+            (&event.down_token, "DOWN", q_down, down_quote.1, down_edge)
+        };
+        if edge < self.config.min_edge {
+            self.bump("skip_event_ml_edge");
+            return None;
+        }
+        let total_score =
+            three_layer_model::threshold_score(edge, self.config.min_edge.max(0.0), 0.08, false)
+                .clamp(-0.50, 1.0);
+        if total_score < self.config.min_entry_score {
+            self.bump("skip_entry_score");
+            return None;
+        }
+        if positions.net_qty(token_id) > Decimal::ZERO {
+            self.bump("skip_existing_position");
+            return None;
+        }
+        if Self::active_order_exists(orders, token_id) {
+            self.bump("skip_active_order");
+            return None;
+        }
+        if self.token_reject_active(token_id, now) {
+            self.bump("skip_token_reject_cooldown");
+            return None;
+        }
+
+        let Some(entry_price) = Decimal::try_from(entry_price_f).ok() else {
+            self.bump("skip_bad_entry_price");
+            return None;
+        };
+        let quantity = self.entry_quantity(entry_price);
+        if quantity <= Decimal::ZERO {
+            self.bump("skip_zero_quantity");
+            return None;
+        }
+        let Some(ask_size) = self
+            .quote_depth
+            .get(token_id)
+            .and_then(|depth| depth.ask_size)
+        else {
+            self.bump("skip_no_ask_size");
+            return None;
+        };
+        if ask_size < quantity {
+            self.bump("skip_insufficient_ask_size");
+            return None;
+        }
+
+        let intent_id = format!(
+            "tl_event_ml_{}_{}_{}_{}",
+            symbol.to_lowercase(),
+            direction.to_lowercase(),
+            event.event_id,
+            now.timestamp_millis()
+        );
+        let intent = TradingIntent {
+            intent_id: intent_id.clone(),
+            deployment_id: String::new(),
+            market_id: event.event_id.to_string(),
+            token_id: token_id.to_string(),
+            side: TradeSide::Buy,
+            quantity,
+            limit_price: Some(entry_price),
+            purpose: IntentPurpose::Entry,
+            created_at: now,
+        };
+        let signal = SignalRecord {
+            strategy: self.name().to_string(),
+            event_id: Some(event.event_id.to_string()),
+            token_id: Some(token_id.to_string()),
+            intent_id: Some(intent_id),
+            symbol: symbol.to_string(),
+            direction: direction.to_string(),
+            p_hat: side_probability,
+            edge,
+            entry_price,
+            decision: "enter".to_string(),
+            ts: now,
+        };
+
+        info!(
+            strategy = "three_layer",
+            symbol = %symbol,
+            direction,
+            event_ml_runtime_score = self.config.autofactor_runtime_score.as_deref().unwrap_or(""),
+            event_ml_probability_up = q_up,
+            edge,
+            total_score,
+            entry_price = %entry_price,
+            "Event ML entry signal"
+        );
+        self.bump("entry_signals");
+        Some(StrategyDecision::Enter {
+            intent,
+            signal: Some(signal),
+        })
+    }
+
     fn try_entry(
         &mut self,
         symbol: &str,
@@ -711,6 +1252,24 @@ impl ThreeLayerStrategy {
                 .get(symbol)
                 .map(|acc| acc.cum_drift())
                 .unwrap_or(0.0);
+
+            if self.config.uses_event_ml_model() {
+                if let Some(decision) = self.try_event_ml_entry_for_event(
+                    symbol,
+                    now,
+                    event,
+                    spot_price,
+                    price_to_beat,
+                    time_remaining,
+                    sigma_h,
+                    distance_over_sigma,
+                    positions,
+                    orders,
+                ) {
+                    return Some(decision);
+                }
+                continue;
+            }
 
             // Layer 1: Direction score
             let Some((direction_sign, effective_p, direction_score)) = evaluate_direction_score(
@@ -1203,6 +1762,15 @@ impl StrategyLogic for ThreeLayerStrategy {
                     .entry(symbol.clone())
                     .or_insert_with(DriftTracker::new)
                     .push(*ts, price_f64);
+                let drift_30s_speed = self
+                    .drift
+                    .get(symbol)
+                    .map(|tracker| tracker.drift_speed_since_secs(30))
+                    .unwrap_or(0.0);
+                self.drift_state
+                    .entry(symbol.clone())
+                    .or_default()
+                    .update(drift_30s_speed, *ts);
                 self.spot.insert(symbol.clone(), *price);
 
                 // Set price_to_beat for events that don't have one yet
@@ -1505,6 +2073,9 @@ impl StrategyLogic for ThreeLayerStrategy {
 
 #[cfg(test)]
 mod tests {
+    use super::super::event_ml_model::{
+        EventMlFeatureStandardizer, EventMlFeatureWeight, EventMlStandardizer,
+    };
     use super::*;
     use rust_decimal_macros::dec;
 
@@ -1552,6 +2123,62 @@ mod tests {
             serde_json::from_str(r#"{"strategy_profile":"settlement_probability"}"#).unwrap();
         let tlc: ThreeLayerConfig = dc.into();
         assert_eq!(tlc.profile, ThreeLayerProfile::SettlementProbability);
+    }
+
+    #[test]
+    fn event_ml_directional_runtime_requires_model_path() {
+        let dc: DirectionalConfig = serde_json::from_str(
+            r#"{"three_layer_autofactor_runtime_score":"event_ml_model:baseline_v1"}"#,
+        )
+        .unwrap();
+
+        let err = ThreeLayerConfig::from_directional_runtime(dc).expect_err("missing model path");
+
+        assert!(err.contains("three_layer_event_ml_model_path"));
+    }
+
+    #[test]
+    fn event_ml_directional_runtime_loads_model_artifact() {
+        let path = std::env::temp_dir().join(format!(
+            "ploy-event-ml-baseline-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let artifact = serde_json::json!({
+            "model": {
+                "kind": "event_ml_logistic_baseline_model",
+                "version": 1,
+                "family": "logistic_regression",
+                "target_label": "settlement_up",
+                "feature_schema": ["pm_up_ask"],
+                "intercept": 0.25,
+                "weights": [{"feature": "pm_up_ask", "weight": -1.0}],
+                "standardizer": {
+                    "method": "zscore",
+                    "fit_split": "train",
+                    "features": [{"feature": "pm_up_ask", "mean": 0.5, "std": 0.2}]
+                }
+            }
+        });
+        std::fs::write(&path, artifact.to_string()).unwrap();
+        let config_json = serde_json::json!({
+            "three_layer_autofactor_runtime_score": "event_ml_model:baseline_v1",
+            "three_layer_event_ml_model_path": path,
+        })
+        .to_string();
+        let dc: DirectionalConfig = serde_json::from_str(&config_json).unwrap();
+
+        let tlc = ThreeLayerConfig::from_directional_runtime(dc).expect("load Event ML model");
+
+        assert!(tlc.event_ml_model.is_some());
+        assert!(tlc.uses_event_ml_model());
+        let _ = std::fs::remove_file(
+            serde_json::from_str::<serde_json::Value>(&config_json)
+                .unwrap()
+                .get("three_layer_event_ml_model_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap(),
+        );
     }
 
     #[test]
@@ -1631,6 +2258,48 @@ mod tests {
             max_entry_price: 0.85,
             min_entry_score: 0.30,
             autofactor_runtime_score: None,
+            event_ml_model: None,
+        }
+    }
+
+    fn event_ml_model_with_intercept(intercept: f64) -> EventMlModelContract {
+        EventMlModelContract {
+            kind: "event_ml_logistic_baseline_model".to_string(),
+            version: 1,
+            family: "logistic_regression".to_string(),
+            target_label: "settlement_up".to_string(),
+            feature_schema: Vec::new(),
+            intercept,
+            weights: Vec::new(),
+            standardizer: EventMlStandardizer {
+                method: "zscore".to_string(),
+                fit_split: "train".to_string(),
+                features: Vec::new(),
+            },
+        }
+    }
+
+    fn event_ml_model_with_feature(feature: &str) -> EventMlModelContract {
+        EventMlModelContract {
+            kind: "event_ml_logistic_baseline_model".to_string(),
+            version: 1,
+            family: "logistic_regression".to_string(),
+            target_label: "settlement_up".to_string(),
+            feature_schema: vec![feature.to_string()],
+            intercept: 0.0,
+            weights: vec![EventMlFeatureWeight {
+                feature: feature.to_string(),
+                weight: 1.0,
+            }],
+            standardizer: EventMlStandardizer {
+                method: "zscore".to_string(),
+                fit_split: "train".to_string(),
+                features: vec![EventMlFeatureStandardizer {
+                    feature: feature.to_string(),
+                    mean: 0.0,
+                    std: 1.0,
+                }],
+            },
         }
     }
 
@@ -2072,6 +2741,69 @@ mod tests {
             }
             other => panic!("expected one executable entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn event_ml_runtime_model_selects_best_settlement_edge_side() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_edge = 0.01;
+        config.min_entry_score = -0.50;
+        config.autofactor_runtime_score = Some("event_ml_model:baseline_v1".to_string());
+        config.event_ml_model = Some(event_ml_model_with_intercept(-2.0));
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &entry_quote("token-up", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &entry_quote("token-down", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        match decisions.as_slice() {
+            [StrategyDecision::Enter { intent, signal }] => {
+                assert_eq!(intent.token_id, "token-down");
+                assert_eq!(intent.side, TradeSide::Buy);
+                assert_eq!(intent.limit_price, Some(dec!(0.20)));
+                let signal = signal.as_ref().expect("signal");
+                assert_eq!(signal.direction, "DOWN");
+                assert!(
+                    signal.p_hat > 0.80,
+                    "expected DOWN probability, got {}",
+                    signal.p_hat
+                );
+            }
+            other => panic!("expected one Event ML executable DOWN entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_ml_runtime_schema_rejects_unsupported_features() {
+        let model = event_ml_model_with_feature("microprice_offset_bps");
+
+        let err = validate_event_ml_runtime_schema(&model).expect_err("unsupported feature");
+
+        assert!(
+            matches!(err, EventMlModelError::MissingFeature(feature) if feature == "microprice_offset_bps")
+        );
     }
 
     #[test]
