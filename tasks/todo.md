@@ -223,6 +223,10 @@ evidence comes from Polymarket full CLOB depth, not top book.
   Actions limit by adding `snapshot_run_id` and relying on default replay
   artifact naming, then calls the hosted artifact-only walk-forward workflow on
   `ubuntu-latest`.
+- 2026-05-06: Follow-up compatibility fix: `replay_parity_run_id` now accepts
+  `run_id:artifact_name`, so recorded replay parity artifacts with names like
+  `recorded-replay-parity-<run_id>` can still be consumed without adding an
+  eleventh GitHub workflow input.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

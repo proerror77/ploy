@@ -238,6 +238,9 @@ build and dispatches `factor-walk-forward-v2-hosted-artifact.yml` on
 `ubuntu-latest`. If `snapshot_run_id` is omitted, the orchestrator still falls
 back to `research-snapshot.yml`; that path remains a legacy DB-adjacent path
 until snapshot export is moved to a hosted-safe data source.
+When replay parity evidence uses a non-default artifact name, encode the input
+as `replay_parity_run_id=<run-id>:<artifact-name>` so the workflow stays within
+GitHub's 10-input dispatch limit.
 
 Use `--output-dir <dir>` to choose the artifact directory. Without it, the
 runner writes under `<dataset>/workflow_runs/event_ml_<timestamp>`.

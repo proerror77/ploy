@@ -34,7 +34,7 @@ on:
         required: true
         default: "168"
       replay_parity_run_id:
-        description: "Optional Replay Dry-run Parity run id"
+        description: "Optional replay parity run id, or run_id:artifact_name for non-default artifact names"
         required: false
         default: ""
       no_wait:
@@ -145,7 +145,7 @@ jobs:
             echo "- Data profile: \`pm5d-vol\`"
             echo "- Audit lookback: \`${audit_lookback_hours}h\`"
             echo "- Replay parity run: \`${{ github.event.inputs.replay_parity_run_id || 'none' }}\`"
-            echo "- Replay parity artifact: \`default\`"
+            echo "- Replay parity artifact: \`default unless encoded as run_id:artifact_name\`"
             echo ""
             echo "A failed workflow can be the correct outcome: the orchestrator exits non-zero when the PRD promotion gate is blocked."
           } >> "$GITHUB_STEP_SUMMARY"
