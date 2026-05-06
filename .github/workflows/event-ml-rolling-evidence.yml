@@ -42,7 +42,7 @@ on:
       options_json:
         description: "Advanced options JSON: sampling, entry/tolerance, logistic search grid, source_dataset_artifact_name, handoff runtime/parity gates"
         required: false
-        default: '{"lob_sample_secs":30,"max_quote_age_secs":30,"entry_secs":60,"tolerance_secs":30,"search_l2":"0,0.001,0.01","search_min_edge":"0,0.02,0.05","search_learning_rate":"0.03,0.05","search_epochs":500,"source_dataset_artifact_name":"","required_strategy_profile":"event_ml_supervised_tabular","runtime_score":"","replay_parity_ready":"false"}'
+        default: '{"lob_sample_secs":30,"max_quote_age_secs":30,"entry_secs":60,"tolerance_secs":30,"search_l2":"0,0.001,0.01","search_min_edge":"0,0.02,0.05","search_learning_rate":"0.03,0.05","search_epochs":500,"source_dataset_artifact_name":"","required_strategy_profile":"event_ml_supervised_tabular","runtime_score":"","replay_parity_ready":"false","create_handoff_issue":"false"}'
 
 concurrency:
   group: event-ml-rolling-evidence-${{ github.ref }}
@@ -51,6 +51,7 @@ concurrency:
 permissions:
   contents: read
   actions: read
+  issues: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -173,6 +174,7 @@ jobs:
               "required_strategy_profile": "event_ml_supervised_tabular",
               "runtime_score": "",
               "replay_parity_ready": "false",
+              "create_handoff_issue": "false",
           }
           raw = os.environ.get("OPTIONS_JSON", "").strip()
           data = json.loads(raw) if raw else {}
@@ -315,6 +317,50 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Create ready Event ML handoff issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "${EVENT_ML_CREATE_HANDOFF_ISSUE:-false}" in
+            true|True|1|yes|YES) ;;
+            *)
+              echo "create_handoff_issue is not true; skipping handoff issue creation."
+              exit 0
+              ;;
+          esac
+
+          handoff_json="$(find artifacts/event-ml/rolling_workflow -path '*/walk_forward/event_ml_strategy_handoff.json' 2>/dev/null | sort | tail -1 || true)"
+          handoff_md="$(find artifacts/event-ml/rolling_workflow -path '*/walk_forward/event_ml_strategy_handoff.md' 2>/dev/null | sort | tail -1 || true)"
+          if [ -z "${handoff_json}" ] || [ -z "${handoff_md}" ] || [ ! -f "${handoff_json}" ] || [ ! -f "${handoff_md}" ]; then
+            echo "Event ML handoff artifacts missing; skipping issue creation."
+            exit 0
+          fi
+          status="$(HANDOFF_JSON="${handoff_json}" python3 - <<'PY'
+          import json
+          import os
+          with open(os.environ["HANDOFF_JSON"], encoding="utf-8") as handle:
+              print(json.load(handle).get("status", "blocked"))
+          PY
+          )"
+          if [ "${status}" != "ready" ]; then
+            echo "Event ML handoff status is ${status}; no dry-run issue will be created."
+            exit 0
+          fi
+
+          mkdir -p artifacts/event-ml/reports
+          {
+            cat "${handoff_md}"
+            echo ""
+            echo "Source Event ML rolling evidence run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo ""
+            echo "This issue is generated from a ready Event ML handoff artifact. It does not deploy and does not enable live trading."
+          } > artifacts/event-ml/reports/event_ml_handoff_issue.md
+          gh issue create \
+            --title "Promote Event ML strategy handoff to dry-run" \
+            --body-file artifacts/event-ml/reports/event_ml_handoff_issue.md
+
       - name: Upload compact report bundle
         if: always()
         uses: actions/upload-artifact@v7
@@ -377,6 +423,7 @@ jobs:
               "required_strategy_profile": "event_ml_supervised_tabular",
               "runtime_score": "",
               "replay_parity_ready": "false",
+              "create_handoff_issue": "false",
           }
           raw = os.environ.get("OPTIONS_JSON", "").strip()
           data = json.loads(raw) if raw else {}
@@ -535,6 +582,50 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create ready Event ML handoff issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "${EVENT_ML_CREATE_HANDOFF_ISSUE:-false}" in
+            true|True|1|yes|YES) ;;
+            *)
+              echo "create_handoff_issue is not true; skipping handoff issue creation."
+              exit 0
+              ;;
+          esac
+
+          handoff_json="$(find artifacts/event-ml/rolling_workflow -path '*/walk_forward/event_ml_strategy_handoff.json' 2>/dev/null | sort | tail -1 || true)"
+          handoff_md="$(find artifacts/event-ml/rolling_workflow -path '*/walk_forward/event_ml_strategy_handoff.md' 2>/dev/null | sort | tail -1 || true)"
+          if [ -z "${handoff_json}" ] || [ -z "${handoff_md}" ] || [ ! -f "${handoff_json}" ] || [ ! -f "${handoff_md}" ]; then
+            echo "Event ML handoff artifacts missing; skipping issue creation."
+            exit 0
+          fi
+          status="$(HANDOFF_JSON="${handoff_json}" python3 - <<'PY'
+          import json
+          import os
+          with open(os.environ["HANDOFF_JSON"], encoding="utf-8") as handle:
+              print(json.load(handle).get("status", "blocked"))
+          PY
+          )"
+          if [ "${status}" != "ready" ]; then
+            echo "Event ML handoff status is ${status}; no dry-run issue will be created."
+            exit 0
+          fi
+
+          mkdir -p artifacts/event-ml/reports
+          {
+            cat "${handoff_md}"
+            echo ""
+            echo "Source Event ML rolling evidence run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo ""
+            echo "This issue is generated from a ready Event ML handoff artifact. It does not deploy and does not enable live trading."
+          } > artifacts/event-ml/reports/event_ml_handoff_issue.md
+          gh issue create \
+            --title "Promote Event ML strategy handoff to dry-run" \
+            --body-file artifacts/event-ml/reports/event_ml_handoff_issue.md
 
       - name: Upload compact report bundle
         if: always()

@@ -182,6 +182,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   replay-parity evidence into the final walk-forward phase, so hosted artifact
   runs can produce a ready handoff only when those gates are explicitly
   supplied.
+- [x] Add ready-only Event ML handoff issue creation to
+  `event-ml-rolling-evidence.yml`. The `options_json.create_handoff_issue`
+  switch defaults to false and creates an issue only when
+  `event_ml_strategy_handoff.json` is `status=ready`; blocked artifacts still
+  produce no promotion issue.
 
 ## Review
 
@@ -296,6 +301,10 @@ evidence comes from Polymarket full CLOB depth, not top book.
   evidence workflow. This keeps the default fail-closed behavior, but lets a
   later replay-verified run carry `runtime_score` and `replay_parity_ready`
   into `event_ml_strategy_handoff.json` without manual artifact edits.
+- 2026-05-06: Added the first downstream Event ML handoff action: ready-only
+  issue creation from `event-ml-rolling-evidence.yml`. This deliberately stops
+  short of config PR automation because the checked-in dry-run config currently
+  supports AutoFactor runtime scores, not a live Event ML runtime scorer.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

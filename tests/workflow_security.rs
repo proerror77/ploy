@@ -118,6 +118,9 @@ fn event_ml_rolling_evidence_has_hosted_artifact_lane() {
         "event-ml-rolling-datasets-${SOURCE_DATASET_RUN_ID}",
         "--runtime-score",
         "--replay-parity-ready",
+        "create_handoff_issue",
+        "issues: write",
+        "Event ML handoff status is ${status}; no dry-run issue will be created.",
     ] {
         if !workflow.contains(needle) {
             offenders.push(format!("event-ml-rolling-evidence.yml: missing `{needle}`"));
@@ -138,6 +141,7 @@ fn event_ml_rolling_evidence_has_hosted_artifact_lane() {
         "source_dataset_artifact_name",
         "runtime_score",
         "replay_parity_ready",
+        "create_handoff_issue",
         "workflow stays within GitHub's 10-input dispatch limit",
     ] {
         if !runbook.contains(needle) {
