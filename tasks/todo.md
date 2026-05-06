@@ -192,6 +192,11 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `ubuntu-latest` via `factor-review-v2-hosted-artifact.yml`; the legacy
   `factor-review-v2.yml` path remains only for fresh DB/snapshot fallback work
   that still needs `ploy-ci-1`.
+- [x] Add an Event ML factor registry artifact to close the missing AutoResearch
+  handoff surface. `event_factor_attribution` now writes
+  `event_ml_factor_registry.json` / `.md` beside attribution and whitelist
+  artifacts, preserving target label, regime, train-derived direction,
+  whitelist status, and blockers for downstream promotion gates.
 
 ## Review
 

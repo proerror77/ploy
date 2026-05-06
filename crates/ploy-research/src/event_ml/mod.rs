@@ -302,7 +302,11 @@ fn canonical_phases() -> Vec<WorkflowPhase> {
             "AutoML factor attribution",
             "Rank candidate factors and register train-derived direction metadata.",
             &["coverage-passing dataset", "candidate features"],
-            &["factor_attributions.json", "factor registry entries"],
+            &[
+                "factor_attributions.json",
+                "event_ml_factor_registry.json",
+                "event_ml_factor_registry.md",
+            ],
             "Stop if validation lift contradicts train direction or coverage is too thin.",
         ),
         phase(
