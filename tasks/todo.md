@@ -13348,3 +13348,11 @@ Issue: https://github.com/proerror77/ploy/issues/256
   as `unknown` windows when event metadata exists. The report also emits hourly
   and hourly-by-window rows with trade count, PnL, cumulative PnL, and drawdown
   so the soak can be reviewed directly by hour and by 5m/15m window.
+- 2026-05-06: PR #377 merged the first `deploy-tango-1-1.yml` Cloud Assistant
+  fallback, but the first main deploy run (`25439072337`) failed while
+  submitting `RunCommand`, before the remote script started. The fallback now
+  uploads the full remote deploy script to the same OSS deployment prefix and
+  sends Cloud Assistant only a small bootstrap command that downloads and
+  executes that script. This keeps CI-built artifacts as the source of truth
+  while avoiding Cloud Assistant command-content length limits and printing
+  Aliyun CLI stdout/stderr on future submission failures.
