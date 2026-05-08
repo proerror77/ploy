@@ -68,6 +68,7 @@ class GapTarget:
     max_gap_critical_minutes: int = 15
     max_gap_warn_minutes: int = 5
     ignore_max_gap: bool = False
+    ignore_missing_buckets: bool = False
     filter_column: Optional[str] = None
     filter_value: Optional[str] = None
 
@@ -244,10 +245,11 @@ def classify_gap(row: dict[str, Any], target: GapTarget) -> tuple[str, list[str]
             status = "warn"
             reasons.append(f"max gap {max_gap_minutes}m >= {target.max_gap_warn_minutes}m")
 
-    missing_buckets = int(row.get("missing_buckets") or 0)
-    if missing_buckets > 0 and STATUS_ORDER[status] < STATUS_ORDER["warn"]:
-        status = "warn"
-        reasons.append(f"missing buckets {missing_buckets}")
+    if not target.ignore_missing_buckets:
+        missing_buckets = int(row.get("missing_buckets") or 0)
+        if missing_buckets > 0 and STATUS_ORDER[status] < STATUS_ORDER["warn"]:
+            status = "warn"
+            reasons.append(f"missing buckets {missing_buckets}")
 
     if not reasons:
         reasons.append("coverage within thresholds")
@@ -359,6 +361,7 @@ def gap_targets(symbols: Iterable[str]) -> list[GapTarget]:
             "received_at",
             900,
             ignore_max_gap=True,
+            ignore_missing_buckets=True,
             max_gap_critical_minutes=0,
             max_gap_warn_minutes=0,
         ),
@@ -368,6 +371,7 @@ def gap_targets(symbols: Iterable[str]) -> list[GapTarget]:
             "received_at",
             900,
             ignore_max_gap=True,
+            ignore_missing_buckets=True,
             max_gap_critical_minutes=0,
             max_gap_warn_minutes=0,
         ),
