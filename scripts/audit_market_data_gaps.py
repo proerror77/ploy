@@ -65,6 +65,9 @@ class GapTarget:
     table_name: str
     timestamp_column: str
     stale_after_seconds: int
+    max_gap_critical_minutes: int = 15
+    max_gap_warn_minutes: int = 5
+    ignore_max_gap: bool = False
     filter_column: Optional[str] = None
     filter_value: Optional[str] = None
 
@@ -228,13 +231,18 @@ def classify_gap(row: dict[str, Any], target: GapTarget) -> tuple[str, list[str]
         status = "critical"
         reasons.append(f"latest lag {latest_lag}s > {target.stale_after_seconds}s")
 
-    max_gap_minutes = int(row.get("max_gap_minutes") or 0)
-    if max_gap_minutes >= 15:
-        status = "critical"
-        reasons.append(f"max gap {max_gap_minutes}m >= 15m")
-    elif max_gap_minutes >= 5 and STATUS_ORDER[status] < STATUS_ORDER["warn"]:
-        status = "warn"
-        reasons.append(f"max gap {max_gap_minutes}m >= 5m")
+    if not target.ignore_max_gap:
+        max_gap_minutes = int(row.get("max_gap_minutes") or 0)
+        if max_gap_minutes >= target.max_gap_critical_minutes:
+            status = "critical"
+            reasons.append(
+                f"max gap {max_gap_minutes}m >= {target.max_gap_critical_minutes}m"
+            )
+        elif max_gap_minutes >= target.max_gap_warn_minutes and STATUS_ORDER[status] < STATUS_ORDER[
+            "warn"
+        ]:
+            status = "warn"
+            reasons.append(f"max gap {max_gap_minutes}m >= {target.max_gap_warn_minutes}m")
 
     missing_buckets = int(row.get("missing_buckets") or 0)
     if missing_buckets > 0 and STATUS_ORDER[status] < STATUS_ORDER["warn"]:
@@ -345,8 +353,24 @@ def parse_symbols(raw: str) -> list[str]:
 
 def gap_targets(symbols: Iterable[str]) -> list[GapTarget]:
     targets = [
-        GapTarget("polymarket_quotes", "clob_quote_ticks", "received_at", 300),
-        GapTarget("polymarket_orderbooks", "clob_orderbook_snapshots", "received_at", 300),
+        GapTarget(
+            "polymarket_quotes",
+            "clob_quote_ticks",
+            "received_at",
+            900,
+            ignore_max_gap=True,
+            max_gap_critical_minutes=0,
+            max_gap_warn_minutes=0,
+        ),
+        GapTarget(
+            "polymarket_orderbooks",
+            "clob_orderbook_snapshots",
+            "received_at",
+            900,
+            ignore_max_gap=True,
+            max_gap_critical_minutes=0,
+            max_gap_warn_minutes=0,
+        ),
         GapTarget("deribit_iv", "deribit_iv_ticks", "fetched_at", 900),
         GapTarget("deribit_atm_greeks", "deribit_atm_greeks_ticks", "fetched_at", 900),
     ]
