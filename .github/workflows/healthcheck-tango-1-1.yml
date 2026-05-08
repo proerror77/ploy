@@ -18,10 +18,8 @@ env:
 jobs:
   healthcheck:
     name: Verify tango-1-1 runtime health
-    runs-on: [self-hosted, tango-1-1]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: tango-1-1
-
     steps:
       - name: Ensure SSH client
         run: |
