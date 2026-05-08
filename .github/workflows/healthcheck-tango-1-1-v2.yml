@@ -1,12 +1,10 @@
-name: Healthcheck tango-1-1
+name: Healthcheck tango-1-1-v2
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/10 * * * *"
 
 concurrency:
-  group: healthcheck-tango-1-1
+  group: healthcheck-tango-1-1-v2
   cancel-in-progress: false
 
 permissions:
@@ -17,4 +15,5 @@ jobs:
     name: Verify tango-1-1 runtime health
     runs-on: ubuntu-latest
     steps:
-      - run: echo "healthcheck probe"
+      - name: probe
+        run: echo "healthcheck v2 probe"
