@@ -37,7 +37,7 @@ permissions:
   contents: read
 
 env:
-  DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
+  DEPLOY_HOST: ${{ vars.TANGO_1_1_HOST || vars.ALIYUN_ECS_HOST || secrets.TANGO_1_1_HOST || secrets.ALIYUN_ECS_HOST }}
   DEPLOY_ROOT: ${{ vars.PLOY_DEPLOY_ROOT || '/opt/ploy' }}
   DEFAULT_SYMBOLS: BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT
 
@@ -70,8 +70,28 @@ jobs:
       - name: Configure SSH
         run: |
           install -m 700 -d ~/.ssh
-          printf '%s\n' '${{ secrets.TANGO_1_1_SSH_KEY }}' > ~/.ssh/tango_1_1_key
+          key_source=""
+          if [ -n '${{ secrets.TANGO_1_1_SSH_KEY }}' ]; then
+            selected_key='${{ secrets.TANGO_1_1_SSH_KEY }}'
+            key_source="TANGO_1_1_SSH_KEY"
+          elif [ -n '${{ secrets.TANGO_SSH_KEY }}' ]; then
+            selected_key='${{ secrets.TANGO_SSH_KEY }}'
+            key_source="TANGO_SSH_KEY"
+          elif [ -n '${{ secrets.ALIYUN_ECS_SSH_KEY }}' ]; then
+            selected_key='${{ secrets.ALIYUN_ECS_SSH_KEY }}'
+            key_source="ALIYUN_ECS_SSH_KEY"
+          else
+            echo "No SSH key secret found for tango-1-1 in this workflow context."
+            exit 1
+          fi
+          printf '%s\n' "${selected_key}" > ~/.ssh/tango_1_1_key
           chmod 600 ~/.ssh/tango_1_1_key
+          echo "tango-1-1-key-bytes=$(wc -c < ~/.ssh/tango_1_1_key)"
+          echo "tango-1-1-key-source=${key_source}"
+          if ! ssh-keygen -y -f ~/.ssh/tango_1_1_key >/dev/null; then
+            echo "Selected SSH key secret (${key_source}) is not valid OpenSSH format."
+            exit 1
+          fi
           cat > ~/.ssh/config <<EOF
           Host tango-1-1
             HostName ${DEPLOY_HOST}
