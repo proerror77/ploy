@@ -33,10 +33,6 @@ on:
     - cron: "*/30 * * * *"
     - cron: "17 */6 * * *"
 
-concurrency:
-  group: market-data-gap-audit
-  cancel-in-progress: false
-
 permissions:
   contents: read
 
@@ -50,7 +46,6 @@ jobs:
     name: Audit Tango market-data gaps
     runs-on: [self-hosted, tango-1-1]
     timeout-minutes: 20
-    environment: tango-1-1
 
     steps:
       - name: Ensure SSH client
