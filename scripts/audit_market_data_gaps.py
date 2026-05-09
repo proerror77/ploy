@@ -221,6 +221,20 @@ SELECT json_build_object(
 
 
 def classify_gap(row: dict[str, Any], target: GapTarget) -> tuple[str, list[str]]:
+    freshness_status, freshness_reasons = classify_freshness(row, target)
+    coverage_status, coverage_reasons = classify_coverage(row, target)
+    status = worst_status([freshness_status, coverage_status])
+    reasons = []
+    if freshness_status != "ok":
+        reasons.extend(freshness_reasons)
+    if coverage_status != "ok":
+        reasons.extend(coverage_reasons)
+    if not reasons:
+        reasons.append("coverage within thresholds")
+    return status, reasons
+
+
+def classify_freshness(row: dict[str, Any], target: GapTarget) -> tuple[str, list[str]]:
     reasons: list[str] = []
     status = "ok"
 
@@ -231,6 +245,15 @@ def classify_gap(row: dict[str, Any], target: GapTarget) -> tuple[str, list[str]
     if latest_lag is not None and latest_lag > target.stale_after_seconds:
         status = "critical"
         reasons.append(f"latest lag {latest_lag}s > {target.stale_after_seconds}s")
+
+    if not reasons:
+        reasons.append("freshness within threshold")
+    return status, reasons
+
+
+def classify_coverage(row: dict[str, Any], target: GapTarget) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    status = "ok"
 
     if not target.ignore_max_gap:
         max_gap_minutes = int(row.get("max_gap_minutes") or 0)
@@ -256,6 +279,36 @@ def classify_gap(row: dict[str, Any], target: GapTarget) -> tuple[str, list[str]
     return status, reasons
 
 
+def classify_gap_for_gate(
+    row: dict[str, Any], target: GapTarget, gate_mode: str
+) -> tuple[str, list[str], str, list[str], str, list[str]]:
+    freshness_status, freshness_reasons = classify_freshness(row, target)
+    coverage_status, coverage_reasons = classify_coverage(row, target)
+    if gate_mode == "freshness":
+        status = freshness_status
+        reasons = list(freshness_reasons)
+        if coverage_status != "ok":
+            reasons.extend(f"coverage not enforced: {reason}" for reason in coverage_reasons)
+    else:
+        status, reasons = classify_gap(row, target)
+    return (
+        status,
+        reasons,
+        freshness_status,
+        freshness_reasons,
+        coverage_status,
+        coverage_reasons,
+    )
+
+
+def worst_status(statuses: Iterable[str]) -> str:
+    status = "ok"
+    for candidate in statuses:
+        if STATUS_ORDER.get(candidate, STATUS_ORDER["unknown"]) > STATUS_ORDER[status]:
+            status = candidate
+    return status
+
+
 def audit_gap_target(
     target: GapTarget,
     *,
@@ -264,6 +317,7 @@ def audit_gap_target(
     recent_minutes: int,
     statement_timeout_seconds: int,
     psql_timeout_seconds: int,
+    gate_mode: str,
 ) -> dict[str, Any]:
     started = time.monotonic()
     try:
@@ -277,9 +331,20 @@ def audit_gap_target(
             ),
             psql_timeout_seconds,
         )
-        status, reasons = classify_gap(row, target)
+        (
+            status,
+            reasons,
+            freshness_status,
+            freshness_reasons,
+            coverage_status,
+            coverage_reasons,
+        ) = classify_gap_for_gate(row, target, gate_mode)
         row["status"] = status
         row["reasons"] = reasons
+        row["freshness_status"] = freshness_status
+        row["freshness_reasons"] = freshness_reasons
+        row["coverage_status"] = coverage_status
+        row["coverage_reasons"] = coverage_reasons
     except Exception as exc:  # noqa: BLE001 - this is an operator diagnostic.
         row = {
             "source_id": target.source_id,
@@ -291,6 +356,10 @@ def audit_gap_target(
             "bucket_minutes": bucket_minutes,
             "status": "unknown",
             "reasons": [str(exc)],
+            "freshness_status": "unknown",
+            "freshness_reasons": [str(exc)],
+            "coverage_status": "unknown",
+            "coverage_reasons": [str(exc)],
         }
     row["query_ms"] = round((time.monotonic() - started) * 1000)
     return row
@@ -524,6 +593,15 @@ def main() -> int:
         default="critical",
         help="exit non-zero on critical, warn-or-higher, unknown-or-critical, or never",
     )
+    parser.add_argument(
+        "--gate-mode",
+        choices=("coverage", "freshness"),
+        default=os.environ.get("PLOY_AUDIT_GATE_MODE", "coverage"),
+        help=(
+            "coverage enforces historical bucket/max-gap checks plus freshness; "
+            "freshness enforces only latest-row staleness while still reporting coverage"
+        ),
+    )
     args = parser.parse_args()
 
     if args.lookback_hours <= 0:
@@ -546,6 +624,7 @@ def main() -> int:
             recent_minutes=args.recent_minutes,
             statement_timeout_seconds=args.statement_timeout_seconds,
             psql_timeout_seconds=args.psql_timeout_seconds,
+            gate_mode=args.gate_mode,
         )
         for target in selected_gap_targets
     ]
@@ -569,6 +648,7 @@ def main() -> int:
         "lookback_hours": args.lookback_hours,
         "bucket_minutes": args.bucket_minutes,
         "recent_minutes": args.recent_minutes,
+        "gate_mode": args.gate_mode,
         "symbols": symbols,
         "required_sources": source_requirements,
         "overall_status": overall_status(items),

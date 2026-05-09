@@ -196,38 +196,44 @@ mod tests {
     use rust_decimal_macros::dec;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::Duration as StdDuration;
 
-    fn test_working_directory() -> PathBuf {
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn test_id() -> String {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
+        let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        format!("{}-{unique}-{sequence}", std::process::id())
+    }
+
+    fn test_working_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "ploy-platform-runtime-workdir-{}-{unique}",
-            std::process::id()
+            "ploy-platform-runtime-workdir-{}",
+            test_id()
         ));
         fs::create_dir_all(&path).expect("create test working directory");
         path
     }
 
     fn test_runner_binary() -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "ploy-platform-runtime-test-runner-{}-{unique}.sh",
-            std::process::id()
+            "ploy-platform-runtime-test-runner-{}.sh",
+            test_id()
         ));
-        fs::write(&path, "#!/bin/sh\nsleep 30\n").expect("write test runner");
+        let tmp_path = path.with_extension("tmp");
+        fs::write(&tmp_path, "#!/bin/sh\nsleep 30\n").expect("write test runner");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o755))
                 .expect("chmod test runner");
         }
+        fs::rename(&tmp_path, &path).expect("publish test runner");
         path
     }
 
