@@ -10,7 +10,7 @@
   gaps.
 - [x] Apply the smallest repo/remote fix that restores actionable Binance audit
   behavior without relaxing Polymarket freshness gates or reviving `ploy-ci-1`.
-- [ ] Verify locally and through GitHub Actions / remote audit evidence, then
+- [x] Verify locally and through GitHub Actions / remote audit evidence, then
   merge the fix back to `main`.
 
 Result so far: the Binance collectors are active and writing fresh rows, but
@@ -22,6 +22,12 @@ for research/data-quality callers.
 PR CI exposed an unrelated `ploy-platform-runtime` test race where temporary
 runner scripts could collide or be executed while published. The test helper now
 uses an atomic per-process sequence and temp-file rename before execution.
+Verification: local `python3 -m unittest
+tests.test_audit_market_data_gaps tests.test_ploy_maintenance_defaults`, local
+`CARGO_TARGET_DIR=/tmp/ploy-platform-runtime-ci-fix rtk cargo test -p
+ploy-platform-runtime --lib`, workflow YAML parse, and `git diff --check` all
+passed. PR #381 CI run `25592707685` passed after the runtime test helper
+hardening commit.
 
 ## Tango Deploy Transport Repair (2026-05-06)
 
