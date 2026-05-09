@@ -29,6 +29,14 @@ on:
           - critical
           - warn
           - never
+      gate_mode:
+        description: "Gate mode: freshness for collector health, coverage for retained-window research quality"
+        type: choice
+        required: true
+        default: "freshness"
+        options:
+          - freshness
+          - coverage
   schedule:
     - cron: "*/30 * * * *"
     - cron: "17 */6 * * *"
@@ -48,7 +56,7 @@ env:
 jobs:
   audit:
     name: Audit Tango market-data gaps
-    runs-on: [self-hosted, tango-1-1]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: tango-1-1
 
@@ -99,6 +107,7 @@ jobs:
           INPUT_BUCKET_MINUTES: ${{ inputs.bucket_minutes }}
           INPUT_SYMBOLS: ${{ inputs.symbols }}
           INPUT_FAIL_ON: ${{ inputs.fail_on }}
+          INPUT_GATE_MODE: ${{ inputs.gate_mode }}
         run: |
           set -euo pipefail
 
@@ -113,6 +122,7 @@ jobs:
           bucket_minutes="${INPUT_BUCKET_MINUTES:-5}"
           symbols="${INPUT_SYMBOLS:-${DEFAULT_SYMBOLS}}"
           fail_on="${INPUT_FAIL_ON:-critical}"
+          gate_mode="${INPUT_GATE_MODE:-freshness}"
 
           case "${run_full}" in
             true|false) ;;
@@ -122,6 +132,10 @@ jobs:
             critical|warn|never) ;;
             *) echo "invalid fail_on value: ${fail_on}" >&2; exit 1 ;;
           esac
+          case "${gate_mode}" in
+            freshness|coverage) ;;
+            *) echo "invalid gate_mode value: ${gate_mode}" >&2; exit 1 ;;
+          esac
 
           {
             echo "run_full=${run_full}"
@@ -129,6 +143,7 @@ jobs:
             echo "bucket_minutes=${bucket_minutes}"
             echo "symbols=${symbols}"
             echo "fail_on=${fail_on}"
+            echo "gate_mode=${gate_mode}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Run remote gap audits
@@ -137,6 +152,7 @@ jobs:
           FULL_LOOKBACK_HOURS: ${{ steps.scope.outputs.lookback_hours }}
           BUCKET_MINUTES: ${{ steps.scope.outputs.bucket_minutes }}
           SYMBOLS: ${{ steps.scope.outputs.symbols }}
+          GATE_MODE: ${{ steps.scope.outputs.gate_mode }}
         run: |
           set -euo pipefail
           mkdir -p artifacts/market-data-gap-audit
@@ -150,7 +166,7 @@ jobs:
 
             # shellcheck disable=SC2029
             ssh tango-1-1 \
-              "DEPLOY_ROOT='${DEPLOY_ROOT}' AUDIT_KIND='${audit_kind}' LOOKBACK_HOURS='${lookback_hours}' BUCKET_MINUTES='${BUCKET_MINUTES}' SYMBOLS='${SYMBOLS}' REMOTE_FILE='${remote_file}' /bin/bash -s" <<'EOF'
+              "DEPLOY_ROOT='${DEPLOY_ROOT}' AUDIT_KIND='${audit_kind}' LOOKBACK_HOURS='${lookback_hours}' BUCKET_MINUTES='${BUCKET_MINUTES}' SYMBOLS='${SYMBOLS}' GATE_MODE='${GATE_MODE}' REMOTE_FILE='${remote_file}' /bin/bash -s" <<'EOF'
           set -euo pipefail
           mkdir -p "$(dirname "${REMOTE_FILE}")"
           test -x "${DEPLOY_ROOT}/scripts/audit_market_data_gaps.py"
@@ -158,6 +174,7 @@ jobs:
             --lookback-hours "${LOOKBACK_HOURS}" \
             --bucket-minutes "${BUCKET_MINUTES}" \
             --symbols "${SYMBOLS}" \
+            --gate-mode "${GATE_MODE}" \
             --statement-timeout-seconds 20 \
             --psql-timeout-seconds 30 \
             --format json \
@@ -178,6 +195,7 @@ jobs:
         env:
           FAIL_ON: ${{ steps.scope.outputs.fail_on }}
           RUN_FULL: ${{ steps.scope.outputs.run_full }}
+          GATE_MODE: ${{ steps.scope.outputs.gate_mode }}
         run: |
           set -euo pipefail
           python3 <<'PY'
@@ -203,26 +221,34 @@ jobs:
               "## Market Data Gap Audit",
               "",
               f"- Gate: `{fail_on}`",
+              f"- Gate mode: `{os.environ['GATE_MODE']}`",
               f"- Full audit requested: `{os.environ['RUN_FULL']}`",
               "",
-              "| Audit | Overall | Lookback | Bucket | Non-OK sources |",
-              "| --- | --- | ---: | ---: | --- |",
+              "| Audit | Overall | Lookback | Bucket | Non-OK sources | Coverage caveats |",
+              "| --- | --- | ---: | ---: | --- | --- |",
           ]
           for name, _path, payload in reports:
               status = payload.get("overall_status", "unknown")
               if status_order.get(status, 2) > status_order[worst]:
                   worst = status
               non_ok = []
+              coverage_caveats = []
               for item in payload.get("gap_audits", []) + payload.get("window_audits", []):
                   item_status = item.get("status", "unknown")
                   if item_status != "ok":
                       source = item.get("source_id", "unknown")
                       reason = "; ".join(item.get("reasons") or [])
                       non_ok.append(f"`{source}` {item_status}: {reason}")
+                  coverage_status = item.get("coverage_status")
+                  if coverage_status and coverage_status != "ok":
+                      source = item.get("source_id", "unknown")
+                      reason = "; ".join(item.get("coverage_reasons") or [])
+                      coverage_caveats.append(f"`{source}` {coverage_status}: {reason}")
               lines.append(
                   f"| {name} | `{status}` | {payload.get('lookback_hours', 'n/a')}h "
                   f"| {payload.get('bucket_minutes', 'n/a')}m | "
-                  f"{'<br>'.join(non_ok) if non_ok else 'none'} |"
+                  f"{'<br>'.join(non_ok) if non_ok else 'none'} | "
+                  f"{'<br>'.join(coverage_caveats) if coverage_caveats else 'none'} |"
               )
 
           should_fail = False

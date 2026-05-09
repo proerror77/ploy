@@ -1,5 +1,25 @@
 # PM5D Settlement Probability PRD Execution Plan (2026-05-05)
 
+## Market Data Audit Runner And Binance Gap Repair (2026-05-09)
+
+- [x] Move `market-data-gap-audit.yml` off the self-hosted `tango-1-1`
+  runner so scheduled/manual audit jobs can run while `ploy-ci-1` remains
+  intentionally offline.
+- [x] Diagnose the current Binance price / agg trade / LOB audit gaps on
+  `tango-1-1` and distinguish collector freshness from historical coverage
+  gaps.
+- [x] Apply the smallest repo/remote fix that restores actionable Binance audit
+  behavior without relaxing Polymarket freshness gates or reviving `ploy-ci-1`.
+- [ ] Verify locally and through GitHub Actions / remote audit evidence, then
+  merge the fix back to `main`.
+
+Result so far: the Binance collectors are active and writing fresh rows, but
+there is an unrecoverable historical outage from roughly `2026-05-06 03:10` to
+`2026-05-08 18:30` CST. The audit script now reports separate freshness and
+coverage statuses. The collector-health workflow defaults to freshness gating
+on GitHub-hosted runners, while strict coverage mode remains the script default
+for research/data-quality callers.
+
 ## Tango Deploy Transport Repair (2026-05-06)
 
 - [x] Diagnose repeated GitHub deploy failure at SSH banner exchange.
