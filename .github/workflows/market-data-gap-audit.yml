@@ -42,8 +42,8 @@ on:
     - cron: "17 */6 * * *"
 
 concurrency:
-  group: market-data-gap-audit
-  cancel-in-progress: false
+  group: market-data-gap-audit-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

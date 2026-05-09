@@ -28,6 +28,11 @@ tests.test_audit_market_data_gaps tests.test_ploy_maintenance_defaults`, local
 ploy-platform-runtime --lib`, workflow YAML parse, and `git diff --check` all
 passed. PR #381 CI run `25592707685` passed after the runtime test helper
 hardening commit.
+After PR #381 deployed, manual audit run `25593275239` and retry `25593324839`
+still stayed `pending` with `jobs=[]`. The remaining workflow fix changes the
+audit concurrency group from the old global key to a ref-scoped key and cancels
+older in-progress audit runs so cancelled historical scheduled runs cannot keep
+new GitHub-hosted audit runs queued.
 
 ## Tango Deploy Transport Repair (2026-05-06)
 
