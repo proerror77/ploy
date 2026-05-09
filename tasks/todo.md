@@ -19,6 +19,9 @@ there is an unrecoverable historical outage from roughly `2026-05-06 03:10` to
 coverage statuses. The collector-health workflow defaults to freshness gating
 on GitHub-hosted runners, while strict coverage mode remains the script default
 for research/data-quality callers.
+PR CI exposed an unrelated `ploy-platform-runtime` test race where temporary
+runner scripts could collide or be executed while published. The test helper now
+uses an atomic per-process sequence and temp-file rename before execution.
 
 ## Tango Deploy Transport Repair (2026-05-06)
 
