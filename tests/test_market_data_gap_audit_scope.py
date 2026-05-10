@@ -47,6 +47,11 @@ class MarketDataGapAuditScopeTests(unittest.TestCase):
         workflow = WORKFLOW.read_text()
         self.assertIn("REQUIRED_SOURCES: pm5d-vol", workflow)
         self.assertIn("--required-sources \"${REQUIRED_SOURCES}\"", workflow)
+        self.assertIn("remote ${audit_kind} audit failed after ${attempt} attempts", workflow)
+        self.assertIn(
+            "copying ${audit_kind} audit report failed after ${attempt} attempts",
+            workflow,
+        )
 
 
 if __name__ == "__main__":
