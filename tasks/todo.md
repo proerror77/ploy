@@ -12628,6 +12628,11 @@ Review:
   metadata for explicit use elsewhere.
 - 2026-05-10: PR #383 checks passed on GitHub-hosted runners; `ploy-ci-1` was
   not used for this fix.
+- 2026-05-10: Post-merge manual audit run `25618785890` reached a GitHub-hosted
+  job after environment approval, then failed before the audit query because
+  Tango SSH timed out during banner exchange. Added bounded SSH/SCP retry so a
+  transient public SSH timeout does not fail the collector-health audit on the
+  first attempt.
 # Data-Requirement Scoped Research Workflows (2026-04-28)
 
 ## Files

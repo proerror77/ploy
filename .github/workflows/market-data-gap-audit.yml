@@ -164,10 +164,12 @@ jobs:
             local remote_dir="${DEPLOY_ROOT}/reports/market-data-gap-audit"
             local remote_file="${remote_dir}/${audit_kind}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
             local local_file="artifacts/market-data-gap-audit/${audit_kind}.json"
+            local attempt
 
-            # shellcheck disable=SC2029
-            ssh tango-1-1 \
-              "DEPLOY_ROOT='${DEPLOY_ROOT}' AUDIT_KIND='${audit_kind}' LOOKBACK_HOURS='${lookback_hours}' BUCKET_MINUTES='${BUCKET_MINUTES}' SYMBOLS='${SYMBOLS}' REQUIRED_SOURCES='${REQUIRED_SOURCES}' GATE_MODE='${GATE_MODE}' REMOTE_FILE='${remote_file}' /bin/bash -s" <<'EOF'
+            for attempt in 1 2 3; do
+              # shellcheck disable=SC2029
+              if ssh tango-1-1 \
+                "DEPLOY_ROOT='${DEPLOY_ROOT}' AUDIT_KIND='${audit_kind}' LOOKBACK_HOURS='${lookback_hours}' BUCKET_MINUTES='${BUCKET_MINUTES}' SYMBOLS='${SYMBOLS}' REQUIRED_SOURCES='${REQUIRED_SOURCES}' GATE_MODE='${GATE_MODE}' REMOTE_FILE='${remote_file}' /bin/bash -s" <<'EOF'
           set -euo pipefail
           mkdir -p "$(dirname "${REMOTE_FILE}")"
           test -x "${DEPLOY_ROOT}/scripts/audit_market_data_gaps.py"
@@ -184,8 +186,27 @@ jobs:
             --fail-on never > "${REMOTE_FILE}"
           cp "${REMOTE_FILE}" "${DEPLOY_ROOT}/reports/market-data-gap-audit/${AUDIT_KIND}-latest.json"
           EOF
+              then
+                break
+              fi
 
-            scp "tango-1-1:${remote_file}" "${local_file}"
+              if [ "${attempt}" -eq 3 ]; then
+                echo "remote ${audit_kind} audit failed after ${attempt} attempts" >&2
+                return 1
+              fi
+              sleep "$((attempt * 15))"
+            done
+
+            for attempt in 1 2 3; do
+              if scp "tango-1-1:${remote_file}" "${local_file}"; then
+                break
+              fi
+              if [ "${attempt}" -eq 3 ]; then
+                echo "copying ${audit_kind} audit report failed after ${attempt} attempts" >&2
+                return 1
+              fi
+              sleep "$((attempt * 15))"
+            done
           }
 
           run_remote_audit quick 1
