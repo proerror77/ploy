@@ -72,6 +72,9 @@ async fn main() -> anyhow::Result<()> {
     let lob_sample_secs: i32 = flag_value(&args, "--lob-sample-secs")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(30);
+    let pm_book_sample_secs: i32 = flag_value(&args, "--pm-book-sample-secs")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(lob_sample_secs);
     let max_quote_age_secs: i64 = flag_value(&args, "--max-quote-age-secs")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(30);
@@ -90,14 +93,15 @@ async fn main() -> anyhow::Result<()> {
     let include_deribit = !flag_present(&args, "--skip-deribit");
 
     eprintln!(
-        "research_snapshot_compile: {} -> {} for {:?}, stake_usd={:.2}, output={}, data_requirements={}, include_deribit={}",
+        "research_snapshot_compile: {} -> {} for {:?}, stake_usd={:.2}, output={}, data_requirements={}, include_deribit={}, pm_book_sample_secs={}",
         start,
         end,
         symbols,
         stake_usd,
         output_dir.display(),
         data_requirements.join(","),
-        include_deribit
+        include_deribit,
+        pm_book_sample_secs
     );
 
     let pool = PgPoolOptions::new()
@@ -113,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
             start,
             end,
             lob_sample_secs,
+            pm_book_sample_secs,
             observation_sample_secs,
             max_quote_age_secs,
             stake_usd,
