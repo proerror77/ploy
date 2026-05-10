@@ -24,9 +24,9 @@ on:
         required: true
         default: "15"
       options_json:
-        description: "Advanced options JSON: sampling, optimizer_data_dir, data_profile, audit gate, local snapshot registry, optional full snapshot upload"
+        description: "Advanced options JSON: sampling, optimizer_data_dir, data_profile, audit gate, and optional full snapshot upload"
         required: false
-        default: '{"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_full_snapshot":false}'
+        default: '{"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_full_snapshot":true}'
 
 concurrency:
   group: research-snapshot-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}-${{ github.event.inputs.symbols }}
@@ -38,30 +38,22 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  PLOY_DB_URL: ${{ secrets.PLOY_DB_URL }}
+  DEPLOY_HOST: ${{ vars.TANGO_1_1_HOST || vars.ALIYUN_ECS_HOST || secrets.TANGO_1_1_HOST || secrets.ALIYUN_ECS_HOST }}
+  DEPLOY_ROOT: ${{ vars.PLOY_DEPLOY_ROOT || '/opt/ploy' }}
+  REMOTE_DIR: /opt/ploy/tmp/research-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   compile:
-    name: Compile research snapshot on ploy-ci-1
-    runs-on: [self-hosted, ploy-ci-1]
-    timeout-minutes: 45
-    environment: ploy-ci-1
+    name: Compile research snapshot on tango-1-1
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: tango-1-1
 
     steps:
-      - name: Repair runner workspace permissions
-        run: |
-          if [ -d "${GITHUB_WORKSPACE}" ]; then
-            sudo chown -R "$(id -un):$(id -gn)" "${GITHUB_WORKSPACE}" || true
-            sudo rm -f "${GITHUB_WORKSPACE}/.cargo-lock" || true
-          fi
-
       - name: Checkout code
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.git_ref }}
-
-      - name: Add cargo to PATH
-        run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Parse advanced options
         id: snapshot_options
@@ -83,7 +75,7 @@ jobs:
               "audit_lookback_hours": "168",
               "data_gate": "never",
               "snapshot_registry_dir": "",
-              "upload_full_snapshot": "false",
+              "upload_full_snapshot": "true",
           }
           bool_keys = {"upload_full_snapshot"}
           choices = {
@@ -123,20 +115,53 @@ jobs:
               handle.write(f"upload_full_snapshot={values['upload_full_snapshot']}\n")
           PY
 
-      - name: Ensure psql client
+      - name: Configure SSH
+        env:
+          TANGO_1_1_SSH_KEY: ${{ secrets.TANGO_1_1_SSH_KEY }}
+          TANGO_SSH_KEY: ${{ secrets.TANGO_SSH_KEY }}
+          ALIYUN_ECS_SSH_KEY: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
+          TANGO_1_1_KNOWN_HOSTS: ${{ secrets.TANGO_1_1_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          if command -v psql >/dev/null 2>&1; then
-            psql --version
-            exit 0
-          fi
-          if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y postgresql-client
-          else
-            echo "psql client is required for scoped data audits" >&2
+          test -n "${DEPLOY_HOST}"
+          install -m 700 -d ~/.ssh
+          if [ -z "${TANGO_1_1_KNOWN_HOSTS}" ]; then
+            echo "TANGO_1_1_KNOWN_HOSTS secret is required for pinned SSH host verification" >&2
             exit 1
           fi
+          key_source=""
+          selected_key=""
+          if [ -n "${TANGO_1_1_SSH_KEY}" ]; then
+            selected_key="${TANGO_1_1_SSH_KEY}"
+            key_source="TANGO_1_1_SSH_KEY"
+          elif [ -n "${TANGO_SSH_KEY}" ]; then
+            selected_key="${TANGO_SSH_KEY}"
+            key_source="TANGO_SSH_KEY"
+          elif [ -n "${ALIYUN_ECS_SSH_KEY}" ]; then
+            selected_key="${ALIYUN_ECS_SSH_KEY}"
+            key_source="ALIYUN_ECS_SSH_KEY"
+          else
+            echo "No SSH key secret found for tango-1-1 in this workflow context." >&2
+            exit 1
+          fi
+          printf '%s\n' "${selected_key}" > ~/.ssh/tango_1_1_key
+          chmod 600 ~/.ssh/tango_1_1_key
+          echo "tango-1-1-key-source=${key_source}"
+          ssh-keygen -y -f ~/.ssh/tango_1_1_key >/dev/null
+          printf '%s\n' "${TANGO_1_1_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host tango-1-1
+            HostName ${DEPLOY_HOST}
+            User root
+            IdentityFile ~/.ssh/tango_1_1_key
+            HostKeyAlias tango-1-1
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            ServerAliveInterval 30
+            ServerAliveCountMax 20
+            ConnectTimeout 30
+          EOF
 
       - name: Resolve data requirements
         id: data_scope
@@ -176,31 +201,55 @@ jobs:
           echo "required_sources=${required_sources}" >> "${GITHUB_OUTPUT}"
           echo "include_deribit=${include_deribit}" >> "${GITHUB_OUTPUT}"
 
-      - name: Audit required market data
+      - name: Audit required market data on tango-1-1
         id: data_audit
         env:
           REQUIRED_SOURCES: ${{ steps.data_scope.outputs.required_sources }}
         run: |
           set -euo pipefail
-          AUDIT_LOOKBACK_HOURS="${SNAPSHOT_AUDIT_LOOKBACK_HOURS}"
-          export DATA_GATE="${SNAPSHOT_DATA_GATE}"
           mkdir -p artifacts/research-snapshot
-          PLOY_DATABASE__URL="${PLOY_DB_URL:?PLOY_DB_URL secret is required}" \
-            scripts/audit_market_data_gaps.py \
-              --lookback-hours "${AUDIT_LOOKBACK_HOURS}" \
+          remote_audit="${REMOTE_DIR}/research-snapshot/data-gap-audit.json"
+
+          ssh tango-1-1 /bin/bash -s -- \
+            "${DEPLOY_ROOT}" \
+            "${REMOTE_DIR}" \
+            "${remote_audit}" \
+            "${SNAPSHOT_AUDIT_LOOKBACK_HOURS}" \
+            "${{ github.event.inputs.symbols }}" \
+            "${REQUIRED_SOURCES}" <<'EOF'
+          set -euo pipefail
+          deploy_root="$1"
+          remote_dir="$2"
+          remote_audit="$3"
+          audit_lookback_hours="$4"
+          symbols="$5"
+          required_sources="$6"
+
+          set -a
+          . "${deploy_root}/.env"
+          set +a
+          : "${PLOY_DATABASE__URL:?PLOY_DATABASE__URL missing in ${deploy_root}/.env}"
+          mkdir -p "${remote_dir}/research-snapshot"
+          test -x "${deploy_root}/scripts/audit_market_data_gaps.py"
+          PLOY_DATABASE__URL="${PLOY_DATABASE__URL}" \
+            "${deploy_root}/scripts/audit_market_data_gaps.py" \
+              --lookback-hours "${audit_lookback_hours}" \
               --bucket-minutes 5 \
-              --symbols "${{ github.event.inputs.symbols }}" \
-              --required-sources "${REQUIRED_SOURCES}" \
+              --symbols "${symbols}" \
+              --required-sources "${required_sources}" \
               --statement-timeout-seconds 20 \
               --psql-timeout-seconds 30 \
               --format json \
-              --fail-on never > artifacts/research-snapshot/data-gap-audit.json
+              --fail-on never > "${remote_audit}"
+          EOF
+
+          scp "tango-1-1:${remote_audit}" artifacts/research-snapshot/data-gap-audit.json
           python3 <<'PY'
           import json
           import os
 
           status_order = {"ok": 0, "warn": 1, "unknown": 2, "critical": 3}
-          gate = os.environ["DATA_GATE"]
+          gate = os.environ["SNAPSHOT_DATA_GATE"]
           with open("artifacts/research-snapshot/data-gap-audit.json", encoding="utf-8") as fh:
               payload = json.load(fh)
           status = payload.get("overall_status", "unknown")
@@ -235,58 +284,97 @@ jobs:
               raise SystemExit(f"scoped data audit gate failed: {status}")
           PY
 
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          cache-targets: "true"
-          key: research-snapshot-db-only-${{ hashFiles('crates/ploy-research/**', 'crates/ploy-feed-loaders/**', 'Cargo.lock') }}
-
-      - name: Build research_snapshot_compile
-        run: |
-          . /home/runner/.cargo/env
-          cargo build --release --locked \
-            -p ploy-research \
-            --features db \
-            --example research_snapshot_compile
-
-      - name: Compile snapshot
+      - name: Compile snapshot on tango-1-1
+        env:
+          INCLUDE_DERIBIT: ${{ steps.data_scope.outputs.include_deribit }}
+          REQUIRED_SOURCES: ${{ steps.data_scope.outputs.required_sources }}
+          DATA_AUDIT_STATUS: ${{ steps.data_audit.outputs.overall_status }}
         run: |
           set -euo pipefail
+          mkdir -p artifacts
+          ssh tango-1-1 /bin/bash -s -- \
+            "${DEPLOY_ROOT}" \
+            "${REMOTE_DIR}" \
+            "${{ github.event.inputs.symbols }}" \
+            "${{ github.event.inputs.start_date }}" \
+            "${{ github.event.inputs.end_date }}" \
+            "${{ github.event.inputs.stake_usd }}" \
+            "${SNAPSHOT_LOB_SAMPLE_SECS}" \
+            "${SNAPSHOT_OBSERVATION_SAMPLE_SECS}" \
+            "${SNAPSHOT_MAX_QUOTE_AGE_SECS}" \
+            "${SNAPSHOT_OPTIMIZER_DATA_DIR}" \
+            "${REQUIRED_SOURCES}" \
+            "${DATA_AUDIT_STATUS}" \
+            "${INCLUDE_DERIBIT}" <<'EOF'
+          set -euo pipefail
+          deploy_root="$1"
+          remote_dir="$2"
+          symbols="$3"
+          start_date="$4"
+          end_date="$5"
+          stake_usd="$6"
+          lob_sample_secs="$7"
+          observation_sample_secs="$8"
+          max_quote_age_secs="$9"
+          optimizer_data_dir="${10}"
+          required_sources="${11}"
+          data_audit_status="${12}"
+          include_deribit="${13}"
+
+          set -a
+          . "${deploy_root}/.env"
+          set +a
+          : "${PLOY_DATABASE__URL:?PLOY_DATABASE__URL missing in ${deploy_root}/.env}"
+          compiler="${deploy_root}/bin/research-snapshot-compile"
+          test -x "${compiler}"
+          mkdir -p "${remote_dir}/research-snapshot"
           deribit_args=()
-          if [ "${{ steps.data_scope.outputs.include_deribit }}" != "true" ]; then
+          if [ "${include_deribit}" != "true" ]; then
             deribit_args+=(--skip-deribit)
           fi
-          mkdir -p artifacts/research-snapshot
-          ./target/release/examples/research_snapshot_compile \
-            --db-url "${PLOY_DB_URL:?PLOY_DB_URL secret is required}" \
-            --symbols "${{ github.event.inputs.symbols }}" \
-            --start-date "${{ github.event.inputs.start_date }}" \
-            --end-date "${{ github.event.inputs.end_date }}" \
-            --stake-usd "${{ github.event.inputs.stake_usd }}" \
-            --lob-sample-secs "${SNAPSHOT_LOB_SAMPLE_SECS}" \
-            --observation-sample-secs "${SNAPSHOT_OBSERVATION_SAMPLE_SECS}" \
-            --max-quote-age-secs "${SNAPSHOT_MAX_QUOTE_AGE_SECS}" \
-            --output-dir artifacts/research-snapshot \
-            --optimizer-data-dir "${SNAPSHOT_OPTIMIZER_DATA_DIR}" \
-            --data-requirements "${{ steps.data_scope.outputs.required_sources }}" \
-            --data-audit-status "${{ steps.data_audit.outputs.overall_status }}" \
+          set +e
+          timeout 3600 "${compiler}" \
+            --db-url "${PLOY_DATABASE__URL}" \
+            --symbols "${symbols}" \
+            --start-date "${start_date}" \
+            --end-date "${end_date}" \
+            --stake-usd "${stake_usd}" \
+            --lob-sample-secs "${lob_sample_secs}" \
+            --observation-sample-secs "${observation_sample_secs}" \
+            --max-quote-age-secs "${max_quote_age_secs}" \
+            --output-dir "${remote_dir}/research-snapshot" \
+            --optimizer-data-dir "${optimizer_data_dir}" \
+            --data-requirements "${required_sources}" \
+            --data-audit-status "${data_audit_status}" \
             --data-audit-report data-gap-audit.json \
             "${deribit_args[@]}" \
-            2>&1 | tee artifacts/research-snapshot/compile.log
+            2>&1 | tee "${remote_dir}/research-snapshot/compile.log"
+          compile_status="${PIPESTATUS[0]}"
+          set -e
+          printf '%s\n' "${compile_status}" > "${remote_dir}/research-snapshot/compile-status.txt"
+          tar -C "${remote_dir}" -cf "${remote_dir}/research-snapshot.tar" research-snapshot
+          ls -lh "${remote_dir}/research-snapshot.tar"
+          EOF
 
-      - name: Publish snapshot to runner-local registry
-        run: |
-          set -euo pipefail
-          registry_args=()
-          if [ -n "${SNAPSHOT_SNAPSHOT_REGISTRY_DIR}" ]; then
-            registry_args=(--registry-dir "${SNAPSHOT_SNAPSHOT_REGISTRY_DIR}")
+          scp "tango-1-1:${REMOTE_DIR}/research-snapshot.tar" artifacts/research-snapshot.tar
+          rm -rf artifacts/research-snapshot
+          mkdir -p artifacts/research-snapshot
+          tar -C artifacts -xf artifacts/research-snapshot.tar
+          compile_status="$(cat artifacts/research-snapshot/compile-status.txt)"
+          if [ "${compile_status}" != "0" ]; then
+            echo "research-snapshot-compile failed with status ${compile_status}" >&2
+            exit "${compile_status}"
           fi
-          scripts/publish_research_snapshot_registry.sh \
-            --snapshot-dir artifacts/research-snapshot \
-            --run-id "${GITHUB_RUN_ID}" \
-            --retention-days 14 \
-            "${registry_args[@]}"
+          test -s artifacts/research-snapshot/manifest.json
+          test -s artifacts/research-snapshot/quality.md
+
+      - name: Cleanup remote snapshot workspace
+        if: always()
+        run: |
+          ssh tango-1-1 /bin/bash -s -- "${REMOTE_DIR}" <<'EOF' || true
+          set -euo pipefail
+          rm -rf "$1"
+          EOF
 
       - name: Publish summary
         if: always()
@@ -294,6 +382,8 @@ jobs:
           {
             echo "## Research Snapshot"
             echo ""
+            echo "- Execution host: \`tango-1-1\`"
+            echo "- Workflow runner: \`ubuntu-latest\`"
             echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
             echo "- Symbols: ${{ github.event.inputs.symbols }}"
             echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
@@ -323,7 +413,7 @@ jobs:
           set -euo pipefail
           rm -rf artifacts/research-snapshot-provenance
           mkdir -p artifacts/research-snapshot-provenance
-          for file in manifest.json quality.md data-gap-audit.md data-gap-audit.json compile.log; do
+          for file in manifest.json quality.md data-gap-audit.md data-gap-audit.json compile.log compile-status.txt; do
             if [ -f "artifacts/research-snapshot/${file}" ]; then
               cp "artifacts/research-snapshot/${file}" artifacts/research-snapshot-provenance/
             fi
@@ -331,7 +421,9 @@ jobs:
           {
             echo "run_id=${GITHUB_RUN_ID}"
             echo "full_snapshot_embedded=${SNAPSHOT_UPLOAD_FULL_SNAPSHOT}"
-            echo "registry=runner-local"
+            echo "registry=tango-remote"
+            echo "execution_host=tango-1-1"
+            echo "workflow_runner=ubuntu-latest"
           } > artifacts/research-snapshot-provenance/source.txt
 
       - name: Upload full snapshot artifact
