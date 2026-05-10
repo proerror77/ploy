@@ -142,11 +142,27 @@ pub struct FactorObservation {
     pub reward_risk_down: f64,
     pub obi: f64,
     pub spread_bps: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub microprice_offset_bps: f64,
     pub bid_depth_near: f64,
     pub ask_depth_near: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub depth_ratio: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub depth_imbalance: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub depth_far_ratio: f64,
     #[serde(
         default = "nan_f64",
@@ -203,8 +219,20 @@ pub struct FactorObservation {
     pub cum_mprice_drift_5m: f64,
     pub cum_trade_imbalance_5m: f64,
     pub cex_bar_return_30s: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub cex_bar_return_60s: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub cex_bar_volume_ratio_30s: f64,
+    #[serde(
+        default = "nan_f64",
+        deserialize_with = "deserialize_nullable_f64_as_nan"
+    )]
     pub cex_bar_volume_trend_3: f64,
     #[serde(
         default = "nan_f64",
@@ -2525,6 +2553,10 @@ mod tests {
         observation.model_edge_up = f64::NAN;
         observation.reward_risk_up = f64::NAN;
         observation.reward_risk_down = f64::NAN;
+        observation.microprice_offset_bps = f64::NAN;
+        observation.depth_ratio = f64::NAN;
+        observation.depth_imbalance = f64::NAN;
+        observation.depth_far_ratio = f64::NAN;
         observation.depth_acceleration = f64::NAN;
         observation.pm_up_bid = f64::NAN;
         observation.pm_up_ask = f64::NAN;
@@ -2534,13 +2566,19 @@ mod tests {
         observation.pm_down_ask = f64::NAN;
         observation.pm_down_bid_size = f64::NAN;
         observation.pm_down_ask_size = f64::NAN;
+        observation.cex_bar_return_60s = f64::NAN;
+        observation.cex_bar_volume_ratio_30s = f64::NAN;
+        observation.cex_bar_volume_trend_3 = f64::NAN;
         observation.cex_signed_volume_ratio_30s = f64::NAN;
         observation.cex_breakout_volume_score = f64::NAN;
         observation.future_up_ask_change_60s = None;
 
         let json = serde_json::to_string(&observation).expect("serialize observation");
         assert!(json.contains("\"flip_age_secs\":null"));
+        assert!(json.contains("\"microprice_offset_bps\":null"));
+        assert!(json.contains("\"depth_ratio\":null"));
         assert!(json.contains("\"depth_acceleration\":null"));
+        assert!(json.contains("\"cex_bar_volume_ratio_30s\":null"));
         assert!(json.contains("\"pm_up_bid_size\":null"));
 
         let decoded: FactorObservation =
@@ -2554,6 +2592,10 @@ mod tests {
         assert!(decoded.model_edge_up.is_nan());
         assert!(decoded.reward_risk_up.is_nan());
         assert!(decoded.reward_risk_down.is_nan());
+        assert!(decoded.microprice_offset_bps.is_nan());
+        assert!(decoded.depth_ratio.is_nan());
+        assert!(decoded.depth_imbalance.is_nan());
+        assert!(decoded.depth_far_ratio.is_nan());
         assert!(decoded.depth_acceleration.is_nan());
         assert!(decoded.pm_up_bid.is_nan());
         assert!(decoded.pm_up_ask.is_nan());
@@ -2563,6 +2605,9 @@ mod tests {
         assert!(decoded.pm_down_ask.is_nan());
         assert!(decoded.pm_down_bid_size.is_nan());
         assert!(decoded.pm_down_ask_size.is_nan());
+        assert!(decoded.cex_bar_return_60s.is_nan());
+        assert!(decoded.cex_bar_volume_ratio_30s.is_nan());
+        assert!(decoded.cex_bar_volume_trend_3.is_nan());
         assert!(decoded.cex_signed_volume_ratio_30s.is_nan());
         assert!(decoded.cex_breakout_volume_score.is_nan());
         assert_eq!(decoded.future_up_ask_change_60s, None);

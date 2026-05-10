@@ -13460,10 +13460,14 @@ Plan:
 - [x] Diagnose why the 6-symbol, 7-day `pm5d-vol` research snapshot timed out.
 - [x] Add independent PM book sampling so CEX/observation sampling can stay at 30s while PM book lookups use a coarser cadence.
 - [x] Validate the code/workflow change locally.
-- [ ] Open PR, merge, deploy, and rerun the full snapshot.
+- [x] Open PR, merge, deploy, and rerun the full snapshot.
+- [ ] Fix hosted walk-forward snapshot parsing for nullable LOB/CEX derived fields, merge, and rerun the walk-forward.
 
 Review:
 
 - Run `25632454419` reached `lob snapshot rows: 87349` and then timed out with compile status `124` during PM book snapshot loading.
 - The failing window has 14,334 PM events, 28,668 token-side rows, about 509,504 generated 30s PM book buckets, and 8,663,685 raw matching orderbook rows in the 73GB `clob_orderbook_snapshots` table.
 - Local checks: `rtk cargo check -p ploy-research --features db,polars-export --example research_snapshot_compile`, YAML parse, `actionlint -color .github/workflows/research-snapshot.yml`, and `rtk git diff --check` all pass.
+- PR #390 merged as `68928d98` and deployed by run `25642258988`.
+- Full `pm5d-vol` snapshot run `25642459432` succeeded with `pm_book_sample_secs=300`, `compile_status=0`, artifact `research-snapshot-25642459432` size `339071681` bytes, and row counts: observations `81645`, Deribit snapshots `16049`, PM book snapshots `46906`.
+- Hosted walk-forward run `25642965148` proved the snapshot artifact is complete but failed while parsing `observations.json`: `invalid type: null, expected f64` for nullable LOB/CEX derived fields that were not yet covered by the nullable-as-NaN serde compatibility path.
