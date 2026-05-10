@@ -7,6 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 AUDIT_SCRIPT = ROOT / "scripts" / "audit_market_data_gaps.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "market-data-gap-audit.yml"
+CLOUD_ASSIST_SCRIPT = ROOT / "scripts" / "ci" / "run_tango_market_data_audit_cloud_assist.py"
 
 
 def load_audit_module():
@@ -52,6 +53,8 @@ class MarketDataGapAuditScopeTests(unittest.TestCase):
             "copying ${audit_kind} audit report failed after ${attempt} attempts",
             workflow,
         )
+        self.assertIn("Run remote gap audits via Cloud Assistant fallback", workflow)
+        self.assertIn(str(CLOUD_ASSIST_SCRIPT.relative_to(ROOT)), workflow)
 
 
 if __name__ == "__main__":

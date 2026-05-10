@@ -12633,6 +12633,10 @@ Review:
   Tango SSH timed out during banner exchange. Added bounded SSH/SCP retry so a
   transient public SSH timeout does not fail the collector-health audit on the
   first attempt.
+- 2026-05-10: Retry was not enough: run `25618990218` failed after three SSH
+  banner timeouts. Added an Aliyun Cloud Assistant fallback that runs the same
+  audit command on Tango and returns JSON artifacts through OSS, matching the
+  deploy workflow's fallback model without using `ploy-ci-1`.
 # Data-Requirement Scoped Research Workflows (2026-04-28)
 
 ## Files

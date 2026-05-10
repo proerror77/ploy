@@ -50,7 +50,9 @@ permissions:
 
 env:
   DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
+  TANGO_1_1_INSTANCE_ID: ${{ vars.TANGO_1_1_INSTANCE_ID || 'i-6we8940uojnsory3ihfw' }}
   DEPLOY_ROOT: ${{ vars.PLOY_DEPLOY_ROOT || '/opt/ploy' }}
+  DEPLOY_OSS_REGION: ${{ vars.ALIYUN_REGION || 'ap-northeast-1' }}
   DEFAULT_SYMBOLS: BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT
   REQUIRED_SOURCES: pm5d-vol
 
@@ -148,6 +150,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Run remote gap audits
+        id: remote_audit_ssh
+        continue-on-error: true
         env:
           RUN_FULL: ${{ steps.scope.outputs.run_full }}
           FULL_LOOKBACK_HOURS: ${{ steps.scope.outputs.lookback_hours }}
@@ -213,6 +217,57 @@ jobs:
           if [ "${RUN_FULL}" = "true" ]; then
             run_remote_audit full "${FULL_LOOKBACK_HOURS}"
           fi
+
+      - name: Checkout fallback scripts
+        if: ${{ steps.remote_audit_ssh.outcome != 'success' }}
+        uses: actions/checkout@v6
+
+      - name: Install Aliyun CLI for audit fallback
+        if: ${{ steps.remote_audit_ssh.outcome != 'success' }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz -o aliyun-cli.tgz
+          tar -xzf aliyun-cli.tgz
+          sudo install -m 0755 aliyun /usr/local/bin/aliyun
+          aliyun version
+
+      - name: Install ossutil for audit fallback
+        if: ${{ steps.remote_audit_ssh.outcome != 'success' }}
+        run: |
+          set -euo pipefail
+          if ! command -v ossutil >/dev/null 2>&1; then
+            curl -fsSL https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
+          fi
+          command -v ossutil >/dev/null 2>&1
+
+      - name: Configure Aliyun CLI for audit fallback
+        if: ${{ steps.remote_audit_ssh.outcome != 'success' }}
+        env:
+          ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ECS_ACCESS_KEY_ID || secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ECS_ACCESS_KEY_SECRET || secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "${ALIYUN_ACCESS_KEY_ID}"
+          test -n "${ALIYUN_ACCESS_KEY_SECRET}"
+          aliyun configure set \
+            --profile default \
+            --mode AK \
+            --region "${DEPLOY_OSS_REGION}" \
+            --access-key-id "${ALIYUN_ACCESS_KEY_ID}" \
+            --access-key-secret "${ALIYUN_ACCESS_KEY_SECRET}"
+
+      - name: Run remote gap audits via Cloud Assistant fallback
+        if: ${{ steps.remote_audit_ssh.outcome != 'success' }}
+        env:
+          RUN_FULL: ${{ steps.scope.outputs.run_full }}
+          FULL_LOOKBACK_HOURS: ${{ steps.scope.outputs.lookback_hours }}
+          BUCKET_MINUTES: ${{ steps.scope.outputs.bucket_minutes }}
+          SYMBOLS: ${{ steps.scope.outputs.symbols }}
+          GATE_MODE: ${{ steps.scope.outputs.gate_mode }}
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+        run: python3 scripts/ci/run_tango_market_data_audit_cloud_assist.py
 
       - name: Summarize and enforce audit gate
         id: gate
