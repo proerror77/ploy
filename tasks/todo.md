@@ -13439,3 +13439,16 @@ Issue: https://github.com/proerror77/ploy/issues/256
   executes that script. This keeps CI-built artifacts as the source of truth
   while avoiding Cloud Assistant command-content length limits and printing
   Aliyun CLI stdout/stderr on future submission failures.
+
+## 2026-05-10 - Tango Research Snapshot Workflow
+
+Plan:
+
+- [x] Add the CI-built `research_snapshot_compile` example to the tango deploy bundle.
+- [x] Move `research-snapshot.yml` off `ploy-ci-1` and onto GitHub-hosted orchestration plus tango SSH execution.
+- [x] Validate workflow syntax and open a PR for normal CI review.
+
+Review:
+
+- Local checks so far: YAML parses; `actionlint -color` passes; GitHub workflow `run` blocks pass `bash -n` after expression sanitization; `rtk git diff --check` passes.
+- Remote preflight: `/opt/ploy/.env` sources under bash and exports `PLOY_DATABASE__URL`; `/opt/ploy/scripts/audit_market_data_gaps.py` is executable; `/opt/ploy/bin/research-snapshot-compile` is not deployed yet and must be installed by the next `deploy-tango-1-1.yml` run from `main`.

@@ -134,13 +134,16 @@ jobs:
           strip "target/${PLATFORM_TARGET}/release/new-ployd" || true
           strip "target/${PLATFORM_TARGET}/release/new-ploy-runner" || true
 
-      - name: Build factor-research
+      - name: Build research tools
         run: |
           cargo build --release --locked \
             --target "${PLATFORM_TARGET}" \
             --features db,polars-export \
-            -p ploy-research --example factor_research
+            -p ploy-research \
+            --example factor_research \
+            --example research_snapshot_compile
           strip "target/${PLATFORM_TARGET}/release/examples/factor_research" || true
+          strip "target/${PLATFORM_TARGET}/release/examples/research_snapshot_compile" || true
 
       - name: Build optimize-backtest
         run: |
@@ -161,6 +164,7 @@ jobs:
           cp "target/${PLATFORM_TARGET}/release/new-ployd" dist/bin/ployd
           cp "target/${PLATFORM_TARGET}/release/new-ploy-runner" dist/bin/ploy-runner
           cp "target/${PLATFORM_TARGET}/release/examples/factor_research" dist/bin/factor-research
+          cp "target/${PLATFORM_TARGET}/release/examples/research_snapshot_compile" dist/bin/research-snapshot-compile
           cp "target/${PLATFORM_TARGET}/release/examples/optimize_backtest" dist/bin/optimize-backtest
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
           cp config/strategies/02-pm5d.live.toml dist/config/strategies/02-pm5d.live.toml
@@ -414,6 +418,7 @@ jobs:
             install -m 0755 ./bin/ployd ${DEPLOY_ROOT}/bin/ployd
             install -m 0755 ./bin/ploy-runner ${DEPLOY_ROOT}/bin/ploy-runner
             install -m 0755 ./bin/factor-research ${DEPLOY_ROOT}/bin/factor-research
+            install -m 0755 ./bin/research-snapshot-compile ${DEPLOY_ROOT}/bin/research-snapshot-compile
             install -m 0755 ./bin/optimize-backtest ${DEPLOY_ROOT}/bin/optimize-backtest
             install -m 0644 ./config/strategies/02-pm5d.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.unified.toml
             install -m 0644 ./config/strategies/02-pm5d.live.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.live.toml
