@@ -1734,7 +1734,8 @@ fn main() {
 
         eprintln!(
             "Loading training data into db-eager replay ({} → {})...",
-            train_start, train_end
+            train_start_ts.as_deref().unwrap_or(&train_start),
+            train_end_ts.as_deref().unwrap_or(&train_end)
         );
         let train_load_started = Instant::now();
         let train = rt
@@ -1759,7 +1760,8 @@ fn main() {
 
         eprintln!(
             "Loading validation data into db-eager replay ({} → {})...",
-            val_start, val_end
+            val_start_ts.as_deref().unwrap_or(&val_start),
+            val_end_ts.as_deref().unwrap_or(&val_end)
         );
         let val_load_started = Instant::now();
         let val = rt

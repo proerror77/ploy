@@ -1,5 +1,26 @@
 # PM5D Settlement Probability PRD Execution Plan (2026-05-05)
 
+## PM5D Backtest LOB Loader Repair (2026-05-10)
+
+- [x] Confirm `backtest.yml` still targets `ploy-ci-1` and avoid dispatching it.
+- [x] Start the BTC/ETH settlement-probability strategy backtest from the
+  deployed `tango-1-1` artifact path.
+- [x] Stop the long direct-DB debug run after it reached the heavy
+  `binance_lob_ticks` scan.
+- [x] Replace the DB L2 loader's computed-bucket `DISTINCT ON` query with
+  bucketed index lookups.
+- [x] Fix `optimize-backtest` DB loader logs so timestamp windows are printed
+  accurately.
+- [x] Verify locally.
+- [ ] Open/merge PR, deploy to `tango-1-1`, then rerun a bounded
+  strategy backtest.
+
+Review:
+- Local verification passed with `rtk cargo test -p ploy-feed-loaders
+  binance_samplers_use_bucketed_index_lookups --lib`,
+  `rtk cargo test -p ploy-strategy-bundles --example optimize_backtest
+  --no-run`, and `git diff --check`.
+
 ## Market Data Audit Runner And Binance Gap Repair (2026-05-09)
 
 - [x] Move `market-data-gap-audit.yml` off the self-hosted `tango-1-1`
