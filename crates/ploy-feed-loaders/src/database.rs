@@ -110,6 +110,35 @@ const BINANCE_AGG_TRADE_SAMPLED_QUERY: &str = r#"
         ORDER BY agg.trade_time
         "#;
 
+const BINANCE_LOB_SAMPLED_QUERY: &str = r#"
+        WITH buckets AS (
+            SELECT s.symbol, bucket_start
+            FROM unnest($1::text[]) AS s(symbol)
+            CROSS JOIN generate_series(
+                $2::timestamptz,
+                $3::timestamptz,
+                make_interval(secs => $4::int)
+            ) AS bucket_start
+        )
+        SELECT lob.event_time, lob.symbol,
+               COALESCE(lob.obi_5, 0.0) as obi,
+               COALESCE(lob.spread_bps, 0)::int as spread_bps,
+               COALESCE(lob.bid_volume_5, 0) as bid_volume_5,
+               COALESCE(lob.ask_volume_5, 0) as ask_volume_5
+        FROM buckets
+        JOIN LATERAL (
+            SELECT event_time, symbol, obi_5, spread_bps, bid_volume_5, ask_volume_5
+            FROM binance_lob_ticks
+            WHERE symbol = buckets.symbol
+              AND event_time >= buckets.bucket_start
+              AND event_time < buckets.bucket_start + make_interval(secs => $4::int)
+              AND event_time <= $3
+            ORDER BY event_time DESC
+            LIMIT 1
+        ) AS lob ON true
+        ORDER BY lob.event_time
+        "#;
+
 /// Historical research backtests only trust canonical historical PM quote captures.
 ///
 /// Older `ploy_runner_live` rows were synthetic midpoint quotes; newer rows carry
@@ -827,21 +856,7 @@ async fn load_l2_data(
 ) -> Result<(), sqlx::Error> {
     let sample_secs = sample_secs.max(1) as i64;
     let rows: Vec<(DateTime<Utc>, String, Decimal, i32, Decimal, Decimal)> = match sqlx::query_as(
-        r#"
-        SELECT DISTINCT ON (symbol, date_trunc('second', event_time) - INTERVAL '1 second' * (EXTRACT(EPOCH FROM event_time)::bigint % $4))
-               event_time, symbol,
-               COALESCE(obi_5, 0.0) as obi,
-               COALESCE(spread_bps, 0)::int as spread_bps,
-               COALESCE(bid_volume_5, 0) as bid_volume_5,
-               COALESCE(ask_volume_5, 0) as ask_volume_5
-        FROM binance_lob_ticks
-        WHERE symbol = ANY($1)
-          AND event_time >= $2
-          AND event_time <= $3
-        ORDER BY symbol,
-                 date_trunc('second', event_time) - INTERVAL '1 second' * (EXTRACT(EPOCH FROM event_time)::bigint % $4),
-                 event_time DESC
-        "#,
+        BINANCE_LOB_SAMPLED_QUERY,
     )
     .bind(symbols)
     .bind(from)
@@ -1152,7 +1167,7 @@ mod tests {
 
     use super::{
         build_event_updates, l2_updates_from_book, near_depth, EventMetadataRow, MarketUpdate,
-        BINANCE_AGG_TRADE_SAMPLED_QUERY, BINANCE_PRICE_SAMPLED_QUERY,
+        BINANCE_AGG_TRADE_SAMPLED_QUERY, BINANCE_LOB_SAMPLED_QUERY, BINANCE_PRICE_SAMPLED_QUERY,
         SYNC_RECORDS_SPOT_SAMPLED_QUERY,
     };
 
@@ -1162,6 +1177,7 @@ mod tests {
             SYNC_RECORDS_SPOT_SAMPLED_QUERY,
             BINANCE_PRICE_SAMPLED_QUERY,
             BINANCE_AGG_TRADE_SAMPLED_QUERY,
+            BINANCE_LOB_SAMPLED_QUERY,
         ] {
             assert!(
                 query.contains("generate_series"),
@@ -1184,6 +1200,8 @@ mod tests {
         assert!(BINANCE_PRICE_SAMPLED_QUERY.contains("trade_time >= buckets.bucket_start"));
         assert!(BINANCE_PRICE_SAMPLED_QUERY.contains("ORDER BY trade_time DESC"));
         assert!(BINANCE_AGG_TRADE_SAMPLED_QUERY.contains("ORDER BY trade_time ASC"));
+        assert!(BINANCE_LOB_SAMPLED_QUERY.contains("event_time >= buckets.bucket_start"));
+        assert!(BINANCE_LOB_SAMPLED_QUERY.contains("ORDER BY event_time DESC"));
     }
 
     #[test]
