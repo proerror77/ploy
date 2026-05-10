@@ -12609,6 +12609,25 @@ Review:
   in 28s. Post-merge workflow run `25041205036` verified quick + full retained
   window reporting with `fail_on=never` and completed successfully in 1m49s;
   `summary.md`, `quick.json`, and `full.json` were uploaded as artifacts.
+
+# Market Data Audit Scope Fix (2026-05-10)
+
+## Tasks
+
+- [x] Confirm the GitHub-hosted audit runner is the active path, not `ploy-ci-1`.
+- [x] Narrow the default workflow scope to collector-health sources only.
+- [x] Add a regression check so `research_valid_windows` stays out of the default gate.
+- [x] Verify the workflow and merge the fix.
+
+## Review
+
+- 2026-05-10: The remaining failure was policy, not dispatch. The hosted audit
+  workflow still treated `research_valid_windows` as part of the default gate,
+  which caused the summary to fail even when the collectors were healthy. The
+  fix now keeps the workflow on collector-health scope and leaves research
+  metadata for explicit use elsewhere.
+- 2026-05-10: PR #383 checks passed on GitHub-hosted runners; `ploy-ci-1` was
+  not used for this fix.
 # Data-Requirement Scoped Research Workflows (2026-04-28)
 
 ## Files

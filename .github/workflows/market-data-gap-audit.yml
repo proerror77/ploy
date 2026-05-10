@@ -52,6 +52,7 @@ env:
   DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
   DEPLOY_ROOT: ${{ vars.PLOY_DEPLOY_ROOT || '/opt/ploy' }}
   DEFAULT_SYMBOLS: BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT
+  REQUIRED_SOURCES: pm5d-vol
 
 jobs:
   audit:
@@ -166,14 +167,16 @@ jobs:
 
             # shellcheck disable=SC2029
             ssh tango-1-1 \
-              "DEPLOY_ROOT='${DEPLOY_ROOT}' AUDIT_KIND='${audit_kind}' LOOKBACK_HOURS='${lookback_hours}' BUCKET_MINUTES='${BUCKET_MINUTES}' SYMBOLS='${SYMBOLS}' GATE_MODE='${GATE_MODE}' REMOTE_FILE='${remote_file}' /bin/bash -s" <<'EOF'
+              "DEPLOY_ROOT='${DEPLOY_ROOT}' AUDIT_KIND='${audit_kind}' LOOKBACK_HOURS='${lookback_hours}' BUCKET_MINUTES='${BUCKET_MINUTES}' SYMBOLS='${SYMBOLS}' REQUIRED_SOURCES='${REQUIRED_SOURCES}' GATE_MODE='${GATE_MODE}' REMOTE_FILE='${remote_file}' /bin/bash -s" <<'EOF'
           set -euo pipefail
           mkdir -p "$(dirname "${REMOTE_FILE}")"
           test -x "${DEPLOY_ROOT}/scripts/audit_market_data_gaps.py"
+          # Keep this workflow on collector health; research metadata is tracked separately.
           "${DEPLOY_ROOT}/scripts/audit_market_data_gaps.py" \
             --lookback-hours "${LOOKBACK_HOURS}" \
             --bucket-minutes "${BUCKET_MINUTES}" \
             --symbols "${SYMBOLS}" \
+            --required-sources "${REQUIRED_SOURCES}" \
             --gate-mode "${GATE_MODE}" \
             --statement-timeout-seconds 20 \
             --psql-timeout-seconds 30 \
