@@ -60,6 +60,8 @@ pub struct ResearchSnapshotManifest {
     pub end: DateTime<Utc>,
     pub history_start: DateTime<Utc>,
     pub lob_sample_secs: i32,
+    #[serde(default)]
+    pub pm_book_sample_secs: Option<i32>,
     pub observation_sample_secs: i64,
     pub max_quote_age_secs: i64,
     pub stake_usd: f64,
@@ -272,6 +274,7 @@ pub struct ResearchSnapshotBuildOptions {
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
     pub lob_sample_secs: i32,
+    pub pm_book_sample_secs: i32,
     pub observation_sample_secs: i64,
     pub max_quote_age_secs: i64,
     pub stake_usd: f64,
@@ -340,12 +343,13 @@ pub async fn build_research_snapshot_from_database(
     });
 
     let started = Instant::now();
+    let pm_book_sample_secs = options.pm_book_sample_secs.max(1);
     let all_pm_book_snapshots = load_research_pm_book_snapshots_sampled(
         pool,
         &options.symbols,
         history_start,
         options.end,
-        options.lob_sample_secs,
+        pm_book_sample_secs,
     )
     .await
     .context("load PM book snapshots")?;
@@ -426,6 +430,7 @@ pub async fn build_research_snapshot_from_database(
             end: options.end,
             history_start,
             lob_sample_secs: options.lob_sample_secs,
+            pm_book_sample_secs: Some(pm_book_sample_secs),
             observation_sample_secs: options.observation_sample_secs,
             max_quote_age_secs: options.max_quote_age_secs,
             stake_usd: options.stake_usd,
@@ -493,6 +498,14 @@ fn compute_snapshot_hash(
     update(&mut hash, manifest.end.to_rfc3339().as_bytes());
     update(&mut hash, manifest.symbols.join(",").as_bytes());
     update(&mut hash, manifest.stake_usd.to_string().as_bytes());
+    update(
+        &mut hash,
+        manifest
+            .pm_book_sample_secs
+            .map(|value| value.to_string())
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     update(&mut hash, manifest.data_requirements.join(",").as_bytes());
     update(&mut hash, manifest.include_deribit.to_string().as_bytes());
     update(
@@ -538,6 +551,21 @@ fn write_quality_markdown(path: &Path, manifest: &ResearchSnapshotManifest) -> R
         manifest.start, manifest.end
     ));
     body.push_str(&format!("- Symbols: `{}`\n", manifest.symbols.join(",")));
+    body.push_str(&format!(
+        "- LOB sample secs: `{}`\n",
+        manifest.lob_sample_secs
+    ));
+    body.push_str(&format!(
+        "- PM book sample secs: `{}`\n",
+        manifest
+            .pm_book_sample_secs
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "<same-as-lob>".to_string())
+    ));
+    body.push_str(&format!(
+        "- Observation sample secs: `{}`\n",
+        manifest.observation_sample_secs
+    ));
     body.push_str(&format!(
         "- Immutable input: `{}`\n",
         manifest.immutable_input
@@ -629,6 +657,7 @@ mod tests {
                 end: Utc::now(),
                 history_start: Utc::now(),
                 lob_sample_secs: 30,
+                pm_book_sample_secs: Some(30),
                 observation_sample_secs: 30,
                 max_quote_age_secs: 30,
                 stake_usd: 15.0,

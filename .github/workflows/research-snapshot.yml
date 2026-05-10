@@ -26,7 +26,7 @@ on:
       options_json:
         description: "Advanced options JSON: sampling, optimizer_data_dir, data_profile, audit gate, and optional full snapshot upload"
         required: false
-        default: '{"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_full_snapshot":true}'
+        default: '{"lob_sample_secs":30,"pm_book_sample_secs":300,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_full_snapshot":true}'
 
 concurrency:
   group: research-snapshot-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}-${{ github.event.inputs.symbols }}
@@ -67,6 +67,7 @@ jobs:
 
           defaults = {
               "lob_sample_secs": "30",
+              "pm_book_sample_secs": "300",
               "observation_sample_secs": "30",
               "max_quote_age_secs": "30",
               "optimizer_data_dir": "/tmp/ploy-parquet",
@@ -300,6 +301,7 @@ jobs:
             "${{ github.event.inputs.end_date }}" \
             "${{ github.event.inputs.stake_usd }}" \
             "${SNAPSHOT_LOB_SAMPLE_SECS}" \
+            "${SNAPSHOT_PM_BOOK_SAMPLE_SECS}" \
             "${SNAPSHOT_OBSERVATION_SAMPLE_SECS}" \
             "${SNAPSHOT_MAX_QUOTE_AGE_SECS}" \
             "${SNAPSHOT_OPTIMIZER_DATA_DIR}" \
@@ -314,12 +316,13 @@ jobs:
           end_date="$5"
           stake_usd="$6"
           lob_sample_secs="$7"
-          observation_sample_secs="$8"
-          max_quote_age_secs="$9"
-          optimizer_data_dir="${10}"
-          required_sources="${11}"
-          data_audit_status="${12}"
-          include_deribit="${13}"
+          pm_book_sample_secs="$8"
+          observation_sample_secs="$9"
+          max_quote_age_secs="${10}"
+          optimizer_data_dir="${11}"
+          required_sources="${12}"
+          data_audit_status="${13}"
+          include_deribit="${14}"
 
           set -a
           . "${deploy_root}/.env"
@@ -340,6 +343,7 @@ jobs:
             --end-date "${end_date}" \
             --stake-usd "${stake_usd}" \
             --lob-sample-secs "${lob_sample_secs}" \
+            --pm-book-sample-secs "${pm_book_sample_secs}" \
             --observation-sample-secs "${observation_sample_secs}" \
             --max-quote-age-secs "${max_quote_age_secs}" \
             --output-dir "${remote_dir}/research-snapshot" \
@@ -390,6 +394,8 @@ jobs:
             echo "- Data profile: ${SNAPSHOT_DATA_PROFILE}"
             echo "- Data requirements: ${{ steps.data_scope.outputs.required_sources }}"
             echo "- Include Deribit: ${{ steps.data_scope.outputs.include_deribit }}"
+            echo "- LOB sample secs: ${SNAPSHOT_LOB_SAMPLE_SECS}"
+            echo "- PM book sample secs: ${SNAPSHOT_PM_BOOK_SAMPLE_SECS}"
             echo ""
             if [ -f artifacts/research-snapshot/data-gap-audit.md ]; then
               cat artifacts/research-snapshot/data-gap-audit.md
