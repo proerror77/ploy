@@ -13790,3 +13790,39 @@ walk-forward variants after a single snapshot download and Rust build.
   empty, but the workflow did not forward `${WALK_FACTOR_NAME_FILTER}`. Added
   the missing argument and a workflow contract assertion so the empty-filter
   base variant remains valid.
+- 2026-05-11: Post-fix sweep run `25667334966` succeeded on `main` in 2m02s.
+  It evaluated four variants in one hosted job; sweep-internal elapsed time was
+  46.67s with all four variants completed. Variant `stable-min50`
+  (`min_observations=50`) was selected with two qualified settlement-probability
+  strategies. The selected dry-run runtime score is
+  `autofactor_formula:auto_settlement_full_depth_settlement_edge` with
+  `icir=0.64167`, `positive_window_ratio=0.8333`, `symbol_positive_ratio=1.0`,
+  and `top_bucket_avg_label=2.308988`.
+
+# AutoFactor Full-Depth Edge Dry-Run Handoff (2026-05-11)
+
+## Goal
+
+Promote the best ready sweep handoff from run `25667334966` into the PM5D
+settlement-probability dry-run config without touching live trading.
+
+## Files / Ownership
+
+- `config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml`
+  - Owner: update only `three_layer_autofactor_runtime_score`.
+
+## Tasks
+
+- [x] Apply the ready AutoFactor handoff artifact to the dry-run config.
+- [x] Validate the config update with focused Python and Rust tests.
+
+## Review
+
+- 2026-05-11: Applied handoff artifact from sweep run `25667334966`. The dry-run
+  config changed from
+  `autofactor_formula:auto_settlement_conservative_settlement_edge` to
+  `autofactor_formula:auto_settlement_full_depth_settlement_edge`.
+- 2026-05-11: Local verification passed:
+  `python3 -m unittest tests.test_apply_autofactor_handoff_to_config tests.test_factor_walk_forward_sweep`,
+  `CARGO_TARGET_DIR=/tmp/ploy-sweep-config /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles settlement_probability_config_carries_autofactor_handoff_score --lib`,
+  and `git diff --check`.
