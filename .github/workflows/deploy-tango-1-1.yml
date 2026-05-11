@@ -129,6 +129,7 @@ jobs:
         run: |
           cargo build --release --locked \
             --target "${PLATFORM_TARGET}" \
+            --features new-ploy-runner/full \
             -p new-ployd \
             -p new-ploy-runner
           strip "target/${PLATFORM_TARGET}/release/new-ployd" || true

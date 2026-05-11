@@ -117,6 +117,7 @@ jobs:
         run: |
           cargo build --release --locked \
             --target "${PLATFORM_TARGET}" \
+            --features full \
             -p new-ploy-runner
           strip "target/${PLATFORM_TARGET}/release/new-ploy-runner" || true
           (cd "target/${PLATFORM_TARGET}/release" && sha256sum new-ploy-runner > new-ploy-runner.sha256)

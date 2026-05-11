@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Next-generation strategy runtime ownership boundary for Ploy"
 
 [features]
-default = ["full"]
+default = ["replay"]
 full = ["backtest-db", "db-recorder", "live", "live-execution", "replay"]
 backtest-db = ["dep:ploy-feed-loaders", "dep:sqlx"]
 db-recorder = ["dep:sqlx"]

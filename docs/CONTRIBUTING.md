@@ -23,7 +23,8 @@ cargo build -p new-ployd -p new-ploy-runner -p ployctl -p ploytui
 
 # Focused daemon / runner loops
 cargo build -p new-ployd
-cargo build -p new-ploy-runner
+cargo build -p new-ploy-runner  # slim default replay runner
+cargo build -p new-ploy-runner --features full  # full live/dry-run runner
 ```
 
 ### Environment

@@ -13504,3 +13504,63 @@ Review:
 - The workflow now uses optional `PLOY_PR_CREATE_TOKEN` before falling back to `github.token`, and treats PR creation failure as a manual follow-up after the branch has already been pushed.
 - Generated config branches now run `tests.test_apply_autofactor_handoff_to_config` and the narrow settlement AutoFactor config contract test before commit/push, so stale hard-coded config expectations fail before the generated PR step.
 - The main PR workflow now runs Python unittest discovery, which exposed and fixed an outdated PM5D recording-source contract test that had drifted outside CI coverage.
+# CI Speed Issue #396 Plan (2026-05-11)
+
+## Goal
+
+Reduce required PR CI wall-clock for the runner/research lanes without weakening
+deployment safety or live-runner coverage.
+
+## Files / Ownership
+
+- `apps/new-ploy-runner/Cargo.toml`, `crates/ploy-runner-host/Cargo.toml`,
+  `crates/ploy-strategy-runtime/Cargo.toml`, `crates/ploy-market-data/Cargo.toml`
+  - Owner: slim default feature graph; keep full/live behind explicit features.
+- `.github/workflows/test.yml`
+  - Owner: required runner CI lane; avoid duplicate build+test and keep full/live
+    compile contract.
+- `.github/workflows/deploy-tango-1-1.yml`,
+  `.github/workflows/build-push-acr.yml`,
+  `.github/workflows/release-platform.yml`, `.github/workflows/deploy-trade.yml`
+  - Owner: production/release runner builds must request `new-ploy-runner/full`
+    explicitly.
+- `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`,
+  `.github/workflows/factor-review-v2-hosted-artifact.yml`
+  - Owner: hosted artifact evidence builds use the existing `fast` profile
+    instead of release LTO/profile settings.
+
+## Tasks
+
+- [x] Move runner and market-data defaults away from live/ops/full feature graphs.
+- [x] Update required runner CI to test slim defaults once and check full/live
+  contracts explicitly.
+- [x] Keep deployment/release workflows on explicit full runner builds.
+- [x] Move hosted artifact evidence builds from release to fast profile paths.
+- [x] Validate workflow syntax, slim/full Cargo feature checks, and dependency
+  tree exclusions.
+
+## Review
+
+- 2026-05-11: Implemented #396 CI speed slice. The default `new-ploy-runner`
+  graph now uses lean replay only, `ploy-market-data` has no live default, and
+  full live/dry-run dependencies are requested explicitly by release/deploy
+  workflows. The required runner CI lane now avoids separate build+test
+  duplicate compilation, removes Postgres/SQLx setup from that lane, tests the
+  slim default packages once, and checks full/live contracts explicitly.
+  Hosted artifact factor review/walk-forward workflows now build examples with
+  the workspace `fast` profile and run them from `target/fast/examples`.
+- 2026-05-11: Verification passed:
+  `ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].each { |f| YAML.load_file(f); puts f }'`,
+  `git diff --check`, `cargo metadata --locked --no-deps --format-version 1`,
+  `CARGO_TARGET_DIR=/tmp/ploy-ci-speed-slim /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p new-ploy-runner -p ploy-runner-host -p ploy-strategy-runtime -p ploy-market-data`,
+  `CARGO_TARGET_DIR=/tmp/ploy-ci-speed-full /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p new-ploy-runner --features full`,
+  `CARGO_TARGET_DIR=/tmp/ploy-ci-speed-market /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-market-data --features live --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-ci-speed-slim /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p new-ploy-runner -p ploy-backtest -p ploy-runner-host -p ploy-strategy-runtime -p ploy-strategy-bundles -p ploy-connectivity`,
+  `CARGO_TARGET_DIR=/tmp/ploy-ci-speed-full /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-backtest -p ploy-runner-host -p ploy-strategy-runtime -p ploy-strategy-bundles -p ploy-connectivity --features ploy-runner-host/full,ploy-strategy-runtime/full`,
+  and fast-profile hosted example builds for `factor_review_v2` and
+  `factor_walk_forward_v2`.
+- 2026-05-11: Dependency evidence: default `cargo tree -p new-ploy-runner`
+  no longer contains `polymarket-client-sdk`, `sqlx`, `ploy-market-data`, or
+  `ploy-connectivity`, and the default normal-edge tree is 132 lines. Explicit
+  `--features full` still includes `ploy-market-data`, `polymarket-client-sdk`,
+  `sqlx`, and `ploy-connectivity`, with a 999-line normal-edge tree.
