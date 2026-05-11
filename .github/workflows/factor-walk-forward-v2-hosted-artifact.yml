@@ -34,6 +34,10 @@ on:
         description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, optional issue/config handoff"
         required: false
         default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
+      sweep_json:
+        description: "Optional JSON array of walk-forward option overrides to run in one job after one download/build"
+        required: false
+        default: ""
 
 concurrency:
   group: factor-walk-forward-v2-hosted-artifact-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.snapshot_run_id }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
@@ -274,12 +278,21 @@ jobs:
             --features db \
             --example factor_walk_forward_v2
 
-      - name: Run factor walk-forward
+      - name: Run factor walk-forward sweep
+        env:
+          SWEEP_JSON: ${{ github.event.inputs.sweep_json }}
         run: |
           set -euo pipefail
           mkdir -p artifacts/factor-walk-forward-v2
+          replay_parity_json="${WALK_REPLAY_PARITY_JSON}"
+          if [ -z "${replay_parity_json}" ] && [ -f artifacts/replay-parity/parity-evaluation.json ]; then
+            replay_parity_json="artifacts/replay-parity/parity-evaluation.json"
+          fi
           args=(
+            --binary ./target/fast/examples/factor_walk_forward_v2
+            --evaluator scripts/evaluate_autofactor_strategy_promotion.py
             --snapshot-dir artifacts/research-snapshot
+            --output-dir artifacts/factor-walk-forward-v2
             --symbols "${{ github.event.inputs.symbols }}"
             --start-ts "${WALK_START_TS}"
             --end-ts "${WALK_END_TS}"
@@ -297,44 +310,18 @@ jobs:
             --data-quality-mode "${WALK_DATA_QUALITY_MODE}"
             --min-event-complete-events "${WALK_MIN_EVENT_COMPLETE_EVENTS}"
             --min-event-complete-rows "${WALK_MIN_EVENT_COMPLETE_ROWS}"
+            --required-strategy-profile "${WALK_REQUIRED_STRATEGY_PROFILE}"
+            --allowed-target "${WALK_ALLOWED_TARGET}"
+            --sweep-json "${SWEEP_JSON}"
+            --fail-if-all-failed
           )
-          if [ -n "${WALK_FACTOR_NAME_FILTER}" ]; then
-            args+=(--factor-name-filter "${WALK_FACTOR_NAME_FILTER}")
-          fi
-          replay_parity_json="${WALK_REPLAY_PARITY_JSON}"
-          if [ -z "${replay_parity_json}" ] && [ -f artifacts/replay-parity/parity-evaluation.json ]; then
-            replay_parity_json="artifacts/replay-parity/parity-evaluation.json"
-          fi
           if [ -n "${replay_parity_json}" ]; then
             args+=(--replay-parity-json "${replay_parity_json}")
           fi
-          ./target/fast/examples/factor_walk_forward_v2 "${args[@]}" \
-            | tee artifacts/factor-walk-forward-v2/report.txt
-          echo "canonical_result=snapshot_artifact" | tee artifacts/factor-walk-forward-v2/source.txt
-
-      - name: Evaluate AutoFactor strategy promotion
-        if: always()
-        run: |
-          set -euo pipefail
-          if [ ! -f artifacts/factor-walk-forward-v2/report.txt ]; then
-            echo "No factor walk-forward report found; skipping AutoFactor strategy promotion evaluation."
-            exit 0
-          fi
-          args=(
-            --report artifacts/factor-walk-forward-v2/report.txt
-            --output-json artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json
-            --output-md artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.md
-            --output-registry-json artifacts/factor-walk-forward-v2/autofactor-factor-registry.json
-            --output-handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json
-            --output-handoff-md artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.md
-            --required-strategy-profile "${WALK_REQUIRED_STRATEGY_PROFILE}"
-            --allowed-target "${WALK_ALLOWED_TARGET}"
-          )
           if [ "${WALK_FAIL_IF_BLOCKED}" = "true" ]; then
             args+=(--fail-if-blocked)
           fi
-          python3 scripts/evaluate_autofactor_strategy_promotion.py "${args[@]}" \
-            | tee artifacts/factor-walk-forward-v2/evaluator-output.json
+          python3 scripts/run_factor_walk_forward_sweep.py "${args[@]}"
 
       - name: Create config PR from ready handoff
         if: always()
@@ -448,6 +435,8 @@ jobs:
 
       - name: Publish summary
         if: always()
+        env:
+          SWEEP_JSON: ${{ github.event.inputs.sweep_json }}
         run: |
           {
             echo "## Factor Walk-Forward V2 Hosted Artifact"
@@ -462,14 +451,23 @@ jobs:
             echo "- Required strategy profile: ${WALK_REQUIRED_STRATEGY_PROFILE}"
             echo "- Allowed target: ${WALK_ALLOWED_TARGET}"
             echo "- Factor filter: ${WALK_FACTOR_NAME_FILTER:-<none>}"
+            if [ -n "${SWEEP_JSON}" ]; then
+              echo "- Sweep mode: \`true\`"
+            else
+              echo "- Sweep mode: \`false\`"
+            fi
             if [ -f artifacts/research-snapshot/quality.md ]; then
               echo ""
               echo "### Snapshot Quality"
               cat artifacts/research-snapshot/quality.md
             fi
+            if [ -f artifacts/factor-walk-forward-v2/sweep-summary.md ]; then
+              echo ""
+              cat artifacts/factor-walk-forward-v2/sweep-summary.md
+            fi
             if [ -f artifacts/factor-walk-forward-v2/report.txt ]; then
               echo ""
-              echo "### Walk-Forward Report"
+              echo "### Selected Walk-Forward Report"
               echo '```'
               sed -n '1,160p' artifacts/factor-walk-forward-v2/report.txt
               echo '```'
