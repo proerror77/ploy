@@ -1,5 +1,20 @@
 # Recorded Replay Official Settlement Enrichment (2026-05-11)
 
+## Follow-up: Settlement Parity Classifier (2026-05-11)
+
+- [x] Classify settlement-exit order/fill price mismatches as
+  `settlement_exit_price_mismatches` while preserving the generic
+  `runtime_evidence_field_mismatches` blocker.
+- [x] Add focused parity coverage for `tl_settle_*` settlement exits.
+
+Review:
+- Implemented structured
+  `runtime_evidence_comparison.settlement_exit_mismatches` details in
+  `scripts/replay_dryrun_parity.py`.
+- Verification passed on the source branch with `python3 -m unittest
+  tests.test_replay_dryrun_parity`, `python3 -m py_compile
+  scripts/replay_dryrun_parity.py`, and `git diff --check`.
+
 ## Plan
 
 - [x] Confirm strict parity blocker is settlement-only drift between recorded NDJSON and dry-run runtime evidence.
