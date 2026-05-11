@@ -24,6 +24,18 @@ evidence for:
 
 `pm5d.threelayer.settlement-probability-btc-eth.dryrun`
 
+Latest deploy preflight:
+
+- run: `25688999691`
+- workflow: `deploy-tango-1-1.yml`
+- input: `git_ref=main`, `deploy=false`
+- status: `completed`
+- result: build-only success
+- interpretation: latest `main` builds the deploy bundle and passes the bundle
+  guard proving `pm5d.threelayer.live` remains paused in the shipped
+  deployment config. No OSS upload, SSH, Cloud Assistant, remote restart, or
+  service mutation was executed.
+
 Historical parity runs that led to the ready handoff:
 
 - run: `25687392088`
@@ -75,6 +87,7 @@ Earlier blocker runs:
 | Promotion gate blocks unsafe candidates | `autofactor-strategy-handoff.json` | `ready` | Earlier runs stayed blocked. Run `25687766026` became ready only after replay parity was supplied and gate blockers were empty. |
 | Replay/dry-run parity is ready for handoff | `recorded-replay-parity.yml` artifact `recorded-replay-parity-25687392088` | `ready` | PR `#433` records `replay_parity_ready=true`, `runtime/event strict ready`, and `blocking=[]`. |
 | A dry-run config PR can be generated from ready handoff | `create_config_pr=true` path in hosted workflow, PR `#433` | `ready` | PR `#433` merged `autofactor_formula:auto_settlement_conservative_settlement_edge` into the dry-run config. |
+| Latest deploy bundle can be built without mutating remote services | `deploy-tango-1-1.yml` run `25688999691` with `deploy=false` | `ready` | Build-only run built the release runner, research tools, optimize-backtest, deploy bundle, and live-paused bundle guard. |
 | A profitable strategy has been produced | ready handoff plus post-merge dry-run/executable evidence | `not ready` | The system has a dry-run candidate. It still needs deployment, fresh sample collection, and post-merge executable PnL/risk evidence before profitability can be claimed. |
 
 ## Latest Alpha-Search Evidence
