@@ -1,3 +1,27 @@
+# Alpha Search Completion Audit (2026-05-12)
+
+## Goal
+
+Create a durable completion audit that maps the user's alpha-search objective
+to concrete artifacts, so future agents can distinguish working alpha discovery
+from a truly promotable/profitable strategy.
+
+## Plan
+
+- [x] Add `tasks/alpha_search_completion_audit_20260512.md`.
+- [x] Map each objective requirement to current evidence and blockers.
+- [x] Record the latest hosted alpha-search runs, summary artifacts, issue
+  evidence, and waiting recorded replay parity run.
+- [x] Validate docs diff hygiene and land as a focused PR.
+
+## Review
+
+- 2026-05-12: Added `tasks/alpha_search_completion_audit_20260512.md`, mapping
+  the user's objective to concrete artifacts and current evidence. The audit
+  records that alpha generation/exploration and chain summaries are ready, but
+  profitable strategy promotion remains blocked by recorded replay/dry-run
+  parity run `25683379408` waiting for protected `tango-1-1` approval.
+
 # Alpha Search Chain Summary Artifact (2026-05-12)
 
 ## Goal
