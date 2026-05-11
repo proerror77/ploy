@@ -233,7 +233,7 @@ class ReplayDryrunParityTests(unittest.TestCase):
         self.assertIn("replay_has_no_event_level_rows", result["blocking_risk_flags"])
         self.assertEqual(runtime["events"]["replay_count"], 0)
 
-    def test_legacy_event_drift_is_advisory_when_runtime_evidence_is_strict_ready(self):
+    def test_legacy_event_drift_is_diagnostic_when_runtime_evidence_is_strict_ready(self):
         replay = evidence_payload()
         dryrun = evidence_payload()
         dryrun["events"] = [
@@ -254,7 +254,12 @@ class ReplayDryrunParityTests(unittest.TestCase):
 
         self.assertTrue(result["runtime_evidence_comparison"]["strict_parity_ready"])
         self.assertEqual(result["blocking_risk_flags"], [])
-        self.assertIn("legacy_events_present_in_dryrun_missing_from_replay", result["advisory_flags"])
+        self.assertEqual(result["advisory_flags"], [])
+        self.assertEqual(result["risk_flags"], [])
+        self.assertIn(
+            "legacy_events_present_in_dryrun_missing_from_replay",
+            result["legacy_event_flags"],
+        )
 
 
 if __name__ == "__main__":
