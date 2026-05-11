@@ -649,6 +649,19 @@ jobs:
               raise SystemExit(2)
           PY
 
+      - name: Summarize alpha search chain evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -d artifacts/factor-walk-forward-v2-upload/factor-walk-forward-v2 ]; then
+            echo "No factor-walk-forward-v2 artifact directory found; skipping alpha search chain summary."
+            exit 0
+          fi
+          python3 scripts/summarize_alpha_search_chain.py \
+            artifacts/factor-walk-forward-v2-upload \
+            --output-json artifacts/factor-walk-forward-v2-upload/alpha-search-chain/summary.json \
+            --output-md artifacts/factor-walk-forward-v2-upload/alpha-search-chain/summary.md
+
       - name: Upload report artifact
         if: always()
         uses: actions/upload-artifact@v7
