@@ -1,3 +1,31 @@
+# Tango Deploy Build-Only Environment (2026-05-11)
+
+## Goal
+
+Allow `deploy-tango-1-1.yml` to run `deploy=false` bundle-smoke validation
+without requiring protected `tango-1-1` environment approval, while preserving
+the protected environment for real deployments.
+
+## Plan
+
+- [x] Confirm `deploy=false` run `25680756036` waited on the protected
+  `tango-1-1` environment without executing steps, then cancel it.
+- [x] Make the workflow choose `tango-1-1` only for `deploy=true`, and
+  `tango-1-1-build-only` for build-only smoke runs.
+- [x] Add workflow security coverage for the conditional environment.
+- [x] Validate workflow syntax, focused tests, and diff hygiene.
+
+## Review
+
+- 2026-05-11: Changed `deploy-tango-1-1.yml` so real deploys still use the
+  protected `tango-1-1` environment, while `deploy=false` bundle-smoke runs use
+  `tango-1-1-build-only`. This should let CI validate deploy bundle construction
+  and bundle-time guards without requesting runtime deployment approval.
+- 2026-05-11: Verification passed:
+  Ruby YAML parse for `.github/workflows/deploy-tango-1-1.yml`,
+  `CARGO_TARGET_DIR=/tmp/ploy-deploy-build-only-env /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test workflow_security tango_deploy_keeps_pm5d_live_paused`,
+  and `rtk git diff --check`.
+
 # Tango Cloud Assistant Live-Paused Guard (2026-05-11)
 
 ## Goal
