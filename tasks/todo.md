@@ -1,3 +1,110 @@
+# Project Semantic Layer Plan (2026-05-11)
+
+## Goal
+
+Make Ploy project semantics explicit and repo-local so agents understand the
+meaning of PM5D, event ML, backtest, replay, dry-run, and promotion work before
+running or interpreting evidence.
+
+## File Ownership
+
+- `docs/PROJECT_SEMANTICS.md`: canonical project semantic contract.
+- `tasks/research_evidence/TEMPLATE.md`: required shape for human-readable
+  research and backtest evidence.
+- `AGENTS.md` and `CLAUDE.md`: agent entrypoints that require the semantic
+  contract before PM5D/event research actions.
+
+## Checklist
+
+- [x] Add project semantic contract.
+- [x] Add research evidence template.
+- [x] Wire Codex and Claude agent instructions to the semantic contract.
+- [x] Add CI/CD alpha-factor search contract.
+
+## Review
+
+- The semantic contract separates diagnostic, factor attribution, executable
+  replay, walk-forward, runtime parity, dry-run candidate, and live candidate
+  stages.
+- The template requires strategy lane, lifecycle segment, data-surface audit,
+  accounting semantics, promotion gates, caveats, and follow-up decisions.
+- No runtime code, strategy config, workflow, or deployment behavior changed.
+- The alpha-search contract records that the downstream promotion/handoff path
+  exists, while CI-level feature/constant/operator search-space artifacts and
+  tree-search traces remain the missing upstream layer.
+- 2026-05-11 update: Re-architected the alpha-search contract around
+  `LLM semantic prior -> MCTS search -> CI backtest feedback ->
+  promotion/handoff`. LLM output is now explicitly scoped to natural-language
+  hypotheses, symbolic formula priors, bounded constants, and interpretable
+  mutation suggestions; MCTS owns systematic exploration/exploitation over
+  typed `FactorExpr` nodes; CI feedback provides multi-dimensional rewards; the
+  existing promotion evaluator remains the only path to handoff/config PR.
+- 2026-05-11 implementation: Added the first CI alpha-search artifact bundle.
+  `crates/ploy-research/src/alpha_search.rs` writes `search-space.json`,
+  `llm-priors.json`, `candidate-expressions.json`,
+  `rejected-expressions.json`, `node-metrics.json`, `tree-trace.json`,
+  `avoided-subtrees.json`, and `search-feedback.json` from each AutoFactor
+  target report. `factor_walk_forward_v2` accepts
+  `--alpha-search-output-dir`, and both Factor Walk-Forward workflows pass
+  `artifacts/factor-walk-forward-v2/alpha-search`, so CI now preserves the
+  searchable evidence needed for systematic alpha discovery. This is still a
+  deterministic single-depth seed tree; full LLM-in-loop MCTS remains the next
+  implementation step.
+- 2026-05-11 continuation: Added deterministic first-depth mutations to
+  AutoFactor mining itself. Each domain seed can now generate bounded,
+  interpretable variants for `clip_or_squash`, `add_spread_penalty`,
+  `add_near_strike_interaction`, settlement `add_capacity_gate`, and repricing
+  `pm_lag_gate`. These mutated `FactorExpr` candidates are evaluated by the
+  same walk-forward/autofactor gates and then preserved in the alpha-search
+  artifact bundle with source=`deterministic_mutation`.
+- 2026-05-11 continuation: Extended deterministic mutation search to bounded
+  multi-depth exploration (`MAX_DETERMINISTIC_MUTATION_DEPTH=2`,
+  `MAX_DETERMINISTIC_MUTATION_CANDIDATES=160`). This gives CI a reproducible
+  second-order formula search path before introducing non-deterministic LLM
+  expansion or true MCTS selection/backpropagation.
+- 2026-05-11 continuation: Added the first MCTS control artifact to the
+  alpha-search bundle. `mcts-expansion-plan.json` ranks non-rejected nodes with
+  a UCB-style priority from current node metrics and maps each node's weakest
+  dimension to a proposed next mutation family. This does not yet execute
+  cross-run backpropagation, but it gives CI a machine-readable branch-selection
+  plan for the next search iteration.
+- 2026-05-11 continuation: Closed the first feedback loop from plan artifact
+  back into candidate generation. `factor_walk_forward_v2` now accepts
+  `--alpha-search-plan-json`, extracts selected factor names, and calls
+  `mine_domain_autofactors_from_v2_with_mcts_plan`, which generates additional
+  `mcts_*` guided mutations from selected prior branches. Both Factor
+  Walk-Forward workflows expose the path through
+  `options_json.alpha_search_plan_json`.
+- 2026-05-11 continuation: Made the feedback loop usable from CI without a
+  local path. Both Factor Walk-Forward workflows now support
+  `options_json.alpha_search_plan_run_id`, optional
+  `alpha_search_plan_artifact_name`, and `alpha_search_plan_target`; when set,
+  the workflow downloads the prior `mcts-expansion-plan.json` from
+  `factor-walk-forward-v2-<run_id>` and feeds it into the current
+  `factor_walk_forward_v2` run.
+- 2026-05-11 continuation: Added bounded auto-chaining to
+  `factor-walk-forward-v2-hosted-artifact.yml`. When
+  `options_json.chain_next_run=true` and `chain_remaining > 0`, the workflow
+  dispatches a follow-up hosted run after uploading the current artifact,
+  setting the next run's `alpha_search_plan_run_id` and artifact name to the
+  current run. The chain decrements `chain_remaining` and stops automatically
+  at zero.
+- 2026-05-11 continuation: Added first stop criteria to the hosted alpha-search
+  chain. Before dispatching the next run, the workflow now stops if
+  `autofactor-strategy-handoff.json` is `status=ready`, or if the current
+  `mcts-expansion-plan.json` has no `selected_nodes`. Improvement-stagnation
+  stopping remains a follow-up.
+- 2026-05-11 continuation: Hardened the hosted alpha-search chain so GitHub
+  Actions can actually dispatch the next iteration (`actions: write`) and every
+  run uploads `alpha-search-chain/chain-decision.json` with the continuation or
+  stop reason. This makes chained CI exploration auditable from artifacts, not
+  only from transient workflow logs.
+- 2026-05-11 continuation: Added reward-stagnation stop criteria to the hosted
+  alpha-search chain. When a current run has a prior plan artifact with
+  `search-feedback.json`, the chain compares current and previous `best_reward`
+  and stops with `reward_stagnation` unless the run improves by at least
+  `options_json.alpha_search_min_reward_improvement` (default `0.0`).
+
 # PM5D Settlement Probability PRD Execution Plan (2026-05-05)
 
 ## Goal

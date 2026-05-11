@@ -180,6 +180,18 @@ ci/<short-description>        — CI/workflow changes
 
 ### Research Issue Workflow
 
+- Before any PM5D, event ML, factor research, replay, backtest, dry-run
+  candidate, live-prep, or strategy-promotion task, read
+  [docs/PROJECT_SEMANTICS.md](docs/PROJECT_SEMANTICS.md) and name the evidence
+  stage being produced.
+- Treat `docs/PROJECT_SEMANTICS.md` as the source of truth for project
+  semantics. Memory and prior chat can provide historical context, but they do
+  not override the repo-local semantic contract.
+- For human-readable research/backtest results, use
+  [tasks/research_evidence/TEMPLATE.md](tasks/research_evidence/TEMPLATE.md)
+  unless a workflow already emits a stricter machine-readable artifact.
+- If evidence conflicts with the semantic contract, mark the result as a caveat
+  or blocker instead of promoting it.
 - Strategy research ideas should be captured as GitHub issues instead of staying
   only in chat, local notes, or one-off scripts.
 - Follow `docs/runbooks/strategy-research-cicd.md` for the canonical research
