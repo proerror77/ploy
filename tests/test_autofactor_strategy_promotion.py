@@ -59,6 +59,22 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
 3,auto_settlement_full_depth_settlement_edge_x_external_pressure,full_depth_settlement_executable_pnl,reject,nonpositive_rank_ic,57777,-0.021993,0.069182,45,0.217558,0.4667,6,0.5000,0.5000,-0.301991,0.4785,3
 """
 
+CORE_SUITE_REPORT = f"""
+# Snapshot
+snapshot_schema=1
+snapshot_data_audit_status=critical
+
+=== Factor Walk-Forward V2 ===
+factor,target,decision
+
+=== Full Depth Execution Matrix ===
+candidate,bucket,count
+
+{READY_GATE}
+
+{AUTOFACTOR_SETTLEMENT_AUTO_REPORT}
+"""
+
 
 class AutoFactorStrategyPromotionTests(unittest.TestCase):
     def run_script(self, report, *extra_args, check=True):
@@ -156,6 +172,22 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
         self.assertFalse(rejected["qualified"])
         self.assertIn("autofactor_not_candidate:reject:nonpositive_rank_ic", rejected["blockers"])
+
+    def test_core_suite_report_is_sufficient_for_handoff_evaluation(self):
+        self.assertNotIn("=== Fillability Review V1 Data Health ===", CORE_SUITE_REPORT)
+        self.assertNotIn("=== Liquidity Gate V1 ===", CORE_SUITE_REPORT)
+        self.assertNotIn("=== Meta Label Walk-Forward V1 ===", CORE_SUITE_REPORT)
+
+        _, payload, registry, handoff, handoff_md = self.run_script(CORE_SUITE_REPORT)
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(registry["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(
+            handoff["strategies"][0]["runtime_score"],
+            "autofactor_formula:auto_settlement_conservative_settlement_edge",
+        )
+        self.assertIn("Promote AutoFactor strategy handoff to dry-run", handoff_md)
 
     def test_qualifies_when_allowed_target_and_runtime_profile_match(self):
         _, payload, registry, handoff, handoff_md = self.run_script(
