@@ -135,6 +135,24 @@ running or interpreting evidence.
   `runtime_evidence_field_mismatches`. Alpha search is automated enough to
   explore formula branches, but producing a dry-run/live profitable strategy is
   still blocked by replay/runtime parity evidence.
+- 2026-05-11 replay-parity diagnosis: Downloaded `recorded-replay-inputs-25669383472`
+  and reran `scripts/replay_dryrun_parity.py` locally over narrower windows.
+  The `2026-05-11T11:48:00Z -> 11:49:00Z` entry-only window passed
+  (`strict_parity_ready=true`, shared orders/fills `1/1`, no blocking flags),
+  and the `2026-05-11T12:00:00Z -> 12:05:30Z` settlement window also passed
+  (`shared_orders=4`, `shared_fills=4`, no blocking flags). The published
+  failing artifact's blocker is localized to the `2026-05-11T11:50:00Z`
+  settlement exit for event `2221812`, where replay records settlement price
+  `0` while dry-run records `1`.
+- 2026-05-11 replay-parity operation: Tried to dispatch
+  `recorded-replay-parity.yml` on `feat/event-ml-runtime-scorer-core` for the
+  known-passing `2026-05-11T20:00:00+08:00 -> 20:05:30+08:00` window; GitHub
+  created runs `25673062404` and `25673120186`, but both failed before any
+  steps were scheduled. Dispatching the same workflow on `main` created run
+  `25673157819`, but it remained `status=waiting` on the `tango-1-1`
+  environment, so it was cancelled to avoid leaving a stale approval queue.
+  A new formal passing replay-parity artifact still requires environment
+  approval or a default-branch workflow path that can start immediately.
 
 # PM5D Settlement Probability PRD Execution Plan (2026-05-05)
 
