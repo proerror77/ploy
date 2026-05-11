@@ -232,6 +232,7 @@ fn normalized_runtime_evidence(
 
     let mut fill_quantity_by_order: BTreeMap<&str, Decimal> = BTreeMap::new();
     let mut fill_notional_by_order: BTreeMap<&str, Decimal> = BTreeMap::new();
+    let mut fill_pnl_by_order: BTreeMap<&str, Decimal> = BTreeMap::new();
     for fill in &snapshot.fills {
         *fill_quantity_by_order
             .entry(fill.order_id.as_str())
@@ -239,6 +240,11 @@ fn normalized_runtime_evidence(
         *fill_notional_by_order
             .entry(fill.order_id.as_str())
             .or_default() += fill.quantity * fill.price;
+        let signed_notional = match fill.side {
+            ploy_trading::TradeSide::Buy => -(fill.quantity * fill.price),
+            ploy_trading::TradeSide::Sell => fill.quantity * fill.price,
+        };
+        *fill_pnl_by_order.entry(fill.order_id.as_str()).or_default() += signed_notional - fill.fee;
     }
 
     let intents: Vec<_> = snapshot
@@ -260,6 +266,64 @@ fn normalized_runtime_evidence(
                 "requested_qty": intent.quantity,
                 "limit_price": intent.limit_price,
                 "created_at": intent.created_at,
+            })
+        })
+        .collect();
+
+    let events: Vec<_> = snapshot
+        .orders
+        .iter()
+        .map(|order| {
+            let intent = intents_by_id.get(order.intent_id.as_str()).copied();
+            let deployment_id =
+                evidence_deployment_id(order.deployment_id.as_str(), fallback_deployment_id)
+                    .or_else(|| {
+                        intent.and_then(|intent| {
+                            evidence_deployment_id(
+                                intent.deployment_id.as_str(),
+                                fallback_deployment_id,
+                            )
+                        })
+                    });
+            let fill_quantity = fill_quantity_by_order
+                .get(order.order_id.as_str())
+                .copied()
+                .unwrap_or(order.filled_qty);
+            let avg_fill_price = if fill_quantity.is_zero() {
+                None
+            } else {
+                fill_notional_by_order
+                    .get(order.order_id.as_str())
+                    .map(|notional| *notional / fill_quantity)
+            };
+            let purpose = intent
+                .map(|intent| intent_purpose_label(intent.purpose))
+                .unwrap_or("ENTRY");
+
+            json!({
+                "deployment_id": deployment_id,
+                "intent_id": order.intent_id.as_str(),
+                "order_id": order.order_id.as_str(),
+                "event_id": intent.map(|intent| intent.market_id.as_str()),
+                "market_id": intent.map(|intent| intent.market_id.as_str()),
+                "token_id": order.token_id.as_str(),
+                "decision_ts": intent.map(|intent| intent.created_at),
+                "quote": order.limit_price,
+                "signal_inputs": {
+                    "purpose": purpose,
+                    "requested_qty": order.requested_qty,
+                    "limit_price": order.limit_price,
+                },
+                "side": intent
+                    .map(|intent| trade_side_label(intent.side))
+                    .unwrap_or("UNKNOWN"),
+                "entry_price": avg_fill_price.or(order.limit_price),
+                "fill_status": order_state_label(order.state),
+                "settlement": "open",
+                "pnl": fill_pnl_by_order
+                    .get(order.order_id.as_str())
+                    .copied()
+                    .unwrap_or(Decimal::ZERO),
             })
         })
         .collect();
@@ -360,6 +424,7 @@ fn normalized_runtime_evidence(
         "basis": "trading_runtime_snapshot",
         "comparison_contract": "Compare these normalized rows against strategy_runtime_orders and strategy_runtime_fills exported from Tango for the same deployment/config/feed window.",
         "intents": intents,
+        "events": events,
         "orders": orders,
         "fills": fills,
     })

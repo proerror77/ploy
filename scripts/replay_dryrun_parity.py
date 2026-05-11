@@ -69,9 +69,12 @@ NUMERIC_FIELDS = {
     "avg_fill_price",
     "price",
     "fee",
+    "quote",
+    "entry_price",
+    "pnl",
 }
 
-TIMESTAMP_FIELDS = {"created_at", "fill_timestamp"}
+TIMESTAMP_FIELDS = {"created_at", "fill_timestamp", "decision_ts"}
 
 NUMERIC_TOLERANCE = Decimal("0.000001")
 TIMESTAMP_TOLERANCE_SECONDS = 1.0
@@ -88,14 +91,12 @@ FILL_KEY_CANDIDATES = (
     ("deployment_id", "token_id", "fill_side", "quantity", "price", "fee", "fill_timestamp"),
 )
 
-EVENT_ONLY_RISK_FLAGS = {
-    "replay_has_no_event_level_rows",
-    "dryrun_has_no_event_level_rows",
-    "events_present_in_replay_missing_from_dryrun",
-    "events_present_in_dryrun_missing_from_replay",
-    "strict_field_mismatches",
-    "missing_strict_parity_fields",
-}
+EVENT_KEY_CANDIDATES = (
+    ("deployment_id", "event_id", "token_id", "side"),
+    ("event_id", "token_id", "side"),
+    ("deployment_id", "event_id", "side"),
+    ("event_id", "side"),
+)
 
 
 def filter_summary(
@@ -160,6 +161,7 @@ def extract_events(data: Any) -> list[dict[str, Any]]:
         return []
     events: list[dict[str, Any]] = []
     for path in [
+        ("runtime_evidence", "events"),
         ("events",),
         ("trades",),
         ("fills",),
@@ -428,6 +430,43 @@ def normalize_fill(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_signal_inputs(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {str(key): normalize_signal_inputs(item) for key, item in sorted(value.items())}
+    if isinstance(value, list):
+        return [normalize_signal_inputs(item) for item in value]
+    text = normalize_text(value)
+    if text is None:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return normalize_decimal(text) or text
+    if isinstance(parsed, (dict, list)):
+        return normalize_signal_inputs(parsed)
+    return normalize_decimal(parsed) or parsed
+
+
+def normalize_event(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "deployment_id": normalize_text(first_present(row, "deployment_id")),
+        "intent_id": normalize_text(first_present(row, "intent_id")),
+        "order_id": normalize_text(first_present(row, "order_id")),
+        "event_id": normalize_text(first_present(row, "event_id", "market_id", "market_slug", "token_id")),
+        "token_id": normalize_text(first_present(row, "token_id")),
+        "decision_ts": normalize_timestamp(canonical_field(row, "decision_ts")),
+        "quote": normalize_decimal(canonical_field(row, "quote")),
+        "signal_inputs": normalize_signal_inputs(canonical_field(row, "signal_inputs")),
+        "side": normalize_text(canonical_field(row, "side"), upper=True),
+        "entry_price": normalize_decimal(canonical_field(row, "entry_price")),
+        "fill_status": normalize_status(canonical_field(row, "fill_status")),
+        "settlement": normalize_text(canonical_field(row, "settlement"), upper=True),
+        "pnl": normalize_decimal(canonical_field(row, "pnl")),
+    }
+
+
 def extract_list_at_paths(data: Any, paths: list[tuple[str, ...]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in paths:
@@ -479,6 +518,16 @@ def extract_runtime_fills(data: Any) -> list[dict[str, Any]]:
         ],
     )
     return [normalize_fill(row) for row in rows]
+
+
+def extract_runtime_events(data: Any) -> list[dict[str, Any]]:
+    rows = extract_list_at_paths(
+        data,
+        [
+            ("runtime_evidence", "events"),
+        ],
+    )
+    return [normalize_event(row) for row in rows]
 
 
 def normalized_key(row: dict[str, Any], key_candidates: tuple[tuple[str, ...], ...]) -> str:
@@ -577,6 +626,13 @@ def compare_runtime_evidence(
     since: datetime | None,
     until: datetime | None,
 ) -> dict[str, Any]:
+    replay_events = filter_rows(
+        extract_runtime_events(replay),
+        deployment_id=deployment_id,
+        since=since,
+        until=until,
+        timestamp_keys=("decision_ts",),
+    )
     replay_fills = filter_rows(
         extract_runtime_fills(replay),
         deployment_id=deployment_id,
@@ -605,6 +661,20 @@ def compare_runtime_evidence(
         since=since,
         until=until,
     )
+    dryrun_events = filter_rows(
+        extract_runtime_events(dryrun),
+        deployment_id=deployment_id,
+        since=since,
+        until=until,
+        timestamp_keys=("decision_ts",),
+    )
+    event_comparison = compare_normalized_rows(
+        replay_events,
+        dryrun_events,
+        row_type="event",
+        key_candidates=EVENT_KEY_CANDIDATES,
+        strict_fields=STRICT_FIELDS,
+    )
     order_comparison = compare_normalized_rows(
         replay_orders,
         dryrun_orders,
@@ -620,15 +690,18 @@ def compare_runtime_evidence(
         strict_fields=FILL_STRICT_FIELDS,
     )
     missing_strict_fields = sorted(
-        set(order_comparison["missing_strict_fields"])
+        set(event_comparison["missing_strict_fields"])
+        | set(order_comparison["missing_strict_fields"])
         | set(fill_comparison["missing_strict_fields"])
     )
-    mismatches = order_comparison["mismatches"] + fill_comparison["mismatches"]
+    mismatches = event_comparison["mismatches"] + order_comparison["mismatches"] + fill_comparison["mismatches"]
     strict_parity_ready = (
-        order_comparison["strict_parity_ready"]
+        event_comparison["strict_parity_ready"]
+        and order_comparison["strict_parity_ready"]
         and fill_comparison["strict_parity_ready"]
     )
     return {
+        "events": event_comparison,
         "orders": order_comparison,
         "fills": fill_comparison,
         "missing_strict_fields": missing_strict_fields,
@@ -716,6 +789,14 @@ def build_result(
     )
     risk_flags: list[str] = []
 
+    if runtime_evidence_comparison["events"]["replay_count"] == 0:
+        risk_flags.append("replay_has_no_event_level_rows")
+    if runtime_evidence_comparison["events"]["dryrun_count"] == 0:
+        risk_flags.append("dryrun_has_no_event_level_rows")
+    if runtime_evidence_comparison["events"]["missing_dryrun_rows"]:
+        risk_flags.append("events_present_in_replay_missing_from_dryrun")
+    if runtime_evidence_comparison["events"]["missing_replay_rows"]:
+        risk_flags.append("events_present_in_dryrun_missing_from_replay")
     if runtime_evidence_comparison["orders"]["replay_count"] == 0:
         risk_flags.append("replay_has_no_order_level_rows")
     if runtime_evidence_comparison["orders"]["dryrun_count"] == 0:
@@ -737,38 +818,34 @@ def build_result(
     if runtime_evidence_comparison["missing_strict_fields"]:
         risk_flags.append("missing_runtime_evidence_strict_fields")
 
-    if not replay_events:
-        risk_flags.append("replay_has_no_event_level_rows")
-    if not dryrun_events:
-        risk_flags.append("dryrun_has_no_event_level_rows")
-    if event_comparison["missing_dryrun_events"]:
-        risk_flags.append("events_present_in_replay_missing_from_dryrun")
-    if event_comparison["missing_replay_events"]:
-        risk_flags.append("events_present_in_dryrun_missing_from_replay")
+    if not replay_events and runtime_evidence_comparison["events"]["replay_count"] == 0:
+        risk_flags.append("replay_has_no_legacy_event_level_rows")
+    if not dryrun_events and runtime_evidence_comparison["events"]["dryrun_count"] == 0:
+        risk_flags.append("dryrun_has_no_legacy_event_level_rows")
+    if (
+        event_comparison["missing_dryrun_events"]
+        and not runtime_evidence_comparison["events"]["missing_dryrun_rows"]
+    ):
+        risk_flags.append("legacy_events_present_in_replay_missing_from_dryrun")
+    if (
+        event_comparison["missing_replay_events"]
+        and not runtime_evidence_comparison["events"]["missing_replay_rows"]
+    ):
+        risk_flags.append("legacy_events_present_in_dryrun_missing_from_replay")
     if event_comparison["mismatches"]:
-        risk_flags.append("strict_field_mismatches")
+        risk_flags.append("legacy_event_strict_field_mismatches")
     if event_comparison["missing_strict_fields"]:
-        risk_flags.append("missing_strict_parity_fields")
+        risk_flags.append("legacy_event_missing_strict_parity_fields")
 
     decision = "continue"
     if not runtime_evidence_comparison["strict_parity_ready"]:
         decision = "fix-data-or-runtime-mismatch"
-    blocking_risk_flags = [
-        flag
-        for flag in risk_flags
-        if not (
-            runtime_evidence_comparison["strict_parity_ready"]
-            and flag in EVENT_ONLY_RISK_FLAGS
-        )
-    ]
     advisory_flags = [
         flag
         for flag in risk_flags
-        if (
-            runtime_evidence_comparison["strict_parity_ready"]
-            and flag in EVENT_ONLY_RISK_FLAGS
-        )
+        if flag.startswith("legacy_event_")
     ]
+    blocking_risk_flags = [flag for flag in risk_flags if flag not in advisory_flags]
 
     return {
         "schema_version": 1,

@@ -198,6 +198,8 @@ pub struct DryRunRuntimeEvidence {
     pub schema_version: u32,
     pub basis: String,
     #[serde(default)]
+    pub events: Vec<serde_json::Value>,
+    #[serde(default)]
     pub orders: Vec<serde_json::Value>,
     #[serde(default)]
     pub fills: Vec<serde_json::Value>,
@@ -258,7 +260,7 @@ pub struct DryRunPerformanceReport {
 #[cfg(test)]
 mod tests {
     use super::DryRunPerformanceReport;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     #[test]
     fn dry_run_report_roundtrip_preserves_diagnostics_fields() {
@@ -351,7 +353,11 @@ mod tests {
         );
         assert_eq!(
             roundtripped["runtime_evidence"]["basis"],
-            "strategy_runtime_orders_and_fills"
+            "strategy_runtime_orders_fills_and_events"
+        );
+        assert_eq!(
+            roundtripped["runtime_evidence"]["events"][0]["event_id"],
+            "event-1"
         );
         assert_eq!(
             roundtripped["runtime_evidence"]["orders"][0]["intent_id"],
@@ -417,7 +423,19 @@ mod tests {
     fn runtime_evidence() -> Value {
         json!({
             "schema_version": 1,
-            "basis": "strategy_runtime_orders_and_fills",
+            "basis": "strategy_runtime_orders_fills_and_events",
+            "events": [{
+                "deployment_id": "pm5d-dryrun",
+                "event_id": "event-1",
+                "decision_ts": "2026-05-02T01:02:03Z",
+                "quote": "0.42",
+                "signal_inputs": {"purpose": "ENTRY"},
+                "side": "BUY",
+                "entry_price": "0.42",
+                "fill_status": "FILLED",
+                "settlement": "open",
+                "pnl": "0"
+            }],
             "orders": [{
                 "deployment_id": "pm5d-dryrun",
                 "intent_id": "intent-1",

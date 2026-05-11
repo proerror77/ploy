@@ -1,3 +1,20 @@
+# Dry-Run Conservative Factor And Event-Level Replay Parity (2026-05-11)
+
+## Plan
+
+- [x] Switch the BTC/ETH settlement-probability dry-run config to the conservative AutoFactor handoff score from the hosted artifact evidence.
+- [x] Extend dry-run runtime evidence with event-level rows carrying `event_id`, `decision_ts`, `quote`, `signal_inputs`, `side`, `entry_price`, `fill_status`, `settlement`, and `pnl`.
+- [x] Extend replay/backtest runtime evidence with the same event-level contract.
+- [x] Make replay/dry-run parity require event-level runtime evidence, not treat missing event rows as advisory once orders/fills match.
+- [x] Verify focused Python/Rust contract tests and diff hygiene before PR/merge/deploy.
+
+## Review
+
+- Implemented the dry-run config handoff to `autofactor_formula:auto_settlement_conservative_settlement_edge`.
+- Added `runtime_evidence.events` to dry-run report/export and replay/backtest artifacts. The event contract uses a stable executable subset for `signal_inputs` so replay and dry-run can compare the same fields without relying on opaque DB-only context.
+- Replay parity now requires event, order, and fill runtime evidence to pass before `strict_parity_ready=true`; missing event rows are blocking.
+- Verification passed: `python3 -m unittest tests.test_replay_dryrun_parity tests.test_dryrun_report_contracts`, focused `run_backtest` example evidence test, focused `ploy-operator-contracts` report roundtrip/schema tests, generated schema/type contract checks, `rtk cargo check -p ploy-strategy-runtime`, and `git diff --check`.
+
 # PM5D Settlement Probability PRD Execution Plan (2026-05-05)
 
 ## Factor Walk-Forward Core Report Suite (2026-05-11)
