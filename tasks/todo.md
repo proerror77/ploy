@@ -1,3 +1,28 @@
+# Alpha Search Chain Summary Artifact (2026-05-12)
+
+## Goal
+
+Make each hosted alpha-search run upload its own chain summary artifacts so
+agents and issue comments can review current-run evidence without manual JSON
+inspection after download.
+
+## Plan
+
+- [x] Wire `scripts/summarize_alpha_search_chain.py` into
+  `factor-walk-forward-v2-hosted-artifact.yml` after chain-decision creation.
+- [x] Upload `alpha-search-chain/summary.json` and `summary.md` in the existing
+  walk-forward artifact.
+- [x] Add workflow security coverage so the summary artifact step stays wired.
+- [x] Validate workflow lint/tests/diff hygiene and land a focused PR.
+
+## Review
+
+- 2026-05-12: Wired the hosted Factor Walk-Forward V2 workflow to run
+  `scripts/summarize_alpha_search_chain.py` after writing
+  `alpha-search-chain/chain-decision.json` and before uploading the artifact.
+  Each hosted run now uploads `alpha-search-chain/summary.json` and
+  `alpha-search-chain/summary.md` alongside the existing chain decision.
+
 # Alpha Search Chain Summary Tool (2026-05-12)
 
 ## Goal

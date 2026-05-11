@@ -297,6 +297,44 @@ fn recorded_replay_parity_supports_auto_window() {
 }
 
 #[test]
+fn hosted_factor_walk_forward_uploads_alpha_chain_summary() {
+    let workflow = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "Summarize alpha search chain evidence",
+        "scripts/summarize_alpha_search_chain.py",
+        "artifacts/factor-walk-forward-v2-upload",
+        "alpha-search-chain/summary.json",
+        "alpha-search-chain/summary.md",
+        "Upload report artifact",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!(
+                "factor-walk-forward-v2-hosted-artifact.yml: missing `{needle}`"
+            ));
+        }
+    }
+
+    let summary_index = workflow
+        .find("Summarize alpha search chain evidence")
+        .unwrap_or(usize::MAX);
+    let upload_index = workflow.find("Upload report artifact").unwrap_or(0);
+    if summary_index > upload_index {
+        offenders.push(
+            "factor-walk-forward-v2-hosted-artifact.yml: summary must be generated before upload"
+                .to_string(),
+        );
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "hosted alpha chain summary artifact guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn tango_deploy_keeps_pm5d_live_paused() {
     let workflow = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
     let cloud_assist = workflow_contents("scripts/ci/deploy_tango_cloud_assist.py");
