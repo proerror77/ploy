@@ -1,5 +1,32 @@
 # PM5D Settlement Probability PRD Execution Plan (2026-05-05)
 
+## Factor Walk-Forward Core Report Suite (2026-05-11)
+
+- [x] Confirm BTC/ETH hosted artifact factor search succeeds from
+  `main@77151171` without using `ploy-ci-1`.
+- [x] Add `--report-suite core|full` to `factor_walk_forward_v2`, keeping the
+  binary default at `full` for existing CLI behavior.
+- [x] Keep the `core` suite large enough for AutoFactor promotion/handoff:
+  walk-forward, full-depth execution matrices, settlement probability reports,
+  PRD promotion gate, and AutoFactor mining.
+- [x] Make the hosted artifact workflow default to `report_suite=core` while
+  leaving the legacy/direct workflow default at `full`.
+- [x] Verify Rust formatting, workflow YAML parsing, example compilation, and
+  diff hygiene.
+
+Review:
+- Verification passed with `rustfmt --edition 2024
+  crates/ploy-research/examples/factor_walk_forward_v2.rs`, Ruby YAML parsing
+  for both factor walk-forward workflows, `rtk cargo build --profile fast
+  --locked -p ploy-research --features db --example factor_walk_forward_v2`,
+  and `git diff --check`.
+- The BTC/ETH hosted artifact search run `25654032760` completed on
+  `main@77151171` and produced a ready handoff. The strongest immediately
+  usable runtime score is
+  `autofactor_formula:auto_settlement_conservative_settlement_edge`; the
+  `*_x_capacity` branch is a high-ICIR near miss but remains blocked by symbol
+  holdout instability.
+
 ## AutoFactor Walk-Forward Evidence Output Repair (2026-05-11)
 
 - [x] Reproduce the current hosted `factor-walk-forward-v2` behavior on

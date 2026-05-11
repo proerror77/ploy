@@ -274,7 +274,12 @@ within the GitHub Actions 10-input limit. Defaults are
 `required_strategy_profile=settlement_probability`,
 `allowed_target=full_depth_settlement_executable_pnl`,
 `create_handoff_issue=false`, `create_config_pr=false`, and
-`fail_if_blocked=false`.
+`fail_if_blocked=false`. The GitHub-hosted artifact workflow defaults
+`report_suite=core`, which keeps the walk-forward report, full-depth execution
+matrices, settlement-probability reports, PRD promotion gate, and AutoFactor
+mining needed for handoff while skipping slower diagnostic-only sections. Pass
+`"report_suite":"full"` when reviewing fillability, liquidity-gated alpha,
+trade formation, meta-label, stability, or combo diagnostics.
 
 To make the hosted walk-forward workflow run the final PR-only config promotion
 step in the same run, pass `create_config_pr=true` inside `options_json`:

@@ -81,6 +81,7 @@ jobs:
               "min_observations": "20",
               "top_quantile": "0.2",
               "factor_name_filter": "",
+              "report_suite": "core",
               "data_quality_mode": "event_complete",
               "min_event_complete_events": "20",
               "min_event_complete_rows": "40",
@@ -97,6 +98,7 @@ jobs:
           }
           bool_keys = {"create_handoff_issue", "create_config_pr", "fail_if_blocked"}
           choices = {
+              "report_suite": {"core", "full"},
               "data_quality_mode": {"strict_continuous", "event_complete"},
           }
           raw = os.environ.get("OPTIONS_JSON", "").strip()
@@ -246,6 +248,7 @@ jobs:
             --min-observations "${WALK_MIN_OBSERVATIONS}"
             --top-quantile "${WALK_TOP_QUANTILE}"
             --top-n "${WALK_TOP_N}"
+            --report-suite "${WALK_REPORT_SUITE}"
             --data-quality-mode "${WALK_DATA_QUALITY_MODE}"
             --min-event-complete-events "${WALK_MIN_EVENT_COMPLETE_EVENTS}"
             --min-event-complete-rows "${WALK_MIN_EVENT_COMPLETE_ROWS}"
@@ -410,6 +413,7 @@ jobs:
             echo "- Symbols: ${{ github.event.inputs.symbols }}"
             echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
             echo "- Data quality mode: ${WALK_DATA_QUALITY_MODE}"
+            echo "- Report suite: ${WALK_REPORT_SUITE}"
             echo "- Required strategy profile: ${WALK_REQUIRED_STRATEGY_PROFILE}"
             echo "- Allowed target: ${WALK_ALLOWED_TARGET}"
             echo "- Factor filter: ${WALK_FACTOR_NAME_FILTER:-<none>}"

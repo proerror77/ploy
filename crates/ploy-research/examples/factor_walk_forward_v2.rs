@@ -5,9 +5,16 @@
 //! scores executable PnL after PM CLOB fillability.
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
+    AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options, FactorObservation,
+    FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
+    FillabilityReviewOptions, FullDepthExecutionMatrixOptions, LiquidityGateV1Options,
+    LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions, RepricingIcOptions,
+    ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
+    SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
+    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
     build_factor_observations_v2_with_deribit_and_pm_books,
     build_factor_observations_with_lob_sampled, build_factor_stability_report,
     build_full_depth_execution_matrix, build_settlement_probability_promotion_gate_report,
@@ -25,13 +32,7 @@ use ploy_research::{
     review_trade_formation_v1_with_deribit_and_pm_books, validate_snapshot_request,
     walk_forward_factor_combo_v1_with_deribit_and_pm_books,
     walk_forward_factors_v2_with_deribit_and_pm_books,
-    walk_forward_meta_label_v1_with_deribit_and_pm_books, AutoFactorOptions, AutoFactorV2Target,
-    FactorComboV1Options, FactorObservation, FactorReviewOptions, FactorStabilityOptions,
-    FactorWalkForwardOptions, FillabilityReviewOptions, FullDepthExecutionMatrixOptions,
-    LiquidityGateV1Options, LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions,
-    RepricingIcOptions, ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
-    SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
-    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
+    walk_forward_meta_label_v1_with_deribit_and_pm_books,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashSet;
@@ -74,6 +75,29 @@ fn parse_data_quality_mode(raw: Option<String>) -> SettlementProbabilityDataQual
         }
         "event_complete" | "event-complete" => SettlementProbabilityDataQualityMode::EventComplete,
         value => panic!("invalid --data-quality-mode: {value}"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReportSuite {
+    Core,
+    Full,
+}
+
+impl ReportSuite {
+    fn parse(raw: Option<String>) -> Self {
+        match raw.as_deref().unwrap_or("full") {
+            "core" => Self::Core,
+            "full" => Self::Full,
+            value => panic!("invalid --report-suite: {value}"),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Full => "full",
+        }
     }
 }
 
@@ -204,9 +228,10 @@ async fn main() {
             .unwrap_or(20),
         factor_name_filter: flag_value(&args, "--factor-name-filter"),
     };
+    let report_suite = ReportSuite::parse(flag_value(&args, "--report-suite"));
 
     eprintln!(
-        "factor_walk_forward_v2: {} -> {} for {:?}, stake_usd={:.2}, train_days={}, test_days={}, observation_sample_secs={}, factor_name_filter={}",
+        "factor_walk_forward_v2: {} -> {} for {:?}, stake_usd={:.2}, train_days={}, test_days={}, observation_sample_secs={}, factor_name_filter={}, report_suite={}",
         start,
         end,
         symbols,
@@ -214,7 +239,8 @@ async fn main() {
         options.train_window_days,
         options.test_window_days,
         observation_sample_secs,
-        options.factor_name_filter.as_deref().unwrap_or("<none>")
+        options.factor_name_filter.as_deref().unwrap_or("<none>"),
+        report_suite.as_str()
     );
 
     let snapshot_dir = flag_value(&args, "--snapshot-dir");
@@ -506,19 +532,21 @@ async fn main() {
         "{}",
         format_full_depth_execution_matrix_report(&conservative_execution_matrix, options.top_n)
     );
-    let repricing_ic_report = review_repricing_ic_with_deribit_and_pm_books(
-        &observations,
-        &deribit_snapshots,
-        &all_pm_book_snapshots,
-        RepricingIcOptions {
-            review: options.review.clone(),
-            ..Default::default()
-        },
-    );
-    println!(
-        "{}",
-        format_repricing_ic_report(&repricing_ic_report, options.top_n)
-    );
+    if report_suite == ReportSuite::Full {
+        let repricing_ic_report = review_repricing_ic_with_deribit_and_pm_books(
+            &observations,
+            &deribit_snapshots,
+            &all_pm_book_snapshots,
+            RepricingIcOptions {
+                review: options.review.clone(),
+                ..Default::default()
+            },
+        );
+        println!(
+            "{}",
+            format_repricing_ic_report(&repricing_ic_report, options.top_n)
+        );
+    }
     let autofactor_rows = build_factor_observations_v2_with_deribit_and_pm_books(
         &observations,
         &deribit_snapshots,
@@ -620,6 +648,9 @@ async fn main() {
                 );
             }
         }
+    }
+    if report_suite == ReportSuite::Core {
+        return;
     }
     let fillability_report = review_fillability_v1_with_deribit_and_pm_books(
         &observations,
