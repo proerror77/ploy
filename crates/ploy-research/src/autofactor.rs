@@ -9,6 +9,8 @@ use crate::factors::{pearson_ic, spearman_ic};
 use crate::factors_v2::FactorObservationV2;
 
 const EPS: f64 = 1e-9;
+const MAX_DETERMINISTIC_MUTATION_DEPTH: usize = 2;
+const MAX_DETERMINISTIC_MUTATION_CANDIDATES: usize = 160;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum FactorExpr {
@@ -503,18 +505,31 @@ pub fn mine_domain_autofactors_from_v2(
     target: AutoFactorV2Target,
     options: &AutoFactorOptions,
 ) -> Result<Vec<AutoFactorReport>, AutoFactorError> {
+    mine_domain_autofactors_from_v2_with_mcts_plan(rows, target, options, &[])
+}
+
+pub fn mine_domain_autofactors_from_v2_with_mcts_plan(
+    rows: &[FactorObservationV2],
+    target: AutoFactorV2Target,
+    options: &AutoFactorOptions,
+    mcts_selected_factor_names: &[String],
+) -> Result<Vec<AutoFactorReport>, AutoFactorError> {
     let matrix = autofactor_matrix_from_v2(rows)?;
     let labels = autofactor_labels_from_v2(rows, target);
     let windows = autofactor_windows_from_v2(rows);
     let symbols = autofactor_symbols_from_v2(rows);
     let target_name = target.as_str().to_string();
-    let candidates = domain_candidates_for_target(&matrix.input_names(), target)
-        .into_iter()
-        .map(|mut factor| {
-            factor.target = Some(target_name.clone());
-            factor
-        })
-        .collect::<Vec<_>>();
+    let candidates = domain_candidates_for_target_with_mcts(
+        &matrix.input_names(),
+        target,
+        mcts_selected_factor_names,
+    )
+    .into_iter()
+    .map(|mut factor| {
+        factor.target = Some(target_name.clone());
+        factor
+    })
+    .collect::<Vec<_>>();
     mine_autofactors(&candidates, &matrix, &labels, &windows, &symbols, options)
 }
 
@@ -756,15 +771,166 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
     out
 }
 
-fn domain_candidates_for_target(
+fn domain_candidates_for_target_with_mcts(
     input_names: &BTreeSet<String>,
     target: AutoFactorV2Target,
+    mcts_selected_factor_names: &[String],
 ) -> Vec<NamedFactorExpr> {
     let mut out = domain_seed_candidates(input_names);
     if target == AutoFactorV2Target::FullDepthSettlementExecutablePnl {
         out.extend(settlement_native_generated_candidates(input_names));
     }
+    out.extend(deterministic_mutation_candidates(input_names, &out, target));
+    if !mcts_selected_factor_names.is_empty() {
+        let selected = out
+            .iter()
+            .filter(|candidate| mcts_selected_factor_names.contains(&candidate.name))
+            .cloned()
+            .collect::<Vec<_>>();
+        out.extend(
+            deterministic_mutation_layer(input_names, &selected, target, 3)
+                .into_iter()
+                .map(|mut candidate| {
+                    candidate.name = candidate.name.replacen("mut2_", "mcts_", 1);
+                    candidate.name = candidate.name.replacen("mut_", "mcts_", 1);
+                    candidate.notes.push(
+                        "MCTS-guided expansion from prior mcts-expansion-plan.json selection."
+                            .to_string(),
+                    );
+                    candidate
+                }),
+        );
+    }
     out
+}
+
+fn deterministic_mutation_candidates(
+    input_names: &BTreeSet<String>,
+    seeds: &[NamedFactorExpr],
+    target: AutoFactorV2Target,
+) -> Vec<NamedFactorExpr> {
+    let mut out = Vec::new();
+    let mut frontier = seeds.to_vec();
+    for depth in 1..=MAX_DETERMINISTIC_MUTATION_DEPTH {
+        if out.len() >= MAX_DETERMINISTIC_MUTATION_CANDIDATES {
+            break;
+        }
+        let next = deterministic_mutation_layer(input_names, &frontier, target, depth);
+        for candidate in next.iter().cloned() {
+            if out.len() >= MAX_DETERMINISTIC_MUTATION_CANDIDATES {
+                break;
+            }
+            out.push(candidate);
+        }
+        frontier = next;
+        if frontier.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+fn deterministic_mutation_layer(
+    input_names: &BTreeSet<String>,
+    seeds: &[NamedFactorExpr],
+    target: AutoFactorV2Target,
+    depth: usize,
+) -> Vec<NamedFactorExpr> {
+    let mut out = Vec::new();
+    let settlement_target = matches!(
+        target,
+        AutoFactorV2Target::SettlementExecutablePnl
+            | AutoFactorV2Target::FullDepthSettlementExecutablePnl
+    );
+
+    for seed in seeds {
+        push_mutation(
+            &mut out,
+            seed,
+            depth,
+            "squashed",
+            FactorExpr::Tanh(Box::new(seed.expr.clone())),
+            "clip_or_squash: bound the seed score so one extreme observation cannot dominate search feedback.",
+        );
+
+        if input_names.contains("side_spread") {
+            push_mutation(
+                &mut out,
+                seed,
+                depth,
+                "spread_adjusted",
+                safe_div_expr(
+                    seed.expr.clone(),
+                    FactorExpr::Add(
+                        Box::new(input("side_spread")),
+                        Box::new(FactorExpr::Const(0.01)),
+                    ),
+                ),
+                "add_spread_penalty: scale the seed by executable Polymarket spread plus epsilon.",
+            );
+        }
+
+        if input_names.contains("near_strike_score") {
+            push_mutation(
+                &mut out,
+                seed,
+                depth,
+                "near_strike",
+                mul(seed.expr.clone(), input("near_strike_score")),
+                "add_near_strike_interaction: emphasize event states where small external moves matter more.",
+            );
+        }
+
+        if settlement_target && input_names.contains("entry_capacity_score") {
+            push_mutation(
+                &mut out,
+                seed,
+                depth,
+                "capacity",
+                mul(seed.expr.clone(), input("entry_capacity_score")),
+                "add_capacity_gate: penalize alpha that cannot be executed at the configured stake.",
+            );
+        }
+
+        if !settlement_target && input_names.contains("poly_quote_age") {
+            push_mutation(
+                &mut out,
+                seed,
+                depth,
+                "pm_lag_gate",
+                mul(
+                    seed.expr.clone(),
+                    FactorExpr::Tanh(Box::new(safe_div_expr(
+                        input("poly_quote_age"),
+                        FactorExpr::Const(3.0),
+                    ))),
+                ),
+                "add_feature_gate: repricing alpha should strengthen when the Polymarket quote is stale.",
+            );
+        }
+    }
+    out
+}
+
+fn push_mutation(
+    out: &mut Vec<NamedFactorExpr>,
+    seed: &NamedFactorExpr,
+    depth: usize,
+    suffix: &str,
+    expr: FactorExpr,
+    note: impl Into<String>,
+) {
+    let prefix = if depth <= 1 { "mut" } else { "mut2" };
+    out.push(NamedFactorExpr {
+        name: format!("{prefix}_{}_{}", seed.name, suffix),
+        expr,
+        target: seed.target.clone(),
+        notes: vec![format!(
+            "Deterministic alpha-search depth-{depth} mutation from `{}`. {}",
+            seed.name,
+            note.into()
+        )],
+    });
 }
 
 fn settlement_native_generated_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactorExpr> {
@@ -1526,6 +1692,13 @@ mod tests {
         assert!(reports
             .iter()
             .any(|report| report.name == "poly_lag_pressure"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "mut_spread_adjusted_external_move_pm_lag_gate"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name
+                == "mut2_mut_spread_adjusted_external_move_pm_lag_gate_squashed"));
     }
 
     #[test]
@@ -1586,6 +1759,15 @@ mod tests {
         assert!(reports.iter().any(|report| {
             report.name == "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity"
         }));
+        assert!(
+            reports
+                .iter()
+                .any(|report| report.name
+                    == "mut_auto_settlement_full_depth_settlement_edge_capacity")
+        );
+        assert!(reports
+            .iter()
+            .any(|report| report.name.starts_with("mut2_")));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use ploy_research::{
     ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
     SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
     SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
-    build_factor_observations_v2_with_deribit_and_pm_books,
+    autofactor_matrix_from_v2, build_factor_observations_v2_with_deribit_and_pm_books,
     build_factor_observations_with_lob_sampled, build_factor_stability_report,
     build_full_depth_execution_matrix, build_settlement_probability_promotion_gate_report,
     format_autofactor_reports, format_factor_combo_v1_report, format_factor_stability_report,
@@ -27,12 +27,12 @@ use ploy_research::{
     format_trade_formation_v1_report, liquidity_gate_v1_with_deribit_and_pm_books,
     liquidity_gated_alpha_v1_with_deribit_and_pm_books, load_deribit_feature_snapshots,
     load_research_lob_snapshots_sampled, load_research_pm_book_snapshots_sampled,
-    load_research_snapshot, mine_domain_autofactors_from_v2,
+    load_research_snapshot, mine_domain_autofactors_from_v2_with_mcts_plan,
     review_fillability_v1_with_deribit_and_pm_books, review_repricing_ic_with_deribit_and_pm_books,
     review_trade_formation_v1_with_deribit_and_pm_books, validate_snapshot_request_coverage,
     walk_forward_factor_combo_v1_with_deribit_and_pm_books,
     walk_forward_factors_v2_with_deribit_and_pm_books,
-    walk_forward_meta_label_v1_with_deribit_and_pm_books,
+    walk_forward_meta_label_v1_with_deribit_and_pm_books, write_alpha_search_artifacts,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashSet;
@@ -162,6 +162,24 @@ fn replay_parity_evidence(path: &str) -> (bool, String) {
     (ready, evidence)
 }
 
+fn alpha_search_plan_factor_names(path: &str) -> Vec<String> {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("read alpha search plan JSON {path} failed: {err}"));
+    let json: serde_json::Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|err| panic!("parse alpha search plan JSON {path} failed: {err}"));
+    json.get("selected_nodes")
+        .and_then(serde_json::Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|node| node.get("factor_name"))
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 fn slice_by_time<T, F>(items: &[T], start: DateTime<Utc>, end: DateTime<Utc>, ts_fn: F) -> &[T]
 where
     F: Fn(&T) -> DateTime<Utc>,
@@ -245,6 +263,8 @@ async fn main() {
 
     let snapshot_dir = flag_value(&args, "--snapshot-dir");
     let replay_parity_json = flag_value(&args, "--replay-parity-json");
+    let alpha_search_output_dir = flag_value(&args, "--alpha-search-output-dir");
+    let alpha_search_plan_json = flag_value(&args, "--alpha-search-plan-json");
     let allow_direct_db_debug = flag_present(&args, "--allow-direct-db-debug");
     let data_quality_mode = parse_data_quality_mode(flag_value(&args, "--data-quality-mode"));
     let min_event_complete_events = flag_value(&args, "--min-event-complete-events")
@@ -631,15 +651,64 @@ async fn main() {
         min_window_observations: options.review.min_observations.max(20),
         ..Default::default()
     };
+    let alpha_search_input_names = alpha_search_output_dir.as_ref().and_then(|_| {
+        autofactor_matrix_from_v2(&autofactor_rows)
+            .map(|matrix| matrix.input_names().into_iter().collect::<Vec<_>>())
+            .map_err(|err| {
+                eprintln!("alpha search matrix build failed: {err}");
+                err
+            })
+            .ok()
+    });
+    let alpha_search_plan_names = alpha_search_plan_json
+        .as_deref()
+        .map(alpha_search_plan_factor_names)
+        .unwrap_or_default();
+    if let Some(path) = alpha_search_plan_json.as_deref() {
+        eprintln!(
+            "alpha search MCTS plan loaded: {} selected nodes from {}",
+            alpha_search_plan_names.len(),
+            path
+        );
+    }
     for target in [
         AutoFactorV2Target::FullDepthRepricePnl10s,
         AutoFactorV2Target::FullDepthRepricePnl30s,
         AutoFactorV2Target::FullDepthSettlementExecutablePnl,
     ] {
-        match mine_domain_autofactors_from_v2(&autofactor_rows, target, &autofactor_options) {
+        match mine_domain_autofactors_from_v2_with_mcts_plan(
+            &autofactor_rows,
+            target,
+            &autofactor_options,
+            &alpha_search_plan_names,
+        ) {
             Ok(reports) => {
                 println!("# AutoFactor target={}", target.as_str());
                 println!("{}", format_autofactor_reports(&reports, options.top_n));
+                if let (Some(output_dir), Some(input_names)) = (
+                    alpha_search_output_dir.as_deref(),
+                    alpha_search_input_names.as_ref(),
+                ) {
+                    match write_alpha_search_artifacts(
+                        output_dir,
+                        target.as_str(),
+                        input_names,
+                        &reports,
+                        &autofactor_options,
+                    ) {
+                        Ok(summary) => eprintln!(
+                            "alpha search artifacts written target={} candidates={} rejected={} best={} dir={}",
+                            summary.target,
+                            summary.candidate_count,
+                            summary.rejected_count,
+                            summary.best_candidate.as_deref().unwrap_or("<none>"),
+                            summary.output_dir
+                        ),
+                        Err(err) => {
+                            eprintln!("alpha search artifact write failed for {}: {err}", target.as_str());
+                        }
+                    }
+                }
             }
             Err(err) => {
                 eprintln!(

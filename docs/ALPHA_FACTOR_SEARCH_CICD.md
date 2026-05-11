@@ -1,0 +1,372 @@
+# Alpha Factor Search CI/CD Contract
+
+This document defines Ploy's CI/CD method for mining alpha factors with a
+two-layer search architecture:
+
+```text
+LLM semantic prior layer
+  -> MCTS/systematic search layer
+  -> CI backtest feedback layer
+  -> promotion/handoff gate
+```
+
+It complements `docs/PROJECT_SEMANTICS.md`; it does not bypass settlement,
+execution, runtime-parity, or dry-run/live promotion gates.
+
+## Paper Basis
+
+The design is grounded in these research patterns:
+
+- `Navigating the Alpha Jungle`: combine LLM symbolic formula generation with
+  MCTS exploration, backtest feedback, and frequent-subtree avoidance for
+  interpretable formulaic factor mining.
+- `RiskMiner`: formulate alpha mining as a reward-dense MDP and solve it with
+  risk-seeking MCTS so the search uses the structure of the discrete formula
+  space instead of treating candidate generation as a flat neural policy.
+- `Alpha-GPT`: use LLMs as an interactive bridge from human trading ideas to
+  symbolic alpha expressions and iterative modification suggestions.
+- `QuantaAlpha`: preserve semantic consistency between hypothesis, expression,
+  and executable code, and reuse high-reward trajectory segments through
+  controlled evolution.
+
+For Ploy, these are architecture inputs, not permission to skip repo gates.
+The useful pattern is LLM-guided symbolic priors plus machine-checked
+exploration and CI evidence.
+
+## Current State
+
+The repo already has the downstream half of the factory:
+
+- `factor-walk-forward-v2.yml`: self-hosted research path for fresh DB-adjacent
+  snapshot and walk-forward evidence.
+- `factor-walk-forward-v2-hosted-artifact.yml`: GitHub-hosted path that consumes
+  a retained full research snapshot artifact.
+- `autofactor-strategy-promotion.yml`: evaluator for existing
+  `factor-walk-forward-v2-*` artifacts.
+- `scripts/evaluate_autofactor_strategy_promotion.py`: fail-closed promotion
+  gate from discovered factor rows to strategy handoff artifacts.
+- `scripts/apply_autofactor_handoff_to_config.py`: ready-only config PR bridge.
+- `crates/ploy-research/src/autofactor.rs`: Rust `FactorExpr` DSL, safe
+  operators, seed candidates, settlement-native generated candidates, and
+  candidate/watchlist/reject scoring.
+
+That means the repo can already do:
+
+```text
+research snapshot
+  -> factor walk-forward
+  -> AutoFactor promotion evaluation
+  -> blocked/ready handoff artifact
+  -> optional dry-run config PR
+```
+
+The missing layer is the upstream search controller:
+
+```text
+semantic hypothesis + formula prior
+  -> feature pool + constant pool + operator pool
+  -> MCTS candidate expansion
+  -> multi-dimensional backtest feedback
+  -> search trace artifacts
+  -> factor walk-forward rows
+```
+
+Until that layer is implemented, AutoFactor is a constrained generator plus
+promotion gate, not a full alpha-search engine.
+
+## Architecture
+
+### 1. LLM Semantic Prior Layer
+
+The LLM should produce a prior, not final truth. Its job is to translate a
+market intuition into a typed, reviewable search seed:
+
+- natural-language hypothesis
+- expected edge mechanism
+- applicable strategy lane, such as `settlement_probability` or `repricing`
+- required data surfaces
+- candidate feature families
+- initial symbolic `FactorExpr` formulas
+- suggested constants and bounded ranges
+- suggested local modifications
+- invalid assumptions and expected failure modes
+
+The LLM output must be machine-checkable before it enters search. Invalid
+features, unsupported operators, unbounded constants, future-looking columns,
+or missing data surfaces are rejected before any backtest.
+
+Required artifact:
+
+- `llm-priors.json`
+- `llm-priors.md`
+
+### 2. MCTS Search Layer
+
+MCTS owns exploration and exploitation over the formula space. Each node is a
+candidate formula state:
+
+```text
+node = {
+  factor_expr,
+  hypothesis_ref,
+  parent,
+  mutation,
+  selected_dimension,
+  metrics,
+  visits,
+  reward,
+  blockers
+}
+```
+
+The search loop:
+
+```text
+select node
+  -> choose weak dimension
+  -> expand with allowed mutation
+  -> evaluate candidate
+  -> backpropagate multi-dimensional reward
+  -> penalize crowded or invalid subtrees
+```
+
+MCTS may use the LLM as an expansion policy, but only inside the declared DSL.
+The LLM can propose modifications like "gate by quote freshness" or "scale by
+capacity", but the Rust layer must compile them into `FactorExpr` using allowed
+features, constants, and operators.
+
+Required artifacts:
+
+- `tree-trace.json`
+- `node-metrics.json`
+- `candidate-expressions.json`
+- `rejected-expressions.json`
+- `avoided-subtrees.json`
+
+### 3. CI Backtest Feedback Layer
+
+Backtest feedback is the scoring signal for MCTS. It must be produced by the
+same CI evidence path used for promotion:
+
+- snapshot provenance
+- walk-forward windows
+- executable target labels
+- data-surface audit
+- fillability/capacity assumptions
+- settlement or exit accounting
+- promotion-gate readiness
+
+The reward should not be a single PnL number. It should combine:
+
+- effectiveness: executable target score, PnL, IC/ICIR, top-bucket label
+- stability: positive-window ratio, window decay, symbol holdout behavior
+- diversity: novelty versus accepted/watchlisted factor expressions
+- execution cost: spread, capacity, fillability, quote age, turnover-like churn
+- overfit risk: complexity, parameter count, train/test decay, permutation and
+  time-shift sensitivity
+- runtime readiness: explicit profile mapping and scorer support
+
+Required artifact:
+
+- `search-feedback.json`
+- `search-feedback.md`
+
+### 4. Promotion/Handoff Layer
+
+Only this layer can produce a dry-run handoff or config PR. The LLM and MCTS
+layers can generate candidates, but they cannot promote them.
+
+The existing fail-closed path remains:
+
+```text
+factor-walk-forward-v2/report.txt
+  -> scripts/evaluate_autofactor_strategy_promotion.py
+  -> autofactor-factor-registry.json
+  -> autofactor-strategy-handoff.json
+  -> optional ready-only handoff issue or config PR
+```
+
+## Search-Space Contract
+
+Every alpha-search run must declare its search space in machine-readable form.
+
+### Feature Pool
+
+Features should be grouped by data meaning, not only by column name:
+
+- external price movement: Binance spot / aggTrade moves, velocity, acceleration
+- external microstructure: L2 imbalance, OFI, depth, thinness, pressure
+- Polymarket quote state: side ask/bid, spread, quote age, PM lag
+- full-depth execution: sweep price, capacity, conservative depth assumptions
+- event geometry: time remaining, distance to strike, near-strike score
+- probability state: q estimates, market prior, EventVolSurface prior
+- volatility state: realized/IV/DVOL primitives when present and audited
+- risk/friction: fees, slippage, fillability, capacity, turnover proxies
+
+A feature absent from the snapshot must fail closed for generated candidates
+that require it. Do not silently substitute a different data surface.
+
+### Constant Pool
+
+Constants are part of the hypothesis. They must be declared, bounded, and
+reported. Initial safe pools:
+
+- additive epsilons: `0.001`, `0.005`, `0.01`, `0.02`
+- spread/capacity thresholds: `0.01`, `0.02`, `0.05`, `0.10`
+- time windows or lags: `1`, `3`, `5`, `10`, `30`, `60`, `300`
+- clipping bounds: `[-5, 5]`, `[-3, 3]`, `[0, 1]`
+- nonlinear scales: `1`, `2`, `3`, `5`, `10`
+
+Constants discovered by search are not automatically runtime constants. A
+runtime handoff must show the selected constants, their source run, and why they
+survived walk-forward and anti-overfit gates.
+
+### Operator Pool
+
+Operators must be safe, deterministic, and supported by replay/runtime parity.
+The current `FactorExpr` foundation already supports:
+
+- inputs and constants
+- `Add`, `Sub`, `Mul`
+- `SafeDiv`
+- `Max`, `Min`
+- `Tanh`, `Log1pAbs`, `SqrtAbs`
+- `Clip`
+- `Delta`
+- `RollingMean`, `RollingStd`, `ZScore`
+
+New operators require deterministic semantics, finite-value handling,
+complexity accounting, serialization compatibility, test coverage, and a
+runtime/replay parity plan if the operator can reach strategy handoff.
+
+## LLM Modification Types
+
+LLM proposals must compile into one of these bounded mutation types:
+
+- `add_feature_gate`: multiply by a bounded regime, capacity, or freshness score
+- `replace_denominator`: change a normalization term with safe division
+- `add_spread_penalty`: subtract or divide by executable friction
+- `add_capacity_gate`: penalize candidates that only work at unavailable depth
+- `add_near_strike_interaction`: condition on event geometry
+- `change_time_window`: swap among declared lag/window constants
+- `clip_or_squash`: add `Clip`, `Tanh`, or `Log1pAbs` for robustness
+- `invert_or_contrarian`: test opposite sign only when semantically justified
+- `remove_component`: ablate a subtree to reduce overfit risk
+
+Free-form code generation is not allowed in the search loop. LLM output is
+advice until it is parsed into typed mutations.
+
+## Frequent-Subtree Avoidance
+
+The search layer must track repeated expression structures. A subtree can be
+penalized or blocked when it repeats a crowded root gene without improving the
+selected weak dimension.
+
+Examples:
+
+- repeated `safe_div(external_move, spread + eps)` variants
+- repeated `edge * near_strike_score` variants
+- repeated stale-quote gates with only epsilon changes
+
+Avoidance is not a hard ban forever. It is a diversity control: a crowded
+subtree can be revisited only when the candidate improves a declared weak
+dimension such as capacity, stability, or overfit risk.
+
+## Workflow Roles
+
+- `factor-walk-forward-v2-hosted-artifact.yml` should be the default efficient
+  search surface once a full snapshot artifact exists.
+- `factor-walk-forward-v2.yml` should be used when a fresh DB-adjacent snapshot
+  or data audit is required.
+- `autofactor-strategy-promotion.yml` should be used to re-evaluate an existing
+  walk-forward artifact without rerunning search.
+- `event-ml-rolling-evidence.yml` is the supervised event-ML lane, not the
+  formula-search lane, though it may consume factor registries later.
+
+## Required Search Artifact Bundle
+
+Every complete CI/CD alpha-search run should upload:
+
+- `search-space.json`: feature pool, constants, operators, targets, limits
+- `llm-priors.json`: hypotheses, symbolic seeds, suggested modifications
+- `candidate-expressions.json`: all generated `FactorExpr` candidates
+- `rejected-expressions.json`: invalid or blocked expressions and reasons
+- `tree-trace.json`: parent/child expansions, selected weak dimension, rewards
+- `node-metrics.json`: multi-dimensional scores per node
+- `mcts-expansion-plan.json`: UCB-style branch selection for the next search
+  run, including selected weak dimension and proposed mutation type
+- `avoided-subtrees.json`: repeated subtrees blocked or penalized
+- `search-feedback.json`: backtest feedback used by MCTS
+- `alpha-search-chain/chain-decision.json`: hosted-workflow continuation
+  decision, including whether the next run was dispatched and why the chain
+  stopped when it did not continue
+- `factor-walk-forward-v2/report.txt`: existing walk-forward report
+- `autofactor-factor-registry.json`: evaluated factor rows and blockers
+- `autofactor-strategy-handoff.json`: ready/blocked handoff manifest
+
+If any of the search artifacts are missing, the run can still be diagnostic,
+but it is not a complete alpha-search run.
+
+## Completion Criteria
+
+The method is fully defined only when CI exposes all of the following:
+
+- LLM prior artifact with machine-checkable hypotheses and formulas
+- declared feature pool, constant pool, and operator pool
+- typed mutation schema from LLM suggestions to `FactorExpr`
+- MCTS controller with selection, expansion, evaluation, and backpropagation
+- multi-dimensional node scoring from CI backtest feedback
+- frequent-subtree/root-gene avoidance
+- full search artifact bundle
+- existing walk-forward and promotion gates
+- ready-only issue/config PR creation
+
+Current implementation status:
+
+- Implemented: deterministic seed-search artifact bundle from
+  `factor_walk_forward_v2` via `--alpha-search-output-dir`.
+- Implemented: bounded deterministic multi-depth mutations over existing domain
+  seeds, including squashing, spread adjustment, near-strike interaction,
+  capacity gating, and PM-lag gating. The current depth is capped at `2`, with
+  a candidate cap to keep CI runs bounded.
+- Implemented: workflow upload path for the artifact bundle through both
+  Factor Walk-Forward V2 workflows.
+- Implemented: first MCTS control artifact,
+  `mcts-expansion-plan.json`, which ranks non-rejected nodes with a UCB-style
+  priority and proposes the next mutation family from each node's weakest
+  dimension.
+- Implemented: `factor_walk_forward_v2 --alpha-search-plan-json <path>` can
+  consume a prior `mcts-expansion-plan.json` and generate extra `mcts_*`
+  guided mutations for selected branches. The Factor Walk-Forward workflows
+  expose this as `options_json.alpha_search_plan_json`.
+- Implemented: the Factor Walk-Forward workflows can download a prior plan from
+  a previous run with `options_json.alpha_search_plan_run_id`,
+  `alpha_search_plan_artifact_name`, and `alpha_search_plan_target`.
+- Implemented: the hosted artifact workflow can dispatch the next search
+  iteration automatically with `options_json.chain_next_run=true` and bounded
+  `chain_remaining`.
+- Implemented: the hosted chain stops early when the current run already
+  produces `autofactor-strategy-handoff.json status=ready` or when the current
+  MCTS plan has no selected nodes.
+- Implemented: hosted chained runs request `actions: write` and publish
+  `alpha-search-chain/chain-decision.json` before dispatch, so CI artifacts
+  record `continue`, `ready_handoff`, `no_selected_nodes`,
+  `chain_remaining_exhausted`, or other stop reasons instead of relying only on
+  workflow logs.
+- Implemented: the hosted chain compares the current
+  `search-feedback.json.best_reward` with the prior plan artifact's
+  `search-feedback.json.best_reward` and stops with `reward_stagnation` when
+  the configured `alpha_search_min_reward_improvement` threshold is not met.
+- Implemented as placeholder artifact: `llm-priors.json` records the typed prior
+  schema without calling an external LLM.
+- Not yet implemented: live LLM expansion policy, typed mutation parser from
+  LLM proposals, full multi-run MCTS visit/reward backpropagation beyond the
+  current artifact-to-artifact feedback loop.
+
+The current system is enough to start systematizing alpha discovery in CI: every
+walk-forward run can now expand interpretable bounded multi-depth mutations,
+download or consume a prior MCTS expansion plan, and preserve search space,
+candidates, rejected expressions, node metrics, tree trace, MCTS expansion plan,
+subtree crowding, and feedback artifacts. Hosted artifact runs can also dispatch
+bounded chained follow-up runs with ready-handoff, empty-plan, and reward
+stagnation stop criteria.

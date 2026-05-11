@@ -1,3 +1,29 @@
+# Alpha Search CI/CD Clean Port (2026-05-11)
+
+## Goal
+
+Port the systematic alpha discovery layer onto a clean `main`-based branch so
+CI can generate, evaluate, chain, and preserve factor candidates without
+bypassing replay/runtime parity or dry-run promotion gates.
+
+## Plan
+
+- [x] Preserve the current hosted factor walk-forward sweep wrapper instead of
+  reverting to a direct binary-only workflow.
+- [x] Add alpha-search artifact output and prior MCTS plan passthrough to the
+  sweep path.
+- [ ] Finish the clean cherry-pick, resolve conflicts, and verify workflow
+  YAML/Python/Rust compile surfaces.
+- [ ] Open a focused PR for the alpha-search CI/CD artifact layer.
+
+Review:
+- The intended search shape is `semantic prior -> typed formula candidates ->
+  deterministic/MCTS-guided expansion -> CI walk-forward feedback -> promotion
+  evaluator -> blocked-or-ready handoff`.
+- This work is candidate discovery infrastructure. It does not claim a
+  profitable deployable strategy until walk-forward, replay/runtime parity,
+  and dry-run handoff gates produce ready evidence.
+
 # Recorded Replay Official Settlement Enrichment (2026-05-11)
 
 ## Follow-up: Settlement Parity Classifier (2026-05-11)
