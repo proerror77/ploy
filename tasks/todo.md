@@ -1,3 +1,27 @@
+# Recorded Replay Official Settlement Enrichment (2026-05-11)
+
+## Plan
+
+- [x] Confirm strict parity blocker is settlement-only drift between recorded NDJSON and dry-run runtime evidence.
+- [x] Add a temporary replay enrichment helper that fills only `event_expired.resolved_up_won` from official runtime settlement evidence.
+- [x] Wire `recorded-replay-parity.yml` to build the enriched recording on `tango-1-1` before replay without mutating the source recording.
+- [x] Verify Python tests, workflow YAML, shell syntax, and diff hygiene.
+- [ ] Open PR, wait for CI, merge, then rerun strict recorded replay parity.
+
+## Review
+
+- Added `scripts/enrich_recording_official_settlement.py` and wired
+  `recorded-replay-parity.yml` to copy it to the temporary tango replay
+  directory. The workflow queries official runtime settlement from
+  `strategy_runtime_event_track_record`, creates an enriched temporary NDJSON,
+  and points replay at that enriched copy.
+- The enrichment deliberately mutates only `event_expired` rows with missing
+  `resolved_up_won`; `event_discovered` rows are left unchanged to avoid
+  decision-time settlement leakage.
+- Verification passed: focused Python parity/enrichment tests, full Python
+  unittest discovery, workflow YAML parse, recorded replay step `bash -n`,
+  workflow input-count guard, Python `py_compile`, and `git diff --check`.
+
 # Dry-Run Conservative Factor And Event-Level Replay Parity (2026-05-11)
 
 ## Plan

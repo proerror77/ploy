@@ -80,30 +80,108 @@ jobs:
           DEPLOYMENT_ID: ${{ github.event.inputs.deployment_id }}
           CONFIG_PATH: ${{ github.event.inputs.config_path }}
           RECORDING_PATH: ${{ github.event.inputs.recording_path }}
+          SINCE: ${{ github.event.inputs.since }}
+          UNTIL: ${{ github.event.inputs.until }}
           REMOTE_DIR: /opt/ploy/tmp/recorded-replay-parity-${{ github.run_id }}
         run: |
           set -euo pipefail
           mkdir -p artifacts/replay artifacts/dryrun artifacts/parity
+
+          ssh tango-1-1 /bin/bash -s -- "${REMOTE_DIR}" <<'EOF'
+          set -euo pipefail
+          mkdir -p "$1"
+          EOF
+          scp scripts/enrich_recording_official_settlement.py \
+            tango-1-1:"${REMOTE_DIR}/enrich_recording_official_settlement.py"
 
           # shellcheck disable=SC2029
           ssh tango-1-1 /bin/bash -s -- \
             "${DEPLOYMENT_ID}" \
             "${CONFIG_PATH}" \
             "${RECORDING_PATH}" \
-            "${REMOTE_DIR}" <<'EOF'
+            "${REMOTE_DIR}" \
+            "${SINCE}" \
+            "${UNTIL}" <<'EOF'
           set -euo pipefail
           deployment_id="$1"
           config_path="$2"
           recording_path="$3"
           remote_dir="$4"
+          since_ts="$5"
+          until_ts="$6"
 
           mkdir -p "${remote_dir}"
           test -x /opt/ploy/bin/ploy-runner
           test -r "${config_path}"
           test -r "${recording_path}"
+          test -r "${remote_dir}/enrich_recording_official_settlement.py"
+
+          set -a
+          . /opt/ploy/.env
+          set +a
+
+          settlements_json="${remote_dir}/official-settlements.json"
+          enriched_recording="${remote_dir}/recording-official-settlement.ndjson"
+          enrichment_report="${remote_dir}/recording-enrichment.json"
+          if [ -n "${PLOY_DATABASE__URL:-}" ]; then
+            PSQL=(psql "${PLOY_DATABASE__URL}" -v ON_ERROR_STOP=1 -t -A)
+          else
+            PSQL=(env PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -t -A)
+          fi
+          "${PSQL[@]}" \
+            -v deployment_id="${deployment_id}" \
+            -v since_ts="${since_ts}" \
+            -v until_ts="${until_ts}" \
+            -c "
+          WITH row_outcomes AS (
+            SELECT
+              event_id,
+              CASE
+                WHEN market_side = 'UP' AND avg_exit_price >= 0.99 THEN 1
+                WHEN market_side = 'UP' AND avg_exit_price <= 0.01 THEN 0
+                WHEN market_side = 'DOWN' AND avg_exit_price >= 0.99 THEN 0
+                WHEN market_side = 'DOWN' AND avg_exit_price <= 0.01 THEN 1
+                ELSE NULL
+              END AS outcome_int
+            FROM strategy_runtime_event_track_record
+            WHERE runtime_mode = 'dryrun'
+              AND deployment_id = :'deployment_id'
+              AND is_closed
+              AND opened_at >= :'since_ts'::timestamptz - INTERVAL '10 minutes'
+              AND opened_at <= :'until_ts'::timestamptz + INTERVAL '10 minutes'
+          ),
+          unambiguous AS (
+            SELECT
+              event_id,
+              MIN(outcome_int) AS outcome_int
+            FROM row_outcomes
+            WHERE event_id IS NOT NULL
+              AND outcome_int IS NOT NULL
+            GROUP BY event_id
+            HAVING MIN(outcome_int) = MAX(outcome_int)
+          )
+          SELECT COALESCE(
+            jsonb_agg(
+              jsonb_build_object(
+                'event_id', event_id,
+                'resolved_up_won', outcome_int = 1
+              )
+              ORDER BY event_id
+            ),
+            '[]'::jsonb
+          )::text
+          FROM unambiguous;
+          " > "${settlements_json}"
+
+          python3 "${remote_dir}/enrich_recording_official_settlement.py" \
+            --input "${recording_path}" \
+            --output "${enriched_recording}" \
+            --settlements-json "${settlements_json}" \
+            --report-json "${enrichment_report}"
+          test -s "${enriched_recording}"
 
           replay_config="${remote_dir}/replay.toml"
-          python3 - "${config_path}" "${recording_path}" "${replay_config}" <<'PY'
+          python3 - "${config_path}" "${enriched_recording}" "${replay_config}" <<'PY'
           import sys
           src, recording, dst = sys.argv[1:]
           lines = []
@@ -137,10 +215,11 @@ jobs:
 
           test -s "${remote_dir}/replay-evaluation.json"
           test -s "${remote_dir}/dryrun-report.json"
-          ls -lh "${remote_dir}/replay-evaluation.json" "${remote_dir}/dryrun-report.json"
+          ls -lh "${remote_dir}/replay-evaluation.json" "${remote_dir}/dryrun-report.json" "${enrichment_report}"
           EOF
 
           scp tango-1-1:"${REMOTE_DIR}/replay-evaluation.json" artifacts/replay/evaluation.json
+          scp tango-1-1:"${REMOTE_DIR}/recording-enrichment.json" artifacts/replay/recording-enrichment.json
           scp tango-1-1:"${REMOTE_DIR}/dryrun-report.json" artifacts/dryrun/dryrun.json
 
       - name: Compare replay and dry-run evidence
