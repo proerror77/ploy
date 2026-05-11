@@ -12,7 +12,7 @@ bypassing replay/runtime parity or dry-run promotion gates.
   reverting to a direct binary-only workflow.
 - [x] Add alpha-search artifact output and prior MCTS plan passthrough to the
   sweep path.
-- [ ] Finish the clean cherry-pick, resolve conflicts, and verify workflow
+- [x] Finish the clean cherry-pick, resolve conflicts, and verify workflow
   YAML/Python/Rust compile surfaces.
 - [ ] Open a focused PR for the alpha-search CI/CD artifact layer.
 
@@ -28,6 +28,13 @@ Review:
   `25672625360` best_reward `4.894975850946932`), but those results are
   research/search evidence only and must be rerun from this clean branch before
   promotion.
+- Clean-branch local verification passed: `python3 -m py_compile
+  scripts/run_factor_walk_forward_sweep.py`, Ruby YAML parse for both factor
+  workflows, `CARGO_TARGET_DIR=/tmp/ploy-alpha-clean rtk cargo check -p
+  ploy-research --features db --example factor_walk_forward_v2`,
+  `CARGO_TARGET_DIR=/tmp/ploy-alpha-clean-test rtk cargo test -p
+  ploy-research alpha_search --lib`, `CARGO_TARGET_DIR=/tmp/ploy-autofactor-clean-test
+  rtk cargo test -p ploy-research autofactor --lib`, and `git diff --check`.
 
 # Recorded Replay Official Settlement Enrichment (2026-05-11)
 
