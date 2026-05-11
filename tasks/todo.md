@@ -972,6 +972,32 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `anti_overfit_diagnostics`, `walk_forward_oos`, and
   `recorded_replay_parity`.
 
+# Amplitude-Weighted Momentum Factor Check (2026-05-11)
+
+## Goal
+
+Verify whether amplitude-weighted CEX momentum is useful for PM5D binary
+options as `factor_attribution` evidence. This is not a dry-run or live
+promotion task.
+
+## Plan
+
+- [x] Add narrow AutoFactor candidates for amplitude-weighted momentum using
+  existing Factor V2 fields only.
+- [x] Run focused local checks that avoid local DB/backtest execution.
+- [ ] Dispatch hosted factor walk-forward evidence from existing research
+  snapshot artifacts.
+- [ ] Record whether the factor is useful for settlement probability,
+  repricing, or neither.
+
+## Review
+
+- 2026-05-11: Added `amplitude_weighted_momentum_30s_sigma` and
+  `amplitude_weighted_momentum_30s_vol_gap` as AutoFactor research candidates
+  only. Local verification passed: `rustfmt --edition 2021 --check
+  crates/ploy-research/src/autofactor.rs` and `CARGO_TARGET_DIR=/tmp/ploy-awm-autofactor
+  rtk cargo test -p ploy-research autofactor --lib` with 8 tests passing.
+
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
 ## Goal

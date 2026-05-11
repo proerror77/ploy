@@ -581,6 +581,18 @@ pub fn autofactor_matrix_from_v2(
         rows,
         |row| row.cex_bar_return_30s * row.side.multiplier(),
     );
+    insert_column(&mut columns, "cex_return_30s_side", rows, |row| {
+        row.cex_bar_return_30s * row.side.multiplier()
+    });
+    insert_column(&mut columns, "cex_return_60s_side", rows, |row| {
+        row.cex_bar_return_60s * row.side.multiplier()
+    });
+    insert_column(&mut columns, "sigma_horizon_pos", rows, |row| {
+        positive_or_nan(row.sigma_horizon)
+    });
+    insert_column(&mut columns, "vol_gap_pos", rows, |row| {
+        positive_or_nan(row.vol_gap)
+    });
     insert_column(&mut columns, "poly_quote_age", rows, |row| {
         row.pm_lag_secs.max(0.0)
     });
@@ -766,6 +778,34 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             ),
             target: Some("reprice_pnl_10s".to_string()),
             notes: vec!["External move must clear the side spread to be tradable.".to_string()],
+        });
+    }
+    if has_all(input_names, &["cex_return_30s_side", "sigma_horizon_pos"]) {
+        out.push(NamedFactorExpr {
+            name: "amplitude_weighted_momentum_30s_sigma".to_string(),
+            expr: mul(
+                input("cex_return_30s_side"),
+                FactorExpr::Log1pAbs(Box::new(input("sigma_horizon_pos"))),
+            ),
+            target: Some("reprice_pnl_10s".to_string()),
+            notes: vec![
+                "Side-aligned 30s CEX return weighted by current event volatility amplitude."
+                    .to_string(),
+            ],
+        });
+    }
+    if has_all(input_names, &["cex_return_30s_side", "vol_gap_pos"]) {
+        out.push(NamedFactorExpr {
+            name: "amplitude_weighted_momentum_30s_vol_gap".to_string(),
+            expr: mul(
+                input("cex_return_30s_side"),
+                FactorExpr::Log1pAbs(Box::new(input("vol_gap_pos"))),
+            ),
+            target: Some("reprice_pnl_10s".to_string()),
+            notes: vec![
+                "Side-aligned 30s CEX return weighted by positive volatility shock versus implied baseline."
+                    .to_string(),
+            ],
         });
     }
     out
@@ -1478,7 +1518,7 @@ mod tests {
             drift_30s: 0.0,
             post_flip_drift: 0.0,
             sigma_horizon: 1.0,
-            vol_gap: 0.0,
+            vol_gap: score + 1.0,
             obi_10: score + 1.0,
             depth_imbalance: 0.0,
             depth_acceleration: 0.0,
@@ -1692,6 +1732,12 @@ mod tests {
         assert!(reports
             .iter()
             .any(|report| report.name == "poly_lag_pressure"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "amplitude_weighted_momentum_30s_sigma"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "amplitude_weighted_momentum_30s_vol_gap"));
         assert!(reports
             .iter()
             .any(|report| report.name == "mut_spread_adjusted_external_move_pm_lag_gate"));
