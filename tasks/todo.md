@@ -1,3 +1,32 @@
+# Alpha Promotion Parity Gate Hardening (2026-05-11)
+
+## Goal
+
+Make the hosted alpha/factor promotion path fail closed unless the supplied
+recorded replay parity artifact proves both runtime evidence parity and
+event-level parity.
+
+## Plan
+
+- [x] Confirm the current promotion blocker remains replay/dry-run parity, not
+  additional MCTS search depth.
+- [x] Require `event_comparison.strict_parity_ready=true` when
+  `factor_walk_forward_v2` converts a parity artifact into the
+  `recorded_replay_parity` promotion gate.
+- [x] Add focused coverage proving runtime-only parity is insufficient.
+- [x] Run focused verification and diff hygiene checks.
+
+## Review
+
+- 2026-05-11: Hardened `factor_walk_forward_v2` so
+  `recorded_replay_parity` requires both
+  `runtime_evidence_comparison.strict_parity_ready` and
+  `event_comparison.strict_parity_ready`, with no blocking flags and
+  `decision=continue`.
+- 2026-05-11: Verification passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-parity-gate /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research --features db --example factor_walk_forward_v2 replay_parity`
+  and `rtk git diff --check`.
+
 # Alpha Search Promotion Blocker: Current Replay/Dry-Run Parity (2026-05-11)
 
 ## Evidence
