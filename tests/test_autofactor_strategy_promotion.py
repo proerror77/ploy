@@ -147,6 +147,8 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike",
             handoff_md,
         )
+        self.assertIn("top bucket avg label", handoff_md)
+        self.assertNotIn("top bucket pnl", handoff_md.lower())
         rejected = next(
             item
             for item in payload["evaluated_factors"]

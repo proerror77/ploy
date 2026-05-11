@@ -100,7 +100,7 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
             f"- Target: `{strategy['target']}`",
             f"- Strategy profile: `{strategy['strategy_profile']}`",
             f"- ICIR: `{strategy['metrics']['icir']}`",
-            f"- Top bucket PnL: `{strategy['metrics']['top_bucket_avg_label']}`",
+            f"- Top bucket avg label: `{strategy['metrics']['top_bucket_avg_label']}`",
             "",
         ]
     )

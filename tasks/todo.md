@@ -1,5 +1,32 @@
 # PM5D Settlement Probability PRD Execution Plan (2026-05-05)
 
+## AutoFactor Walk-Forward Evidence Output Repair (2026-05-11)
+
+- [x] Reproduce the current hosted `factor-walk-forward-v2` behavior on
+  `main@76f00c18` and confirm the run succeeds while issue comments still
+  collapse the decision to `pending`.
+- [x] Make walk-forward issue comments read the AutoFactor promotion/handoff
+  artifacts and report terminal decision, handoff status, actionable blockers,
+  and qualified strategy rows.
+- [x] Keep hosted and self-hosted walk-forward comment logic aligned through a
+  shared GitHub Actions helper.
+- [x] Rename promotion/handoff markdown labels from misleading `top bucket PnL`
+  wording to `top bucket avg label`.
+- [x] Verify the Python scripts, workflow YAML, GitHub Actions helper, and diff
+  hygiene.
+
+Review:
+- Verification passed with `python3 -m unittest
+  tests.test_autofactor_strategy_promotion
+  tests.test_apply_autofactor_handoff_to_config`, Ruby YAML parsing for
+  `factor-walk-forward-v2.yml` and
+  `factor-walk-forward-v2-hosted-artifact.yml`, a Node smoke of
+  `.github/scripts/autofactor-walk-forward-evidence.js` against run
+  `25652518730` artifacts, and `git diff --check`.
+- `backtest.yml` still targets `ploy-ci-1`; migrating that workflow to
+  GitHub-hosted runners requires a separate artifact-backed data source because
+  its current DB/Parquet path depends on Tango/private-host access.
+
 ## PM5D Backtest LOB Loader Repair (2026-05-10)
 
 - [x] Confirm `backtest.yml` still targets `ploy-ci-1` and avoid dispatching it.
