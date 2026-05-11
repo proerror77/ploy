@@ -711,6 +711,7 @@ jobs:
           PY
           next_options="$(cat artifacts/factor-walk-forward-v2/next-options.json)"
           gh workflow run factor-walk-forward-v2-hosted-artifact.yml \
+            --ref "${{ github.ref_name }}" \
             -f git_ref="${{ github.event.inputs.git_ref }}" \
             -f snapshot_run_id="${{ github.event.inputs.snapshot_run_id }}" \
             -f snapshot_artifact_name="${{ github.event.inputs.snapshot_artifact_name }}" \
