@@ -256,6 +256,31 @@ fn replay_dryrun_parity_reports_strict_readiness() {
 }
 
 #[test]
+fn tango_deploy_keeps_pm5d_live_paused() {
+    let workflow = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "Verify live deployment remains paused in bundle",
+        "pm5d.threelayer.live.json",
+        "desired_state=paused",
+        "deployments inspect pm5d.threelayer.live",
+        "desired=Paused",
+        "observed=Paused",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!("deploy-tango-1-1.yml: missing `{needle}`"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "tango deploy live-paused guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn research_issue_workflows_apply_decision_labels() {
     let helper = workflow_contents(".github/scripts/research-issue-labels.js");
     let mut offenders = Vec::new();

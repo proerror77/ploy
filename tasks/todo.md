@@ -1,3 +1,34 @@
+# Tango Dry-Run Deploy Live-Paused Guard (2026-05-11)
+
+## Goal
+
+Before the next approved dry-run deployment for alpha parity sampling, make the
+protected `deploy-tango-1-1.yml` path prove that `pm5d.threelayer.live` remains
+paused in both the shipped bundle and the post-deploy control-plane state.
+
+## Plan
+
+- [x] Inspect the current tango deploy workflow and PM5D deployment manifests.
+- [x] Add a bundle-time guard requiring
+  `config/deployments/pm5d.threelayer.live.json` to keep
+  `desired_state=paused`.
+- [x] Add a post-deploy `ployctl deployments inspect pm5d.threelayer.live`
+  guard requiring `desired=Paused observed=Paused`.
+- [x] Add workflow security coverage so the guard cannot be removed silently.
+- [x] Validate workflow syntax, focused tests, and diff hygiene.
+
+## Review
+
+- 2026-05-11: Added bundle-time and post-deploy live-paused guards to
+  `deploy-tango-1-1.yml`. The workflow now fails before upload if the shipped
+  `pm5d.threelayer.live` manifest is not `desired_state=paused`, and fails
+  after deploy if `ployctl deployments inspect pm5d.threelayer.live` does not
+  report `desired=Paused observed=Paused`.
+- 2026-05-11: Verification passed:
+  Ruby YAML parse for `.github/workflows/deploy-tango-1-1.yml`,
+  `CARGO_TARGET_DIR=/tmp/ploy-tango-live-paused-guard /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test workflow_security tango_deploy_keeps_pm5d_live_paused`,
+  and `rtk git diff --check`.
+
 # Alpha Promotion Parity Gate Hardening (2026-05-11)
 
 ## Goal

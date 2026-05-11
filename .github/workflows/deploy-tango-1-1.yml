@@ -213,6 +213,24 @@ jobs:
             -C dist -cf - . | gzip -n > "${DEPLOY_BUNDLE_NAME}"
           sha256sum "${DEPLOY_BUNDLE_NAME}" > "${DEPLOY_BUNDLE_NAME}.sha256"
 
+      - name: Verify live deployment remains paused in bundle
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = Path("dist/config/deployments/pm5d.threelayer.live.json")
+          data = json.loads(manifest.read_text(encoding="utf-8"))
+          if data.get("deployment_id") != "pm5d.threelayer.live":
+              raise SystemExit(f"unexpected live deployment manifest: {data.get('deployment_id')}")
+          if data.get("runtime_mode") != "live":
+              raise SystemExit("pm5d.threelayer.live manifest is not runtime_mode=live")
+          if data.get("desired_state") != "paused":
+              raise SystemExit("pm5d.threelayer.live must remain desired_state=paused")
+          print("pm5d.threelayer.live bundle manifest remains paused")
+          PY
+
       - name: Validate OSS deploy secrets
         if: ${{ inputs.deploy }}
         env:
@@ -544,6 +562,15 @@ jobs:
               curl -fsS http://127.0.0.1:8081/health
               curl -fsS http://127.0.0.1:8081/api/reports/dry-run | ${DEPLOY_ROOT}/scripts/check_dryrun_report_contract.py
               ${DEPLOY_ROOT}/bin/ployctl deployments list
+              live_status="\$(${DEPLOY_ROOT}/bin/ployctl deployments inspect pm5d.threelayer.live)"
+              echo "\${live_status}"
+              case "\${live_status}" in
+                *"desired=Paused"*"observed=Paused"*) ;;
+                *)
+                  echo "pm5d.threelayer.live must remain desired=Paused observed=Paused after deploy" >&2
+                  exit 1
+                  ;;
+              esac
             fi
 
             wait_for_recent_rows \
