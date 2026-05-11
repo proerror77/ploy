@@ -14,8 +14,10 @@ live-paused guard that failed after the SSH deploy path had already updated
 - [x] Harden both SSH and Cloud Assistant live-paused guard parsing against
   multi-line `ployctl` output.
 - [x] Run focused workflow/security validation.
-- [ ] Collect enough post-deploy closed dry-run rows and rerun recorded replay
-  parity before claiming profitability.
+- [x] Run a post-deploy recorded replay parity smoke on the fresh conservative
+  AutoFactor config.
+- [ ] Collect a larger post-deploy dry-run sample before claiming
+  profitability.
 
 ## Review
 
@@ -45,6 +47,75 @@ live-paused guard that failed after the SSH deploy path had already updated
   new dry-run is producing evidence, but it is far too small for profitability
   or parity promotion. Wait for a larger fresh sample before triggering
   recorded replay parity.
+- 2026-05-12: Post-deploy recorded replay parity smoke run `25693140654`
+  completed successfully on `main@71a2e7bc` for
+  `2026-05-11T19:18:00Z -> 2026-05-11T19:45:00Z`. It reported
+  `decision=continue`, runtime strict parity ready for events/orders/fills,
+  event-comparison strict parity ready, shared orders/fills `4 / 4`, and no
+  blocking or advisory flags. This is a replay/runtime sanity proof for the
+  newly deployed conservative score, not profitability evidence.
+- 2026-05-12: A later small-sample check found `3` closed rows since deploy,
+  net PnL `116.7990538484`, wins `2`, losses `1`. This remains too small for
+  drawdown/capacity/profitability conclusions; continue collecting fresh
+  dry-run rows.
+- 2026-05-12: Fresh sample later expanded to `8` closed rows since deploy, net
+  PnL `-12.723670482`, wins `4`, losses `4`, min trade `-15.0389997293`, max
+  trade `20.4126279478`. This invalidates any premature profitability reading
+  from the earlier 1-row or 3-row positive samples. Next step is a wider
+  post-deploy recorded replay parity window and then continued dry-run
+  evidence collection.
+- 2026-05-12: Wider post-deploy recorded replay parity run `25696442629`
+  completed as a workflow for `2026-05-11T19:18:00Z ->
+  2026-05-11T20:45:00Z`, but promotion is blocked: strict parity ready was
+  `false`, shared orders/fills were `14 / 14`, and blocking flags were
+  `events_present_in_dryrun_missing_from_replay`,
+  `orders_present_in_dryrun_missing_from_replay`,
+  `runtime_evidence_field_mismatches`, and
+  `settlement_exit_price_mismatches`. Decision:
+  `fix-data-or-runtime-mismatch`.
+- 2026-05-12: The wider parity failure exposed a real settlement accounting
+  bug. Dry-run recorded settlement sells at price `1` for loser DOWN tokens
+  `tl_settle_2224678_down`
+  (`22984322675566906063440731510690462022328880420028837859173298902726718908808`)
+  and `tl_settle_2224929_down`
+  (`105790814239175086118079172325499034237209026503084523434023850314205168796365`),
+  while `pm_token_settlements` marks both DOWN tokens as `loser` with
+  `settled_price=0` and the corresponding UP tokens as winners with
+  `settled_price=1`. Do not collect more profitability evidence until
+  three-layer settlement exits stop falling back to spot/price-to-beat when
+  official `resolved_up_won` is missing.
+
+# Three-Layer Official Settlement Gate (2026-05-12)
+
+## Goal
+
+Prevent dry-run/replay settlement exits from fabricating binary payout prices
+when the runtime has not received an official Polymarket resolution.
+
+## Plan
+
+- [x] Record the wider parity blocker and affected loser-token settlement rows.
+- [x] Make three-layer settlement exits require explicit `resolved_up_won`.
+- [x] Add focused coverage for missing, winning, and losing official
+  settlement outcomes.
+- [x] Run focused strategy-bundle verification.
+- [ ] Redeploy from `main`, rerun recorded replay parity, and only then resume
+  fresh profitability sampling.
+
+## Review
+
+- 2026-05-12: Updated `ThreeLayerStrategy::resolve_up_won` so settlement exits
+  no longer infer the result from spot/price-to-beat when
+  `EventExpired.resolved_up_won` is missing. Missing official resolution now
+  skips settlement exit generation instead of recording a guessed `0` or `1`
+  payout.
+- 2026-05-12: Added tests proving three-layer skips settlement exits without
+  official resolution even when spot implies a side, and still prices explicit
+  official winner/loser token exits at `1`/`0`. Verification passed:
+  `rustfmt --check crates/ploy-strategy-bundles/src/strategies/three_layer.rs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-fallback /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles settlement_exit_requires_official_resolution_even_when_spot_implies_winner --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-settlement-fallback /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles official_settlement_resolution_prices_winner_and_loser_tokens --lib`,
+  and `CARGO_TARGET_DIR=/tmp/ploy-settlement-fallback /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles --lib`.
 
 # Alpha Search Post-Handoff Audit Refresh (2026-05-12)
 
@@ -61,9 +132,11 @@ profitability gate.
   BTC/ETH dry-run config.
 - [x] Refresh `tasks/alpha_search_completion_audit_20260512.md` so future
   agents do not treat the handoff/config PR as still blocked.
-- [ ] With explicit operator approval, deploy current `main` to the protected
-  dry-run path, collect a fresh sample, and verify post-merge executable
-  profitability evidence.
+- [x] With explicit operator approval, deploy current `main` to the protected
+  dry-run path and verify the remote dry-run config uses the ready handoff.
+- [x] Run a post-deploy recorded replay parity smoke on the fresh sample.
+- [ ] Collect a larger fresh sample and verify executable profitability
+  evidence.
 
 ## Review
 
