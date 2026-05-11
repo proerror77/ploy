@@ -199,6 +199,21 @@ pub fn validate_snapshot_request(
     manifest: &ResearchSnapshotManifest,
     request: ResearchSnapshotRequest<'_>,
 ) -> Result<()> {
+    validate_snapshot_request_with_window_mode(manifest, request, true)
+}
+
+pub fn validate_snapshot_request_coverage(
+    manifest: &ResearchSnapshotManifest,
+    request: ResearchSnapshotRequest<'_>,
+) -> Result<()> {
+    validate_snapshot_request_with_window_mode(manifest, request, false)
+}
+
+fn validate_snapshot_request_with_window_mode(
+    manifest: &ResearchSnapshotManifest,
+    request: ResearchSnapshotRequest<'_>,
+    require_exact_window: bool,
+) -> Result<()> {
     let mut requested_symbols = request.symbols.to_vec();
     requested_symbols.sort();
     let mut snapshot_symbols = manifest.symbols.clone();
@@ -210,9 +225,18 @@ pub fn validate_snapshot_request(
             requested_symbols
         );
     }
-    if manifest.start != request.start || manifest.end != request.end {
+    if require_exact_window && (manifest.start != request.start || manifest.end != request.end) {
         anyhow::bail!(
             "snapshot window {} -> {} does not match requested window {} -> {}",
+            manifest.start,
+            manifest.end,
+            request.start,
+            request.end
+        );
+    }
+    if !require_exact_window && (manifest.start > request.start || manifest.end < request.end) {
+        anyhow::bail!(
+            "snapshot window {} -> {} does not cover requested window {} -> {}",
             manifest.start,
             manifest.end,
             request.start,
@@ -646,6 +670,10 @@ mod tests {
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
+        let start = "2026-04-24T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let end = "2026-05-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let subset_start = "2026-04-25T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let subset_end = "2026-04-27T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let snapshot = ResearchSnapshot {
             manifest: ResearchSnapshotManifest {
                 schema_version: RESEARCH_SNAPSHOT_SCHEMA_VERSION.to_string(),
@@ -653,9 +681,9 @@ mod tests {
                 generated_at: Utc::now(),
                 git_sha: Some("test-sha".to_string()),
                 symbols: vec!["BTCUSDT".to_string()],
-                start: Utc::now(),
-                end: Utc::now(),
-                history_start: Utc::now(),
+                start,
+                end,
+                history_start: start,
                 lob_sample_secs: 30,
                 pm_book_sample_secs: Some(30),
                 observation_sample_secs: 30,
@@ -702,6 +730,34 @@ mod tests {
             },
         )
         .expect("snapshot request validation");
+        validate_snapshot_request_coverage(
+            &loaded.manifest,
+            ResearchSnapshotRequest {
+                symbols: &["BTCUSDT".to_string()],
+                start: subset_start,
+                end: subset_end,
+                lob_sample_secs: loaded.manifest.lob_sample_secs,
+                observation_sample_secs: loaded.manifest.observation_sample_secs,
+                max_quote_age_secs: loaded.manifest.max_quote_age_secs,
+                stake_usd: loaded.manifest.stake_usd,
+                require_official_settlement: loaded.manifest.require_official_settlement,
+            },
+        )
+        .expect("snapshot coverage validation");
+        let exact_subset_result = validate_snapshot_request(
+            &loaded.manifest,
+            ResearchSnapshotRequest {
+                symbols: &["BTCUSDT".to_string()],
+                start: subset_start,
+                end: subset_end,
+                lob_sample_secs: loaded.manifest.lob_sample_secs,
+                observation_sample_secs: loaded.manifest.observation_sample_secs,
+                max_quote_age_secs: loaded.manifest.max_quote_age_secs,
+                stake_usd: loaded.manifest.stake_usd,
+                require_official_settlement: loaded.manifest.require_official_settlement,
+            },
+        );
+        assert!(exact_subset_result.is_err());
         assert_eq!(loaded.manifest.row_counts.observations, 0);
         assert!(root.join("quality.md").exists());
 

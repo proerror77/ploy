@@ -27,7 +27,7 @@ use ploy_research::{
     format_factor_review_v2_report, load_deribit_feature_snapshots,
     load_research_lob_snapshots_sampled, load_research_pm_book_snapshots_sampled,
     load_research_snapshot, review_factors_v2_with_deribit_and_pm_books_filtered,
-    validate_snapshot_request,
+    validate_snapshot_request_coverage,
 };
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
@@ -180,7 +180,7 @@ async fn main() {
         let started = std::time::Instant::now();
         let snapshot =
             load_research_snapshot(&snapshot_dir).expect("load research snapshot failed");
-        validate_snapshot_request(
+        validate_snapshot_request_coverage(
             &snapshot.manifest,
             ResearchSnapshotRequest {
                 symbols: &symbols,
@@ -193,7 +193,7 @@ async fn main() {
                 require_official_settlement: true,
             },
         )
-        .expect("snapshot does not match requested review inputs");
+        .expect("snapshot does not cover requested review inputs");
         let snapshot_hash = snapshot
             .manifest
             .snapshot_hash

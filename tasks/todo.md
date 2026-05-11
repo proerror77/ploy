@@ -13683,3 +13683,61 @@ deployment safety or live-runner coverage.
   `ploy-connectivity`, and the default normal-edge tree is 132 lines. Explicit
   `--features full` still includes `ploy-market-data`, `polymarket-client-sdk`,
   `sqlx`, and `ploy-connectivity`, with a 999-line normal-edge tree.
+
+# Hosted Artifact Factor Loop Window Fix (2026-05-11)
+
+## Goal
+
+Make retained research snapshot artifacts usable for repeated factor-search
+loops without hard-coded date windows or unnecessary snapshot re-export.
+
+## Files / Ownership
+
+- `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`,
+  `.github/workflows/factor-review-v2-hosted-artifact.yml`
+  - Owner: resolve `auto` review/walk-forward windows from snapshot
+    `manifest.json`, and pass timestamp bounds to Rust examples.
+- `crates/ploy-research/src/research_snapshot.rs`, `crates/ploy-research/src/lib.rs`
+  - Owner: keep exact snapshot validation for producers while exposing a
+    coverage validator for artifact-backed consumers.
+- `crates/ploy-research/examples/factor_review_v2.rs`,
+  `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: accept snapshot artifacts that cover the requested sub-window.
+
+## Tasks
+
+- [x] Prove legacy replay parity flags are clean on `main`.
+- [x] Run all-symbol hosted walk-forward from retained snapshot artifact.
+- [x] Diagnose the hard-coded/end-date mismatch that made the first run panic.
+- [x] Replace hard-coded hosted artifact workflow defaults with manifest-backed
+  `auto` window resolution.
+- [x] Allow factor review/walk-forward examples to use snapshot-covered
+  sub-windows instead of requiring exact full-window equality.
+- [x] Validate YAML, focused snapshot tests, and hosted example compilation.
+
+## Review
+
+- 2026-05-11: PR #408 merged as `e8f0fc81`; recorded replay parity run
+  `25665442731` on `main` passed in 1m09s. Runtime evidence strict parity is
+  ready for events/orders/fills with shared counts `1/1/1`; `risk_flags=[]`,
+  `blocking_risk_flags=[]`, and `advisory_flags=[]`. Legacy event drift remains
+  only in `legacy_event_flags`.
+- 2026-05-11: Full snapshot run `25642459432` took 23m12s wall-clock. Snapshot
+  phase timings show the slow path is export/materialization, especially
+  `historical_updates=474666ms`, `pm_book_snapshots=222302ms`,
+  `cex_lob_snapshots=180860ms`, and `factor_observations=159357ms`.
+- 2026-05-11: Hosted artifact walk-forward run `25665802778` reused snapshot
+  `25642459432` plus replay parity `25665442731` and completed in 1m11s. The
+  result is `blocked`: no qualified dry-run handoff. The best settlement-edge
+  family rows remain watchlist only because of `low_icir`, despite positive
+  window ratios around `0.68-0.75` and symbol-positive ratio `1.0`.
+- 2026-05-11: The failed walk-forward run `25665703311` exposed the hard-coded
+  date trap: workflow `end_date=2026-05-01` was interpreted by the Rust example
+  as an inclusive date and converted to the right-open timestamp
+  `2026-05-02T00:00:00Z`, outside the snapshot manifest end
+  `2026-05-01T00:00:00Z`.
+- 2026-05-11: Local verification for the fix passed:
+  `ruby -e 'require "yaml"; %w[.github/workflows/factor-walk-forward-v2-hosted-artifact.yml .github/workflows/factor-review-v2-hosted-artifact.yml].each { |f| YAML.load_file(f); puts f }'`,
+  `CARGO_TARGET_DIR=/tmp/ploy-window-auto /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research research_snapshot --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-window-auto /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --features db --example factor_walk_forward_v2 --example factor_review_v2`,
+  and `git diff --check`.

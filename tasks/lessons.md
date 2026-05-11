@@ -269,3 +269,13 @@
   - Before adding non-trivial TS logic, ask whether the behavior can instead live in `ployctl`, `ployd`, or a Rust crate.
   - If TS is temporarily unavoidable, keep it as a thin wrapper over canonical Rust surfaces rather than embedding core logic there.
   - Do not move strategy, execution, or oversight policy deeper into TS just because the sidecar currently runs on Node.
+
+## 2026-05-11
+
+- Pattern: Hosted artifact factor workflows become slow and brittle when they
+  keep hard-coded date defaults that must exactly match a retained research
+  snapshot manifest.
+- Rule: Artifact-backed research loops should resolve default windows from the
+  snapshot manifest and run sub-window searches against the retained artifact.
+  Do not re-export a full snapshot or rely on hidden inclusive-date semantics
+  just to test another factor window.
