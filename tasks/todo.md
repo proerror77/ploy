@@ -6,7 +6,8 @@
 - [x] Add a temporary replay enrichment helper that fills only `event_expired.resolved_up_won` from official runtime settlement evidence.
 - [x] Wire `recorded-replay-parity.yml` to build the enriched recording on `tango-1-1` before replay without mutating the source recording.
 - [x] Verify Python tests, workflow YAML, shell syntax, and diff hygiene.
-- [ ] Open PR, wait for CI, merge, then rerun strict recorded replay parity.
+- [x] Open PR, wait for CI, merge, then rerun strict recorded replay parity.
+- [ ] Fix the post-merge `psql -c` variable-substitution failure and rerun strict recorded replay parity.
 
 ## Review
 
@@ -21,6 +22,11 @@
 - Verification passed: focused Python parity/enrichment tests, full Python
   unittest discovery, workflow YAML parse, recorded replay step `bash -n`,
   workflow input-count guard, Python `py_compile`, and `git diff --check`.
+- PR #403 merged as `306433258429e6ce67251abab25625446b555042`. The first
+  post-merge recorded replay run `25661788361` failed before replay because
+  psql variables were not expanded inside `-c`; the follow-up fix feeds SQL on
+  stdin so `:'deployment_id'`, `:'since_ts'`, and `:'until_ts'` are expanded by
+  psql before execution.
 
 # Dry-Run Conservative Factor And Event-Level Replay Parity (2026-05-11)
 
