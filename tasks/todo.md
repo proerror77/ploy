@@ -1,3 +1,30 @@
+# Alpha Search Chain Summary Tool (2026-05-12)
+
+## Goal
+
+Make hosted alpha-search chain evidence machine-readable without manually
+inspecting each downloaded artifact directory.
+
+## Plan
+
+- [x] Add a script that summarizes one or more downloaded
+  `factor-walk-forward-v2-*` artifacts.
+- [x] Include candidate counts, passed counts, best reward, selected MCTS
+  factor, handoff status, recommended action, and chain decision per run.
+- [x] Add focused tests with tiny fixture directories.
+- [x] Validate tests, syntax, diff hygiene, then land as a focused PR.
+
+## Review
+
+- 2026-05-12: Added `scripts/summarize_alpha_search_chain.py` to summarize
+  downloaded hosted Factor Walk-Forward V2 artifacts into JSON and Markdown.
+  The summary records per-run candidate counts, passed counts, best reward,
+  selected MCTS factor, handoff status/action, promotion decision, and chain
+  decision fields, then highlights the best run and ready/blocked handoff
+  counts.
+- 2026-05-12: Added focused fixture tests and documented the review command in
+  `docs/ALPHA_FACTOR_SEARCH_CICD.md`.
+
 # Alpha Search Current-State Semantics (2026-05-12)
 
 ## Goal
