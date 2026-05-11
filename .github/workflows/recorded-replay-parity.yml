@@ -132,7 +132,7 @@ jobs:
             -v deployment_id="${deployment_id}" \
             -v since_ts="${since_ts}" \
             -v until_ts="${until_ts}" \
-            -c "
+            > "${settlements_json}" <<'SQL'
           WITH row_outcomes AS (
             SELECT
               event_id,
@@ -171,7 +171,7 @@ jobs:
             '[]'::jsonb
           )::text
           FROM unambiguous;
-          " > "${settlements_json}"
+          SQL
 
           python3 "${remote_dir}/enrich_recording_official_settlement.py" \
             --input "${recording_path}" \
