@@ -13785,3 +13785,8 @@ walk-forward variants after a single snapshot download and Rust build.
   `python3 -m py_compile scripts/run_factor_walk_forward_sweep.py tests/test_factor_walk_forward_sweep.py`,
   `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml"); puts "ok"'`,
   and `git diff --check`.
+- 2026-05-11: Post-merge smoke run `25667022672` exposed a workflow wiring
+  gap: the sweep runner requires `--factor-name-filter` even when the value is
+  empty, but the workflow did not forward `${WALK_FACTOR_NAME_FILTER}`. Added
+  the missing argument and a workflow contract assertion so the empty-filter
+  base variant remains valid.

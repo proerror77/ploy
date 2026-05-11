@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "run_factor_walk_forward_sweep.py"
+WORKFLOW = ROOT / ".github" / "workflows" / "factor-walk-forward-v2-hosted-artifact.yml"
 
 
 FAKE_REPORT = r'''
@@ -140,6 +141,12 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(summary["variants"][0]["decision"], "qualified")
         self.assertEqual(summary["variants"][0]["qualified_count"], 1)
         self.assertIn("auto_settlement_conservative_settlement_edge", summary_md)
+
+    def test_hosted_workflow_passes_empty_factor_filter_to_sweep_runner(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("--sweep-json \"${SWEEP_JSON}\"", workflow)
+        self.assertIn("--factor-name-filter \"${WALK_FACTOR_NAME_FILTER}\"", workflow)
 
 
 if __name__ == "__main__":
