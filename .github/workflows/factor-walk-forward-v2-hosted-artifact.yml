@@ -15,13 +15,13 @@ on:
         required: false
         default: ""
       start_date:
-        description: "Review start date (YYYY-MM-DD)"
+        description: "Review start date (YYYY-MM-DD), or auto to use the snapshot manifest start"
         required: true
-        default: "2026-04-21"
+        default: "auto"
       end_date:
-        description: "Review end date (YYYY-MM-DD)"
+        description: "Review end date (inclusive YYYY-MM-DD), or auto to use the snapshot manifest end"
         required: true
-        default: "2026-04-25"
+        default: "auto"
       symbols:
         description: "Comma-separated Binance symbols"
         required: true
@@ -194,6 +194,51 @@ jobs:
           print("full research snapshot payload present: " + ", ".join(required))
           PY
 
+      - name: Resolve walk-forward window
+        env:
+          INPUT_START_DATE: ${{ github.event.inputs.start_date }}
+          INPUT_END_DATE: ${{ github.event.inputs.end_date }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+
+          def parse_manifest_ts(raw):
+              return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+          def parse_start(raw):
+              if raw.lower() == "auto":
+                  return manifest_start
+              return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+          def parse_end(raw):
+              if raw.lower() == "auto":
+                  return manifest_end
+              return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+
+          def iso_z(ts):
+              return ts.isoformat().replace("+00:00", "Z")
+
+          manifest = json.loads(Path("artifacts/research-snapshot/manifest.json").read_text(encoding="utf-8"))
+          manifest_start = parse_manifest_ts(manifest["start"])
+          manifest_end = parse_manifest_ts(manifest["end"])
+          start = parse_start(os.environ["INPUT_START_DATE"])
+          end = parse_end(os.environ["INPUT_END_DATE"])
+          if start < manifest_start or end > manifest_end or start >= end:
+              raise SystemExit(
+                  "walk-forward window must be within snapshot manifest window: "
+                  f"requested {iso_z(start)} -> {iso_z(end)}, "
+                  f"snapshot {iso_z(manifest_start)} -> {iso_z(manifest_end)}"
+              )
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write(f"WALK_START_TS={iso_z(start)}\n")
+              handle.write(f"WALK_END_TS={iso_z(end)}\n")
+          print(f"resolved walk-forward window: {iso_z(start)} -> {iso_z(end)}")
+          PY
+
       - name: Download replay parity artifact
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -236,8 +281,8 @@ jobs:
           args=(
             --snapshot-dir artifacts/research-snapshot
             --symbols "${{ github.event.inputs.symbols }}"
-            --start-date "${{ github.event.inputs.start_date }}"
-            --end-date "${{ github.event.inputs.end_date }}"
+            --start-ts "${WALK_START_TS}"
+            --end-ts "${WALK_END_TS}"
             --stake-usd "${{ github.event.inputs.stake_usd }}"
             --train-window-days "${WALK_TRAIN_WINDOW_DAYS}"
             --test-window-days "${WALK_TEST_WINDOW_DAYS}"
@@ -408,7 +453,7 @@ jobs:
             echo "## Factor Walk-Forward V2 Hosted Artifact"
             echo ""
             echo "- Snapshot run: \`${{ github.event.inputs.snapshot_run_id }}\`"
-            echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
+            echo "- Window: ${WALK_START_TS} -> ${WALK_END_TS}"
             echo "- Train/Test: ${WALK_TRAIN_WINDOW_DAYS}d / ${WALK_TEST_WINDOW_DAYS}d"
             echo "- Symbols: ${{ github.event.inputs.symbols }}"
             echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
@@ -491,8 +536,8 @@ jobs:
                 runUrl,
                 gitRef: "${{ github.event.inputs.git_ref }}",
                 snapshotRunId: "${{ github.event.inputs.snapshot_run_id }}",
-                startDate: "${{ github.event.inputs.start_date }}",
-                endDate: "${{ github.event.inputs.end_date }}",
+                startDate: process.env.WALK_START_TS,
+                endDate: process.env.WALK_END_TS,
                 symbols: "${{ github.event.inputs.symbols }}",
                 artifactName: `factor-walk-forward-v2-${process.env.GITHUB_RUN_ID}`,
               },

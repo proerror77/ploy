@@ -29,7 +29,7 @@ use ploy_research::{
     load_research_lob_snapshots_sampled, load_research_pm_book_snapshots_sampled,
     load_research_snapshot, mine_domain_autofactors_from_v2,
     review_fillability_v1_with_deribit_and_pm_books, review_repricing_ic_with_deribit_and_pm_books,
-    review_trade_formation_v1_with_deribit_and_pm_books, validate_snapshot_request,
+    review_trade_formation_v1_with_deribit_and_pm_books, validate_snapshot_request_coverage,
     walk_forward_factor_combo_v1_with_deribit_and_pm_books,
     walk_forward_factors_v2_with_deribit_and_pm_books,
     walk_forward_meta_label_v1_with_deribit_and_pm_books,
@@ -287,7 +287,7 @@ async fn main() {
             std::process::exit(2);
         }
         let validation_symbols = snapshot.manifest.symbols.clone();
-        validate_snapshot_request(
+        validate_snapshot_request_coverage(
             &snapshot.manifest,
             ResearchSnapshotRequest {
                 symbols: &validation_symbols,
@@ -300,7 +300,7 @@ async fn main() {
                 require_official_settlement: true,
             },
         )
-        .expect("snapshot does not match requested walk-forward inputs");
+        .expect("snapshot does not cover requested walk-forward inputs");
         let snapshot_hash = snapshot
             .manifest
             .snapshot_hash
