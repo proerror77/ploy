@@ -93,6 +93,8 @@ jobs:
           EOF
           scp scripts/enrich_recording_official_settlement.py \
             tango-1-1:"${REMOTE_DIR}/enrich_recording_official_settlement.py"
+          scp scripts/enrich_replay_runtime_evidence.py \
+            tango-1-1:"${REMOTE_DIR}/enrich_replay_runtime_evidence.py"
 
           # shellcheck disable=SC2029
           ssh tango-1-1 /bin/bash -s -- \
@@ -115,6 +117,7 @@ jobs:
           test -r "${config_path}"
           test -r "${recording_path}"
           test -r "${remote_dir}/enrich_recording_official_settlement.py"
+          test -r "${remote_dir}/enrich_replay_runtime_evidence.py"
 
           set -a
           . /opt/ploy/.env
@@ -136,6 +139,8 @@ jobs:
           WITH row_outcomes AS (
             SELECT
               event_id,
+              token_id,
+              avg_exit_price::text AS settlement,
               CASE
                 WHEN market_side = 'UP' AND avg_exit_price >= 0.99 THEN 1
                 WHEN market_side = 'UP' AND avg_exit_price <= 0.01 THEN 0
@@ -153,20 +158,26 @@ jobs:
           unambiguous AS (
             SELECT
               event_id,
-              MIN(outcome_int) AS outcome_int
+              token_id,
+              MIN(outcome_int) AS outcome_int,
+              MIN(settlement) AS settlement
             FROM row_outcomes
             WHERE event_id IS NOT NULL
+              AND token_id IS NOT NULL
               AND outcome_int IS NOT NULL
-            GROUP BY event_id
+              AND settlement IS NOT NULL
+            GROUP BY event_id, token_id
             HAVING MIN(outcome_int) = MAX(outcome_int)
           )
           SELECT COALESCE(
             jsonb_agg(
               jsonb_build_object(
                 'event_id', event_id,
+                'token_id', token_id,
+                'settlement', settlement,
                 'resolved_up_won', outcome_int = 1
               )
-              ORDER BY event_id
+              ORDER BY event_id, token_id
             ),
             '[]'::jsonb
           )::text
@@ -210,16 +221,23 @@ jobs:
             --deployment-id "${deployment_id}" \
             --output-json "${remote_dir}/replay-evaluation.json"
 
+          python3 "${remote_dir}/enrich_replay_runtime_evidence.py" \
+            --input-json "${remote_dir}/replay-evaluation.json" \
+            --output-json "${remote_dir}/replay-evaluation.json" \
+            --settlements-json "${settlements_json}" \
+            --report-json "${remote_dir}/replay-evidence-enrichment.json"
+
           curl -fsS http://127.0.0.1:8081/api/reports/dry-run \
             -o "${remote_dir}/dryrun-report.json"
 
           test -s "${remote_dir}/replay-evaluation.json"
           test -s "${remote_dir}/dryrun-report.json"
-          ls -lh "${remote_dir}/replay-evaluation.json" "${remote_dir}/dryrun-report.json" "${enrichment_report}"
+          ls -lh "${remote_dir}/replay-evaluation.json" "${remote_dir}/dryrun-report.json" "${enrichment_report}" "${remote_dir}/replay-evidence-enrichment.json"
           EOF
 
           scp tango-1-1:"${REMOTE_DIR}/replay-evaluation.json" artifacts/replay/evaluation.json
           scp tango-1-1:"${REMOTE_DIR}/recording-enrichment.json" artifacts/replay/recording-enrichment.json
+          scp tango-1-1:"${REMOTE_DIR}/replay-evidence-enrichment.json" artifacts/replay/replay-evidence-enrichment.json
           scp tango-1-1:"${REMOTE_DIR}/dryrun-report.json" artifacts/dryrun/dryrun.json
 
       - name: Compare replay and dry-run evidence

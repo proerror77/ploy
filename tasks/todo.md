@@ -8,7 +8,8 @@
 - [x] Verify Python tests, workflow YAML, shell syntax, and diff hygiene.
 - [x] Open PR, wait for CI, merge, then rerun strict recorded replay parity.
 - [x] Fix the post-merge `psql -c` variable-substitution failure and rerun strict recorded replay parity.
-- [ ] Fix settlement lookup runtime-mode mismatch and rerun strict recorded replay parity.
+- [x] Fix settlement lookup runtime-mode mismatch and rerun strict recorded replay parity.
+- [ ] Backfill replay artifact event-level settlement from the same official map and rerun strict recorded replay parity.
 
 ## Review
 
@@ -32,6 +33,12 @@
   replay run `25662126098` completed but still blocked because the settlement
   lookup used `runtime_mode = 'dryrun'` while current dry-run evidence is stored
   as `dry_run`; the follow-up lookup accepts both spellings.
+- PR #405 merged as `63552cd05c84573d3e3c2f3ad546f581ce5302eb`. Replay run
+  `25662486505` enriched one `event_expired` row and found one settlement row,
+  but strict parity still blocked because the replay JSON `runtime_evidence`
+  event kept `settlement=open`. The next follow-up uses the same official
+  settlement map to backfill replay artifact event-level settlement by
+  `event_id + token_id`, without relaxing parity comparison.
 
 # Dry-Run Conservative Factor And Event-Level Replay Parity (2026-05-11)
 
