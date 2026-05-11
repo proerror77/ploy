@@ -262,6 +262,7 @@ fn tango_deploy_keeps_pm5d_live_paused() {
     let mut offenders = Vec::new();
 
     for needle in [
+        "environment: ${{ inputs.deploy && 'tango-1-1' || 'tango-1-1-build-only' }}",
         "Verify live deployment remains paused in bundle",
         "pm5d.threelayer.live.json",
         "desired_state=paused",
