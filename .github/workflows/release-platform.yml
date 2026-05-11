@@ -87,6 +87,7 @@ jobs:
           # binary names used by existing hosts and systemd units.
           cargo build --release --locked \
             --target "${PLATFORM_TARGET}" \
+            --features new-ploy-runner/full \
             -p new-ployd \
             -p ployctl \
             -p ploytui \

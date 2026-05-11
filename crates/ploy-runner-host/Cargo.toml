@@ -8,7 +8,7 @@ repository.workspace = true
 description = "CLI host crate for the Ploy strategy runner"
 
 [features]
-default = ["full"]
+default = ["lean-replay"]
 full = ["ops", "run-full"]
 lean-backtest = ["ploy-strategy-runtime/backtest-db"]
 lean-replay = ["ploy-strategy-runtime/replay"]

@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Bootstrap shell for the next-generation Ploy strategy runner"
 
 [features]
-default = ["full"]
+default = ["lean-replay"]
 full = ["ploy-runner-host/full"]
 lean-backtest = ["ploy-runner-host/lean-backtest"]
 lean-replay = ["ploy-runner-host/lean-replay"]

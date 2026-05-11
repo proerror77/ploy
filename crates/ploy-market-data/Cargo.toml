@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Market-data collection, discovery, and scanning infrastructure for Ploy"
 
 [features]
-default = ["live"]
+default = []
 live = [
     "dep:futures",
     "dep:polymarket-client-sdk",

@@ -35,7 +35,7 @@ cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
 cargo run -p ployctl -- trading cancel example.live <order-id>
 cargo run -p ploytui
-cargo run -p new-ploy-runner -- run --config config/strategies/02-pm5d.unified.toml --dry-run
+cargo run -p new-ploy-runner --features full -- run --config config/strategies/02-pm5d.unified.toml --dry-run
 # realtime operator stream
 curl -N http://127.0.0.1:8081/api/events/stream
 rtk cargo test --test platform_smoke -- --nocapture
@@ -128,12 +128,14 @@ Use `new-ploy-runner -- run --config ...` for:
 
 - local backtests
 - local dry-run debugging
+- full live/dry-run mode requires the explicit Cargo feature:
+  `cargo run -p new-ploy-runner --features full -- run --config ...`
 - one-off manual strategy inspection
 
 Example:
 
 ```bash
-cargo run -p new-ploy-runner -- run --config config/strategies/02-pm5d.v4-dryrun.toml --dry-run
+cargo run -p new-ploy-runner --features full -- run --config config/strategies/02-pm5d.v4-dryrun.toml --dry-run
 ```
 
 Use deployment manifests when you want the platform daemon to own lifecycle and supervision.
@@ -583,7 +585,7 @@ cargo run -p ployctl -- deployments apply config/deployments/example.paper.json
 cargo run -p ployctl -- deployments list
 cargo run -p ployctl -- deployments inspect example.paper
 cargo run -p ploytui
-cargo run -p new-ploy-runner -- run --config config/strategies/02-pm5d.unified.toml --dry-run
+cargo run -p new-ploy-runner --features full -- run --config config/strategies/02-pm5d.unified.toml --dry-run
 curl -N http://127.0.0.1:8081/api/events/stream
 rtk cargo check -p new-ployd         # Fast daemon type-check loop
 rtk cargo check -p new-ploy-runner   # Fast runner type-check loop
@@ -593,7 +595,7 @@ rtk cargo test --test platform_smoke platform_smoke_registers_and_starts_one_dep
 cargo fmt --check                    # Check formatting
 cargo clippy -- -D warnings          # Lint
 rtk cargo build -p new-ployd         # Build the daemon binary
-rtk cargo build -p new-ploy-runner   # Build the runner binary
+rtk cargo build -p new-ploy-runner --features full   # Build the full runner binary
 rtk cargo build -p ployctl           # Build the operator client binary
 rtk cargo build -p ploytui           # Build the terminal console binary
 ```

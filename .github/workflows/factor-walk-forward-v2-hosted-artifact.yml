@@ -222,7 +222,7 @@ jobs:
       - name: Build factor walk-forward
         run: |
           set -euo pipefail
-          cargo build --release --locked \
+          cargo build --profile fast --locked \
             -p ploy-research \
             --features db \
             --example factor_walk_forward_v2
@@ -260,7 +260,7 @@ jobs:
           if [ -n "${replay_parity_json}" ]; then
             args+=(--replay-parity-json "${replay_parity_json}")
           fi
-          ./target/release/examples/factor_walk_forward_v2 "${args[@]}" \
+          ./target/fast/examples/factor_walk_forward_v2 "${args[@]}" \
             | tee artifacts/factor-walk-forward-v2/report.txt
           echo "canonical_result=snapshot_artifact" | tee artifacts/factor-walk-forward-v2/source.txt
 

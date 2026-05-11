@@ -168,7 +168,7 @@ jobs:
       - name: Build factor review
         run: |
           set -euo pipefail
-          cargo build --release --locked \
+          cargo build --profile fast --locked \
             -p ploy-research \
             --features db \
             --example factor_review_v2
@@ -177,7 +177,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/factor-review-v2
-          ./target/release/examples/factor_review_v2 \
+          ./target/fast/examples/factor_review_v2 \
             --snapshot-dir artifacts/research-snapshot \
             --symbols "${{ github.event.inputs.symbols }}" \
             --start-date "${{ github.event.inputs.start_date }}" \
