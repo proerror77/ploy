@@ -144,7 +144,7 @@ jobs:
                 ELSE NULL
               END AS outcome_int
             FROM strategy_runtime_event_track_record
-            WHERE runtime_mode = 'dryrun'
+            WHERE runtime_mode IN ('dry_run', 'dryrun')
               AND deployment_id = :'deployment_id'
               AND is_closed
               AND opened_at >= :'since_ts'::timestamptz - INTERVAL '10 minutes'

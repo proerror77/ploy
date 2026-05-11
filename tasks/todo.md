@@ -7,7 +7,8 @@
 - [x] Wire `recorded-replay-parity.yml` to build the enriched recording on `tango-1-1` before replay without mutating the source recording.
 - [x] Verify Python tests, workflow YAML, shell syntax, and diff hygiene.
 - [x] Open PR, wait for CI, merge, then rerun strict recorded replay parity.
-- [ ] Fix the post-merge `psql -c` variable-substitution failure and rerun strict recorded replay parity.
+- [x] Fix the post-merge `psql -c` variable-substitution failure and rerun strict recorded replay parity.
+- [ ] Fix settlement lookup runtime-mode mismatch and rerun strict recorded replay parity.
 
 ## Review
 
@@ -27,6 +28,10 @@
   psql variables were not expanded inside `-c`; the follow-up fix feeds SQL on
   stdin so `:'deployment_id'`, `:'since_ts'`, and `:'until_ts'` are expanded by
   psql before execution.
+- PR #404 merged as `e028a4b61f6b9723410012fb7c21ed48cf58fbaf`. The next
+  replay run `25662126098` completed but still blocked because the settlement
+  lookup used `runtime_mode = 'dryrun'` while current dry-run evidence is stored
+  as `dry_run`; the follow-up lookup accepts both spellings.
 
 # Dry-Run Conservative Factor And Event-Level Replay Parity (2026-05-11)
 
