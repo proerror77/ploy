@@ -202,7 +202,62 @@ FROM (
 RUNTIME_EVIDENCE_QUERY = f"""
 SELECT jsonb_build_object(
   'schema_version', 1,
-  'basis', 'strategy_runtime_orders_and_fills',
+  'basis', 'strategy_runtime_orders_fills_and_events',
+  'events', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'runtime_mode', o.runtime_mode,
+      'strategy_id', o.strategy_id,
+      'deployment_id', o.deployment_id,
+      'event_id', o.event_id,
+      'market_id', o.event_id,
+      'intent_id', o.intent_id,
+      'order_id', o.order_id,
+      'token_id', o.token_id,
+      'market_side', o.market_side,
+      'side', o.order_side,
+      'decision_ts', o.recorded_at,
+      'quote', COALESCE(o.limit_price, o.avg_fill_price),
+      'signal_inputs', jsonb_build_object(
+        'purpose', COALESCE(o.context ->> 'purpose', 'ENTRY'),
+        'requested_qty', o.quantity,
+        'limit_price', o.limit_price
+      ),
+      'entry_price', COALESCE(fill.avg_fill_price, o.avg_fill_price, o.limit_price),
+      'fill_status', o.status,
+      'settlement', CASE
+        WHEN COALESCE(track.is_closed, false)
+          THEN COALESCE(track.avg_exit_price::text, 'closed')
+        ELSE 'open'
+      END,
+      'pnl', COALESCE(track.net_pnl, fill.pnl, 0)
+    ) ORDER BY o.recorded_at, o.order_id)
+    FROM strategy_runtime_orders o
+    LEFT JOIN LATERAL (
+      SELECT
+        CASE
+          WHEN COALESCE(SUM(f.quantity), 0) > 0
+            THEN SUM(f.quantity * f.price) / SUM(f.quantity)
+          ELSE NULL
+        END AS avg_fill_price,
+        SUM(
+          CASE
+            WHEN f.fill_side = 'SELL' THEN f.quantity * f.price
+            ELSE -(f.quantity * f.price)
+          END - f.fee
+        ) AS pnl
+      FROM strategy_runtime_fills f
+      WHERE f.runtime_mode = o.runtime_mode
+        AND f.strategy_id = o.strategy_id
+        AND f.deployment_id = o.deployment_id
+        AND f.order_id = o.order_id
+    ) fill ON true
+    LEFT JOIN strategy_runtime_event_track_record track
+      ON track.runtime_mode = o.runtime_mode
+      AND track.strategy_id = o.strategy_id
+      AND track.deployment_id = o.deployment_id
+      AND track.intent_id = o.intent_id
+    WHERE o.runtime_mode IN ({MODE_FILTER})
+  ), '[]'::jsonb),
   'orders', COALESCE((
     SELECT jsonb_agg(jsonb_build_object(
       'runtime_mode', o.runtime_mode,
@@ -804,7 +859,8 @@ def empty_payload():
         "execution_diagnostics": build_execution_diagnostics([]),
         "runtime_evidence": {
             "schema_version": 1,
-            "basis": "strategy_runtime_orders_and_fills",
+            "basis": "strategy_runtime_orders_fills_and_events",
+            "events": [],
             "orders": [],
             "fills": [],
         },

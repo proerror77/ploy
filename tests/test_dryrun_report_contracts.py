@@ -111,19 +111,24 @@ class DryRunReportContractTests(unittest.TestCase):
         payload = summary.empty_payload()
 
         self.assertEqual(payload["runtime_evidence"]["schema_version"], 1)
-        self.assertEqual(payload["runtime_evidence"]["basis"], "strategy_runtime_orders_and_fills")
+        self.assertEqual(payload["runtime_evidence"]["basis"], "strategy_runtime_orders_fills_and_events")
+        self.assertEqual(payload["runtime_evidence"]["events"], [])
         self.assertEqual(payload["runtime_evidence"]["orders"], [])
         self.assertEqual(payload["runtime_evidence"]["fills"], [])
 
-    def test_runtime_evidence_query_exports_order_and_fill_rows(self) -> None:
+    def test_runtime_evidence_query_exports_event_order_and_fill_rows(self) -> None:
         script = SUMMARY_SCRIPT.read_text()
 
         self.assertIn("RUNTIME_EVIDENCE_QUERY", script)
         self.assertIn('"runtime_evidence"', script)
         self.assertIn("FROM strategy_runtime_orders o", script)
+        self.assertIn("LEFT JOIN strategy_runtime_event_track_record track", script)
+        self.assertIn("FROM strategy_runtime_orders o", script)
         self.assertIn("FROM strategy_runtime_fills f", script)
+        self.assertIn("'events'", script)
         self.assertIn("'orders'", script)
         self.assertIn("'fills'", script)
+        self.assertIn("'signal_inputs'", script)
         self.assertIn("'context', o.context", script)
 
     def test_report_contract_checker_accepts_clean_empty_dryrun(self) -> None:
@@ -136,7 +141,8 @@ class DryRunReportContractTests(unittest.TestCase):
             "execution_diagnostics": {"basis": "strategy_runtime_orders"},
             "runtime_evidence": {
                 "schema_version": 1,
-                "basis": "strategy_runtime_orders_and_fills",
+                "basis": "strategy_runtime_orders_fills_and_events",
+                "events": [],
                 "orders": [],
                 "fills": [],
             },

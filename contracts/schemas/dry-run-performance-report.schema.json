@@ -765,6 +765,11 @@
         "basis": {
           "type": "string"
         },
+        "events": {
+          "default": [],
+          "type": "array",
+          "items": true
+        },
         "fills": {
           "default": [],
           "type": "array",

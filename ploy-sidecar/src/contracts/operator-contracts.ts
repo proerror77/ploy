@@ -61,7 +61,7 @@ export interface DryRunOpenPositionRow { deployment_id?: string | null; entry_pr
 
 export interface DryRunPairingReport { current_view_rows: number; fills_in_mixed_event_groups: number; mixed_event_groups: number; pair_key: string; side_aware_rows: number; }
 
-export interface DryRunRuntimeEvidence { basis: string; fills?: JsonValue[]; orders?: JsonValue[]; schema_version: number; }
+export interface DryRunRuntimeEvidence { basis: string; events?: JsonValue[]; fills?: JsonValue[]; orders?: JsonValue[]; schema_version: number; }
 
 export interface DryRunStrategyReport { by_window: DryRunWindowRow[]; closed_trades: DryRunClosedTradeRow[]; daily: DryRunDailyRow[]; daily_by_window: DryRunDailyWindowRow[]; deployment_id: string; equity_curve: DryRunEquityPoint[]; execution_diagnostics?: DryRunExecutionDiagnostics | null; experiment_label?: string | null; hourly?: DryRunHourlyRow[]; hourly_by_window?: DryRunHourlyWindowRow[]; label: string; metrics: DryRunMetrics; open_positions: DryRunOpenPositionRow[]; recent_closed: DryRunClosedTradeRow[]; runtime_mode: string; strategy_id: string; summary: DryRunSummary; symbols: DryRunSymbolRow[]; symbols_by_window: DryRunSymbolRow[]; }
 

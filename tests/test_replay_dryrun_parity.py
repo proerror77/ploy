@@ -22,9 +22,32 @@ def evidence_payload(
     deployment_id="pm5d.threelayer.test",
     created_at="2026-05-02T01:02:03Z",
     fill_timestamp="2026-05-02T01:02:04Z",
+    event_side="BUY",
 ):
+    event_pnl = f"-{DecimalString.mul('10', fill_price)}"
     return {
         "runtime_evidence": {
+            "events": [
+                {
+                    "deployment_id": deployment_id,
+                    "intent_id": intent_id,
+                    "order_id": order_id,
+                    "event_id": "event-1",
+                    "token_id": "token-up",
+                    "decision_ts": created_at,
+                    "quote": limit_price,
+                    "signal_inputs": {
+                        "purpose": "ENTRY",
+                        "requested_qty": "10",
+                        "limit_price": limit_price,
+                    },
+                    "side": event_side,
+                    "entry_price": fill_price,
+                    "fill_status": "FILLED",
+                    "settlement": "open",
+                    "pnl": event_pnl,
+                }
+            ],
             "orders": [
                 {
                     "deployment_id": deployment_id,
@@ -60,6 +83,14 @@ def evidence_payload(
     }
 
 
+class DecimalString:
+    @staticmethod
+    def mul(left, right):
+        from decimal import Decimal
+
+        return format((Decimal(str(left)) * Decimal(str(right))).normalize(), "f")
+
+
 class ReplayDryrunParityTests(unittest.TestCase):
     def run_script(self, replay, dryrun, extra_args=None):
         with tempfile.TemporaryDirectory() as tmp:
@@ -91,16 +122,17 @@ class ReplayDryrunParityTests(unittest.TestCase):
             )
             return json.loads(output_path.read_text(encoding="utf-8"))
 
-    def test_runtime_evidence_parity_ready_for_matching_orders_and_fills(self):
+    def test_runtime_evidence_parity_ready_for_matching_events_orders_and_fills(self):
         result = self.run_script(evidence_payload(), evidence_payload())
 
         runtime = result["runtime_evidence_comparison"]
         self.assertTrue(runtime["strict_parity_ready"])
         self.assertEqual(result["decision"], "continue")
+        self.assertEqual(runtime["events"]["shared_count"], 1)
         self.assertEqual(runtime["orders"]["shared_count"], 1)
         self.assertEqual(runtime["fills"]["shared_count"], 1)
         self.assertEqual(result["blocking_risk_flags"], [])
-        self.assertIn("replay_has_no_event_level_rows", result["advisory_flags"])
+        self.assertEqual(result["advisory_flags"], [])
 
     def test_runtime_evidence_matches_semantic_rows_with_different_generated_ids(self):
         result = self.run_script(
@@ -111,6 +143,7 @@ class ReplayDryrunParityTests(unittest.TestCase):
         runtime = result["runtime_evidence_comparison"]
         self.assertTrue(runtime["strict_parity_ready"])
         self.assertEqual(result["decision"], "continue")
+        self.assertEqual(runtime["events"]["shared_count"], 1)
         self.assertEqual(runtime["orders"]["shared_count"], 1)
         self.assertEqual(runtime["fills"]["shared_count"], 1)
 
@@ -125,7 +158,7 @@ class ReplayDryrunParityTests(unittest.TestCase):
         self.assertEqual(result["decision"], "fix-data-or-runtime-mismatch")
         self.assertIn("runtime_evidence_field_mismatches", result["risk_flags"])
         self.assertIn("runtime_evidence_field_mismatches", result["blocking_risk_flags"])
-        self.assertEqual(runtime["mismatches"][0]["field"], "price")
+        self.assertIn(runtime["mismatches"][0]["field"], {"entry_price", "pnl", "price"})
 
     def test_runtime_evidence_blocks_fill_side_mismatch(self):
         result = self.run_script(
@@ -165,6 +198,7 @@ class ReplayDryrunParityTests(unittest.TestCase):
         )
         dryrun["runtime_evidence"]["orders"].extend(extra["runtime_evidence"]["orders"])
         dryrun["runtime_evidence"]["fills"].extend(extra["runtime_evidence"]["fills"])
+        dryrun["runtime_evidence"]["events"].extend(extra["runtime_evidence"]["events"])
 
         result = self.run_script(
             replay,
@@ -181,9 +215,23 @@ class ReplayDryrunParityTests(unittest.TestCase):
 
         runtime = result["runtime_evidence_comparison"]
         self.assertTrue(runtime["strict_parity_ready"])
+        self.assertEqual(runtime["events"]["dryrun_count"], 1)
         self.assertEqual(runtime["orders"]["dryrun_count"], 1)
         self.assertEqual(runtime["fills"]["dryrun_count"], 1)
         self.assertEqual(result["filters"]["deployment_id"], "pm5d.threelayer.test")
+
+    def test_runtime_evidence_blocks_missing_event_rows(self):
+        replay = evidence_payload()
+        dryrun = evidence_payload()
+        replay["runtime_evidence"]["events"] = []
+
+        result = self.run_script(replay, dryrun)
+
+        runtime = result["runtime_evidence_comparison"]
+        self.assertFalse(runtime["strict_parity_ready"])
+        self.assertEqual(result["decision"], "fix-data-or-runtime-mismatch")
+        self.assertIn("replay_has_no_event_level_rows", result["blocking_risk_flags"])
+        self.assertEqual(runtime["events"]["replay_count"], 0)
 
 
 if __name__ == "__main__":

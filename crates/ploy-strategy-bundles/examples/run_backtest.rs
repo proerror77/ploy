@@ -13,12 +13,12 @@
 //! If no --db-url is given, uses synthetic market data.
 
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    config::FullConfig, DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder,
-    ReversalStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
-    StrategyLogic, StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy,
+    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
+    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
+    StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy, config::FullConfig,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -261,6 +261,15 @@ mod tests {
         let evidence = normalized_runtime_evidence(&snapshot);
 
         assert_eq!(evidence["basis"], "trading_runtime_snapshot");
+        assert_eq!(evidence["events"][0]["event_id"], "event-1");
+        assert!(evidence["events"][0]["decision_ts"].as_str().is_some());
+        assert_eq!(evidence["events"][0]["quote"], "0.42");
+        assert_eq!(evidence["events"][0]["signal_inputs"]["purpose"], "ENTRY");
+        assert_eq!(evidence["events"][0]["side"], "BUY");
+        assert_eq!(evidence["events"][0]["entry_price"], "0.41");
+        assert_eq!(evidence["events"][0]["fill_status"], "FILLED");
+        assert_eq!(evidence["events"][0]["settlement"], "open");
+        assert_eq!(evidence["events"][0]["pnl"], "-4.10");
         assert_eq!(evidence["orders"][0]["deployment_id"], "pm5d-test");
         assert_eq!(evidence["orders"][0]["intent_id"], "intent-1");
         assert_eq!(evidence["orders"][0]["status"], "FILLED");
@@ -685,6 +694,7 @@ fn normalized_runtime_evidence(
 
     let mut fill_quantity_by_order: BTreeMap<&str, Decimal> = BTreeMap::new();
     let mut fill_notional_by_order: BTreeMap<&str, Decimal> = BTreeMap::new();
+    let mut fill_pnl_by_order: BTreeMap<&str, Decimal> = BTreeMap::new();
     for fill in &snapshot.fills {
         *fill_quantity_by_order
             .entry(fill.order_id.as_str())
@@ -692,7 +702,61 @@ fn normalized_runtime_evidence(
         *fill_notional_by_order
             .entry(fill.order_id.as_str())
             .or_default() += fill.quantity * fill.price;
+        let signed_notional = match fill.side {
+            ploy_trading::TradeSide::Buy => -(fill.quantity * fill.price),
+            ploy_trading::TradeSide::Sell => fill.quantity * fill.price,
+        };
+        *fill_pnl_by_order.entry(fill.order_id.as_str()).or_default() += signed_notional - fill.fee;
     }
+
+    let events: Vec<_> = snapshot
+        .orders
+        .iter()
+        .map(|order| {
+            let intent = intents_by_id.get(order.intent_id.as_str()).copied();
+            let fill_quantity = fill_quantity_by_order
+                .get(order.order_id.as_str())
+                .copied()
+                .unwrap_or(order.filled_qty);
+            let avg_fill_price = if fill_quantity == Decimal::ZERO {
+                None
+            } else {
+                fill_notional_by_order
+                    .get(order.order_id.as_str())
+                    .map(|notional| *notional / fill_quantity)
+            };
+            let purpose = intent
+                .map(|intent| intent_purpose_label(intent.purpose))
+                .unwrap_or("ENTRY");
+
+            json!({
+                "deployment_id": empty_to_none(order.deployment_id.as_str())
+                    .or_else(|| intent.and_then(|intent| empty_to_none(intent.deployment_id.as_str()))),
+                "intent_id": order.intent_id.as_str(),
+                "order_id": order.order_id.as_str(),
+                "event_id": intent.map(|intent| intent.market_id.as_str()),
+                "market_id": intent.map(|intent| intent.market_id.as_str()),
+                "token_id": order.token_id.as_str(),
+                "decision_ts": intent.map(|intent| intent.created_at),
+                "quote": order.limit_price,
+                "signal_inputs": {
+                    "purpose": purpose,
+                    "requested_qty": order.requested_qty,
+                    "limit_price": order.limit_price,
+                },
+                "side": intent
+                    .map(|intent| trade_side_label(intent.side))
+                    .unwrap_or("UNKNOWN"),
+                "entry_price": avg_fill_price.or(order.limit_price),
+                "fill_status": order_state_label(order.state),
+                "settlement": "open",
+                "pnl": fill_pnl_by_order
+                    .get(order.order_id.as_str())
+                    .copied()
+                    .unwrap_or(Decimal::ZERO),
+            })
+        })
+        .collect();
 
     let orders: Vec<_> = snapshot
         .orders
@@ -770,17 +834,14 @@ fn normalized_runtime_evidence(
         "schema_version": 1,
         "basis": "trading_runtime_snapshot",
         "comparison_contract": "Compare these normalized rows against strategy_runtime_orders and strategy_runtime_fills exported from Tango for the same deployment/config/feed window.",
+        "events": events,
         "orders": orders,
         "fills": fills,
     })
 }
 
 fn empty_to_none(value: &str) -> Option<&str> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn trade_side_label(side: ploy_trading::TradeSide) -> &'static str {

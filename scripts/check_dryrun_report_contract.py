@@ -61,6 +61,7 @@ def main() -> int:
                 "total_trades": nested_value(payload, "summary.total_trades"),
                 "sharpe_basis": nested_value(payload, "metrics.sharpe_basis"),
                 "execution_diagnostics": nested_value(payload, "execution_diagnostics.basis"),
+                "runtime_evidence_events": len(nested_value(payload, "runtime_evidence.events") or []),
                 "runtime_evidence_orders": len(nested_value(payload, "runtime_evidence.orders") or []),
                 "runtime_evidence_fills": len(nested_value(payload, "runtime_evidence.fills") or []),
             },
