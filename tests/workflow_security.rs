@@ -335,6 +335,31 @@ fn hosted_factor_walk_forward_uploads_alpha_chain_summary() {
 }
 
 #[test]
+fn hosted_factor_walk_forward_splits_replay_parity_artifact_suffix() {
+    let workflow = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "replay_parity_run_id",
+        "replay_parity_artifact_name",
+        "split(\":\", 1)",
+        "replay_parity_run_id must be <run-id>:<artifact-name>",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!(
+                "factor-walk-forward-v2-hosted-artifact.yml: missing `{needle}`"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "hosted factor walk-forward replay parity artifact split guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn tango_deploy_keeps_pm5d_live_paused() {
     let workflow = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
     let cloud_assist = workflow_contents("scripts/ci/deploy_tango_cloud_assist.py");

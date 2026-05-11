@@ -135,6 +135,13 @@ jobs:
                   allowed = ", ".join(sorted(choices[key]))
                   raise SystemExit(f"options_json value for {key} must be one of: {allowed}")
 
+          if ":" in values["replay_parity_run_id"] and not values["replay_parity_artifact_name"]:
+              run_id, artifact_name = values["replay_parity_run_id"].split(":", 1)
+              if not run_id or not artifact_name:
+                  raise SystemExit("replay_parity_run_id must be <run-id>:<artifact-name>")
+              values["replay_parity_run_id"] = run_id
+              values["replay_parity_artifact_name"] = artifact_name
+
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
               for key, value in values.items():
                   if "\n" in value:
