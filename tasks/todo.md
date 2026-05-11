@@ -13461,7 +13461,7 @@ Plan:
 - [x] Add independent PM book sampling so CEX/observation sampling can stay at 30s while PM book lookups use a coarser cadence.
 - [x] Validate the code/workflow change locally.
 - [x] Open PR, merge, deploy, and rerun the full snapshot.
-- [ ] Fix hosted walk-forward snapshot parsing for nullable LOB/CEX derived fields, merge, and rerun the walk-forward.
+- [x] Fix hosted walk-forward snapshot parsing for nullable LOB/CEX derived fields, merge, and rerun the walk-forward.
 
 Review:
 
@@ -13471,3 +13471,4 @@ Review:
 - PR #390 merged as `68928d98` and deployed by run `25642258988`.
 - Full `pm5d-vol` snapshot run `25642459432` succeeded with `pm_book_sample_secs=300`, `compile_status=0`, artifact `research-snapshot-25642459432` size `339071681` bytes, and row counts: observations `81645`, Deribit snapshots `16049`, PM book snapshots `46906`.
 - Hosted walk-forward run `25642965148` proved the snapshot artifact is complete but failed while parsing `observations.json`: `invalid type: null, expected f64` for nullable LOB/CEX derived fields that were not yet covered by the nullable-as-NaN serde compatibility path.
+- PR #391 merged as `0b394616` and hosted walk-forward run `25643191151` succeeded from snapshot `25642459432`. AutoFactor promotion is correctly blocked, not broken: handoff status `blocked`, recommendation `do_not_promote`, with blockers `symbol_holdout` and `walk_forward_oos`; settlement AutoFactor formulas are watchlist only because of `low_icir`.
