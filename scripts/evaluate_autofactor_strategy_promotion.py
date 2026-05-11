@@ -463,20 +463,20 @@ def render_handoff_markdown(handoff: dict[str, Any]) -> str:
             "",
             "## Qualified Strategies",
             "",
-            "| factor | target | strategy profile | runtime score | icir | top bucket pnl |",
+            "| factor | target | strategy profile | runtime score | icir | top bucket avg label |",
             "| --- | --- | --- | --- | --- | --- |",
         ]
     )
     for strategy in handoff["strategies"]:
         metrics = strategy["metrics"]
         lines.append(
-            "| {name} | {target} | {profile} | {runtime_score} | {icir:.6f} | {pnl:.6f} |".format(
+            "| {name} | {target} | {profile} | {runtime_score} | {icir:.6f} | {label:.6f} |".format(
                 name=strategy["name"],
                 target=strategy["target"],
                 profile=strategy["strategy_profile"],
                 runtime_score=strategy["runtime_score"],
                 icir=metrics["icir"],
-                pnl=metrics["top_bucket_avg_label"],
+                label=metrics["top_bucket_avg_label"],
             )
         )
 
@@ -534,18 +534,18 @@ def render_markdown(result: dict[str, Any]) -> str:
         "",
     ]
     if result["qualified_strategies"]:
-        lines.append("| factor | target | runtime profile | icir | top bucket pnl |")
+        lines.append("| factor | target | runtime profile | icir | top bucket avg label |")
         lines.append("| --- | --- | --- | --- | --- |")
         for item in result["qualified_strategies"]:
             factor = item["factor"]
             mapping = item["runtime_mapping"] or {}
             lines.append(
-                "| {name} | {target} | {profile} | {icir:.6f} | {pnl:.6f} |".format(
+                "| {name} | {target} | {profile} | {icir:.6f} | {label:.6f} |".format(
                     name=factor["name"],
                     target=factor["target"],
                     profile=mapping.get("strategy_profile", ""),
                     icir=factor["icir"],
-                    pnl=factor["top_bucket_avg_label"],
+                    label=factor["top_bucket_avg_label"],
                 )
             )
     else:

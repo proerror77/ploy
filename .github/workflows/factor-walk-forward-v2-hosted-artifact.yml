@@ -469,7 +469,8 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const { applyResearchIssueLabels } = require("./.github/scripts/research-issue-labels.js");
+            const { applyResearchIssueLabels, labelsForDecision } = require("./.github/scripts/research-issue-labels.js");
+            const { buildWalkForwardEvidence } = require("./.github/scripts/autofactor-walk-forward-evidence.js");
             const issueNumberRaw = process.env.WALK_ISSUE_NUMBER || "";
             if (!issueNumberRaw) {
               core.info("No issue_number configured; skipping issue comment.");
@@ -477,30 +478,33 @@ jobs:
             }
             const issue_number = Number(issueNumberRaw);
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
-            const body = [
-              "Hosted factor walk-forward evidence:",
-              "",
-              `- Workflow: ${context.workflow}`,
-              `- Run URL: ${runUrl}`,
-              `- Git ref: ${{ github.event.inputs.git_ref }}`,
-              `- Source snapshot run: \`${{ github.event.inputs.snapshot_run_id }}\``,
-              `- Dataset/window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}`,
-              `- Symbols: ${{ github.event.inputs.symbols }}`,
-              `- Artifact: \`factor-walk-forward-v2-${process.env.GITHUB_RUN_ID}\``,
-              "- Decision: pending"
-            ].join("\n");
+            const evidence = buildWalkForwardEvidence({
+              title: "Hosted factor walk-forward evidence",
+              artifactDir: "artifacts/factor-walk-forward-v2",
+              runnerLabel: "runner:hosted",
+              metadata: {
+                workflow: context.workflow,
+                runUrl,
+                gitRef: "${{ github.event.inputs.git_ref }}",
+                snapshotRunId: "${{ github.event.inputs.snapshot_run_id }}",
+                startDate: "${{ github.event.inputs.start_date }}",
+                endDate: "${{ github.event.inputs.end_date }}",
+                symbols: "${{ github.event.inputs.symbols }}",
+                artifactName: `factor-walk-forward-v2-${process.env.GITHUB_RUN_ID}`,
+              },
+            });
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number,
-              body
+              body: evidence.body
             });
             await applyResearchIssueLabels({
               github,
               context,
               core,
               issue_number,
-              labels: ["evidence:walk-forward", "runner:hosted", "decision:pending"]
+              labels: [...evidence.labels, ...labelsForDecision(evidence.decision)]
             });
 
       - name: Create ready handoff issue
