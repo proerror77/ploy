@@ -104,6 +104,37 @@ running or interpreting evidence.
   `search-feedback.json`, the chain compares current and previous `best_reward`
   and stops with `reward_stagnation` unless the run improves by at least
   `options_json.alpha_search_min_reward_improvement` (default `0.0`).
+- 2026-05-11 CI evidence: Pushed branch
+  `feat/event-ml-runtime-scorer-core` and ran hosted alpha-search smoke against
+  snapshot run `25642459432` with BTC/ETH and `chain_remaining=1`. Initial
+  smoke `25671421610` exposed legacy snapshot `null` parsing; fixed
+  `FactorObservation` nullable legacy numeric fields in
+  `crates/ploy-research/src/factors.rs`. Second smoke `25671998656` confirmed
+  parsing passed and then exposed a window mismatch; reran with the snapshot's
+  actual `2026-04-24 -> 2026-05-01` window.
+- 2026-05-11 CI evidence: Hosted alpha-search run `25672175576` succeeded and
+  uploaded alpha-search bundles for settlement and reprice targets. The
+  settlement target artifact reported `candidate_count=183`, `passed_count=32`,
+  best candidate `auto_settlement_conservative_settlement_edge`, and
+  `best_reward=4.81954070569323`; its chain decision had
+  `should_dispatch=true`, `selected_node_count=12`, and `reason=continue`.
+- 2026-05-11 CI evidence: The first chain dispatch exposed that
+  `gh workflow run` without `--ref` incorrectly created follow-up runs on
+  `main`; cancelled the accidental main runs and fixed the hosted workflow to
+  dispatch with `--ref ${{ github.ref_name }}`.
+- 2026-05-11 CI evidence: Follow-up run `25672625360` ran on
+  `feat/event-ml-runtime-scorer-core`, downloaded the prior alpha-search plan,
+  generated MCTS-guided candidates, and stopped cleanly with
+  `chain_next_run_false`. The settlement target improved to
+  `candidate_count=231`, `passed_count=68`, best candidate
+  `mcts_mcts_auto_settlement_conservative_settlement_edge_x_near_strike_near_strike_near_strike`,
+  and `best_reward=4.894975850946932`.
+- 2026-05-11 blocker: The latest available recorded replay parity artifact
+  `25669383472` is not promotion-ready: `strict_parity_ready=false`,
+  `decision=fix-data-or-runtime-mismatch`, and blocking risk flag
+  `runtime_evidence_field_mismatches`. Alpha search is automated enough to
+  explore formula branches, but producing a dry-run/live profitable strategy is
+  still blocked by replay/runtime parity evidence.
 
 # PM5D Settlement Probability PRD Execution Plan (2026-05-05)
 
