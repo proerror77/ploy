@@ -1,3 +1,35 @@
+# Recorded Replay Parity Auto Window (2026-05-12)
+
+## Goal
+
+Make the recorded replay/dry-run parity workflow derive a recent closed dry-run
+window automatically so alpha promotion can rerun parity after a fresh dry-run
+deploy without hand-picking fragile `since` / `until` bounds.
+
+## Plan
+
+- [x] Change `recorded-replay-parity.yml` so `since` and `until` can be `auto`.
+- [x] Persist the resolved window in workflow artifacts, summaries, and issue
+  comments.
+- [x] Add workflow security coverage for the auto-window contract.
+- [x] Update the research CI/CD runbook and validate YAML/tests/diff hygiene.
+
+## Review
+
+- 2026-05-12: `recorded-replay-parity.yml` now accepts the default
+  `since=auto` / `until=auto` path. Auto mode queries the target dry-run
+  deployment for the most recent 20 closed track-record rows, derives a
+  UTC-bounded parity window with 60-second padding, and writes
+  `resolved-window.json` / `resolved-window.env` for the comparison step,
+  summary, artifact, and issue comment.
+- 2026-05-12: Manual timestamps still work for reproducing a specific window.
+  Verification passed: YAML parse for all workflows, `rtk git diff --check`,
+  focused `workflow_security` tests
+  `recorded_replay_parity_supports_auto_window` and
+  `workflow_dispatch_inputs_stay_lintable`. The full `workflow_security` file
+  still has unrelated existing guard failures in host deploy provenance and
+  research issue label checks.
+
 # Tango Deploy Build-Only Environment (2026-05-11)
 
 ## Goal

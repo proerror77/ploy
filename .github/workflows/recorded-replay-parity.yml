@@ -16,11 +16,13 @@ on:
         required: true
         default: "/opt/ploy/data/recordings/pm5d-threelayer-canonical.ndjson"
       since:
-        description: "Inclusive ISO-8601 lower timestamp bound for parity rows"
-        required: true
+        description: "Inclusive ISO-8601 lower timestamp bound for parity rows, or auto"
+        required: false
+        default: "auto"
       until:
-        description: "Inclusive ISO-8601 upper timestamp bound for parity rows"
-        required: true
+        description: "Inclusive ISO-8601 upper timestamp bound for parity rows, or auto"
+        required: false
+        default: "auto"
       issue_number:
         description: "Optional GitHub issue number for posting parity evidence"
         required: false
@@ -126,10 +128,18 @@ jobs:
           . /opt/ploy/.env
           set +a
 
+          requested_since_ts="${since_ts}"
+          requested_until_ts="${until_ts}"
+          auto_window=false
+          case "${since_ts}" in ""|auto|AUTO) auto_window=true ;; esac
+          case "${until_ts}" in ""|auto|AUTO) auto_window=true ;; esac
+
           settlements_json="${remote_dir}/official-settlements.json"
           dryrun_report="${remote_dir}/dryrun-report.json"
           enriched_recording="${remote_dir}/recording-official-settlement.ndjson"
           enrichment_report="${remote_dir}/recording-enrichment.json"
+          resolved_window_json="${remote_dir}/resolved-window.json"
+          resolved_window_env="${remote_dir}/resolved-window.env"
           curl -fsS http://127.0.0.1:8081/api/reports/dry-run \
             -o "${dryrun_report}"
           if [ -n "${PLOY_DATABASE__URL:-}" ]; then
@@ -137,6 +147,97 @@ jobs:
           else
             PSQL=(env PGPASSWORD=postgres psql -U postgres -d ploy -v ON_ERROR_STOP=1 -t -A)
           fi
+
+          if [ "${auto_window}" = true ]; then
+            "${PSQL[@]}" \
+              -v deployment_id="${deployment_id}" \
+              > "${resolved_window_json}" <<'SQL'
+          WITH recent_closed AS (
+            SELECT
+              opened_at,
+              COALESCE(closed_at, last_fill_at, opened_at) AS evidence_at
+            FROM strategy_runtime_event_track_record
+            WHERE runtime_mode IN ('dry_run', 'dryrun')
+              AND deployment_id = :'deployment_id'
+              AND is_closed
+              AND opened_at IS NOT NULL
+            ORDER BY COALESCE(closed_at, last_fill_at, opened_at) DESC
+            LIMIT 20
+          ),
+          bounds AS (
+            SELECT
+              MIN(opened_at) - INTERVAL '60 seconds' AS since_ts,
+              MAX(evidence_at) + INTERVAL '60 seconds' AS until_ts,
+              COUNT(*) AS closed_row_count
+            FROM recent_closed
+          )
+          SELECT jsonb_build_object(
+            'mode', 'auto',
+            'closed_row_count', closed_row_count,
+            'since', to_char(since_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+            'until', to_char(until_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+          )::text
+          FROM bounds
+          WHERE closed_row_count > 0;
+          SQL
+            test -s "${resolved_window_json}"
+            python3 - "${resolved_window_json}" "${resolved_window_env}" <<'PY'
+          import json
+          import sys
+
+          source, dest = sys.argv[1:]
+          text = open(source, encoding="utf-8").read().strip()
+          if not text:
+              raise SystemExit("auto parity window found no closed dry-run rows")
+          payload = json.loads(text)
+          since = payload.get("since")
+          until = payload.get("until")
+          row_count = int(payload.get("closed_row_count") or 0)
+          if not since or not until or row_count <= 0:
+              raise SystemExit(f"invalid auto parity window: {payload}")
+          with open(dest, "w", encoding="utf-8") as handle:
+              handle.write(f"RESOLVED_SINCE={since}\n")
+              handle.write(f"RESOLVED_UNTIL={until}\n")
+              handle.write(f"RESOLVED_WINDOW_MODE=auto\n")
+              handle.write(f"RESOLVED_CLOSED_ROW_COUNT={row_count}\n")
+          PY
+            # shellcheck disable=SC1090
+            . "${resolved_window_env}"
+            since_ts="${RESOLVED_SINCE}"
+            until_ts="${RESOLVED_UNTIL}"
+          else
+            cat > "${resolved_window_env}" <<EOF_WINDOW
+          RESOLVED_SINCE=${since_ts}
+          RESOLVED_UNTIL=${until_ts}
+          RESOLVED_WINDOW_MODE=manual
+          RESOLVED_CLOSED_ROW_COUNT=
+          EOF_WINDOW
+            python3 - "${resolved_window_env}" "${resolved_window_json}" <<'PY'
+          import json
+          import sys
+
+          env_path, json_path = sys.argv[1:]
+          values = {}
+          for raw in open(env_path, encoding="utf-8"):
+              key, _, value = raw.rstrip("\n").partition("=")
+              values[key] = value
+          with open(json_path, "w", encoding="utf-8") as handle:
+              json.dump(
+                  {
+                      "mode": values.get("RESOLVED_WINDOW_MODE"),
+                      "closed_row_count": None,
+                      "since": values.get("RESOLVED_SINCE"),
+                      "until": values.get("RESOLVED_UNTIL"),
+                  },
+                  handle,
+                  indent=2,
+                  sort_keys=True,
+              )
+              handle.write("\n")
+          PY
+          fi
+          echo "Recorded replay parity window: ${since_ts} -> ${until_ts} (requested ${requested_since_ts} -> ${requested_until_ts})"
+
           "${PSQL[@]}" \
             -v deployment_id="${deployment_id}" \
             -v since_ts="${since_ts}" \
@@ -249,6 +350,8 @@ jobs:
           scp tango-1-1:"${REMOTE_DIR}/recording-enrichment.json" artifacts/replay/recording-enrichment.json
           scp tango-1-1:"${REMOTE_DIR}/replay-evidence-enrichment.json" artifacts/replay/replay-evidence-enrichment.json
           scp tango-1-1:"${REMOTE_DIR}/dryrun-report.json" artifacts/dryrun/dryrun.json
+          scp tango-1-1:"${REMOTE_DIR}/resolved-window.json" artifacts/parity/resolved-window.json
+          scp tango-1-1:"${REMOTE_DIR}/resolved-window.env" artifacts/parity/resolved-window.env
 
       - name: Compare replay and dry-run evidence
         env:
@@ -257,6 +360,12 @@ jobs:
           UNTIL: ${{ github.event.inputs.until }}
         run: |
           set -euo pipefail
+          if [ -f artifacts/parity/resolved-window.env ]; then
+            # shellcheck disable=SC1091
+            . artifacts/parity/resolved-window.env
+            SINCE="${RESOLVED_SINCE}"
+            UNTIL="${RESOLVED_UNTIL}"
+          fi
           python3 scripts/replay_dryrun_parity.py \
             --replay-json artifacts/replay/evaluation.json \
             --dryrun-json artifacts/dryrun/dryrun.json \
@@ -268,14 +377,34 @@ jobs:
       - name: Publish parity summary
         if: always()
         run: |
+          resolved_since="${{ github.event.inputs.since }}"
+          resolved_until="${{ github.event.inputs.until }}"
+          resolved_mode="manual"
+          resolved_count=""
+          RESOLVED_SINCE=""
+          RESOLVED_UNTIL=""
+          RESOLVED_WINDOW_MODE=""
+          RESOLVED_CLOSED_ROW_COUNT=""
+          if [ -f artifacts/parity/resolved-window.env ]; then
+            # shellcheck disable=SC1091
+            . artifacts/parity/resolved-window.env
+            resolved_since="${RESOLVED_SINCE}"
+            resolved_until="${RESOLVED_UNTIL}"
+            resolved_mode="${RESOLVED_WINDOW_MODE}"
+            resolved_count="${RESOLVED_CLOSED_ROW_COUNT:-}"
+          fi
           {
             echo "## Recorded Replay vs Dry-run Parity"
             echo ""
             echo "- Deployment: \`${{ github.event.inputs.deployment_id }}\`"
             echo "- Config: \`${{ github.event.inputs.config_path }}\`"
             echo "- Recording: \`${{ github.event.inputs.recording_path }}\`"
-            echo "- Since: \`${{ github.event.inputs.since }}\`"
-            echo "- Until: \`${{ github.event.inputs.until }}\`"
+            echo "- Requested window: \`${{ github.event.inputs.since }} -> ${{ github.event.inputs.until }}\`"
+            echo "- Resolved window: \`${resolved_since} -> ${resolved_until}\`"
+            echo "- Window mode: \`${resolved_mode}\`"
+            if [ -n "${resolved_count}" ]; then
+              echo "- Auto-window closed rows: \`${resolved_count}\`"
+            fi
             if [ -f artifacts/parity/parity-evaluation.json ]; then
               echo "- Artifact: \`recorded-replay-parity-${{ github.run_id }}\`"
               echo ""
@@ -320,6 +449,15 @@ jobs:
             let advisory = [];
             let sharedOrders = null;
             let sharedFills = null;
+            let resolvedWindow = {
+              since: "${{ github.event.inputs.since }}",
+              until: "${{ github.event.inputs.until }}",
+              mode: "manual",
+              closed_row_count: null
+            };
+            if (fs.existsSync("artifacts/parity/resolved-window.json")) {
+              resolvedWindow = JSON.parse(fs.readFileSync("artifacts/parity/resolved-window.json", "utf8"));
+            }
             if (fs.existsSync("artifacts/parity/parity-evaluation.json")) {
               const data = JSON.parse(fs.readFileSync("artifacts/parity/parity-evaluation.json", "utf8"));
               const runtime = data.runtime_evidence_comparison || {};
@@ -338,14 +476,17 @@ jobs:
               `- Deployment: \`${{ github.event.inputs.deployment_id }}\``,
               `- Config: \`${{ github.event.inputs.config_path }}\``,
               `- Recording: \`${{ github.event.inputs.recording_path }}\``,
-              `- Window: \`${{ github.event.inputs.since }} -> ${{ github.event.inputs.until }}\``,
+              `- Requested window: \`${{ github.event.inputs.since }} -> ${{ github.event.inputs.until }}\``,
+              `- Resolved window: \`${resolvedWindow.since} -> ${resolvedWindow.until}\``,
+              `- Window mode: \`${resolvedWindow.mode || "manual"}\``,
+              resolvedWindow.closed_row_count == null ? null : `- Auto-window closed rows: \`${resolvedWindow.closed_row_count}\``,
               `- Artifact: \`recorded-replay-parity-${process.env.GITHUB_RUN_ID}\``,
               `- Strict parity ready: \`${strictReady}\``,
               `- Shared orders/fills: \`${sharedOrders ?? "n/a"} / ${sharedFills ?? "n/a"}\``,
               `- Blocking flags: \`${blocking.join(", ") || "none"}\``,
               `- Advisory flags: \`${advisory.join(", ") || "none"}\``,
               `- Decision: ${decision}`
-            ].join("\n");
+            ].filter(Boolean).join("\n");
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,

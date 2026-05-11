@@ -60,6 +60,13 @@ mismatch is understood and tracked as a follow-up issue.
 | Trade deploy | `.github/workflows/deploy-trade.yml` | Deploy runner/configs to `ploy-trade-1` through a protected environment |
 | Platform release | `.github/workflows/release-platform.yml` | Build platform bundle and optionally deploy it |
 
+`recorded-replay-parity.yml` defaults `since=auto` and `until=auto`. In auto
+mode it queries the target dry-run deployment on `tango-1-1`, selects the most
+recent closed dry-run track-record rows, and records the resolved window in the
+workflow summary, issue comment, and `resolved-window.json` artifact. Manual
+timestamps remain supported for reproducing a known incident window or an older
+research issue.
+
 ## Research Issue Contract
 
 Every research issue must describe one testable claim. Use child issues when a

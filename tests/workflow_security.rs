@@ -256,6 +256,47 @@ fn replay_dryrun_parity_reports_strict_readiness() {
 }
 
 #[test]
+fn recorded_replay_parity_supports_auto_window() {
+    let workflow = workflow_contents(".github/workflows/recorded-replay-parity.yml");
+    let runbook = workflow_contents("docs/runbooks/strategy-research-cicd.md");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "default: \"auto\"",
+        "auto parity window found no closed dry-run rows",
+        "recent_closed AS",
+        "LIMIT 20",
+        "resolved-window.json",
+        "resolved-window.env",
+        "RESOLVED_SINCE",
+        "RESOLVED_UNTIL",
+        "Requested window",
+        "Resolved window",
+        "Auto-window closed rows",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!("recorded-replay-parity.yml: missing `{needle}`"));
+        }
+    }
+
+    for needle in [
+        "defaults `since=auto` and `until=auto`",
+        "records the resolved window",
+        "timestamps remain supported",
+    ] {
+        if !runbook.contains(needle) {
+            offenders.push(format!("strategy-research-cicd.md: missing `{needle}`"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "recorded replay parity auto-window guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn tango_deploy_keeps_pm5d_live_paused() {
     let workflow = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
     let cloud_assist = workflow_contents("scripts/ci/deploy_tango_cloud_assist.py");
