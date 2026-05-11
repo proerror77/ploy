@@ -70,9 +70,10 @@ class ApplyAutoFactorHandoffToConfigTests(unittest.TestCase):
 
     def test_updates_runtime_score_from_ready_handoff(self):
         _, config_text, summary = self.run_script(READY_HANDOFF)
+        runtime_score = READY_HANDOFF["strategies"][0]["runtime_score"]
 
         self.assertIn(
-            'three_layer_autofactor_runtime_score = "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike"',
+            f'three_layer_autofactor_runtime_score = "{runtime_score}"',
             config_text,
         )
         self.assertTrue(summary["changed"])
@@ -89,10 +90,11 @@ three_layer_min_entry_score = 0.25
 """
 
         _, config_text, summary = self.run_script(READY_HANDOFF, config_without_score)
+        runtime_score = READY_HANDOFF["strategies"][0]["runtime_score"]
 
         self.assertIn(
             'three_layer_strategy_profile = "settlement_probability"\n'
-            'three_layer_autofactor_runtime_score = "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike"',
+            f'three_layer_autofactor_runtime_score = "{runtime_score}"',
             config_text,
         )
         self.assertTrue(summary["changed"])
