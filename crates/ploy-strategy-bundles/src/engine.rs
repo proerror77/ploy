@@ -188,14 +188,11 @@ where
             updates_processed += 1;
             self.executor.observe_market_update(&update);
 
-            // Throttle: skip high-frequency price/quote updates if within the same time slot.
-            // Event lifecycle updates (discovered/expired) always pass through.
+            // Throttle: skip high-frequency evaluation updates if within the same time slot.
+            // Lifecycle and quote updates always pass through because they mutate strategy state
+            // that must stay aligned with the executor's order-book view.
             if let Some(hz) = self.config.throttle_hz {
-                let is_lifecycle = matches!(
-                    update,
-                    MarketUpdate::EventDiscovered { .. } | MarketUpdate::EventExpired { .. }
-                );
-                if !is_lifecycle {
+                if !Self::bypasses_throttle(&update) {
                     if let Some(ts) = Self::update_ts(&update) {
                         if let Some(last) = last_eval_ts {
                             let min_gap_ms = 1000 / hz as i64;
@@ -664,6 +661,15 @@ where
         }
     }
 
+    fn bypasses_throttle(update: &MarketUpdate) -> bool {
+        matches!(
+            update,
+            MarketUpdate::EventDiscovered { .. }
+                | MarketUpdate::EventExpired { .. }
+                | MarketUpdate::Quote { .. }
+        )
+    }
+
     /// Extract timestamp from a market update (for throttling).
     fn update_ts(update: &MarketUpdate) -> Option<DateTime<Utc>> {
         match update {
@@ -685,11 +691,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use ploy_trading::{
         FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
     };
@@ -707,6 +713,10 @@ mod tests {
 
     struct SingleUpdateFeed {
         next: Option<MarketUpdate>,
+    }
+
+    struct MultiUpdateFeed {
+        updates: VecDeque<MarketUpdate>,
     }
 
     #[test]
@@ -728,6 +738,13 @@ mod tests {
     impl Feed for SingleUpdateFeed {
         async fn next(&mut self) -> Option<MarketUpdate> {
             self.next.take()
+        }
+    }
+
+    #[async_trait]
+    impl Feed for MultiUpdateFeed {
+        async fn next(&mut self) -> Option<MarketUpdate> {
+            self.updates.pop_front()
         }
     }
 
@@ -799,6 +816,104 @@ mod tests {
         fn name(&self) -> &str {
             "noop_strategy"
         }
+    }
+
+    struct CountingStrategy {
+        updates: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl StrategyLogic for CountingStrategy {
+        fn on_update(
+            &mut self,
+            update: &MarketUpdate,
+            _positions: &PositionLedger,
+            _orders: &OrderLedger,
+        ) -> Vec<StrategyDecision> {
+            let kind = match update {
+                MarketUpdate::SpotPrice { .. } => "spot",
+                MarketUpdate::Quote { .. } => "quote",
+                MarketUpdate::EventDiscovered { .. } => "discovered",
+                MarketUpdate::EventExpired { .. } => "expired",
+                _ => "other",
+            };
+            self.updates.lock().unwrap().push(kind);
+            vec![]
+        }
+
+        fn on_fill(&mut self, _fill: &FillRecord) {}
+
+        fn name(&self) -> &str {
+            "counting_strategy"
+        }
+    }
+
+    #[tokio::test]
+    async fn quote_updates_bypass_runtime_throttle_to_keep_strategy_book_fresh() {
+        let now = Utc::now();
+        let seen_updates = Arc::new(Mutex::new(Vec::new()));
+        let feed = MultiUpdateFeed {
+            updates: VecDeque::from(vec![
+                MarketUpdate::SpotPrice {
+                    symbol: "BTCUSDT".into(),
+                    price: dec!(100000),
+                    ts: now,
+                },
+                MarketUpdate::SpotPrice {
+                    symbol: "BTCUSDT".into(),
+                    price: dec!(100001),
+                    ts: now + Duration::milliseconds(100),
+                },
+                MarketUpdate::Quote {
+                    token_id: "token-up".into(),
+                    bid: Some(dec!(0.56)),
+                    ask: Some(dec!(0.57)),
+                    bid_size: Some(dec!(100)),
+                    ask_size: Some(dec!(100)),
+                    bid_levels: vec![],
+                    ask_levels: vec![],
+                    ts: now + Duration::milliseconds(200),
+                },
+                MarketUpdate::Quote {
+                    token_id: "token-up".into(),
+                    bid: Some(dec!(0.58)),
+                    ask: Some(dec!(0.59)),
+                    bid_size: Some(dec!(100)),
+                    ask_size: Some(dec!(100)),
+                    bid_levels: vec![],
+                    ask_levels: vec![],
+                    ts: now + Duration::milliseconds(300),
+                },
+            ]),
+        };
+        let strategy = CountingStrategy {
+            updates: seen_updates.clone(),
+        };
+        let config = RuntimeConfig {
+            mode: RuntimeMode::DryRun,
+            throttle_hz: Some(1),
+            max_updates: None,
+            skip_settlement_exits: false,
+        };
+
+        let mut runtime = StrategyRuntime::new(
+            strategy,
+            feed,
+            RejectingExecutor,
+            Box::new(CollectingRecorder {
+                signals: Arc::new(Mutex::new(Vec::new())),
+                orders: Arc::new(Mutex::new(Vec::new())),
+                fills: Arc::new(Mutex::new(Vec::new())),
+            }),
+            config,
+        )
+        .with_deployment_id("test.dryrun");
+        let result = runtime.run().await;
+
+        assert_eq!(result.updates_processed, 4);
+        assert_eq!(
+            seen_updates.lock().unwrap().as_slice(),
+            ["spot", "quote", "quote"]
+        );
     }
 
     struct FillCountingStrategy {

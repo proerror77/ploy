@@ -1,3 +1,40 @@
+# Runtime Quote Throttle State Repair (2026-05-12)
+
+## Goal
+
+Keep dry-run strategy quote state aligned with executor quote state so
+AutoFactor handoff candidates are evaluated and executed against the same
+order-book view.
+
+## Plan
+
+- [x] Record the post-settlement-fix rejection diagnosis: the strategy emitted
+  a signal, but execution rejected it because the strategy used stale quote
+  state while the executor had fresher full-depth liquidity.
+- [x] Make `MarketUpdate::Quote` bypass runtime throttle, matching lifecycle
+  updates that mutate required strategy state.
+- [x] Add focused runtime coverage proving quote updates pass through under
+  throttle while ordinary spot-price evaluations remain throttled.
+- [x] Run focused strategy-bundle verification and diff hygiene checks.
+- [ ] Land through PR, deploy from `main`, then collect fresh dry-run rows
+  before rerunning recorded replay parity.
+
+## Review
+
+- 2026-05-12: Current blocker is a runtime state-alignment bug, not missing
+  alpha generation. The target dry-run emitted an entry signal, but execution
+  rejected it as `No full-depth liquidity` because the executor had observed
+  current quote levels while runtime throttling could skip the quote update
+  before `three_layer` refreshed its internal quote/depth cache.
+- 2026-05-12: Runtime now lets `MarketUpdate::Quote` bypass throttle alongside
+  event lifecycle updates. Verification passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-quote-throttle /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles quote_updates_bypass_runtime_throttle_to_keep_strategy_book_fresh --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-quote-throttle /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles --lib`,
+  `rustfmt --edition 2021 --check crates/ploy-strategy-bundles/src/engine.rs`,
+  and `rtk git diff --check`. Full package `cargo fmt --check --package
+  ploy-strategy-bundles` still reports pre-existing formatting drift in
+  unrelated files, so this slice only checked the touched Rust file.
+
 # Tango Deploy False-Negative Guard Repair (2026-05-12)
 
 ## Goal
