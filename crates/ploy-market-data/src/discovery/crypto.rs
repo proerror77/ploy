@@ -75,8 +75,7 @@ async fn normalize_crypto_market(
     if !matches!(market_window_secs, Some(300 | 900)) {
         return None;
     }
-    let up_token = token_ids[0].to_string();
-    let down_token = token_ids[1].to_string();
+    let (up_token, down_token) = semantic_up_down_tokens(market, token_ids)?;
     let reference_symbol = market_symbol_to_chainlink_symbol(strategy_symbol);
 
     let price_to_beat = latest_reference_price(
@@ -129,6 +128,35 @@ async fn normalize_crypto_market(
         raw_event: event.and_then(event_to_value),
         raw_market: serde_json::to_value(market).ok()?,
     })
+}
+
+fn semantic_up_down_tokens<T: ToString>(
+    market: &Market,
+    token_ids: &[T],
+) -> Option<(String, String)> {
+    if token_ids.len() != 2 {
+        return None;
+    }
+
+    if let Some(outcomes) = market.outcomes.as_ref() {
+        if outcomes.len() == token_ids.len() {
+            let mut up_token = None;
+            let mut down_token = None;
+            for (outcome, token_id) in outcomes.iter().zip(token_ids.iter()) {
+                let outcome = outcome.to_ascii_lowercase();
+                if outcome.contains("up") || outcome.contains("yes") {
+                    up_token = Some(token_id.to_string());
+                } else if outcome.contains("down") || outcome.contains("no") {
+                    down_token = Some(token_id.to_string());
+                }
+            }
+            if let (Some(up), Some(down)) = (up_token, down_token) {
+                return Some((up, down));
+            }
+        }
+    }
+
+    Some((token_ids[0].to_string(), token_ids[1].to_string()))
 }
 
 fn crypto_market_start_time(market: &Market, event: Option<&Event>) -> Option<DateTime<Utc>> {
@@ -307,6 +335,44 @@ mod tests {
         .await;
 
         assert_eq!(discovered.len(), 1, "15-minute markets should be kept");
+    }
+
+    #[tokio::test]
+    async fn maps_crypto_tokens_by_outcome_semantics_not_array_order() {
+        let registry = new_reference_price_registry();
+
+        let market: polymarket_client_sdk::gamma::types::response::Market =
+            serde_json::from_value(json!({
+                "id": "market-reversed",
+                "question": "Will Bitcoin be up or down in 5 minutes?",
+                "slug": "bitcoin-up-or-down-apr-6-0000",
+                "endDate": "2026-04-06T00:05:00Z",
+                "startDate": "2026-04-06T00:00:00Z",
+                "groupItemThreshold": "0",
+                "outcomes": "[\"Down\",\"Up\"]",
+                "clobTokenIds": "[\"111\",\"222\"]",
+                "active": true,
+                "acceptingOrders": true,
+                "events": [{
+                    "id": "event-reversed",
+                    "slug": "bitcoin-up-or-down-apr-6-0000",
+                    "title": "Bitcoin Up Or Down",
+                    "startDate": "2026-04-06T00:00:00Z"
+                }]
+            }))
+            .unwrap();
+
+        let discovered = discover_crypto_markets(
+            &[market],
+            &["BTCUSDT".to_string()],
+            &registry,
+            Utc.with_ymd_and_hms(2026, 4, 6, 0, 0, 30).unwrap(),
+        )
+        .await;
+
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].up_token, "222");
+        assert_eq!(discovered[0].down_token, "111");
     }
 
     #[tokio::test]
