@@ -321,6 +321,21 @@ Every complete CI/CD alpha-search run should upload:
 If any of the search artifacts are missing, the run can still be diagnostic,
 but it is not a complete alpha-search run.
 
+For a quick review across multiple downloaded hosted runs, use:
+
+```bash
+python3 scripts/summarize_alpha_search_chain.py \
+  /tmp/ploy-alpha-run-25683730944 \
+  /tmp/ploy-alpha-run-25683858420 \
+  --output-json /tmp/alpha-search-chain-summary.json \
+  --output-md /tmp/alpha-search-chain-summary.md
+```
+
+The summary reports candidate counts, passed counts, best reward, selected MCTS
+factor, handoff status, recommended action, and chain stop reason per run. It
+is a review aid only; it does not replace the promotion evaluator or replay
+parity gate.
+
 ## Completion Criteria
 
 The method is fully defined only when CI exposes all of the following:
