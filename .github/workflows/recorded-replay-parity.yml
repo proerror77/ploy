@@ -95,6 +95,8 @@ jobs:
             tango-1-1:"${REMOTE_DIR}/enrich_recording_official_settlement.py"
           scp scripts/enrich_replay_runtime_evidence.py \
             tango-1-1:"${REMOTE_DIR}/enrich_replay_runtime_evidence.py"
+          scp scripts/extract_dryrun_settlement_evidence.py \
+            tango-1-1:"${REMOTE_DIR}/extract_dryrun_settlement_evidence.py"
 
           # shellcheck disable=SC2029
           ssh tango-1-1 /bin/bash -s -- \
@@ -118,14 +120,18 @@ jobs:
           test -r "${recording_path}"
           test -r "${remote_dir}/enrich_recording_official_settlement.py"
           test -r "${remote_dir}/enrich_replay_runtime_evidence.py"
+          test -r "${remote_dir}/extract_dryrun_settlement_evidence.py"
 
           set -a
           . /opt/ploy/.env
           set +a
 
           settlements_json="${remote_dir}/official-settlements.json"
+          dryrun_report="${remote_dir}/dryrun-report.json"
           enriched_recording="${remote_dir}/recording-official-settlement.ndjson"
           enrichment_report="${remote_dir}/recording-enrichment.json"
+          curl -fsS http://127.0.0.1:8081/api/reports/dry-run \
+            -o "${dryrun_report}"
           if [ -n "${PLOY_DATABASE__URL:-}" ]; then
             PSQL=(psql "${PLOY_DATABASE__URL}" -v ON_ERROR_STOP=1 -t -A)
           else
@@ -184,6 +190,13 @@ jobs:
           FROM unambiguous;
           SQL
 
+          python3 "${remote_dir}/extract_dryrun_settlement_evidence.py" \
+            --dryrun-json "${dryrun_report}" \
+            --output-json "${settlements_json}" \
+            --deployment-id "${deployment_id}" \
+            --since "${since_ts}" \
+            --until "${until_ts}"
+
           python3 "${remote_dir}/enrich_recording_official_settlement.py" \
             --input "${recording_path}" \
             --output "${enriched_recording}" \
@@ -226,9 +239,6 @@ jobs:
             --output-json "${remote_dir}/replay-evaluation.json" \
             --settlements-json "${settlements_json}" \
             --report-json "${remote_dir}/replay-evidence-enrichment.json"
-
-          curl -fsS http://127.0.0.1:8081/api/reports/dry-run \
-            -o "${remote_dir}/dryrun-report.json"
 
           test -s "${remote_dir}/replay-evaluation.json"
           test -s "${remote_dir}/dryrun-report.json"
