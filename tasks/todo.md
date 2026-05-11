@@ -25,6 +25,12 @@ the protected environment for real deployments.
   Ruby YAML parse for `.github/workflows/deploy-tango-1-1.yml`,
   `CARGO_TARGET_DIR=/tmp/ploy-deploy-build-only-env /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test workflow_security tango_deploy_keeps_pm5d_live_paused`,
   and `rtk git diff --check`.
+- 2026-05-11: Post-merge no-deploy smoke run `25681953230` on
+  `main@629468acf60f48b7f573a22410e5d3fe4ae89b39` completed successfully.
+  It built the release runner, research, and optimize binaries; built the
+  deploy bundle; passed `Verify live deployment remains paused in bundle`; and
+  skipped all OSS upload, SSH, Cloud Assistant, remote restart, and deployment
+  summary steps because `deploy=false`.
 
 # Tango Cloud Assistant Live-Paused Guard (2026-05-11)
 
