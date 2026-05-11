@@ -1,3 +1,41 @@
+# Alpha Search CI/CD Clean Port (2026-05-11)
+
+## Goal
+
+Port the systematic alpha discovery layer onto a clean `main`-based branch so
+CI can generate, evaluate, chain, and preserve factor candidates without
+bypassing replay/runtime parity or dry-run promotion gates.
+
+## Plan
+
+- [x] Preserve the current hosted factor walk-forward sweep wrapper instead of
+  reverting to a direct binary-only workflow.
+- [x] Add alpha-search artifact output and prior MCTS plan passthrough to the
+  sweep path.
+- [x] Finish the clean cherry-pick, resolve conflicts, and verify workflow
+  YAML/Python/Rust compile surfaces.
+- [ ] Open a focused PR for the alpha-search CI/CD artifact layer.
+
+Review:
+- The intended search shape is `semantic prior -> typed formula candidates ->
+  deterministic/MCTS-guided expansion -> CI walk-forward feedback -> promotion
+  evaluator -> blocked-or-ready handoff`.
+- This work is candidate discovery infrastructure. It does not claim a
+  profitable deployable strategy until walk-forward, replay/runtime parity,
+  and dry-run handoff gates produce ready evidence.
+- Old-branch CI smoke evidence showed the chain can improve candidate search
+  rewards (`25672175576` best_reward `4.81954070569323`, chained run
+  `25672625360` best_reward `4.894975850946932`), but those results are
+  research/search evidence only and must be rerun from this clean branch before
+  promotion.
+- Clean-branch local verification passed: `python3 -m py_compile
+  scripts/run_factor_walk_forward_sweep.py`, Ruby YAML parse for both factor
+  workflows, `CARGO_TARGET_DIR=/tmp/ploy-alpha-clean rtk cargo check -p
+  ploy-research --features db --example factor_walk_forward_v2`,
+  `CARGO_TARGET_DIR=/tmp/ploy-alpha-clean-test rtk cargo test -p
+  ploy-research alpha_search --lib`, `CARGO_TARGET_DIR=/tmp/ploy-autofactor-clean-test
+  rtk cargo test -p ploy-research autofactor --lib`, and `git diff --check`.
+
 # Recorded Replay Official Settlement Enrichment (2026-05-11)
 
 ## Follow-up: Settlement Parity Classifier (2026-05-11)
@@ -945,6 +983,32 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `ready_for_dry_run_handoff=false`; blocked gates were
   `anti_overfit_diagnostics`, `walk_forward_oos`, and
   `recorded_replay_parity`.
+
+# Amplitude-Weighted Momentum Factor Check (2026-05-11)
+
+## Goal
+
+Verify whether amplitude-weighted CEX momentum is useful for PM5D binary
+options as `factor_attribution` evidence. This is not a dry-run or live
+promotion task.
+
+## Plan
+
+- [x] Add narrow AutoFactor candidates for amplitude-weighted momentum using
+  existing Factor V2 fields only.
+- [x] Run focused local checks that avoid local DB/backtest execution.
+- [ ] Dispatch hosted factor walk-forward evidence from existing research
+  snapshot artifacts.
+- [ ] Record whether the factor is useful for settlement probability,
+  repricing, or neither.
+
+## Review
+
+- 2026-05-11: Added `amplitude_weighted_momentum_30s_sigma` and
+  `amplitude_weighted_momentum_30s_vol_gap` as AutoFactor research candidates
+  only. Local verification passed: `rustfmt --edition 2021 --check
+  crates/ploy-research/src/autofactor.rs` and `CARGO_TARGET_DIR=/tmp/ploy-awm-autofactor
+  rtk cargo test -p ploy-research autofactor --lib` with 8 tests passing.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
