@@ -207,6 +207,28 @@ evidence comes from Polymarket full CLOB depth, not top book.
   `baseline_metrics.json` model contract, validates kind/version/target,
   enforces schema-order parity across weights and train-fitted standardizer
   rows, and scores ordered or map-based feature inputs fail-closed.
+- [ ] Add an Alpha Jungle-inspired AutoFactor tree-search design note. Treat
+  `Navigating the Alpha Jungle` as a search-governance pattern, not as a prompt
+  upgrade: candidate formula nodes are `FactorExpr` trees, expansion is guided
+  by multi-dimensional backtest feedback, and every output still flows through
+  the existing walk-forward, promotion, runtime-mapping, and replay-parity
+  gates.
+- [ ] Extend AutoFactor mining with an explicit tree-search candidate lane for
+  `full_depth_settlement_executable_pnl`. Start with deterministic
+  `FactorExpr` refinements before any LLM-generated refinements so the search
+  contract is reproducible in CI.
+- [ ] Add multi-dimensional node scoring for the tree-search lane:
+  effectiveness on executable PnL, stability across walk-forward windows,
+  diversity versus the accepted factor repository, fillability/capacity cost,
+  and complexity/overfit risk.
+- [ ] Add frequent-root-gene avoidance for AutoFactor expressions. Mine common
+  expression subtrees from accepted/watchlisted candidates and penalize or block
+  new expansions that repeat the same root-gene structure unless they improve a
+  declared weak dimension.
+- [ ] Emit reviewable search artifacts: tree trace, node metrics, selected weak
+  dimension, rejected invalid formulas, avoided subtrees, and final candidate
+  rows. These artifacts must be attached to the same hosted walk-forward /
+  promotion workflow path as current AutoFactor evidence.
 
 ## Review
 
@@ -325,6 +347,14 @@ evidence comes from Polymarket full CLOB depth, not top book.
   issue creation from `event-ml-rolling-evidence.yml`. This deliberately stops
   short of config PR automation because the checked-in dry-run config currently
   supports AutoFactor runtime scores, not a live Event ML runtime scorer.
+- 2026-05-09: Reviewed `Navigating the Alpha Jungle: An LLM-Powered MCTS
+  Framework for Formulaic Alpha Factor Mining` against the current Ploy
+  research stack. The useful import is not open-ended LLM formula generation;
+  it is turning AutoFactor candidate expansion into a feedback-driven search
+  tree with dimension-specific refinements and frequent-subtree avoidance. This
+  should become the next AutoFactor search-governance slice after the current
+  runtime scorer work, while keeping the existing settlement PRD, hosted
+  artifact, promotion, and replay-parity gates unchanged.
 - 2026-05-05: Implemented the first settlement-probability research slice in
   `crates/ploy-research/src/factors_v2.rs` and wired it into
   `factor_walk_forward_v2`. The new report uses full-depth entry-fillable

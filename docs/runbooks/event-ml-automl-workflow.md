@@ -191,6 +191,49 @@ removes the profile/mapping blocker; it does not override the PRD promotion
 gate. Recorded replay parity and the other settlement gates must still be
 ready before a handoff issue/config is created.
 
+### Alpha Jungle-Inspired Tree Search Lane
+
+The next AutoFactor expansion should adapt the search-governance pattern from
+`Navigating the Alpha Jungle` without changing the promotion contract. The
+paper's useful split is:
+
+- MCTS owns search control: select an existing formula node, choose the weakest
+  evaluation dimension, expand the tree, and backpropagate the best observed
+  reward.
+- The formula generator owns candidate refinement only. In this repo, start
+  with deterministic `FactorExpr` refinements; add LLM refinement only after the
+  syntax, operator, and artifact contracts are fully machine-checkable.
+- Frequent-subtree avoidance owns diversity control. Mine repeated expression
+  subtrees from accepted/watchlisted formulas and penalize or block repeated
+  root-gene structures unless the expansion improves a declared weak dimension.
+
+For Ploy, this lane belongs between AutoFactor seed generation and the existing
+walk-forward/promotion evaluator:
+
+```text
+domain seed candidates
+  -> tree-search refinements over FactorExpr
+  -> multi-dimensional node scoring
+  -> frequent-subtree avoidance
+  -> factor_walk_forward_v2 report rows
+  -> autofactor-strategy-promotion gate
+  -> ready-only handoff/config PR path
+```
+
+Required dimensions for the first implementation:
+
+- effectiveness: full-depth settlement executable PnL / IC-style target score
+- stability: walk-forward window consistency and positive-window ratio
+- diversity: correlation or subtree novelty versus the factor repository
+- cost: fillability, capacity, spread, and turnover-like execution friction
+- overfit risk: formula complexity, parameter count, and validation/test decay
+
+The tree-search lane must emit `tree_trace`, `node_metrics`,
+`selected_dimension`, `avoided_subtrees`, rejected invalid formulas, and final
+candidate rows. It must not create a dry-run handoff, config PR, deployment, or
+live path unless the existing promotion, runtime-score, and replay-parity gates
+already report ready.
+
 For an existing Factor Walk-Forward V2 artifact, use the hosted GitHub workflow
 instead of waiting for the self-hosted research runner:
 
