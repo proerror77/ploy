@@ -224,6 +224,10 @@ pub struct AutoFactorReport {
     pub window_ic_mean: f64,
     pub icir: f64,
     pub positive_window_ratio: f64,
+    pub symbol_count: usize,
+    pub symbol_ic_mean: f64,
+    pub symbol_icir: f64,
+    pub symbol_positive_ratio: f64,
     pub bucket_avg_labels: Vec<f64>,
     pub bottom_bucket_n: usize,
     pub bottom_bucket_avg_label: f64,
@@ -287,6 +291,7 @@ pub fn evaluate_named_factor(
     matrix: &AutoFactorMatrix,
     labels: &[f64],
     windows: &[String],
+    symbols: &[String],
     options: &AutoFactorOptions,
 ) -> Result<AutoFactorReport, AutoFactorError> {
     if labels.len() != matrix.len() {
@@ -299,6 +304,12 @@ pub fn evaluate_named_factor(
         return Err(AutoFactorError::WindowLengthMismatch {
             expected: matrix.len(),
             actual: windows.len(),
+        });
+    }
+    if !symbols.is_empty() && symbols.len() != matrix.len() {
+        return Err(AutoFactorError::WindowLengthMismatch {
+            expected: matrix.len(),
+            actual: symbols.len(),
         });
     }
 
@@ -346,6 +357,34 @@ pub fn evaluate_named_factor(
     );
     let window_ic_mean = finite_mean(window_ics.iter().copied());
     let factor_icir = icir(&window_ics);
+    let mut grouped_symbols: BTreeMap<&str, Vec<(f64, f64)>> = BTreeMap::new();
+    for (idx, score, label) in &scored {
+        let key = if symbols.is_empty() {
+            "all"
+        } else {
+            symbols[*idx].as_str()
+        };
+        grouped_symbols
+            .entry(key)
+            .or_default()
+            .push((*score, *label));
+    }
+    let symbol_ics = grouped_symbols
+        .values()
+        .filter(|pairs| pairs.len() >= options.min_window_observations)
+        .map(|pairs| {
+            let xs = pairs.iter().map(|(score, _)| *score).collect::<Vec<_>>();
+            let ys = pairs.iter().map(|(_, label)| *label).collect::<Vec<_>>();
+            spearman_ic(&xs, &ys)
+        })
+        .filter(|ic| ic.is_finite())
+        .collect::<Vec<_>>();
+    let symbol_positive_ratio = ratio(
+        symbol_ics.iter().filter(|ic| **ic > 0.0).count(),
+        symbol_ics.len(),
+    );
+    let symbol_ic_mean = finite_mean(symbol_ics.iter().copied());
+    let symbol_icir = icir(&symbol_ics);
 
     let buckets = build_buckets(&scored, options.bucket_count);
     let bucket_avg_labels = buckets
@@ -379,6 +418,10 @@ pub fn evaluate_named_factor(
         window_ic_mean,
         icir: factor_icir,
         positive_window_ratio,
+        symbol_count: symbol_ics.len(),
+        symbol_ic_mean,
+        symbol_icir,
+        symbol_positive_ratio,
         bucket_avg_labels,
         bottom_bucket_n: bottom.map(|bucket| bucket.n).unwrap_or(0),
         bottom_bucket_avg_label: bottom.map(|bucket| bucket.avg_label).unwrap_or(f64::NAN),
@@ -399,12 +442,13 @@ pub fn mine_autofactors(
     matrix: &AutoFactorMatrix,
     labels: &[f64],
     windows: &[String],
+    symbols: &[String],
     options: &AutoFactorOptions,
 ) -> Result<Vec<AutoFactorReport>, AutoFactorError> {
     let mut reports = Vec::with_capacity(factors.len());
     for factor in factors {
         reports.push(evaluate_named_factor(
-            factor, matrix, labels, windows, options,
+            factor, matrix, labels, windows, symbols, options,
         )?);
     }
     reports.sort_by(|lhs, rhs| {
@@ -427,11 +471,11 @@ pub fn format_autofactor_reports(reports: &[AutoFactorReport], top_n: usize) -> 
         "target labels are side-aligned executable PnL for the requested target; reports are candidate discovery gates, not deploy decisions.\n",
     );
     out.push_str(
-        "rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,monotonicity,top_bucket_avg_label,top_bucket_positive_label_rate,complexity\n",
+        "rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_avg_label,top_bucket_positive_label_rate,complexity\n",
     );
     for (idx, report) in reports.iter().take(top_n).enumerate() {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{:.6},{:.6},{},{:.6},{:.4},{:.4},{:.6},{:.4},{}\n",
+            "{},{},{},{},{},{},{:.6},{:.6},{},{:.6},{:.4},{},{:.4},{:.4},{:.6},{:.4},{}\n",
             idx + 1,
             report.name,
             report.target.as_deref().unwrap_or("<unspecified>"),
@@ -443,6 +487,8 @@ pub fn format_autofactor_reports(reports: &[AutoFactorReport], top_n: usize) -> 
             report.window_count,
             report.icir,
             report.positive_window_ratio,
+            report.symbol_count,
+            report.symbol_positive_ratio,
             report.monotonicity_score,
             report.top_bucket_avg_label,
             report.top_bucket_positive_label_rate,
@@ -460,6 +506,7 @@ pub fn mine_domain_autofactors_from_v2(
     let matrix = autofactor_matrix_from_v2(rows)?;
     let labels = autofactor_labels_from_v2(rows, target);
     let windows = autofactor_windows_from_v2(rows);
+    let symbols = autofactor_symbols_from_v2(rows);
     let target_name = target.as_str().to_string();
     let candidates = domain_candidates_for_target(&matrix.input_names(), target)
         .into_iter()
@@ -468,7 +515,7 @@ pub fn mine_domain_autofactors_from_v2(
             factor
         })
         .collect::<Vec<_>>();
-    mine_autofactors(&candidates, &matrix, &labels, &windows, options)
+    mine_autofactors(&candidates, &matrix, &labels, &windows, &symbols, options)
 }
 
 pub fn autofactor_matrix_from_v2(
@@ -570,6 +617,10 @@ pub fn autofactor_windows_from_v2(rows: &[FactorObservationV2]) -> Vec<String> {
             )
         })
         .collect()
+}
+
+pub fn autofactor_symbols_from_v2(rows: &[FactorObservationV2]) -> Vec<String> {
+    rows.iter().map(|row| row.symbol.clone()).collect()
 }
 
 fn valid_pm_price(value: f64) -> bool {
@@ -1413,8 +1464,9 @@ mod tests {
             ..Default::default()
         };
 
-        let reports =
-            mine_autofactors(&candidates, &matrix, &labels, &windows, &options).expect("reports");
+        let symbols = Vec::new();
+        let reports = mine_autofactors(&candidates, &matrix, &labels, &windows, &symbols, &options)
+            .expect("reports");
         let report = reports
             .iter()
             .find(|item| item.name == "ofi_l5_depth_norm")
@@ -1446,8 +1498,9 @@ mod tests {
             max_complexity: 3,
             ..Default::default()
         };
-        let report =
-            evaluate_named_factor(&factor, &matrix, &labels, &windows, &options).expect("report");
+        let symbols = Vec::new();
+        let report = evaluate_named_factor(&factor, &matrix, &labels, &windows, &symbols, &options)
+            .expect("report");
         assert_eq!(report.decision, AutoFactorDecision::Reject);
         assert_eq!(report.reason, "too_complex");
     }

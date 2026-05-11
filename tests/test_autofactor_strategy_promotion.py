@@ -24,6 +24,16 @@ data_quality,false,mode=event_complete event_complete_events=0 event_complete_ro
 recorded_replay_parity,false,missing replay parity
 """
 
+MODEL_BLOCKED_GATE = """=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=false stake_usd=15.00 min_entry_fill_rate=0.0500 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=true include_deribit=true data_quality_mode=event_complete event_complete_events=292 event_complete_rows=468 replay_parity_ready=true
+gate,passed,evidence
+data_quality,true,mode=event_complete event_complete_events=292 event_complete_rows=468
+deribit_vol_surface,true,require_deribit=true include_deribit=true
+recorded_replay_parity,true,blocking_flags=<none>
+symbol_holdout,false,no non-naive model passes all symbol holdouts
+walk_forward_oos,false,no non-naive model has non-empty OOS windows with positive_window_ratio >= 0.60
+"""
+
 AUTOFACTOR_REPORT = """
 # AutoFactor target=full_depth_settlement_executable_pnl
 === AutoFactor Seed Candidate Report ===
@@ -43,10 +53,10 @@ AUTOFACTOR_SETTLEMENT_AUTO_REPORT = """
 # AutoFactor target=full_depth_settlement_executable_pnl
 === AutoFactor Seed Candidate Report ===
 target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
-rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,monotonicity,top_bucket_avg_label,top_bucket_positive_label_rate,complexity
-1,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,49831,0.110842,0.150273,43,1.064178,0.9535,1.0000,2.666226,0.6836,1
-2,auto_settlement_conservative_settlement_edge_x_near_strike,full_depth_settlement_executable_pnl,candidate,passed,49831,0.107526,0.157904,43,1.044245,0.9302,1.0000,2.631575,0.6790,3
-3,auto_settlement_full_depth_settlement_edge_x_external_pressure,full_depth_settlement_executable_pnl,reject,nonpositive_rank_ic,57777,-0.021993,0.069182,45,0.217558,0.4667,0.5000,-0.301991,0.4785,3
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_avg_label,top_bucket_positive_label_rate,complexity
+1,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,49831,0.110842,0.150273,43,1.064178,0.9535,6,0.8333,1.0000,2.666226,0.6836,1
+2,auto_settlement_conservative_settlement_edge_x_near_strike,full_depth_settlement_executable_pnl,candidate,passed,49831,0.107526,0.157904,43,1.044245,0.9302,6,0.8333,1.0000,2.631575,0.6790,3
+3,auto_settlement_full_depth_settlement_edge_x_external_pressure,full_depth_settlement_executable_pnl,reject,nonpositive_rank_ic,57777,-0.021993,0.069182,45,0.217558,0.4667,6,0.5000,0.5000,-0.301991,0.4785,3
 """
 
 
@@ -184,6 +194,33 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertEqual(payload["decision"], "blocked")
         self.assertEqual(handoff["status"], "blocked")
         self.assertIn("promotion_gate_not_ready", payload["evaluated_factors"][0]["blockers"])
+
+    def test_formula_candidates_use_formula_specific_model_gates(self):
+        _, payload, _, handoff, _ = self.run_script(
+            MODEL_BLOCKED_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(len(handoff["strategies"]), 2)
+        first = payload["qualified_strategies"][0]["factor"]
+        self.assertEqual(first["symbol_count"], 6)
+        self.assertEqual(first["symbol_positive_ratio"], 0.8333)
+
+    def test_formula_candidates_require_symbol_stability(self):
+        weak_symbol_report = AUTOFACTOR_SETTLEMENT_AUTO_REPORT.replace(
+            ",6,0.8333,",
+            ",6,0.5000,",
+        )
+
+        _, payload, _, handoff, _ = self.run_script(
+            MODEL_BLOCKED_GATE + weak_symbol_report
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        first = payload["evaluated_factors"][0]
+        self.assertIn("formula_symbol_holdout_unstable:0.5000<0.60", first["blockers"])
 
 
 if __name__ == "__main__":
