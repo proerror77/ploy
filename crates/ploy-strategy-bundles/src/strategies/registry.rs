@@ -219,7 +219,7 @@ pub fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StrategyKind, build_strategy, canonical_strategy_variant};
+    use super::{build_strategy, canonical_strategy_variant, StrategyKind};
     use crate::FullConfig;
 
     #[test]

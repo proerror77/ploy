@@ -176,7 +176,11 @@ pub fn norm_cdf(x: f64) -> f64 {
     let d = 0.3989422804014327 * (-x * x / 2.0).exp();
     let p =
         d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-    if x >= 0.0 { 1.0 - p } else { p }
+    if x >= 0.0 {
+        1.0 - p
+    } else {
+        p
+    }
 }
 
 pub fn calibrate_direction_probability(
@@ -243,7 +247,11 @@ pub fn reward_risk_ratio(entry_price: f64) -> f64 {
     let fee = crypto_fee_cost(entry_price);
     let reward = 1.0 - entry_price - fee;
     let risk = entry_price + fee;
-    if risk <= 0.0 { f64::NAN } else { reward / risk }
+    if risk <= 0.0 {
+        f64::NAN
+    } else {
+        reward / risk
+    }
 }
 
 pub fn evaluate_direction_score(

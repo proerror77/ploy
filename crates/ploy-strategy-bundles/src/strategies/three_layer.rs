@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tracing::{debug, info, warn};

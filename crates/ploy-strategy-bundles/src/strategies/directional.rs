@@ -13,8 +13,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
