@@ -265,6 +265,30 @@ class ReplayDryrunParityTests(unittest.TestCase):
         self.assertIn("replay_has_no_event_level_rows", result["blocking_risk_flags"])
         self.assertEqual(runtime["events"]["replay_count"], 0)
 
+    def test_legacy_event_comparison_normalizes_timestamp_and_numeric_shapes(self):
+        replay = evidence_payload(
+            created_at="2026-05-11T17:40:00Z",
+            limit_price="1",
+            fill_price="1",
+        )
+        dryrun = evidence_payload(
+            created_at="2026-05-12T01:40:00+08:00",
+            limit_price=1.0,
+            fill_price=1.0,
+        )
+        dryrun["runtime_evidence"]["events"][0]["signal_inputs"] = {
+            "purpose": "ENTRY",
+            "requested_qty": 10.0,
+            "limit_price": 1.0,
+        }
+
+        result = self.run_script(replay, dryrun)
+
+        self.assertTrue(result["runtime_evidence_comparison"]["strict_parity_ready"])
+        self.assertTrue(result["event_comparison"]["strict_parity_ready"])
+        self.assertEqual(result["event_comparison"]["mismatches"], [])
+        self.assertNotIn("legacy_event_strict_field_mismatches", result["legacy_event_flags"])
+
     def test_legacy_event_drift_is_diagnostic_when_runtime_evidence_is_strict_ready(self):
         replay = evidence_payload()
         dryrun = evidence_payload()

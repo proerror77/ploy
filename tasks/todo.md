@@ -24,6 +24,40 @@ system from treating a blocked handoff as a profitable strategy.
   settlement-exit price mismatches. No candidate should be promoted until a
   fresh main dry-run sample produces ready parity.
 
+# Alpha Search Parity Recovery (2026-05-12)
+
+## Goal
+
+Remove the false deploy guard failure that blocks fresh recorded replay parity,
+then rerun the strict dry-run/replay gate before any alpha-search handoff can
+be treated as promotable.
+
+## Plan
+
+- [x] Inspect failed deploy run `25686133681` and confirm whether live stayed
+  paused.
+- [x] Harden the SSH and Cloud Assistant live-paused checks against multi-line
+  `ployctl` output.
+- [x] Normalize replay/dry-run legacy event comparison for timestamp timezone
+  and numeric representation drift.
+- [x] Verify the guard and parity-normalization changes locally.
+- [x] Confirm remote dry-run state and trigger fresh recorded replay parity.
+- [ ] Use only a strict-ready parity run as input to the hosted alpha-search
+  promotion chain.
+
+## Review
+
+- 2026-05-12: Deploy run `25686133681` shipped the bundle and showed
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun desired=Running
+  observed=Running`; it also showed `pm5d.threelayer.live desired=Paused
+  observed=Paused`. The deploy failed because both SSH and Cloud Assistant
+  guard code misclassified that valid live-paused line.
+- 2026-05-12: Narrow parity run `25686923236` succeeded on `main@2f730b12`.
+  Its runtime evidence was strict-ready, but event comparison was blocked only
+  by representation drift: `+08:00` timestamp versus `Z`, and JSON number
+  versus string values. Recomputing the same artifact with the local
+  normalization fix reports runtime ready, event ready, and no blockers.
+
 # Alpha Search Completion Audit (2026-05-12)
 
 ## Goal

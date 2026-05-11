@@ -771,13 +771,15 @@ def compare_events(
     for key in shared_keys:
         replay = replay_index[key]
         dryrun = dryrun_index[key]
+        normalized_replay = normalize_event(replay)
+        normalized_dryrun = normalize_event(dryrun)
         for field in STRICT_FIELDS:
-            replay_value = canonical_field(replay, field)
-            dryrun_value = canonical_field(dryrun, field)
+            replay_value = normalized_replay.get(field)
+            dryrun_value = normalized_dryrun.get(field)
             if replay_value is None or dryrun_value is None:
                 missing_fields.add(field)
                 continue
-            if replay_value != dryrun_value:
+            if not values_match(field, replay_value, dryrun_value):
                 mismatches.append(
                     {
                         "event_key": key,
