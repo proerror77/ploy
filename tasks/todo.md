@@ -890,9 +890,9 @@ promotion task.
 - [x] Add narrow AutoFactor candidates for amplitude-weighted momentum using
   existing Factor V2 fields only.
 - [x] Run focused local checks that avoid local DB/backtest execution.
-- [ ] Dispatch hosted factor walk-forward evidence from existing research
+- [x] Dispatch hosted factor walk-forward evidence from existing research
   snapshot artifacts.
-- [ ] Record whether the factor is useful for settlement probability,
+- [x] Record whether the factor is useful for settlement probability,
   repricing, or neither.
 
 ## Review
@@ -902,6 +902,33 @@ promotion task.
   only. Local verification passed: `rustfmt --edition 2021 --check
   crates/ploy-research/src/autofactor.rs` and `CARGO_TARGET_DIR=/tmp/ploy-awm-autofactor
   rtk cargo test -p ploy-research autofactor --lib` with 8 tests passing.
+- 2026-05-11 evidence: Used research snapshot run `25642459432` covering
+  `2026-04-24T00:00:00Z -> 2026-05-01T00:00:00Z` with snapshot hash
+  `a33418c4185a6b40`, official settlement required, and all six crypto
+  symbols present. Snapshot audit status was `critical`, so this is
+  factor-attribution evidence only, not promotion evidence.
+- 2026-05-11 evidence: XRP/DOGE/BNB walk-forward run `25672328201` rejected
+  both amplitude-weighted momentum candidates for `full_depth_reprice_pnl_10s`.
+  `amplitude_weighted_momentum_30s_sigma` had only `n=37`,
+  Spearman IC `0.109384`, and top-bucket average label `-4.570090`.
+  `amplitude_weighted_momentum_30s_vol_gap` had only `n=10`, Spearman IC
+  `-0.054545`, and top-bucket average label `-4.083593`. Both top buckets had
+  `0.0000` positive label rate.
+- 2026-05-11 evidence: BTC/ETH walk-forward run `25672515273` showed only a
+  weak repricing diagnostic, not a strategy candidate. For
+  `full_depth_reprice_pnl_10s`,
+  `amplitude_weighted_momentum_30s_sigma` ranked 8 as `watchlist` with reason
+  `low_icir`, `n=78`, Spearman IC `0.157123`, one window, ICIR `NaN`, and
+  top-bucket average label `-0.748874` with `0.0000` positive label rate. For
+  `full_depth_reprice_pnl_30s`, the PM-lag-gated vol-gap mutation was rejected
+  for too few observations (`n=4`) and negative top-bucket label `-0.450000`.
+  The strategy handoff artifact was `status=blocked` with
+  `recommended_action=do_not_promote`; promotion was `decision=blocked`.
+- Decision: reject amplitude-weighted momentum as an immediate PM5D binary
+  options strategy or dry-run candidate. It is not useful for the settlement
+  probability lane, and its repricing signal is too sparse/low-ICIR with
+  negative executable top-bucket labels. Keep it only as an optional diagnostic
+  feature family for future alpha search, not as a promotion path.
 
 # PM5D High ICIR Strategy Discovery Plan (2026-05-03)
 
