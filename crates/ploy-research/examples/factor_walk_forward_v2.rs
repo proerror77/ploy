@@ -141,7 +141,7 @@ fn replay_parity_evidence(path: &str) -> (bool, String) {
         .get("decision")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("<missing>");
-    let ready = runtime_ready && risk_flags.is_empty() && decision == "continue";
+    let ready = runtime_ready && event_ready && risk_flags.is_empty() && decision == "continue";
     let evidence = format!(
         "replay_parity_json={} runtime_ready={} event_ready={} blocking_flags={} advisory_flags={} decision={}",
         path,
@@ -160,6 +160,60 @@ fn replay_parity_evidence(path: &str) -> (bool, String) {
         decision,
     );
     (ready, evidence)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replay_parity_evidence;
+    use std::fs;
+
+    fn write_parity_fixture(name: &str, payload: &str) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "ploy-factor-walk-forward-{name}-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        fs::write(&path, payload).expect("write parity fixture");
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn replay_parity_requires_runtime_and_event_strict_readiness() {
+        let path = write_parity_fixture(
+            "event-not-ready",
+            r#"{
+              "decision": "continue",
+              "blocking_risk_flags": [],
+              "runtime_evidence_comparison": {"strict_parity_ready": true},
+              "event_comparison": {"strict_parity_ready": false}
+            }"#,
+        );
+
+        let (ready, evidence) = replay_parity_evidence(&path);
+
+        assert!(!ready);
+        assert!(evidence.contains("runtime_ready=true"));
+        assert!(evidence.contains("event_ready=false"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn replay_parity_accepts_runtime_and_event_strict_readiness() {
+        let path = write_parity_fixture(
+            "ready",
+            r#"{
+              "decision": "continue",
+              "blocking_risk_flags": [],
+              "runtime_evidence_comparison": {"strict_parity_ready": true},
+              "event_comparison": {"strict_parity_ready": true}
+            }"#,
+        );
+
+        let (ready, evidence) = replay_parity_evidence(&path);
+
+        assert!(ready, "{evidence}");
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn alpha_search_plan_factor_names(path: &str) -> Vec<String> {
@@ -705,7 +759,10 @@ async fn main() {
                             summary.output_dir
                         ),
                         Err(err) => {
-                            eprintln!("alpha search artifact write failed for {}: {err}", target.as_str());
+                            eprintln!(
+                                "alpha search artifact write failed for {}: {err}",
+                                target.as_str()
+                            );
                         }
                     }
                 }
