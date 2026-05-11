@@ -29,6 +29,11 @@ profitability gate.
   after green CI. This completes the systematic generation/exploration/config
   handoff slice, but does not prove profitability until the merged config is
   deployed to dry-run and fresh executable evidence is collected.
+- 2026-05-12: Build-only deploy smoke run `25688999691` passed on `main`
+  (`deploy=false`). It built the release runner, research tools,
+  optimize-backtest, deploy bundle, and passed the live-paused bundle guard.
+  The run skipped all OSS upload, SSH, Cloud Assistant, remote restart, and
+  deployment summary steps, so it did not mutate `tango-1-1`.
 
 # Alpha Search Parity Blocker Refresh (2026-05-12)
 
