@@ -22,6 +22,7 @@ def evidence_payload(
     deployment_id="pm5d.threelayer.test",
     created_at="2026-05-02T01:02:03Z",
     fill_timestamp="2026-05-02T01:02:04Z",
+    purpose="ENTRY",
 ):
     return {
         "runtime_evidence": {
@@ -33,7 +34,7 @@ def evidence_payload(
                     "event_id": "event-1",
                     "token_id": "token-up",
                     "order_side": order_side,
-                    "purpose": "ENTRY",
+                    "purpose": purpose,
                     "quantity": "10",
                     "limit_price": limit_price,
                     "filled_quantity": "10.0000000",
@@ -50,6 +51,7 @@ def evidence_payload(
                     "event_id": "event-1",
                     "token_id": "token-up",
                     "fill_side": fill_side,
+                    "purpose": purpose,
                     "quantity": "10",
                     "price": fill_price,
                     "fee": "0",
@@ -126,6 +128,36 @@ class ReplayDryrunParityTests(unittest.TestCase):
         self.assertIn("runtime_evidence_field_mismatches", result["risk_flags"])
         self.assertIn("runtime_evidence_field_mismatches", result["blocking_risk_flags"])
         self.assertEqual(runtime["mismatches"][0]["field"], "price")
+
+    def test_runtime_evidence_classifies_settlement_exit_price_mismatch(self):
+        result = self.run_script(
+            evidence_payload(
+                intent_id="tl_settle_event-1_up",
+                order_side="SELL",
+                fill_side="SELL",
+                limit_price="0",
+                fill_price="0",
+                purpose="SETTLEMENT_EXIT",
+            ),
+            evidence_payload(
+                intent_id="tl_settle_event-1_up",
+                order_side="SELL",
+                fill_side="SELL",
+                limit_price="1",
+                fill_price="1",
+                purpose="SETTLEMENT_EXIT",
+            ),
+        )
+
+        runtime = result["runtime_evidence_comparison"]
+        self.assertFalse(runtime["strict_parity_ready"])
+        self.assertIn("runtime_evidence_field_mismatches", result["risk_flags"])
+        self.assertIn("settlement_exit_price_mismatches", result["risk_flags"])
+        self.assertIn("settlement_exit_price_mismatches", result["blocking_risk_flags"])
+        self.assertEqual(
+            runtime["settlement_exit_mismatches"][0]["dryrun_row"]["intent_id"],
+            "tl_settle_event-1_up",
+        )
 
     def test_runtime_evidence_blocks_fill_side_mismatch(self):
         result = self.run_script(

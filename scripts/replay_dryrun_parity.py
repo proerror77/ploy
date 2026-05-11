@@ -517,6 +517,19 @@ def values_match(field: str, left: Any, right: Any) -> bool:
     return left == right
 
 
+def runtime_row_summary(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "deployment_id": row.get("deployment_id"),
+        "intent_id": row.get("intent_id"),
+        "event_id": row.get("event_id"),
+        "token_id": row.get("token_id"),
+        "market_side": row.get("market_side"),
+        "order_side": row.get("order_side"),
+        "fill_side": row.get("fill_side"),
+        "purpose": row.get("purpose"),
+    }
+
+
 def compare_normalized_rows(
     replay_rows: list[dict[str, Any]],
     dryrun_rows: list[dict[str, Any]],
@@ -548,6 +561,8 @@ def compare_normalized_rows(
                         "field": field,
                         "replay": replay_value,
                         "dryrun": dryrun_value,
+                        "replay_row": runtime_row_summary(replay),
+                        "dryrun_row": runtime_row_summary(dryrun),
                     }
                 )
 
@@ -567,6 +582,36 @@ def compare_normalized_rows(
         and not (set(dryrun_index) - set(replay_index))
         and not (set(replay_index) - set(dryrun_index)),
     }
+
+
+def is_settlement_exit_row(row: dict[str, Any] | None) -> bool:
+    if not row:
+        return False
+    intent_id = str(row.get("intent_id") or "").lower()
+    purpose = str(row.get("purpose") or "").upper()
+    order_side = str(row.get("order_side") or "").upper()
+    fill_side = str(row.get("fill_side") or "").upper()
+    is_sell_exit = order_side == "SELL" or fill_side == "SELL"
+    return (
+        intent_id.startswith("tl_settle_")
+        or purpose in {"SETTLEMENT", "SETTLEMENT_EXIT"}
+        or ("SETTLE" in intent_id and purpose in {"CLOSE", "EXIT"} and is_sell_exit)
+    )
+
+
+def settlement_exit_price_mismatches(mismatches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    price_fields = {"limit_price", "price", "avg_fill_price"}
+    settlement_mismatches: list[dict[str, Any]] = []
+    for mismatch in mismatches:
+        if mismatch.get("field") not in price_fields:
+            continue
+        if not (
+            is_settlement_exit_row(mismatch.get("replay_row"))
+            or is_settlement_exit_row(mismatch.get("dryrun_row"))
+        ):
+            continue
+        settlement_mismatches.append(mismatch)
+    return settlement_mismatches[:100]
 
 
 def compare_runtime_evidence(
@@ -624,6 +669,7 @@ def compare_runtime_evidence(
         | set(fill_comparison["missing_strict_fields"])
     )
     mismatches = order_comparison["mismatches"] + fill_comparison["mismatches"]
+    settlement_mismatches = settlement_exit_price_mismatches(mismatches)
     strict_parity_ready = (
         order_comparison["strict_parity_ready"]
         and fill_comparison["strict_parity_ready"]
@@ -633,6 +679,7 @@ def compare_runtime_evidence(
         "fills": fill_comparison,
         "missing_strict_fields": missing_strict_fields,
         "mismatches": mismatches[:100],
+        "settlement_exit_mismatches": settlement_mismatches,
         "strict_parity_ready": strict_parity_ready,
     }
 
@@ -734,6 +781,8 @@ def build_result(
         risk_flags.append("fills_present_in_dryrun_missing_from_replay")
     if runtime_evidence_comparison["mismatches"]:
         risk_flags.append("runtime_evidence_field_mismatches")
+    if runtime_evidence_comparison["settlement_exit_mismatches"]:
+        risk_flags.append("settlement_exit_price_mismatches")
     if runtime_evidence_comparison["missing_strict_fields"]:
         risk_flags.append("missing_runtime_evidence_strict_fields")
 

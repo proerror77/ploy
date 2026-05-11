@@ -153,6 +153,16 @@ running or interpreting evidence.
   environment, so it was cancelled to avoid leaving a stale approval queue.
   A new formal passing replay-parity artifact still requires environment
   approval or a default-branch workflow path that can start immediately.
+- 2026-05-11 replay-parity classifier fix: Updated
+  `scripts/replay_dryrun_parity.py` so settlement-exit order/fill price
+  mismatches are surfaced as the explicit blocking risk flag
+  `settlement_exit_price_mismatches`, with structured
+  `runtime_evidence_comparison.settlement_exit_mismatches` details. This keeps
+  the existing generic `runtime_evidence_field_mismatches` blocker while making
+  the current event `2221812` failure actionable for the next settlement-source
+  diagnosis. Verification passed: `python3 -m unittest
+  tests.test_replay_dryrun_parity`, `python3 -m py_compile
+  scripts/replay_dryrun_parity.py`, and `git diff --check`.
 
 # PM5D Settlement Probability PRD Execution Plan (2026-05-05)
 
