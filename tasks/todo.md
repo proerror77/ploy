@@ -13741,3 +13741,47 @@ loops without hard-coded date windows or unnecessary snapshot re-export.
   `CARGO_TARGET_DIR=/tmp/ploy-window-auto /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research research_snapshot --lib`,
   `CARGO_TARGET_DIR=/tmp/ploy-window-auto /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --features db --example factor_walk_forward_v2 --example factor_review_v2`,
   and `git diff --check`.
+
+# Factor Search Loop Efficiency (2026-05-11)
+
+## Goal
+
+Reduce factor-search loop overhead by running multiple hosted artifact
+walk-forward variants after a single snapshot download and Rust build.
+
+## Files / Ownership
+
+- `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`
+  - Owner: accept optional `sweep_json` and route the prepared artifact/binary
+    through the sweep runner.
+- `scripts/run_factor_walk_forward_sweep.py`
+  - Owner: execute variants, evaluate each AutoFactor promotion artifact, choose
+    the best selected variant, and write sweep summary artifacts.
+- `tests/test_factor_walk_forward_sweep.py`
+  - Owner: prove sweep parsing and multi-variant execution without requiring
+    live data or a Rust binary.
+
+## Tasks
+
+- [x] Identify repeated per-candidate overhead in the current hosted artifact
+  path: GitHub job startup, artifact download, cargo build, and single-config
+  evaluation.
+- [x] Add a sweep runner that loops variants inside one prepared job.
+- [x] Preserve backward compatibility: empty `sweep_json` still runs one base
+  variant and promotes root `report.txt` / handoff files for downstream steps.
+- [x] Add tests for dry-run expansion and two-variant execution.
+
+## Review
+
+- 2026-05-11: The workflow now has an optional `sweep_json` input. A single run
+  can test multiple overrides such as `factor_name_filter`, `top_quantile`,
+  `min_observations`, or walk-window sizes after one artifact download/build.
+  The sweep runner writes per-variant reports under numbered directories,
+  `sweep-summary.json`, `sweep-summary.md`, and copies the selected best
+  variant back to the root artifact path so existing promotion/config-PR steps
+  keep working.
+- 2026-05-11: Local verification passed:
+  `python3 -m unittest tests.test_factor_walk_forward_sweep tests.test_autofactor_strategy_promotion`,
+  `python3 -m py_compile scripts/run_factor_walk_forward_sweep.py tests/test_factor_walk_forward_sweep.py`,
+  `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml"); puts "ok"'`,
+  and `git diff --check`.
