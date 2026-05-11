@@ -1,3 +1,40 @@
+# Alpha Search Promotion Blocker: Current Replay/Dry-Run Parity (2026-05-11)
+
+## Evidence
+
+- [x] Main alpha-search smoke run `25676716895` succeeded from snapshot
+  `25642459432`, emitted alpha-search artifacts, and dispatched chained run
+  `25676869074`.
+- [x] Chained run `25676869074` improved the settlement target search to
+  `candidate_count=231`, `passed_count=68`, best
+  `mcts_mcts_auto_settlement_conservative_settlement_edge_x_near_strike_near_strike_near_strike`,
+  and `best_reward=4.894975850946932`.
+- [x] Promotion remains blocked because no current replay/dry-run parity
+  artifact is ready for the settlement-probability BTC/ETH dry-run lane.
+- [x] Fresh recorded replay parity run `25677127568` on
+  `main@48e3f7fb8f6b66ae602f9a12ab27a48ab0312b75` completed but reported
+  `strict_parity_ready=false`, `decision=fix-data-or-runtime-mismatch`, and
+  blockers `runtime_evidence_field_mismatches` plus
+  `settlement_exit_price_mismatches`.
+
+## Current Blocker
+
+The mismatch is settlement-exit-only for event `2221812` /
+`tl_settle_2221812_up`: dry-run runtime evidence still reports settlement
+sell order/fill price `1`, while current replay evidence reports `0`. This
+blocks AutoFactor promotion even though the top settlement candidate is a
+mapped runtime candidate.
+
+## Next Decision
+
+- [ ] With explicit approval, deploy current `main` to `tango-1-1` through the
+  protected dry-run deployment path, keep live paused, collect a fresh
+  settlement-probability BTC/ETH dry-run sample, rerun recorded replay parity,
+  then rerun hosted alpha-search with `replay_parity_run_id=<ready-run>`.
+- [ ] Do not use older ready parity run `25662901788` as promotion evidence; it
+  predates the later settlement token-semantics fix and is weaker than the
+  current failing run.
+
 # Alpha Search CI/CD Clean Port (2026-05-11)
 
 ## Goal
