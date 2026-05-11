@@ -116,6 +116,53 @@ when the runtime has not received an official Polymarket resolution.
   `CARGO_TARGET_DIR=/tmp/ploy-settlement-fallback /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles settlement_exit_requires_official_resolution_even_when_spot_implies_winner --lib`,
   `CARGO_TARGET_DIR=/tmp/ploy-settlement-fallback /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles official_settlement_resolution_prices_winner_and_loser_tokens --lib`,
   and `CARGO_TARGET_DIR=/tmp/ploy-settlement-fallback /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles --lib`.
+- 2026-05-12: PR `#439` merged the official-settlement gate to `main` as
+  `eae68bb1a5bae69d6bf428fea7452bac00e088f3`. Protected deploy run
+  `25697379244` was approved and the primary SSH deploy step passed, so the
+  settlement fix is on `tango-1-1`. Independent verification confirmed
+  `pm5d.threelayer.live desired=Paused observed=Paused`,
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun desired=Running
+  observed=Running`, the dry-run config still uses
+  `autofactor_formula:auto_settlement_conservative_settlement_edge`, and
+  `require_official_settlement=true`. The workflow still failed in the Cloud
+  Assistant fallback guard even though its own log printed the valid live line;
+  treat this as a CI/CD guard false-negative to repair before the next deploy
+  run, not as evidence that live was unpaused.
+
+# Tango Cloud Assistant Live-Paused Guard AWK Repair (2026-05-12)
+
+## Goal
+
+Remove the remaining false-negative in the Cloud Assistant live-paused guard
+after deploy run `25697379244` printed a valid
+`pm5d.threelayer.live desired=Paused observed=Paused` line but exited `1`.
+
+## Plan
+
+- [x] Diagnose deploy run `25697379244` and verify the primary SSH deploy
+  actually updated `tango-1-1`.
+- [x] Replace the fragile `grep | head` live-line selection with exact-field
+  `awk` selection in both SSH and Cloud Assistant deploy paths.
+- [x] Keep workflow-security coverage for the live-paused guard contract.
+- [x] Run focused syntax, workflow-security, and diff-hygiene verification.
+- [ ] Land the guard repair, then rerun recorded replay parity against the
+  already deployed post-fix dry-run sample.
+
+## Review
+
+- 2026-05-12: The remaining deploy failure was a guard false-negative in the
+  Cloud Assistant fallback. The SSH deploy step passed and remote verification
+  confirmed live remained paused while the target dry-run was running; no
+  `cargo` or `rustc` build process was found by exact process-name check.
+- 2026-05-12: Updated both `.github/workflows/deploy-tango-1-1.yml` and
+  `scripts/ci/deploy_tango_cloud_assist.py` to select the live deployment line
+  with `awk '$1 == "pm5d.threelayer.live" { print; exit }'` and validate both
+  `desired=Paused` and `observed=Paused` in one shell `case`, avoiding
+  `set -euo pipefail` sensitivity around `grep | head`. Verification passed:
+  `python3 -m py_compile scripts/ci/deploy_tango_cloud_assist.py`,
+  Ruby YAML parse for `.github/workflows/deploy-tango-1-1.yml`,
+  `CARGO_TARGET_DIR=/tmp/ploy-live-paused-awk /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test workflow_security tango_deploy_keeps_pm5d_live_paused`,
+  and `rtk git diff --check`.
 
 # Alpha Search Post-Handoff Audit Refresh (2026-05-12)
 
