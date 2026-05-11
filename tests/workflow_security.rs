@@ -258,6 +258,7 @@ fn replay_dryrun_parity_reports_strict_readiness() {
 #[test]
 fn tango_deploy_keeps_pm5d_live_paused() {
     let workflow = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
+    let cloud_assist = workflow_contents("scripts/ci/deploy_tango_cloud_assist.py");
     let mut offenders = Vec::new();
 
     for needle in [
@@ -270,6 +271,19 @@ fn tango_deploy_keeps_pm5d_live_paused() {
     ] {
         if !workflow.contains(needle) {
             offenders.push(format!("deploy-tango-1-1.yml: missing `{needle}`"));
+        }
+    }
+
+    for needle in [
+        "require_pm5d_live_paused",
+        "deployments inspect pm5d.threelayer.live",
+        "desired=Paused",
+        "observed=Paused",
+    ] {
+        if !cloud_assist.contains(needle) {
+            offenders.push(format!(
+                "deploy_tango_cloud_assist.py: missing `{needle}`"
+            ));
         }
     }
 
