@@ -85,7 +85,7 @@ service_exists() {{
 require_pm5d_live_paused() {{
   local live_status
   local live_line
-  live_status="$("${{DEPLOY_ROOT}}/bin/ployctl" deployments inspect pm5d.threelayer.live)"
+  live_status="$("${{DEPLOY_ROOT}}/bin/ployctl" deployments inspect pm5d.threelayer.live 2>&1)"
   echo "${{live_status}}"
   live_line="$(printf '%s\n' "${{live_status}}" | awk '$1 == "pm5d.threelayer.live" {{ print; exit }}')"
   case "${{live_line}}" in

@@ -1,3 +1,39 @@
+# Deploy Live-Paused Stderr Guard Repair (2026-05-12)
+
+## Goal
+
+Stop the protected tango deploy workflow from failing after a successful
+primary SSH deploy when `ployctl deployments inspect` writes the valid live
+paused line to stderr.
+
+## Plan
+
+- [x] Reproduce the Cloud Assistant fallback false-negative on `tango-1-1`.
+- [x] Capture `ployctl deployments inspect pm5d.threelayer.live` stderr in
+  both SSH and Cloud Assistant live-paused guards before awk matching.
+- [x] Run focused workflow/security validation.
+- [ ] Land the guard fix and rerun deploy from `main` so the workflow result
+  matches the already verified remote state.
+
+## Review
+
+- 2026-05-12: Deploy run `25700821724` deployed the bundle through the primary
+  SSH path, but failed in the Cloud Assistant fallback guard. Independent
+  remote verification confirmed `pm5d.threelayer.live desired=Paused
+  observed=Paused`, the settlement-probability dry-run still Running,
+  `ployd` active/running with guardrails, and no host-side `cargo`/`rustc`
+  build process. A direct shell reproduction showed the valid live line prints
+  while command substitution receives an empty stdout value, so the guard must
+  capture stderr before selecting the exact live deployment row.
+- 2026-05-12: Updated both deploy guards to capture `ployctl deployments
+  inspect pm5d.threelayer.live 2>&1` before exact-row awk selection.
+  Verification passed: `python3 -m py_compile
+  scripts/ci/deploy_tango_cloud_assist.py`, Ruby YAML parse for
+  `.github/workflows/deploy-tango-1-1.yml`,
+  `CARGO_TARGET_DIR=/tmp/ploy-live-paused-stderr /opt/homebrew/bin/timeout
+  300 rtk cargo test --locked --test workflow_security
+  tango_deploy_keeps_pm5d_live_paused`, and `rtk git diff --check`.
+
 # Runtime Quote Throttle State Repair (2026-05-12)
 
 ## Goal
