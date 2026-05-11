@@ -92,6 +92,82 @@ class EnrichReplayRuntimeEvidenceTests(unittest.TestCase):
         self.assertEqual(output["runtime_evidence"]["events"][1]["settlement"], "open")
         self.assertEqual(report["runtime_events_settlement_enriched"], 0)
 
+    def test_backfills_replay_event_identity_from_intent_and_fills(self):
+        payload = {
+            "runtime_evidence": {
+                "events": [
+                    {
+                        "intent_id": "tl_btcusdt_up_2221812_1778500092316",
+                        "token_id": "token-up",
+                        "decision_ts": None,
+                        "event_id": None,
+                        "market_id": None,
+                        "side": "UNKNOWN",
+                        "settlement": "open",
+                        "pnl": "-15.1080000000",
+                    },
+                    {
+                        "intent_id": "tl_settle_2221812_up",
+                        "token_id": "token-up",
+                        "decision_ts": None,
+                        "event_id": None,
+                        "market_id": None,
+                        "side": "UNKNOWN",
+                        "settlement": "open",
+                        "pnl": "23.4375",
+                    },
+                ],
+                "orders": [
+                    {
+                        "intent_id": "tl_btcusdt_up_2221812_1778500092316",
+                        "created_at": None,
+                    },
+                    {
+                        "intent_id": "tl_settle_2221812_up",
+                        "created_at": None,
+                    },
+                ],
+                "fills": [
+                    {
+                        "intent_id": "tl_btcusdt_up_2221812_1778500092316",
+                        "token_id": "token-up",
+                        "fill_side": "BUY",
+                        "quantity": "23.4375",
+                        "price": "0.64",
+                        "fee": "0.1080000000",
+                        "fill_timestamp": "2026-05-11T11:48:12.316Z",
+                    },
+                    {
+                        "intent_id": "tl_settle_2221812_up",
+                        "token_id": "token-up",
+                        "fill_side": "SELL",
+                        "quantity": "23.4375",
+                        "price": "1",
+                        "fee": "0",
+                        "fill_timestamp": "2026-05-11T11:50:00Z",
+                    },
+                ],
+            }
+        }
+        output, report = self.run_script(
+            payload,
+            [{"event_id": "2221812", "token_id": "token-up", "settlement": "1.00000000000000000000"}],
+        )
+
+        entry, settlement = output["runtime_evidence"]["events"]
+        self.assertEqual(entry["event_id"], "2221812")
+        self.assertEqual(entry["market_id"], "2221812")
+        self.assertEqual(entry["market_side"], "UP")
+        self.assertEqual(entry["side"], "BUY")
+        self.assertEqual(entry["decision_ts"], "2026-05-11T11:48:12.316Z")
+        self.assertEqual(entry["settlement"], "1.00000000000000000000")
+        self.assertEqual(entry["pnl"], "8.3295")
+        self.assertEqual(settlement["side"], "SELL")
+        self.assertEqual(settlement["decision_ts"], "2026-05-11T11:50:00Z")
+        self.assertEqual(settlement["settlement"], "open")
+        self.assertEqual(report["runtime_events_settlement_enriched"], 1)
+        self.assertGreaterEqual(report["runtime_events_identity_backfilled"], 8)
+
 
 if __name__ == "__main__":
     unittest.main()
