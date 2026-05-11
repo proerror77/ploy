@@ -291,7 +291,7 @@ jobs:
       - name: Create config PR from ready handoff
         if: always()
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PLOY_PR_CREATE_TOKEN || github.token }}
           BASE_REF: ${{ github.event.inputs.git_ref }}
         run: |
           set -euo pipefail
@@ -338,6 +338,12 @@ jobs:
             exit 0
           fi
 
+          python3 -m unittest tests.test_apply_autofactor_handoff_to_config
+          cargo test --locked \
+            -p ploy-strategy-bundles \
+            settlement_probability_config_carries_autofactor_handoff_score \
+            --lib
+
           branch="autofactor/hosted-walk-forward-handoff-${GITHUB_RUN_ID}"
           git switch -c "${branch}"
           git config user.name "github-actions[bot]"
@@ -364,11 +370,33 @@ jobs:
             echo ""
             echo "This PR is generated from a ready hosted handoff artifact. It does not deploy and does not enable live trading."
           } > artifacts/factor-walk-forward-v2/autofactor-config-handoff/pr-body.md
-          gh pr create \
+          pr_url_file="artifacts/factor-walk-forward-v2/autofactor-config-handoff/pr-create-result.txt"
+          if gh pr create \
             --base "${BASE_REF}" \
             --head "${branch}" \
             --title "${title}" \
-            --body-file artifacts/factor-walk-forward-v2/autofactor-config-handoff/pr-body.md
+            --body-file artifacts/factor-walk-forward-v2/autofactor-config-handoff/pr-body.md \
+            | tee "${pr_url_file}"; then
+            echo "Created config PR from ready AutoFactor handoff."
+          else
+            status=$?
+            manual_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/new/${branch}"
+            {
+              echo "Config branch was pushed, but automatic PR creation failed with exit code ${status}."
+              echo "Manual PR URL: ${manual_url}"
+              echo "This commonly happens when repository policy blocks pull requests created by GitHub Actions tokens."
+            } | tee "${pr_url_file}"
+            {
+              echo "### AutoFactor config PR creation"
+              echo ""
+              echo "Config branch was pushed: \`${branch}\`"
+              echo ""
+              echo "Automatic PR creation failed with exit code \`${status}\`."
+              echo "Manual PR URL: ${manual_url}"
+              echo ""
+              echo "The workflow result remains successful because the research artifact and reviewable branch were produced."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Publish summary
         if: always()

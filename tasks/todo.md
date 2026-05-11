@@ -13487,3 +13487,20 @@ Review:
 - The implementation adds `symbol_count` and `symbol_positive_ratio` to AutoFactor seed reports, preserving window IC/ICIR gates while adding formula-level symbol stability for `autofactor_formula:*` runtime scores.
 - The promotion evaluator still treats data quality, Deribit, executable-depth, calibration, and replay-parity failures as global blockers; it only replaces PRD model-specific `symbol_holdout` / `walk_forward_oos` blockers with formula-specific AutoFactor gates.
 - Local checks: `python3 -m unittest tests.test_autofactor_strategy_promotion`, `rtk cargo test -p ploy-research autofactor --lib`, `rtk cargo check -p ploy-research --features db --example factor_walk_forward_v2`, and `rtk git diff --check` pass.
+
+## 2026-05-11 - Hosted AutoFactor Config PR Fallback
+
+Plan:
+
+- [x] Diagnose why `create_config_pr=true` marked the hosted walk-forward run failed after a ready handoff.
+- [x] Keep the pushed config branch and artifact as success evidence when only `gh pr create` is blocked by repository token policy.
+- [x] Add promotion preflight checks before pushing a generated config branch.
+- [x] Add Python script tests to the PR `Test` workflow.
+- [ ] Validate workflow syntax and merge the CI fix.
+
+Review:
+
+- Hosted config run `25650041859` produced a ready handoff and pushed branch `autofactor/hosted-walk-forward-handoff-25650041859`, but failed at `gh pr create` with `GitHub Actions is not permitted to create or approve pull requests`.
+- The workflow now uses optional `PLOY_PR_CREATE_TOKEN` before falling back to `github.token`, and treats PR creation failure as a manual follow-up after the branch has already been pushed.
+- Generated config branches now run `tests.test_apply_autofactor_handoff_to_config` and the narrow settlement AutoFactor config contract test before commit/push, so stale hard-coded config expectations fail before the generated PR step.
+- The main PR workflow now runs Python unittest discovery, which exposed and fixed an outdated PM5D recording-source contract test that had drifted outside CI coverage.
