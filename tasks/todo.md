@@ -1,3 +1,51 @@
+# Tango Deploy False-Negative Guard Repair (2026-05-12)
+
+## Goal
+
+Record the protected dry-run deploy outcome and repair the Cloud Assistant
+live-paused guard that failed after the SSH deploy path had already updated
+`tango-1-1`.
+
+## Plan
+
+- [x] Approve and monitor protected deploy run `25690789142`.
+- [x] Independently verify the remote dry-run config, live paused state, and
+  `ployd` guardrails after the workflow failure.
+- [x] Harden both SSH and Cloud Assistant live-paused guard parsing against
+  multi-line `ployctl` output.
+- [x] Run focused workflow/security validation.
+- [ ] Collect enough post-deploy closed dry-run rows and rerun recorded replay
+  parity before claiming profitability.
+
+## Review
+
+- 2026-05-12: Protected deploy run `25690789142` built the release runner,
+  research tools, optimize-backtest, deploy bundle, passed the bundle
+  live-paused guard, uploaded the bundle, and completed the primary SSH
+  `Pull bundle from OSS and restart services` step. The run failed later in
+  the Cloud Assistant fallback live-paused guard even though the output
+  included `pm5d.threelayer.live desired=Paused observed=Paused`.
+- 2026-05-12: Independent read-only remote verification at
+  `2026-05-11T19:18:53Z` confirmed the deployment was actually applied:
+  `pm5d.threelayer.live desired=Paused observed=Paused`,
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun desired=Running
+  observed=Running`, and the remote dry-run config now uses
+  `autofactor_formula:auto_settlement_conservative_settlement_edge`.
+  `ployd` was `ActiveState=active`, `SubState=running`, with
+  `Restart=always`, `OOMPolicy=kill`, and `MemoryMax=1610612736`.
+- 2026-05-12: Fixed both deploy live-paused guards to select the live line via
+  fixed-string `grep -F "pm5d.threelayer.live "` and then check
+  `desired=Paused` and `observed=Paused` separately. Verification passed:
+  `python3 -m py_compile scripts/ci/deploy_tango_cloud_assist.py`,
+  Ruby YAML parse for `.github/workflows/deploy-tango-1-1.yml`,
+  `CARGO_TARGET_DIR=/tmp/ploy-tango-live-paused-grep /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test workflow_security tango_deploy_keeps_pm5d_live_paused`,
+  and `rtk git diff --check`.
+- 2026-05-12: First post-deploy closed-row check found only `1` closed row
+  since `2026-05-11T19:18:00Z`, with net PnL `20.4126279478`. This proves the
+  new dry-run is producing evidence, but it is far too small for profitability
+  or parity promotion. Wait for a larger fresh sample before triggering
+  recorded replay parity.
+
 # Alpha Search Post-Handoff Audit Refresh (2026-05-12)
 
 ## Goal
