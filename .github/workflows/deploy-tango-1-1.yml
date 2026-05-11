@@ -400,15 +400,14 @@ jobs:
               local live_line
               live_status="\$(${DEPLOY_ROOT}/bin/ployctl deployments inspect pm5d.threelayer.live)"
               echo "\${live_status}"
-              live_line="\$(printf '%s\n' "\${live_status}" | grep -F "pm5d.threelayer.live " | head -n 1 || true)"
-              if ! printf '%s\n' "\${live_line}" | grep -F "desired=Paused" >/dev/null; then
-                echo "pm5d.threelayer.live must remain desired=Paused observed=Paused after deploy" >&2
-                exit 1
-              fi
-              if ! printf '%s\n' "\${live_line}" | grep -F "observed=Paused" >/dev/null; then
-                echo "pm5d.threelayer.live must remain desired=Paused observed=Paused after deploy" >&2
-                exit 1
-              fi
+              live_line="\$(printf '%s\n' "\${live_status}" | awk '\$1 == "pm5d.threelayer.live" { print; exit }')"
+              case "\${live_line}" in
+                *"desired=Paused"*"observed=Paused"*) ;;
+                *)
+                  echo "pm5d.threelayer.live must remain desired=Paused observed=Paused after deploy" >&2
+                  exit 1
+                  ;;
+              esac
             }
 
             service_exists() {
