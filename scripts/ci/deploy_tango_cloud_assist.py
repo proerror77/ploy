@@ -82,6 +82,19 @@ service_exists() {{
   systemctl cat "$1" >/dev/null 2>&1
 }}
 
+require_pm5d_live_paused() {{
+  local live_status
+  live_status="$("${{DEPLOY_ROOT}}/bin/ployctl" deployments inspect pm5d.threelayer.live)"
+  echo "${{live_status}}"
+  case "${{live_status}}" in
+    *"desired=Paused"*"observed=Paused"*) ;;
+    *)
+      echo "pm5d.threelayer.live must remain desired=Paused observed=Paused after deploy" >&2
+      exit 1
+      ;;
+  esac
+}}
+
 require_service_guardrails() {{
   local unit="$1"
   test "$(systemctl show -P Restart "${{unit}}")" = "always"
@@ -257,6 +270,8 @@ if service_exists ployd.service; then
   systemctl is-active --quiet ployd.service
   curl -fsS http://127.0.0.1:8081/health
   curl -fsS http://127.0.0.1:8081/api/reports/dry-run | "${{DEPLOY_ROOT}}/scripts/check_dryrun_report_contract.py"
+  "${{DEPLOY_ROOT}}/bin/ployctl" deployments list
+  require_pm5d_live_paused
 fi
 
 wait_for_recent_rows \\

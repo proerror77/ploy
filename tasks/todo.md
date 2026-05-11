@@ -1,3 +1,32 @@
+# Tango Cloud Assistant Live-Paused Guard (2026-05-11)
+
+## Goal
+
+Make the Cloud Assistant fallback deployment path enforce the same
+`pm5d.threelayer.live` paused postflight as the primary SSH path before the next
+approved dry-run parity deployment.
+
+## Plan
+
+- [x] Inspect `scripts/ci/deploy_tango_cloud_assist.py` for post-deploy
+  `ployctl` checks.
+- [x] Add a Cloud Assistant remote-script guard requiring
+  `pm5d.threelayer.live` to report `desired=Paused observed=Paused`.
+- [x] Extend workflow security coverage so both SSH and Cloud Assistant deploy
+  paths must keep the live-paused guard.
+- [x] Validate Python syntax, focused tests, and diff hygiene.
+
+## Review
+
+- 2026-05-11: Added `require_pm5d_live_paused` to the Cloud Assistant fallback
+  remote script and call it after `ployd` health/dry-run report checks. The
+  fallback now fails closed if `pm5d.threelayer.live` is not
+  `desired=Paused observed=Paused`.
+- 2026-05-11: Verification passed:
+  `python3 -m py_compile scripts/ci/deploy_tango_cloud_assist.py`,
+  `CARGO_TARGET_DIR=/tmp/ploy-cloud-assist-paused-guard /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test workflow_security tango_deploy_keeps_pm5d_live_paused`,
+  and `rtk git diff --check`.
+
 # Tango Dry-Run Deploy Live-Paused Guard (2026-05-11)
 
 ## Goal
