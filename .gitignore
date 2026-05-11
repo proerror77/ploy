@@ -19,6 +19,7 @@ __pycache__/
 # Environment & secrets
 .env
 .env.local
+.env.development
 .env.production.backup
 *.pem
 *.key
@@ -41,6 +42,10 @@ data/
 reports/
 results/
 models/
+crates/ploy-daemon-host/run/
+
+# Local UI screenshots
+/dry-run-*.png
 
 # Tool artifacts
 .serena/
