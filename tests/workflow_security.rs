@@ -371,6 +371,7 @@ fn tango_deploy_keeps_pm5d_live_paused() {
         "pm5d.threelayer.live.json",
         "desired_state=paused",
         "deployments inspect pm5d.threelayer.live",
+        "deployments inspect pm5d.threelayer.live 2>&1",
         "awk '\\$1 == \"pm5d.threelayer.live\"",
         "desired=Paused",
         "observed=Paused",
@@ -383,6 +384,7 @@ fn tango_deploy_keeps_pm5d_live_paused() {
     for needle in [
         "require_pm5d_live_paused",
         "deployments inspect pm5d.threelayer.live",
+        "deployments inspect pm5d.threelayer.live 2>&1",
         "awk '$1 == \"pm5d.threelayer.live\"",
         "desired=Paused",
         "observed=Paused",
