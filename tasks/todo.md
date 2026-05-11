@@ -34,6 +34,15 @@ profitability gate.
   optimize-backtest, deploy bundle, and passed the live-paused bundle guard.
   The run skipped all OSS upload, SSH, Cloud Assistant, remote restart, and
   deployment summary steps, so it did not mutate `tango-1-1`.
+- 2026-05-12: Read-only `tango-1-1` check confirmed
+  `pm5d.threelayer.live desired=Paused observed=Paused` and
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun desired=Running
+  observed=Running`. The remote dry-run config still uses
+  `autofactor_formula:auto_settlement_full_depth_settlement_edge`, while
+  `origin/main` uses the ready handoff
+  `autofactor_formula:auto_settlement_conservative_settlement_edge`. Protected
+  dry-run deploy is therefore still required before fresh profitability
+  evidence can be collected.
 
 # Alpha Search Parity Blocker Refresh (2026-05-12)
 

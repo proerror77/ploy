@@ -36,6 +36,20 @@ Latest deploy preflight:
   deployment config. No OSS upload, SSH, Cloud Assistant, remote restart, or
   service mutation was executed.
 
+Latest read-only remote config check:
+
+- checked_at: `2026-05-11T18:36:46Z`
+- remote deployment state:
+  `pm5d.threelayer.live desired=Paused observed=Paused`;
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun desired=Running observed=Running`
+- remote dry-run score:
+  `autofactor_formula:auto_settlement_full_depth_settlement_edge`
+- `origin/main` dry-run score:
+  `autofactor_formula:auto_settlement_conservative_settlement_edge`
+- interpretation: protected dry-run deployment is still required because the
+  running settlement-probability dry-run lane has not yet picked up the ready
+  hosted handoff merged by PR `#433`.
+
 Historical parity runs that led to the ready handoff:
 
 - run: `25687392088`
@@ -88,6 +102,7 @@ Earlier blocker runs:
 | Replay/dry-run parity is ready for handoff | `recorded-replay-parity.yml` artifact `recorded-replay-parity-25687392088` | `ready` | PR `#433` records `replay_parity_ready=true`, `runtime/event strict ready`, and `blocking=[]`. |
 | A dry-run config PR can be generated from ready handoff | `create_config_pr=true` path in hosted workflow, PR `#433` | `ready` | PR `#433` merged `autofactor_formula:auto_settlement_conservative_settlement_edge` into the dry-run config. |
 | Latest deploy bundle can be built without mutating remote services | `deploy-tango-1-1.yml` run `25688999691` with `deploy=false` | `ready` | Build-only run built the release runner, research tools, optimize-backtest, deploy bundle, and live-paused bundle guard. |
+| Remote dry-run config matches the ready handoff on `main` | read-only `tango-1-1` config comparison | `blocked` | Remote is still `auto_settlement_full_depth_settlement_edge`; `origin/main` is `auto_settlement_conservative_settlement_edge`, so protected dry-run deploy is required. |
 | A profitable strategy has been produced | ready handoff plus post-merge dry-run/executable evidence | `not ready` | The system has a dry-run candidate. It still needs deployment, fresh sample collection, and post-merge executable PnL/risk evidence before profitability can be claimed. |
 
 ## Latest Alpha-Search Evidence
