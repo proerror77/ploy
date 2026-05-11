@@ -1,3 +1,27 @@
+# Alpha Search Current-State Semantics (2026-05-12)
+
+## Goal
+
+Correct the alpha-search semantic layer so agents no longer treat the upstream
+search controller as missing after the CI/CD alpha-search artifacts and MCTS
+chain were implemented.
+
+## Plan
+
+- [x] Update `docs/ALPHA_FACTOR_SEARCH_CICD.md` current-state language.
+- [x] Make the document distinguish implemented search infrastructure from the
+  still-blocking replay/dry-run parity and profitable-strategy evidence.
+- [x] Validate docs diff hygiene and commit the focused change.
+
+## Review
+
+- 2026-05-12: Updated the alpha-search semantic contract to say the repo now
+  has the core alpha-search factory: hosted artifact walk-forward emits
+  alpha-search artifacts, `alpha_search.rs` writes the search-space/priors/tree
+  trace/MCTS feedback bundle, and the hosted workflow can chain bounded MCTS
+  iterations. The document now names promotion evidence, especially recorded
+  replay/dry-run parity and ready handoff artifacts, as the current blocker.
+
 # Recorded Replay Parity Auto Window (2026-05-12)
 
 ## Goal

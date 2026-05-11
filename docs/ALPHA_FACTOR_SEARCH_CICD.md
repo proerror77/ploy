@@ -35,12 +35,14 @@ exploration and CI evidence.
 
 ## Current State
 
-The repo already has the downstream half of the factory:
+The repo now has the core alpha-search factory, not only the downstream
+promotion half:
 
 - `factor-walk-forward-v2.yml`: self-hosted research path for fresh DB-adjacent
   snapshot and walk-forward evidence.
 - `factor-walk-forward-v2-hosted-artifact.yml`: GitHub-hosted path that consumes
-  a retained full research snapshot artifact.
+  a retained full research snapshot artifact, emits alpha-search artifacts, and
+  can chain bounded follow-up search runs.
 - `autofactor-strategy-promotion.yml`: evaluator for existing
   `factor-walk-forward-v2-*` artifacts.
 - `scripts/evaluate_autofactor_strategy_promotion.py`: fail-closed promotion
@@ -49,18 +51,26 @@ The repo already has the downstream half of the factory:
 - `crates/ploy-research/src/autofactor.rs`: Rust `FactorExpr` DSL, safe
   operators, seed candidates, settlement-native generated candidates, and
   candidate/watchlist/reject scoring.
+- `crates/ploy-research/src/alpha_search.rs`: alpha-search artifact writer for
+  search space, typed priors, candidates, rejected expressions, tree trace,
+  node metrics, search feedback, and MCTS expansion plan.
 
 That means the repo can already do:
 
 ```text
 research snapshot
   -> factor walk-forward
+  -> alpha-search artifact bundle
+  -> MCTS expansion plan
+  -> optional chained hosted search iteration
   -> AutoFactor promotion evaluation
   -> blocked/ready handoff artifact
   -> optional dry-run config PR
 ```
 
-The missing layer is the upstream search controller:
+The implemented search controller is intentionally bounded. It is currently a
+typed, deterministic formula-search and MCTS-planning layer rather than a
+free-form code generator:
 
 ```text
 semantic hypothesis + formula prior
@@ -71,8 +81,12 @@ semantic hypothesis + formula prior
   -> factor walk-forward rows
 ```
 
-Until that layer is implemented, AutoFactor is a constrained generator plus
-promotion gate, not a full alpha-search engine.
+The main unresolved blocker is no longer "can the system generate/explore alpha
+candidates?" It can. The current blocker is promotion quality evidence:
+recorded replay/dry-run parity must be ready for the target dry-run lane, the
+handoff artifact must be `status=ready`, and any resulting config PR must still
+pass normal CI before deployment. Search reward, MCTS rank, or a ready-looking
+candidate row is not enough to claim a profitable strategy.
 
 ## Architecture
 
