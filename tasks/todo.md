@@ -23,6 +23,11 @@ Review:
 - This work is candidate discovery infrastructure. It does not claim a
   profitable deployable strategy until walk-forward, replay/runtime parity,
   and dry-run handoff gates produce ready evidence.
+- Old-branch CI smoke evidence showed the chain can improve candidate search
+  rewards (`25672175576` best_reward `4.81954070569323`, chained run
+  `25672625360` best_reward `4.894975850946932`), but those results are
+  research/search evidence only and must be rerun from this clean branch before
+  promotion.
 
 # Recorded Replay Official Settlement Enrichment (2026-05-11)
 
