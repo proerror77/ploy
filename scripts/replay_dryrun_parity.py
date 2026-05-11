@@ -818,30 +818,31 @@ def build_result(
     if runtime_evidence_comparison["missing_strict_fields"]:
         risk_flags.append("missing_runtime_evidence_strict_fields")
 
+    legacy_event_flags: list[str] = []
     if not replay_events and runtime_evidence_comparison["events"]["replay_count"] == 0:
-        risk_flags.append("replay_has_no_legacy_event_level_rows")
+        legacy_event_flags.append("replay_has_no_legacy_event_level_rows")
     if not dryrun_events and runtime_evidence_comparison["events"]["dryrun_count"] == 0:
-        risk_flags.append("dryrun_has_no_legacy_event_level_rows")
+        legacy_event_flags.append("dryrun_has_no_legacy_event_level_rows")
     if (
         event_comparison["missing_dryrun_events"]
         and not runtime_evidence_comparison["events"]["missing_dryrun_rows"]
     ):
-        risk_flags.append("legacy_events_present_in_replay_missing_from_dryrun")
+        legacy_event_flags.append("legacy_events_present_in_replay_missing_from_dryrun")
     if (
         event_comparison["missing_replay_events"]
         and not runtime_evidence_comparison["events"]["missing_replay_rows"]
     ):
-        risk_flags.append("legacy_events_present_in_dryrun_missing_from_replay")
+        legacy_event_flags.append("legacy_events_present_in_dryrun_missing_from_replay")
     if event_comparison["mismatches"]:
-        risk_flags.append("legacy_event_strict_field_mismatches")
+        legacy_event_flags.append("legacy_event_strict_field_mismatches")
     if event_comparison["missing_strict_fields"]:
-        risk_flags.append("legacy_event_missing_strict_parity_fields")
+        legacy_event_flags.append("legacy_event_missing_strict_parity_fields")
 
     decision = "continue"
     if not runtime_evidence_comparison["strict_parity_ready"]:
         decision = "fix-data-or-runtime-mismatch"
-    advisory_flags = [flag for flag in risk_flags if flag.startswith("legacy_")]
-    blocking_risk_flags = [flag for flag in risk_flags if flag not in advisory_flags]
+    advisory_flags: list[str] = []
+    blocking_risk_flags = list(risk_flags)
 
     return {
         "schema_version": 1,
@@ -855,6 +856,7 @@ def build_result(
         "dryrun_metrics": extract_metrics(dryrun),
         "event_comparison": event_comparison,
         "runtime_evidence_comparison": runtime_evidence_comparison,
+        "legacy_event_flags": legacy_event_flags,
         "risk_flags": risk_flags,
         "blocking_risk_flags": blocking_risk_flags,
         "advisory_flags": advisory_flags,
