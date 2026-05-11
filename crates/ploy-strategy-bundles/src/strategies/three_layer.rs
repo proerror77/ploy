@@ -14,7 +14,6 @@ use tracing::{debug, info, warn};
 use super::common::event::EventWindow;
 use super::common::fees::crypto_fee_cost;
 use super::common::quote::QuoteState;
-use super::common::settlement;
 use super::event_ml_model::{
     self, is_event_ml_runtime_score, EventMlModelContract, EventMlModelError,
 };
@@ -1723,11 +1722,14 @@ impl ThreeLayerStrategy {
     }
 
     fn resolve_up_won(&self, event: &EventWindow, resolved: Option<bool>) -> Option<bool> {
-        settlement::resolve_up_won(
-            resolved,
-            self.spot.get(&event.symbol).copied(),
-            event.price_to_beat,
-        )
+        if resolved.is_none() {
+            debug!(
+                strategy = "three_layer",
+                event_id = %event.event_id,
+                "Skipping settlement exit without official resolution"
+            );
+        }
+        resolved
     }
 }
 
@@ -2937,6 +2939,87 @@ mod tests {
                 assert_eq!(intent.limit_price, Some(Decimal::new(1, 0)));
             }
             other => panic!("expected settlement exit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settlement_exit_requires_official_resolution_even_when_spot_implies_winner() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 6, 9, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        discover_test_event(&mut strategy, now);
+        let positions = position_with_token("token-down", now);
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(90000),
+                ts: now,
+            },
+            &PositionLedger::default(),
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::EventExpired {
+                event_id: Arc::from("evt1"),
+                end_time: now,
+                resolved_up_won: None,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "settlement exits must not infer official result from spot/price_to_beat"
+        );
+    }
+
+    #[test]
+    fn official_settlement_resolution_prices_winner_and_loser_tokens() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 5, 12, 6, 9, 0).unwrap();
+        let orders = OrderLedger::default();
+
+        let mut up_strategy = ThreeLayerStrategy::new(test_config());
+        discover_test_event(&mut up_strategy, now);
+        let up_decisions = up_strategy.on_update(
+            &MarketUpdate::EventExpired {
+                event_id: Arc::from("evt1"),
+                end_time: now,
+                resolved_up_won: Some(true),
+            },
+            &position_with_token("token-up", now),
+            &orders,
+        );
+        match &up_decisions[..] {
+            [StrategyDecision::Exit(intent)] => {
+                assert_eq!(intent.token_id, "token-up");
+                assert_eq!(intent.limit_price, Some(Decimal::new(1, 0)));
+            }
+            other => panic!("expected one UP settlement exit, got {other:?}"),
+        }
+
+        let mut down_strategy = ThreeLayerStrategy::new(test_config());
+        discover_test_event(&mut down_strategy, now);
+        let down_decisions = down_strategy.on_update(
+            &MarketUpdate::EventExpired {
+                event_id: Arc::from("evt1"),
+                end_time: now,
+                resolved_up_won: Some(true),
+            },
+            &position_with_token("token-down", now),
+            &orders,
+        );
+        match &down_decisions[..] {
+            [StrategyDecision::Exit(intent)] => {
+                assert_eq!(intent.token_id, "token-down");
+                assert_eq!(intent.limit_price, Some(Decimal::ZERO));
+            }
+            other => panic!("expected one DOWN settlement exit, got {other:?}"),
         }
     }
 
