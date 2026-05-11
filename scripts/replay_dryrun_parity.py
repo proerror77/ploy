@@ -840,11 +840,7 @@ def build_result(
     decision = "continue"
     if not runtime_evidence_comparison["strict_parity_ready"]:
         decision = "fix-data-or-runtime-mismatch"
-    advisory_flags = [
-        flag
-        for flag in risk_flags
-        if flag.startswith("legacy_event_")
-    ]
+    advisory_flags = [flag for flag in risk_flags if flag.startswith("legacy_")]
     blocking_risk_flags = [flag for flag in risk_flags if flag not in advisory_flags]
 
     return {
