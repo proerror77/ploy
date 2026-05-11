@@ -13472,3 +13472,18 @@ Review:
 - Full `pm5d-vol` snapshot run `25642459432` succeeded with `pm_book_sample_secs=300`, `compile_status=0`, artifact `research-snapshot-25642459432` size `339071681` bytes, and row counts: observations `81645`, Deribit snapshots `16049`, PM book snapshots `46906`.
 - Hosted walk-forward run `25642965148` proved the snapshot artifact is complete but failed while parsing `observations.json`: `invalid type: null, expected f64` for nullable LOB/CEX derived fields that were not yet covered by the nullable-as-NaN serde compatibility path.
 - PR #391 merged as `0b394616` and hosted walk-forward run `25643191151` succeeded from snapshot `25642459432`. AutoFactor promotion is correctly blocked, not broken: handoff status `blocked`, recommendation `do_not_promote`, with blockers `symbol_holdout` and `walk_forward_oos`; settlement AutoFactor formulas are watchlist only because of `low_icir`.
+
+## 2026-05-11 - AutoFactor Formula Promotion Gate
+
+Plan:
+
+- [x] Add formula-level symbol stability evidence to AutoFactor seed reports.
+- [x] Make the promotion evaluator distinguish global data/parity gates from formula-specific AutoFactor gates.
+- [x] Validate with focused unit/script tests before opening the implementation PR.
+
+Review:
+
+- Strict top-edge hosted run `25649549442` converted leading settlement AutoFactor rows into `candidate/passed`, but the handoff stayed blocked because the evaluator only understood the global PRD model gates.
+- The implementation adds `symbol_count` and `symbol_positive_ratio` to AutoFactor seed reports, preserving window IC/ICIR gates while adding formula-level symbol stability for `autofactor_formula:*` runtime scores.
+- The promotion evaluator still treats data quality, Deribit, executable-depth, calibration, and replay-parity failures as global blockers; it only replaces PRD model-specific `symbol_holdout` / `walk_forward_oos` blockers with formula-specific AutoFactor gates.
+- Local checks: `python3 -m unittest tests.test_autofactor_strategy_promotion`, `rtk cargo test -p ploy-research autofactor --lib`, `rtk cargo check -p ploy-research --features db --example factor_walk_forward_v2`, and `rtk git diff --check` pass.

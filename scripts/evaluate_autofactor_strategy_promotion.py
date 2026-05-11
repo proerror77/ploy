@@ -4,10 +4,15 @@
 This is intentionally stricter than the AutoFactor IC/ICIR candidate gate.
 An AutoFactor row is only a qualified strategy when:
 
-1. the surrounding settlement PRD promotion gate is ready;
+1. all global settlement PRD promotion gates are ready;
 2. the row is a `candidate` with reason `passed`;
 3. the target is one of the allowed executable targets; and
 4. the factor has an explicit runtime strategy-profile mapping.
+
+For `autofactor_formula:*` runtime scores, the PRD model-specific
+`symbol_holdout` and `walk_forward_oos` gates are replaced by formula-level
+symbol/window stability from the AutoFactor row. Data quality, Deribit,
+execution-depth, calibration, and replay-parity gates remain global blockers.
 
 The current PM5D/PM15D settlement PRD should not silently promote a good
 repricing factor into the settlement strategy lane.
@@ -125,6 +130,8 @@ class AutoFactorRow:
     window_count: int
     icir: float
     positive_window_ratio: float
+    symbol_count: int
+    symbol_positive_ratio: float
     monotonicity: float
     top_bucket_avg_label: float
     top_bucket_positive_label_rate: float
@@ -148,6 +155,8 @@ def factor_metrics(row: AutoFactorRow) -> dict[str, Any]:
         "window_count": row.window_count,
         "icir": row.icir,
         "positive_window_ratio": row.positive_window_ratio,
+        "symbol_count": row.symbol_count,
+        "symbol_positive_ratio": row.symbol_positive_ratio,
         "monotonicity": row.monotonicity,
         "top_bucket_avg_label": row.top_bucket_avg_label,
         "top_bucket_positive_label_rate": row.top_bucket_positive_label_rate,
@@ -243,6 +252,8 @@ def parse_autofactor_rows(report_text: str) -> list[AutoFactorRow]:
                 window_count=parse_int(item["window_count"]),
                 icir=parse_float(item["icir"]),
                 positive_window_ratio=parse_float(item["positive_window_ratio"]),
+                symbol_count=parse_int(item.get("symbol_count", "0")),
+                symbol_positive_ratio=parse_float(item.get("symbol_positive_ratio", "nan")),
                 monotonicity=parse_float(item["monotonicity"]),
                 top_bucket_avg_label=parse_float(item["top_bucket_avg_label"]),
                 top_bucket_positive_label_rate=parse_float(item["top_bucket_positive_label_rate"]),
@@ -264,6 +275,33 @@ def load_runtime_mappings(path: str | None) -> dict[str, dict[str, str]]:
     return mappings
 
 
+MODEL_SPECIFIC_PRD_GATE_PREFIXES = (
+    "symbol_holdout:",
+    "walk_forward_oos:",
+)
+
+
+def is_autofactor_formula(mapping: dict[str, str] | None) -> bool:
+    if not mapping:
+        return False
+    return mapping.get("runtime_score", "").startswith("autofactor_formula:")
+
+
+def global_gate_blockers(gate: PromotionGate, *, formula_specific: bool) -> list[str]:
+    if gate.ready:
+        return []
+    if not formula_specific:
+        return ["promotion_gate_not_ready"]
+    blockers = [
+        item
+        for item in gate.blocked_gates
+        if not item.startswith(MODEL_SPECIFIC_PRD_GATE_PREFIXES)
+    ]
+    if blockers:
+        return [f"global_promotion_gate_not_ready:{item}" for item in blockers]
+    return []
+
+
 def evaluate(
     report_text: str,
     *,
@@ -277,13 +315,13 @@ def evaluate(
 
     for row in rows:
         blockers: list[str] = []
-        if not gate.ready:
-            blockers.append("promotion_gate_not_ready")
+        mapping = runtime_mappings.get(row.name)
+        formula_specific = is_autofactor_formula(mapping)
+        blockers.extend(global_gate_blockers(gate, formula_specific=formula_specific))
         if row.target not in allowed_targets:
             blockers.append("target_not_allowed")
         if row.decision != "candidate" or row.reason != "passed":
             blockers.append(f"autofactor_not_candidate:{row.decision}:{row.reason}")
-        mapping = runtime_mappings.get(row.name)
         if not mapping:
             blockers.append("missing_runtime_strategy_mapping")
         else:
@@ -293,6 +331,13 @@ def evaluate(
             elif mapped_profile != required_strategy_profile:
                 blockers.append(
                     f"runtime_profile_mismatch:{mapped_profile}!={required_strategy_profile}"
+                )
+        if formula_specific:
+            if row.symbol_count < 2:
+                blockers.append("formula_symbol_holdout_too_few_symbols")
+            elif row.symbol_positive_ratio < 0.60:
+                blockers.append(
+                    f"formula_symbol_holdout_unstable:{row.symbol_positive_ratio:.4f}<0.60"
                 )
         evaluated.append(
             EvaluatedFactor(
