@@ -764,16 +764,39 @@ venue = "sportsbook"
 
     #[test]
     fn settlement_probability_config_carries_autofactor_handoff_score() {
+        use crate::strategies::three_layer_model::{
+            AutoSettlementFactorInputs, auto_settlement_formula_score,
+        };
+
         let path = strategy_config_dir()
             .join("02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml");
         let config = FullConfig::from_file(path.to_str().unwrap()).unwrap();
 
-        assert_eq!(
-            config
-                .strategy
-                .three_layer_autofactor_runtime_score
-                .as_deref(),
-            Some("autofactor_formula:auto_settlement_conservative_settlement_edge")
+        let runtime_score = config
+            .strategy
+            .three_layer_autofactor_runtime_score
+            .as_deref()
+            .expect("settlement probability dry-run config should carry an AutoFactor handoff");
+        assert!(
+            runtime_score.starts_with("autofactor_formula:auto_settlement_"),
+            "settlement probability dry-run config should use a settlement AutoFactor formula, got {runtime_score}"
+        );
+        let raw = auto_settlement_formula_score(
+            runtime_score,
+            AutoSettlementFactorInputs {
+                settlement_edge: 0.06,
+                distance_over_sigma: 0.20,
+                direction_sign: 1.0,
+                entry_capacity_ratio: 3.0,
+                side_spread: 0.03,
+                external_pressure: 1.0,
+                iv_change_1m: 1.0,
+            },
+        )
+        .expect("configured AutoFactor formula should be supported by the runtime scorer");
+        assert!(
+            raw.is_finite(),
+            "configured AutoFactor formula should produce a finite runtime score"
         );
     }
 
