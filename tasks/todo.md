@@ -1,3 +1,29 @@
+# Alpha Search Parity Blocker Refresh (2026-05-12)
+
+## Goal
+
+Record the completed recorded replay parity evidence and keep the alpha-search
+system from treating a blocked handoff as a profitable strategy.
+
+## Plan
+
+- [x] Inspect manual-window recorded replay parity run `25685537480`.
+- [x] Update the completion audit from "waiting for approval" to the current
+  strict parity failure.
+- [x] Preserve the next action as an explicit dry-run deploy approval gate
+  instead of silently mutating `tango-1-1`.
+- [ ] After approval, deploy current `main` to the protected dry-run path,
+  collect a fresh sample, and rerun recorded replay parity.
+
+## Review
+
+- 2026-05-12: Run `25685537480` completed successfully as a workflow but
+  reported `strict_parity_ready=false`. It improved over the prior auto-window
+  run by finding `18 / 18` shared orders/fills, but still blocked promotion with
+  missing dry-run-only entry rows, runtime field mismatches, and
+  settlement-exit price mismatches. No candidate should be promoted until a
+  fresh main dry-run sample produces ready parity.
+
 # Alpha Search Completion Audit (2026-05-12)
 
 ## Goal
