@@ -9,7 +9,7 @@
 - [x] Open PR, wait for CI, merge, then rerun strict recorded replay parity.
 - [x] Fix the post-merge `psql -c` variable-substitution failure and rerun strict recorded replay parity.
 - [x] Fix settlement lookup runtime-mode mismatch and rerun strict recorded replay parity.
-- [ ] Backfill replay artifact event-level settlement from the same official map and rerun strict recorded replay parity.
+- [x] Backfill replay artifact event-level settlement from the same official map and rerun strict recorded replay parity.
 
 ## Review
 
@@ -39,6 +39,12 @@
   event kept `settlement=open`. The next follow-up uses the same official
   settlement map to backfill replay artifact event-level settlement by
   `event_id + token_id`, without relaxing parity comparison.
+- PR #406 merged as `ae22e7c75071fec912a9fec6e8bc6f78d76770dc`. Recorded
+  replay parity run `25662901788` on main passed with
+  `strict_parity_ready=true`, `decision=continue`, shared events/orders/fills
+  `1/1`, and `blocking_risk_flags=[]`. The recording enrichment filled one
+  `event_expired` row, and replay evidence enrichment filled one event-level
+  settlement row. Remaining legacy event flags are advisory only.
 
 # Dry-Run Conservative Factor And Event-Level Replay Parity (2026-05-11)
 
