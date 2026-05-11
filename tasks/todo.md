@@ -1,3 +1,35 @@
+# Alpha Search Post-Handoff Audit Refresh (2026-05-12)
+
+## Goal
+
+Update the alpha-search system record after a ready handoff was generated and
+merged into the dry-run config, while preserving the remaining post-deploy
+profitability gate.
+
+## Plan
+
+- [x] Verify hosted alpha-search run `25687766026` produced a ready handoff.
+- [x] Verify PR `#433` merged the ready handoff into the settlement-probability
+  BTC/ETH dry-run config.
+- [x] Refresh `tasks/alpha_search_completion_audit_20260512.md` so future
+  agents do not treat the handoff/config PR as still blocked.
+- [ ] With explicit operator approval, deploy current `main` to the protected
+  dry-run path, collect a fresh sample, and verify post-merge executable
+  profitability evidence.
+
+## Review
+
+- 2026-05-12: Run `25687766026` completed successfully with
+  `autofactor-strategy-handoff.json status=ready`,
+  `recommended_action=create_dry_run_handoff`, `ready_handoff_count=1`, and
+  selected runtime score
+  `autofactor_formula:auto_settlement_conservative_settlement_edge`.
+- 2026-05-12: PR `#433` merged the handoff into
+  `config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml`
+  after green CI. This completes the systematic generation/exploration/config
+  handoff slice, but does not prove profitability until the merged config is
+  deployed to dry-run and fresh executable evidence is collected.
+
 # Alpha Search Parity Blocker Refresh (2026-05-12)
 
 ## Goal

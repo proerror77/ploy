@@ -11,19 +11,31 @@ claim a profitable strategy.
 
 ## Current Verdict
 
-Status: `not complete`.
+Status: `partially complete`.
 
 The repo can automatically generate and explore alpha candidates through the
-hosted Factor Walk-Forward V2 path. The latest evidence still produces
-`autofactor-strategy-handoff.json status=blocked` and
-`recommended_action=do_not_promote`, so there is no promotable or proven
-profitable strategy yet.
+hosted Factor Walk-Forward V2 path, and run `25687766026` produced a ready
+dry-run handoff. PR `#433` merged that handoff into the
+settlement-probability BTC/ETH dry-run config. This is a promotable dry-run
+candidate, not a proven profitable strategy.
 
-The hard blocker is recorded replay/dry-run parity for:
+The remaining blocker is post-merge dry-run deployment and fresh executable
+evidence for:
 
 `pm5d.threelayer.settlement-probability-btc-eth.dryrun`
 
-Latest parity runs:
+Historical parity runs that led to the ready handoff:
+
+- run: `25687392088`
+- workflow: `recorded-replay-parity.yml`
+- status: `completed`
+- result: runtime/event strict ready
+- artifact: `recorded-replay-parity-25687392088`
+- blocking flags: `[]`
+- interpretation: this parity artifact was used by hosted walk-forward run
+  `25687766026` and is sufficient for the config handoff decision.
+
+Earlier blocker runs:
 
 - run: `25683379408`
 - workflow: `recorded-replay-parity.yml`
@@ -59,11 +71,11 @@ Latest parity runs:
 | System can explore with MCTS-style continuation | `mcts-expansion-plan.json`, `alpha_search_plan_run_id`, `chain_next_run`, and `alpha-search-chain/chain-decision.json` | `ready` | Run `25683730944` dispatched `25683858420`; run `25683858420` dispatched `25683945041`. |
 | System records interpretable search artifacts | `search-space.json`, `llm-priors.json`, `candidate-expressions.json`, `rejected-expressions.json`, `tree-trace.json`, `node-metrics.json`, `search-feedback.json` | `ready` | These are uploaded in hosted artifacts. `llm-priors.json` is a typed placeholder prior, not free-form live LLM generation. |
 | System summarizes search-chain evidence | `scripts/summarize_alpha_search_chain.py`, `alpha-search-chain/summary.json`, `alpha-search-chain/summary.md` | `ready` | PR #428 added the script. PR #429 wired it into the hosted workflow. Run `25684811262` proves the summary files are uploaded. |
-| Search found a stronger candidate branch | run `25683858420` | `partial` | Best reward improved to `4.894975850946932` with `mcts_mcts_auto_settlement_conservative_settlement_edge_x_near_strike_near_strike_near_strike`. |
-| Promotion gate blocks unsafe candidates | `autofactor-strategy-handoff.json` | `ready` | Recent runs report `status=blocked`, `recommended_action=do_not_promote`, and `ready_handoff_count=0`. This is correct behavior, not a search failure. |
-| Replay/dry-run parity is ready | `recorded-replay-parity.yml` artifact | `blocked` | Runs `25683379408` and `25685537480` completed, but no ready parity artifact exists for the current target lane. The latest manual-window run has shared rows, yet still reports runtime field mismatches and settlement-exit mismatches. |
-| A dry-run config PR can be generated from ready handoff | `create_config_pr=true` path in hosted workflow | `blocked` | The path exists, but it is fail-closed until handoff status is `ready`. |
-| A profitable strategy has been produced | ready handoff plus parity plus dry-run/executable evidence | `not ready` | No artifact currently proves executable profitability with replay/dry-run parity. |
+| Search found a stronger candidate branch | run `25683858420` | `partial` | Best reward improved to `4.894975850946932` with `mcts_mcts_auto_settlement_conservative_settlement_edge_x_near_strike_near_strike_near_strike`, but the ready handoff selected the simpler conservative settlement edge. |
+| Promotion gate blocks unsafe candidates | `autofactor-strategy-handoff.json` | `ready` | Earlier runs stayed blocked. Run `25687766026` became ready only after replay parity was supplied and gate blockers were empty. |
+| Replay/dry-run parity is ready for handoff | `recorded-replay-parity.yml` artifact `recorded-replay-parity-25687392088` | `ready` | PR `#433` records `replay_parity_ready=true`, `runtime/event strict ready`, and `blocking=[]`. |
+| A dry-run config PR can be generated from ready handoff | `create_config_pr=true` path in hosted workflow, PR `#433` | `ready` | PR `#433` merged `autofactor_formula:auto_settlement_conservative_settlement_edge` into the dry-run config. |
+| A profitable strategy has been produced | ready handoff plus post-merge dry-run/executable evidence | `not ready` | The system has a dry-run candidate. It still needs deployment, fresh sample collection, and post-merge executable PnL/risk evidence before profitability can be claimed. |
 
 ## Latest Alpha-Search Evidence
 
@@ -81,6 +93,7 @@ All runs used:
 | `25683858420` | 231 | 68 | 4.894975850946932 | `mcts_mcts_auto_settlement_conservative_settlement_edge_x_near_strike_near_strike_near_strike` | blocked | do_not_promote |
 | `25683945041` | 203 | 47 | 4.81954070569323 | `auto_settlement_conservative_settlement_edge` | blocked | do_not_promote |
 | `25684811262` | 183 | 32 | 4.81954070569323 | `auto_settlement_conservative_settlement_edge` | blocked | do_not_promote |
+| `25687766026` | 183 | 32 | 4.81954070569323 | `auto_settlement_conservative_settlement_edge` | ready | create_dry_run_handoff |
 
 ## Landed System Improvements
 
@@ -93,6 +106,12 @@ All runs used:
   hosted artifacts into chain-level JSON and Markdown.
 - PR #429: hosted Factor Walk-Forward V2 now uploads
   `alpha-search-chain/summary.json` and `summary.md` for each run.
+- PR #432: fixed alpha parity readiness gates so strict parity can be used by
+  the hosted promotion chain.
+- PR #433: promoted ready hosted AutoFactor handoff from run `25687766026` into
+  `config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml`.
+- PR #434: fixed hosted replay parity artifact option parsing so
+  `<run-id>:<artifact-name>` inputs route correctly.
 
 ## Remaining Actions
 
@@ -100,14 +119,11 @@ All runs used:
    `tango-1-1` dry-run path while keeping live paused.
 2. Collect a fresh settlement-probability BTC/ETH dry-run sample from the
    newly deployed binary/config.
-3. Rerun `recorded-replay-parity.yml` against that fresh sample. Use `auto`
-   only after confirming the recording and dry-run coverage overlap; otherwise
-   use the explicit fresh recording window.
-4. If parity is ready, rerun hosted alpha-search/promotion with
-   `replay_parity_run_id=<ready-run>`.
-5. If handoff becomes `ready`, create the dry-run config PR through the
-   existing `create_config_pr=true` path.
-6. Only after dry-run/replay parity and executable evidence remain clean should
+3. Rerun `recorded-replay-parity.yml` against that fresh sample to prove the
+   merged config reproduces runtime behavior after deployment.
+4. Review fresh dry-run PnL, fills, drawdown, capacity, and settlement-exit
+   evidence before calling the strategy profitable.
+5. Only after dry-run/replay parity and executable evidence remain clean should
    any live deployment discussion start.
 
 ## Completion Rule
