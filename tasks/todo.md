@@ -163,6 +163,19 @@ running or interpreting evidence.
   diagnosis. Verification passed: `python3 -m unittest
   tests.test_replay_dryrun_parity`, `python3 -m py_compile
   scripts/replay_dryrun_parity.py`, and `git diff --check`.
+- 2026-05-11 settlement token semantics fix: The `2221812` artifact showed an
+  internal dry-run contradiction: official track-record accounting marked the
+  UP trade as a loss (`exit_price=0`, `net_pnl=-15.108`), while runtime
+  order/fill evidence recorded the settlement exit at price `1`. Root cause is
+  that crypto discovery treated the raw `clobTokenIds` array order as
+  UP/DOWN semantics; if Gamma returns outcomes in another order, scanner
+  `official_event_outcome` can invert the event result. Updated
+  `crates/ploy-market-data/src/discovery/crypto.rs` to map tokens by the
+  market `outcomes` labels (`Up`/`Down`, `Yes`/`No`) and only fall back to array
+  order when labels are unavailable. Verification passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-market-data-token-map rtk cargo test -p
+  ploy-market-data discovery::crypto --lib`, `python3 -m unittest
+  tests.test_replay_dryrun_parity`, and `git diff --check`.
 
 # PM5D Settlement Probability PRD Execution Plan (2026-05-05)
 
