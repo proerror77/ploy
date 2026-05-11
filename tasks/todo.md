@@ -12,7 +12,7 @@ paused line to stderr.
 - [x] Capture `ployctl deployments inspect pm5d.threelayer.live` stderr in
   both SSH and Cloud Assistant live-paused guards before awk matching.
 - [x] Run focused workflow/security validation.
-- [ ] Land the guard fix and rerun deploy from `main` so the workflow result
+- [x] Land the guard fix and rerun deploy from `main` so the workflow result
   matches the already verified remote state.
 
 ## Review
@@ -33,6 +33,14 @@ paused line to stderr.
   `CARGO_TARGET_DIR=/tmp/ploy-live-paused-stderr /opt/homebrew/bin/timeout
   300 rtk cargo test --locked --test workflow_security
   tango_deploy_keeps_pm5d_live_paused`, and `rtk git diff --check`.
+- 2026-05-12: PR `#442` merged to `main` as
+  `ea100512d9ba080bacc2f391fe7376019425bae5`. Protected deploy run
+  `25701601995` completed successfully. Post-deploy remote verification
+  confirmed `pm5d.threelayer.live desired=Paused observed=Paused`,
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun desired=Running
+  observed=Running`, `ployd` active/running with `Restart=always`,
+  `OOMPolicy=kill`, `MemoryMax=1610612736`, and no host-side `cargo`/`rustc`
+  build process.
 
 # Runtime Quote Throttle State Repair (2026-05-12)
 
@@ -52,8 +60,8 @@ order-book view.
 - [x] Add focused runtime coverage proving quote updates pass through under
   throttle while ordinary spot-price evaluations remain throttled.
 - [x] Run focused strategy-bundle verification and diff hygiene checks.
-- [ ] Land through PR, deploy from `main`, then collect fresh dry-run rows
-  before rerunning recorded replay parity.
+- [x] Land through PR and deploy from `main`.
+- [ ] Collect fresh dry-run rows before rerunning recorded replay parity.
 
 ## Review
 
@@ -70,6 +78,12 @@ order-book view.
   and `rtk git diff --check`. Full package `cargo fmt --check --package
   ploy-strategy-bundles` still reports pre-existing formatting drift in
   unrelated files, so this slice only checked the touched Rust file.
+- 2026-05-12: PR `#441` merged to `main` as
+  `c4898b15149b81e6ebf8bbf64679b57dee89efd1`. The first deploy run
+  `25700821724` applied the runtime fix through the primary SSH path but ended
+  red due to the stderr live-paused guard false-negative. The follow-up guard
+  repair deploy run `25701601995` completed green from `main`, leaving the
+  quote-throttle runtime fix deployed on `tango-1-1`.
 
 # Tango Deploy False-Negative Guard Repair (2026-05-12)
 
