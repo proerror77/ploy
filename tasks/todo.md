@@ -1,3 +1,35 @@
+# Research Snapshot Timestamp Window Fix (2026-05-12)
+
+## Goal
+
+Allow PM5D diagnostic research snapshots to target an exact clean intraday
+window after a known data gap. The Rust snapshot compiler already supports
+`--start-ts` / `--end-ts`; the GitHub Actions workflow only exposed whole-date
+windows, which forced snapshots to include same-day LOB gaps.
+
+## Plan
+
+- [x] Verify the compiler supports timestamp windows.
+- [x] Add optional `start_ts` and `end_ts` keys to
+  `research-snapshot.yml` `options_json`.
+- [x] Pass timestamp windows through to `research-snapshot-compile` when
+  provided, otherwise preserve the existing date behavior.
+- [x] Show the timestamp override in the workflow summary.
+- [x] Validate workflow YAML parses locally.
+
+## Review
+
+- 2026-05-12: 24h coverage audit run `25745006382` failed only on
+  Binance LOB for BTC/ETH, with an 80-minute gap from about
+  `2026-05-12 09:27 +08` to `2026-05-12 10:47 +08`; current 1h freshness was
+  still `ok`.
+- 2026-05-12: `.github/workflows/research-snapshot.yml` now accepts
+  `options_json.start_ts` / `options_json.end_ts`, passes those to the remote
+  `research-snapshot-compile` command as `--start-ts` / `--end-ts`, and keeps
+  `--start-date` / `--end-date` as the default path.
+- 2026-05-12: Local validation passed:
+  `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/research-snapshot.yml")'`.
+
 # Recorded Replay No-Sample Classification Fix (2026-05-12)
 
 ## Goal

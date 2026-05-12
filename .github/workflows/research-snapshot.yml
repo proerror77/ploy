@@ -24,9 +24,9 @@ on:
         required: true
         default: "15"
       options_json:
-        description: "Advanced options JSON: sampling, optimizer_data_dir, data_profile, audit gate, and optional full snapshot upload"
+        description: "Advanced options JSON: optional start_ts/end_ts, sampling, optimizer_data_dir, data_profile, audit gate, and optional full snapshot upload"
         required: false
-        default: '{"lob_sample_secs":30,"pm_book_sample_secs":300,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_full_snapshot":true}'
+        default: '{"start_ts":"","end_ts":"","lob_sample_secs":30,"pm_book_sample_secs":300,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_full_snapshot":true}'
 
 concurrency:
   group: research-snapshot-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}-${{ github.event.inputs.symbols }}
@@ -66,6 +66,8 @@ jobs:
           import os
 
           defaults = {
+              "start_ts": "",
+              "end_ts": "",
               "lob_sample_secs": "30",
               "pm_book_sample_secs": "300",
               "observation_sample_secs": "30",
@@ -299,6 +301,8 @@ jobs:
             "${{ github.event.inputs.symbols }}" \
             "${{ github.event.inputs.start_date }}" \
             "${{ github.event.inputs.end_date }}" \
+            "${SNAPSHOT_START_TS}" \
+            "${SNAPSHOT_END_TS}" \
             "${{ github.event.inputs.stake_usd }}" \
             "${SNAPSHOT_LOB_SAMPLE_SECS}" \
             "${SNAPSHOT_PM_BOOK_SAMPLE_SECS}" \
@@ -314,15 +318,17 @@ jobs:
           symbols="$3"
           start_date="$4"
           end_date="$5"
-          stake_usd="$6"
-          lob_sample_secs="$7"
-          pm_book_sample_secs="$8"
-          observation_sample_secs="$9"
-          max_quote_age_secs="${10}"
-          optimizer_data_dir="${11}"
-          required_sources="${12}"
-          data_audit_status="${13}"
-          include_deribit="${14}"
+          start_ts="$6"
+          end_ts="$7"
+          stake_usd="$8"
+          lob_sample_secs="$9"
+          pm_book_sample_secs="${10}"
+          observation_sample_secs="${11}"
+          max_quote_age_secs="${12}"
+          optimizer_data_dir="${13}"
+          required_sources="${14}"
+          data_audit_status="${15}"
+          include_deribit="${16}"
 
           set -a
           . "${deploy_root}/.env"
@@ -335,12 +341,22 @@ jobs:
           if [ "${include_deribit}" != "true" ]; then
             deribit_args+=(--skip-deribit)
           fi
+          window_args=()
+          if [ -n "${start_ts}" ]; then
+            window_args+=(--start-ts "${start_ts}")
+          else
+            window_args+=(--start-date "${start_date}")
+          fi
+          if [ -n "${end_ts}" ]; then
+            window_args+=(--end-ts "${end_ts}")
+          else
+            window_args+=(--end-date "${end_date}")
+          fi
           set +e
           timeout 3600 "${compiler}" \
             --db-url "${PLOY_DATABASE__URL}" \
             --symbols "${symbols}" \
-            --start-date "${start_date}" \
-            --end-date "${end_date}" \
+            "${window_args[@]}" \
             --stake-usd "${stake_usd}" \
             --lob-sample-secs "${lob_sample_secs}" \
             --pm-book-sample-secs "${pm_book_sample_secs}" \
@@ -389,6 +405,9 @@ jobs:
             echo "- Execution host: \`tango-1-1\`"
             echo "- Workflow runner: \`ubuntu-latest\`"
             echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
+            if [ -n "${SNAPSHOT_START_TS}" ] || [ -n "${SNAPSHOT_END_TS}" ]; then
+              echo "- Timestamp window override: \`${SNAPSHOT_START_TS:-<date-start>} -> ${SNAPSHOT_END_TS:-<date-end>}\`"
+            fi
             echo "- Symbols: ${{ github.event.inputs.symbols }}"
             echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
             echo "- Data profile: ${SNAPSHOT_DATA_PROFILE}"
