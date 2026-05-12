@@ -146,6 +146,7 @@ const HEALTH_CHECK_INTERVAL_SECS: u64 = 15;
 const DEFAULT_PERSIST_QUEUE_CAPACITY: usize = 4_096;
 const DEFAULT_PERSIST_WORKERS: usize = 4;
 const DEFAULT_PERSIST_BATCH_SIZE: usize = 50;
+const DEFAULT_PERSIST_BATCH_WINDOW_MS: u64 = 10;
 const DEFAULT_STALE_AFTER_SECS: u64 = 120;
 
 fn is_tradeable_price(price: Decimal) -> bool {
@@ -595,6 +596,7 @@ impl QuoteCollector {
                     };
 
                     let mut jobs = vec![job];
+                    sleep(StdDuration::from_millis(DEFAULT_PERSIST_BATCH_WINDOW_MS)).await;
                     {
                         let mut rx = rx.lock().await;
                         while jobs.len() < DEFAULT_PERSIST_BATCH_SIZE {
