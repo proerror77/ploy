@@ -1,3 +1,58 @@
+# Alpha Search LLM Prior And MCTS State (2026-05-12)
+
+## Goal
+
+Turn the current placeholder alpha-search prior and single-run MCTS plan into a
+machine-checkable LLM-prior input path plus cumulative MCTS state artifact,
+without allowing free-form generated code into the research loop.
+
+## Plan
+
+- [x] Add a typed LLM prior/mutation schema that compiles into existing
+  `FactorExpr` candidates using only declared features, constants, and safe
+  mutation types.
+- [x] Add cumulative `mcts-state.json` merge/write support so UCB priority can
+  use prior visits and rewards instead of treating each CI run as isolated.
+- [x] Wire the new prior/state inputs through `factor_walk_forward_v2` and the
+  hosted/self-hosted factor workflows.
+- [x] Add focused Rust/workflow tests and update alpha-search docs.
+- [x] Open a focused PR after local verification.
+
+## Review
+
+- 2026-05-12: Existing implementation already has `FactorExpr`, deterministic
+  mutations, alpha-search artifacts, `mcts-expansion-plan.json`, and hosted
+  chained dispatch. Missing pieces are true typed LLM prior input and
+  cumulative MCTS state across runs.
+- 2026-05-12: Added typed `LlmPriorSpec` / `LlmMutationSpec` input that compiles
+  into safe `FactorExpr` mutations only when referenced features exist and
+  constants/windows are bounded. Added cumulative `mcts-state.json` read/merge
+  support, made UCB priority use cumulative visits/rewards, and wired
+  `--alpha-search-llm-prior-json` plus `--alpha-search-state-json` through
+  self-hosted and hosted walk-forward workflows, including the hosted route
+  allowlist.
+- 2026-05-12: Verification passed:
+  `rustfmt --edition 2021 --check crates/ploy-research/src/alpha_search.rs
+  crates/ploy-research/src/autofactor.rs
+  crates/ploy-research/examples/factor_walk_forward_v2.rs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-alpha-prior-state /opt/homebrew/bin/timeout 300
+  rtk cargo test --locked -p ploy-research alpha_search --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-alpha-prior-state /opt/homebrew/bin/timeout 300
+  rtk cargo test --locked -p ploy-research autofactor --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-alpha-prior-state /opt/homebrew/bin/timeout 300
+  rtk cargo test --locked --test workflow_security
+  factor_walk_forward_wires_alpha_prior_and_state_inputs`,
+  `CARGO_TARGET_DIR=/tmp/ploy-alpha-prior-state /opt/homebrew/bin/timeout 300
+  rtk cargo check --locked -p ploy-research --features db --example
+  factor_walk_forward_v2`, Ruby YAML parse for both factor walk-forward
+  workflows, and `rtk git diff --check`.
+- 2026-05-12: Opened PR #444 from `feat/alpha-search-prior-state`. GitHub
+  Actions passed for workflow lint, commit hygiene, dependency audit, Python
+  script tests, frontend/sidecar, Rust control-plane/core, Rust integration
+  regressions, Rust market-data ops, Rust research heavy features, Rust runner
+  lean replay/backtest, and Rust runner live/default. CodeRabbit review was
+  still pending when this evidence was recorded.
+
 # Deploy Live-Paused Stderr Guard Repair (2026-05-12)
 
 ## Goal

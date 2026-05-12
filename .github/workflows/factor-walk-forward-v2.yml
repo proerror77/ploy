@@ -30,7 +30,7 @@ on:
       options_json:
         description: "Advanced options JSON: walk windows, factor filters, snapshot/data/audit settings, local snapshot registry, optional replay parity artifact"
         required: false
-        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","data_quality_mode":"strict_continuous","min_event_complete_events":20,"min_event_complete_rows":40,"issue_number":"","snapshot_registry_dir":"","replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl"}'
+        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","data_quality_mode":"strict_continuous","min_event_complete_events":20,"min_event_complete_rows":40,"issue_number":"","snapshot_registry_dir":"","replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":""}'
 
 concurrency:
   group: factor-walk-forward-v2-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
@@ -88,6 +88,12 @@ jobs:
               "replay_parity_json",
               "replay_parity_run_id",
               "replay_parity_artifact_name",
+              "alpha_search_plan_json",
+              "alpha_search_plan_run_id",
+              "alpha_search_plan_artifact_name",
+              "alpha_search_plan_target",
+              "alpha_search_llm_prior_json",
+              "alpha_search_state_json",
               "required_strategy_profile",
               "allowed_target",
               "issue_number",
@@ -197,6 +203,8 @@ jobs:
               "alpha_search_plan_run_id": "",
               "alpha_search_plan_artifact_name": "",
               "alpha_search_plan_target": "full_depth_settlement_executable_pnl",
+              "alpha_search_llm_prior_json": "",
+              "alpha_search_state_json": "",
           }
           bool_keys = {"compile_snapshot", "allow_direct_db_debug"}
           choices = {
@@ -581,6 +589,16 @@ jobs:
           fi
           if [ -n "${alpha_search_plan_json}" ]; then
             args+=(--alpha-search-plan-json "${alpha_search_plan_json}")
+          fi
+          alpha_search_state_json="${WALK_ALPHA_SEARCH_STATE_JSON}"
+          if [ -z "${alpha_search_state_json}" ] && [ -f artifacts/alpha-search-plan/mcts-state.json ]; then
+            alpha_search_state_json="artifacts/alpha-search-plan/mcts-state.json"
+          fi
+          if [ -n "${alpha_search_state_json}" ]; then
+            args+=(--alpha-search-state-json "${alpha_search_state_json}")
+          fi
+          if [ -n "${WALK_ALPHA_SEARCH_LLM_PRIOR_JSON}" ]; then
+            args+=(--alpha-search-llm-prior-json "${WALK_ALPHA_SEARCH_LLM_PRIOR_JSON}")
           fi
           ./target/release/examples/factor_walk_forward_v2 "${args[@]}" \
             | tee artifacts/factor-walk-forward-v2/report.txt

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::autofactor::{AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr};
 
@@ -15,6 +15,26 @@ pub struct AlphaSearchArtifactSummary {
     pub candidate_count: usize,
     pub rejected_count: usize,
     pub best_candidate: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MctsSearchStateArtifact {
+    pub version: String,
+    pub mode: String,
+    pub target: String,
+    pub total_visits: usize,
+    pub nodes: Vec<MctsSearchStateNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MctsSearchStateNode {
+    pub factor_name: String,
+    pub visits: usize,
+    pub total_reward: f64,
+    pub best_reward: f64,
+    pub last_reward: f64,
+    pub selected_dimension: String,
+    pub last_decision: String,
 }
 
 #[derive(Debug)]
@@ -199,6 +219,31 @@ pub fn write_alpha_search_artifacts(
     reports: &[AutoFactorReport],
     options: &AutoFactorOptions,
 ) -> Result<AlphaSearchArtifactSummary, AlphaSearchArtifactError> {
+    write_alpha_search_artifacts_with_state(
+        output_root,
+        target,
+        input_names,
+        reports,
+        options,
+        None,
+    )
+}
+
+pub fn read_mcts_search_state(
+    path: impl AsRef<Path>,
+) -> Result<MctsSearchStateArtifact, AlphaSearchArtifactError> {
+    let raw = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&raw)?)
+}
+
+pub fn write_alpha_search_artifacts_with_state(
+    output_root: impl AsRef<Path>,
+    target: &str,
+    input_names: &[String],
+    reports: &[AutoFactorReport],
+    options: &AutoFactorOptions,
+    prior_state: Option<&MctsSearchStateArtifact>,
+) -> Result<AlphaSearchArtifactSummary, AlphaSearchArtifactError> {
     let output_dir = output_root.as_ref().join(target);
     std::fs::create_dir_all(&output_dir)?;
 
@@ -303,9 +348,11 @@ pub fn write_alpha_search_artifacts(
         .map(|(idx, report)| node_metric(idx, report))
         .collect::<Vec<_>>();
     write_json(&output_dir.join("node-metrics.json"), &node_metrics)?;
+    let mcts_state = mcts_search_state(target, &node_metrics, prior_state);
+    write_json(&output_dir.join("mcts-state.json"), &mcts_state)?;
     write_json(
         &output_dir.join("mcts-expansion-plan.json"),
-        &mcts_expansion_plan(target, &node_metrics),
+        &mcts_expansion_plan(target, &node_metrics, &mcts_state),
     )?;
 
     write_json(
@@ -442,16 +489,78 @@ fn node_metric(idx: usize, report: &AutoFactorReport) -> NodeMetric {
     }
 }
 
-fn mcts_expansion_plan(target: &str, metrics: &[NodeMetric]) -> MctsExpansionPlan {
+fn mcts_search_state(
+    target: &str,
+    metrics: &[NodeMetric],
+    prior_state: Option<&MctsSearchStateArtifact>,
+) -> MctsSearchStateArtifact {
+    let mut nodes = prior_state
+        .filter(|state| state.target == target)
+        .map(|state| {
+            state
+                .nodes
+                .iter()
+                .map(|node| (node.factor_name.clone(), node.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    for metric in metrics {
+        let mut node = nodes
+            .remove(&metric.factor_name)
+            .unwrap_or_else(|| MctsSearchStateNode {
+                factor_name: metric.factor_name.clone(),
+                visits: 0,
+                total_reward: 0.0,
+                best_reward: f64::NEG_INFINITY,
+                last_reward: 0.0,
+                selected_dimension: metric.selected_dimension.clone(),
+                last_decision: metric.decision.clone(),
+            });
+        node.visits = node.visits.saturating_add(1);
+        node.total_reward += metric.reward;
+        node.best_reward = node.best_reward.max(metric.reward);
+        node.last_reward = metric.reward;
+        node.selected_dimension = metric.selected_dimension.clone();
+        node.last_decision = metric.decision.clone();
+        nodes.insert(node.factor_name.clone(), node);
+    }
+
+    let mut nodes = nodes.into_values().collect::<Vec<_>>();
+    nodes.sort_by(|lhs, rhs| lhs.factor_name.cmp(&rhs.factor_name));
+    let total_visits = nodes.iter().map(|node| node.visits).sum();
+    MctsSearchStateArtifact {
+        version: ALPHA_SEARCH_ARTIFACT_VERSION.to_string(),
+        mode: "cumulative_ucb_state".to_string(),
+        target: target.to_string(),
+        total_visits,
+        nodes,
+    }
+}
+
+fn mcts_expansion_plan(
+    target: &str,
+    metrics: &[NodeMetric],
+    state: &MctsSearchStateArtifact,
+) -> MctsExpansionPlan {
     let exploration_weight = 0.75;
-    let total_visits = metrics.len().max(1) as f64;
+    let total_visits = state.total_visits.max(1) as f64;
+    let state_by_factor = state
+        .nodes
+        .iter()
+        .map(|node| (node.factor_name.as_str(), node))
+        .collect::<BTreeMap<_, _>>();
     let mut selected = metrics
         .iter()
         .filter(|metric| metric.decision != "reject")
         .map(|metric| {
-            let visits = 1.0_f64;
+            let state_node = state_by_factor.get(metric.factor_name.as_str());
+            let visits = state_node.map(|node| node.visits).unwrap_or(1).max(1) as f64;
+            let average_reward = state_node
+                .map(|node| node.total_reward / visits)
+                .unwrap_or(metric.reward);
             let ucb_priority =
-                metric.reward + exploration_weight * (total_visits.ln() / visits).sqrt();
+                average_reward + exploration_weight * (total_visits.ln() / visits).sqrt();
             MctsSelectedNode {
                 node_id: metric.id.clone(),
                 factor_name: metric.factor_name.clone(),
@@ -624,6 +733,82 @@ mod tests {
         assert!(tmp
             .join("full_depth_settlement_executable_pnl/mcts-expansion-plan.json")
             .exists());
+        assert!(tmp
+            .join("full_depth_settlement_executable_pnl/mcts-state.json")
+            .exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn merges_prior_mcts_state_into_search_artifacts() {
+        let tmp = std::env::temp_dir().join(format!(
+            "ploy-alpha-search-state-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let report = AutoFactorReport {
+            name: "auto_settlement_conservative_settlement_edge".to_string(),
+            target: Some("full_depth_settlement_executable_pnl".to_string()),
+            expr: FactorExpr::Input("conservative_settlement_edge".to_string()),
+            n: 100,
+            pearson_ic: 0.2,
+            spearman_ic: 0.25,
+            window_count: 3,
+            window_ic_mean: 0.2,
+            icir: 1.2,
+            positive_window_ratio: 1.0,
+            symbol_count: 2,
+            symbol_ic_mean: 0.18,
+            symbol_icir: 1.0,
+            symbol_positive_ratio: 1.0,
+            bucket_avg_labels: vec![-0.1, 0.0, 0.2],
+            bottom_bucket_n: 20,
+            bottom_bucket_avg_label: -0.1,
+            top_bucket_n: 20,
+            top_bucket_avg_label: 0.2,
+            top_bucket_positive_label_rate: 0.7,
+            monotonicity_score: 1.0,
+            complexity: 1,
+            decision: AutoFactorDecision::Candidate,
+            reason: "passed".to_string(),
+        };
+        let prior = MctsSearchStateArtifact {
+            version: ALPHA_SEARCH_ARTIFACT_VERSION.to_string(),
+            mode: "cumulative_ucb_state".to_string(),
+            target: "full_depth_settlement_executable_pnl".to_string(),
+            total_visits: 3,
+            nodes: vec![MctsSearchStateNode {
+                factor_name: "auto_settlement_conservative_settlement_edge".to_string(),
+                visits: 3,
+                total_reward: 6.0,
+                best_reward: 2.0,
+                last_reward: 2.0,
+                selected_dimension: "exploit".to_string(),
+                last_decision: "candidate".to_string(),
+            }],
+        };
+
+        write_alpha_search_artifacts_with_state(
+            &tmp,
+            "full_depth_settlement_executable_pnl",
+            &["conservative_settlement_edge".to_string()],
+            &[report],
+            &AutoFactorOptions::default(),
+            Some(&prior),
+        )
+        .expect("write artifacts");
+
+        let state = read_mcts_search_state(
+            tmp.join("full_depth_settlement_executable_pnl/mcts-state.json"),
+        )
+        .expect("state");
+        let node = state
+            .nodes
+            .iter()
+            .find(|node| node.factor_name == "auto_settlement_conservative_settlement_edge")
+            .expect("merged node");
+        assert_eq!(node.visits, 4);
+        assert!(node.total_reward > 6.0);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

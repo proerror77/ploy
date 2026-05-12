@@ -83,15 +83,18 @@ pub fn crate_marker() -> &'static str {
 // factor registry uses the same type internally, but does not re-export its own
 // `factors_new::Regime` alias.
 pub use alpha_search::{
-    write_alpha_search_artifacts, AlphaSearchArtifactError, AlphaSearchArtifactSummary,
+    read_mcts_search_state, write_alpha_search_artifacts, write_alpha_search_artifacts_with_state,
+    AlphaSearchArtifactError, AlphaSearchArtifactSummary, MctsSearchStateArtifact,
+    MctsSearchStateNode,
 };
 pub use attribution::{factor_pnl, regime_pnl, AttributionReport, RegimePnl};
 pub use autofactor::{
     autofactor_labels_from_v2, autofactor_matrix_from_v2, autofactor_windows_from_v2,
     domain_seed_candidates, evaluate_named_factor, format_autofactor_reports, mine_autofactors,
-    mine_domain_autofactors_from_v2, mine_domain_autofactors_from_v2_with_mcts_plan,
-    AutoFactorDecision, AutoFactorError, AutoFactorMatrix, AutoFactorOptions, AutoFactorReport,
-    AutoFactorV2Target, FactorExpr, NamedFactorExpr,
+    mine_domain_autofactors_from_v2, mine_domain_autofactors_from_v2_with_guidance,
+    mine_domain_autofactors_from_v2_with_mcts_plan, AutoFactorDecision, AutoFactorError,
+    AutoFactorMatrix, AutoFactorOptions, AutoFactorReport, AutoFactorV2Target, FactorExpr,
+    LlmMutationSpec, LlmPriorSpec, NamedFactorExpr,
 };
 pub use backtest::{run_binary_backtest, BacktestMetrics, SimulatedFill};
 pub use factors_new::{

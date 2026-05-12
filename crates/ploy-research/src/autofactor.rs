@@ -112,6 +112,32 @@ pub struct NamedFactorExpr {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmPriorSpec {
+    #[serde(default)]
+    pub mutations: Vec<LlmMutationSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmMutationSpec {
+    pub base_factor: String,
+    pub mutation_type: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub feature: Option<String>,
+    #[serde(default)]
+    pub denominator_feature: Option<String>,
+    #[serde(default)]
+    pub constant: Option<f64>,
+    #[serde(default)]
+    pub lo: Option<f64>,
+    #[serde(default)]
+    pub hi: Option<f64>,
+    #[serde(default)]
+    pub window: Option<usize>,
+}
+
 impl NamedFactorExpr {
     pub fn new(name: impl Into<String>, expr: FactorExpr) -> Self {
         Self {
@@ -514,15 +540,32 @@ pub fn mine_domain_autofactors_from_v2_with_mcts_plan(
     options: &AutoFactorOptions,
     mcts_selected_factor_names: &[String],
 ) -> Result<Vec<AutoFactorReport>, AutoFactorError> {
+    mine_domain_autofactors_from_v2_with_guidance(
+        rows,
+        target,
+        options,
+        mcts_selected_factor_names,
+        None,
+    )
+}
+
+pub fn mine_domain_autofactors_from_v2_with_guidance(
+    rows: &[FactorObservationV2],
+    target: AutoFactorV2Target,
+    options: &AutoFactorOptions,
+    mcts_selected_factor_names: &[String],
+    llm_prior: Option<&LlmPriorSpec>,
+) -> Result<Vec<AutoFactorReport>, AutoFactorError> {
     let matrix = autofactor_matrix_from_v2(rows)?;
     let labels = autofactor_labels_from_v2(rows, target);
     let windows = autofactor_windows_from_v2(rows);
     let symbols = autofactor_symbols_from_v2(rows);
     let target_name = target.as_str().to_string();
-    let candidates = domain_candidates_for_target_with_mcts(
+    let candidates = domain_candidates_for_target_with_guidance(
         &matrix.input_names(),
         target,
         mcts_selected_factor_names,
+        llm_prior,
     )
     .into_iter()
     .map(|mut factor| {
@@ -811,10 +854,11 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
     out
 }
 
-fn domain_candidates_for_target_with_mcts(
+fn domain_candidates_for_target_with_guidance(
     input_names: &BTreeSet<String>,
     target: AutoFactorV2Target,
     mcts_selected_factor_names: &[String],
+    llm_prior: Option<&LlmPriorSpec>,
 ) -> Vec<NamedFactorExpr> {
     let mut out = domain_seed_candidates(input_names);
     if target == AutoFactorV2Target::FullDepthSettlementExecutablePnl {
@@ -841,7 +885,162 @@ fn domain_candidates_for_target_with_mcts(
                 }),
         );
     }
+    if let Some(prior) = llm_prior {
+        let base = out.clone();
+        out.extend(llm_prior_mutation_candidates(input_names, &base, prior));
+    }
     out
+}
+
+fn llm_prior_mutation_candidates(
+    input_names: &BTreeSet<String>,
+    candidates: &[NamedFactorExpr],
+    prior: &LlmPriorSpec,
+) -> Vec<NamedFactorExpr> {
+    let by_name = candidates
+        .iter()
+        .map(|candidate| (candidate.name.as_str(), candidate))
+        .collect::<BTreeMap<_, _>>();
+    let mut out = Vec::new();
+    for mutation in &prior.mutations {
+        let Some(base) = by_name.get(mutation.base_factor.as_str()) else {
+            continue;
+        };
+        let Some((suffix, expr)) = compile_llm_mutation(input_names, base, mutation) else {
+            continue;
+        };
+        let name = mutation
+            .name
+            .as_ref()
+            .map(|name| sanitize_factor_name(name))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| format!("llm_{}_{}", base.name, suffix));
+        out.push(NamedFactorExpr {
+            name,
+            expr,
+            target: base.target.clone(),
+            notes: vec![format!(
+                "Typed LLM-prior mutation `{}` compiled from base factor `{}`.",
+                mutation.mutation_type, base.name
+            )],
+        });
+    }
+    out
+}
+
+fn compile_llm_mutation(
+    input_names: &BTreeSet<String>,
+    base: &NamedFactorExpr,
+    mutation: &LlmMutationSpec,
+) -> Option<(&'static str, FactorExpr)> {
+    let constant = mutation.constant.unwrap_or(0.01);
+    if !constant.is_finite() || constant.abs() > 300.0 {
+        return None;
+    }
+    match mutation.mutation_type.as_str() {
+        "add_feature_gate" => {
+            let feature = existing_feature(input_names, mutation.feature.as_deref())?;
+            Some(("feature_gate", mul(base.expr.clone(), input(feature))))
+        }
+        "add_capacity_gate" => {
+            let feature = mutation
+                .feature
+                .as_deref()
+                .unwrap_or("entry_capacity_score");
+            let feature = existing_feature(input_names, Some(feature))?;
+            Some(("capacity_gate", mul(base.expr.clone(), input(feature))))
+        }
+        "add_near_strike_interaction" => {
+            let feature = existing_feature(input_names, Some("near_strike_score"))?;
+            Some(("near_strike", mul(base.expr.clone(), input(feature))))
+        }
+        "add_spread_penalty" => {
+            let feature = existing_feature(input_names, Some("side_spread"))?;
+            Some((
+                "spread_penalty",
+                safe_div_expr(
+                    base.expr.clone(),
+                    FactorExpr::Add(
+                        Box::new(input(feature)),
+                        Box::new(FactorExpr::Const(constant)),
+                    ),
+                ),
+            ))
+        }
+        "replace_denominator" => {
+            let feature = existing_feature(
+                input_names,
+                mutation
+                    .denominator_feature
+                    .as_deref()
+                    .or(mutation.feature.as_deref()),
+            )?;
+            Some((
+                "replace_denominator",
+                safe_div_expr(
+                    base.expr.clone(),
+                    FactorExpr::Add(
+                        Box::new(input(feature)),
+                        Box::new(FactorExpr::Const(constant)),
+                    ),
+                ),
+            ))
+        }
+        "clip_or_squash" => {
+            if let (Some(lo), Some(hi)) = (mutation.lo, mutation.hi) {
+                if lo.is_finite() && hi.is_finite() && lo < hi {
+                    return Some((
+                        "clip",
+                        FactorExpr::Clip {
+                            expr: Box::new(base.expr.clone()),
+                            lo,
+                            hi,
+                        },
+                    ));
+                }
+            }
+            Some(("squash", FactorExpr::Tanh(Box::new(base.expr.clone()))))
+        }
+        "change_time_window" => {
+            let window = mutation.window.unwrap_or(30);
+            if !(1..=300).contains(&window) {
+                return None;
+            }
+            Some((
+                "rolling_mean",
+                FactorExpr::RollingMean {
+                    expr: Box::new(base.expr.clone()),
+                    window,
+                },
+            ))
+        }
+        "invert_or_contrarian" => Some((
+            "contrarian",
+            mul(FactorExpr::Const(-1.0), base.expr.clone()),
+        )),
+        "remove_component" => None,
+        _ => None,
+    }
+}
+
+fn existing_feature<'a>(
+    input_names: &BTreeSet<String>,
+    feature: Option<&'a str>,
+) -> Option<&'a str> {
+    let feature = feature?;
+    input_names.contains(feature).then_some(feature)
+}
+
+fn sanitize_factor_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn deterministic_mutation_candidates(
@@ -1814,6 +2013,49 @@ mod tests {
         assert!(reports
             .iter()
             .any(|report| report.name.starts_with("mut2_")));
+    }
+
+    #[test]
+    fn typed_llm_prior_mutations_compile_into_factor_expr_candidates() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let options = AutoFactorOptions {
+            min_observations: 40,
+            min_window_observations: 10,
+            min_icir: 0.1,
+            ..Default::default()
+        };
+        let prior = LlmPriorSpec {
+            mutations: vec![LlmMutationSpec {
+                base_factor: "auto_settlement_full_depth_settlement_edge".to_string(),
+                mutation_type: "add_feature_gate".to_string(),
+                name: Some("llm_full_depth_edge_near_strike".to_string()),
+                feature: Some("near_strike_score".to_string()),
+                denominator_feature: None,
+                constant: None,
+                lo: None,
+                hi: None,
+                window: None,
+            }],
+        };
+
+        let reports = mine_domain_autofactors_from_v2_with_guidance(
+            &rows,
+            AutoFactorV2Target::FullDepthSettlementExecutablePnl,
+            &options,
+            &[],
+            Some(&prior),
+        )
+        .expect("reports");
+
+        let report = reports
+            .iter()
+            .find(|report| report.name == "llm_full_depth_edge_near_strike")
+            .expect("LLM-prior compiled candidate");
+        assert_eq!(
+            report.target.as_deref(),
+            Some("full_depth_settlement_executable_pnl")
+        );
+        assert!(matches!(report.expr, FactorExpr::Mul(_, _)));
     }
 
     #[test]
