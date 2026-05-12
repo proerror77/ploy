@@ -67,6 +67,21 @@ Latest reset / data-quality evidence:
     known 80-minute gap from `2026-05-12 09:28 +08` to `10:48 +08`
   - interpretation: do not run promotion-grade 24h/48h walk-forward over this
     retained window.
+- 24h BTC/ETH coverage recheck run: `25753059613`
+  - workflow: `market-data-gap-audit.yml`
+  - input: `gate_mode=coverage`, `full_lookback_hours=24`,
+    `symbols=BTCUSDT,ETHUSDT`, `fail_on=never`
+  - quick 1h status: `ok`
+  - full 24h retained coverage: `critical`
+  - blocker: `binance_lob/BTCUSDT` and `binance_lob/ETHUSDT`, max gap
+    `80m >= 15m`
+  - interpretation: recent collector health is OK, but the retained 24h window
+    is still not promotion-grade. The known LOB gap must age out before 24h+
+    walk-forward/MCTS evidence can support promotion.
+  - earliest clean-window timing if no new gaps appear:
+    - 24h window after `2026-05-13 10:48 +08`
+    - 48h window after `2026-05-14 10:48 +08`
+    - 72h window after `2026-05-15 10:48 +08`
 - reset preview run: `25748008417`
   - workflow: `reset-strategy-runtime-evidence.yml`
   - input: `execute=false`
@@ -169,7 +184,7 @@ Earlier blocker runs:
 | Old dry-run runtime evidence can be cleared without touching raw data | PRs `#464`, `#465`, `#466`; reset preview `25748008417`; guard run `25748940434` | `ready but not executed` | Tooling is merged and guarded. Actual deletion remains blocked until explicit approval to pause the running deployment. |
 | Reset procedure is documented and operator-gated | `docs/runbooks/strategy-runtime-evidence-reset.md`; PR `#470` | `ready` | Runbook records preflight, approval text, preview, pause, guarded execute, artifact inspection, resume, and post-reset gates. |
 | Clean post-reset baseline can be machine-checked | `scripts/check_dryrun_candidate_gate.py`; PR `#471`; workflow `dryrun-candidate-gate.yml`; PR `#472`; reset-workflow post-gate PR `#474`; run `25751440786` | `ready and currently blocked` | The standalone gate blocks the current report with `residual_runtime_evidence`: 20 trades and 185 orders remain. The reset workflow now runs the same clean-baseline gate automatically after `execute=true`. |
-| Current retained data window supports promotion-grade search | market-data audit `25747004738` | `blocked` | 24h coverage still includes the known Binance LOB gap. Wait for a clean 48-72h window or use shorter diagnostic-only snapshots. |
+| Current retained data window supports promotion-grade search | market-data audits `25747004738`, `25753059613` | `blocked` | 24h coverage still includes the known Binance LOB gap for BTC/ETH. Wait for a clean 48-72h window or use shorter diagnostic-only snapshots. |
 | A profitable strategy has been produced | ready handoff plus post-merge dry-run/executable evidence | `not ready` | Current dry-run is negative: 20 closed trades, PnL `-115.17`, profit factor `0.2927`, max drawdown `-136.3244`. |
 
 ## Latest Alpha-Search Evidence
@@ -244,7 +259,10 @@ All runs used:
    or `dryrun-candidate-gate.yml`.
 5. Resume the dry-run only after reset verification.
 6. Wait for a clean 48-72h retained data window after the 2026-05-12 LOB gap
-   ages out, then run hosted walk-forward / MCTS alpha search again.
+   ages out. If no new gaps appear, the earliest 48h window is after
+   `2026-05-14 10:48 +08`; the earliest 72h window is after
+   `2026-05-15 10:48 +08`. Then run hosted walk-forward / MCTS alpha search
+   again.
 7. Rerun recorded replay parity against the fresh clean sample.
 8. Review fresh dry-run PnL, fills, drawdown, capacity, and settlement-exit
    evidence before calling any strategy profitable.
