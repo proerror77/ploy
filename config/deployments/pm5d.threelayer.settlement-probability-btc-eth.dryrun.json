@@ -2,7 +2,7 @@
   "deployment_id": "pm5d.threelayer.settlement-probability-btc-eth.dryrun",
   "bundle_id": "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun",
   "account_id": "acct-pm5d-dryrun",
-  "max_gross_exposure": "5.00",
+  "max_gross_exposure": "60.00",
   "runtime_mode": "paper",
   "desired_state": "running"
 }

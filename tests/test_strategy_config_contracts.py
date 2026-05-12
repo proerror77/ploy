@@ -1,10 +1,13 @@
 from pathlib import Path
+from decimal import Decimal
+import json
 import tomllib
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 STRATEGY_DIR = ROOT / "config" / "strategies"
+DEPLOYMENT_DIR = ROOT / "config" / "deployments"
 
 
 class StrategyConfigContractTests(unittest.TestCase):
@@ -41,6 +44,32 @@ class StrategyConfigContractTests(unittest.TestCase):
         for _, runtime in recorders:
             self.assertGreater(runtime["record_market_updates_max_records"], 0)
             self.assertGreater(runtime["record_market_updates_max_bytes"], 0)
+
+    def test_settlement_probability_dryrun_deployment_exposure_covers_strategy_sizing(self) -> None:
+        strategy = tomllib.loads(
+            (
+                STRATEGY_DIR
+                / "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"
+            ).read_text()
+        )
+        deployment = json.loads(
+            (
+                DEPLOYMENT_DIR
+                / "pm5d.threelayer.settlement-probability-btc-eth.dryrun.json"
+            ).read_text()
+        )
+
+        strategy_config = strategy["strategy"]
+        expected_exposure = Decimal(str(strategy_config["stake_usd"])) * Decimal(
+            str(strategy_config["max_positions"])
+        )
+        deployment_limit = Decimal(deployment["max_gross_exposure"])
+
+        self.assertEqual(
+            deployment["bundle_id"],
+            "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun",
+        )
+        self.assertGreaterEqual(deployment_limit, expected_exposure)
 
 
 if __name__ == "__main__":
