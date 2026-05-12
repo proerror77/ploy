@@ -214,6 +214,21 @@ jobs:
           ssh tango-1-1 "${remote_cmd}"
           scp -r "tango-1-1:${remote_backup}/." artifacts/reset-strategy-runtime-evidence/
 
+      - name: Verify post-reset clean baseline
+        if: ${{ github.event.inputs.execute == 'true' }}
+        env:
+          DEPLOYMENT_ID: ${{ github.event.inputs.deployment_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/reset-strategy-runtime-evidence
+          curl -fsS --max-time 10 "http://${DEPLOY_HOST}/api/reports/dry-run" \
+            > artifacts/reset-strategy-runtime-evidence/post-reset-dryrun-report.json
+          python3 scripts/check_dryrun_candidate_gate.py \
+            --dryrun-json artifacts/reset-strategy-runtime-evidence/post-reset-dryrun-report.json \
+            --deployment-id "${DEPLOYMENT_ID}" \
+            --mode clean-baseline \
+            > artifacts/reset-strategy-runtime-evidence/post-reset-clean-baseline-gate.json
+
       - name: Publish summary
         if: always()
         run: |
@@ -237,6 +252,12 @@ jobs:
           print(f"- Deleted orders: `{payload['deleted_orders']}`")
           print(f"- After: orders=`{payload['after']['orders']}`, fills=`{payload['after']['fills']}`")
           print("- Raw market data tables were not touched.")
+          gate_path = Path("artifacts/reset-strategy-runtime-evidence/post-reset-clean-baseline-gate.json")
+          if gate_path.exists():
+              gate = json.loads(gate_path.read_text())
+              print(f"- Post-reset clean-baseline gate: `{gate.get('status')}`")
+              if gate.get("reason"):
+                  print(f"- Post-reset gate reason: `{gate.get('reason')}`")
           PY
 
       - name: Upload reset artifact
