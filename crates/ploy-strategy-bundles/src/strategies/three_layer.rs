@@ -901,6 +901,30 @@ impl ThreeLayerStrategy {
         })
     }
 
+    fn event_position_exists(
+        event: &EventWindow,
+        positions: &PositionLedger,
+        selected_token_id: &str,
+    ) -> bool {
+        [event.up_token.as_ref(), event.down_token.as_ref()]
+            .into_iter()
+            .any(|token_id| {
+                token_id != selected_token_id && positions.net_qty(token_id) > Decimal::ZERO
+            })
+    }
+
+    fn event_active_order_exists(
+        event: &EventWindow,
+        orders: &OrderLedger,
+        selected_token_id: &str,
+    ) -> bool {
+        [event.up_token.as_ref(), event.down_token.as_ref()]
+            .into_iter()
+            .any(|token_id| {
+                token_id != selected_token_id && Self::active_order_exists(orders, token_id)
+            })
+    }
+
     fn event_ml_quote(&self, token_id: &str, now: DateTime<Utc>) -> Option<(f64, f64, f64)> {
         let quote = self.quotes.get(token_id)?;
         let bid = quote
@@ -1096,6 +1120,14 @@ impl ThreeLayerStrategy {
         }
         if Self::active_order_exists(orders, token_id) {
             self.bump("skip_active_order");
+            return None;
+        }
+        if Self::event_position_exists(event, positions, token_id) {
+            self.bump("skip_existing_event_position");
+            return None;
+        }
+        if Self::event_active_order_exists(event, orders, token_id) {
+            self.bump("skip_active_event_order");
             return None;
         }
         if self.token_reject_active(token_id, now) {
@@ -1297,6 +1329,14 @@ impl ThreeLayerStrategy {
             }
             if Self::active_order_exists(orders, token_id) {
                 self.bump("skip_active_order");
+                continue;
+            }
+            if Self::event_position_exists(event, positions, token_id) {
+                self.bump("skip_existing_event_position");
+                continue;
+            }
+            if Self::event_active_order_exists(event, orders, token_id) {
+                self.bump("skip_active_event_order");
                 continue;
             }
             if self.token_reject_active(token_id, now) {
@@ -2746,6 +2786,84 @@ mod tests {
     }
 
     #[test]
+    fn opposite_side_position_blocks_same_event_entry() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = position_with_token("token-down", now);
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &entry_quote("token-up", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "an existing DOWN position must block a new UP entry in the same event"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_existing_event_position"), Some(&1));
+    }
+
+    #[test]
+    fn opposite_side_active_order_blocks_same_event_entry() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = active_order_for_token("token-down", now);
+
+        strategy.on_update(
+            &entry_quote("token-up", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "an active DOWN order must block a new UP entry in the same event"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_active_event_order"), Some(&1));
+    }
+
+    #[test]
     fn event_ml_runtime_model_selects_best_settlement_edge_side() {
         use chrono::TimeZone;
 
@@ -2795,6 +2913,52 @@ mod tests {
             }
             other => panic!("expected one Event ML executable DOWN entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn event_ml_opposite_side_position_blocks_same_event_entry() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_edge = 0.01;
+        config.min_entry_score = -0.50;
+        config.autofactor_runtime_score = Some("event_ml_model:baseline_v1".to_string());
+        config.event_ml_model = Some(event_ml_model_with_intercept(-2.0));
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = position_with_token("token-up", now);
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &entry_quote("token-up", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &entry_quote("token-down", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "Event ML must not enter DOWN when the same event already has an UP position"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_existing_event_position"), Some(&1));
     }
 
     #[test]
