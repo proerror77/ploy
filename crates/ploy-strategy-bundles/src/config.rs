@@ -5,8 +5,8 @@
 
 use chrono::{DateTime, Utc};
 use ploy_market_contracts::{InstrumentKind, PredictionFamily, VenueKind};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::path::Path;
 use std::path::PathBuf;
@@ -87,6 +87,12 @@ pub struct RuntimeSection {
     pub market_data_source: MarketDataSource,
     /// Required when `mode = "replay"`; points at a previously recorded NDJSON log.
     pub replay_market_updates_from: Option<PathBuf>,
+    /// Override settlement-exit submission for parity replays.
+    ///
+    /// Live mode defaults to skipping settlement exits because Polymarket
+    /// settles on-chain. Replay/backtest/dry-run default to preserving strategy
+    /// exits unless this field is explicitly set.
+    pub skip_settlement_exits: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -322,7 +328,10 @@ impl FullConfig {
             mode,
             throttle_hz: self.runtime.throttle_hz,
             max_updates: self.runtime.max_updates,
-            skip_settlement_exits: mode == RuntimeMode::Live,
+            skip_settlement_exits: self
+                .runtime
+                .skip_settlement_exits
+                .unwrap_or(mode == RuntimeMode::Live),
         }
     }
 
@@ -495,6 +504,41 @@ replay_market_updates_from = "captures/dryrun.ndjson"
             config.replay_market_updates_path(),
             Some(Path::new("captures/dryrun.ndjson"))
         );
+    }
+
+    #[test]
+    fn replay_runtime_can_skip_settlement_exits_for_dryrun_parity() {
+        let replay_toml = r#"
+[runtime]
+mode = "replay"
+replay_market_updates_from = "captures/dryrun.ndjson"
+skip_settlement_exits = true
+
+[strategy]
+"#;
+
+        let config = FullConfig::from_toml(replay_toml).unwrap();
+        let runtime = config.runtime_config();
+
+        assert_eq!(runtime.mode, RuntimeMode::Replay);
+        assert!(runtime.skip_settlement_exits);
+    }
+
+    #[test]
+    fn replay_runtime_preserves_settlement_exits_by_default() {
+        let replay_toml = r#"
+[runtime]
+mode = "replay"
+replay_market_updates_from = "captures/dryrun.ndjson"
+
+[strategy]
+"#;
+
+        let config = FullConfig::from_toml(replay_toml).unwrap();
+        let runtime = config.runtime_config();
+
+        assert_eq!(runtime.mode, RuntimeMode::Replay);
+        assert!(!runtime.skip_settlement_exits);
     }
 
     #[test]
@@ -765,7 +809,7 @@ venue = "sportsbook"
     #[test]
     fn settlement_probability_config_carries_autofactor_handoff_score() {
         use crate::strategies::three_layer_model::{
-            AutoSettlementFactorInputs, auto_settlement_formula_score,
+            auto_settlement_formula_score, AutoSettlementFactorInputs,
         };
 
         let path = strategy_config_dir()

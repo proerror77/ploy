@@ -83,8 +83,13 @@ def runtime_rows_by_intent(payload: dict[str, Any], row_name: str) -> dict[str, 
     return indexed
 
 
-def event_cashflow_by_event_token(payload: dict[str, Any]) -> dict[tuple[str, str], str]:
+def event_cashflow_by_event_token(
+    payload: dict[str, Any],
+    prices: dict[tuple[str, str], str],
+) -> dict[tuple[str, str], str]:
     totals: dict[tuple[str, str], Decimal] = {}
+    buy_quantities: dict[tuple[str, str], Decimal] = {}
+    has_sell_fill: set[tuple[str, str]] = set()
     runtime = payload.get("runtime_evidence") or {}
     fills = runtime.get("fills") or []
     if not isinstance(fills, list):
@@ -106,24 +111,41 @@ def event_cashflow_by_event_token(payload: dict[str, Any]) -> dict[tuple[str, st
         except InvalidOperation:
             continue
         side = str(fill.get("fill_side") or fill.get("side") or "").upper()
+        key = (str(event_id), str(token_id))
         signed = quantity * price
         if side == "BUY":
             signed = -signed
+            buy_quantities[key] = buy_quantities.get(key, Decimal("0")) + quantity
         elif side != "SELL":
             continue
-        key = (str(event_id), str(token_id))
+        else:
+            has_sell_fill.add(key)
         totals[key] = totals.get(key, Decimal("0")) + signed - fee
+    for key, settlement in prices.items():
+        if key in has_sell_fill:
+            continue
+        buy_quantity = buy_quantities.get(key)
+        if buy_quantity is None:
+            continue
+        try:
+            settlement_price = Decimal(str(settlement))
+        except InvalidOperation:
+            continue
+        totals[key] = totals.get(key, Decimal("0")) + buy_quantity * settlement_price
     return {key: format(value.normalize(), "f") for key, value in totals.items()}
 
 
-def backfill_replay_event_identity(payload: dict[str, Any]) -> int:
+def backfill_replay_event_identity(
+    payload: dict[str, Any],
+    prices: dict[tuple[str, str], str],
+) -> int:
     runtime = payload.get("runtime_evidence") or {}
     events = runtime.get("events") or []
     if not isinstance(events, list):
         return 0
     fills_by_intent = runtime_rows_by_intent(payload, "fills")
     orders_by_intent = runtime_rows_by_intent(payload, "orders")
-    cashflow_by_event_token = event_cashflow_by_event_token(payload)
+    cashflow_by_event_token = event_cashflow_by_event_token(payload, prices)
     changed = 0
 
     for event in events:
@@ -170,7 +192,7 @@ def backfill_replay_event_identity(payload: dict[str, Any]) -> int:
 
 
 def enrich_payload(payload: dict[str, Any], prices: dict[tuple[str, str], str]) -> dict[str, int]:
-    backfilled = backfill_replay_event_identity(payload)
+    backfilled = backfill_replay_event_identity(payload, prices)
     events = ((payload.get("runtime_evidence") or {}).get("events") or [])
     stats = {
         "runtime_events": 0,

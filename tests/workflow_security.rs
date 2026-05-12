@@ -268,6 +268,7 @@ fn recorded_replay_parity_supports_auto_window() {
         "LIMIT 20",
         "resolved-window.json",
         "resolved-window.env",
+        "skip_settlement_exits = true",
         "RESOLVED_SINCE",
         "RESOLVED_UNTIL",
         "Requested window",

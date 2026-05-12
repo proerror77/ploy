@@ -168,6 +168,51 @@ class EnrichReplayRuntimeEvidenceTests(unittest.TestCase):
         self.assertEqual(report["runtime_events_settlement_enriched"], 1)
         self.assertGreaterEqual(report["runtime_events_identity_backfilled"], 8)
 
+    def test_backfills_settlement_pnl_without_synthetic_sell_fill(self):
+        payload = {
+            "runtime_evidence": {
+                "events": [
+                    {
+                        "intent_id": "tl_btcusdt_up_2221812_1778500092316",
+                        "token_id": "token-up",
+                        "decision_ts": None,
+                        "event_id": None,
+                        "market_id": None,
+                        "side": "UNKNOWN",
+                        "settlement": "open",
+                        "pnl": "-15.1080000000",
+                    }
+                ],
+                "orders": [
+                    {
+                        "intent_id": "tl_btcusdt_up_2221812_1778500092316",
+                        "created_at": None,
+                    }
+                ],
+                "fills": [
+                    {
+                        "intent_id": "tl_btcusdt_up_2221812_1778500092316",
+                        "token_id": "token-up",
+                        "fill_side": "BUY",
+                        "quantity": "23.4375",
+                        "price": "0.64",
+                        "fee": "0.1080000000",
+                        "fill_timestamp": "2026-05-11T11:48:12.316Z",
+                    }
+                ],
+            }
+        }
+        output, report = self.run_script(
+            payload,
+            [{"event_id": "2221812", "token_id": "token-up", "settlement": "1.00000000000000000000"}],
+        )
+
+        event = output["runtime_evidence"]["events"][0]
+        self.assertEqual(event["event_id"], "2221812")
+        self.assertEqual(event["settlement"], "1.00000000000000000000")
+        self.assertEqual(event["pnl"], "8.3295")
+        self.assertEqual(report["runtime_events_settlement_enriched"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

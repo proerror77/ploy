@@ -1,3 +1,111 @@
+# Recorded Replay Parity Settlement Lifecycle Fix (2026-05-12)
+
+## Goal
+
+Fix the current recorded replay/dry-run parity blocker for the PM5D
+settlement-probability lane: replay creates settlement SELL exits and later
+extra entries, while the dry-run report represents settlement through
+event-level track records and does not persist matching settlement SELL
+orders/fills for the sampled window.
+
+## Plan
+
+- [x] Read `docs/PROJECT_SEMANTICS.md`; current evidence stage is
+  `runtime_parity`.
+- [x] Reproduce the blocker from run `25714741551` artifacts and identify the
+  exact missing rows.
+- [x] Identify root cause: replay starts from an empty state and currently
+  records synthetic settlement exits, which frees positions and creates extra
+  replay-only entries not present in dry-run evidence.
+- [x] Add a runtime config switch so the recorded parity workflow can make
+  replay skip settlement exit orders.
+- [x] Backfill replay event-level settlement PnL from official settlement when
+  synthetic settlement exits are skipped.
+- [x] Add focused tests for the no-settlement-exit parity path.
+- [x] Validate focused tests.
+- [ ] Land the fix on `main`, then dispatch a fresh recorded replay parity run
+  from `main` after the fix lands.
+
+## Review
+
+- 2026-05-12: Run `25714741551` had 4 shared entry rows that matched exactly,
+  plus 6 replay-only rows: 4 settlement SELL exits and 2 later entries. The
+  later entries are a consequence of replay freeing positions through synthetic
+  settlement exits while the dry-run report did not persist those exit
+  orders/fills.
+- 2026-05-12: Added `[runtime].skip_settlement_exits` override support and made
+  `recorded-replay-parity.yml` inject `skip_settlement_exits = true` into the
+  generated replay config. Replay remains settlement-aware through event-level
+  enrichment instead of synthetic settlement SELL order/fill rows.
+- 2026-05-12: Updated replay evidence enrichment so official settlement can
+  compute event-level PnL for BUY entries when no synthetic settlement SELL fill
+  exists.
+- 2026-05-12: Verification passed:
+  `python3 -m unittest tests.test_enrich_replay_runtime_evidence
+  tests.test_replay_dryrun_parity tests.test_extract_dryrun_settlement_evidence`,
+  `python3 -m py_compile scripts/enrich_replay_runtime_evidence.py
+  scripts/replay_dryrun_parity.py scripts/extract_dryrun_settlement_evidence.py`,
+  YAML parse for `.github/workflows/recorded-replay-parity.yml`,
+  `CARGO_TARGET_DIR=/tmp/ploy-parity-settlement-lifecycle
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p
+  ploy-strategy-bundles config::tests::replay_runtime --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-parity-workflow-security
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test
+  workflow_security recorded_replay_parity_supports_auto_window`, `rustfmt
+  --edition 2021 --check crates/ploy-strategy-bundles/src/config.rs`, and
+  `rtk git diff --check`.
+
+# PM5D Hosted Alpha Search Continuation (2026-05-12)
+
+## Goal
+
+Continue systematic PM5D alpha discovery on GitHub-hosted artifact workflows
+after the quote freshness fix landed on `main`, while keeping promotion blocked
+until fresh recorded replay/runtime parity is ready.
+
+## Plan
+
+- [x] Re-read `docs/PROJECT_SEMANTICS.md` and
+  `docs/ALPHA_FACTOR_SEARCH_CICD.md`; current evidence stage is
+  `factor_attribution` / `walk_forward`, not live promotion.
+- [x] Confirm existing candidate status: `auto_settlement_conservative_settlement_edge`
+  is a candidate factor/handoff from prior hosted search, but not a verified
+  profitable strategy because latest parity is blocked.
+- [x] Verify quote freshness fix is present on `origin/main`.
+- [x] Dispatch a GitHub-hosted artifact alpha-search continuation from `main`
+  using the typed PM5D settlement/liquidity prior and retained snapshot.
+- [x] Monitor the workflow, download the resulting artifacts, and summarize
+  candidate count, passed count, best factor, handoff status, and caveats.
+- [x] Record whether the next action is `continue`, `revise`, `reject`, or
+  `promote to dry-run` under the repo semantic gates.
+
+## Review
+
+- 2026-05-12: Existing dry-run profitability evidence remains underpowered and
+  blocked by recorded replay parity mismatch. New search runs may find better
+  factors, but they cannot become dry-run/live promotion evidence until parity
+  is fixed.
+- 2026-05-12: Dispatched hosted workflow run `25722101811` from `main` with
+  snapshot `25642459432`, latest parity artifact
+  `recorded-replay-parity-25714741551`, typed prior
+  `tasks/alpha_search_priors/pm5d_settlement_liquidity_prior_20260512.json`,
+  prior MCTS artifact `factor-walk-forward-v2-25707061616`, BTC/ETH, and
+  `full_depth_settlement_executable_pnl`.
+- 2026-05-12: Run `25722101811` failed before research because the workflow
+  treats `end_date` as inclusive; `2026-05-01` resolved to
+  `2026-05-02T00:00Z`, outside snapshot `25642459432`. Re-dispatch with
+  `end_date=2026-04-30` for the same exclusive `2026-05-01T00:00Z` window.
+- 2026-05-12: Re-dispatched corrected hosted workflow as run `25722193283`.
+- 2026-05-12: Run `25722193283` succeeded and improved best reward to
+  `4.894975850946932` with `237` candidates and `71` passed; best factor was
+  `mcts_mcts_auto_settlement_conservative_settlement_edge_x_near_strike_near_strike_near_strike`.
+  Handoff remained `blocked` by latest replay/runtime parity.
+- 2026-05-12: Chained run `25722317462` succeeded, then stopped with
+  `reward_stagnation`; best factor reverted to
+  `auto_settlement_conservative_settlement_edge`, `193` candidates, `38`
+  passed, handoff `blocked`. Evidence recorded in
+  `tasks/research_evidence/pm5d_hosted_alpha_search_continuation_20260512.md`.
+
 # PM5D Quote Freshness And Hosted Evidence Correction (2026-05-12)
 
 ## Goal
