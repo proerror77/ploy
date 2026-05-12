@@ -191,6 +191,8 @@ pub async fn run_collect_quotes(args: &[String]) {
         refresh_interval_secs: 300,
         persist_queue_capacity: env_usize("PLOY_QUOTE_COLLECTOR_QUEUE_CAPACITY", 4_096),
         persist_workers: env_usize("PLOY_QUOTE_COLLECTOR_PERSIST_WORKERS", 4),
+        persist_batch_size: env_usize("PLOY_QUOTE_COLLECTOR_BATCH_SIZE", 50),
+        persist_batch_window_ms: env_u64("PLOY_QUOTE_COLLECTOR_BATCH_WINDOW_MS", 10),
         stale_after_secs: env_u64("PLOY_QUOTE_COLLECTOR_STALE_AFTER_SECS", 120),
         snapshot_sample_ms: env_u64("PLOY_QUOTE_COLLECTOR_SNAPSHOT_SAMPLE_MS", 1_000),
     };

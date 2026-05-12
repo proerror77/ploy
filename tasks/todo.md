@@ -167,6 +167,36 @@ CI-built artifacts for the tango collector migration.
   `CARGO_TARGET_DIR=/tmp/ploy-rust-collectors-deploy /opt/homebrew/bin/timeout 300 rtk cargo check --locked --features ops -p ploy-runner-host`,
   and `rtk git diff --check`.
 
+# Tango Quote Collector CPU Batch Tuning (2026-05-12)
+
+## Goal
+
+Reduce remaining `ploy-quote-collector` CPU on the 2-core `tango-1-1` host
+without sampling top-of-book quote ticks.
+
+## Plan
+
+- [x] Re-sample remote service health, process CPU, and collector logs after
+  the quote snapshot sampling deploy.
+- [x] Identify why quote persistence batches stayed near one row despite
+  batching support.
+- [x] Make quote persistence batch size/window configurable and tune the tango
+  unit for fewer DB transactions.
+- [x] Run focused Rust checks before pushing.
+- [ ] Land through PR, deploy from `main`, and verify remote CPU/log evidence.
+
+## Review
+
+- 2026-05-12: Remote sampling after PR #452 showed healthy services and no
+  host Rust builds, but `ploy-quote-collector` still used roughly 30% CPU.
+  Logs showed `batch_len` usually at `1`, so the fixed 10ms batch window plus
+  two persistence workers was not coalescing quote writes at the observed book
+  rate.
+- 2026-05-12: Added configurable `PLOY_QUOTE_COLLECTOR_BATCH_SIZE` and
+  `PLOY_QUOTE_COLLECTOR_BATCH_WINDOW_MS`. Tuned the tango quote unit to one
+  persistence worker, 100ms batch window, and up to 100 rows per batch while
+  leaving full-resolution `clob_quote_ticks` intact.
+
 # Deploy Live-Paused Stderr Guard Repair (2026-05-12)
 
 ## Goal

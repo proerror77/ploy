@@ -44,6 +44,8 @@ pub struct CollectorConfig {
     pub refresh_interval_secs: u64,
     pub persist_queue_capacity: usize,
     pub persist_workers: usize,
+    pub persist_batch_size: usize,
+    pub persist_batch_window_ms: u64,
     pub stale_after_secs: u64,
     /// Minimum milliseconds between raw orderbook snapshot persists per token.
     /// Set to 0 to persist every book update. Top-of-book quote ticks are not sampled.
@@ -401,6 +403,12 @@ impl CollectorConfig {
         if self.persist_workers == 0 {
             self.persist_workers = DEFAULT_PERSIST_WORKERS;
         }
+        if self.persist_batch_size == 0 {
+            self.persist_batch_size = DEFAULT_PERSIST_BATCH_SIZE;
+        }
+        if self.persist_batch_window_ms == 0 {
+            self.persist_batch_window_ms = DEFAULT_PERSIST_BATCH_WINDOW_MS;
+        }
         if self.stale_after_secs == 0 {
             self.stale_after_secs = DEFAULT_STALE_AFTER_SECS;
         }
@@ -613,6 +621,8 @@ impl QuoteCollector {
     fn spawn_persist_workers(&self) -> mpsc::Sender<BookPersistJob> {
         let capacity = self.config.persist_queue_capacity;
         let worker_count = self.config.persist_workers.max(1);
+        let batch_size = self.config.persist_batch_size.max(1);
+        let batch_window_ms = self.config.persist_batch_window_ms;
         let (tx, rx) = mpsc::channel::<BookPersistJob>(capacity);
         let rx = Arc::new(Mutex::new(rx));
 
@@ -631,10 +641,10 @@ impl QuoteCollector {
                     };
 
                     let mut jobs = vec![job];
-                    sleep(StdDuration::from_millis(DEFAULT_PERSIST_BATCH_WINDOW_MS)).await;
+                    sleep(StdDuration::from_millis(batch_window_ms)).await;
                     {
                         let mut rx = rx.lock().await;
-                        while jobs.len() < DEFAULT_PERSIST_BATCH_SIZE {
+                        while jobs.len() < batch_size {
                             match rx.try_recv() {
                                 Ok(job) => jobs.push(job),
                                 Err(TryRecvError::Empty) => break,
@@ -1491,6 +1501,8 @@ mod tests {
             refresh_interval_secs: 300,
             persist_queue_capacity: 0,
             persist_workers: 0,
+            persist_batch_size: 0,
+            persist_batch_window_ms: 0,
             stale_after_secs: 0,
             snapshot_sample_ms: 0,
         }
@@ -1498,6 +1510,8 @@ mod tests {
 
         assert_eq!(config.persist_queue_capacity, 4_096);
         assert_eq!(config.persist_workers, 4);
+        assert_eq!(config.persist_batch_size, 50);
+        assert_eq!(config.persist_batch_window_ms, 10);
         assert_eq!(config.stale_after_secs, 120);
         assert_eq!(config.snapshot_sample_ms, 0);
     }
