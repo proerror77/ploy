@@ -1,3 +1,34 @@
+# PM5D Prior Factor Reuse For Alpha Search (2026-05-12)
+
+## Goal
+
+Turn the user's earlier PM5D factor findings into a typed alpha-search prior so
+the next CI runs search around known promising settlement-probability and
+liquidity-gated factors instead of starting from generic exploration.
+
+## Plan
+
+- [x] Re-read the project semantic contract for PM5D binary-option settlement
+  accounting and evidence stages.
+- [x] Review prior factor evidence for `side_fair_prob`,
+  liquidity-gated `side_model_prob` / `side_distance_over_sigma`,
+  full-depth/conservative settlement edge, near-strike, capacity, spread, and
+  repricing backup factors.
+- [x] Write a reusable research evidence plan separating reusable factors from
+  negative constraints.
+- [x] Add a typed LLM prior JSON file that can be passed to
+  `factor_walk_forward_v2 --alpha-search-llm-prior-json`.
+- [ ] Run or dispatch the first hosted alpha-search chain from the prior once a
+  retained snapshot/run target is selected.
+
+## Review
+
+- 2026-05-12: Added
+  `tasks/research_evidence/pm5d_alpha_factor_reuse_plan_20260512.md` and
+  `tasks/alpha_search_priors/pm5d_settlement_liquidity_prior_20260512.json`.
+  The prior reuses the historically strongest settlement and liquidity-gated
+  factors while marking rejected or unstable standalone factors as constraints.
+
 # Alpha Search LLM Prior And MCTS State (2026-05-12)
 
 ## Goal
