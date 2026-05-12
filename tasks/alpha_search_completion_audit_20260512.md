@@ -32,6 +32,15 @@ evidence for:
 
 `pm5d.threelayer.settlement-probability-btc-eth.dryrun`
 
+2026-05-13 later update: the system gap is now narrower. PR `#484` added
+entry-price-quality as a bounded AutoFactor research feature, generated
+settlement candidates, runtime scorer suffixes, promotion mappings, and typed
+prior `tasks/alpha_search_priors/pm5d_entry_price_quality_prior_20260513.json`.
+PR `#485` made the 6-hour full scheduled market-data audit use coverage mode.
+These fix search/promotion plumbing, not profitability. Current promotion
+remains blocked by retained-window LOB coverage and insufficient fresh dry-run
+sample size.
+
 Latest deploy preflight:
 
 - run: `25688999691`
@@ -82,6 +91,25 @@ Latest reset / data-quality evidence:
     - 24h window after `2026-05-13 10:48 +08`
     - 48h window after `2026-05-14 10:48 +08`
     - 72h window after `2026-05-15 10:48 +08`
+- 24h BTC/ETH coverage recheck run: `25758692951`
+  - workflow: `market-data-gap-audit.yml`
+  - git ref: `main@d43873a72cb9c8a51313b0f6a301c4dfe1bb1978`
+  - input: `gate_mode=coverage`, `full_lookback_hours=24`,
+    `symbols=BTCUSDT,ETHUSDT`, `fail_on=never`
+  - quick 1h status: `ok`
+  - full 24h retained coverage: `critical`
+  - blocker: `binance_lob/BTCUSDT` and `binance_lob/ETHUSDT`, max gap
+    `85m >= 15m`, from `2026-05-12 09:24 +08` to `10:49 +08`
+  - interpretation: collector freshness is OK, but promotion-grade 24h
+    walk-forward/MCTS remains blocked until this gap ages out.
+- scheduled quick audit run: `25761849741`
+  - workflow: `market-data-gap-audit.yml`
+  - git ref: `main@7308aee535aa9b13d15230c625b9637c147e3429`
+  - event: `schedule`
+  - summary: `gate_mode=freshness`, `run_full=false`, quick 1h status `ok`
+  - interpretation: the 30-minute scheduled collector-health path still works
+    after PR `#485`. The next full scheduled coverage audit is the
+    `17 */6 * * *` UTC path.
 - reset preview run: `25748008417`
   - workflow: `reset-strategy-runtime-evidence.yml`
   - input: `execute=false`
@@ -143,6 +171,17 @@ Latest reset / data-quality evidence:
     post-reset closed-trade sample for profitability claims.
   - advisory: buy fill rate is `97.93%`, so fillability is not the main
     current blocker.
+- dry-run candidate-quality gate run: `25759457465`
+  - workflow: `dryrun-candidate-gate.yml`
+  - git ref: `main@d43873a72cb9c8a51313b0f6a301c4dfe1bb1978`
+  - input: `mode=candidate-quality`
+  - artifact: `dryrun-candidate-gate-25759457465`
+  - status: `blocked`
+  - failures: closed trades `7 < 50`
+  - values: realized PnL `15.33`, profit factor `1.3359`, max drawdown
+    `-30.468`, buy fill rate `98.01%`
+  - interpretation: the current post-reset dry-run sample is positive but
+    under-sampled. Treat as `collect-more`, not a tradable strategy.
 
 Current dry-run profitability read:
 
@@ -160,6 +199,21 @@ Current dry-run profitability read:
 - interpretation: current dry-run is rejected / not tradeable; do not promote.
   The deployment is still running, so destructive reset remains blocked until
   explicit operator approval to pause or stop this dry-run lane.
+
+Current post-reset dry-run read:
+
+- checked_at: `2026-05-13 05:08 +08`
+- deployment: `pm5d.threelayer.settlement-probability-btc-eth.dryrun`
+- state: `desired_state=running`, `observed_state=running`,
+  `deployment_state=enabled`
+- closed trades: `7`
+- realized PnL: `15.33`
+- profit factor: `1.3359`
+- max drawdown: `-30.468`
+- buy fill rate: `98.01%`
+- interpretation: still not tradeable. Positive PnL over 7 closed trades is
+  not enough to promote; the candidate-quality gate requires at least 50 closed
+  trades before the PnL/profit-factor read can matter.
 
 Historical parity runs that led to the ready handoff:
 
@@ -218,8 +272,10 @@ Earlier blocker runs:
 | Reset procedure is documented and operator-gated | `docs/runbooks/strategy-runtime-evidence-reset.md`; PR `#470` | `ready` | Runbook records preflight, approval text, preview, pause, guarded execute, artifact inspection, resume, and post-reset gates. |
 | Clean post-reset baseline can be machine-checked | `scripts/check_dryrun_candidate_gate.py`; PR `#471`; workflow `dryrun-candidate-gate.yml`; PR `#472`; reset-workflow post-gate PR `#474`; run `25754514193` | `passed` | The reset workflow and an independent current API check both passed with `target_strategy_absent`. |
 | Dry-run candidate quality can be machine-checked | `scripts/check_dryrun_candidate_gate.py --mode candidate-quality`; run `25753663370`; current API check after reset | `ready and currently blocked` | Before reset, the old strategy failed closed-trade, PnL, profit-factor, and max-drawdown thresholds. After reset, candidate-quality blocks with `target_strategy_absent` until fresh closed trades accumulate. |
-| Current retained data window supports promotion-grade search | market-data audits `25747004738`, `25753059613` | `blocked` | 24h coverage still includes the known Binance LOB gap for BTC/ETH. Wait for a clean 48-72h window or use shorter diagnostic-only snapshots. |
-| A profitable strategy has been produced | ready handoff plus post-reset dry-run/executable evidence | `not ready` | Old negative dry-run rows have been cleared. Fresh collection has started with one open position, but there are not yet fresh post-reset closed trades, so no profitability claim is allowed. |
+| Entry-price-quality alpha prior is available to search and runtime handoff | PR `#484`, `tasks/alpha_search_priors/pm5d_entry_price_quality_prior_20260513.json`, runtime `autofactor_formula:*_x_entry_price_quality` suffixes | `ready` | This repairs a semantic/search gap for binary-ticket entry quality. It is search plumbing, not performance evidence. |
+| Scheduled full retained-window audits enforce coverage | PR `#485`, `.github/workflows/market-data-gap-audit.yml` | `ready` | The `17 */6 * * *` UTC full schedule forces `gate_mode=coverage`; the 30-minute quick schedule remains freshness-only. Environment approval may still be required for protected `tango-1-1` access. |
+| Current retained data window supports promotion-grade search | market-data audits `25747004738`, `25753059613`, `25758692951` | `blocked` | 24h coverage still includes the known Binance LOB gap for BTC/ETH through `2026-05-12 10:49 +08`. Wait for a clean retained window or use shorter diagnostic-only snapshots. |
+| A profitable strategy has been produced | ready handoff plus post-reset dry-run/executable evidence | `not ready` | Old negative dry-run rows have been cleared. Fresh post-reset dry-run has `7` closed trades with positive PnL, but sample-size gate requires `50`; no profitability claim is allowed. |
 
 ## Latest Alpha-Search Evidence
 
