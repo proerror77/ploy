@@ -757,6 +757,19 @@ def compare_runtime_evidence(
     }
 
 
+def has_no_comparable_runtime_sample(runtime_evidence_comparison: dict[str, Any]) -> bool:
+    """Return true when the selected window has no replay or dry-run rows to compare."""
+    for row_type in ("events", "orders", "fills"):
+        comparison = runtime_evidence_comparison.get(row_type) or {}
+        if comparison.get("replay_count", 0) != 0:
+            return False
+        if comparison.get("dryrun_count", 0) != 0:
+            return False
+        if comparison.get("shared_count", 0) != 0:
+            return False
+    return True
+
+
 def compare_events(
     replay_events: list[dict[str, Any]], dryrun_events: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -890,10 +903,15 @@ def build_result(
         legacy_event_flags.append("legacy_event_missing_strict_parity_fields")
 
     decision = "continue"
-    if not runtime_evidence_comparison["strict_parity_ready"]:
+    no_comparable_runtime_sample = has_no_comparable_runtime_sample(runtime_evidence_comparison)
+    if no_comparable_runtime_sample:
+        decision = "collect-more"
+    elif not runtime_evidence_comparison["strict_parity_ready"]:
         decision = "fix-data-or-runtime-mismatch"
     advisory_flags: list[str] = []
-    blocking_risk_flags = list(risk_flags)
+    if no_comparable_runtime_sample:
+        advisory_flags.append("no_comparable_runtime_sample")
+    blocking_risk_flags = [] if no_comparable_runtime_sample else list(risk_flags)
 
     return {
         "schema_version": 1,

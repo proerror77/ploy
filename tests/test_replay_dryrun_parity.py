@@ -218,6 +218,18 @@ class ReplayDryrunParityTests(unittest.TestCase):
         self.assertEqual(runtime["orders"]["shared_count"], 0)
         self.assertEqual(runtime["fills"]["shared_count"], 0)
 
+    def test_empty_runtime_window_collects_more_instead_of_fixing_runtime(self):
+        result = self.run_script({"runtime_evidence": {}}, {"runtime_evidence": {}})
+
+        runtime = result["runtime_evidence_comparison"]
+        self.assertFalse(runtime["strict_parity_ready"])
+        self.assertEqual(result["decision"], "collect-more")
+        self.assertIn("no_comparable_runtime_sample", result["advisory_flags"])
+        self.assertEqual(result["blocking_risk_flags"], [])
+        self.assertEqual(runtime["events"]["shared_count"], 0)
+        self.assertEqual(runtime["orders"]["shared_count"], 0)
+        self.assertEqual(runtime["fills"]["shared_count"], 0)
+
     def test_filters_limit_comparison_to_matching_deployment_window(self):
         replay = evidence_payload()
         dryrun = evidence_payload()

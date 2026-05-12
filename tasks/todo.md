@@ -1,3 +1,41 @@
+# Recorded Replay No-Sample Classification Fix (2026-05-12)
+
+## Goal
+
+Prevent PM5D recorded replay/dry-run parity windows with no comparable runtime
+rows from being mislabeled as data or runtime failures. Evidence stage is
+`runtime_parity`; an empty sampled window should block promotion as
+`collect-more`, not imply a broken runner, collector, or scorer.
+
+## Plan
+
+- [x] Re-read the project semantic contract and strategy research runbook.
+- [x] Inspect current dry-run evidence and the latest #419 parity comments.
+- [x] Change the parity evaluator to classify all-empty replay/dry-run runtime
+  windows as `decision=collect-more`.
+- [x] Preserve real mismatches and one-sided missing rows as
+  `fix-data-or-runtime-mismatch`.
+- [x] Add a regression test for empty runtime windows.
+- [x] Run focused parity tests.
+
+## Review
+
+- 2026-05-12: Current target dry-run report for
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun` still shows 16 closed
+  trades, realized PnL `-58.21`, profit factor `0.4501`, and max drawdown
+  `-86.0965`; this remains a revise/collect-more candidate, not a profitable
+  strategy claim.
+- 2026-05-12: Latest recorded parity evidence on #419 had shared
+  orders/fills `0 / 0`. That is an under-sampled window, not enough evidence to
+  diagnose runtime drift.
+- 2026-05-12: `scripts/replay_dryrun_parity.py` now emits
+  `decision=collect-more` plus advisory flag `no_comparable_runtime_sample`
+  when events, orders, and fills are empty on both replay and dry-run sides.
+  One-sided missing rows and field mismatches still produce
+  `fix-data-or-runtime-mismatch`.
+- 2026-05-12: Verification passed:
+  `python3 -m unittest tests.test_replay_dryrun_parity`.
+
 # PM5D Tradable Strategy Search Continuation (2026-05-12)
 
 ## Goal
