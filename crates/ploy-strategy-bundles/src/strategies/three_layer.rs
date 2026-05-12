@@ -1430,6 +1430,7 @@ impl ThreeLayerStrategy {
                 if let Some(runtime_score) = self.config.autofactor_runtime_score.as_deref() {
                     let inputs = AutoSettlementFactorInputs {
                         settlement_edge: edge,
+                        entry_price: entry_price_f,
                         distance_over_sigma,
                         direction_sign,
                         entry_capacity_ratio,
@@ -3496,6 +3497,7 @@ mod tests {
 
         let inputs = AutoSettlementFactorInputs {
             settlement_edge: 0.06,
+            entry_price: 0.30,
             distance_over_sigma: 0.20,
             direction_sign: 1.0,
             entry_capacity_ratio: 3.0,
@@ -3522,6 +3524,7 @@ mod tests {
 
         let near_inputs = AutoSettlementFactorInputs {
             settlement_edge: 0.06,
+            entry_price: 0.30,
             distance_over_sigma: 0.20,
             direction_sign: 1.0,
             entry_capacity_ratio: 3.0,
@@ -3550,6 +3553,45 @@ mod tests {
         assert!((near_raw - 0.048).abs() < 1e-9);
         assert!((far_raw - 0.006).abs() < 1e-9);
         assert!(near_score > far_score);
+    }
+
+    #[test]
+    fn autofactor_entry_price_quality_formula_penalizes_brittle_ticket_prices() {
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::SettlementProbability;
+        config.min_edge = 0.02;
+
+        let good_inputs = AutoSettlementFactorInputs {
+            settlement_edge: 0.06,
+            entry_price: 0.30,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            entry_capacity_ratio: 3.0,
+            side_spread: 0.03,
+            external_pressure: 0.0,
+            iv_change_1m: 0.0,
+        };
+        let low_ticket_inputs = AutoSettlementFactorInputs {
+            entry_price: 0.10,
+            ..good_inputs
+        };
+
+        let (good_raw, good_score) = autofactor_formula_entry_score(
+            "autofactor_formula:auto_settlement_conservative_settlement_edge_x_entry_price_quality",
+            good_inputs,
+            config.min_edge,
+        )
+        .expect("entry-price-quality settlement formula score");
+        let (low_raw, low_score) = autofactor_formula_entry_score(
+            "autofactor_formula:auto_settlement_conservative_settlement_edge_x_entry_price_quality",
+            low_ticket_inputs,
+            config.min_edge,
+        )
+        .expect("low-ticket settlement formula score");
+
+        assert!((good_raw - 0.06).abs() < 1e-9);
+        assert!((low_raw - 0.01).abs() < 1e-9);
+        assert!(good_score > low_score);
     }
 
     #[test]

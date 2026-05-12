@@ -829,6 +829,7 @@ venue = "sportsbook"
             runtime_score,
             AutoSettlementFactorInputs {
                 settlement_edge: 0.06,
+                entry_price: 0.30,
                 distance_over_sigma: 0.20,
                 direction_sign: 1.0,
                 entry_capacity_ratio: 3.0,

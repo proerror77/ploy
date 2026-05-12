@@ -63,9 +63,17 @@ BUILTIN_RUNTIME_MAPPINGS: dict[str, dict[str, str]] = {
         **SETTLEMENT_RUNTIME_MAPPING,
         "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_capacity",
     },
+    "auto_settlement_full_depth_settlement_edge_x_entry_price_quality": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_entry_price_quality",
+    },
     "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity": {
         **SETTLEMENT_RUNTIME_MAPPING,
         "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity",
+    },
+    "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality",
     },
     "auto_settlement_full_depth_settlement_edge_spread_adjusted": {
         **SETTLEMENT_RUNTIME_MAPPING,
@@ -91,9 +99,17 @@ BUILTIN_RUNTIME_MAPPINGS: dict[str, dict[str, str]] = {
         **SETTLEMENT_RUNTIME_MAPPING,
         "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_capacity",
     },
+    "auto_settlement_conservative_settlement_edge_x_entry_price_quality": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_entry_price_quality",
+    },
     "auto_settlement_conservative_settlement_edge_x_near_strike_x_capacity": {
         **SETTLEMENT_RUNTIME_MAPPING,
         "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike_x_capacity",
+    },
+    "auto_settlement_conservative_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality": {
+        **SETTLEMENT_RUNTIME_MAPPING,
+        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality",
     },
     "auto_settlement_conservative_settlement_edge_spread_adjusted": {
         **SETTLEMENT_RUNTIME_MAPPING,

@@ -52,6 +52,7 @@ pub struct EntryScoreInputs {
 #[derive(Debug, Clone, Copy)]
 pub struct AutoSettlementFactorInputs {
     pub settlement_edge: f64,
+    pub entry_price: f64,
     pub distance_over_sigma: f64,
     pub direction_sign: f64,
     pub entry_capacity_ratio: f64,
@@ -110,6 +111,15 @@ pub fn auto_settlement_entry_capacity_score(entry_capacity_ratio: f64) -> f64 {
     }
 }
 
+pub fn auto_settlement_entry_price_quality_score(entry_price: f64) -> f64 {
+    if !entry_price.is_finite() || entry_price <= 0.0 || entry_price >= 1.0 {
+        return f64::NAN;
+    }
+    let low_ticket_gate = ((entry_price - 0.08) / 0.12).clamp(0.0, 1.0);
+    let expensive_ticket_gate = ((0.85 - entry_price) / 0.20).clamp(0.0, 1.0);
+    low_ticket_gate.min(expensive_ticket_gate)
+}
+
 pub fn auto_settlement_formula_score(
     runtime_score: &str,
     inputs: AutoSettlementFactorInputs,
@@ -140,12 +150,23 @@ pub fn auto_settlement_formula_score(
                 auto_settlement_near_strike_score(inputs.distance_over_sigma, inputs.direction_sign)
         }
         "_x_capacity" => score *= auto_settlement_entry_capacity_score(inputs.entry_capacity_ratio),
+        "_x_entry_price_quality" => {
+            score *= auto_settlement_entry_price_quality_score(inputs.entry_price)
+        }
         "_x_near_strike_x_capacity" => {
             score *= auto_settlement_near_strike_score(
                 inputs.distance_over_sigma,
                 inputs.direction_sign,
             );
             score *= auto_settlement_entry_capacity_score(inputs.entry_capacity_ratio);
+        }
+        "_x_near_strike_x_capacity_x_entry_price_quality" => {
+            score *= auto_settlement_near_strike_score(
+                inputs.distance_over_sigma,
+                inputs.direction_sign,
+            );
+            score *= auto_settlement_entry_capacity_score(inputs.entry_capacity_ratio);
+            score *= auto_settlement_entry_price_quality_score(inputs.entry_price);
         }
         "_spread_adjusted" => {
             if !inputs.side_spread.is_finite() || inputs.side_spread < 0.0 {
@@ -176,7 +197,11 @@ pub fn norm_cdf(x: f64) -> f64 {
     let d = 0.3989422804014327 * (-x * x / 2.0).exp();
     let p =
         d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-    if x >= 0.0 { 1.0 - p } else { p }
+    if x >= 0.0 {
+        1.0 - p
+    } else {
+        p
+    }
 }
 
 pub fn calibrate_direction_probability(
@@ -243,7 +268,11 @@ pub fn reward_risk_ratio(entry_price: f64) -> f64 {
     let fee = crypto_fee_cost(entry_price);
     let reward = 1.0 - entry_price - fee;
     let risk = entry_price + fee;
-    if risk <= 0.0 { f64::NAN } else { reward / risk }
+    if risk <= 0.0 {
+        f64::NAN
+    } else {
+        reward / risk
+    }
 }
 
 pub fn evaluate_direction_score(

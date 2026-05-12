@@ -609,6 +609,9 @@ pub fn autofactor_matrix_from_v2(
             f64::NAN
         }
     });
+    insert_column(&mut columns, "entry_price_quality_score", rows, |row| {
+        entry_price_quality_score(row.entry_ask)
+    });
     insert_column(&mut columns, "repricing_gap_side_10s", rows, |row| {
         row.side_model_edge
     });
@@ -1131,6 +1134,17 @@ fn deterministic_mutation_layer(
             );
         }
 
+        if settlement_target && input_names.contains("entry_price_quality_score") {
+            push_mutation(
+                &mut out,
+                seed,
+                depth,
+                "entry_price_quality",
+                mul(seed.expr.clone(), input("entry_price_quality_score")),
+                "add_feature_gate: penalize brittle binary-ticket prices before runtime handoff.",
+            );
+        }
+
         if !settlement_target && input_names.contains("poly_quote_age") {
             push_mutation(
                 &mut out,
@@ -1210,6 +1224,14 @@ fn settlement_native_generated_candidates(input_names: &BTreeSet<String>) -> Vec
                 "Settlement edge gated by full-depth entry capacity.",
             );
         }
+        if input_names.contains("entry_price_quality_score") {
+            push_generated(
+                &mut out,
+                format!("auto_settlement_{edge_name}_x_entry_price_quality"),
+                mul(input(edge_name), input("entry_price_quality_score")),
+                "Settlement edge gated by binary entry-price quality.",
+            );
+        }
         if has_all(input_names, &["near_strike_score", "entry_capacity_score"]) {
             push_generated(
                 &mut out,
@@ -1219,6 +1241,27 @@ fn settlement_native_generated_candidates(input_names: &BTreeSet<String>) -> Vec
                     input("entry_capacity_score"),
                 ),
                 "Settlement edge gated by both near-strike state and executable capacity.",
+            );
+        }
+        if has_all(
+            input_names,
+            &[
+                "near_strike_score",
+                "entry_capacity_score",
+                "entry_price_quality_score",
+            ],
+        ) {
+            push_generated(
+                &mut out,
+                format!("auto_settlement_{edge_name}_x_near_strike_x_capacity_x_entry_price_quality"),
+                mul(
+                    mul(
+                        mul(input(edge_name), input("near_strike_score")),
+                        input("entry_capacity_score"),
+                    ),
+                    input("entry_price_quality_score"),
+                ),
+                "Settlement edge gated by near-strike state, executable capacity, and entry-price quality.",
             );
         }
         if input_names.contains("side_spread") {
@@ -1577,6 +1620,15 @@ fn near_strike_score(row: &FactorObservationV2) -> f64 {
     } else {
         f64::NAN
     }
+}
+
+fn entry_price_quality_score(entry_price: f64) -> f64 {
+    if !valid_pm_price(entry_price) {
+        return f64::NAN;
+    }
+    let low_ticket_gate = ((entry_price - 0.08) / 0.12).clamp(0.0, 1.0);
+    let expensive_ticket_gate = ((0.85 - entry_price) / 0.20).clamp(0.0, 1.0);
+    low_ticket_gate.min(expensive_ticket_gate)
 }
 
 fn time_remaining_bucket(secs: i64) -> &'static str {
@@ -2003,6 +2055,13 @@ mod tests {
         assert!(full_depth_edge.spearman_ic > 0.95);
         assert!(reports.iter().any(|report| {
             report.name == "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity"
+        }));
+        assert!(reports.iter().any(|report| {
+            report.name == "auto_settlement_full_depth_settlement_edge_x_entry_price_quality"
+        }));
+        assert!(reports.iter().any(|report| {
+            report.name
+                == "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality"
         }));
         assert!(
             reports
