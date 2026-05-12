@@ -1,3 +1,57 @@
+# PM5D Prior Factor Reuse For Alpha Search (2026-05-12)
+
+## Goal
+
+Turn the user's earlier PM5D factor findings into a typed alpha-search prior so
+the next CI runs search around known promising settlement-probability and
+liquidity-gated factors instead of starting from generic exploration.
+
+## Plan
+
+- [x] Re-read the project semantic contract for PM5D binary-option settlement
+  accounting and evidence stages.
+- [x] Review prior factor evidence for `side_fair_prob`,
+  liquidity-gated `side_model_prob` / `side_distance_over_sigma`,
+  full-depth/conservative settlement edge, near-strike, capacity, spread, and
+  repricing backup factors.
+- [x] Write a reusable research evidence plan separating reusable factors from
+  negative constraints.
+- [x] Add a typed LLM prior JSON file that can be passed to
+  `factor_walk_forward_v2 --alpha-search-llm-prior-json`.
+- [x] Run or dispatch the first hosted alpha-search chain from the prior once a
+  retained snapshot/run target is selected.
+- [x] Repair the hosted sweep wrapper so typed alpha-search prior/state
+  arguments pass through to the Rust factor binary.
+
+## Review
+
+- 2026-05-12: Added
+  `tasks/research_evidence/pm5d_alpha_factor_reuse_plan_20260512.md` and
+  `tasks/alpha_search_priors/pm5d_settlement_liquidity_prior_20260512.json`.
+  The prior reuses the historically strongest settlement and liquidity-gated
+  factors while marking rejected or unstable standalone factors as constraints.
+- 2026-05-12: Dispatched hosted alpha-search run `25706878456` from branch
+  `research/pm5d-alpha-prior-reuse` against snapshot `25642459432`,
+  BTC/ETH, `2026-04-24 -> 2026-05-01`, recorded parity artifact
+  `recorded-replay-parity-25687392088`, and target
+  `full_depth_settlement_executable_pnl`. The run proved checkout, option
+  parsing, snapshot/parity download, and Rust build, but failed in
+  `Run factor walk-forward sweep` because `scripts/run_factor_walk_forward_sweep.py`
+  did not yet accept `--alpha-search-llm-prior-json`.
+- 2026-05-12: Added sweep-wrapper pass-through for
+  `--alpha-search-state-json` and `--alpha-search-llm-prior-json`, plus a
+  focused unittest proving those args reach the factor binary. Verification
+  passed: `python3 -m unittest tests.test_factor_walk_forward_sweep`,
+  `python3 -m py_compile scripts/run_factor_walk_forward_sweep.py
+  tests/test_factor_walk_forward_sweep.py`, and `rtk git diff --check`.
+- 2026-05-12: Re-ran hosted alpha-search as `25707061616`; it completed
+  successfully and produced alpha-search artifacts. Summary: candidates `193`,
+  passed `38`, best reward `4.81954070569323`, best factor
+  `auto_settlement_conservative_settlement_edge`, handoff `ready`, recommended
+  action `create_dry_run_handoff`, chain decision `ready_handoff`. The typed
+  prior compiled into `llm_*` candidates, but did not beat the simpler
+  conservative settlement edge on this BTC/ETH window.
+
 # Alpha Search LLM Prior And MCTS State (2026-05-12)
 
 ## Goal

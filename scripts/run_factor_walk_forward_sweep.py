@@ -124,6 +124,10 @@ def factor_args(args: argparse.Namespace, variant: Variant, replay_parity_json: 
         command.extend(["--alpha-search-output-dir", args.alpha_search_output_dir])
     if args.alpha_search_plan_json:
         command.extend(["--alpha-search-plan-json", args.alpha_search_plan_json])
+    if args.alpha_search_state_json:
+        command.extend(["--alpha-search-state-json", args.alpha_search_state_json])
+    if args.alpha_search_llm_prior_json:
+        command.extend(["--alpha-search-llm-prior-json", args.alpha_search_llm_prior_json])
     return command
 
 
@@ -310,6 +314,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--replay-parity-json", default="")
     parser.add_argument("--alpha-search-output-dir", default="")
     parser.add_argument("--alpha-search-plan-json", default="")
+    parser.add_argument("--alpha-search-state-json", default="")
+    parser.add_argument("--alpha-search-llm-prior-json", default="")
     parser.add_argument("--required-strategy-profile", default="settlement_probability")
     parser.add_argument("--allowed-target", action="append", default=[])
     parser.add_argument("--sweep-json", default="")
