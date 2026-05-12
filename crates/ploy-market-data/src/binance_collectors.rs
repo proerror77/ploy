@@ -483,13 +483,14 @@ async fn run_lob_ws(
                             .unwrap_or("")
                             .to_uppercase();
 
+                        let received_at = Utc::now();
                         let event_time_ms = data["E"].as_i64();
                         let update_id = data["u"].as_i64().or_else(|| data["lastUpdateId"].as_i64());
                         let raw_bids = data["b"].as_array().or_else(|| data["bids"].as_array());
                         let raw_asks = data["a"].as_array().or_else(|| data["asks"].as_array());
 
-                        let (event_time_ms, update_id) = match (event_time_ms, update_id) {
-                            (Some(e), Some(u)) => (e, u),
+                        let update_id = match update_id {
+                            Some(u) => u,
                             _ => continue,
                         };
 
@@ -512,7 +513,7 @@ async fn run_lob_ws(
                         let ask_vol_5 = sum_volume(&asks, 5);
                         let bid_vol_10 = sum_volume(&bids, 10);
                         let ask_vol_10 = sum_volume(&asks, 10);
-                        let event_time = ms_to_utc(event_time_ms);
+                        let event_time = event_time_ms.map(ms_to_utc).unwrap_or(received_at);
 
                         let bids_json = levels_to_json(&bids[..bids.len().min(depth_levels)]);
                         let asks_json = levels_to_json(&asks[..asks.len().min(depth_levels)]);
