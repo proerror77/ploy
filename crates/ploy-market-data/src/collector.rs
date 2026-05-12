@@ -23,6 +23,7 @@ use polymarket_client_sdk::rtds::Client as RtdsClient;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sqlx::types::Json;
 use sqlx::{PgPool, QueryBuilder};
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -171,15 +172,22 @@ where
         .min_by(|left, right| left.0.cmp(&right.0))
 }
 
-fn serialize_orderbook_levels(levels: &[OrderBookLevel]) -> String {
-    let levels = levels
+fn persisted_orderbook_levels(levels: &[OrderBookLevel]) -> Vec<PersistedOrderBookLevel> {
+    levels
         .iter()
         .map(|level| PersistedOrderBookLevel {
             price: level.price.to_string(),
             size: level.size.to_string(),
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
 
+fn orderbook_levels_json(levels: &[OrderBookLevel]) -> Json<Vec<PersistedOrderBookLevel>> {
+    Json(persisted_orderbook_levels(levels))
+}
+
+fn serialize_orderbook_levels(levels: &[OrderBookLevel]) -> String {
+    let levels = persisted_orderbook_levels(levels);
     serde_json::to_string(&levels).expect("serializing persisted orderbook levels cannot fail")
 }
 
@@ -321,15 +329,23 @@ async fn clear_unofficial_market_settlements(
     .map(|result| result.rows_affected())
 }
 
-fn snapshot_context(meta: &TokenMetadata, timeframe: &str) -> String {
-    let context = SnapshotContext {
+fn snapshot_context_value(meta: &TokenMetadata, timeframe: &str) -> SnapshotContext {
+    SnapshotContext {
         slug: meta.slug.clone(),
         symbol: meta.symbol.clone(),
         side: meta.side.clone(),
         timeframe: timeframe.to_string(),
         collector: "collect-quotes",
         end_time: meta.end_time.to_rfc3339(),
-    };
+    }
+}
+
+fn snapshot_context_json(meta: &TokenMetadata, timeframe: &str) -> Json<SnapshotContext> {
+    Json(snapshot_context_value(meta, timeframe))
+}
+
+fn snapshot_context(meta: &TokenMetadata, timeframe: &str) -> String {
+    let context = snapshot_context_value(meta, timeframe);
 
     serde_json::to_string(&context).expect("serializing snapshot context cannot fail")
 }
@@ -1190,15 +1206,12 @@ async fn persist_book_updates(
         row.push_bind("Crypto")
             .push_bind(job.token_id.clone())
             .push_bind(job.book.market.to_string())
-            .push_bind(serialize_orderbook_levels(&job.book.bids))
-            .push("::jsonb")
-            .push_bind(serialize_orderbook_levels(&job.book.asks))
-            .push("::jsonb")
+            .push_bind(orderbook_levels_json(&job.book.bids))
+            .push_bind(orderbook_levels_json(&job.book.asks))
             .push_bind(book_timestamp(job.book.timestamp))
             .push_bind(job.book.hash.clone())
             .push_bind("polymarket_ws_collector")
-            .push_bind(snapshot_context(&job.meta, &job.timeframe))
-            .push("::jsonb")
+            .push_bind(snapshot_context_json(&job.meta, &job.timeframe))
             .push_bind(received_at);
     });
 
