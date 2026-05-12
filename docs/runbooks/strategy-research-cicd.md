@@ -61,11 +61,12 @@ mismatch is understood and tracked as a follow-up issue.
 | Platform release | `.github/workflows/release-platform.yml` | Build platform bundle and optionally deploy it |
 
 `recorded-replay-parity.yml` defaults `since=auto` and `until=auto`. In auto
-mode it queries the target dry-run deployment on `tango-1-1`, selects the most
-recent closed dry-run track-record rows, and records the resolved window in the
-workflow summary, issue comment, and `resolved-window.json` artifact. Manual
-timestamps remain supported for reproducing a known incident window or an older
-research issue.
+mode it scans the target recording on `tango-1-1`, intersects that recording
+coverage with the dry-run report for the target deployment, prefers the latest
+closed dry-run rows when available, and falls back to current open rows when a
+fresh recording has not yet accumulated closed events. The workflow records the resolved window in the workflow summary, issue comment, and
+`resolved-window.json` artifact. Manual timestamps remain supported for
+reproducing a known incident window or an older research issue.
 
 ## Research Issue Contract
 

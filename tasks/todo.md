@@ -23,7 +23,7 @@ orders/fills for the sampled window.
   synthetic settlement exits are skipped.
 - [x] Add focused tests for the no-settlement-exit parity path.
 - [x] Validate focused tests.
-- [ ] Land the fix on `main`, then dispatch a fresh recorded replay parity run
+- [x] Land the fix on `main`, then dispatch a fresh recorded replay parity run
   from `main` after the fix lands.
 
 ## Review
@@ -54,6 +54,16 @@ orders/fills for the sampled window.
   workflow_security recorded_replay_parity_supports_auto_window`, `rustfmt
   --edition 2021 --check crates/ploy-strategy-bundles/src/config.rs`, and
   `rtk git diff --check`.
+- 2026-05-12: PR #458 merged to `main` as `f8a9ef5f`; fresh recorded replay
+  parity run `25735155294` completed from `main`, but remains blocked:
+  `decision=fix-data-or-runtime-mismatch`,
+  `runtime_evidence_comparison.strict_parity_ready=false`, shared
+  orders/fills/events `4`, and blocking flags still include replay/dry-run
+  missing rows. The new evidence shows the workflow generated a replay config
+  with `skip_settlement_exits = true`, but it still ran the currently deployed
+  `/opt/ploy/bin/ploy-runner`; that deployed binary emitted `tl_settle_*` SELL
+  rows and 12 intents/fills, so the next required action is to deploy the
+  CI-built `main` runner to `tango-1-1` and rerun recorded replay parity.
 
 # PM5D Hosted Alpha Search Continuation (2026-05-12)
 

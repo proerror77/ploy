@@ -99,6 +99,10 @@ jobs:
             tango-1-1:"${REMOTE_DIR}/enrich_replay_runtime_evidence.py"
           scp scripts/extract_dryrun_settlement_evidence.py \
             tango-1-1:"${REMOTE_DIR}/extract_dryrun_settlement_evidence.py"
+          scp scripts/replay_dryrun_parity.py \
+            tango-1-1:"${REMOTE_DIR}/replay_dryrun_parity.py"
+          scp scripts/resolve_recorded_replay_window.py \
+            tango-1-1:"${REMOTE_DIR}/resolve_recorded_replay_window.py"
 
           # shellcheck disable=SC2029
           ssh tango-1-1 /bin/bash -s -- \
@@ -123,6 +127,8 @@ jobs:
           test -r "${remote_dir}/enrich_recording_official_settlement.py"
           test -r "${remote_dir}/enrich_replay_runtime_evidence.py"
           test -r "${remote_dir}/extract_dryrun_settlement_evidence.py"
+          test -r "${remote_dir}/replay_dryrun_parity.py"
+          test -r "${remote_dir}/resolve_recorded_replay_window.py"
 
           set -a
           . /opt/ploy/.env
@@ -149,58 +155,12 @@ jobs:
           fi
 
           if [ "${auto_window}" = true ]; then
-            "${PSQL[@]}" \
-              -v deployment_id="${deployment_id}" \
-              > "${resolved_window_json}" <<'SQL'
-          WITH recent_closed AS (
-            SELECT
-              opened_at,
-              COALESCE(closed_at, last_fill_at, opened_at) AS evidence_at
-            FROM strategy_runtime_event_track_record
-            WHERE runtime_mode IN ('dry_run', 'dryrun')
-              AND deployment_id = :'deployment_id'
-              AND is_closed
-              AND opened_at IS NOT NULL
-            ORDER BY COALESCE(closed_at, last_fill_at, opened_at) DESC
-            LIMIT 20
-          ),
-          bounds AS (
-            SELECT
-              MIN(opened_at) - INTERVAL '60 seconds' AS since_ts,
-              MAX(evidence_at) + INTERVAL '60 seconds' AS until_ts,
-              COUNT(*) AS closed_row_count
-            FROM recent_closed
-          )
-          SELECT jsonb_build_object(
-            'mode', 'auto',
-            'closed_row_count', closed_row_count,
-            'since', to_char(since_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-            'until', to_char(until_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-          )::text
-          FROM bounds
-          WHERE closed_row_count > 0;
-          SQL
-            test -s "${resolved_window_json}"
-            python3 - "${resolved_window_json}" "${resolved_window_env}" <<'PY'
-          import json
-          import sys
-
-          source, dest = sys.argv[1:]
-          text = open(source, encoding="utf-8").read().strip()
-          if not text:
-              raise SystemExit("auto parity window found no closed dry-run rows")
-          payload = json.loads(text)
-          since = payload.get("since")
-          until = payload.get("until")
-          row_count = int(payload.get("closed_row_count") or 0)
-          if not since or not until or row_count <= 0:
-              raise SystemExit(f"invalid auto parity window: {payload}")
-          with open(dest, "w", encoding="utf-8") as handle:
-              handle.write(f"RESOLVED_SINCE={since}\n")
-              handle.write(f"RESOLVED_UNTIL={until}\n")
-              handle.write(f"RESOLVED_WINDOW_MODE=auto\n")
-              handle.write(f"RESOLVED_CLOSED_ROW_COUNT={row_count}\n")
-          PY
+            python3 "${remote_dir}/resolve_recorded_replay_window.py" \
+              --recording "${recording_path}" \
+              --dryrun-json "${dryrun_report}" \
+              --deployment-id "${deployment_id}" \
+              --output-json "${resolved_window_json}" \
+              --output-env "${resolved_window_env}"
             # shellcheck disable=SC1090
             . "${resolved_window_env}"
             since_ts="${RESOLVED_SINCE}"

@@ -263,9 +263,9 @@ fn recorded_replay_parity_supports_auto_window() {
 
     for needle in [
         "default: \"auto\"",
-        "auto parity window found no closed dry-run rows",
-        "recent_closed AS",
-        "LIMIT 20",
+        "resolve_recorded_replay_window.py",
+        "--recording \"${recording_path}\"",
+        "--dryrun-json \"${dryrun_report}\"",
         "resolved-window.json",
         "resolved-window.env",
         "skip_settlement_exits = true",
