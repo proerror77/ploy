@@ -110,6 +110,16 @@ Latest reset / data-quality evidence:
   - interpretation: the CI gate now proves the current dry-run report is not a
     clean baseline and will block post-reset promotion until runtime evidence is
     actually cleared.
+- dry-run candidate-quality gate run: `25753663370`
+  - workflow: `dryrun-candidate-gate.yml`
+  - input: `mode=candidate-quality`
+  - result: expected failure / blocked
+  - artifact: `dryrun-candidate-gate-25753663370`
+  - status: `blocked`
+  - failures: closed trades `20 < 50`, realized PnL `-115.17 < 0`,
+    profit factor `0.2927 < 1.1`, max drawdown `-136.3244 < -50`
+  - advisory: buy fill rate is `97.93%`, so fillability is not the main
+    current blocker.
 
 Current dry-run profitability read:
 
@@ -184,6 +194,7 @@ Earlier blocker runs:
 | Old dry-run runtime evidence can be cleared without touching raw data | PRs `#464`, `#465`, `#466`; reset preview `25748008417`; guard run `25748940434` | `ready but not executed` | Tooling is merged and guarded. Actual deletion remains blocked until explicit approval to pause the running deployment. |
 | Reset procedure is documented and operator-gated | `docs/runbooks/strategy-runtime-evidence-reset.md`; PR `#470` | `ready` | Runbook records preflight, approval text, preview, pause, guarded execute, artifact inspection, resume, and post-reset gates. |
 | Clean post-reset baseline can be machine-checked | `scripts/check_dryrun_candidate_gate.py`; PR `#471`; workflow `dryrun-candidate-gate.yml`; PR `#472`; reset-workflow post-gate PR `#474`; run `25751440786` | `ready and currently blocked` | The standalone gate blocks the current report with `residual_runtime_evidence`: 20 trades and 185 orders remain. The reset workflow now runs the same clean-baseline gate automatically after `execute=true`. |
+| Dry-run candidate quality can be machine-checked | `scripts/check_dryrun_candidate_gate.py --mode candidate-quality`; run `25753663370` | `ready and currently blocked` | Current strategy fails closed-trade, PnL, profit-factor, and max-drawdown thresholds. Buy fill rate is acceptable, so edge/selection and stale evidence remain the main blockers. |
 | Current retained data window supports promotion-grade search | market-data audits `25747004738`, `25753059613` | `blocked` | 24h coverage still includes the known Binance LOB gap for BTC/ETH. Wait for a clean 48-72h window or use shorter diagnostic-only snapshots. |
 | A profitable strategy has been produced | ready handoff plus post-merge dry-run/executable evidence | `not ready` | Current dry-run is negative: 20 closed trades, PnL `-115.17`, profit factor `0.2927`, max drawdown `-136.3244`. |
 
