@@ -14761,4 +14761,10 @@ lookback window.
   index and is accumulating duplicate rows.
 - [x] Implement collector-side de-dupe and batch persistence.
 - [x] Run focused local Rust checks.
-- [ ] Push PR, merge, deploy from `main`, and verify remote CPU/freshness.
+- [x] Push PR, merge, deploy from `main`, and verify remote CPU/freshness.
+- [x] Confirm PM trade duplicate writes dropped after deploy: first post-deploy
+  poll inserted 4,137 rows and skipped 40,753, down from 44,008 inserted in
+  the preceding pre-deploy poll.
+- [ ] Reduce quote collector CPU by sampling raw orderbook snapshots while
+  preserving full-resolution top-of-book quote ticks.
+- [ ] Run focused checks, merge, deploy, and re-sample `tango-1-1` CPU.
