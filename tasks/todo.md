@@ -4,8 +4,11 @@
 
 Use the fresh strict recorded replay parity evidence to continue PM5D
 settlement-probability alpha discovery on the GitHub-hosted artifact path.
-Current evidence stage is `factor_attribution` / `walk_forward`; this is not a
-dry-run or live promotion claim.
+Current evidence stage is `walk_forward` with a dry-run handoff target; this is
+not a live promotion claim. Dry-run promotion means selecting the next paper
+runtime score for controlled observation, while live promotion remains blocked
+until separate risk, reset/windowed performance, and operator approval evidence
+exists.
 
 ## Plan
 
@@ -66,6 +69,9 @@ dry-run or live promotion claim.
   `rustfmt --edition 2021 --check
   crates/ploy-strategy-bundles/src/strategies/three_layer.rs`, and
   `python3 -m py_compile scripts/apply_autofactor_handoff_to_config.py`.
+- 2026-05-12: Old dry-run rows must be reset or filtered before using
+  post-deploy profitability metrics; live trading remains blocked pending
+  separate approval and risk evidence.
 
 # Recorded Replay Parity Settlement Lifecycle Fix (2026-05-12)
 
