@@ -23,8 +23,8 @@ use polymarket_client_sdk::rtds::Client as RtdsClient;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
-use tokio::sync::mpsc::error::TrySendError;
+use sqlx::{PgPool, QueryBuilder};
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -96,8 +96,8 @@ struct SnapshotContext {
 
 #[derive(Debug, Default)]
 struct PersistResult {
-    snapshot_inserted: bool,
-    quote_inserted: bool,
+    snapshots_inserted: u64,
+    quotes_inserted: u64,
 }
 
 #[derive(Debug)]
@@ -144,6 +144,7 @@ const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 15;
 const DEFAULT_PERSIST_QUEUE_CAPACITY: usize = 4_096;
 const DEFAULT_PERSIST_WORKERS: usize = 4;
+const DEFAULT_PERSIST_BATCH_SIZE: usize = 50;
 const DEFAULT_STALE_AFTER_SECS: u64 = 120;
 
 fn is_tradeable_price(price: Decimal) -> bool {
@@ -577,29 +578,30 @@ impl QuoteCollector {
                         break;
                     };
 
-                    let token_id = job.token_id.clone();
-                    match persist_book_update(
-                        &pool,
-                        &job.timeframe,
-                        &job.meta,
-                        &job.book,
-                        &job.token_id,
-                        job.best_bid,
-                        job.best_ask,
-                        job.bid_size,
-                        job.ask_size,
-                    )
-                    .await
+                    let mut jobs = vec![job];
                     {
+                        let mut rx = rx.lock().await;
+                        while jobs.len() < DEFAULT_PERSIST_BATCH_SIZE {
+                            match rx.try_recv() {
+                                Ok(job) => jobs.push(job),
+                                Err(TryRecvError::Empty) => break,
+                                Err(TryRecvError::Disconnected) => break,
+                            }
+                        }
+                    }
+
+                    let batch_len = jobs.len();
+                    let first_token_id = jobs[0].token_id.clone();
+                    match persist_book_updates(&pool, &jobs).await {
                         Ok(result) => {
                             let mut s = stats.write().await;
-                            s.snapshots_inserted += u64::from(result.snapshot_inserted);
-                            s.quotes_inserted += u64::from(result.quote_inserted);
+                            s.snapshots_inserted += result.snapshots_inserted;
+                            s.quotes_inserted += result.quotes_inserted;
                             let now = Utc::now();
-                            if result.snapshot_inserted {
+                            if result.snapshots_inserted > 0 {
                                 s.last_snapshot_at = Some(now);
                             }
-                            if result.quote_inserted {
+                            if result.quotes_inserted > 0 {
                                 s.last_quote_at = Some(now);
                             }
 
@@ -611,6 +613,7 @@ impl QuoteCollector {
                                     persist_errors = s.persist_errors,
                                     dropped_books = s.dropped_books,
                                     worker_id,
+                                    batch_len,
                                     "Quote collector stats"
                                 );
                             }
@@ -623,10 +626,11 @@ impl QuoteCollector {
 
                             warn!(
                                 error = %e,
-                                token = %token_id,
+                                token = %first_token_id,
                                 worker_id,
+                                batch_len,
                                 persist_errors,
-                                "Failed to persist book update"
+                                "Failed to persist book update batch"
                             );
                         }
                     }
@@ -1160,78 +1164,91 @@ struct ActiveMarketRow {
     down_token: String,
 }
 
-/// Persist a raw orderbook snapshot and its derived top-of-book quote.
-async fn persist_book_update(
+/// Persist raw orderbook snapshots and derived top-of-book quotes in one
+/// transaction. Batching avoids one transaction and two SQL round trips per
+/// WebSocket book update, which is expensive on the small tango-1-1 host.
+async fn persist_book_updates(
     pool: &PgPool,
-    timeframe: &str,
-    meta: &TokenMetadata,
-    book: &BookUpdate,
-    token_id: &str,
-    best_bid: Option<Decimal>,
-    best_ask: Option<Decimal>,
-    bid_size: Option<Decimal>,
-    ask_size: Option<Decimal>,
+    jobs: &[BookPersistJob],
 ) -> Result<PersistResult, sqlx::Error> {
-    let received_at = Utc::now();
-    let bids_json = serialize_orderbook_levels(&book.bids);
-    let asks_json = serialize_orderbook_levels(&book.asks);
-    let context_json = snapshot_context(meta, timeframe);
+    if jobs.is_empty() {
+        return Ok(PersistResult::default());
+    }
 
+    let received_at = Utc::now();
     let mut tx = pool.begin().await?;
 
-    let snapshot_rows = sqlx::query(
+    let mut snapshot_insert = QueryBuilder::new(
         r#"
         INSERT INTO clob_orderbook_snapshots (
             domain, token_id, market, bids, asks,
             book_timestamp, hash, source, context, received_at
-        ) VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9::jsonb, $10)
-        "#,
-    )
-    .bind("Crypto")
-    .bind(token_id)
-    .bind(book.market.to_string())
-    .bind(bids_json)
-    .bind(asks_json)
-    .bind(book_timestamp(book.timestamp))
-    .bind(book.hash.clone())
-    .bind("polymarket_ws_collector")
-    .bind(context_json)
-    .bind(received_at)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-
-    let quote_rows = if best_bid.is_some() || best_ask.is_some() {
-        sqlx::query(
-            r#"
-        INSERT INTO clob_quote_ticks (
-            token_id, side, best_bid, best_ask, bid_size, ask_size,
-            received_at, source, domain
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ON CONFLICT DO NOTHING
-        "#,
         )
-        .bind(token_id)
-        .bind(&meta.side)
-        .bind(best_bid)
-        .bind(best_ask)
-        .bind(bid_size)
-        .bind(ask_size)
-        .bind(received_at)
-        .bind("polymarket_ws_collector")
-        .bind("Crypto")
+        "#,
+    );
+    snapshot_insert.push_values(jobs, |mut row, job| {
+        row.push_bind("Crypto")
+            .push_bind(job.token_id.clone())
+            .push_bind(job.book.market.to_string())
+            .push_bind(serialize_orderbook_levels(&job.book.bids))
+            .push("::jsonb")
+            .push_bind(serialize_orderbook_levels(&job.book.asks))
+            .push("::jsonb")
+            .push_bind(book_timestamp(job.book.timestamp))
+            .push_bind(job.book.hash.clone())
+            .push_bind("polymarket_ws_collector")
+            .push_bind(snapshot_context(&job.meta, &job.timeframe))
+            .push("::jsonb")
+            .push_bind(received_at);
+    });
+
+    let snapshot_rows = snapshot_insert
+        .build()
         .execute(&mut *tx)
         .await?
-        .rows_affected()
-    } else {
+        .rows_affected();
+
+    let quote_jobs = jobs
+        .iter()
+        .filter(|job| job.best_bid.is_some() || job.best_ask.is_some())
+        .collect::<Vec<_>>();
+
+    let quote_rows = if quote_jobs.is_empty() {
         0
+    } else {
+        let mut quote_insert = QueryBuilder::new(
+            r#"
+            INSERT INTO clob_quote_ticks (
+                token_id, side, best_bid, best_ask, bid_size, ask_size,
+                received_at, source, domain
+            )
+            "#,
+        );
+        quote_insert.push_values(quote_jobs, |mut row, job| {
+            row.push_bind(job.token_id.clone())
+                .push_bind(job.meta.side.clone())
+                .push_bind(job.best_bid)
+                .push_bind(job.best_ask)
+                .push_bind(job.bid_size)
+                .push_bind(job.ask_size)
+                .push_bind(received_at)
+                .push_bind("polymarket_ws_collector")
+                .push_bind("Crypto");
+        });
+        quote_insert.push(" ON CONFLICT DO NOTHING");
+
+        quote_insert
+            .build()
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
     };
 
     tx.commit().await?;
 
     Ok(PersistResult {
-        snapshot_inserted: snapshot_rows > 0,
-        quote_inserted: quote_rows > 0,
+        snapshots_inserted: snapshot_rows,
+        quotes_inserted: quote_rows,
     })
 }
 
