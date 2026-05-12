@@ -198,6 +198,8 @@ done
 install -d /etc/systemd/system/ploy-quote-collector.service.d
 install -m 0644 ./deployment/systemd/ploy-binance-aggtrade-collector.service /etc/systemd/system/ploy-binance-aggtrade-collector.service
 install -m 0644 ./deployment/systemd/ploy-binance-lob-collector.service /etc/systemd/system/ploy-binance-lob-collector.service
+install -m 0644 ./deployment/systemd/ploy-binance-price-collector.service /etc/systemd/system/ploy-binance-price-collector.service
+install -m 0644 ./deployment/systemd/ploy-deribit-iv-collector.service /etc/systemd/system/ploy-deribit-iv-collector.service
 install -m 0644 ./deployment/systemd/ploy-deribit-greeks-collector.service /etc/systemd/system/ploy-deribit-greeks-collector.service
 install -m 0644 ./deployment/systemd/ploy-market-discovery.service /etc/systemd/system/ploy-market-discovery.service
 install -m 0644 ./deployment/systemd/ploy-pm-trade-collector.service /etc/systemd/system/ploy-pm-trade-collector.service
@@ -226,12 +228,10 @@ systemctl enable --now ploy-binance-aggtrade-collector.service
 systemctl restart ploy-binance-aggtrade-collector.service
 systemctl enable --now ploy-binance-lob-collector.service
 systemctl restart ploy-binance-lob-collector.service
-if service_exists ploy-binance-price-collector.service; then
-  systemctl restart ploy-binance-price-collector.service
-fi
-if service_exists ploy-deribit-iv-collector.service; then
-  systemctl restart ploy-deribit-iv-collector.service
-fi
+systemctl enable --now ploy-binance-price-collector.service
+systemctl restart ploy-binance-price-collector.service
+systemctl enable --now ploy-deribit-iv-collector.service
+systemctl restart ploy-deribit-iv-collector.service
 systemctl enable --now ploy-deribit-greeks-collector.service
 systemctl restart ploy-deribit-greeks-collector.service
 systemctl enable --now ploy-market-discovery.service
@@ -258,12 +258,10 @@ if service_exists ploy-quote-collector.service; then
 fi
 systemctl is-active --quiet ploy-pm-trade-collector.service
 require_service_guardrails ploy-pm-trade-collector.service
-if service_exists ploy-binance-price-collector.service; then
-  systemctl is-active --quiet ploy-binance-price-collector.service
-fi
-if service_exists ploy-deribit-iv-collector.service; then
-  systemctl is-active --quiet ploy-deribit-iv-collector.service
-fi
+systemctl is-active --quiet ploy-binance-price-collector.service
+require_service_guardrails ploy-binance-price-collector.service
+systemctl is-active --quiet ploy-deribit-iv-collector.service
+require_service_guardrails ploy-deribit-iv-collector.service
 systemctl is-active --quiet ploy-deribit-greeks-collector.service
 require_service_guardrails ploy-deribit-greeks-collector.service
 systemctl is-active --quiet ploy-market-discovery.service

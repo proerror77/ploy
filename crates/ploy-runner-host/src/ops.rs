@@ -1,4 +1,8 @@
+use ploy_market_data::binance_collectors::{
+    collect_binance_aggtrade, collect_binance_lob, collect_binance_price,
+};
 use ploy_market_data::collector::{CollectorConfig, QuoteCollector};
+use ploy_market_data::deribit_collectors::{collect_deribit_greeks, collect_deribit_iv};
 use ploy_market_data::diagnostics::check_database;
 use ploy_market_data::pm_trades::{TradeCollector, TradeCollectorConfig};
 use ploy_market_data::scanner::{MarketDiscoveryCollectorConfig, run_market_discovery_collector};
@@ -61,6 +65,32 @@ pub fn print_usage() {
     eprintln!(
         "  env PLOY_PM_TRADE_COLLECTOR_TAKER_ONLY      true/false Data API takerOnly (default: true)"
     );
+    eprintln!();
+    eprintln!("Options for 'collect-binance-lob':");
+    eprintln!("  --symbols <list>  Comma-separated symbols (default: BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT)");
+    eprintln!("  --depth <n>       Depth levels (default: 20)");
+    eprintln!("  --batch-size <n>  DB commit batch size (default: 25)");
+    eprintln!("  --db-url <url>    Database URL (or DATABASE_URL/PLOY_DATABASE__URL)");
+    eprintln!();
+    eprintln!("Options for 'collect-binance-price':");
+    eprintln!("  --symbols <list>  Comma-separated symbols (default: BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT)");
+    eprintln!("  --batch-size <n>  DB commit batch size (default: 25)");
+    eprintln!("  --db-url <url>    Database URL (or DATABASE_URL/PLOY_DATABASE__URL)");
+    eprintln!();
+    eprintln!("Options for 'collect-binance-aggtrade':");
+    eprintln!("  --symbols <list>  Comma-separated symbols (default: BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT)");
+    eprintln!("  --batch-size <n>  DB commit batch size (default: 50)");
+    eprintln!("  --db-url <url>    Database URL (or DATABASE_URL/PLOY_DATABASE__URL)");
+    eprintln!();
+    eprintln!("Options for 'collect-deribit-iv':");
+    eprintln!("  --currencies <l>  Comma-separated currencies (default: BTC,ETH,SOL)");
+    eprintln!("  --poll-secs <n>   Poll interval in seconds (default: 30)");
+    eprintln!("  --db-url <url>    Database URL (or DATABASE_URL/PLOY_DATABASE__URL)");
+    eprintln!();
+    eprintln!("Options for 'collect-deribit-greeks':");
+    eprintln!("  --currencies <l>  Comma-separated currencies (default: BTC,ETH,SOL)");
+    eprintln!("  --poll-secs <n>   Poll interval in seconds (default: 30)");
+    eprintln!("  --db-url <url>    Database URL (or DATABASE_URL/PLOY_DATABASE__URL)");
 }
 
 pub async fn run_collect_markets(args: &[String]) {
@@ -280,4 +310,145 @@ fn parse_symbols(symbols: &str) -> Vec<String> {
         .filter(|symbol| !symbol.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Binance collectors
+// ---------------------------------------------------------------------------
+
+pub async fn run_collect_binance_lob(args: &[String]) {
+    let db_url = match db_url(args) {
+        Ok(db_url) => db_url,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+    let symbols = arg_value(args, "--symbols")
+        .map(String::as_str)
+        .unwrap_or("BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT");
+    let depth = arg_value(args, "--depth")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(20);
+    let batch = arg_value(args, "--batch-size")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(25);
+
+    let pool = match PgPoolOptions::new().max_connections(3).connect(&db_url).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("DB connection failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    collect_binance_lob(pool, symbols, depth, batch).await;
+}
+
+pub async fn run_collect_binance_price(args: &[String]) {
+    let db_url = match db_url(args) {
+        Ok(db_url) => db_url,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+    let symbols = arg_value(args, "--symbols")
+        .map(String::as_str)
+        .unwrap_or("BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT");
+    let batch = arg_value(args, "--batch-size")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(25);
+
+    let pool = match PgPoolOptions::new().max_connections(3).connect(&db_url).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("DB connection failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    collect_binance_price(pool, symbols, batch).await;
+}
+
+pub async fn run_collect_binance_aggtrade(args: &[String]) {
+    let db_url = match db_url(args) {
+        Ok(db_url) => db_url,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+    let symbols = arg_value(args, "--symbols")
+        .map(String::as_str)
+        .unwrap_or("BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT");
+    let batch = arg_value(args, "--batch-size")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50);
+
+    let pool = match PgPoolOptions::new().max_connections(3).connect(&db_url).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("DB connection failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    collect_binance_aggtrade(pool, symbols, batch).await;
+}
+
+// ---------------------------------------------------------------------------
+// Deribit collectors
+// ---------------------------------------------------------------------------
+
+pub async fn run_collect_deribit_iv(args: &[String]) {
+    let db_url = match db_url(args) {
+        Ok(db_url) => db_url,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+    let currencies = arg_value(args, "--currencies")
+        .map(String::as_str)
+        .unwrap_or("BTC,ETH,SOL");
+    let poll_secs = arg_value(args, "--poll-secs")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30);
+
+    let pool = match PgPoolOptions::new().max_connections(2).connect(&db_url).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("DB connection failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    collect_deribit_iv(pool, currencies, poll_secs).await;
+}
+
+pub async fn run_collect_deribit_greeks(args: &[String]) {
+    let db_url = match db_url(args) {
+        Ok(db_url) => db_url,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+    let currencies = arg_value(args, "--currencies")
+        .map(String::as_str)
+        .unwrap_or("BTC,ETH,SOL");
+    let poll_secs = arg_value(args, "--poll-secs")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30);
+
+    let pool = match PgPoolOptions::new().max_connections(2).connect(&db_url).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("DB connection failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    collect_deribit_greeks(pool, currencies, poll_secs).await;
 }

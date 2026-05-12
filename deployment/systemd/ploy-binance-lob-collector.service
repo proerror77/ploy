@@ -9,17 +9,20 @@ WorkingDirectory=/opt/ploy
 Environment=BINANCE_LOB_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT
 Environment=BINANCE_LOB_LEVELS=20
 Environment=BINANCE_LOB_COMMIT_BATCH_SIZE=25
-Environment=BINANCE_LOB_COMMIT_INTERVAL_SECS=1.0
-Environment=BINANCE_LOB_REPORT_INTERVAL_SECS=60
 Environment=PLOY_DATABASE__URL=postgresql://postgres:postgres@localhost:5432/ploy
-ExecStart=/usr/bin/python3 /opt/ploy/scripts/binance_lob_collector.py
+ExecStartPre=/bin/sleep 17
+ExecStart=/opt/ploy/bin/ploy-runner collect-binance-lob \
+    --symbols ${BINANCE_LOB_SYMBOLS} \
+    --depth ${BINANCE_LOB_LEVELS} \
+    --batch-size ${BINANCE_LOB_COMMIT_BATCH_SIZE}
 Restart=always
-RestartSec=5
+RestartSec=17
 StandardOutput=journal
 StandardError=journal
 
 MemoryHigh=384M
 MemoryMax=768M
+CPUQuota=70%
 OOMPolicy=kill
 
 [Install]
