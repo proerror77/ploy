@@ -84,6 +84,37 @@ class AuditMarketDataGapsTests(unittest.TestCase):
         self.assertEqual(coverage_status, "ok")
         self.assertIn("latest lag 1200s > 600s", reasons)
 
+    def test_pm_quote_quality_blocks_missing_ask_size(self):
+        row = {
+            "active_tokens": 20,
+            "missing_quotes": 0,
+            "older_than_15s": 0,
+            "missing_ask_or_size": 1,
+            "max_age_seconds": 4,
+        }
+
+        status, reasons = audit.classify_pm_quote_quality(row)
+
+        self.assertEqual(status, "critical")
+        self.assertIn("1/20 active token quotes missing ask/ask_size", reasons)
+
+    def test_pm_quote_quality_passes_fresh_complete_active_tokens(self):
+        row = {
+            "active_tokens": 20,
+            "missing_quotes": 0,
+            "older_than_15s": 0,
+            "missing_ask_or_size": 0,
+            "max_age_seconds": 5,
+        }
+
+        status, reasons = audit.classify_pm_quote_quality(row)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(
+            reasons,
+            ["active token quote quality within thresholds; max_age_seconds=5"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
