@@ -43,6 +43,19 @@ sample size.
 
 Latest deploy preflight:
 
+- run: `25766143754`
+- workflow: `deploy-tango-1-1.yml`
+- git ref: `main@f26490541d82127db78512e6a186bd84117c5340`
+- input: `git_ref=main`, `deploy=false`
+- status: `completed`
+- result: build-only success
+- interpretation: latest `main` builds the deploy bundle and passes the bundle
+  guard proving `pm5d.threelayer.live` remains paused in the shipped
+  deployment config. Because `deploy=false`, OSS upload, SSH, Cloud Assistant,
+  remote restart, and service mutation steps were skipped.
+
+Earlier deploy preflight:
+
 - run: `25688999691`
 - workflow: `deploy-tango-1-1.yml`
 - input: `git_ref=main`, `deploy=false`
@@ -182,6 +195,17 @@ Latest reset / data-quality evidence:
     `-30.468`, buy fill rate `98.01%`
   - interpretation: the current post-reset dry-run sample is positive but
     under-sampled. Treat as `collect-more`, not a tradable strategy.
+- dry-run candidate-quality gate run: `25766027782`
+  - workflow: `dryrun-candidate-gate.yml`
+  - git ref: `main@f26490541d82127db78512e6a186bd84117c5340`
+  - input: `mode=candidate-quality`
+  - artifact: `dryrun-candidate-gate-25766027782`
+  - status: `blocked`
+  - failures: closed trades `7 < 50`
+  - values: realized PnL `15.33`, profit factor `1.3359`, max drawdown
+    `-30.468`, buy fill rate `98.01%`
+  - interpretation: no new closed trades were available at this recheck. The
+    dry-run remains `collect-more`; do not promote.
 
 Current dry-run profitability read:
 
@@ -266,12 +290,12 @@ Earlier blocker runs:
 | Promotion gate blocks unsafe candidates | `autofactor-strategy-handoff.json` | `ready` | Earlier runs stayed blocked. Run `25687766026` became ready only after replay parity was supplied and gate blockers were empty. |
 | Replay/dry-run parity is ready for handoff | `recorded-replay-parity.yml` artifact `recorded-replay-parity-25687392088` | `ready` | PR `#433` records `replay_parity_ready=true`, `runtime/event strict ready`, and `blocking=[]`. |
 | A dry-run config PR can be generated from ready handoff | `create_config_pr=true` path in hosted workflow, PR `#433`, current `origin/main` config | `ready` | PR `#433` proved the config-PR path; the current dry-run config on `origin/main` uses `autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike`. |
-| Latest deploy bundle can be built without mutating remote services | `deploy-tango-1-1.yml` run `25688999691` with `deploy=false` | `ready` | Build-only run built the release runner, research tools, optimize-backtest, deploy bundle, and live-paused bundle guard. |
+| Latest deploy bundle can be built without mutating remote services | `deploy-tango-1-1.yml` run `25766143754` with `deploy=false` | `ready` | Build-only run built the release runner, research tools, optimize-backtest, deploy bundle, and live-paused bundle guard from `main@f26490541d82127db78512e6a186bd84117c5340`. |
 | Remote dry-run config matches the ready handoff on `main` | read-only `tango-1-1` config comparison plus current `origin/main` config check | `blocked` | Remote is still `auto_settlement_full_depth_settlement_edge`; `origin/main` is `auto_settlement_conservative_settlement_edge_x_near_strike`, so protected dry-run deploy is required before judging the current handoff. |
 | Old dry-run runtime evidence can be cleared without touching raw data | PRs `#464`, `#465`, `#466`; reset preview `25748008417`; guard run `25748940434`; reset execute run `25754514193` | `done` | The guarded reset deleted only the scoped runtime rows: before `185` orders / `20` fills, after `0` / `0`. Raw market data was not part of the reset scope. |
 | Reset procedure is documented and operator-gated | `docs/runbooks/strategy-runtime-evidence-reset.md`; PR `#470` | `ready` | Runbook records preflight, approval text, preview, pause, guarded execute, artifact inspection, resume, and post-reset gates. |
 | Clean post-reset baseline can be machine-checked | `scripts/check_dryrun_candidate_gate.py`; PR `#471`; workflow `dryrun-candidate-gate.yml`; PR `#472`; reset-workflow post-gate PR `#474`; run `25754514193` | `passed` | The reset workflow and an independent current API check both passed with `target_strategy_absent`. |
-| Dry-run candidate quality can be machine-checked | `scripts/check_dryrun_candidate_gate.py --mode candidate-quality`; run `25753663370`; current API check after reset | `ready and currently blocked` | Before reset, the old strategy failed closed-trade, PnL, profit-factor, and max-drawdown thresholds. After reset, candidate-quality blocks with `target_strategy_absent` until fresh closed trades accumulate. |
+| Dry-run candidate quality can be machine-checked | `scripts/check_dryrun_candidate_gate.py --mode candidate-quality`; run `25766027782`; current API check after reset | `ready and currently blocked` | Latest recheck still has only `7` closed trades, below the `50` trade minimum. Positive PnL over 7 trades is under-sampled and remains `collect-more`. |
 | Entry-price-quality alpha prior is available to search and runtime handoff | PR `#484`, `tasks/alpha_search_priors/pm5d_entry_price_quality_prior_20260513.json`, runtime `autofactor_formula:*_x_entry_price_quality` suffixes | `ready` | This repairs a semantic/search gap for binary-ticket entry quality. It is search plumbing, not performance evidence. |
 | Scheduled full retained-window audits enforce coverage | PR `#485`, `.github/workflows/market-data-gap-audit.yml` | `ready` | The `17 */6 * * *` UTC full schedule forces `gate_mode=coverage`; the 30-minute quick schedule remains freshness-only. Environment approval may still be required for protected `tango-1-1` access. |
 | Current retained data window supports promotion-grade search | market-data audits `25747004738`, `25753059613`, `25758692951` | `blocked` | 24h coverage still includes the known Binance LOB gap for BTC/ETH through `2026-05-12 10:49 +08`. Wait for a clean retained window or use shorter diagnostic-only snapshots. |
