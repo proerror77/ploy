@@ -47,6 +47,9 @@ pub struct CollectorConfig {
     pub persist_batch_size: usize,
     pub persist_batch_window_ms: u64,
     pub stale_after_secs: u64,
+    /// Seconds between lossless quote refresh rows for unchanged but still
+    /// connected token books. A zero config value is replaced by the safe default.
+    pub quote_refresh_secs: u64,
     /// Minimum milliseconds between raw orderbook snapshot persists per token.
     /// Set to 0 to persist every book update. Top-of-book quote ticks are not sampled.
     pub snapshot_sample_ms: u64,
@@ -106,7 +109,7 @@ struct PersistResult {
     quotes_inserted: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BookPersistJob {
     timeframe: String,
     meta: TokenMetadata,
@@ -148,15 +151,16 @@ enum OfficialMarketSettlementStatus {
 
 const POLYMARKET_CLOB_WS_ENDPOINT: &str = "wss://ws-subscriptions-clob.polymarket.com";
 const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
-const HEALTH_CHECK_INTERVAL_SECS: u64 = 15;
+const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_PERSIST_QUEUE_CAPACITY: usize = 4_096;
 const DEFAULT_PERSIST_WORKERS: usize = 4;
 const DEFAULT_PERSIST_BATCH_SIZE: usize = 50;
 const DEFAULT_PERSIST_BATCH_WINDOW_MS: u64 = 10;
 const DEFAULT_STALE_AFTER_SECS: u64 = 120;
+const DEFAULT_QUOTE_REFRESH_SECS: u64 = 5;
 
 fn is_tradeable_price(price: Decimal) -> bool {
-    price > rust_decimal_macros::dec!(0.02) && price < rust_decimal_macros::dec!(0.98)
+    price > Decimal::ZERO && price < Decimal::ONE
 }
 
 fn best_tradeable_bid_level<I>(levels: I) -> Option<(Decimal, Decimal)>
@@ -384,6 +388,33 @@ fn should_persist_snapshot(
     }
 }
 
+fn should_refresh_cached_quote(
+    last_quote_refresh_by_token: &mut HashMap<String, DateTime<Utc>>,
+    token_id: &str,
+    now: DateTime<Utc>,
+    quote_refresh_secs: u64,
+) -> bool {
+    if quote_refresh_secs == 0 {
+        return false;
+    }
+
+    match last_quote_refresh_by_token.get(token_id) {
+        Some(last_refresh_at)
+            if (now - *last_refresh_at).num_seconds() < quote_refresh_secs as i64 =>
+        {
+            false
+        }
+        _ => {
+            last_quote_refresh_by_token.insert(token_id.to_string(), now);
+            true
+        }
+    }
+}
+
+fn latest_seen_at(values: &[Option<DateTime<Utc>>]) -> Option<DateTime<Utc>> {
+    values.iter().filter_map(|value| *value).max()
+}
+
 fn collector_market_data_ws_config() -> PolymarketWsConfig {
     let mut config = PolymarketWsConfig::default();
     // The collector only needs a healthy market-data stream, not a tightly policed
@@ -411,6 +442,9 @@ impl CollectorConfig {
         }
         if self.stale_after_secs == 0 {
             self.stale_after_secs = DEFAULT_STALE_AFTER_SECS;
+        }
+        if self.quote_refresh_secs == 0 {
+            self.quote_refresh_secs = DEFAULT_QUOTE_REFRESH_SECS;
         }
         self
     }
@@ -502,11 +536,18 @@ impl QuoteCollector {
             let refresh_deadline = tokio::time::Instant::now()
                 + StdDuration::from_secs(self.config.refresh_interval_secs);
             let mut last_snapshot_by_token: HashMap<String, DateTime<Utc>> = HashMap::new();
+            let mut last_quote_refresh_by_token: HashMap<String, DateTime<Utc>> = HashMap::new();
+            let mut latest_quote_by_token: HashMap<String, BookPersistJob> = HashMap::new();
 
             loop {
                 tokio::select! {
                     _ = health_tick.tick() => {
                         self.check_runtime_health(active_asset_count).await?;
+                        self.refresh_cached_quotes(
+                            &persist_tx,
+                            &mut latest_quote_by_token,
+                            &mut last_quote_refresh_by_token,
+                        ).await?;
                     }
                     _ = tokio::time::sleep_until(refresh_deadline) => {
                         info!("Refresh interval reached, reconnecting...");
@@ -588,8 +629,13 @@ impl QuoteCollector {
                                         include_snapshot,
                                     };
 
-                                    match persist_tx.try_send(job) {
-                                        Ok(()) => {}
+                                    match persist_tx.try_send(job.clone()) {
+                                        Ok(()) => {
+                                            let mut cached_job = job;
+                                            cached_job.include_snapshot = false;
+                                            latest_quote_by_token.insert(token_id.clone(), cached_job);
+                                            last_quote_refresh_by_token.insert(token_id.clone(), Utc::now());
+                                        }
                                         Err(TrySendError::Full(_job)) => {
                                             self.note_dropped_book(&token_id).await;
                                         }
@@ -606,6 +652,7 @@ impl QuoteCollector {
                             }
                             Some(Err(e)) => {
                                 warn!(error = %e, "WebSocket stream error");
+                                break;
                             }
                             None => {
                                 warn!("WebSocket stream ended, reconnecting...");
@@ -616,6 +663,53 @@ impl QuoteCollector {
                 }
             }
         }
+    }
+
+    async fn refresh_cached_quotes(
+        &self,
+        persist_tx: &mpsc::Sender<BookPersistJob>,
+        latest_quote_by_token: &mut HashMap<String, BookPersistJob>,
+        last_quote_refresh_by_token: &mut HashMap<String, DateTime<Utc>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.config.quote_refresh_secs == 0 || latest_quote_by_token.is_empty() {
+            return Ok(());
+        }
+
+        let active_tokens = {
+            let subscribed = self.subscribed_tokens.read().await;
+            subscribed.clone()
+        };
+        latest_quote_by_token.retain(|token_id, _| active_tokens.contains(token_id));
+        last_quote_refresh_by_token.retain(|token_id, _| active_tokens.contains(token_id));
+
+        let now = Utc::now();
+        for (token_id, job) in latest_quote_by_token.iter() {
+            if !should_refresh_cached_quote(
+                last_quote_refresh_by_token,
+                token_id,
+                now,
+                self.config.quote_refresh_secs,
+            ) {
+                continue;
+            }
+
+            let mut refresh_job = job.clone();
+            refresh_job.include_snapshot = false;
+            match persist_tx.try_send(refresh_job) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_job)) => {
+                    self.note_dropped_book(token_id).await;
+                }
+                Err(TrySendError::Closed(_job)) => {
+                    return Err(Box::new(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "quote collector persistence queue closed",
+                    )));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn spawn_persist_workers(&self) -> mpsc::Sender<BookPersistJob> {
@@ -738,15 +832,11 @@ impl QuoteCollector {
         let last_refresh = stats.last_refresh;
         let last_book_at = stats.last_book_at;
         let last_snapshot_at = stats.last_snapshot_at;
+        let last_quote_at = stats.last_quote_at;
         drop(stats);
 
-        let last_seen = if snapshots_inserted > 0 {
-            last_snapshot_at
-        } else if books_received > 0 {
-            last_refresh
-        } else {
-            last_book_at.or(last_refresh)
-        };
+        let last_seen =
+            latest_seen_at(&[last_quote_at, last_snapshot_at, last_book_at, last_refresh]);
 
         if let Some(last_seen) = last_seen {
             let age = now - last_seen;
@@ -1325,9 +1415,10 @@ async fn persist_book_updates(
 mod tests {
     use super::{
         best_tradeable_ask_level, best_tradeable_bid_level, book_timestamp, bridge_sdk_json,
-        collector_market_data_ws_config, parse_official_market_settlements,
-        serialize_orderbook_levels, should_persist_snapshot, snapshot_context, CollectorConfig,
-        OfficialMarketSettlementPayload, OrderBookLevel, TokenMetadata,
+        collector_market_data_ws_config, latest_seen_at, parse_official_market_settlements,
+        serialize_orderbook_levels, should_persist_snapshot, should_refresh_cached_quote,
+        snapshot_context, CollectorConfig, OfficialMarketSettlementPayload, OrderBookLevel,
+        TokenMetadata,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;
@@ -1335,40 +1426,39 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn best_tradeable_bid_skips_placeholders_and_takes_highest_level() {
+    fn best_tradeable_bid_takes_highest_nonzero_nonone_level() {
         let levels = vec![
-            (dec!(0.01), dec!(100)),
+            (dec!(0), dec!(100)),
             (dec!(0.45), dec!(12)),
             (dec!(0.62), dec!(4)),
             (dec!(0.99), dec!(100)),
         ];
         assert_eq!(
             best_tradeable_bid_level(levels),
-            Some((dec!(0.62), dec!(4)))
+            Some((dec!(0.99), dec!(100)))
         );
     }
 
     #[test]
-    fn best_tradeable_ask_skips_placeholders_and_takes_lowest_level() {
+    fn best_tradeable_ask_takes_lowest_nonzero_nonone_level() {
         let levels = vec![
-            (dec!(0.99), dec!(100)),
+            (dec!(1), dec!(100)),
             (dec!(0.54), dec!(12)),
             (dec!(0.31), dec!(4)),
             (dec!(0.01), dec!(100)),
         ];
         assert_eq!(
             best_tradeable_ask_level(levels),
-            Some((dec!(0.31), dec!(4)))
+            Some((dec!(0.01), dec!(100)))
         );
     }
 
     #[test]
-    fn best_tradeable_prices_return_none_when_only_placeholders_exist() {
+    fn best_tradeable_prices_return_none_when_only_terminal_or_empty_levels_exist() {
         let levels = vec![
-            (dec!(0.01), dec!(100)),
-            (dec!(0.02), dec!(100)),
-            (dec!(0.98), dec!(100)),
-            (dec!(0.99), dec!(100)),
+            (dec!(0), dec!(100)),
+            (dec!(0.45), dec!(0)),
+            (dec!(1), dec!(100)),
         ];
         assert_eq!(best_tradeable_bid_level(levels.clone()), None);
         assert_eq!(best_tradeable_ask_level(levels), None);
@@ -1486,6 +1576,45 @@ mod tests {
     }
 
     #[test]
+    fn cached_quote_refresh_respects_interval() {
+        let mut last_quote_refresh_by_token = HashMap::new();
+        let first = Utc.with_ymd_and_hms(2026, 5, 12, 1, 0, 0).unwrap();
+        let same_window = first + chrono::Duration::seconds(4);
+        let next_window = first + chrono::Duration::seconds(5);
+
+        assert!(should_refresh_cached_quote(
+            &mut last_quote_refresh_by_token,
+            "token-a",
+            first,
+            5
+        ));
+        assert!(!should_refresh_cached_quote(
+            &mut last_quote_refresh_by_token,
+            "token-a",
+            same_window,
+            5
+        ));
+        assert!(should_refresh_cached_quote(
+            &mut last_quote_refresh_by_token,
+            "token-a",
+            next_window,
+            5
+        ));
+    }
+
+    #[test]
+    fn latest_seen_at_prefers_freshest_quote_or_book_marker() {
+        let older = Utc.with_ymd_and_hms(2026, 5, 12, 1, 0, 0).unwrap();
+        let newer = older + chrono::Duration::seconds(30);
+
+        assert_eq!(
+            latest_seen_at(&[Some(older), None, Some(newer)]),
+            Some(newer)
+        );
+        assert_eq!(latest_seen_at(&[None, None]), None);
+    }
+
+    #[test]
     fn collector_market_data_uses_relaxed_ws_heartbeat_settings() {
         let config = collector_market_data_ws_config();
         assert_eq!(config.heartbeat_interval, Duration::from_secs(15));
@@ -1504,6 +1633,7 @@ mod tests {
             persist_batch_size: 0,
             persist_batch_window_ms: 0,
             stale_after_secs: 0,
+            quote_refresh_secs: 0,
             snapshot_sample_ms: 0,
         }
         .with_safe_defaults();
@@ -1513,6 +1643,7 @@ mod tests {
         assert_eq!(config.persist_batch_size, 50);
         assert_eq!(config.persist_batch_window_ms, 10);
         assert_eq!(config.stale_after_secs, 120);
+        assert_eq!(config.quote_refresh_secs, 5);
         assert_eq!(config.snapshot_sample_ms, 0);
     }
 
