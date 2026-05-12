@@ -27,7 +27,7 @@ pub fn print_usage() {
         "  env PLOY_QUOTE_COLLECTOR_STALE_AFTER_SECS Stale self-restart threshold (default: 120)"
     );
     eprintln!(
-        "  env PLOY_QUOTE_COLLECTOR_SNAPSHOT_SAMPLE_MS Raw snapshot sample interval per token (default: 1000, 0=all)"
+        "  env PLOY_QUOTE_COLLECTOR_SNAPSHOT_SAMPLE_MS Raw snapshot sample interval per token (default: 0=all)"
     );
     eprintln!();
     eprintln!("Options for 'collect-markets':");
@@ -194,7 +194,7 @@ pub async fn run_collect_quotes(args: &[String]) {
         persist_batch_size: env_usize("PLOY_QUOTE_COLLECTOR_BATCH_SIZE", 50),
         persist_batch_window_ms: env_u64("PLOY_QUOTE_COLLECTOR_BATCH_WINDOW_MS", 10),
         stale_after_secs: env_u64("PLOY_QUOTE_COLLECTOR_STALE_AFTER_SECS", 120),
-        snapshot_sample_ms: env_u64("PLOY_QUOTE_COLLECTOR_SNAPSHOT_SAMPLE_MS", 1_000),
+        snapshot_sample_ms: env_u64("PLOY_QUOTE_COLLECTOR_SNAPSHOT_SAMPLE_MS", 0),
     };
 
     let collector = QuoteCollector::new(config, pool);
