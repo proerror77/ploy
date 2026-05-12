@@ -1,3 +1,72 @@
+# PM5D Tradable Strategy Search Continuation (2026-05-12)
+
+## Goal
+
+Use the fresh strict recorded replay parity evidence to continue PM5D
+settlement-probability alpha discovery on the GitHub-hosted artifact path.
+Current evidence stage is `factor_attribution` / `walk_forward`; this is not a
+dry-run or live promotion claim.
+
+## Plan
+
+- [x] Re-read `docs/PROJECT_SEMANTICS.md`; current prerequisite evidence stage
+  from run `25737603431` is `runtime_parity`.
+- [x] Verify run `25737603431` completed from `main` and produced strict replay
+  / dry-run parity.
+- [x] Trigger a hosted artifact walk-forward alpha search from `main` using the
+  retained research snapshot, typed LLM prior, prior MCTS plan, and fresh parity
+  artifact.
+- [x] Download and inspect the search artifacts.
+- [x] Record candidate count, passed count, best factor, handoff status,
+  caveats, and next decision.
+- [x] Apply the ready near-strike dry-run handoff to the settlement-probability
+  dry-run config for review.
+- [x] Validate the config change with focused tests.
+
+## Review
+
+- 2026-05-12: Recorded replay parity run `25737603431` completed from
+  `main@025e90b657ee641bcbb35e1411ccde3bf5c74c42`. Artifact
+  `recorded-replay-parity-25737603431` reported `decision=continue`,
+  `runtime_evidence_comparison.strict_parity_ready=true`, no blocking risk
+  flags, no order/fill/event mismatches, and no replay `tl_settle_*` rows.
+  Resolved window mode was `auto_recording_intersection` over
+  `2026-05-12T13:07:35.573000Z..2026-05-12T13:13:55.625000Z`.
+- 2026-05-12: Hosted artifact alpha-search run `25737965398` completed from
+  `main@025e90b657ee641bcbb35e1411ccde3bf5c74c42` using snapshot
+  `25642459432`, parity run `25737603431`, prior
+  `tasks/alpha_search_priors/pm5d_settlement_liquidity_prior_20260512.json`,
+  and prior MCTS plan `25707061616`. Search feedback produced `237`
+  candidates, `71` passed, best reward `4.894975850946932`, and best selected
+  factor
+  `mcts_mcts_auto_settlement_conservative_settlement_edge_x_near_strike_near_strike_near_strike`.
+  Promotion handoff was `status=ready` with two dry-run handoff strategies:
+  `auto_settlement_conservative_settlement_edge` and
+  `auto_settlement_conservative_settlement_edge_x_near_strike`.
+- 2026-05-12: Evidence recorded in
+  `tasks/research_evidence/pm5d_alpha_search_ready_handoff_20260512.md`.
+  Current config already uses the base conservative settlement edge; the
+  near-strike variant requires a config change if selected for the next dry-run
+  comparison.
+- 2026-05-12: Applied the ready near-strike handoff to
+  `config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml`.
+  The only config change is `three_layer_autofactor_runtime_score` from
+  `autofactor_formula:auto_settlement_conservative_settlement_edge` to
+  `autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike`.
+- 2026-05-12: Added a focused runtime scorer test for the near-strike
+  AutoFactor formula. Verification passed:
+  `python3 -m unittest tests.test_apply_autofactor_handoff_to_config
+  tests.test_autofactor_strategy_promotion`,
+  `CARGO_TARGET_DIR=/tmp/ploy-nearstrike-handoff /opt/homebrew/bin/timeout 300
+  rtk cargo test --locked -p ploy-strategy-bundles
+  autofactor_near_strike_formula_adjusts_settlement_edge --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-nearstrike-config /opt/homebrew/bin/timeout 300
+  rtk cargo test --locked -p ploy-strategy-bundles
+  settlement_probability_config_carries_autofactor_handoff_score --lib`,
+  `rustfmt --edition 2021 --check
+  crates/ploy-strategy-bundles/src/strategies/three_layer.rs`, and
+  `python3 -m py_compile scripts/apply_autofactor_handoff_to_config.py`.
+
 # Recorded Replay Parity Settlement Lifecycle Fix (2026-05-12)
 
 ## Goal

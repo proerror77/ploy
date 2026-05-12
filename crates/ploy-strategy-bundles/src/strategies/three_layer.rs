@@ -3515,6 +3515,44 @@ mod tests {
     }
 
     #[test]
+    fn autofactor_near_strike_formula_adjusts_settlement_edge() {
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::SettlementProbability;
+        config.min_edge = 0.02;
+
+        let near_inputs = AutoSettlementFactorInputs {
+            settlement_edge: 0.06,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            entry_capacity_ratio: 3.0,
+            side_spread: 0.03,
+            external_pressure: 0.0,
+            iv_change_1m: 0.0,
+        };
+        let far_inputs = AutoSettlementFactorInputs {
+            distance_over_sigma: 0.90,
+            ..near_inputs
+        };
+
+        let (near_raw, near_score) = autofactor_formula_entry_score(
+            "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike",
+            near_inputs,
+            config.min_edge,
+        )
+        .expect("near-strike settlement formula score");
+        let (far_raw, far_score) = autofactor_formula_entry_score(
+            "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike",
+            far_inputs,
+            config.min_edge,
+        )
+        .expect("far settlement formula score");
+
+        assert!((near_raw - 0.048).abs() < 1e-9);
+        assert!((far_raw - 0.006).abs() < 1e-9);
+        assert!(near_score > far_score);
+    }
+
+    #[test]
     fn edge_score_returns_continuous_value() {
         let config = test_config();
         // ask=0.35 → fee≈0.00455, edge=0.55-0.35-0.00455≈0.195 → edge_score≈1.95 clamped to 1.0
