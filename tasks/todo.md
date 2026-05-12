@@ -18,8 +18,10 @@ liquidity-gated factors instead of starting from generic exploration.
   negative constraints.
 - [x] Add a typed LLM prior JSON file that can be passed to
   `factor_walk_forward_v2 --alpha-search-llm-prior-json`.
-- [ ] Run or dispatch the first hosted alpha-search chain from the prior once a
+- [x] Run or dispatch the first hosted alpha-search chain from the prior once a
   retained snapshot/run target is selected.
+- [x] Repair the hosted sweep wrapper so typed alpha-search prior/state
+  arguments pass through to the Rust factor binary.
 
 ## Review
 
@@ -28,6 +30,20 @@ liquidity-gated factors instead of starting from generic exploration.
   `tasks/alpha_search_priors/pm5d_settlement_liquidity_prior_20260512.json`.
   The prior reuses the historically strongest settlement and liquidity-gated
   factors while marking rejected or unstable standalone factors as constraints.
+- 2026-05-12: Dispatched hosted alpha-search run `25706878456` from branch
+  `research/pm5d-alpha-prior-reuse` against snapshot `25642459432`,
+  BTC/ETH, `2026-04-24 -> 2026-05-01`, recorded parity artifact
+  `recorded-replay-parity-25687392088`, and target
+  `full_depth_settlement_executable_pnl`. The run proved checkout, option
+  parsing, snapshot/parity download, and Rust build, but failed in
+  `Run factor walk-forward sweep` because `scripts/run_factor_walk_forward_sweep.py`
+  did not yet accept `--alpha-search-llm-prior-json`.
+- 2026-05-12: Added sweep-wrapper pass-through for
+  `--alpha-search-state-json` and `--alpha-search-llm-prior-json`, plus a
+  focused unittest proving those args reach the factor binary. Verification
+  passed: `python3 -m unittest tests.test_factor_walk_forward_sweep`,
+  `python3 -m py_compile scripts/run_factor_walk_forward_sweep.py
+  tests/test_factor_walk_forward_sweep.py`, and `rtk git diff --check`.
 
 # Alpha Search LLM Prior And MCTS State (2026-05-12)
 

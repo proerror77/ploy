@@ -148,6 +148,45 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--sweep-json \"${SWEEP_JSON}\"", workflow)
         self.assertIn("--factor-name-filter \"${WALK_FACTOR_NAME_FILTER}\"", workflow)
 
+    def test_alpha_search_prior_and_state_args_pass_through_to_factor_binary(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = tmp / "capture_factor_args.py"
+            capture = tmp / "captured_args.json"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                f"open({str(capture)!r}, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+                f"{FAKE_REPORT}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--alpha-search-output-dir",
+                    "artifacts/alpha",
+                    "--alpha-search-plan-json",
+                    "artifacts/plan/mcts-expansion-plan.json",
+                    "--alpha-search-state-json",
+                    "artifacts/plan/mcts-state.json",
+                    "--alpha-search-llm-prior-json",
+                    "tasks/alpha_search_priors/pm5d_settlement_liquidity_prior_20260512.json",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            captured = json.loads(capture.read_text(encoding="utf-8"))
+
+        self.assertIn("--alpha-search-output-dir", captured)
+        self.assertIn("--alpha-search-plan-json", captured)
+        self.assertIn("--alpha-search-state-json", captured)
+        self.assertIn("--alpha-search-llm-prior-json", captured)
+
 
 if __name__ == "__main__":
     unittest.main()
