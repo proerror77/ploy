@@ -16,7 +16,7 @@ without allowing free-form generated code into the research loop.
 - [x] Wire the new prior/state inputs through `factor_walk_forward_v2` and the
   hosted/self-hosted factor workflows.
 - [x] Add focused Rust/workflow tests and update alpha-search docs.
-- [ ] Open a focused PR after local verification.
+- [x] Open a focused PR after local verification.
 
 ## Review
 
@@ -46,6 +46,12 @@ without allowing free-form generated code into the research loop.
   rtk cargo check --locked -p ploy-research --features db --example
   factor_walk_forward_v2`, Ruby YAML parse for both factor walk-forward
   workflows, and `rtk git diff --check`.
+- 2026-05-12: Opened PR #444 from `feat/alpha-search-prior-state`. GitHub
+  Actions passed for workflow lint, commit hygiene, dependency audit, Python
+  script tests, frontend/sidecar, Rust control-plane/core, Rust integration
+  regressions, Rust market-data ops, Rust research heavy features, Rust runner
+  lean replay/backtest, and Rust runner live/default. CodeRabbit review was
+  still pending when this evidence was recorded.
 
 # Deploy Live-Paused Stderr Guard Repair (2026-05-12)
 
