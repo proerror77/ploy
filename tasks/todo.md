@@ -1,3 +1,31 @@
+# PM5D Active Quote Quality Gate (2026-05-13)
+
+## Goal
+
+Make the market-data audit directly catch the PM quote caveat that matters for
+PM5D dry-run confidence: active BTC/ETH tokens must have fresh quotes inside
+the 15s strategy lag gate and executable ask/ask_size fields.
+
+## Plan
+
+- [x] Add `polymarket_quote_quality` to the PM5D market-data audit profiles.
+- [x] Check active BTC/ETH token latest quote age, missing quote rows, and
+      missing ask/ask_size.
+- [x] Include the result in the audit payload and summary gate.
+- [x] Add focused unit tests for pass/fail classification.
+- [x] Validate the query against the live tango schema using a temporary
+      read-only script copy.
+
+## Review
+
+- 2026-05-13: Added `polymarket_quote_quality` to `pm5d-core`,
+  `pm5d-execution`, and `pm5d-vol` audit profiles. This keeps the scheduled
+  and manual PM5D collector audits sensitive to active-token quote quality, not
+  just table-level freshness.
+- 2026-05-13: Live read-only validation on `tango-1-1` with the modified script
+  reported `status=ok`, `active_tokens=8`, `missing_quotes=0`,
+  `older_than_15s=0`, `missing_ask_or_size=0`, and `max_age_seconds=1`.
+
 # Dry-Run Strategy Config-Only Sync (2026-05-13)
 
 ## Goal

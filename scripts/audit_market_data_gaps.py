@@ -34,6 +34,7 @@ SOURCE_PROFILES = {
     "all": ["*"],
     "pm5d-core": [
         "polymarket_quotes",
+        "polymarket_quote_quality",
         "polymarket_orderbooks",
         "binance_price",
         "binance_agg_trades",
@@ -41,6 +42,7 @@ SOURCE_PROFILES = {
     ],
     "pm5d-execution": [
         "polymarket_quotes",
+        "polymarket_quote_quality",
         "polymarket_orderbooks",
         "binance_price",
         "binance_agg_trades",
@@ -48,6 +50,7 @@ SOURCE_PROFILES = {
     ],
     "pm5d-vol": [
         "polymarket_quotes",
+        "polymarket_quote_quality",
         "polymarket_orderbooks",
         "deribit_iv",
         "deribit_atm_greeks",
@@ -418,6 +421,125 @@ def audit_research_windows(statement_timeout_seconds: int, psql_timeout_seconds:
     return row
 
 
+def pm_quote_quality_query(symbols: list[str], statement_timeout_seconds: int) -> str:
+    symbol_list = ", ".join(sql_literal(symbol) for symbol in symbols)
+    return f"""
+SET statement_timeout TO '{statement_timeout_seconds}s';
+WITH active AS (
+  SELECT
+    m.market_slug,
+    m.symbol,
+    m.start_time,
+    m.end_time,
+    token.token_id
+  FROM pm_market_metadata m
+  CROSS JOIN LATERAL jsonb_array_elements_text(
+    (m.raw_market->'markets'->0->>'clobTokenIds')::jsonb
+  ) AS token(token_id)
+  WHERE m.symbol IN ({symbol_list})
+    AND now() >= m.start_time - interval '1 minute'
+    AND now() < m.end_time + interval '1 minute'
+),
+latest AS (
+  SELECT
+    a.*,
+    q.received_at,
+    q.best_ask,
+    q.ask_size,
+    q.best_bid,
+    q.bid_size,
+    CASE
+      WHEN q.received_at IS NULL THEN NULL
+      ELSE GREATEST(0, floor(extract(epoch FROM now() - q.received_at))::bigint)
+    END AS age_seconds
+  FROM active a
+  LEFT JOIN LATERAL (
+    SELECT received_at, best_ask, ask_size, best_bid, bid_size
+    FROM clob_quote_ticks q
+    WHERE q.token_id = a.token_id
+    ORDER BY q.received_at DESC
+    LIMIT 1
+  ) q ON TRUE
+)
+SELECT json_build_object(
+  'source_id', 'polymarket_quote_quality',
+  'table_name', 'clob_quote_ticks',
+  'symbols', ARRAY[{symbol_list}],
+  'max_quote_age_seconds', 15,
+  'active_tokens', count(*)::int,
+  'missing_quotes', count(*) FILTER (WHERE received_at IS NULL)::int,
+  'older_than_15s', count(*) FILTER (
+    WHERE received_at IS NOT NULL AND age_seconds > 15
+  )::int,
+  'missing_ask_or_size', count(*) FILTER (
+    WHERE best_ask IS NULL OR ask_size IS NULL OR ask_size <= 0
+  )::int,
+  'missing_bid_or_size', count(*) FILTER (
+    WHERE best_bid IS NULL OR bid_size IS NULL OR bid_size <= 0
+  )::int,
+  'max_age_seconds', max(age_seconds),
+  'oldest_latest_quote', min(received_at),
+  'newest_latest_quote', max(received_at)
+)::text
+FROM latest
+"""
+
+
+def classify_pm_quote_quality(row: dict[str, Any]) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    status = "ok"
+
+    active_tokens = int(row.get("active_tokens") or 0)
+    missing_quotes = int(row.get("missing_quotes") or 0)
+    older_than_15s = int(row.get("older_than_15s") or 0)
+    missing_ask_or_size = int(row.get("missing_ask_or_size") or 0)
+
+    if active_tokens == 0:
+        status = "critical"
+        reasons.append("no active BTC/ETH PM token rows")
+    if missing_quotes > 0:
+        status = "critical"
+        reasons.append(f"missing quotes for {missing_quotes}/{active_tokens} active tokens")
+    if older_than_15s > 0:
+        status = "critical"
+        reasons.append(f"{older_than_15s}/{active_tokens} active token quotes older than 15s")
+    if missing_ask_or_size > 0:
+        status = "critical"
+        reasons.append(
+            f"{missing_ask_or_size}/{active_tokens} active token quotes missing ask/ask_size"
+        )
+
+    if not reasons:
+        max_age = row.get("max_age_seconds")
+        reasons.append(f"active token quote quality within thresholds; max_age_seconds={max_age}")
+    return status, reasons
+
+
+def audit_pm_quote_quality(
+    symbols: list[str],
+    statement_timeout_seconds: int,
+    psql_timeout_seconds: int,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    try:
+        row = run_json(
+            pm_quote_quality_query(symbols, statement_timeout_seconds),
+            psql_timeout_seconds,
+        )
+        status, reasons = classify_pm_quote_quality(row)
+        row["status"] = status
+        row["reasons"] = reasons
+    except Exception as exc:  # noqa: BLE001 - this is an operator diagnostic.
+        row = {
+            "source_id": "polymarket_quote_quality",
+            "table_name": "clob_quote_ticks",
+            "status": "unknown",
+            "reasons": [str(exc)],
+        }
+    row["query_ms"] = round((time.monotonic() - started) * 1000)
+    return row
+
+
 def parse_symbols(raw: str) -> list[str]:
     return [item.strip().upper() for item in raw.split(",") if item.strip()]
 
@@ -557,12 +679,22 @@ def print_text(payload: dict[str, Any]) -> None:
 
     print()
     for item in payload["window_audits"]:
-        print(
-            f"[{item['status'].upper()}] {item['source_id']} "
-            f"rows_7d={item.get('rows_7d')} total_rows={item.get('total_rows')} "
-            f"latest_end={item.get('latest_end_time')} "
-            f"lag_s={item.get('latest_lag_seconds')} query_ms={item.get('query_ms')}"
-        )
+        if item["source_id"] == "polymarket_quote_quality":
+            print(
+                f"[{item['status'].upper()}] {item['source_id']} "
+                f"active_tokens={item.get('active_tokens')} "
+                f"missing_quotes={item.get('missing_quotes')} "
+                f"older_than_15s={item.get('older_than_15s')} "
+                f"missing_ask_or_size={item.get('missing_ask_or_size')} "
+                f"max_age_s={item.get('max_age_seconds')} query_ms={item.get('query_ms')}"
+            )
+        else:
+            print(
+                f"[{item['status'].upper()}] {item['source_id']} "
+                f"rows_7d={item.get('rows_7d')} total_rows={item.get('total_rows')} "
+                f"latest_end={item.get('latest_end_time')} "
+                f"lag_s={item.get('latest_lag_seconds')} query_ms={item.get('query_ms')}"
+            )
         print(f"  reasons: {'; '.join(item.get('reasons') or [])}")
 
 
@@ -636,6 +768,14 @@ def main() -> int:
     if source_is_required(research_window_target, source_requirements):
         window_results.append(
             audit_research_windows(args.statement_timeout_seconds, args.psql_timeout_seconds)
+        )
+    pm_quote_quality_target = {
+        "source_id": "polymarket_quote_quality",
+        "table_name": "clob_quote_ticks",
+    }
+    if source_is_required(pm_quote_quality_target, source_requirements):
+        window_results.append(
+            audit_pm_quote_quality(symbols, args.statement_timeout_seconds, args.psql_timeout_seconds)
         )
     items = gap_results + window_results
     if not items:
