@@ -280,3 +280,33 @@
   snapshot manifest and run sub-window searches against the retained artifact.
   Do not re-export a full snapshot or rely on hidden inclusive-date semantics
   just to test another factor window.
+
+## 2026-05-13
+
+- Pattern: PM5D settlement-probability dry-run rows from earlier configs can
+  contaminate post-handoff profitability reads, making a rejected strategy look
+  like a current candidate or making a current candidate look worse for the
+  wrong reason.
+- Rule: Before interpreting PM5D dry-run performance after a strategy cutover,
+  prove the observation window is clean. Prefer the reset workflow artifact
+  `post-reset-clean-baseline-gate.json` with `status=passed`; otherwise run
+  `check_dryrun_candidate_gate.py --mode clean-baseline` or
+  `dryrun-candidate-gate.yml`. Do not promote from a report that still contains
+  residual runtime orders/fills.
+
+- Pattern: GitHub-hosted artifact workflows are now the default efficient
+  research/search surface once a full snapshot artifact exists, but older notes
+  and habits still point agents at `ploy-ci-1`.
+- Rule: For PM5D AutoFactor mining, walk-forward promotion, and dry-run handoff
+  checks, use GitHub-hosted artifact workflows by default. Treat `ploy-ci-1` as
+  a legacy DB-adjacent fallback only when a fresh DB export/snapshot is truly
+  required.
+
+- Pattern: A successful reset preview or green workflow does not prove runtime
+  evidence was cleared; a destructive reset can be correctly blocked while the
+  deployment is still running.
+- Rule: Destructive runtime-evidence cleanup requires explicit operator
+  approval, target deployment paused/stopped, `execute=true`,
+  `allow_running=false`, `confirm=delete-strategy-runtime-evidence`, backup
+  artifacts, and a passing post-reset clean-baseline gate before any fresh
+  dry-run observation or strategy-quality claim.
