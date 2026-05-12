@@ -10,15 +10,25 @@ fn print_usage_for(program: &str) {
     eprintln!("Usage: {program} [COMMAND] [OPTIONS]");
     eprintln!();
     eprintln!("Commands:");
-    eprintln!("  run               Run the strategy (default)");
+    eprintln!("  run                       Run the strategy (default)");
     #[cfg(feature = "ops")]
-    eprintln!("  check-db          Check database data completeness");
+    eprintln!("  check-db                  Check database data completeness");
     #[cfg(feature = "ops")]
-    eprintln!("  collect-markets  Discover Polymarket markets into the local DB catalog");
+    eprintln!("  collect-markets           Discover Polymarket markets into the local DB catalog");
     #[cfg(feature = "ops")]
-    eprintln!("  collect-quotes    Collect orderbook quotes from Polymarket CLOB WebSocket");
+    eprintln!("  collect-quotes            Collect orderbook quotes from Polymarket CLOB WebSocket");
     #[cfg(feature = "ops")]
-    eprintln!("  collect-pm-trades Collect public Polymarket trade prints from Data API");
+    eprintln!("  collect-pm-trades         Collect public Polymarket trade prints from Data API");
+    #[cfg(feature = "ops")]
+    eprintln!("  collect-binance-lob       Collect Binance L2 orderbook depth snapshots");
+    #[cfg(feature = "ops")]
+    eprintln!("  collect-binance-price     Collect Binance spot trade prices");
+    #[cfg(feature = "ops")]
+    eprintln!("  collect-binance-aggtrade  Collect Binance aggregated trades");
+    #[cfg(feature = "ops")]
+    eprintln!("  collect-deribit-iv        Collect Deribit option IV ticks (HTTP poll)");
+    #[cfg(feature = "ops")]
+    eprintln!("  collect-deribit-greeks    Collect Deribit ATM option greeks (HTTP poll)");
     eprintln!();
     eprintln!("Options for 'run':");
     eprintln!("  --config <path>          Unified TOML config file (required)");
@@ -55,17 +65,61 @@ pub async fn run_with_args(args: Vec<String>) {
     let command = args.get(1).map(|s| s.as_str());
     match command {
         Some("check-db") => {
-            run_check_db(&args).await;
+            #[cfg(feature = "ops")]
+            ops::run_check_db(&args).await;
+            #[cfg(not(feature = "ops"))]
+            eprintln!("The check-db command requires the full/ops runner build");
         }
         Some("collect-quotes") => {
-            run_collect_quotes(&args).await;
+            #[cfg(feature = "ops")]
+            ops::run_collect_quotes(&args).await;
+            #[cfg(not(feature = "ops"))]
+            eprintln!("The collect-quotes command requires the full/ops runner build");
         }
         Some("collect-markets") => {
-            run_collect_markets(&args).await;
+            #[cfg(feature = "ops")]
+            ops::run_collect_markets(&args).await;
+            #[cfg(not(feature = "ops"))]
+            eprintln!("The collect-markets command requires the full/ops runner build");
         }
         Some("collect-pm-trades") => {
-            run_collect_pm_trades(&args).await;
+            #[cfg(feature = "ops")]
+            ops::run_collect_pm_trades(&args).await;
+            #[cfg(not(feature = "ops"))]
+            eprintln!("The collect-pm-trades command requires the full/ops runner build");
         }
+        // --- New Binance/Deribit collectors ---
+        Some("collect-binance-lob") => {
+            #[cfg(feature = "ops")]
+            ops::run_collect_binance_lob(&args).await;
+            #[cfg(not(feature = "ops"))]
+            eprintln!("The collect-binance-lob command requires the full/ops runner build");
+        }
+        Some("collect-binance-price") => {
+            #[cfg(feature = "ops")]
+            ops::run_collect_binance_price(&args).await;
+            #[cfg(not(feature = "ops"))]
+            eprintln!("The collect-binance-price command requires the full/ops runner build");
+        }
+        Some("collect-binance-aggtrade") => {
+            #[cfg(feature = "ops")]
+            ops::run_collect_binance_aggtrade(&args).await;
+            #[cfg(not(feature = "ops"))]
+            eprintln!("The collect-binance-aggtrade command requires the full/ops runner build");
+        }
+        Some("collect-deribit-iv") => {
+            #[cfg(feature = "ops")]
+            ops::run_collect_deribit_iv(&args).await;
+            #[cfg(not(feature = "ops"))]
+            eprintln!("The collect-deribit-iv command requires the full/ops runner build");
+        }
+        Some("collect-deribit-greeks") => {
+            #[cfg(feature = "ops")]
+            ops::run_collect_deribit_greeks(&args).await;
+            #[cfg(not(feature = "ops"))]
+            eprintln!("The collect-deribit-greeks command requires the full/ops runner build");
+        }
+        // --- End new collectors ---
         Some("run") | None => {
             run::run_command(&args, command).await;
         }
@@ -119,48 +173,4 @@ fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .try_init();
-}
-
-#[cfg(feature = "ops")]
-async fn run_check_db(args: &[String]) {
-    ops::run_check_db(args).await;
-}
-
-#[cfg(not(feature = "ops"))]
-async fn run_check_db(_args: &[String]) {
-    eprintln!("The check-db command requires the full/ops runner build");
-    std::process::exit(1);
-}
-
-#[cfg(feature = "ops")]
-async fn run_collect_quotes(args: &[String]) {
-    ops::run_collect_quotes(args).await;
-}
-
-#[cfg(not(feature = "ops"))]
-async fn run_collect_quotes(_args: &[String]) {
-    eprintln!("The collect-quotes command requires the full/ops runner build");
-    std::process::exit(1);
-}
-
-#[cfg(feature = "ops")]
-async fn run_collect_markets(args: &[String]) {
-    ops::run_collect_markets(args).await;
-}
-
-#[cfg(not(feature = "ops"))]
-async fn run_collect_markets(_args: &[String]) {
-    eprintln!("The collect-markets command requires the full/ops runner build");
-    std::process::exit(1);
-}
-
-#[cfg(feature = "ops")]
-async fn run_collect_pm_trades(args: &[String]) {
-    ops::run_collect_pm_trades(args).await;
-}
-
-#[cfg(not(feature = "ops"))]
-async fn run_collect_pm_trades(_args: &[String]) {
-    eprintln!("The collect-pm-trades command requires the full/ops runner build");
-    std::process::exit(1);
 }
