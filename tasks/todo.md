@@ -196,6 +196,12 @@ without sampling top-of-book quote ticks.
   `PLOY_QUOTE_COLLECTOR_BATCH_WINDOW_MS`. Tuned the tango quote unit to one
   persistence worker, 100ms batch window, and up to 100 rows per batch while
   leaving full-resolution `clob_quote_ticks` intact.
+- 2026-05-12: The raw `clob_orderbook_snapshots` sampling from PR #452 reduced
+  snapshot density even though full-resolution top-of-book quote ticks were
+  preserved. The precision contract is no sampling for quote data, so
+  `PLOY_QUOTE_COLLECTOR_SNAPSHOT_SAMPLE_MS` is restored to `0` by default and
+  in the tango unit. Keep CPU reductions to lossless paths such as de-dupe,
+  batching, and transaction coalescing.
 
 # Deploy Live-Paused Stderr Guard Repair (2026-05-12)
 
