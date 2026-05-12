@@ -32,6 +32,11 @@ on:
         type: boolean
         required: true
         default: false
+      allow_running:
+        description: "Allow execute=true while deployment desired/observed state is running"
+        type: boolean
+        required: true
+        default: false
       confirm:
         description: "Required when execute=true: delete-strategy-runtime-evidence"
         required: false
@@ -84,6 +89,41 @@ jobs:
               raise SystemExit("execute=true requires confirm=delete-strategy-runtime-evidence")
           if any(mode not in {"dry_run", "dryrun", "paper"} for mode in modes):
               raise SystemExit("this workflow only resets dry-run/paper runtime modes")
+          PY
+
+      - name: Block destructive reset while deployment is running
+        env:
+          DEPLOYMENT_ID: ${{ github.event.inputs.deployment_id }}
+          EXECUTE: ${{ github.event.inputs.execute }}
+          ALLOW_RUNNING: ${{ github.event.inputs.allow_running }}
+        run: |
+          set -euo pipefail
+          if [ "${EXECUTE}" != "true" ] || [ "${ALLOW_RUNNING}" = "true" ]; then
+            exit 0
+          fi
+          curl -fsS --max-time 10 "http://${DEPLOY_HOST}/api/deployments" > /tmp/deployments.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          deployment_id = os.environ["DEPLOYMENT_ID"]
+          deployments = json.loads(Path("/tmp/deployments.json").read_text(encoding="utf-8"))
+          target = next((item for item in deployments if item.get("deployment_id") == deployment_id), None)
+          if target is None:
+              raise SystemExit(f"deployment {deployment_id!r} not found; refusing destructive reset")
+          desired = str(target.get("desired_state") or "").lower()
+          observed = str(target.get("observed_state") or "").lower()
+          if "running" in {desired, observed}:
+              raise SystemExit(
+                  f"deployment {deployment_id!r} is still running "
+                  f"(desired_state={desired!r}, observed_state={observed!r}); "
+                  "pause/stop it or set allow_running=true explicitly"
+              )
+          print(
+              f"deployment {deployment_id} is not running "
+              f"(desired_state={desired!r}, observed_state={observed!r})"
+          )
           PY
 
       - name: Configure SSH

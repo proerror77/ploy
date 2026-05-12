@@ -88,6 +88,15 @@ raw market data and default to preview/backup only.
   tests/test_reset_strategy_runtime_evidence.py`, YAML parse for
   `.github/workflows/reset-strategy-runtime-evidence.yml`, and `git diff
   --check` on the touched files.
+- 2026-05-13: Reset preview run `25748008417` on `main` succeeded with
+  `execute=false`: it matched and backed up `185` orders and `20` fills for
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun`. The deployment was
+  still `desired_state=running` / `observed_state=running`, so no destructive
+  reset was executed.
+- 2026-05-13: Added a follow-up workflow guard so `execute=true` refuses to run
+  while the target deployment is desired/observed `running`, unless
+  `allow_running=true` is explicitly supplied. This makes the pause-before-reset
+  rule machine-enforced instead of chat-only.
 
 # Recorded Replay No-Sample Classification Fix (2026-05-12)
 
