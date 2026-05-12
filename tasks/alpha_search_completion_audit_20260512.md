@@ -62,10 +62,10 @@ Latest read-only remote config check:
 - remote dry-run score:
   `autofactor_formula:auto_settlement_full_depth_settlement_edge`
 - `origin/main` dry-run score:
-  `autofactor_formula:auto_settlement_conservative_settlement_edge`
+  `autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike`
 - interpretation: protected dry-run deployment is still required because the
   running settlement-probability dry-run lane has not yet picked up the ready
-  hosted handoff merged by PR `#433`.
+  hosted handoff currently on `main`.
 
 Latest reset / data-quality evidence:
 
@@ -265,9 +265,9 @@ Earlier blocker runs:
 | Search found a stronger candidate branch | run `25683858420` | `partial` | Best reward improved to `4.894975850946932` with `mcts_mcts_auto_settlement_conservative_settlement_edge_x_near_strike_near_strike_near_strike`, but the ready handoff selected the simpler conservative settlement edge. |
 | Promotion gate blocks unsafe candidates | `autofactor-strategy-handoff.json` | `ready` | Earlier runs stayed blocked. Run `25687766026` became ready only after replay parity was supplied and gate blockers were empty. |
 | Replay/dry-run parity is ready for handoff | `recorded-replay-parity.yml` artifact `recorded-replay-parity-25687392088` | `ready` | PR `#433` records `replay_parity_ready=true`, `runtime/event strict ready`, and `blocking=[]`. |
-| A dry-run config PR can be generated from ready handoff | `create_config_pr=true` path in hosted workflow, PR `#433` | `ready` | PR `#433` merged `autofactor_formula:auto_settlement_conservative_settlement_edge` into the dry-run config. |
+| A dry-run config PR can be generated from ready handoff | `create_config_pr=true` path in hosted workflow, PR `#433`, current `origin/main` config | `ready` | PR `#433` proved the config-PR path; the current dry-run config on `origin/main` uses `autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike`. |
 | Latest deploy bundle can be built without mutating remote services | `deploy-tango-1-1.yml` run `25688999691` with `deploy=false` | `ready` | Build-only run built the release runner, research tools, optimize-backtest, deploy bundle, and live-paused bundle guard. |
-| Remote dry-run config matches the ready handoff on `main` | read-only `tango-1-1` config comparison | `blocked` | Remote is still `auto_settlement_full_depth_settlement_edge`; `origin/main` is `auto_settlement_conservative_settlement_edge`, so protected dry-run deploy is required. |
+| Remote dry-run config matches the ready handoff on `main` | read-only `tango-1-1` config comparison plus current `origin/main` config check | `blocked` | Remote is still `auto_settlement_full_depth_settlement_edge`; `origin/main` is `auto_settlement_conservative_settlement_edge_x_near_strike`, so protected dry-run deploy is required before judging the current handoff. |
 | Old dry-run runtime evidence can be cleared without touching raw data | PRs `#464`, `#465`, `#466`; reset preview `25748008417`; guard run `25748940434`; reset execute run `25754514193` | `done` | The guarded reset deleted only the scoped runtime rows: before `185` orders / `20` fills, after `0` / `0`. Raw market data was not part of the reset scope. |
 | Reset procedure is documented and operator-gated | `docs/runbooks/strategy-runtime-evidence-reset.md`; PR `#470` | `ready` | Runbook records preflight, approval text, preview, pause, guarded execute, artifact inspection, resume, and post-reset gates. |
 | Clean post-reset baseline can be machine-checked | `scripts/check_dryrun_candidate_gate.py`; PR `#471`; workflow `dryrun-candidate-gate.yml`; PR `#472`; reset-workflow post-gate PR `#474`; run `25754514193` | `passed` | The reset workflow and an independent current API check both passed with `target_strategy_absent`. |
@@ -337,23 +337,29 @@ All runs used:
 
 ## Remaining Actions
 
-1. With explicit operator approval, pause or stop
-   `pm5d.threelayer.settlement-probability-btc-eth.dryrun`.
-2. Verify the target deployment is no longer desired/observed `running`.
-3. Execute `reset-strategy-runtime-evidence.yml` with `execute=true`,
-   `allow_running=false`, and `confirm=delete-strategy-runtime-evidence`.
-4. Download and inspect the reset artifacts, then verify `/api/reports/dry-run`
-   starts from a clean baseline for this deployment. The reset workflow should
-   upload `post-reset-clean-baseline-gate.json` with `status=passed`; manual
-   rechecks can use `scripts/check_dryrun_candidate_gate.py --mode clean-baseline`
-   or `dryrun-candidate-gate.yml`.
-5. Resume the dry-run only after reset verification.
-6. Wait for a clean 48-72h retained data window after the 2026-05-12 LOB gap
-   ages out. If no new gaps appear, the earliest 48h window is after
-   `2026-05-14 10:48 +08`; the earliest 72h window is after
-   `2026-05-15 10:48 +08`. Then run hosted walk-forward / MCTS alpha search
-   again.
-7. Rerun recorded replay parity against the fresh clean sample.
+1. Do not reset runtime evidence again unless a new contaminated window is
+   identified. The scoped reset already completed in run `25754514193`, passed
+   the post-reset clean-baseline gate, and resumed the dry-run deployment.
+2. Keep
+   `pm5d.threelayer.settlement-probability-btc-eth.dryrun` running in dry-run
+   mode so post-reset closed trades can accumulate. The candidate-quality gate
+   remains `collect-more` until at least `50` closed trades exist.
+3. After `2026-05-13 10:49 +08`, rerun the 24h BTC/ETH market-data coverage
+   audit with `gate_mode=coverage`. If it remains `critical`, classify the next
+   decision as `fix-data` or `collect-more`, not promotion.
+4. If the 24h audit is clean, compile a new full research snapshot from the
+   clean exact timestamp window with `research-snapshot.yml`, `data_gate=critical`,
+   `data_profile=pm5d-execution`, and `upload_full_snapshot=true`.
+5. Run `factor-walk-forward-v2-hosted-artifact.yml` from `main` using that
+   snapshot artifact and
+   `tasks/alpha_search_priors/pm5d_entry_price_quality_prior_20260513.json`,
+   with `required_strategy_profile=settlement_probability` and
+   `allowed_target=full_depth_settlement_executable_pnl`.
+6. Do not create a config PR from the new search unless
+   `autofactor-strategy-handoff.json` is `ready`, the data audit is clean, and
+   the parity plan is explicit.
+7. Rerun recorded replay parity against the fresh clean dry-run sample before
+   promotion or live discussion.
 8. Review fresh dry-run PnL, fills, drawdown, capacity, and settlement-exit
    evidence before calling any strategy profitable.
 
