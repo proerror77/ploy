@@ -335,6 +335,54 @@ fn hosted_factor_walk_forward_uploads_alpha_chain_summary() {
 }
 
 #[test]
+fn factor_walk_forward_wires_alpha_prior_and_state_inputs() {
+    let hosted = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
+    let self_hosted = workflow_contents(".github/workflows/factor-walk-forward-v2.yml");
+    let mut offenders = Vec::new();
+
+    for (name, workflow) in [
+        ("factor-walk-forward-v2-hosted-artifact.yml", hosted.as_str()),
+        ("factor-walk-forward-v2.yml", self_hosted.as_str()),
+    ] {
+        for needle in [
+            "alpha_search_llm_prior_json",
+            "alpha_search_state_json",
+            "mcts-state.json",
+            "--alpha-search-state-json",
+            "--alpha-search-llm-prior-json",
+        ] {
+            if !workflow.contains(needle) {
+                offenders.push(format!("{name}: missing `{needle}`"));
+            }
+        }
+    }
+
+    let route_allowlist = self_hosted
+        .split("allowed = {")
+        .nth(1)
+        .and_then(|tail| tail.split("raw = os.environ").next())
+        .unwrap_or("");
+    for needle in [
+        "alpha_search_plan_run_id",
+        "alpha_search_plan_artifact_name",
+        "alpha_search_llm_prior_json",
+        "alpha_search_state_json",
+    ] {
+        if !route_allowlist.contains(needle) {
+            offenders.push(format!(
+                "factor-walk-forward-v2.yml: hosted route allowlist missing `{needle}`"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "alpha-search prior/state workflow wiring guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn hosted_factor_walk_forward_splits_replay_parity_artifact_suffix() {
     let workflow = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
     let mut offenders = Vec::new();

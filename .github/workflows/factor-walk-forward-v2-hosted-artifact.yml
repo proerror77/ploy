@@ -33,7 +33,7 @@ on:
       options_json:
         description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, optional issue/config handoff"
         required: false
-        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
+        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
       sweep_json:
         description: "Optional JSON array of walk-forward option overrides to run in one job after one download/build"
         required: false
@@ -96,6 +96,8 @@ jobs:
               "alpha_search_plan_run_id": "",
               "alpha_search_plan_artifact_name": "",
               "alpha_search_plan_target": "full_depth_settlement_executable_pnl",
+              "alpha_search_llm_prior_json": "",
+              "alpha_search_state_json": "",
               "alpha_search_min_reward_improvement": "0.0",
               "chain_next_run": "false",
               "chain_remaining": "0",
@@ -361,6 +363,16 @@ jobs:
           fi
           if [ -n "${alpha_search_plan_json}" ]; then
             args+=(--alpha-search-plan-json "${alpha_search_plan_json}")
+          fi
+          alpha_search_state_json="${WALK_ALPHA_SEARCH_STATE_JSON}"
+          if [ -z "${alpha_search_state_json}" ] && [ -f artifacts/alpha-search-plan/mcts-state.json ]; then
+            alpha_search_state_json="artifacts/alpha-search-plan/mcts-state.json"
+          fi
+          if [ -n "${alpha_search_state_json}" ]; then
+            args+=(--alpha-search-state-json "${alpha_search_state_json}")
+          fi
+          if [ -n "${WALK_ALPHA_SEARCH_LLM_PRIOR_JSON}" ]; then
+            args+=(--alpha-search-llm-prior-json "${WALK_ALPHA_SEARCH_LLM_PRIOR_JSON}")
           fi
           if [ "${WALK_FAIL_IF_BLOCKED}" = "true" ]; then
             args+=(--fail-if-blocked)

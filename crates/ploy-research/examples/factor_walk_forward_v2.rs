@@ -5,16 +5,9 @@
 //! scores executable PnL after PM CLOB fillability.
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
-    AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options, FactorObservation,
-    FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
-    FillabilityReviewOptions, FullDepthExecutionMatrixOptions, LiquidityGateV1Options,
-    LiquidityGatedAlphaV1Options, MetaLabelWalkForwardOptions, RepricingIcOptions,
-    ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
-    SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
-    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
     autofactor_matrix_from_v2, build_factor_observations_v2_with_deribit_and_pm_books,
     build_factor_observations_with_lob_sampled, build_factor_stability_report,
     build_full_depth_execution_matrix, build_settlement_probability_promotion_gate_report,
@@ -27,12 +20,19 @@ use ploy_research::{
     format_trade_formation_v1_report, liquidity_gate_v1_with_deribit_and_pm_books,
     liquidity_gated_alpha_v1_with_deribit_and_pm_books, load_deribit_feature_snapshots,
     load_research_lob_snapshots_sampled, load_research_pm_book_snapshots_sampled,
-    load_research_snapshot, mine_domain_autofactors_from_v2_with_mcts_plan,
+    load_research_snapshot, mine_domain_autofactors_from_v2_with_guidance, read_mcts_search_state,
     review_fillability_v1_with_deribit_and_pm_books, review_repricing_ic_with_deribit_and_pm_books,
     review_trade_formation_v1_with_deribit_and_pm_books, validate_snapshot_request_coverage,
     walk_forward_factor_combo_v1_with_deribit_and_pm_books,
     walk_forward_factors_v2_with_deribit_and_pm_books,
-    walk_forward_meta_label_v1_with_deribit_and_pm_books, write_alpha_search_artifacts,
+    walk_forward_meta_label_v1_with_deribit_and_pm_books, write_alpha_search_artifacts_with_state,
+    AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options, FactorObservation,
+    FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
+    FillabilityReviewOptions, FullDepthExecutionMatrixOptions, LiquidityGateV1Options,
+    LiquidityGatedAlphaV1Options, LlmPriorSpec, MetaLabelWalkForwardOptions, RepricingIcOptions,
+    ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
+    SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
+    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashSet;
@@ -234,6 +234,13 @@ fn alpha_search_plan_factor_names(path: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn read_llm_prior(path: &str) -> LlmPriorSpec {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("read alpha search LLM prior JSON {path} failed: {err}"));
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|err| panic!("parse alpha search LLM prior JSON {path} failed: {err}"))
+}
+
 fn slice_by_time<T, F>(items: &[T], start: DateTime<Utc>, end: DateTime<Utc>, ts_fn: F) -> &[T]
 where
     F: Fn(&T) -> DateTime<Utc>,
@@ -319,6 +326,8 @@ async fn main() {
     let replay_parity_json = flag_value(&args, "--replay-parity-json");
     let alpha_search_output_dir = flag_value(&args, "--alpha-search-output-dir");
     let alpha_search_plan_json = flag_value(&args, "--alpha-search-plan-json");
+    let alpha_search_llm_prior_json = flag_value(&args, "--alpha-search-llm-prior-json");
+    let alpha_search_state_json = flag_value(&args, "--alpha-search-state-json");
     let allow_direct_db_debug = flag_present(&args, "--allow-direct-db-debug");
     let data_quality_mode = parse_data_quality_mode(flag_value(&args, "--data-quality-mode"));
     let min_event_complete_events = flag_value(&args, "--min-event-complete-events")
@@ -718,6 +727,17 @@ async fn main() {
         .as_deref()
         .map(alpha_search_plan_factor_names)
         .unwrap_or_default();
+    let llm_prior = alpha_search_llm_prior_json.as_deref().map(read_llm_prior);
+    if let Some(path) = alpha_search_llm_prior_json.as_deref() {
+        eprintln!("alpha search typed LLM prior loaded from {path}");
+    }
+    let mcts_state = alpha_search_state_json.as_deref().map(|path| {
+        read_mcts_search_state(path)
+            .unwrap_or_else(|err| panic!("read alpha search MCTS state JSON {path} failed: {err}"))
+    });
+    if let Some(path) = alpha_search_state_json.as_deref() {
+        eprintln!("alpha search cumulative MCTS state loaded from {path}");
+    }
     if let Some(path) = alpha_search_plan_json.as_deref() {
         eprintln!(
             "alpha search MCTS plan loaded: {} selected nodes from {}",
@@ -730,11 +750,12 @@ async fn main() {
         AutoFactorV2Target::FullDepthRepricePnl30s,
         AutoFactorV2Target::FullDepthSettlementExecutablePnl,
     ] {
-        match mine_domain_autofactors_from_v2_with_mcts_plan(
+        match mine_domain_autofactors_from_v2_with_guidance(
             &autofactor_rows,
             target,
             &autofactor_options,
             &alpha_search_plan_names,
+            llm_prior.as_ref(),
         ) {
             Ok(reports) => {
                 println!("# AutoFactor target={}", target.as_str());
@@ -743,12 +764,13 @@ async fn main() {
                     alpha_search_output_dir.as_deref(),
                     alpha_search_input_names.as_ref(),
                 ) {
-                    match write_alpha_search_artifacts(
+                    match write_alpha_search_artifacts_with_state(
                         output_dir,
                         target.as_str(),
                         input_names,
                         &reports,
                         &autofactor_options,
+                        mcts_state.as_ref(),
                     ) {
                         Ok(summary) => eprintln!(
                             "alpha search artifacts written target={} candidates={} rejected={} best={} dir={}",

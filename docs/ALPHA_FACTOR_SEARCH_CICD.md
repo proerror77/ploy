@@ -360,14 +360,23 @@ Current implementation status:
   a candidate cap to keep CI runs bounded.
 - Implemented: workflow upload path for the artifact bundle through both
   Factor Walk-Forward V2 workflows.
-- Implemented: first MCTS control artifact,
-  `mcts-expansion-plan.json`, which ranks non-rejected nodes with a UCB-style
-  priority and proposes the next mutation family from each node's weakest
-  dimension.
+- Implemented: first MCTS control artifacts, `mcts-state.json` and
+  `mcts-expansion-plan.json`. The state artifact accumulates visits and
+  rewards per factor across runs, and the expansion plan ranks non-rejected
+  current-run nodes with a UCB-style priority using that cumulative state.
 - Implemented: `factor_walk_forward_v2 --alpha-search-plan-json <path>` can
   consume a prior `mcts-expansion-plan.json` and generate extra `mcts_*`
   guided mutations for selected branches. The Factor Walk-Forward workflows
   expose this as `options_json.alpha_search_plan_json`.
+- Implemented: `factor_walk_forward_v2 --alpha-search-state-json <path>` can
+  consume a prior `mcts-state.json`; when a prior alpha-search artifact is
+  downloaded via `options_json.alpha_search_plan_run_id`, the workflows pass
+  its `mcts-state.json` automatically when present.
+- Implemented: `factor_walk_forward_v2 --alpha-search-llm-prior-json <path>`
+  accepts a typed LLM-prior JSON file with bounded mutation requests. The Rust
+  layer compiles those requests into existing `FactorExpr` candidates only when
+  the requested base factor, feature, mutation type, and constants are valid.
+  Unsupported free-form code is ignored rather than evaluated.
 - Implemented: the Factor Walk-Forward workflows can download a prior plan from
   a previous run with `options_json.alpha_search_plan_run_id`,
   `alpha_search_plan_artifact_name`, and `alpha_search_plan_target`.
@@ -386,11 +395,12 @@ Current implementation status:
   `search-feedback.json.best_reward` with the prior plan artifact's
   `search-feedback.json.best_reward` and stops with `reward_stagnation` when
   the configured `alpha_search_min_reward_improvement` threshold is not met.
-- Implemented as placeholder artifact: `llm-priors.json` records the typed prior
-  schema without calling an external LLM.
-- Not yet implemented: live LLM expansion policy, typed mutation parser from
-  LLM proposals, full multi-run MCTS visit/reward backpropagation beyond the
-  current artifact-to-artifact feedback loop.
+- Implemented as artifact and input contract: `llm-priors.json` records the
+  typed prior schema, and an operator- or LLM-produced prior file can now enter
+  CI through `--alpha-search-llm-prior-json` / `options_json.alpha_search_llm_prior_json`.
+- Not yet implemented: direct live LLM API invocation inside CI. The intended
+  boundary is still external LLM proposal -> reviewed typed JSON -> Rust DSL
+  compiler -> CI evaluation.
 
 The current system is enough to start systematizing alpha discovery in CI: every
 walk-forward run can now expand interpretable bounded multi-depth mutations,
