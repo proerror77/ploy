@@ -1,3 +1,45 @@
+# PM5D Entry-Price Quality Alpha Prior (2026-05-13)
+
+## Goal
+
+Make the alpha-search system able to explore and promote bounded
+entry-price-quality variants for PM5D settlement-probability formulas, instead
+of leaving entry-price caveats as chat-only guidance.
+
+## Plan
+
+- [x] Add a bounded `entry_price_quality_score` feature to research
+  AutoFactor inputs.
+- [x] Generate settlement-native candidates that combine settlement edge with
+  entry-price quality, capacity, and near-strike gates.
+- [x] Add runtime scorer support for the same formula suffixes.
+- [x] Add promotion mappings so ready candidates can become dry-run handoff
+  artifacts.
+- [x] Add a machine-readable alpha-search prior for the next hosted run.
+- [x] Run focused Python and Rust verification.
+- [ ] After the known BTC/ETH LOB gap ages out, run a fresh 24h data audit
+  before hosted walk-forward/MCTS search.
+
+## Review
+
+- 2026-05-13: Added
+  `tasks/alpha_search_priors/pm5d_entry_price_quality_prior_20260513.json`.
+  This prior is factor-attribution/search guidance only; it is not a
+  profitability claim.
+- 2026-05-13: Added
+  `tasks/research_evidence/pm5d_entry_price_quality_prior_20260513.md` to make
+  the current evidence stage explicit and block promotion until clean data,
+  walk-forward, dry-run, and parity gates pass.
+- 2026-05-13: Focused verification passed:
+  `python3 -m json.tool tasks/alpha_search_priors/pm5d_entry_price_quality_prior_20260513.json`,
+  promotion mapping smoke for four new AutoFactor formula names,
+  `python3 -m py_compile scripts/evaluate_autofactor_strategy_promotion.py tests/test_autofactor_strategy_promotion.py`,
+  `python3 -m unittest tests.test_autofactor_strategy_promotion`,
+  `rtk cargo test --locked -p ploy-research mines_generated_settlement_native_candidates_from_v2_rows --lib`,
+  `rtk cargo test --locked -p ploy-research typed_llm_prior_mutations_compile_into_factor_expr_candidates --lib`,
+  `rtk cargo test --locked -p ploy-strategy-bundles autofactor_entry_price_quality_formula_penalizes_brittle_ticket_prices --lib`,
+  and `rtk cargo test --locked -p ploy-strategy-bundles settlement_probability_config_carries_autofactor_handoff_score --lib`.
+
 # Research Snapshot Timestamp Window Fix (2026-05-12)
 
 ## Goal

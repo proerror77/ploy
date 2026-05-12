@@ -56,7 +56,8 @@ target labels are side-aligned executable settlement PnL; reports are candidate 
 rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_avg_label,top_bucket_positive_label_rate,complexity
 1,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,49831,0.110842,0.150273,43,1.064178,0.9535,6,0.8333,1.0000,2.666226,0.6836,1
 2,auto_settlement_conservative_settlement_edge_x_near_strike,full_depth_settlement_executable_pnl,candidate,passed,49831,0.107526,0.157904,43,1.044245,0.9302,6,0.8333,1.0000,2.631575,0.6790,3
-3,auto_settlement_full_depth_settlement_edge_x_external_pressure,full_depth_settlement_executable_pnl,reject,nonpositive_rank_ic,57777,-0.021993,0.069182,45,0.217558,0.4667,6,0.5000,0.5000,-0.301991,0.4785,3
+3,auto_settlement_conservative_settlement_edge_x_entry_price_quality,full_depth_settlement_executable_pnl,candidate,passed,49831,0.106112,0.155901,43,1.031294,0.9070,6,0.8333,1.0000,2.512771,0.6712,3
+4,auto_settlement_full_depth_settlement_edge_x_external_pressure,full_depth_settlement_executable_pnl,reject,nonpositive_rank_ic,57777,-0.021993,0.069182,45,0.217558,0.4667,6,0.5000,0.5000,-0.301991,0.4785,3
 """
 
 CORE_SUITE_REPORT = f"""
@@ -150,7 +151,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertEqual(registry["decision"], "qualified")
         self.assertEqual(handoff["status"], "ready")
         self.assertEqual(handoff["blocked_factor_count"], 1)
-        self.assertEqual(len(handoff["strategies"]), 2)
+        self.assertEqual(len(handoff["strategies"]), 3)
         self.assertEqual(
             handoff["strategies"][0]["runtime_score"],
             "autofactor_formula:auto_settlement_conservative_settlement_edge",
@@ -161,6 +162,10 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
         self.assertIn(
             "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike",
+            handoff_md,
+        )
+        self.assertIn(
+            "autofactor_formula:auto_settlement_conservative_settlement_edge_x_entry_price_quality",
             handoff_md,
         )
         self.assertIn("top bucket avg label", handoff_md)
@@ -236,7 +241,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
 
         self.assertEqual(payload["decision"], "qualified")
         self.assertEqual(handoff["status"], "ready")
-        self.assertEqual(len(handoff["strategies"]), 2)
+        self.assertEqual(len(handoff["strategies"]), 3)
         first = payload["qualified_strategies"][0]["factor"]
         self.assertEqual(first["symbol_count"], 6)
         self.assertEqual(first["symbol_positive_ratio"], 0.8333)
