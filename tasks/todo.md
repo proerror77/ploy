@@ -44,6 +44,13 @@ liquidity-gated factors instead of starting from generic exploration.
   passed: `python3 -m unittest tests.test_factor_walk_forward_sweep`,
   `python3 -m py_compile scripts/run_factor_walk_forward_sweep.py
   tests/test_factor_walk_forward_sweep.py`, and `rtk git diff --check`.
+- 2026-05-12: Re-ran hosted alpha-search as `25707061616`; it completed
+  successfully and produced alpha-search artifacts. Summary: candidates `193`,
+  passed `38`, best reward `4.81954070569323`, best factor
+  `auto_settlement_conservative_settlement_edge`, handoff `ready`, recommended
+  action `create_dry_run_handoff`, chain decision `ready_handoff`. The typed
+  prior compiled into `llm_*` candidates, but did not beat the simpler
+  conservative settlement edge on this BTC/ETH window.
 
 # Alpha Search LLM Prior And MCTS State (2026-05-12)
 

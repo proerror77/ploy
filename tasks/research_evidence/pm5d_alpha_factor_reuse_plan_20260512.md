@@ -109,3 +109,49 @@ Continue only if the run produces:
 
 Promotion remains blocked unless recorded replay/dry-run parity and fresh
 dry-run executable evidence are clean.
+
+## First Hosted Run Result
+
+Run:
+
+- Workflow: `factor-walk-forward-v2-hosted-artifact.yml`
+- Run: `25707061616`
+- Branch/ref: `research/pm5d-alpha-prior-reuse`
+- Snapshot: `25642459432`
+- Replay parity artifact: `recorded-replay-parity-25687392088`
+- Symbols: `BTCUSDT,ETHUSDT`
+- Window: `2026-04-24T00:00:00Z -> 2026-05-01T00:00:00Z`
+- Target: `full_depth_settlement_executable_pnl`
+
+Result:
+
+- Status: workflow success.
+- Alpha-search candidates: `193`.
+- Passed candidates: `38`.
+- Best reward: `4.81954070569323`.
+- Best selected factor: `auto_settlement_conservative_settlement_edge`.
+- Handoff: `ready`.
+- Recommended action: `create_dry_run_handoff`.
+- Chain decision: `ready_handoff`, so no follow-up chained run was dispatched.
+
+Prior-specific read:
+
+- The typed prior compiled into `llm_*` candidates, including near-strike,
+  capacity, fair-probability, spread-penalty, full-depth, and repricing backup
+  variants.
+- The best typed-prior candidate was
+  `llm_conservative_settlement_edge_near_strike` with reward
+  `4.775414902351155`, matching the deterministic near-strike branch.
+- The best overall factor stayed the simpler
+  `auto_settlement_conservative_settlement_edge`.
+
+Interpretation:
+
+- Reusing the user's previous factors is valid: the prior entered CI and
+  produced evaluated candidates.
+- The prior did not beat the simpler conservative settlement edge on this
+  BTC/ETH snapshot/window.
+- The next strategy step should not be to add more formula complexity. It
+  should be to deploy/collect/compare the ready conservative settlement dry-run
+  candidate, then use fresh dry-run evidence to decide whether near-strike or
+  capacity variants deserve a second promotion attempt.
