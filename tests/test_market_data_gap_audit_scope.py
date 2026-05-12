@@ -55,6 +55,11 @@ class MarketDataGapAuditScopeTests(unittest.TestCase):
         )
         self.assertIn("Run remote gap audits via Cloud Assistant fallback", workflow)
         self.assertIn(str(CLOUD_ASSIST_SCRIPT.relative_to(ROOT)), workflow)
+        self.assertIn(
+            'if [ "${EVENT_NAME}" = "schedule" ] && [ "${EVENT_SCHEDULE}" = "17 */6 * * *" ]; then',
+            workflow,
+        )
+        self.assertIn('gate_mode="coverage"', workflow)
 
 
 if __name__ == "__main__":
