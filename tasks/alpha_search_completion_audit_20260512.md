@@ -15,11 +15,11 @@ Status: `partially complete`.
 
 2026-05-13 update: the previous ready dry-run handoff is not currently a
 profitable strategy. The live dry-run evidence for
-`pm5d.threelayer.settlement-probability-btc-eth.dryrun` is negative, and old
-runtime rows must be cleared before any new dry-run performance claim is made.
-The reset path is now implemented and guarded, but the destructive reset has
-not been executed because the deployment is still running and requires explicit
-operator approval to pause.
+`pm5d.threelayer.settlement-probability-btc-eth.dryrun` was negative, and old
+runtime rows had to be cleared before any new dry-run performance claim could be
+made. Reset workflow run `25754514193` executed after the dry-run deployment was
+paused, backed up and deleted only the scoped runtime rows, and the deployment
+was resumed after clean-baseline verification.
 
 The repo can automatically generate and explore alpha candidates through the
 hosted Factor Walk-Forward V2 path, and run `25687766026` produced a ready
@@ -118,6 +118,29 @@ Latest reset / data-quality evidence:
   - status: `blocked`
   - failures: closed trades `20 < 50`, realized PnL `-115.17 < 0`,
     profit factor `0.2927 < 1.1`, max drawdown `-136.3244 < -50`
+- reset execute run: `25754514193`
+  - workflow: `reset-strategy-runtime-evidence.yml`
+  - input: `execute=true`, `allow_running=false`,
+    `confirm=delete-strategy-runtime-evidence`
+  - guard artifact: `status=allowed`, deployment `desired_state=paused`,
+    `observed_state=paused`
+  - scope: `deployment_id=pm5d.threelayer.settlement-probability-btc-eth.dryrun`,
+    `strategy_id=three_layer`, runtime modes `dry_run,dryrun,paper`
+  - before reset: `185` orders, `20` fills
+  - after reset: `0` orders, `0` fills
+  - post-reset clean-baseline gate: `passed` with reason
+    `target_strategy_absent`
+  - post-reset deployment check: `desired_state=running`,
+    `observed_state=running`, `deployment_state=enabled`
+  - interpretation: contaminated dry-run evidence is cleared. Candidate-quality
+    remains blocked until fresh post-reset closed trades accumulate.
+- post-resume candidate-quality check:
+  - checked after deployment resumed from reset run `25754514193`
+  - fresh post-reset rows: `1` buy order, `1` open position, `0` closed trades
+  - candidate-quality status: `blocked`
+  - failures: closed trades `0 < 50`, profit factor `0.0 < 1.1`
+  - interpretation: fresh collection has started, but there is still no
+    post-reset closed-trade sample for profitability claims.
   - advisory: buy fill rate is `97.93%`, so fillability is not the main
     current blocker.
 
@@ -191,12 +214,12 @@ Earlier blocker runs:
 | A dry-run config PR can be generated from ready handoff | `create_config_pr=true` path in hosted workflow, PR `#433` | `ready` | PR `#433` merged `autofactor_formula:auto_settlement_conservative_settlement_edge` into the dry-run config. |
 | Latest deploy bundle can be built without mutating remote services | `deploy-tango-1-1.yml` run `25688999691` with `deploy=false` | `ready` | Build-only run built the release runner, research tools, optimize-backtest, deploy bundle, and live-paused bundle guard. |
 | Remote dry-run config matches the ready handoff on `main` | read-only `tango-1-1` config comparison | `blocked` | Remote is still `auto_settlement_full_depth_settlement_edge`; `origin/main` is `auto_settlement_conservative_settlement_edge`, so protected dry-run deploy is required. |
-| Old dry-run runtime evidence can be cleared without touching raw data | PRs `#464`, `#465`, `#466`; reset preview `25748008417`; guard run `25748940434` | `ready but not executed` | Tooling is merged and guarded. Actual deletion remains blocked until explicit approval to pause the running deployment. |
+| Old dry-run runtime evidence can be cleared without touching raw data | PRs `#464`, `#465`, `#466`; reset preview `25748008417`; guard run `25748940434`; reset execute run `25754514193` | `done` | The guarded reset deleted only the scoped runtime rows: before `185` orders / `20` fills, after `0` / `0`. Raw market data was not part of the reset scope. |
 | Reset procedure is documented and operator-gated | `docs/runbooks/strategy-runtime-evidence-reset.md`; PR `#470` | `ready` | Runbook records preflight, approval text, preview, pause, guarded execute, artifact inspection, resume, and post-reset gates. |
-| Clean post-reset baseline can be machine-checked | `scripts/check_dryrun_candidate_gate.py`; PR `#471`; workflow `dryrun-candidate-gate.yml`; PR `#472`; reset-workflow post-gate PR `#474`; run `25751440786` | `ready and currently blocked` | The standalone gate blocks the current report with `residual_runtime_evidence`: 20 trades and 185 orders remain. The reset workflow now runs the same clean-baseline gate automatically after `execute=true`. |
-| Dry-run candidate quality can be machine-checked | `scripts/check_dryrun_candidate_gate.py --mode candidate-quality`; run `25753663370` | `ready and currently blocked` | Current strategy fails closed-trade, PnL, profit-factor, and max-drawdown thresholds. Buy fill rate is acceptable, so edge/selection and stale evidence remain the main blockers. |
+| Clean post-reset baseline can be machine-checked | `scripts/check_dryrun_candidate_gate.py`; PR `#471`; workflow `dryrun-candidate-gate.yml`; PR `#472`; reset-workflow post-gate PR `#474`; run `25754514193` | `passed` | The reset workflow and an independent current API check both passed with `target_strategy_absent`. |
+| Dry-run candidate quality can be machine-checked | `scripts/check_dryrun_candidate_gate.py --mode candidate-quality`; run `25753663370`; current API check after reset | `ready and currently blocked` | Before reset, the old strategy failed closed-trade, PnL, profit-factor, and max-drawdown thresholds. After reset, candidate-quality blocks with `target_strategy_absent` until fresh closed trades accumulate. |
 | Current retained data window supports promotion-grade search | market-data audits `25747004738`, `25753059613` | `blocked` | 24h coverage still includes the known Binance LOB gap for BTC/ETH. Wait for a clean 48-72h window or use shorter diagnostic-only snapshots. |
-| A profitable strategy has been produced | ready handoff plus post-merge dry-run/executable evidence | `not ready` | Current dry-run is negative: 20 closed trades, PnL `-115.17`, profit factor `0.2927`, max drawdown `-136.3244`. |
+| A profitable strategy has been produced | ready handoff plus post-reset dry-run/executable evidence | `not ready` | Old negative dry-run rows have been cleared. Fresh collection has started with one open position, but there are not yet fresh post-reset closed trades, so no profitability claim is allowed. |
 
 ## Latest Alpha-Search Evidence
 
