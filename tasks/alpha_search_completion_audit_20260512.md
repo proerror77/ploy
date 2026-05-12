@@ -86,12 +86,20 @@ Latest reset / data-quality evidence:
 
 Current dry-run profitability read:
 
-- checked_at: `2026-05-13 00:15 +08` range
-- closed trades: `17`
-- realized PnL: `-72.34`
-- profit factor: `0.3971`
-- max drawdown: `-93.5018`
+- checked_at: `2026-05-13 02:20 +08` range
+- deployment: `pm5d.threelayer.settlement-probability-btc-eth.dryrun`
+- state: `desired_state=running`, `observed_state=running`,
+  `deployment_state=enabled`
+- closed trades: `20`
+- wins / losses: `9 / 11`
+- realized PnL: `-115.17`
+- profit factor: `0.2927`
+- max drawdown: `-136.3244`
+- buy fill rate: `97.93%` notional fill basis, with `20` buy orders and
+  `300.00` requested notional
 - interpretation: current dry-run is rejected / not tradeable; do not promote.
+  The deployment is still running, so destructive reset remains blocked until
+  explicit operator approval to pause or stop this dry-run lane.
 
 Historical parity runs that led to the ready handoff:
 
@@ -148,7 +156,7 @@ Earlier blocker runs:
 | Remote dry-run config matches the ready handoff on `main` | read-only `tango-1-1` config comparison | `blocked` | Remote is still `auto_settlement_full_depth_settlement_edge`; `origin/main` is `auto_settlement_conservative_settlement_edge`, so protected dry-run deploy is required. |
 | Old dry-run runtime evidence can be cleared without touching raw data | PRs `#464`, `#465`, `#466`; reset preview `25748008417`; guard run `25748940434` | `ready but not executed` | Tooling is merged and guarded. Actual deletion remains blocked until explicit approval to pause the running deployment. |
 | Current retained data window supports promotion-grade search | market-data audit `25747004738` | `blocked` | 24h coverage still includes the known Binance LOB gap. Wait for a clean 48-72h window or use shorter diagnostic-only snapshots. |
-| A profitable strategy has been produced | ready handoff plus post-merge dry-run/executable evidence | `not ready` | Current dry-run is negative: 17 closed trades, PnL `-72.34`, profit factor `0.3971`, max drawdown `-93.5018`. |
+| A profitable strategy has been produced | ready handoff plus post-merge dry-run/executable evidence | `not ready` | Current dry-run is negative: 20 closed trades, PnL `-115.17`, profit factor `0.2927`, max drawdown `-136.3244`. |
 
 ## Latest Alpha-Search Evidence
 
