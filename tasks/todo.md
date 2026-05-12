@@ -14768,3 +14768,55 @@ lookback window.
 - [ ] Reduce quote collector CPU by sampling raw orderbook snapshots while
   preserving full-resolution top-of-book quote ticks.
 - [ ] Run focused checks, merge, deploy, and re-sample `tango-1-1` CPU.
+
+# PM5D Same-Event Side Guard Repair (2026-05-12)
+
+## Goal
+
+Keep the paused settlement-probability dry-run in `dry_run_candidate`
+diagnostic mode until runtime and reporting enforce one event, one decision, one
+trade lifecycle for PM5D binary-option events.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: add event-level entry guards for both Event ML and AutoFactor/normal
+    entry paths.
+- `migrations/039_fix_strategy_track_record_side_key.sql`
+  - Owner: keep side-aware grouping without dropping official residual
+    settlement accounting.
+- `migrations/041_repair_strategy_track_record_side_residual.sql`
+  - Owner: re-apply the repaired view on databases that may already have
+    marked migration 039 as applied.
+
+## Tasks
+
+- [x] Add event-level position/order guards before BUY entry decisions.
+- [x] Add focused unit tests for opposite-side position and active-order locks.
+- [x] Repair the side-aware track-record view while preserving official
+      settlement residual fields.
+- [x] Run focused validation and record deployment follow-up blockers.
+
+## Review
+
+- 2026-05-12: Added same-event entry locks to `ThreeLayerStrategy` for both
+  Event ML and normal/AutoFactor BUY paths. Same-token guards still fire first;
+  the new event guards block only the opposite token side and emit
+  `skip_existing_event_position` or `skip_active_event_order`.
+- 2026-05-12: Added migration 041 to rebuild
+  `strategy_runtime_event_track_record` / `strategy_runtime_daily_track_record`
+  with grouping by `runtime_mode, strategy_id, deployment_id, trade_key,
+  token_id, market_side`, while retaining official residual settlement columns
+  such as `recorded_sell_quantity`, `settlement_exit_quantity`,
+  `official_residual_quantity`, `official_exit_price`, `is_confirmed`, and
+  `settlement_corrected`.
+- 2026-05-12: Local validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-same-event-guard /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles same_event --lib`
+  (`4 passed, 159 filtered out`) and `git diff --check`. `cargo fmt --check`
+  still reports pre-existing formatting drift in unrelated files, so this slice
+  did not apply broad formatting.
+- Deployment follow-up: keep
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun` paused until this fix
+  is merged, deployed from `main`, migration 041 is applied on `tango-1-1`, the
+  invalid mixed-side post-cutover rows are backed up/cleared, and a fresh dry-run
+  window shows zero same-event UP/DOWN BUY pairs.

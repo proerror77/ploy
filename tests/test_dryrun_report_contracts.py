@@ -12,6 +12,7 @@ SUMMARY_SCRIPT = ROOT / "scripts" / "report_dryrun_summary.py"
 HTML_SCRIPT = ROOT / "scripts" / "report_strategy.py"
 CHECK_SCRIPT = ROOT / "scripts" / "check_dryrun_report_contract.py"
 SIDE_KEY_MIGRATION = ROOT / "migrations" / "039_fix_strategy_track_record_side_key.sql"
+SIDE_RESIDUAL_REPAIR_MIGRATION = ROOT / "migrations" / "041_repair_strategy_track_record_side_residual.sql"
 
 
 def load_summary_module():
@@ -217,6 +218,29 @@ class DryRunReportContractTests(unittest.TestCase):
 
         self.assertIn("trade_key,\n        token_id,\n        market_side", migration)
         self.assertIn("GROUP BY\n        runtime_mode,\n        strategy_id,\n        deployment_id,\n        trade_key,\n        token_id,\n        market_side", migration)
+
+    def test_migration_versions_are_unique(self) -> None:
+        migration_versions = [
+            path.name.split("_", 1)[0]
+            for path in (ROOT / "migrations").glob("[0-9][0-9][0-9]_*.sql")
+        ]
+
+        duplicates = {
+            version
+            for version in migration_versions
+            if migration_versions.count(version) > 1
+        }
+        self.assertEqual(duplicates, set())
+
+    def test_side_residual_repair_preserves_official_settlement_accounting(self) -> None:
+        migration = SIDE_RESIDUAL_REPAIR_MIGRATION.read_text()
+
+        self.assertIn("041_repair_strategy_track_record_side_residual", migration)
+        self.assertIn("GROUP BY\n        runtime_mode,\n        strategy_id,\n        deployment_id,\n        trade_key,\n        token_id,\n        market_side", migration)
+        self.assertIn("official_residual_quantity", migration)
+        self.assertIn("recorded_sell_quantity", migration)
+        self.assertIn("settlement_exit_quantity", migration)
+        self.assertIn("settlement_corrected", migration)
 
 
 if __name__ == "__main__":
